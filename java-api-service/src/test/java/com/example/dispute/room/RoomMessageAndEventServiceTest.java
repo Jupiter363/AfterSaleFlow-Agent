@@ -39,6 +39,7 @@ import com.example.dispute.room.application.RoomMessageService;
 import com.example.dispute.room.application.RoomMessageView;
 import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.domain.MessageSenderType;
+import com.example.dispute.room.domain.MessageSource;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.domain.RoomType;
@@ -51,11 +52,16 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.example.dispute.workflow.targete2e.ingress.IntakeIngressSelection;
 import com.example.dispute.workflow.targete2e.ingress.IntakeMessageIngressRouter;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeActivationGrant;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeIngressReceipt;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -101,6 +107,8 @@ class RoomMessageAndEventServiceTest {
     @Mock private IntakeProgressService intakeProgressService;
     @Mock private IntakeMessageIngressRouter intakeMessageIngressRouter;
     @Mock private LegacyIntakeWriterGuard legacyIntakeWriterGuard;
+    @Mock private CaseRoomEpochRepository roomEpochRepository;
+    @Mock private CaseRoomEpochEntity evidenceEpoch;
 
     private CaseEventService eventService;
     private RoomMessageService messageService;
@@ -136,7 +144,8 @@ class RoomMessageAndEventServiceTest {
                         intakeProgressService,
                         intakeMessageIngressRouter,
                         legacyIntakeWriterGuard,
-                        CLOCK);
+                        CLOCK,
+                        roomEpochRepository);
         lenient()
                 .when(intakeMessageIngressRouter.select(any()))
                 .thenReturn(IntakeIngressSelection.legacy());
@@ -1002,6 +1011,199 @@ class RoomMessageAndEventServiceTest {
     // 上游调用：「RoomMessageAndEventServiceTest.evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
     // 下游影响：「RoomMessageAndEventServiceTest.evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted()」的下游是被测服务、仓储或外部客户端替身；「verify」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「RoomMessageAndEventServiceTest.evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    @Test
+    void targetEvidenceSubmissionBindsRunBeforeOneInsertAndFailsClosed() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_EVIDENCE",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        String logicalRunId = "target-evidence-run:message-authority";
+        String idempotencyKey = "target-evidence-create-time";
+        AtomicInteger materializerCalls = new AtomicInteger();
+        AtomicReference<RoomMessageView> sealedMessage = new AtomicReference<>();
+        AtomicReference<RoomMessageEntity> savedTargetMessage = new AtomicReference<>();
+
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), actor.actorId(), actor.role()))
+                .thenReturn(true);
+        when(roomEpochRepository
+                        .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                                eq(dispute.getId()), any(), any()))
+                .thenReturn(Optional.of(evidenceEpoch));
+        when(evidenceEpoch.getWriterMode()).thenReturn(WriterMode.TEMPORAL);
+        when(evidenceEpoch.getProvisioningStatus()).thenReturn(EpochProvisioningStatus.READY);
+        when(evidenceEpoch.getGraphKey()).thenReturn(TargetTypedRoomProtocol.GRAPH_KEY);
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenAnswer(
+                        invocation -> {
+                            String requestedKey = invocation.getArgument(1);
+                            if (idempotencyKey.equals(requestedKey)) {
+                                return Optional.ofNullable(savedTargetMessage.get());
+                            }
+                            return Optional.empty();
+                        });
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(eventRepository.findMaxSequenceByCaseId(dispute.getId())).thenReturn(0L);
+        when(messageRepository.save(any()))
+                .thenAnswer(
+                        invocation -> {
+                            RoomMessageEntity saved = invocation.getArgument(0);
+                            if (idempotencyKey.equals(saved.getIdempotencyKey())) {
+                                savedTargetMessage.set(saved);
+                            }
+                            return saved;
+                        });
+        when(eventRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        RoomMessageCommand command =
+                new RoomMessageCommand(
+                        MessageType.PARTY_EVIDENCE_REFERENCE,
+                        null,
+                        List.of("EVIDENCE_TARGET_CREATE_TIME"));
+        RoomMessageView first =
+                messageService.postTargetEvidenceSubmission(
+                        dispute.getId(),
+                        command,
+                        actor,
+                        idempotencyKey,
+                        "TRACE_TARGET_EVIDENCE_CREATE_TIME",
+                        draft -> {
+                            assertThat(savedTargetMessage.get()).isNull();
+                            materializerCalls.incrementAndGet();
+                            sealedMessage.set(draft);
+                            return logicalRunId;
+                        });
+
+        assertThat(materializerCalls).hasValue(1);
+        assertThat(sealedMessage.get().id()).isEqualTo(first.id());
+        assertThat(sealedMessage.get().caseId()).isEqualTo(dispute.getId());
+        assertThat(sealedMessage.get().roomId()).isEqualTo(room.getId());
+        assertThat(sealedMessage.get().sequenceNo()).isEqualTo(1L);
+        assertThat(sealedMessage.get().senderRole()).isEqualTo(actor.role().name());
+        assertThat(sealedMessage.get().senderId()).isEqualTo(actor.actorId());
+        assertThat(sealedMessage.get().messageType())
+                .isEqualTo(MessageType.PARTY_EVIDENCE_REFERENCE);
+        assertThat(sealedMessage.get().messageSource()).isEqualTo(MessageSource.PARTY_ACTION);
+        assertThat(sealedMessage.get().attachmentRefs())
+                .containsExactly("EVIDENCE_TARGET_CREATE_TIME");
+        assertThat(sealedMessage.get().agentRunId()).isNull();
+        assertThat(sealedMessage.get().createdAt()).isEqualTo(CLOCK.instant());
+        assertThat(first.agentRunId()).isEqualTo(logicalRunId);
+        assertThat(savedTargetMessage.get().getAgentRunId()).isEqualTo(logicalRunId);
+        assertThat(savedTargetMessage.get().getAudienceJson())
+                .isEqualTo("[\"USER\",\"CUSTOMER_SERVICE\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]");
+        verify(messageRepository, times(1)).save(any());
+        verifyNoInteractions(evidenceAgentTurnService);
+
+        AtomicInteger replayMaterializerCalls = new AtomicInteger();
+        RoomMessageView replay =
+                messageService.postTargetEvidenceSubmission(
+                        dispute.getId(),
+                        command,
+                        actor,
+                        idempotencyKey,
+                        "TRACE_TARGET_EVIDENCE_REPLAY",
+                        draft -> {
+                            replayMaterializerCalls.incrementAndGet();
+                            return "target-evidence-run:conflicting-replay";
+                        });
+        assertThat(replay.id()).isEqualTo(first.id());
+        assertThat(replay.agentRunId()).isEqualTo(logicalRunId);
+        assertThat(replayMaterializerCalls).hasValue(0);
+        verify(messageRepository, times(1)).save(any());
+
+        assertThatThrownBy(
+                        () ->
+                                messageService.postTargetEvidenceSubmission(
+                                        dispute.getId(),
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_EVIDENCE_REFERENCE,
+                                                null,
+                                                List.of("EVIDENCE_CHANGED")),
+                                        actor,
+                                        idempotencyKey,
+                                        "TRACE_TARGET_EVIDENCE_CONFLICT",
+                                        draft -> logicalRunId))
+                .isInstanceOf(IdempotencyConflictException.class);
+        assertThatThrownBy(
+                        () ->
+                                messageService.postTargetEvidenceSubmission(
+                                        dispute.getId(),
+                                        command,
+                                        actor,
+                                        "target-evidence-blank-run",
+                                        "TRACE_TARGET_EVIDENCE_BLANK",
+                                        draft -> " "))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("target Evidence run materializer returned no logical run authority");
+        IllegalStateException materializerConflict =
+                new IllegalStateException("target materializer conflict");
+        assertThatThrownBy(
+                        () ->
+                                messageService.postTargetEvidenceSubmission(
+                                        dispute.getId(),
+                                        command,
+                                        actor,
+                                        "target-evidence-materializer-conflict",
+                                        "TRACE_TARGET_EVIDENCE_MATERIALIZER_CONFLICT",
+                                        draft -> {
+                                            throw materializerConflict;
+                                        }))
+                .isSameAs(materializerConflict);
+        verify(messageRepository, times(1)).save(any());
+
+        when(roomEpochRepository
+                        .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                                eq(dispute.getId()), any(), any()))
+                .thenReturn(Optional.empty());
+        AtomicInteger inactiveMaterializerCalls = new AtomicInteger();
+        assertThatThrownBy(
+                        () ->
+                                messageService.postTargetEvidenceSubmission(
+                                        dispute.getId(),
+                                        command,
+                                        actor,
+                                        "target-evidence-inactive",
+                                        "TRACE_TARGET_EVIDENCE_INACTIVE",
+                                        draft -> {
+                                            inactiveMaterializerCalls.incrementAndGet();
+                                            return logicalRunId;
+                                        }))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("target Evidence run materializer requires an active target Evidence epoch");
+        assertThat(inactiveMaterializerCalls).hasValue(0);
+        verify(messageRepository, times(1)).save(any());
+
+        messageService.post(
+                dispute.getId(),
+                RoomType.EVIDENCE,
+                command,
+                actor,
+                "legacy-evidence-create-time-adjacent",
+                "TRACE_LEGACY_EVIDENCE_ADJACENT");
+        verify(evidenceAgentTurnService, times(1))
+                .continueFromParticipantMessage(
+                        eq(dispute.getId()),
+                        eq(RoomType.EVIDENCE),
+                        eq(actor),
+                        eq(command),
+                        any(String.class),
+                        eq(CLOCK.instant()),
+                        eq("TRACE_LEGACY_EVIDENCE_ADJACENT"),
+                        eq("TRACE_LEGACY_EVIDENCE_ADJACENT"));
+        verify(messageRepository, times(2)).save(any());
+    }
+
     @Test
     void evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted() {
         FulfillmentCaseEntity dispute = evidenceCase();

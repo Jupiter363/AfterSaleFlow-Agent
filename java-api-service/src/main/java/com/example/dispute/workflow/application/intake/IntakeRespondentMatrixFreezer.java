@@ -334,9 +334,15 @@ public final class IntakeRespondentMatrixFreezer {
                 factId = item.factKey();
                 prior = parentIndex.byId().get(factId);
                 if (prior == null) {
-                    throw rejected(
-                            "INTAKE_RESPONDENT_MATRIX_FACT_UNKNOWN",
-                            "respondent matrix delta references an unknown formal fact");
+                    String canonicalId = parentIndex.byFingerprint()
+                            .get(fingerprint(item.category(), item.factTarget()));
+                    prior = canonicalId == null ? null : parentIndex.byId().get(canonicalId);
+                    if (prior == null) {
+                        throw rejected(
+                                "INTAKE_RESPONDENT_MATRIX_FACT_UNKNOWN",
+                                "respondent matrix delta references an unknown formal fact");
+                    }
+                    factId = canonicalId;
                 }
                 requireStableBinding(prior, item);
                 if (!carriedParentIds.add(factId)) {
@@ -469,7 +475,7 @@ public final class IntakeRespondentMatrixFreezer {
             origin.set("introduced_stage", priorOrigin.required("introduced_stage").deepCopy());
             addTextValues(refs, priorOrigin.required("source_refs"));
         }
-        if (usesCurrentSource(item.sourceScope())) {
+        if (prior == null || usesCurrentSource(item.sourceScope())) {
             refs.add(currentSource);
         }
         requireSourceCount(refs, "fact origin");
@@ -506,14 +512,9 @@ public final class IntakeRespondentMatrixFreezer {
         if (usesPreviousSource(item.sourceScope()) && prior != null) {
             addTextValues(refs, prior.required("source_refs"));
         }
-        if (usesCurrentSource(item.sourceScope())) {
-            refs.add(currentSource);
-        }
-        if (refs.isEmpty()) {
-            throw rejected(
-                    "INTAKE_RESPONDENT_MATRIX_SOURCE_SCOPE_INVALID",
-                    "a substantive respondent position has no authorized source");
-        }
+        // A substantive position is authored in this turn, so its current event is
+        // authoritative provenance regardless of the model's source-scope hint.
+        refs.add(currentSource);
         requireSourceCount(refs, "respondent position");
         ObjectNode result = JsonNodeFactory.instance.objectNode();
         result.put("stance", item.stance());

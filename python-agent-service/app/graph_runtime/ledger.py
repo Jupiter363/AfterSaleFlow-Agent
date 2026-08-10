@@ -54,6 +54,13 @@ class AttemptStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class CheckpointRestoreKind(StrEnum):
+    """Authoritative source of one current command restore pointer."""
+
+    CURRENT_COMMITTED = "CURRENT_COMMITTED"
+    COMPLETED_START = "COMPLETED_START"
+
+
 LEGAL_TRANSITIONS: Final[dict[CommandStatus, frozenset[CommandStatus]]] = {
     CommandStatus.REGISTERED: frozenset(
         {CommandStatus.EXECUTING, CommandStatus.CANCELLED, CommandStatus.ABORTED}
@@ -415,6 +422,27 @@ class CompletedStartCheckpoint:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class CheckpointRestoreAuthority:
+    """MVCC-proven physical checkpoint selector for one exact active command."""
+
+    kind: CheckpointRestoreKind
+    checkpoint_ns: str
+    checkpoint_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, CheckpointRestoreKind):
+            raise GraphTerminalBindingError("checkpoint restore kind is invalid")
+        if (
+            not isinstance(self.checkpoint_ns, str)
+            or len(self.checkpoint_ns) > 128
+            or not isinstance(self.checkpoint_id, str)
+            or not self.checkpoint_id
+            or len(self.checkpoint_id) > 128
+        ):
+            raise GraphTerminalBindingError("checkpoint restore identity is invalid")
+
+
 COMMAND_COLUMNS: Final[str] = """
 thread_id, command_id, request_schema_version, request_json, request_hash,
 execution_mode, activation_id, room_fencing_token, command_hash, command_envelope_hash, room_epoch,
@@ -477,6 +505,27 @@ select {COMMAND_COLUMNS}
   from agent_graph_command
  where thread_id = %s and command_id = %s
  for update
+"""
+
+
+LOAD_CHECKPOINT_RESTORE_AUTHORITY_SQL: Final[str] = """
+select command.start_checkpoint_ns, command.start_checkpoint_id,
+       command.committed_checkpoint_ns, command.committed_checkpoint_id
+  from agent_graph_command command
+ where command.thread_id = %s
+   and command.command_id = %s
+   and command.request_hash = %s
+   and command.room_epoch = %s
+   and command.graph_key = %s
+   and command.graph_version = %s
+   and command.checkpoint_schema_version = %s
+   and command.execution_mode = %s
+   and command.activation_id is not distinct from %s
+   and command.room_fencing_token is not distinct from %s
+   and command.command_hash is not distinct from %s
+   and command.command_envelope_hash is not distinct from %s
+   and command.fencing_token = %s
+   and command.status = 'EXECUTING'
 """
 
 LOAD_CANDIDATE_TERMINAL_PROOF_SQL: Final[str] = f"""
@@ -900,6 +949,81 @@ class PostgresCommandLedger:
         if row is None:
             raise GraphCommandNotFoundError()
         return self._command_from_row(row)
+
+    async def load_checkpoint_restore_authority(
+        self,
+        connection: Any,
+        *,
+        fence: GraphFenceContext,
+    ) -> CheckpointRestoreAuthority | None:
+        """Select an exact active command's restore pointer without locking rows.
+
+        Physical checkpoint recency is never authority.  The current command's
+        committed pointer wins after it has written a checkpoint; before that,
+        only its immutable start pointer may authorize a cross-command read.
+        """
+
+        row = await (
+            await connection.execute(
+                LOAD_CHECKPOINT_RESTORE_AUTHORITY_SQL,
+                (
+                    fence.thread_id,
+                    fence.command_id,
+                    fence.request_hash,
+                    fence.room_epoch,
+                    fence.graph_key,
+                    fence.graph_version,
+                    fence.checkpoint_schema_version,
+                    fence.execution_lane.value,
+                    fence.activation_id,
+                    fence.room_fencing_token,
+                    fence.command_hash,
+                    fence.command_envelope_hash,
+                    fence.fencing_token,
+                ),
+            )
+        ).fetchone()
+        if row is None:
+            raise GraphTerminalBindingError(
+                "active command checkpoint restore authority is missing or stale"
+            )
+
+        start = self._checkpoint_restore_pair(row, "start")
+        committed = self._checkpoint_restore_pair(row, "committed")
+        if committed is not None:
+            return CheckpointRestoreAuthority(
+                kind=CheckpointRestoreKind.CURRENT_COMMITTED,
+                checkpoint_ns=committed[0],
+                checkpoint_id=committed[1],
+            )
+        if start is not None:
+            return CheckpointRestoreAuthority(
+                kind=CheckpointRestoreKind.COMPLETED_START,
+                checkpoint_ns=start[0],
+                checkpoint_id=start[1],
+            )
+        return None
+
+    @staticmethod
+    def _checkpoint_restore_pair(
+        row: Mapping[str, Any],
+        prefix: str,
+    ) -> tuple[str, str] | None:
+        checkpoint_ns = row.get(f"{prefix}_checkpoint_ns")
+        checkpoint_id = row.get(f"{prefix}_checkpoint_id")
+        if checkpoint_ns is None and checkpoint_id is None:
+            return None
+        if (
+            not isinstance(checkpoint_ns, str)
+            or len(checkpoint_ns) > 128
+            or not isinstance(checkpoint_id, str)
+            or not checkpoint_id
+            or len(checkpoint_id) > 128
+        ):
+            raise GraphTerminalBindingError(
+                f"active command {prefix} checkpoint pointer is incomplete or invalid"
+            )
+        return checkpoint_ns, checkpoint_id
 
     async def referenced_verification_key_ids(self, connection: Any) -> frozenset[str]:
         rows = await (await connection.execute(REFERENCED_KEY_IDS_SQL)).fetchall()

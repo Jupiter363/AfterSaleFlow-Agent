@@ -199,8 +199,17 @@ def _formal_initiator_matrix(
     return matrix
 
 
-def _formal_respondent_opening_successor(case_id: str) -> dict:
-    previous = _formal_initiator_matrix(case_id, matrix_version=5)
+def _formal_respondent_opening_successor(
+    case_id: str,
+    *,
+    initiator_role: str = "USER",
+) -> dict:
+    respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
+    previous = _formal_initiator_matrix(
+        case_id,
+        initiator_role=initiator_role,
+        matrix_version=5,
+    )
     successor = copy.deepcopy(previous)
     successor.update(
         matrix_id="CASE_MATRIX_2345678901ABCDEF0123",
@@ -213,12 +222,111 @@ def _formal_respondent_opening_successor(case_id: str) -> dict:
         },
     )
     successor["generation_ref"].update(
-        actor_role="MERCHANT",
+        actor_role=respondent_role,
         source_stage="RESPONDENT_INTAKE",
         source_context_hash="c" * 64,
     )
     successor["content_hash"] = canonical_sha256_omitting(successor, "content_hash")
     return successor
+
+
+def _formal_respondent_new_fact_successor(
+    case_id: str,
+    *,
+    initiator_role: str = "USER",
+) -> dict:
+    respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
+    previous = _formal_respondent_opening_successor(
+        case_id,
+        initiator_role=initiator_role,
+    )
+    source_ref = f"MESSAGE_P4_{respondent_role}_2"
+    fact_id = "FACT_RESPONDENT_LOGISTICS"
+    successor = copy.deepcopy(previous)
+    successor.update(
+        matrix_id="CASE_MATRIX_3456789012ABCDEF0123",
+        matrix_version=7,
+        parent_ref={
+            "matrix_id": previous["matrix_id"],
+            "matrix_version": previous["matrix_version"],
+            "content_hash": previous["content_hash"],
+        },
+    )
+    successor["source_refs"].append(source_ref)
+    successor["case_overview"]["summary_source_fact_ids"].append(fact_id)
+    successor["fact_rows"].append(
+        {
+            "fact_id": fact_id,
+            "category": "LOGISTICS",
+            "fact_target": "Whether delivery exceeded the promised date.",
+            "materiality": "SUPPORTING",
+            "origin": {
+                "introduced_stage": "RESPONDENT_INTAKE",
+                "source_refs": [source_ref],
+            },
+            "positions": {
+                initiator_role: {
+                    "stance": "NOT_ADDRESSED",
+                    "position_summary": "该方尚未直接陈述。",
+                    "asserted_value": None,
+                    "source_type": "NO_DIRECT_POSITION",
+                    "source_refs": [],
+                },
+                respondent_role: {
+                    "stance": "CONFIRM",
+                    "position_summary": "The respondent reports a delivery delay.",
+                    "asserted_value": "delayed",
+                    "source_type": "DIRECT_PARTY_STATEMENT",
+                    "source_refs": [source_ref],
+                },
+            },
+            "party_alignment": {
+                "status": "ONE_SIDED",
+                "agreed_statement": None,
+                "conflict_summary": "Only the respondent has addressed this fact.",
+            },
+            "requires_resolution": True,
+            "truth_status": "NOT_EVALUATED",
+            "evidence_coverage_status": "PENDING_EVIDENCE_REVIEW",
+        }
+    )
+    successor["generation_ref"].update(
+        actor_role=respondent_role,
+        latest_source_ref=source_ref,
+        source_context_hash="e" * 64,
+    )
+    successor["fact_indexes"]["one_sided_fact_ids"].append(fact_id)
+    successor["fact_indexes"]["requires_resolution_fact_ids"].append(fact_id)
+    successor["content_hash"] = canonical_sha256_omitting(successor, "content_hash")
+    return successor
+
+
+def _respondent_matrix_authority_record(
+    bindings,
+    version_pins,
+    snapshot,
+    matrix: dict,
+    *,
+    initiator_role: str,
+) -> dict:
+    respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
+    selected_bindings = copy.deepcopy(bindings)
+    selected_bindings["private"]["audience"] = respondent_role
+    selected_snapshot = _initiator_snapshot(
+        snapshot,
+        initiator_role=initiator_role,
+        audience=respondent_role,
+    )
+    selected_snapshot["current_dossier"]["case_fact_matrix"] = matrix
+    selected_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        selected_snapshot,
+        "snapshot_hash",
+    )
+    state = new_intake_graph_state(
+        bindings=selected_bindings,
+        version_pins=version_pins,
+    )
+    return matrix_authority_record(state, selected_snapshot)
 
 
 def _historic_matrix_content_hash(matrix: dict) -> str:
@@ -1052,6 +1160,115 @@ def test_respondent_ingress_binds_canonical_opening_bilateral_successor(
 
     assert authority["proposal_mode"] == "RESPONDENT_DELTA"
     assert authority["formal_matrix_hash"] == bilateral["content_hash"]
+
+
+@pytest.mark.parametrize("initiator_role", ["USER", "MERCHANT"])
+def test_bilateral_respondent_introduced_fact_accepts_closed_initiator_absence(
+    bindings,
+    version_pins,
+    snapshot,
+    initiator_role: str,
+) -> None:
+    bilateral = _formal_respondent_new_fact_successor(
+        snapshot["case_id"],
+        initiator_role=initiator_role,
+    )
+
+    authority = _respondent_matrix_authority_record(
+        bindings,
+        version_pins,
+        snapshot,
+        bilateral,
+        initiator_role=initiator_role,
+    )
+
+    assert authority["proposal_mode"] == "RESPONDENT_DELTA"
+    assert authority["formal_matrix_hash"] == bilateral["content_hash"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param(
+            lambda position, _source_ref: position.update(source_type="DIRECT_PARTY_STATEMENT"),
+            id="direct-source-type",
+        ),
+        pytest.param(
+            lambda position, _source_ref: position.update(asserted_value="fabricated"),
+            id="asserted-value",
+        ),
+        pytest.param(
+            lambda position, source_ref: position.update(source_refs=[source_ref]),
+            id="nonempty-source-refs",
+        ),
+    ],
+)
+def test_bilateral_closed_initiator_absence_tuple_fails_closed_when_malformed(
+    bindings,
+    version_pins,
+    snapshot,
+    mutation,
+) -> None:
+    bilateral = _formal_respondent_new_fact_successor(snapshot["case_id"])
+    row = bilateral["fact_rows"][-1]
+    mutation(row["positions"]["USER"], row["origin"]["source_refs"][0])
+    bilateral["content_hash"] = canonical_sha256_omitting(bilateral, "content_hash")
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_INVALID"):
+        _respondent_matrix_authority_record(
+            bindings,
+            version_pins,
+            snapshot,
+            bilateral,
+            initiator_role="USER",
+        )
+
+
+def test_initiator_frozen_still_rejects_empty_initiator_source_refs(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    matrix = _formal_initiator_matrix(snapshot["case_id"])
+    matrix["fact_rows"][0]["positions"]["USER"]["source_refs"] = []
+    matrix["content_hash"] = canonical_sha256_omitting(matrix, "content_hash")
+    selected_snapshot = _initiator_snapshot(snapshot, initiator_role="USER")
+    selected_snapshot["current_dossier"]["case_fact_matrix"] = matrix
+    selected_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        selected_snapshot,
+        "snapshot_hash",
+    )
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_INVALID"):
+        matrix_authority_record(state, selected_snapshot)
+
+
+@pytest.mark.parametrize(
+    "source_refs",
+    [
+        pytest.param([], id="empty"),
+        pytest.param(["MESSAGE_UNKNOWN"], id="undeclared"),
+    ],
+)
+def test_bilateral_direct_position_requires_declared_nonempty_source_refs(
+    bindings,
+    version_pins,
+    snapshot,
+    source_refs: list[str],
+) -> None:
+    bilateral = _formal_respondent_new_fact_successor(snapshot["case_id"])
+    bilateral["fact_rows"][-1]["positions"]["MERCHANT"]["source_refs"] = source_refs
+    bilateral["content_hash"] = canonical_sha256_omitting(bilateral, "content_hash")
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_INVALID"):
+        _respondent_matrix_authority_record(
+            bindings,
+            version_pins,
+            snapshot,
+            bilateral,
+            initiator_role="USER",
+        )
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter.CommitCommand;
+import com.example.dispute.room.application.EvidenceAgentTurnCommand;
+import com.example.dispute.room.application.EvidenceAgentTurnResult;
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
@@ -15,6 +17,7 @@ import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnProposalLoader.LoadedProposal;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.time.Instant;
@@ -66,20 +69,23 @@ class TargetEvidenceFinalizationRequestResolverTest {
             envelopeHash,
             graph.roomEpoch(),
             fence);
-    TargetEvidenceCommandMaterial material =
-        new TargetEvidenceCommandMaterial(
-            TargetEvidenceCommandMaterial.SCHEMA_VERSION,
-            TargetEvidenceCommandMaterial.TARGET_LANE,
-            activationId,
-            manifestHash,
-            fence,
-            graph.processRevision(),
-            expectedRoomRevision,
-            commandHash,
-            envelopeHash,
-            caseCommandRequestHash,
-            execution);
+    TargetEvidenceCommandMaterial material = mock(TargetEvidenceCommandMaterial.class);
+    when(material.schemaVersion()).thenReturn(TargetEvidenceCommandMaterial.SCHEMA_VERSION);
+    when(material.executionLane()).thenReturn(TargetEvidenceCommandMaterial.TARGET_LANE);
+    when(material.activationId()).thenReturn(activationId);
+    when(material.activationManifestHash()).thenReturn(manifestHash);
+    when(material.roomFencingToken()).thenReturn(fence);
+    when(material.expectedProcessRevision()).thenReturn(graph.processRevision());
+    when(material.expectedRoomRevision()).thenReturn(expectedRoomRevision);
+    when(material.commandHash()).thenReturn(commandHash);
+    when(material.commandEnvelopeHash()).thenReturn(envelopeHash);
+    when(material.caseCommandRequestHash()).thenReturn(caseCommandRequestHash);
+    when(material.request()).thenReturn(execution);
+    when(material.evidenceAgentTurnCommand()).thenReturn(mock(EvidenceAgentTurnCommand.class));
     TargetEvidenceCommandMaterialStore store = mock(TargetEvidenceCommandMaterialStore.class);
+    var snapshot =
+        new TargetEvidenceCommandMaterialStore.MaterialSnapshot(
+            admissionId, admission, material, "f".repeat(64), Instant.EPOCH);
     when(store.readByRoute(
             new TargetEvidenceCommandMaterialStore.CommandLookup(
                 graph.tenantSurrogate(),
@@ -87,14 +93,30 @@ class TargetEvidenceFinalizationRequestResolverTest {
                 graph.commandId(),
                 graph.roomEpoch(),
                 fence)))
-        .thenReturn(
-            Optional.of(
-                new TargetEvidenceCommandMaterialStore.MaterialSnapshot(
-                    admissionId, admission, material, "f".repeat(64), Instant.EPOCH)));
+        .thenReturn(Optional.of(snapshot));
     CommitCommand command = new CommitCommand(execution, result, manifest);
+    TargetEvidenceTurnProposalLoader proposalLoader = mock(TargetEvidenceTurnProposalLoader.class);
+    LoadedProposal proposal = mock(LoadedProposal.class);
+    EvidenceAgentTurnResult turnResult = mock(EvidenceAgentTurnResult.class);
+    when(turnResult.roomUtterance()).thenReturn("guarded Evidence Clerk message");
+    when(proposal.proposalHash()).thenReturn("7".repeat(64));
+    when(proposal.commandId()).thenReturn(graph.commandId());
+    when(proposal.logicalRunId()).thenReturn(graph.logicalRunId());
+    when(proposal.attemptId()).thenReturn(graph.attemptId());
+    when(proposal.tenantSurrogate()).thenReturn(graph.tenantSurrogate());
+    when(proposal.caseId()).thenReturn(graph.caseId());
+    when(proposal.roomEpoch()).thenReturn(graph.roomEpoch());
+    when(proposal.fencingToken()).thenReturn(fence);
+    when(proposal.threadId()).thenReturn(graph.threadId());
+    when(proposal.actorId()).thenReturn(graph.actorScope().actorId());
+    when(proposal.actorRole()).thenReturn(graph.actorScope().actorRole().name());
+    when(proposal.inputHash()).thenReturn(graph.domainSnapshotRef().sha256());
+    when(proposal.roomUtterance()).thenReturn(turnResult.roomUtterance());
+    when(proposal.evidenceTurnResult()).thenReturn(turnResult);
+    when(proposalLoader.load(command, snapshot)).thenReturn(proposal);
 
     TargetEvidenceFinalizationRequest resolved =
-        new TargetEvidenceFinalizationRequestResolver(store, mapper).resolve(command);
+        new TargetEvidenceFinalizationRequestResolver(store, proposalLoader, mapper).resolve(command);
 
     assertThat(resolved.activationId()).isEqualTo(activationId);
     assertThat(resolved.activationManifestHash()).isEqualTo(manifestHash);

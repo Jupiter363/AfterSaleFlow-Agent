@@ -1463,13 +1463,54 @@ def test_evidence_turn_endpoint_accepts_java_command_payload_without_degrading()
 
 
 def test_evidence_turn_stream_accepts_one_hearing_batch_without_422() -> None:
+    from app.agents.evidence_clerk.public_reply import (
+        EVIDENCE_CANONICAL_OPENING,
+        guard_evidence_public_reply,
+    )
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.streaming import current_stream_observer
+
+    safe_sentence = EVIDENCE_CANONICAL_OPENING
+    risky_sentence = "不判断责任但实际由商家承担。"
+    raw_room_utterance = safe_sentence + risky_sentence
+    guarded_room_utterance = guard_evidence_public_reply(raw_room_utterance)
+    provider_calls = 0
+
+    class StreamingEvidenceRunner(FakeEvidenceRunner):
+        def invoke_structured(self, **kwargs):
+            nonlocal provider_calls
+            provider_calls += 1
+            observer = current_stream_observer()
+            assert observer is not None
+            assert observer.finalized_public_output == EVIDENCE_CANONICAL_OPENING
+            result = super().invoke_structured(**kwargs)
+            observer.visible_delta(
+                "evidence_turn",
+                "room_utterance",
+                safe_sentence[:6],
+            )
+            observer.visible_delta(
+                "evidence_turn",
+                "room_utterance",
+                safe_sentence[6:] + risky_sentence,
+            )
+            observer.usage(
+                node_name="evidence_turn",
+                model="hearing-evidence-test-model",
+                latency_ms=1,
+                token_usage={"input": 5, "output": 4, "total": 9},
+            )
+            return SimpleNamespace(
+                value=result.value.model_copy(
+                    update={"room_utterance": raw_room_utterance}
+                )
+            )
 
     client = TestClient(
         create_app(
             _settings(),
             evidence_turn_workflow=EvidenceTurnWorkflow(
-                model_runner=FakeEvidenceRunner()
+                model_runner=StreamingEvidenceRunner()
             ),
         )
     )
@@ -1482,13 +1523,25 @@ def test_evidence_turn_stream_accepts_one_hearing_batch_without_422() -> None:
 
     assert response.status_code == 200
     events = [json.loads(line) for line in response.text.splitlines() if line]
-    assert not any(event["type"] == "visible_delta" for event in events)
-    assert events[-1]["type"] == "final"
-    assert events[-1]["response"]["room_utterance"] == (
-        "我会先核验这份截图的来源、可读性和与签收争议的关联性；"
-        "本轮只核验证据，不裁决责任。"
-        "本轮只做证据核验，不判断责任或最终方案。"
+    event_types = [event["type"] for event in events]
+    usage_index = event_types.index("usage")
+    assert event_types[0] == "start"
+    assert event_types[-1] == "final"
+    assert event_types.count("usage") == 1
+    assert events[1]["type"] == "visible_delta"
+    assert events[1]["delta"] == EVIDENCE_CANONICAL_OPENING
+    assert all(
+        event_type == "visible_delta"
+        for event_type in event_types[1:usage_index]
     )
+    visible_text = "".join(
+        event["delta"] for event in events if event["type"] == "visible_delta"
+    )
+    assert visible_text == guarded_room_utterance
+    assert events[-1]["response"]["room_utterance"] == guarded_room_utterance
+    assert guarded_room_utterance.count(EVIDENCE_CANONICAL_OPENING) == 1
+    assert risky_sentence not in response.text
+    assert provider_calls == 1
     assert events[-1]["response"]["referenced_evidence_ids"] == [
         "EVIDENCE_signature_photo",
         "EVIDENCE_logistics_record",
@@ -2444,3 +2497,147 @@ def test_existing_evidence_links_are_filtered_by_fact_and_visibility() -> None:
     assert assembled.context_sources["evidence_gap_plan"]["covered_fact_ids"] == [
         "FACT_SIGNATURE"
     ]
+
+
+def _freeze_bound_evidence_turn_payload() -> dict[str, object]:
+    from app.contracts.v1.codec import canonical_sha256
+
+    payload = _evidence_turn_payload()
+    envelope = payload["context_envelope"]
+    case_id = envelope["case_snapshot"]["case_id"]
+    matrix = _case_fact_matrix_v2(case_id)
+    matrix.pop("content_hash", None)
+    matrix.pop("matrix_id", None)
+    matrix["matrix_id"] = "CASE_MATRIX_" + canonical_sha256(matrix)[:20].upper()
+    matrix["content_hash"] = canonical_sha256(matrix)
+    event_id = "EVIB_EVIDENCE_FROZEN"
+    event_ref = f"urn:after-sale-flow:intake-event:{event_id}"
+    projection_ref = f"{event_ref}#/result/frozen_submission/matrix"
+    authority = {
+        "schemaVersion": "frozen-intake-submission-authority.v1",
+        "tenantSurrogate": "tenant-run001",
+        "caseId": case_id,
+        "respondentActorId": "MERCHANT_local_1",
+        "respondentActorRole": "MERCHANT",
+        "respondentCompletionId": "INTAKE_COMPLETION_RESPONDENT",
+        "respondentCompletionStatus": "COMPLETED",
+        "respondentCompletedAt": "2026-07-11T09:59:00Z",
+        "submitOperation": "RESPONDENT_CONFIRM",
+        "submitOperationKey": "intake-respondent-confirm:operation",
+        "submitCommandId": "intake-respondent-confirm:command",
+        "submitCommandSequence": 7,
+        "submitRequestHash": "1" * 64,
+        "submitEventId": event_id,
+        "submitEventRef": event_ref,
+        "submitEventSequence": 9,
+        "submitEventType": "RESPONDENT_CONFIRMED",
+        "sourceRoomEpoch": 1,
+        "sourceFencingToken": 11,
+        "sourceProcessRevision": 6,
+        "sourceRoomRevision": 5,
+        "dossierId": "DOSSIER_evidence_turn",
+        "dossierVersion": 3,
+        "matrixId": matrix["matrix_id"],
+        "matrixVersion": matrix["matrix_version"],
+        "matrixContentHash": matrix["content_hash"],
+        "projectionRef": projection_ref,
+    }
+    authority_material = {
+        "schema_version": authority["schemaVersion"],
+        "tenant_surrogate": authority["tenantSurrogate"],
+        "case_id": authority["caseId"],
+        "respondent_actor_id": authority["respondentActorId"],
+        "respondent_actor_role": authority["respondentActorRole"],
+        "respondent_completion_id": authority["respondentCompletionId"],
+        "respondent_completion_status": authority["respondentCompletionStatus"],
+        "respondent_completed_at": authority["respondentCompletedAt"],
+        "submit_operation": authority["submitOperation"],
+        "submit_operation_key": authority["submitOperationKey"],
+        "submit_command_id": authority["submitCommandId"],
+        "submit_command_sequence": authority["submitCommandSequence"],
+        "submit_request_hash": authority["submitRequestHash"],
+        "submit_event_id": authority["submitEventId"],
+        "submit_event_ref": authority["submitEventRef"],
+        "submit_event_sequence": authority["submitEventSequence"],
+        "submit_event_type": authority["submitEventType"],
+        "source_room_epoch": authority["sourceRoomEpoch"],
+        "source_fencing_token": authority["sourceFencingToken"],
+        "source_process_revision": authority["sourceProcessRevision"],
+        "source_room_revision": authority["sourceRoomRevision"],
+        "dossier_id": authority["dossierId"],
+        "dossier_version": authority["dossierVersion"],
+        "matrix_id": authority["matrixId"],
+        "matrix_version": authority["matrixVersion"],
+        "matrix_content_hash": authority["matrixContentHash"],
+        "projection_ref": authority["projectionRef"],
+    }
+    authority["authorityHash"] = canonical_sha256(authority_material)
+    envelope["schema_version"] = "evidence_context_envelope.v2"
+    envelope["intake_dossier_snapshot"] = None
+    envelope["frozen_submission"] = {
+        "evidence_room_epoch": 2,
+        "evidence_fencing_token": 23,
+        "projection_ref": projection_ref,
+        "projection_sha256": matrix["content_hash"],
+        "authority": authority,
+        "matrix": matrix,
+    }
+    return payload
+
+
+def test_freeze_bound_evidence_context_preserves_exact_matrix_and_authority() -> None:
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _freeze_bound_evidence_turn_payload()
+    expected = payload["context_envelope"]["frozen_submission"]
+    first = EvidenceTurnRequest.model_validate(payload)
+    replay = EvidenceTurnRequest.model_validate(payload)
+    assembled = EvidenceContextAssembler().assemble(first)
+
+    assert replay == first
+    assert assembled.working_set.case_intake_dossier["case_fact_matrix"] == expected["matrix"]
+    audit = assembled.context_sources["internal_audit_context"]
+    assert audit["frozen_submission_authority"] == expected["authority"]
+    assert audit["evidence_projection_authority"] == {
+        "evidence_room_epoch": 2,
+        "evidence_fencing_token": 23,
+        "projection_ref": expected["projection_ref"],
+        "projection_sha256": expected["projection_sha256"],
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "WRONG_HASH",
+        "FOREIGN_CASE",
+        "NEED_MORE_INFO",
+        "NON_BILATERAL",
+        "DOSSIER_ONLY",
+    ],
+)
+def test_freeze_bound_evidence_context_fails_closed_before_model_execution(
+    mutation: str,
+) -> None:
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _freeze_bound_evidence_turn_payload()
+    envelope = payload["context_envelope"]
+    frozen = envelope["frozen_submission"]
+    if mutation == "WRONG_HASH":
+        frozen["projection_sha256"] = "f" * 64
+    elif mutation == "FOREIGN_CASE":
+        frozen["matrix"]["case_id"] = "CASE_foreign_frozen_matrix"
+    elif mutation == "NEED_MORE_INFO":
+        frozen["authority"]["respondentCompletionStatus"] = "NEED_MORE_INFO"
+    elif mutation == "NON_BILATERAL":
+        frozen["matrix"]["matrix_kind"] = "RESPONDENT_OPENING"
+    else:
+        envelope["intake_dossier_snapshot"] = _evidence_turn_payload()[
+            "context_envelope"
+        ]["intake_dossier_snapshot"]
+        envelope.pop("frozen_submission")
+
+    with pytest.raises(ValidationError):
+        EvidenceTurnRequest.model_validate(payload)

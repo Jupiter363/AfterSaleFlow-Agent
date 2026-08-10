@@ -39,6 +39,7 @@ final class TargetE2eFinalizationFixture {
     static final String HASH = "a".repeat(64);
     static final String RUN_ID = "RUN_TARGET_E2E";
     static final String ATTEMPT_ID = "ATTEMPT_TARGET_E2E";
+    static final String RETRY_ATTEMPT_ID = "ATTEMPT_TARGET_E2E_RETRY";
     static final String CASE_ID = "CASE_TARGET_E2E";
     static final String TENANT = "tenant-target-e2e";
     static final String ROOM_ID = "ROOM_TARGET_E2E";
@@ -54,6 +55,19 @@ final class TargetE2eFinalizationFixture {
     private TargetE2eFinalizationFixture() {}
 
     static Fixture valid() {
+        return validAttempt(1, ATTEMPT_ID, "COMMAND_TARGET_E2E", "nonce-target-e2e");
+    }
+
+    static Fixture validRetry() {
+        return validAttempt(
+                2,
+                RETRY_ATTEMPT_ID,
+                "COMMAND_TARGET_E2E_RETRY",
+                "nonce-target-e2e-retry");
+    }
+
+    private static Fixture validAttempt(
+            int attemptNo, String attemptId, String commandId, String commandNonce) {
         String threadId = "grt.v1." + "b".repeat(32);
         var actor = new IntakePrivateThreadRegistration.ActorScope(
                 "user-target-e2e",
@@ -107,25 +121,16 @@ final class TargetE2eFinalizationFixture {
                 Audience.USER,
                 NOW.minusSeconds(40),
                 NOW.minusSeconds(39));
-        RoomGraphCommand command = new IntakeGraphCommandFactory().create(
-                new IntakeGraphCommandFactory.CommandRequest(
-                        "COMMAND_TARGET_E2E",
-                        RUN_ID,
-                        ATTEMPT_ID,
-                        binding,
-                        snapshot,
-                        event,
-                        14,
-                        "INTAKE_ACTIVE",
-                        7,
-                        "intake-agent.v2",
-                        2,
-                        3,
-                        1,
-                        NOW.plusSeconds(300),
-                        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-                        "graph-envelope.target-e2e.v1",
-                        "nonce-target-e2e"));
+        RoomGraphCommand originCommand = command(
+                binding,
+                snapshot,
+                event,
+                "COMMAND_TARGET_E2E",
+                ATTEMPT_ID,
+                "nonce-target-e2e");
+        RoomGraphCommand command = attemptNo == 1
+                ? originCommand
+                : command(binding, snapshot, event, commandId, attemptId, commandNonce);
         ArtifactPointer proposal = new ArtifactPointer(
                 "intake.proposal." + HASH.substring(0, 32),
                 "intake-turn-proposal.v2",
@@ -135,7 +140,7 @@ final class TargetE2eFinalizationFixture {
                 "room-graph-result.v1",
                 command.commandId(),
                 RUN_ID,
-                ATTEMPT_ID,
+                attemptId,
                 command.graphKey(),
                 command.graphVersion(),
                 "CHECKPOINT_TARGET_E2E",
@@ -176,11 +181,11 @@ final class TargetE2eFinalizationFixture {
         var request = new ExecuteAgentRunRequest(
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
                 RUN_ID,
-                1,
-                1,
+                attemptNo,
+                Math.max(1, attemptNo),
                 "agent-stream.v2",
                 "e".repeat(64),
-                null,
+                attemptNo == 1 ? null : ATTEMPT_ID,
                 false,
                 0,
                 command);
@@ -188,8 +193,8 @@ final class TargetE2eFinalizationFixture {
                 ExecuteAgentRunResult.SCHEMA_VERSION,
                 RUN_ID,
                 RUN_ID,
-                ATTEMPT_ID,
-                1,
+                attemptId,
+                attemptNo,
                 ExecuteAgentRunResult.Outcome.COMPLETED,
                 graphResult,
                 graphResult.outputHash(),
@@ -214,15 +219,15 @@ final class TargetE2eFinalizationFixture {
                 4,
                 14,
                 91,
-                command.requestHash(),
+                originCommand.requestHash(),
                 request.logicalInputHash(),
-                ATTEMPT_ID,
+                attemptId,
                 null,
                 graphResult.outputHash());
         var attempt = new TargetE2eIntakeFinalizationState.Attempt(
-                ATTEMPT_ID,
+                attemptId,
                 RUN_ID,
-                1,
+                attemptNo,
                 "RESULT_READY",
                 "TEMPORAL_ACTIVITY",
                 null,
@@ -304,7 +309,7 @@ final class TargetE2eFinalizationFixture {
         normalizedProposal.put("proposal_id", "target-proposal." + HASH.substring(0, 32));
         normalizedProposal.put("command_id", command.commandId());
         normalizedProposal.put("logical_run_id", RUN_ID);
-        normalizedProposal.put("attempt_id", ATTEMPT_ID);
+        normalizedProposal.put("attempt_id", attemptId);
         normalizedProposal.put("payload_schema_version", proposal.schemaVersion());
         normalizedProposal.put(
                 "payload_ref", "urn:target-e2e:proposal:intake:" + proposal.sha256());
@@ -447,6 +452,34 @@ final class TargetE2eFinalizationFixture {
                 unsigned.issuedAt(),
                 IntakeContractHashes.registrationHash(unsigned));
         return new IntakeGraphThreadBinding(registration, 91);
+    }
+
+    private static RoomGraphCommand command(
+            IntakeGraphThreadBinding binding,
+            IntakeSnapshotReference snapshot,
+            IntakeEventReference event,
+            String commandId,
+            String attemptId,
+            String commandNonce) {
+        return new IntakeGraphCommandFactory().create(
+                new IntakeGraphCommandFactory.CommandRequest(
+                        commandId,
+                        RUN_ID,
+                        attemptId,
+                        binding,
+                        snapshot,
+                        event,
+                        14,
+                        "INTAKE_ACTIVE",
+                        7,
+                        "intake-agent.v2",
+                        2,
+                        3,
+                        1,
+                        NOW.plusSeconds(300),
+                        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                        "graph-envelope.target-e2e.v1",
+                        commandNonce));
     }
 
     record Fixture(

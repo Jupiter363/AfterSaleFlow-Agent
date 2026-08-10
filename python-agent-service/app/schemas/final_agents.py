@@ -4,12 +4,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_serializer, model_validator
 
+from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
 from app.harness.invocation_context import AgentInvocationContext
+from app.schemas.case_fact_matrix import CaseFactMatrixV2
 from app.schemas.models import (
     Confidence,
     EvidenceItem,
@@ -683,10 +686,170 @@ class EvidenceRoomPolicyV1(StrictModel):
     initiator_evidence_required: bool
 
 
+class FrozenIntakeSubmissionAuthorityV1(StrictModel):
+    """Exact Java FrozenIntakeSubmissionAuthority record carried without remapping."""
+
+    schema_version: Literal["frozen-intake-submission-authority.v1"] = Field(
+        alias="schemaVersion"
+    )
+    tenant_surrogate: Annotated[str, Field(min_length=1, max_length=128)] = Field(
+        alias="tenantSurrogate"
+    )
+    case_id: Annotated[str, Field(min_length=1, max_length=64)] = Field(alias="caseId")
+    respondent_actor_id: Annotated[str, Field(min_length=1, max_length=128)] = Field(
+        alias="respondentActorId"
+    )
+    respondent_actor_role: Literal["USER", "MERCHANT"] = Field(
+        alias="respondentActorRole"
+    )
+    respondent_completion_id: Annotated[str, Field(min_length=1, max_length=512)] = Field(
+        alias="respondentCompletionId"
+    )
+    respondent_completion_status: Literal["COMPLETED"] = Field(
+        alias="respondentCompletionStatus"
+    )
+    respondent_completed_at: Annotated[str, Field(min_length=1, max_length=64)] = Field(
+        alias="respondentCompletedAt"
+    )
+    submit_operation: Literal["RESPONDENT_CONFIRM"] = Field(alias="submitOperation")
+    submit_operation_key: Annotated[str, Field(min_length=1, max_length=512)] = Field(
+        alias="submitOperationKey"
+    )
+    submit_command_id: Annotated[str, Field(min_length=1, max_length=512)] = Field(
+        alias="submitCommandId"
+    )
+    submit_command_sequence: Annotated[int, Field(ge=1)] = Field(
+        alias="submitCommandSequence"
+    )
+    submit_request_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] = Field(
+        alias="submitRequestHash"
+    )
+    submit_event_id: Annotated[str, Field(min_length=1, max_length=512)] = Field(
+        alias="submitEventId"
+    )
+    submit_event_ref: Annotated[str, Field(min_length=1, max_length=1024)] = Field(
+        alias="submitEventRef"
+    )
+    submit_event_sequence: Annotated[int, Field(ge=1)] = Field(alias="submitEventSequence")
+    submit_event_type: Literal["RESPONDENT_CONFIRMED"] = Field(alias="submitEventType")
+    source_room_epoch: Annotated[int, Field(ge=0)] = Field(alias="sourceRoomEpoch")
+    source_fencing_token: Annotated[int, Field(ge=1)] = Field(alias="sourceFencingToken")
+    source_process_revision: Annotated[int, Field(ge=1)] = Field(
+        alias="sourceProcessRevision"
+    )
+    source_room_revision: Annotated[int, Field(ge=1)] = Field(alias="sourceRoomRevision")
+    dossier_id: Annotated[str, Field(min_length=1, max_length=512)] = Field(alias="dossierId")
+    dossier_version: Annotated[int, Field(ge=1)] = Field(alias="dossierVersion")
+    matrix_id: Annotated[str, Field(pattern=r"^CASE_MATRIX_[A-F0-9]{20}$")] = Field(
+        alias="matrixId"
+    )
+    matrix_version: Annotated[int, Field(ge=2)] = Field(alias="matrixVersion")
+    matrix_content_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] = Field(
+        alias="matrixContentHash"
+    )
+    projection_ref: Annotated[str, Field(min_length=1, max_length=1024)] = Field(
+        alias="projectionRef"
+    )
+    authority_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] = Field(
+        alias="authorityHash"
+    )
+
+    @model_validator(mode="after")
+    def validate_canonical_authority(self) -> "FrozenIntakeSubmissionAuthorityV1":
+        try:
+            completed_at = datetime.fromisoformat(
+                self.respondent_completed_at.replace("Z", "+00:00")
+            )
+        except ValueError as failure:
+            raise ValueError("respondentCompletedAt must be an ISO-8601 instant") from failure
+        if completed_at.tzinfo is None or not self.respondent_completed_at.endswith("Z"):
+            raise ValueError("respondentCompletedAt must be a UTC instant")
+        expected_event_ref = (
+            "urn:after-sale-flow:intake-event:" + self.submit_event_id
+        )
+        if self.submit_event_ref != expected_event_ref:
+            raise ValueError("submitEventRef does not identify submitEventId")
+        if self.projection_ref != (
+            self.submit_event_ref + "#/result/frozen_submission/matrix"
+        ):
+            raise ValueError("projectionRef does not locate the frozen Submit matrix")
+        authority_material = {
+            "schema_version": self.schema_version,
+            "tenant_surrogate": self.tenant_surrogate,
+            "case_id": self.case_id,
+            "respondent_actor_id": self.respondent_actor_id,
+            "respondent_actor_role": self.respondent_actor_role,
+            "respondent_completion_id": self.respondent_completion_id,
+            "respondent_completion_status": self.respondent_completion_status,
+            "respondent_completed_at": self.respondent_completed_at,
+            "submit_operation": self.submit_operation,
+            "submit_operation_key": self.submit_operation_key,
+            "submit_command_id": self.submit_command_id,
+            "submit_command_sequence": self.submit_command_sequence,
+            "submit_request_hash": self.submit_request_hash,
+            "submit_event_id": self.submit_event_id,
+            "submit_event_ref": self.submit_event_ref,
+            "submit_event_sequence": self.submit_event_sequence,
+            "submit_event_type": self.submit_event_type,
+            "source_room_epoch": self.source_room_epoch,
+            "source_fencing_token": self.source_fencing_token,
+            "source_process_revision": self.source_process_revision,
+            "source_room_revision": self.source_room_revision,
+            "dossier_id": self.dossier_id,
+            "dossier_version": self.dossier_version,
+            "matrix_id": self.matrix_id,
+            "matrix_version": self.matrix_version,
+            "matrix_content_hash": self.matrix_content_hash,
+            "projection_ref": self.projection_ref,
+        }
+        if canonical_sha256(authority_material) != self.authority_hash:
+            raise ValueError("authorityHash is not canonical")
+        return self
+
+
+class EvidenceFrozenSubmissionV1(StrictModel):
+    evidence_room_epoch: Annotated[int, Field(ge=0)]
+    evidence_fencing_token: Annotated[int, Field(ge=1)]
+    projection_ref: Annotated[str, Field(min_length=1, max_length=1024)]
+    projection_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    authority: FrozenIntakeSubmissionAuthorityV1
+    matrix: dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_frozen_matrix(self) -> "EvidenceFrozenSubmissionV1":
+        authority = self.authority
+        matrix = self.matrix
+        if (
+            self.projection_ref != authority.projection_ref
+            or self.projection_sha256 != authority.matrix_content_hash
+            or matrix.get("schema_version") != "case_fact_matrix.v2"
+            or matrix.get("matrix_kind") != "BILATERAL_FROZEN"
+            or matrix.get("case_id") != authority.case_id
+            or matrix.get("matrix_id") != authority.matrix_id
+            or type(matrix.get("matrix_version")) is not int
+            or matrix.get("matrix_version") != authority.matrix_version
+            or matrix.get("content_hash") != authority.matrix_content_hash
+        ):
+            raise ValueError("frozen matrix does not match Submit authority")
+        if canonical_sha256_omitting(matrix, "content_hash") != authority.matrix_content_hash:
+            raise ValueError("frozen matrix content_hash is not canonical")
+        matrix_id_material = dict(matrix)
+        matrix_id_material.pop("content_hash")
+        matrix_id_material.pop("matrix_id", None)
+        expected_matrix_id = "CASE_MATRIX_" + canonical_sha256(matrix_id_material)[:20].upper()
+        if authority.matrix_id != expected_matrix_id:
+            raise ValueError("frozen matrix_id is not canonical")
+        CaseFactMatrixV2.model_validate(matrix)
+        return self
+
+
 class EvidenceContextEnvelopeV1(StrictModel):
     """Versioned Java-to-Harness evidence context boundary."""
 
-    schema_version: Literal["evidence_context_envelope.v1"]
+    schema_version: Literal[
+        "evidence_context_envelope.v1",
+        "evidence_context_envelope.v2",
+    ]
     captured_at: ShortText
     case_snapshot: EvidenceCaseSnapshotV1
     intake_dossier_snapshot: EvidenceIntakeDossierSnapshotV1 | None
@@ -695,6 +858,7 @@ class EvidenceContextEnvelopeV1(StrictModel):
     visible_evidence: list[EvidenceVisibleEvidenceItemV1]
     private_conversation: EvidencePrivateConversationV1
     room_policy: EvidenceRoomPolicyV1
+    frozen_submission: EvidenceFrozenSubmissionV1 | None = None
 
     # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
     # 具体功能：`validate_visible_evidence_scope` 校验当前可见证据的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`model_validator`、`visible_ids.add`、`ValueError`。
@@ -702,6 +866,22 @@ class EvidenceContextEnvelopeV1(StrictModel):
     # 系统意义：这是信任边界：拒绝多余字段、资源越界、身份错配和非法枚举。
     @model_validator(mode="after")
     def validate_visible_evidence_scope(self) -> "EvidenceContextEnvelopeV1":
+        freeze_bound = self.schema_version == "evidence_context_envelope.v2"
+        if freeze_bound != (self.frozen_submission is not None):
+            raise ValueError(
+                "evidence context schema does not match frozen Submit authority"
+            )
+        if freeze_bound:
+            assert self.frozen_submission is not None
+            if (
+                self.intake_dossier_snapshot is not None
+                or self.room_policy.room_type != "EVIDENCE"
+                or self.case_snapshot.case_id
+                != self.frozen_submission.authority.case_id
+            ):
+                raise ValueError(
+                    "freeze-bound evidence context does not match its Evidence case"
+                )
         actor = self.actor_snapshot
         visible_ids: set[str] = set()
         for item in self.visible_evidence:

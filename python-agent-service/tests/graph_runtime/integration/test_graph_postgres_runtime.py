@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import json
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
@@ -15,6 +16,7 @@ from psycopg.rows import dict_row
 import pytest
 from testcontainers.postgres import PostgresContainer
 
+import app.graph_runtime.checkpoint as checkpoint_module
 from app.graph_runtime.checkpoint import (
     FencedPostgresSaver,
     TerminalResultMaterializer,
@@ -27,10 +29,12 @@ from app.contracts.v1.codec import canonical_sha256_omitting
 from app.graph_runtime.bulkhead import GraphBulkheadScope, GraphPermitFenceContext
 from app.graph_runtime.errors import (
     GraphCommandHashConflictError,
+    GraphLeaseLostError,
     GraphNonceReplayError,
     GraphPermitBindingError,
     GraphPermitLostError,
 )
+from app.graph_runtime.gateway import GatewayExecution, GraphCommandGateway
 from app.graph_runtime.ledger import CommandBinding, InvocationNonce, PostgresCommandLedger
 from app.graph_runtime.migrations import (
     GraphMigrationRunner,
@@ -44,6 +48,7 @@ from app.graph_runtime.postgres_bulkhead import (
     PostgresGraphFanoutBulkhead,
 )
 from app.graph_runtime.persistence_models import (
+    GraphBindingError,
     GraphGatewayMode,
     GraphFenceContext,
     GraphFenceError,
@@ -81,6 +86,7 @@ STATE_SCHEMA_HASH = "c" * 64
 BINDING_HASH = "d" * 64
 THREAD_ID = f"grt.v1.{'1' * 32}"
 COMMAND_ID = "command-integration-1"
+STATEMENT_TIMEOUT_MS = 5_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -1409,7 +1415,11 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
         {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "hearing"}},
         first_fence,
     )
-    saver = FencedPostgresSaver(pool, acquire_timeout_seconds=5)
+    saver = FencedPostgresSaver(
+        pool,
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        acquire_timeout_seconds=5,
+    )
     try:
         first_checkpoint, first_versions = _revision_checkpoint(1)
         first_saved = await saver.aput(
@@ -1514,7 +1524,11 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
     replacement_pool = _runtime_pool(graph_database)
     await replacement_pool.open(wait=True, timeout=10)
     try:
-        replacement = FencedPostgresSaver(replacement_pool, acquire_timeout_seconds=5)
+        replacement = FencedPostgresSaver(
+            replacement_pool,
+            statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+            acquire_timeout_seconds=5,
+        )
         restored = await replacement.aget_tuple(second_config)
         async with replacement_pool.connection(timeout=5) as connection:
             async with connection.transaction():
@@ -1566,6 +1580,925 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
         "last_checkpoint_ns": "hearing",
         "last_checkpoint_id": terminal_checkpoint_id,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("checkpoint", "pending_writes"))
+async def test_real_bulk_write_does_not_block_renewal_before_final_fence_refresh(
+    graph_database: _Database,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    await _migration_runner(graph_database).run()
+    await _seed_executable_command(graph_database)
+    pool = _runtime_pool(graph_database)
+    await pool.open(wait=True, timeout=10)
+    saver = FencedPostgresSaver(
+        pool,
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        acquire_timeout_seconds=5,
+    )
+    fence = _fence(owner_id="worker-1", fencing_token=1)
+    config = bind_fence_context(
+        {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "hearing"}},
+        fence,
+    )
+    if operation == "pending_writes":
+        parent, parent_versions = _revision_checkpoint(1)
+        config = await saver.aput(
+            config,
+            parent,  # type: ignore[arg-type]
+            {},
+            parent_versions,
+        )
+
+    async with pool.connection(timeout=5) as connection:
+        initial_lease = await (
+            await connection.execute(
+                """
+                update agent_graph_lease
+                   set renewed_at = clock_timestamp(),
+                       lease_expires_at = clock_timestamp() + interval '2 seconds'
+                 where thread_id = %s and command_id = %s
+             returning lease_revision, lease_expires_at
+                """,
+                (THREAD_ID, COMMAND_ID),
+            )
+        ).fetchone()
+        command_deadline_row = await (
+            await connection.execute(
+                """
+                select deadline_at from agent_graph_command
+                 where thread_id = %s and command_id = %s
+                """,
+                (THREAD_ID, COMMAND_ID),
+            )
+        ).fetchone()
+    assert initial_lease is not None
+    assert command_deadline_row is not None
+    command_deadline_at = command_deadline_row["deadline_at"]
+    assert isinstance(command_deadline_at, datetime)
+
+    bulk_written = asyncio.Event()
+    release_bulk = asyncio.Event()
+    if operation == "checkpoint":
+        original_write = saver._write_prepared_checkpoint  # noqa: SLF001
+
+        async def hold_after_checkpoint_write(connection: Any, prepared: Any) -> None:
+            await original_write(connection, prepared)
+            bulk_written.set()
+            await release_bulk.wait()
+
+        monkeypatch.setattr(
+            saver,
+            "_write_prepared_checkpoint",
+            hold_after_checkpoint_write,
+        )
+        checkpoint, versions = _revision_checkpoint(2)
+        checkpoint["channel_values"].update(
+            {"blob-a": {"value": "a"}, "blob-b": {"value": "b"}}
+        )
+        checkpoint["channel_versions"].update({"blob-a": "v-a", "blob-b": "v-b"})
+        versions.update({"blob-a": "v-a", "blob-b": "v-b"})
+        write_task = asyncio.create_task(
+            saver.aput(config, checkpoint, {}, versions)  # type: ignore[arg-type]
+        )
+    else:
+        original_write = saver._write_prepared_pending_writes  # noqa: SLF001
+
+        async def hold_after_pending_write(connection: Any, prepared: Any) -> None:
+            await original_write(connection, prepared)
+            bulk_written.set()
+            await release_bulk.wait()
+
+        monkeypatch.setattr(
+            saver,
+            "_write_prepared_pending_writes",
+            hold_after_pending_write,
+        )
+        write_task = asyncio.create_task(
+            saver.aput_writes(
+                config,
+                (("custom-channel", {"value": "pending"}),),
+                "task-bulk-renew",
+            )
+        )
+
+    async def renew_exact_lease() -> Any:
+        async with pool.connection(timeout=5) as connection:
+            async with connection.transaction():
+                return await PostgresLeaseRepository().renew(
+                    connection,
+                    thread_id=THREAD_ID,
+                    command_id=COMMAND_ID,
+                    owner_id="worker-1",
+                    fencing_token=1,
+                    command_deadline_at=command_deadline_at,
+                )
+
+    renew_task: asyncio.Task[Any] | None = None
+    try:
+        await asyncio.wait_for(bulk_written.wait(), timeout=2)
+        renew_task = asyncio.create_task(renew_exact_lease())
+        renewed = await asyncio.wait_for(asyncio.shield(renew_task), timeout=1)
+        assert write_task.done() is False
+        assert renewed.fencing_token == 1
+        assert renewed.owner_id == "worker-1"
+
+        await asyncio.sleep(2.05)
+        async with pool.connection(timeout=5) as connection:
+            horizon = await (
+                await connection.execute(
+                    """
+                    select clock_timestamp() > %s as crossed_initial_horizon,
+                           lease_expires_at > clock_timestamp() as active
+                      from agent_graph_lease where thread_id = %s
+                    """,
+                    (initial_lease["lease_expires_at"], THREAD_ID),
+                )
+            ).fetchone()
+        assert horizon == {"crossed_initial_horizon": True, "active": True}
+        assert write_task.done() is False
+
+        release_bulk.set()
+        await asyncio.wait_for(write_task, timeout=2)
+        async with pool.connection(timeout=5) as connection:
+            lease_row = await (
+                await connection.execute(
+                    """
+                    select owner_id, fencing_token, released_at, cancelled_at,
+                           lease_revision, lease_expires_at > clock_timestamp() as active
+                      from agent_graph_lease where thread_id = %s
+                    """,
+                    (THREAD_ID,),
+                )
+            ).fetchone()
+            authority = await (
+                await connection.execute(
+                    """
+                    select
+                      (select status from agent_graph_command
+                        where thread_id = %s and command_id = %s) as command_status,
+                      (select count(*) from agent_graph_command_attempt
+                        where thread_id = %s and command_id = %s) as attempt_count,
+                      (select coalesce(sum(provider_call_count), 0)
+                         from agent_graph_command_attempt
+                        where thread_id = %s and command_id = %s) as provider_calls
+                    """,
+                    (
+                        THREAD_ID,
+                        COMMAND_ID,
+                        THREAD_ID,
+                        COMMAND_ID,
+                        THREAD_ID,
+                        COMMAND_ID,
+                    ),
+                )
+            ).fetchone()
+            clean = await (await connection.execute("select 1 as clean")).fetchone()
+            assert clean == {"clean": 1}
+        assert lease_row is not None
+        assert lease_row["owner_id"] == "worker-1"
+        assert lease_row["fencing_token"] == 1
+        assert lease_row["released_at"] is None
+        assert lease_row["cancelled_at"] is None
+        assert lease_row["lease_revision"] >= initial_lease["lease_revision"] + 2
+        assert lease_row["active"] is True
+        assert authority == {
+            "command_status": "EXECUTING",
+            "attempt_count": 0,
+            "provider_calls": 0,
+        }
+    finally:
+        release_bulk.set()
+        if not write_task.done():
+            write_task.cancel()
+        await asyncio.gather(write_task, return_exceptions=True)
+        if renew_task is not None and not renew_task.done():
+            renew_task.cancel()
+            await asyncio.gather(renew_task, return_exceptions=True)
+        await pool.close(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_real_post_lease_checkpoint_suffix_releases_heartbeat_within_safety_horizon(
+    graph_database: _Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _migration_runner(graph_database).run()
+    await _seed_executable_command(graph_database)
+    saver_pool = _runtime_pool(graph_database)
+    control_pool = _runtime_pool(graph_database)
+    await saver_pool.open(wait=True, timeout=10)
+    await control_pool.open(wait=True, timeout=10)
+    monkeypatch.setattr(
+        checkpoint_module,
+        "FENCED_LEASE_SUFFIX_BODY_TIMEOUT_SECONDS",
+        0.10,
+        raising=False,
+    )
+    saver = FencedPostgresSaver(
+        saver_pool,
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        acquire_timeout_seconds=5,
+    )
+    fence = _fence(owner_id="worker-1", fencing_token=1)
+    config = bind_fence_context(
+        {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "hearing"}},
+        fence,
+    )
+    checkpoint, versions = _revision_checkpoint(1)
+    checkpoint["channel_values"].update(
+        {"suffix-blob-a": {"value": "a"}, "suffix-blob-b": {"value": "b"}}
+    )
+    checkpoint["channel_versions"].update(
+        {"suffix-blob-a": "v-a", "suffix-blob-b": "v-b"}
+    )
+    versions.update({"suffix-blob-a": "v-a", "suffix-blob-b": "v-b"})
+    checkpoint_id = checkpoint["id"]
+
+    lease_repository = PostgresLeaseRepository()
+    async with control_pool.connection(timeout=5) as connection:
+        initial_lease = await lease_repository.observe(connection, thread_id=THREAD_ID)
+        command_deadline_row = await (
+            await connection.execute(
+                """
+                select deadline_at from agent_graph_command
+                 where thread_id = %s and command_id = %s
+                """,
+                (THREAD_ID, COMMAND_ID),
+            )
+        ).fetchone()
+        baseline = await (
+            await connection.execute(
+                """
+                select
+                  (select count(*) from checkpoints
+                    where thread_id = %s and checkpoint_ns = 'hearing'
+                      and checkpoint_id = %s) as checkpoint_count,
+                  (select count(*) from checkpoint_blobs
+                    where thread_id = %s and checkpoint_ns = 'hearing') as blob_count,
+                  (select count(*) from checkpoint_writes
+                    where thread_id = %s and checkpoint_ns = 'hearing') as pending_count,
+                  (select committed_checkpoint_id from agent_graph_command
+                    where thread_id = %s and command_id = %s) as command_checkpoint_id,
+                  (select last_checkpoint_id from graph_thread_registry
+                    where thread_id = %s) as thread_checkpoint_id,
+                  (select count(*) from agent_graph_command_attempt
+                    where thread_id = %s and command_id = %s) as attempt_count,
+                  (select coalesce(sum(provider_call_count), 0)
+                     from agent_graph_command_attempt
+                    where thread_id = %s and command_id = %s) as provider_calls
+                """,
+                (
+                    THREAD_ID,
+                    checkpoint_id,
+                    THREAD_ID,
+                    THREAD_ID,
+                    THREAD_ID,
+                    COMMAND_ID,
+                    THREAD_ID,
+                    THREAD_ID,
+                    COMMAND_ID,
+                    THREAD_ID,
+                    COMMAND_ID,
+                ),
+            )
+        ).fetchone()
+    assert initial_lease is not None
+    assert command_deadline_row is not None
+    assert baseline is not None
+    command_deadline_at = command_deadline_row["deadline_at"]
+    assert isinstance(command_deadline_at, datetime)
+
+    refresh_entered = asyncio.Event()
+    release_refresh = asyncio.Event()
+    renew_entered = asyncio.Event()
+    original_refresh = saver._refresh_locked_fence_lease  # noqa: SLF001
+    original_renew = lease_repository.renew
+
+    async def hold_before_refresh(connection: Any, current_fence: Any) -> None:
+        refresh_entered.set()
+        await release_refresh.wait()
+        await original_refresh(connection, current_fence)
+
+    async def observe_real_renew(connection: Any, **kwargs: Any) -> Any:
+        renew_entered.set()
+        return await original_renew(connection, **kwargs)
+
+    monkeypatch.setattr(saver, "_refresh_locked_fence_lease", hold_before_refresh)
+    monkeypatch.setattr(lease_repository, "renew", observe_real_renew)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=control_pool,
+        leases=lease_repository,
+        input_authorizer=object(),  # type: ignore[arg-type]
+        acquire_timeout_seconds=2,
+    )
+    execution = GatewayExecution(  # type: ignore[arg-type]
+        admission=SimpleNamespace(
+            command=SimpleNamespace(deadline_at=command_deadline_at)
+        ),
+        attempt=SimpleNamespace(),
+        lease=initial_lease,
+        fence=fence,
+    )
+    write_task = asyncio.create_task(
+        saver.aput(config, checkpoint, {}, versions)  # type: ignore[arg-type]
+    )
+    renew_task: asyncio.Task[Any] | None = None
+    suffix_horizon_seconds = 0.25
+    suffix_released_by_horizon = False
+    heartbeat_released_by_horizon = False
+    try:
+        await asyncio.wait_for(refresh_entered.wait(), timeout=2)
+        renew_task = asyncio.create_task(gateway.renew_execution(execution))
+        await asyncio.wait_for(renew_entered.wait(), timeout=2)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(renew_task), timeout=0.05)
+
+        observation_deadline = (
+            asyncio.get_running_loop().time() + suffix_horizon_seconds
+        )
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(write_task),
+                timeout=suffix_horizon_seconds,
+            )
+        except TimeoutError:
+            pass
+        except GraphFenceError:
+            pass
+        suffix_released_by_horizon = write_task.done()
+        remaining_observation = max(
+            0.0,
+            observation_deadline - asyncio.get_running_loop().time(),
+        )
+        if suffix_released_by_horizon and not renew_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(renew_task),
+                    timeout=remaining_observation,
+                )
+            except TimeoutError:
+                pass
+        heartbeat_released_by_horizon = renew_task.done()
+
+        if not write_task.done():
+            write_task.cancel()
+        write_result = await asyncio.gather(write_task, return_exceptions=True)
+        assert len(write_result) == 1
+        if suffix_released_by_horizon:
+            assert isinstance(write_result[0], GraphFenceError)
+        else:
+            assert isinstance(write_result[0], asyncio.CancelledError)
+        release_refresh.set()
+
+        renewed = await asyncio.wait_for(renew_task, timeout=2)
+        assert renewed.thread_id == THREAD_ID
+        assert renewed.command_id == COMMAND_ID
+        assert renewed.owner_id == "worker-1"
+        assert renewed.fencing_token == 1
+        assert renewed.revision == initial_lease.revision + 1
+
+        async with control_pool.connection(timeout=5) as connection:
+            durable = await (
+                await connection.execute(
+                    """
+                    select
+                      (select count(*) from checkpoints
+                        where thread_id = %s and checkpoint_ns = 'hearing'
+                          and checkpoint_id = %s) as checkpoint_count,
+                      (select count(*) from checkpoint_blobs
+                        where thread_id = %s and checkpoint_ns = 'hearing') as blob_count,
+                      (select count(*) from checkpoint_writes
+                        where thread_id = %s and checkpoint_ns = 'hearing') as pending_count,
+                      (select committed_checkpoint_id from agent_graph_command
+                        where thread_id = %s and command_id = %s) as command_checkpoint_id,
+                      (select last_checkpoint_id from graph_thread_registry
+                        where thread_id = %s) as thread_checkpoint_id,
+                      (select count(*) from agent_graph_command_attempt
+                        where thread_id = %s and command_id = %s) as attempt_count,
+                      (select coalesce(sum(provider_call_count), 0)
+                         from agent_graph_command_attempt
+                        where thread_id = %s and command_id = %s) as provider_calls,
+                      (select lease_revision from agent_graph_lease
+                        where thread_id = %s and command_id = %s) as lease_revision,
+                      (select lease_expires_at > clock_timestamp()
+                         and released_at is null and cancelled_at is null
+                         from agent_graph_lease
+                        where thread_id = %s and command_id = %s) as lease_active
+                    """,
+                    (
+                        THREAD_ID,
+                        checkpoint_id,
+                        THREAD_ID,
+                        THREAD_ID,
+                        THREAD_ID,
+                        COMMAND_ID,
+                        THREAD_ID,
+                        THREAD_ID,
+                        COMMAND_ID,
+                        THREAD_ID,
+                        COMMAND_ID,
+                        THREAD_ID,
+                        COMMAND_ID,
+                        THREAD_ID,
+                        COMMAND_ID,
+                    ),
+                )
+            ).fetchone()
+            control_clean = await (
+                await connection.execute("select 1 as clean")
+            ).fetchone()
+        async with saver_pool.connection(timeout=5) as connection:
+            saver_clean = await (
+                await connection.execute("select 1 as clean")
+            ).fetchone()
+
+        assert durable == {
+            "checkpoint_count": baseline["checkpoint_count"],
+            "blob_count": baseline["blob_count"],
+            "pending_count": baseline["pending_count"],
+            "command_checkpoint_id": baseline["command_checkpoint_id"],
+            "thread_checkpoint_id": baseline["thread_checkpoint_id"],
+            "attempt_count": baseline["attempt_count"],
+            "provider_calls": baseline["provider_calls"],
+            "lease_revision": renewed.revision,
+            "lease_active": True,
+        }
+        assert control_clean == {"clean": 1}
+        assert saver_clean == {"clean": 1}
+        assert (
+            suffix_released_by_horizon,
+            heartbeat_released_by_horizon,
+        ) == (True, True), (
+            "post-lease checkpoint suffix exceeded its safety horizon "
+            "while the exact gateway heartbeat remained blocked"
+        )
+    finally:
+        release_refresh.set()
+        if not write_task.done():
+            write_task.cancel()
+        await asyncio.gather(write_task, return_exceptions=True)
+        if renew_task is not None and not renew_task.done():
+            renew_task.cancel()
+            await asyncio.gather(renew_task, return_exceptions=True)
+        gateway.cleanup_execution_lease(execution)
+        await control_pool.close(timeout=10)
+        await saver_pool.close(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_real_released_final_fence_rolls_back_uncommitted_bulk_checkpoint(
+    graph_database: _Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _migration_runner(graph_database).run()
+    await _seed_executable_command(graph_database)
+    pool = _runtime_pool(graph_database)
+    await pool.open(wait=True, timeout=10)
+    saver = FencedPostgresSaver(
+        pool,
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        acquire_timeout_seconds=5,
+    )
+    fence = _fence(owner_id="worker-1", fencing_token=1)
+    config = bind_fence_context(
+        {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "hearing"}},
+        fence,
+    )
+    checkpoint, versions = _revision_checkpoint(1)
+    checkpoint_id = checkpoint["id"]
+    async with pool.connection(timeout=5) as connection:
+        baseline = await (
+            await connection.execute(
+                """
+                select
+                  (select count(*) from checkpoint_blobs
+                    where thread_id = %s and checkpoint_ns = 'hearing') as blob_count,
+                  (select committed_checkpoint_id from agent_graph_command
+                    where thread_id = %s and command_id = %s) as command_checkpoint_id,
+                  (select last_checkpoint_id from graph_thread_registry
+                    where thread_id = %s) as thread_checkpoint_id
+                """,
+                (THREAD_ID, THREAD_ID, COMMAND_ID, THREAD_ID),
+            )
+        ).fetchone()
+    assert baseline is not None
+    bulk_written = asyncio.Event()
+    release_bulk = asyncio.Event()
+    original_write = saver._write_prepared_checkpoint  # noqa: SLF001
+
+    async def hold_after_checkpoint_write(connection: Any, prepared: Any) -> None:
+        await original_write(connection, prepared)
+        bulk_written.set()
+        await release_bulk.wait()
+
+    monkeypatch.setattr(
+        saver,
+        "_write_prepared_checkpoint",
+        hold_after_checkpoint_write,
+    )
+    write_task = asyncio.create_task(
+        saver.aput(config, checkpoint, {}, versions)  # type: ignore[arg-type]
+    )
+
+    async def release_exact_lease() -> Any:
+        async with pool.connection(timeout=5) as connection:
+            async with connection.transaction():
+                return await PostgresLeaseRepository().release(
+                    connection,
+                    thread_id=THREAD_ID,
+                    command_id=COMMAND_ID,
+                    owner_id="worker-1",
+                    fencing_token=1,
+                )
+
+    release_task: asyncio.Task[Any] | None = None
+    try:
+        await asyncio.wait_for(bulk_written.wait(), timeout=2)
+        release_task = asyncio.create_task(release_exact_lease())
+        released = await asyncio.wait_for(asyncio.shield(release_task), timeout=1)
+        assert released.released_at is not None
+        assert write_task.done() is False
+
+        release_bulk.set()
+        with pytest.raises(
+            GraphFenceError,
+            match="Graph lease is stale, expired, released, or cancelled",
+        ):
+            await asyncio.wait_for(write_task, timeout=2)
+
+        async with pool.connection(timeout=5) as connection:
+            durable = await (
+                await connection.execute(
+                    """
+                    select
+                      (select count(*) from checkpoints
+                        where thread_id = %s and checkpoint_ns = 'hearing'
+                          and checkpoint_id = %s) as checkpoint_count,
+                      (select count(*) from checkpoint_blobs
+                        where thread_id = %s and checkpoint_ns = 'hearing') as blob_count,
+                      (select committed_checkpoint_id from agent_graph_command
+                        where thread_id = %s and command_id = %s) as command_checkpoint_id,
+                      (select last_checkpoint_id from graph_thread_registry
+                        where thread_id = %s) as thread_checkpoint_id,
+                      (select released_at is not null from agent_graph_lease
+                        where thread_id = %s) as lease_released
+                    """,
+                    (
+                        THREAD_ID,
+                        checkpoint_id,
+                        THREAD_ID,
+                        THREAD_ID,
+                        COMMAND_ID,
+                        THREAD_ID,
+                        THREAD_ID,
+                    ),
+                )
+            ).fetchone()
+        assert durable == {
+            "checkpoint_count": 0,
+            "blob_count": baseline["blob_count"],
+            "command_checkpoint_id": baseline["command_checkpoint_id"],
+            "thread_checkpoint_id": baseline["thread_checkpoint_id"],
+            "lease_released": True,
+        }
+    finally:
+        release_bulk.set()
+        if not write_task.done():
+            write_task.cancel()
+        await asyncio.gather(write_task, return_exceptions=True)
+        if release_task is not None and not release_task.done():
+            release_task.cancel()
+            await asyncio.gather(release_task, return_exceptions=True)
+        await pool.close(timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_binding", ("exact", "stale"))
+async def test_real_cross_replica_checkpoint_then_pending_validation_avoids_lease_cycle(
+    graph_database: _Database,
+    monkeypatch: pytest.MonkeyPatch,
+    pending_binding: str,
+) -> None:
+    await _migration_runner(graph_database).run()
+    await _seed_executable_command(graph_database)
+    pool = _runtime_pool(graph_database)
+    control_pool = _runtime_pool(graph_database)
+    await pool.open(wait=True, timeout=10)
+    await control_pool.open(wait=True, timeout=10)
+    seed_saver = FencedPostgresSaver(
+        pool,
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        acquire_timeout_seconds=5,
+    )
+    checkpoint_saver = FencedPostgresSaver(
+        pool,
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        acquire_timeout_seconds=5,
+    )
+    pending_saver = FencedPostgresSaver(
+        pool,
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        acquire_timeout_seconds=5,
+    )
+    fence = _fence(owner_id="worker-1", fencing_token=1)
+    base_config = bind_fence_context(
+        {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "hearing"}},
+        fence,
+    )
+    checkpoint, versions = _revision_checkpoint(1)
+    checkpoint_id = checkpoint["id"]
+    checkpoint_config = await seed_saver.aput(
+        base_config,
+        checkpoint,  # type: ignore[arg-type]
+        {},
+        versions,
+    )
+
+    updated_checkpoint, updated_versions = _revision_checkpoint(2)
+    updated_checkpoint["id"] = checkpoint_id
+    pending_fence = (
+        fence if pending_binding == "exact" else replace(fence, graph_key="outcome_flow")
+    )
+    pending_config = bind_fence_context(
+        {
+            "configurable": {
+                "thread_id": THREAD_ID,
+                "checkpoint_ns": "hearing",
+                "checkpoint_id": checkpoint_id,
+            }
+        },
+        pending_fence,
+    )
+    checkpoint_written = asyncio.Event()
+    release_checkpoint = asyncio.Event()
+    pending_written = asyncio.Event()
+    validation_started = asyncio.Event()
+    original_checkpoint_write = checkpoint_saver._write_prepared_checkpoint  # noqa: SLF001
+    original_pending_write = pending_saver._write_prepared_pending_writes  # noqa: SLF001
+    original_validate = pending_saver._validate_pending_write_target  # noqa: SLF001
+
+    async def hold_after_checkpoint_write(connection: Any, prepared: Any) -> None:
+        await original_checkpoint_write(connection, prepared)
+        checkpoint_written.set()
+        await release_checkpoint.wait()
+
+    async def observe_pending_write(connection: Any, prepared: Any) -> None:
+        await original_pending_write(connection, prepared)
+        pending_written.set()
+
+    async def observe_checkpoint_validation(
+        connection: Any,
+        config: Any,
+        selected_fence: GraphFenceContext,
+    ) -> None:
+        validation_started.set()
+        await original_validate(connection, config, selected_fence)
+
+    monkeypatch.setattr(
+        checkpoint_saver,
+        "_write_prepared_checkpoint",
+        hold_after_checkpoint_write,
+    )
+    monkeypatch.setattr(
+        pending_saver,
+        "_write_prepared_pending_writes",
+        observe_pending_write,
+    )
+    monkeypatch.setattr(
+        pending_saver,
+        "_validate_pending_write_target",
+        observe_checkpoint_validation,
+    )
+    checkpoint_task = asyncio.create_task(
+        checkpoint_saver.aput(
+            checkpoint_config,
+            updated_checkpoint,  # type: ignore[arg-type]
+            {},
+            updated_versions,
+        )
+    )
+    pending_task: asyncio.Task[Any] | None = None
+    try:
+        await asyncio.wait_for(checkpoint_written.wait(), timeout=2)
+        pending_task = asyncio.create_task(
+            pending_saver.aput_writes(
+                pending_config,
+                (("custom-channel", {"value": "pending"}),),
+                "task-cross-replica",
+            )
+        )
+        await asyncio.wait_for(pending_written.wait(), timeout=2)
+        await asyncio.wait_for(validation_started.wait(), timeout=2)
+        assert pending_task.done() is False
+
+        async with control_pool.connection(timeout=5) as connection:
+            async with connection.transaction():
+                command_deadline_row = await (
+                    await connection.execute(
+                        """
+                        select deadline_at from agent_graph_command
+                         where thread_id = %s and command_id = %s
+                        """,
+                        (THREAD_ID, COMMAND_ID),
+                    )
+                ).fetchone()
+                assert command_deadline_row is not None
+                command_deadline_at = command_deadline_row["deadline_at"]
+                assert isinstance(command_deadline_at, datetime)
+                renewed = await asyncio.wait_for(
+                    PostgresLeaseRepository().renew(
+                        connection,
+                        thread_id=THREAD_ID,
+                        command_id=COMMAND_ID,
+                        owner_id="worker-1",
+                        fencing_token=1,
+                        command_deadline_at=command_deadline_at,
+                    ),
+                    timeout=1,
+                )
+        assert renewed.owner_id == "worker-1"
+        assert renewed.fencing_token == 1
+        assert checkpoint_task.done() is False
+        assert pending_task.done() is False
+
+        release_checkpoint.set()
+        await asyncio.wait_for(checkpoint_task, timeout=2)
+        if pending_binding == "exact":
+            await asyncio.wait_for(pending_task, timeout=2)
+        else:
+            with pytest.raises(GraphBindingError, match="graph_key"):
+                await asyncio.wait_for(pending_task, timeout=2)
+
+        async with pool.connection(timeout=5) as connection:
+            durable = await (
+                await connection.execute(
+                    """
+                    select
+                      (select count(*) from checkpoints
+                        where thread_id = %s and checkpoint_ns = 'hearing'
+                          and checkpoint_id = %s) as checkpoint_count,
+                      (select count(*) from checkpoint_writes
+                        where thread_id = %s and checkpoint_ns = 'hearing'
+                          and checkpoint_id = %s) as pending_count,
+                      (select committed_checkpoint_id from agent_graph_command
+                        where thread_id = %s and command_id = %s) as command_checkpoint_id,
+                      (select lease_expires_at > clock_timestamp()
+                         and released_at is null and cancelled_at is null
+                         from agent_graph_lease where thread_id = %s) as lease_active
+                    """,
+                    (
+                        THREAD_ID,
+                        checkpoint_id,
+                        THREAD_ID,
+                        checkpoint_id,
+                        THREAD_ID,
+                        COMMAND_ID,
+                        THREAD_ID,
+                    ),
+                )
+            ).fetchone()
+        assert durable == {
+            "checkpoint_count": 1,
+            "pending_count": 1 if pending_binding == "exact" else 0,
+            "command_checkpoint_id": checkpoint_id,
+            "lease_active": True,
+        }
+    finally:
+        release_checkpoint.set()
+        if not checkpoint_task.done():
+            checkpoint_task.cancel()
+        await asyncio.gather(checkpoint_task, return_exceptions=True)
+        if pending_task is not None and not pending_task.done():
+            pending_task.cancel()
+            await asyncio.gather(pending_task, return_exceptions=True)
+        await control_pool.close(timeout=10)
+        await pool.close(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_real_blocked_renew_released_after_command_deadline_cannot_mutate_lease(
+    graph_database: _Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _migration_runner(graph_database).run()
+    await _seed_executable_command(
+        graph_database,
+        command_deadline_interval="3 seconds",
+    )
+    pool = _runtime_pool(graph_database)
+    await pool.open(wait=True, timeout=10)
+    saver = FencedPostgresSaver(
+        pool,
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        acquire_timeout_seconds=5,
+    )
+    fence = _fence(owner_id="worker-1", fencing_token=1)
+    config = bind_fence_context(
+        {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "hearing"}},
+        fence,
+    )
+    checkpoint_holds_lease = asyncio.Event()
+    release_checkpoint = asyncio.Event()
+    refreshed_inside_checkpoint: dict[str, Any] = {}
+    original_lock = saver._lock_fence  # noqa: SLF001
+    original_refresh = saver._refresh_locked_fence_lease  # noqa: SLF001
+
+    async def hold_exact_lease_row(
+        connection: Any,
+        current_fence: GraphFenceContext,
+    ) -> None:
+        await original_lock(connection, current_fence)
+        checkpoint_holds_lease.set()
+        await release_checkpoint.wait()
+
+    async def capture_checkpoint_refresh(connection: Any, current_fence: Any) -> None:
+        await original_refresh(connection, current_fence)
+        row = await (
+            await connection.execute(
+                """
+                select lease_revision, renewed_at, lease_expires_at
+                  from agent_graph_lease
+                 where thread_id = %s and command_id = %s
+                """,
+                (THREAD_ID, COMMAND_ID),
+            )
+        ).fetchone()
+        assert row is not None
+        refreshed_inside_checkpoint.update(row)
+
+    monkeypatch.setattr(saver, "_lock_fence", hold_exact_lease_row)
+    monkeypatch.setattr(saver, "_refresh_locked_fence_lease", capture_checkpoint_refresh)
+    checkpoint, versions = _revision_checkpoint(1)
+    checkpoint_task = asyncio.create_task(
+        saver.aput(config, checkpoint, {}, versions)  # type: ignore[arg-type]
+    )
+    renew_task: asyncio.Task[Any] | None = None
+    try:
+        await asyncio.wait_for(checkpoint_holds_lease.wait(), timeout=2)
+        async with pool.connection(timeout=5) as connection:
+            command_deadline_row = await (
+                await connection.execute(
+                    """
+                    select deadline_at from agent_graph_command
+                     where thread_id = %s and command_id = %s
+                    """,
+                    (THREAD_ID, COMMAND_ID),
+                )
+            ).fetchone()
+        assert command_deadline_row is not None
+        command_deadline_at = command_deadline_row["deadline_at"]
+        assert isinstance(command_deadline_at, datetime)
+
+        async def renew_after_row_lock() -> Any:
+            async with pool.connection(timeout=5) as connection:
+                async with connection.transaction():
+                    await connection.execute("set local lock_timeout = '5s'")
+                    return await PostgresLeaseRepository().renew(
+                        connection,
+                        thread_id=THREAD_ID,
+                        command_id=COMMAND_ID,
+                        owner_id="worker-1",
+                        fencing_token=1,
+                        command_deadline_at=command_deadline_at,
+                    )
+
+        renew_task = asyncio.create_task(renew_after_row_lock())
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(renew_task), timeout=0.02)
+        remaining = (command_deadline_at - datetime.now(timezone.utc)).total_seconds()
+        await asyncio.sleep(max(0.0, remaining) + 0.05)
+        assert renew_task.done() is False
+        release_checkpoint.set()
+        await asyncio.wait_for(checkpoint_task, timeout=2)
+        with pytest.raises(GraphLeaseLostError):
+            await asyncio.wait_for(renew_task, timeout=2)
+
+        async with pool.connection(timeout=5) as connection:
+            durable = await (
+                await connection.execute(
+                    """
+                    select lease_revision, renewed_at, lease_expires_at
+                      from agent_graph_lease
+                     where thread_id = %s and command_id = %s
+                    """,
+                    (THREAD_ID, COMMAND_ID),
+                )
+            ).fetchone()
+        assert durable == refreshed_inside_checkpoint
+    finally:
+        release_checkpoint.set()
+        if not checkpoint_task.done():
+            checkpoint_task.cancel()
+            await asyncio.gather(checkpoint_task, return_exceptions=True)
+        if renew_task is not None:
+            if not renew_task.done():
+                renew_task.cancel()
+            await asyncio.gather(renew_task, return_exceptions=True)
+        await pool.close(timeout=10)
 
 
 @pytest.mark.asyncio
@@ -1825,6 +2758,7 @@ def _runtime_pool(database: _Database):
             max_waiting=2,
             acquire_timeout_seconds=5,
             connect_timeout_seconds=5,
+            statement_timeout_ms=STATEMENT_TIMEOUT_MS,
         ),
     )
 
@@ -1937,6 +2871,7 @@ async def _seed_executable_command(
     *,
     ensure_lease: bool = True,
     include_expired_nonce: bool = False,
+    command_deadline_interval: str = "10 minutes",
 ) -> None:
     binding = _command_binding(COMMAND_ID, variant="execution")
     async with await AsyncConnection.connect(
@@ -2006,7 +2941,7 @@ async def _seed_executable_command(
                         'SHADOW', 3, 'hearing_flow', 'hearing_flow.v2',
                         'hearing_checkpoint.v2', 'prompt.v1', 'model.v1',
                         'output.v1', 'policy.v1', 'guardrail.v1', 'tools.v1',
-                        clock_timestamp() + interval '10 minutes',
+                        clock_timestamp() + %s::interval,
                         'EXECUTING', 1, 1, clock_timestamp()
                     ) on conflict do nothing
                     """,
@@ -2015,6 +2950,7 @@ async def _seed_executable_command(
                         COMMAND_ID,
                         json.dumps(binding.request_json, separators=(",", ":")),
                         binding.request_hash,
+                        command_deadline_interval,
                     ),
                 )
                 await connection.execute(

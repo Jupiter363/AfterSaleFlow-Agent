@@ -54,6 +54,16 @@ export const disputeApi = {
     }),
   intakeStatus: (actor, caseId) =>
     apiRequest(`/disputes/${caseId}/intake/status`, actor),
+  prepareIntake: (actor, caseId, idempotencyKey) =>
+    apiRequest(
+      `/disputes/${encodeURIComponent(caseId)}/intake/preparation`,
+      actor,
+      {
+        method: "POST",
+        timeoutMs: 35_000,
+        headers: { "Idempotency-Key": idempotencyKey },
+      },
+    ),
   cancelIntake: (
     actor,
     caseId,

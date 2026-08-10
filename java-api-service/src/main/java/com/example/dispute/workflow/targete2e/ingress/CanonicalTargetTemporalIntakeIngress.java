@@ -7,10 +7,15 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeMaterializer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.transaction.annotation.Transactional;
 
 /** Target-only adapter. It is deliberately not component-scanned; target assembly must opt in. */
 public class CanonicalTargetTemporalIntakeIngress implements TargetTemporalIntakeIngress {
+
+    private static final Logger LOGGER =
+            LoggerFactory.getLogger(CanonicalTargetTemporalIntakeIngress.class);
 
     private final CaseCommandService commandService;
     private final TargetIntakeMaterializer materializer;
@@ -25,7 +30,9 @@ public class CanonicalTargetTemporalIntakeIngress implements TargetTemporalIntak
     @Override
     @Transactional
     public TargetIntakeIngressReceipt accept(TargetIntakeMessageRequest request) {
+        long startedAt = System.nanoTime();
         TargetIntakeMaterializer.MaterializedIntake material = materializer.materialize(request);
+        long materializedAt = System.nanoTime();
         CaseCommandAcceptance acceptance =
                 commandService.accept(
                         request.caseId(),
@@ -45,6 +52,13 @@ public class CanonicalTargetTemporalIntakeIngress implements TargetTemporalIntak
                         request.traceId(),
                         request.idempotencyKey(),
                         null);
+        long acceptedAt = System.nanoTime();
+        LOGGER.info(
+                "target_intake_ingress_timing run_id={} materialize_ms={} command_accept_ms={} total_ms={}",
+                material.runId(),
+                elapsedMillis(startedAt, materializedAt),
+                elapsedMillis(materializedAt, acceptedAt),
+                elapsedMillis(startedAt, acceptedAt));
         return new TargetIntakeIngressReceipt(
                 acceptance.command().commandId(),
                 material.runId(),
@@ -52,5 +66,9 @@ public class CanonicalTargetTemporalIntakeIngress implements TargetTemporalIntak
                 acceptance.commandStatus(),
                 acceptance.idempotentReplay(),
                 material.admittedAt());
+    }
+
+    private static double elapsedMillis(long startedAt, long completedAt) {
+        return (completedAt - startedAt) / 1_000_000.0d;
     }
 }

@@ -93,6 +93,9 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       "target-intake-complete-timeline-cursor-v1";
   public static final String TARGET_REVIEW_NON_EXECUTION_CHANGE_ID =
       "target-review-non-execution-v1";
+  public static final String TARGET_EVIDENCE_FROZEN_SUBMISSION_START_CHANGE_ID =
+      "target-evidence-frozen-submission-start-v1";
+  private static final int FROZEN_EVIDENCE_START = 1;
 
   private final TargetIntakeCommandBridgeActivities targetIntakeCommandBridge =
       Workflow.newActivityStub(
@@ -361,7 +364,13 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
                 request.caseId(),
                 request.roomEpoch(),
                 request.fencingToken()));
-    EvidenceRoomStart start = targetEvidenceStart(request, participants);
+    boolean frozenStartEnabled =
+        Workflow.getVersion(
+                TARGET_EVIDENCE_FROZEN_SUBMISSION_START_CHANGE_ID,
+                Workflow.DEFAULT_VERSION,
+                FROZEN_EVIDENCE_START)
+            == FROZEN_EVIDENCE_START;
+    EvidenceRoomStart start = targetEvidenceStart(request, participants, frozenStartEnabled);
     EvidenceRoomWorkflow child =
         Workflow.newChildWorkflowStub(
             EvidenceRoomWorkflow.class, childOptions(request.roomWorkflowId()));
@@ -382,11 +391,24 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
   static EvidenceRoomStart targetEvidenceStart(
       ProvisionRoomEpoch request,
       TargetEvidenceParticipantBindingActivities.Binding participants) {
+    return targetEvidenceStart(request, participants, true);
+  }
+
+  private static EvidenceRoomStart targetEvidenceStart(
+      ProvisionRoomEpoch request,
+      TargetEvidenceParticipantBindingActivities.Binding participants,
+      boolean frozenStartEnabled) {
     Objects.requireNonNull(request, "request");
     Objects.requireNonNull(participants, "participants");
+    if (request.roomType() != RoomType.EVIDENCE) {
+      throw new IllegalArgumentException("target Evidence start requires an Evidence epoch");
+    }
     Instant openedAt = request.requestedAt();
+    boolean freezeBound = frozenStartEnabled && request.projectionRef() != null;
     return new EvidenceRoomStart(
-        "evidence-room-start.v1",
+        freezeBound
+            ? EvidenceRoomStart.FROZEN_SUBMISSION_SCHEMA_VERSION
+            : EvidenceRoomStart.LEGACY_SCHEMA_VERSION,
         request.tenantSurrogate(),
         request.caseId(),
         request.roomId(),
@@ -400,7 +422,9 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         request.initialProcessRevision(),
         request.initialRoomRevision(),
         request.roomWorkflowBuildId(),
-        ExecutionLane.TARGET_E2E_CANDIDATE);
+        ExecutionLane.TARGET_E2E_CANDIDATE,
+        freezeBound ? request.projectionRef() : null,
+        freezeBound ? request.projectionSha256() : null);
   }
 
   private TargetTypedRoomChildHandle startHearing(ProvisionRoomEpoch request) {

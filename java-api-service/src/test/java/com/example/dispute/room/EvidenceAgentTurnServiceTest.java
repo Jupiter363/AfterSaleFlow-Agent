@@ -51,23 +51,34 @@ import com.example.dispute.room.infrastructure.persistence.entity.AgentConversat
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
 import com.example.dispute.evidence.application.EvidenceDossierFreezer;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.FrozenIntakeSubmissionAuthority;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -96,6 +107,8 @@ class EvidenceAgentTurnServiceTest {
     @Mock private CaseRoomRepository roomRepository;
     @Mock private RoomTurnMemoryRepository memoryRepository;
     @Mock private CaseIntakeDossierRepository intakeDossierRepository;
+    @Mock private CaseProcessProjectionRepository processProjectionRepository;
+    @Mock private CaseTimelineEventRepository timelineEventRepository;
     @Mock private EvidenceItemRepository evidenceItemRepository;
     @Mock private EvidenceVerificationRepository verificationRepository;
     @Mock private EvidenceDossierFreezer dossierFreezer;
@@ -120,6 +133,8 @@ class EvidenceAgentTurnServiceTest {
         EvidenceContextEnvelopeFactory contextEnvelopeFactory =
                 new EvidenceContextEnvelopeFactory(
                         intakeDossierRepository,
+                        processProjectionRepository,
+                        timelineEventRepository,
                         evidenceItemRepository,
                         memoryRepository,
                         objectMapper,
@@ -165,6 +180,9 @@ class EvidenceAgentTurnServiceTest {
                                 Optional.of(
                                         intakeDossierWithFormalFacts(
                                                 invocation.getArgument(0))));
+        lenient()
+                .when(processProjectionRepository.findById(any()))
+                .thenReturn(Optional.empty());
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus()」。
@@ -1128,6 +1146,383 @@ class EvidenceAgentTurnServiceTest {
                 .isEqualTo(memory.getValue().getDossierPatchJson());
     }
 
+    @Test
+    void frozenOpeningReplaysExactlyAndHigherEpochStartsOneFreshProviderRun()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        AtomicLong evidenceEpoch = new AtomicLong(2);
+        FrozenSubmissionFixture frozen = frozenSubmissionFixture(dispute.getId(), evidenceEpoch);
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(processProjectionRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(frozen.projection()));
+        when(timelineEventRepository.findByIdAndCaseId(
+                        frozen.authority().submitEventId(), dispute.getId()))
+                .thenReturn(Optional.of(frozen.event()));
+        RoomMessageEntity priorEpochMessage =
+                RoomMessageEntity.create(
+                        "MESSAGE_PRIOR_EVIDENCE_EPOCH",
+                        dispute.getId(),
+                        room.getId(),
+                        7,
+                        com.example.dispute.room.domain.MessageSenderType.AGENT,
+                        "CUSTOMER_SERVICE",
+                        "evidence-clerk",
+                        "[\"USER\",\"CUSTOMER_SERVICE\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]",
+                        "[\"user-local\"]",
+                        MessageType.AGENT_MESSAGE,
+                        "Prior Evidence epoch opening remains immutable audit data.",
+                        "[]",
+                        "agent-evidence-opening:prior-epoch",
+                        Instant.parse("2026-07-05T23:00:00Z"),
+                        "TRACE_PRIOR_EPOCH");
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(List.of(priorEpochMessage));
+        Map<String, RoomMessageEntity> storedOpenings = new HashMap<>();
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenAnswer(
+                        invocation ->
+                                Optional.ofNullable(
+                                        storedOpenings.get(invocation.getArgument(1))));
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(8L, 9L);
+        when(messageRepository.save(any()))
+                .thenAnswer(
+                        invocation -> {
+                            RoomMessageEntity saved = invocation.getArgument(0);
+                            storedOpenings.put(saved.getIdempotencyKey(), saved);
+                            return saved;
+                        });
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(memoryRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of());
+        when(client.run(any(), any(), any()))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "Freeze-bound Evidence opening.",
+                                objectMapper.createObjectNode(),
+                                objectMapper.createArrayNode(),
+                                List.of(),
+                                false,
+                                false,
+                                "LLM",
+                                0.91));
+
+        var first =
+                service.ensureOpening(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "TRACE_FROZEN_EPOCH_2",
+                        "REQ_FROZEN_EPOCH_2");
+        var replay =
+                service.ensureOpening(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "TRACE_FROZEN_EPOCH_2_REPLAY",
+                        "REQ_FROZEN_EPOCH_2_REPLAY");
+        evidenceEpoch.set(3);
+        var nextEpoch =
+                service.ensureOpening(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "TRACE_FROZEN_EPOCH_3",
+                        "REQ_FROZEN_EPOCH_3");
+
+        ArgumentCaptor<EvidenceAgentTurnCommand> commands =
+                ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
+        verify(client, times(2)).run(commands.capture(), any(), any());
+        assertThat(first.id()).isEqualTo(replay.id());
+        assertThat(nextEpoch.id()).isNotEqualTo(first.id());
+        assertThat(storedOpenings).hasSize(2);
+        assertThat(storedOpenings.keySet())
+                .allMatch(key -> key.startsWith("agent-evidence-opening:freeze-v1:"));
+        assertThat(commands.getAllValues())
+                .extracting(
+                        command ->
+                                command.contextEnvelope()
+                                        .frozenSubmission()
+                                        .evidenceRoomEpoch())
+                .containsExactly(2L, 3L);
+        EvidenceContextEnvelopeV1 envelope =
+                commands.getAllValues().getFirst().contextEnvelope();
+        assertThat(envelope.schemaVersion())
+                .isEqualTo(EvidenceContextEnvelopeV1.FROZEN_SUBMISSION_SCHEMA_VERSION);
+        assertThat(envelope.intakeDossierSnapshot()).isNull();
+        assertThat(envelope.frozenSubmission().authority()).isEqualTo(frozen.authority());
+        assertThat(envelope.frozenSubmission().matrix()).isEqualTo(frozen.matrix());
+        verify(intakeDossierRepository, never())
+                .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE);
+    }
+
+    @Test
+    void frozenOpeningRejectsHashDriftAndNeedMoreInfoEventBeforeProvider() throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        FrozenSubmissionFixture frozen =
+                frozenSubmissionFixture(dispute.getId(), new AtomicLong(2));
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(processProjectionRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(frozen.projection()));
+        when(timelineEventRepository.findByIdAndCaseId(
+                        frozen.authority().submitEventId(), dispute.getId()))
+                .thenReturn(Optional.of(frozen.event()));
+        when(frozen.projection().getProjectionSha256()).thenReturn("e".repeat(64));
+
+        assertThatThrownBy(
+                        () ->
+                                service.ensureOpening(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        "TRACE_FROZEN_HASH_DRIFT",
+                                        "REQ_FROZEN_HASH_DRIFT"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("frozen Evidence submission authority is invalid");
+
+        when(frozen.projection().getProjectionSha256())
+                .thenReturn(frozen.authority().matrixContentHash());
+        ObjectNode needMoreInfo = frozen.eventDocument().deepCopy();
+        needMoreInfo.put("event_type", "TURN_NEEDS_INPUT");
+        needMoreInfo.remove("event_hash");
+        needMoreInfo.put("event_hash", ContractJson.sha256Hex(needMoreInfo));
+        when(frozen.event().getEventType()).thenReturn("TURN_NEEDS_INPUT");
+        when(frozen.event().getEventJson())
+                .thenReturn(objectMapper.writeValueAsString(needMoreInfo));
+
+        assertThatThrownBy(
+                        () ->
+                                service.ensureOpening(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        "TRACE_NEED_MORE_INFO",
+                                        "REQ_NEED_MORE_INFO"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("frozen Evidence submission authority is invalid");
+        verify(client, never()).run(any(), any(), any());
+        verify(messageRepository, never()).save(any());
+    }
+
+    @Test
+    void legacyParticipantResultIsRejectedWhenProjectionBecomesFreezeBoundDuringProvider()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        FrozenSubmissionFixture frozen =
+                frozenSubmissionFixture(dispute.getId(), new AtomicLong(2));
+        AtomicBoolean paired = new AtomicBoolean(false);
+        when(frozen.projection().getProjectionRef())
+                .thenAnswer(
+                        ignored -> paired.get() ? frozen.authority().projectionRef() : null);
+        when(frozen.projection().getProjectionSha256())
+                .thenAnswer(
+                        ignored -> paired.get() ? frozen.authority().matrixContentHash() : null);
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(processProjectionRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(frozen.projection()));
+        when(timelineEventRepository.findByIdAndCaseId(
+                        frozen.authority().submitEventId(), dispute.getId()))
+                .thenReturn(Optional.of(frozen.event()));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of());
+        when(client.run(any(), eq("TRACE_LEGACY_DRIFT"), eq("REQ_LEGACY_DRIFT")))
+                .thenAnswer(
+                        ignored -> {
+                            paired.set(true);
+                            return safeOpeningResult("Stale legacy participant result.");
+                        });
+
+        assertThatThrownBy(
+                        () ->
+                                service.continueFromParticipantMessage(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_TEXT,
+                                                "Please review this evidence.",
+                                                List.of()),
+                                        "MESSAGE_LEGACY_DRIFT",
+                                        CLOCK.instant(),
+                                        "TRACE_LEGACY_DRIFT",
+                                        "REQ_LEGACY_DRIFT"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("legacy Evidence submission became freeze-bound");
+
+        verify(client, times(1)).run(any(), eq("TRACE_LEGACY_DRIFT"), eq("REQ_LEGACY_DRIFT"));
+        verify(memoryRepository, times(1)).save(any());
+        verify(verificationRepository, never()).save(any());
+        verify(messageRepository, never()).save(any());
+    }
+
+    @ParameterizedTest(name = "post-provider frozen projection drift: {0}")
+    @MethodSource("freezeBoundProviderDrifts")
+    void freezeBoundOpeningRejectsProjectionDriftAfterProviderBeforePersistence(String drift)
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        AtomicLong evidenceEpoch = new AtomicLong(2);
+        FrozenSubmissionFixture frozen = frozenSubmissionFixture(dispute.getId(), evidenceEpoch);
+        AtomicReference<String> projectionHash =
+                new AtomicReference<>(frozen.authority().matrixContentHash());
+        when(frozen.projection().getProjectionSha256())
+                .thenAnswer(ignored -> projectionHash.get());
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(processProjectionRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(frozen.projection()));
+        when(timelineEventRepository.findByIdAndCaseId(
+                        frozen.authority().submitEventId(), dispute.getId()))
+                .thenReturn(Optional.of(frozen.event()));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(List.of());
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of());
+        when(client.run(any(), eq("TRACE_FROZEN_PROVIDER_DRIFT"), any()))
+                .thenAnswer(
+                        ignored -> {
+                            if ("epoch".equals(drift)) {
+                                evidenceEpoch.set(3);
+                            } else {
+                                projectionHash.set("e".repeat(64));
+                            }
+                            return safeOpeningResult("Stale freeze-bound opening result.");
+                        });
+
+        assertThatThrownBy(
+                        () ->
+                                service.ensureOpening(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        "TRACE_FROZEN_PROVIDER_DRIFT",
+                                        "REQ_FROZEN_PROVIDER_DRIFT_" + drift))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("frozen Evidence submission");
+
+        verify(client, times(1)).run(any(), eq("TRACE_FROZEN_PROVIDER_DRIFT"), any());
+        verify(memoryRepository, never()).save(any());
+        verify(messageRepository, never()).save(any());
+    }
+
+    private static Stream<Arguments> freezeBoundProviderDrifts() {
+        return Stream.of(Arguments.of("epoch"), Arguments.of("hash"));
+    }
+
+    @Test
+    void frozenOpeningRequiresRepositoryLookupByExactEventAndCaseBeforeProvider() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        FrozenSubmissionFixture frozen =
+                frozenSubmissionFixture(dispute.getId(), new AtomicLong(2));
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(processProjectionRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(frozen.projection()));
+        when(timelineEventRepository.findByIdAndCaseId(
+                        frozen.authority().submitEventId(), dispute.getId()))
+                .thenReturn(Optional.empty());
+        lenient()
+                .when(timelineEventRepository.findById(frozen.authority().submitEventId()))
+                .thenReturn(Optional.of(frozen.event()));
+
+        assertThatThrownBy(
+                        () ->
+                                service.ensureOpening(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        "TRACE_FOREIGN_EVENT_CASE",
+                                        "REQ_FOREIGN_EVENT_CASE"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasRootCauseMessage("frozen Submit event is missing");
+
+        verify(timelineEventRepository, times(1))
+                .findByIdAndCaseId(frozen.authority().submitEventId(), dispute.getId());
+        verify(timelineEventRepository, never()).findById(frozen.authority().submitEventId());
+        verify(client, never()).run(any(), any(), any());
+    }
+
+    @ParameterizedTest(name = "frozen result revision drift: {0}")
+    @MethodSource("frozenResultRevisionFields")
+    void frozenOpeningRejectsResultRevisionDriftBeforeProvider(String revisionField)
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        FrozenSubmissionFixture frozen =
+                frozenSubmissionFixture(dispute.getId(), new AtomicLong(2));
+        ObjectNode driftedEvent = frozen.eventDocument().deepCopy();
+        ObjectNode driftedResult = (ObjectNode) driftedEvent.required("result");
+        driftedResult.put(
+                revisionField, driftedResult.required(revisionField).asLong() + 1);
+        driftedEvent.put("result_hash", ContractJson.sha256Hex(driftedResult));
+        driftedEvent.remove("event_hash");
+        driftedEvent.put("event_hash", ContractJson.sha256Hex(driftedEvent));
+        when(frozen.event().getEventJson())
+                .thenReturn(objectMapper.writeValueAsString(driftedEvent));
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(processProjectionRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(frozen.projection()));
+        when(timelineEventRepository.findByIdAndCaseId(
+                        frozen.authority().submitEventId(), dispute.getId()))
+                .thenReturn(Optional.of(frozen.event()));
+
+        assertThatThrownBy(
+                        () ->
+                                service.ensureOpening(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        "TRACE_RESULT_REVISION_DRIFT",
+                                        "REQ_RESULT_REVISION_DRIFT_" + revisionField))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("frozen Evidence submission authority is invalid");
+
+        verify(timelineEventRepository, times(1))
+                .findByIdAndCaseId(frozen.authority().submitEventId(), dispute.getId());
+        verify(client, never()).run(any(), any(), any());
+    }
+
+    private static Stream<Arguments> frozenResultRevisionFields() {
+        return Stream.of(
+                Arguments.of("process_revision"), Arguments.of("room_revision"));
+    }
+
     // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()」。
     // 具体功能：「EvidenceAgentTurnServiceTest.ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()」：复现“核对完整业务行为（场景方法「ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「messageRepository.findByCaseIdAndIdempotencyKey」、「messageRepository.findAllByRoomIdOrderBySequenceNoAsc」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「MESSAGE_EXISTING_USER_THREAD」、「USER」、「user-local」、「[\"user-local\"]」。
     // 上游调用：「EvidenceAgentTurnServiceTest.ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
@@ -1912,6 +2307,126 @@ class EvidenceAgentTurnServiceTest {
     // 上游调用：「EvidenceAgentTurnServiceTest.evidenceCase()」由本测试类中的 「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」、「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed」、「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification」、「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence」 调用。
     // 下游影响：「EvidenceAgentTurnServiceTest.evidenceCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
     // 系统意义：「EvidenceAgentTurnServiceTest.evidenceCase()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_EVIDENCE_AGENT」、「ORDER-EVIDENCE」、「AFTER-EVIDENCE」、「LOG-EVIDENCE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    private EvidenceAgentTurnResult safeOpeningResult(String roomUtterance) {
+        return new EvidenceAgentTurnResult(
+                roomUtterance,
+                objectMapper.createObjectNode(),
+                objectMapper.createArrayNode(),
+                List.of(),
+                false,
+                false,
+                "STUB",
+                0.9);
+    }
+
+    private FrozenSubmissionFixture frozenSubmissionFixture(
+            String caseId, AtomicLong evidenceEpoch) {
+        ObjectNode matrix = objectMapper.createObjectNode();
+        matrix.put("schema_version", FrozenIntakeSubmissionAuthority.MATRIX_SCHEMA_VERSION);
+        matrix.put("matrix_kind", FrozenIntakeSubmissionAuthority.MATRIX_KIND);
+        matrix.put("case_id", caseId);
+        matrix.put("matrix_version", 3);
+        ObjectNode overview = matrix.putObject("case_overview");
+        overview.put("neutral_summary", "Frozen bilateral watch dispute.");
+        overview.put("core_conflict", "Whether the delivered watch was already scratched.");
+        String matrixId =
+                "CASE_MATRIX_"
+                        + ContractJson.sha256Hex(matrix)
+                                .substring(0, 20)
+                                .toUpperCase(java.util.Locale.ROOT);
+        matrix.put("matrix_id", matrixId);
+        matrix.put("content_hash", ContractJson.sha256Hex(matrix));
+
+        String eventId = "EVIB_EVIDENCE_FROZEN";
+        String eventRef = "urn:after-sale-flow:intake-event:" + eventId;
+        FrozenIntakeSubmissionAuthority authority =
+                FrozenIntakeSubmissionAuthority.capture(
+                        "tenant-run001",
+                        caseId,
+                        "merchant-local",
+                        com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole.MERCHANT,
+                        "INTAKE_COMPLETION_RESPONDENT",
+                        FrozenIntakeSubmissionAuthority.COMPLETION_STATUS,
+                        Instant.parse("2026-07-05T22:00:00Z"),
+                        "intake-respondent-confirm:operation",
+                        "intake-respondent-confirm:command",
+                        7,
+                        "1".repeat(64),
+                        eventId,
+                        eventRef,
+                        9,
+                        1,
+                        11,
+                        6,
+                        5,
+                        "INTAKE_DOSSIER_FROZEN",
+                        3,
+                        matrix);
+
+        ObjectNode result = objectMapper.createObjectNode();
+        result.put("schema_version", "intake-branch-result.v2");
+        result.put("operation", FrozenIntakeSubmissionAuthority.SUBMIT_OPERATION);
+        result.put("case_id", caseId);
+        result.put("case_status", "EVIDENCE_OPEN");
+        result.put("current_room", "EVIDENCE");
+        result.put("process_revision", authority.sourceProcessRevision());
+        result.put("room_revision", authority.sourceRoomRevision());
+        result.put("matrix_kind", FrozenIntakeSubmissionAuthority.MATRIX_KIND);
+        result.put("matrix_hash", authority.matrixContentHash());
+        ObjectNode frozen = result.putObject("frozen_submission");
+        frozen.set("authority", objectMapper.valueToTree(authority));
+        frozen.set("matrix", matrix.deepCopy());
+
+        ObjectNode eventDocument = objectMapper.createObjectNode();
+        eventDocument.put("schema_version", "intake-branch-committed-event.v1");
+        eventDocument.put("event_id", eventId);
+        eventDocument.put("event_ref", eventRef);
+        eventDocument.put("event_sequence", authority.submitEventSequence());
+        eventDocument.put("event_type", authority.submitEventType());
+        eventDocument.put("party", "RESPONDENT");
+        eventDocument.put("command_id", authority.submitCommandId());
+        eventDocument.put("tenant_surrogate", authority.tenantSurrogate());
+        eventDocument.put("case_id", caseId);
+        eventDocument.put("room_epoch", authority.sourceRoomEpoch());
+        eventDocument.put("fencing_token", authority.sourceFencingToken());
+        eventDocument.put("operation_key", authority.submitOperationKey());
+        eventDocument.put("request_hash", authority.submitRequestHash());
+        eventDocument.put("result_hash", ContractJson.sha256Hex(result));
+        eventDocument.put("process_revision", authority.sourceProcessRevision());
+        eventDocument.put("room_revision", authority.sourceRoomRevision());
+        eventDocument.set("result", result);
+        eventDocument.put("event_hash", ContractJson.sha256Hex(eventDocument));
+
+        CaseProcessProjectionEntity projection =
+                org.mockito.Mockito.mock(CaseProcessProjectionEntity.class);
+        when(projection.getCaseId()).thenReturn(caseId);
+        lenient()
+                .when(projection.getTenantSurrogate())
+                .thenReturn(authority.tenantSurrogate());
+        when(projection.getCurrentRoom()).thenReturn("EVIDENCE");
+        when(projection.getRoomEpoch()).thenAnswer(ignored -> evidenceEpoch.get());
+        when(projection.getFencingToken()).thenReturn(23L);
+        lenient().when(projection.getProjectionRef()).thenReturn(authority.projectionRef());
+        lenient()
+                .when(projection.getProjectionSha256())
+                .thenReturn(authority.matrixContentHash());
+
+        CaseTimelineEventEntity event =
+                org.mockito.Mockito.mock(CaseTimelineEventEntity.class);
+        lenient().when(event.getId()).thenReturn(eventId);
+        lenient().when(event.getSequenceNo()).thenReturn(authority.submitEventSequence());
+        lenient().when(event.getEventType()).thenReturn(authority.submitEventType());
+        try {
+            lenient()
+                    .when(event.getEventJson())
+                    .thenReturn(objectMapper.writeValueAsString(eventDocument));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+            throw new IllegalStateException(failure);
+        }
+        return new FrozenSubmissionFixture(
+                projection, event, authority, matrix, eventDocument);
+    }
+
     private static FulfillmentCaseEntity evidenceCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_EVIDENCE_AGENT",
@@ -1976,4 +2491,11 @@ class EvidenceAgentTurnServiceTest {
                 OffsetDateTime.parse("2026-07-06T00:00:00Z"),
                 "system");
     }
+
+    private record FrozenSubmissionFixture(
+            CaseProcessProjectionEntity projection,
+            CaseTimelineEventEntity event,
+            FrozenIntakeSubmissionAuthority authority,
+            ObjectNode matrix,
+            ObjectNode eventDocument) {}
 }

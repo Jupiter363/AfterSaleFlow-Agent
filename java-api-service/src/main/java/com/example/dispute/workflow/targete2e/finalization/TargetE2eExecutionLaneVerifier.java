@@ -127,7 +127,9 @@ public final class TargetE2eExecutionLaneVerifier {
         requireEqual(run.caseId(), command.caseId(), "command case");
         requireEqual(run.roomEpoch(), command.roomEpoch(), "command room epoch");
         requireEqual(run.processRevision(), command.processRevision(), "command process revision");
-        requireEqual(run.requestHash(), command.requestHash(), "run request hash");
+        if (attempt.attemptNo() == 1) {
+            requireEqual(run.requestHash(), command.requestHash(), "run request hash");
+        }
         requireEqual(run.logicalInputHash(), request.logicalInputHash(), "logical input hash");
         requireEqual(attempt.commandId(), command.commandId(), "attempt command id");
         requireEqual(attempt.requestHash(), command.requestHash(), "attempt request hash");

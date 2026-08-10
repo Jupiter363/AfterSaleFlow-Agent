@@ -19,9 +19,15 @@ import com.example.dispute.room.infrastructure.persistence.entity.AgentConversat
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.FrozenIntakeSubmissionAuthority;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,8 +36,10 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 // 所属模块：【房间协作与权限 / 应用编排层】类型「EvidenceContextEnvelopeFactory」。
@@ -45,6 +53,8 @@ public class EvidenceContextEnvelopeFactory {
     private static final int RECENT_TURN_LIMIT = 20;
 
     private final CaseIntakeDossierRepository intakeDossierRepository;
+    private final CaseProcessProjectionRepository processProjectionRepository;
+    private final CaseTimelineEventRepository timelineEventRepository;
     private final EvidenceItemRepository evidenceItemRepository;
     private final RoomTurnMemoryRepository memoryRepository;
     private final ObjectMapper objectMapper;
@@ -62,7 +72,28 @@ public class EvidenceContextEnvelopeFactory {
             RoomTurnMemoryRepository memoryRepository,
             ObjectMapper objectMapper,
             Clock clock) {
+        this(
+                intakeDossierRepository,
+                null,
+                null,
+                evidenceItemRepository,
+                memoryRepository,
+                objectMapper,
+                clock);
+    }
+
+    @Autowired
+    public EvidenceContextEnvelopeFactory(
+            CaseIntakeDossierRepository intakeDossierRepository,
+            CaseProcessProjectionRepository processProjectionRepository,
+            CaseTimelineEventRepository timelineEventRepository,
+            EvidenceItemRepository evidenceItemRepository,
+            RoomTurnMemoryRepository memoryRepository,
+            ObjectMapper objectMapper,
+            Clock clock) {
         this.intakeDossierRepository = intakeDossierRepository;
+        this.processProjectionRepository = processProjectionRepository;
+        this.timelineEventRepository = timelineEventRepository;
         this.evidenceItemRepository = evidenceItemRepository;
         this.memoryRepository = memoryRepository;
         this.objectMapper = objectMapper;
@@ -87,23 +118,63 @@ public class EvidenceContextEnvelopeFactory {
             List<String> attachmentRefs,
             int turnNo,
             Instant occurredAt) {
-        CaseIntakeDossierEntity intakeDossier =
-                intakeDossierRepository
-                        .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE)
-                        .orElse(null);
-        JsonNode intakeDossierJson =
-                intakeDossier == null ? null : readJson(intakeDossier.getDossierJson());
-        JsonNode sharedIntakeDossierJson = sharedIntakeDossierProjection(intakeDossierJson);
+        return create(
+                dispute,
+                room,
+                actor,
+                accessSession,
+                agentSession,
+                eventType,
+                eventId,
+                messageType,
+                text,
+                attachmentRefs,
+                turnNo,
+                occurredAt,
+                resolveFrozenSubmission(dispute, room));
+    }
+
+    EvidenceContextEnvelopeV1 create(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity room,
+            AuthenticatedActor actor,
+            CaseAccessSessionEntity accessSession,
+            AgentConversationSessionEntity agentSession,
+            String eventType,
+            String eventId,
+            MessageType messageType,
+            String text,
+            List<String> attachmentRefs,
+            int turnNo,
+            Instant occurredAt,
+            EvidenceContextEnvelopeV1.FrozenSubmission frozenSubmission) {
+        CaseIntakeDossierEntity intakeDossier = null;
+        JsonNode sharedIntakeDossierJson;
+        if (frozenSubmission == null) {
+            intakeDossier =
+                    intakeDossierRepository
+                            .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE)
+                            .orElse(null);
+            JsonNode intakeDossierJson =
+                    intakeDossier == null ? null : readJson(intakeDossier.getDossierJson());
+            sharedIntakeDossierJson = sharedIntakeDossierProjection(intakeDossierJson);
+        } else {
+            sharedIntakeDossierJson = frozenMatrixProjection(frozenSubmission.matrix());
+        }
         RecentTurnsWindow recentTurns = recentTurns(agentSession);
         List<EvidenceContextEnvelopeV1.VisibleEvidence> visibleEvidence =
                 visibleEvidence(dispute.getId(), actor);
         validateEvidenceReferences(attachmentRefs, visibleEvidence);
 
         return new EvidenceContextEnvelopeV1(
-                EvidenceContextEnvelopeV1.SCHEMA_VERSION,
+                frozenSubmission == null
+                        ? EvidenceContextEnvelopeV1.SCHEMA_VERSION
+                        : EvidenceContextEnvelopeV1.FROZEN_SUBMISSION_SCHEMA_VERSION,
                 clock.instant().toString(),
                 caseSnapshot(dispute, sharedIntakeDossierJson),
-                intakeDossierSnapshot(intakeDossier, sharedIntakeDossierJson),
+                frozenSubmission == null
+                        ? intakeDossierSnapshot(intakeDossier, sharedIntakeDossierJson)
+                        : null,
                 actorSnapshot(dispute, actor, accessSession, agentSession),
                 new EvidenceContextEnvelopeV1.CurrentEvent(
                         eventId,
@@ -128,7 +199,8 @@ public class EvidenceContextEnvelopeFactory {
                         room.getRoomStatus().name(),
                         isoTimestamp(dispute.getCurrentDeadlineAt()),
                         dispute.getInitiatorRole().name(),
-                        true));
+                        true),
+                frozenSubmission);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceContextEnvelopeFactory.caseSnapshot(FulfillmentCaseEntity)」。
@@ -136,6 +208,186 @@ public class EvidenceContextEnvelopeFactory {
     // 上游调用：「EvidenceContextEnvelopeFactory.caseSnapshot(FulfillmentCaseEntity)」的上游调用点包括 「EvidenceContextEnvelopeFactory.create」。
     // 下游影响：「EvidenceContextEnvelopeFactory.caseSnapshot(FulfillmentCaseEntity)」向下依次触达 「dispute.getId」、「dispute.getVersion」、「dispute.getCaseStatus」、「dispute.getCaseType」；计算结果以「EvidenceContextEnvelopeV1.CaseSnapshot」交给调用方。
     // 系统意义：「EvidenceContextEnvelopeFactory.caseSnapshot(FulfillmentCaseEntity)」负责主链路中的“案件快照”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+    EvidenceContextEnvelopeV1.FrozenSubmission resolveFrozenSubmission(
+            FulfillmentCaseEntity dispute, CaseRoomEntity room) {
+        Objects.requireNonNull(dispute, "dispute must not be null");
+        Objects.requireNonNull(room, "room must not be null");
+        if (room.getRoomType() != RoomType.EVIDENCE) {
+            return null;
+        }
+        if (processProjectionRepository == null || timelineEventRepository == null) {
+            return null;
+        }
+        CaseProcessProjectionEntity projection =
+                processProjectionRepository.findById(dispute.getId()).orElse(null);
+        if (projection == null) {
+            return null;
+        }
+        String projectionRef = projection.getProjectionRef();
+        String projectionSha256 = projection.getProjectionSha256();
+        if (projectionRef == null && projectionSha256 == null) {
+            return null;
+        }
+        try {
+            if (projectionRef == null
+                    || projectionSha256 == null
+                    || !dispute.getId().equals(room.getCaseId())
+                    || !dispute.getId().equals(projection.getCaseId())
+                    || !"EVIDENCE".equals(projection.getCurrentRoom())
+                    || projection.getRoomEpoch() < 0
+                    || projection.getFencingToken() < 1) {
+                throw new IllegalArgumentException(
+                        "Evidence projection does not contain one exact frozen pair");
+            }
+            String pointer = "#" + FrozenIntakeSubmissionAuthority.FROZEN_MATRIX_RESULT_POINTER;
+            if (!projectionRef.endsWith(pointer)) {
+                throw new IllegalArgumentException(
+                        "Evidence projection does not locate a frozen Submit matrix");
+            }
+            String submitEventRef =
+                    projectionRef.substring(0, projectionRef.length() - pointer.length());
+            String eventRefPrefix = "urn:after-sale-flow:intake-event:";
+            if (!submitEventRef.startsWith(eventRefPrefix)
+                    || submitEventRef.length() == eventRefPrefix.length()) {
+                throw new IllegalArgumentException("frozen Submit event reference is invalid");
+            }
+            String submitEventId = submitEventRef.substring(eventRefPrefix.length());
+            CaseTimelineEventEntity storedEvent =
+                    timelineEventRepository
+                            .findByIdAndCaseId(submitEventId, dispute.getId())
+                            .orElseThrow(
+                                    () ->
+                                            new IllegalArgumentException(
+                                                    "frozen Submit event is missing"));
+            JsonNode eventDocument = objectMapper.readTree(storedEvent.getEventJson());
+            if (!(eventDocument instanceof ObjectNode eventObject)) {
+                throw new IllegalArgumentException("frozen Submit event must be an object");
+            }
+            ObjectNode eventHashInput = eventObject.deepCopy();
+            JsonNode eventHash = eventHashInput.remove("event_hash");
+            JsonNode result = eventObject.required("result");
+            JsonNode frozenNode = result.required("frozen_submission");
+            if (!(result instanceof ObjectNode)
+                    || !(frozenNode instanceof ObjectNode frozenObject)
+                    || frozenObject.size() != 2
+                    || !frozenObject.path("authority").isObject()
+                    || !frozenObject.path("matrix").isObject()
+                    || eventHash == null
+                    || !eventHash.isTextual()
+                    || !eventHash.textValue().equals(ContractJson.sha256Hex(eventHashInput))
+                    || !eventObject.required("result_hash")
+                            .asText()
+                            .equals(ContractJson.sha256Hex(result))) {
+                throw new IllegalArgumentException(
+                        "frozen Submit event canonical hashes are invalid");
+            }
+            JsonNode authorityDocument = frozenObject.required("authority");
+            JsonNode matrix = frozenObject.required("matrix");
+            FrozenIntakeSubmissionAuthority authority =
+                    objectMapper.treeToValue(
+                            authorityDocument, FrozenIntakeSubmissionAuthority.class);
+            if (!ContractJson.canonicalString(authorityDocument)
+                    .equals(
+                            ContractJson.canonicalString(
+                                    objectMapper.valueToTree(authority)))) {
+                throw new IllegalArgumentException(
+                        "frozen Submit authority serialization is not canonical");
+            }
+            authority.requireProjectionPair(projectionRef, projectionSha256);
+            authority.requireMatchesMatrix(matrix);
+            if (!storedEvent.getId().equals(authority.submitEventId())
+                    || storedEvent.getSequenceNo() != authority.submitEventSequence()
+                    || !storedEvent.getEventType().equals(authority.submitEventType())
+                    || !"intake-branch-committed-event.v1"
+                            .equals(eventObject.required("schema_version").asText())
+                    || !authority.submitEventId()
+                            .equals(eventObject.required("event_id").asText())
+                    || !authority.submitEventRef()
+                            .equals(eventObject.required("event_ref").asText())
+                    || authority.submitEventSequence()
+                            != eventObject.required("event_sequence").asLong()
+                    || !authority.submitEventType()
+                            .equals(eventObject.required("event_type").asText())
+                    || !"RESPONDENT".equals(eventObject.required("party").asText())
+                    || !authority.submitCommandId()
+                            .equals(eventObject.required("command_id").asText())
+                    || !authority.tenantSurrogate()
+                            .equals(eventObject.required("tenant_surrogate").asText())
+                    || !authority.caseId().equals(eventObject.required("case_id").asText())
+                    || authority.sourceRoomEpoch()
+                            != eventObject.required("room_epoch").asLong()
+                    || authority.sourceFencingToken()
+                            != eventObject.required("fencing_token").asLong()
+                    || !authority.submitOperationKey()
+                            .equals(eventObject.required("operation_key").asText())
+                    || !authority.submitRequestHash()
+                            .equals(eventObject.required("request_hash").asText())
+                    || authority.sourceProcessRevision()
+                            != eventObject.required("process_revision").asLong()
+                    || authority.sourceRoomRevision()
+                            != eventObject.required("room_revision").asLong()
+                    || !"intake-branch-result.v2"
+                            .equals(result.required("schema_version").asText())
+                    || !authority.submitOperation()
+                            .equals(result.required("operation").asText())
+                    || !authority.caseId().equals(result.required("case_id").asText())
+                    || authority.sourceProcessRevision()
+                            != result.required("process_revision").asLong()
+                    || authority.sourceRoomRevision()
+                            != result.required("room_revision").asLong()
+                    || !FrozenIntakeSubmissionAuthority.MATRIX_KIND.equals(
+                            result.required("matrix_kind").asText())
+                    || !authority.matrixContentHash()
+                            .equals(result.required("matrix_hash").asText())
+                    || !authority.tenantSurrogate().equals(projection.getTenantSurrogate())) {
+                throw new IllegalArgumentException(
+                        "frozen Submit event differs from its persisted authority");
+            }
+            return new EvidenceContextEnvelopeV1.FrozenSubmission(
+                    projection.getRoomEpoch(),
+                    projection.getFencingToken(),
+                    projectionRef,
+                    projectionSha256,
+                    authority,
+                    matrix);
+        } catch (JsonProcessingException | IllegalArgumentException failure) {
+            throw new IllegalStateException(
+                    "frozen Evidence submission authority is invalid", failure);
+        }
+    }
+
+    void requireCurrentFrozenSubmission(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity room,
+            EvidenceContextEnvelopeV1 envelope) {
+        EvidenceContextEnvelopeV1.FrozenSubmission current =
+                resolveFrozenSubmission(dispute, room);
+        if (!envelope.freezeBound()) {
+            if (current != null) {
+                throw new IllegalStateException(
+                        "legacy Evidence submission became freeze-bound before Agent finalization");
+            }
+            return;
+        }
+        if (!Objects.equals(current, envelope.frozenSubmission())) {
+            throw new IllegalStateException(
+                    "frozen Evidence submission changed before Agent finalization");
+        }
+    }
+
+    private JsonNode frozenMatrixProjection(JsonNode matrix) {
+        ObjectNode projected = objectMapper.createObjectNode();
+        projected.put("schema_version", "intake_frozen_matrix_projection.v1");
+        projected.set("case_fact_matrix", matrix.deepCopy());
+        JsonNode overview = matrix.path("case_overview");
+        ObjectNode story = projected.putObject("case_story");
+        story.put("title", "待核验争议");
+        story.put("one_sentence_summary", overview.path("neutral_summary").asText(""));
+        ObjectNode coreState = projected.putObject("dispute_core_state");
+        coreState.put("core_conflict", overview.path("core_conflict").asText(""));
+        return projected;
+    }
+
     private EvidenceContextEnvelopeV1.CaseSnapshot caseSnapshot(
             FulfillmentCaseEntity dispute, JsonNode sharedIntakeDossier) {
         String sharedDescription = sharedCaseDescription(dispute, sharedIntakeDossier);

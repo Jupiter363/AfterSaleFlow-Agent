@@ -66,6 +66,8 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Caller-transaction target Intake materialization. No workflow is launched here: the persisted
@@ -74,6 +76,8 @@ import java.util.UUID;
 public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMaterializer {
     private static final int ATTEMPT_LIMIT = 3;
     private static final String OPERATION = "INTAKE_MESSAGE";
+    private static final Logger LOGGER =
+            LoggerFactory.getLogger(CanonicalTargetIntakeMaterializer.class);
 
     private final AccessSessionResolver accessSessions;
     private final AgentSessionResolver agentSessions;
@@ -140,6 +144,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
     public MaterializedIntake materialize(TargetIntakeMessageRequest request) {
         Objects.requireNonNull(request, "request");
         TargetIntakeActivationGrant activation = request.activation();
+        long startedAt = System.nanoTime();
         Instant now = clock.instant();
         if (!now.isBefore(activation.expiresAt())) {
             throw new IllegalStateException("target Intake activation has expired");
@@ -178,11 +183,13 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             return replay;
         }
         requireRespondentOpeningPhase(stage, request);
+        long authorityLoadedAt = System.nanoTime();
         participants.activateExistingParty(
                 request.caseId(), request.actor(), OffsetDateTime.ofInstant(now, ZoneOffset.UTC));
         AgentConversationSessionEntity session = agentSessions.resolve(
                 access, RoomType.INTAKE, IntakeAgentTurnService.AGENT_ROLE,
                 actorRegistrationPins.promptVersion(), activePins.memoryPolicyVersion());
+        long sessionResolvedAt = System.nanoTime();
 
         IntakePrivateThreadRegistration.ActorScope actorScope = new IntakePrivateThreadRegistration.ActorScope(
                 request.actor().actorId(),
@@ -195,6 +202,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                         registrationId, activation.tenantSurrogate(), request.caseId(), activation.roomEpoch(),
                         activation.roomFencingToken(), actorScope, session.getId(), actorRegistrationPins,
                         WriterMode.TEMPORAL, request.createdAt())).value();
+        long threadRegisteredAt = System.nanoTime();
 
         IntakeSnapshotReference snapshot = snapshots.publishOrLoad(new IntakeDomainSnapshotPublisher.SnapshotRequest(
                 "target-intake-snapshot:" + token(registrationId), thread,
@@ -202,6 +210,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 List.of(request.messageId()), initialCaseFacts(dispute),
                 shareableProjection(dispute), List.of(), currentDossier(request.caseId()),
                 request.createdAt())).value();
+        long snapshotPublishedAt = System.nanoTime();
         String eventId = "target-intake-event:" + messageIdentity;
         var allocation = events.allocate(thread, eventId, request.messageId());
         if (isRespondentOpening(request) && allocation.sequenceNo() != 1) {
@@ -214,6 +223,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                         activation.processRevision(), audience(request),
                         eventSourceType(request), request.text(),
                         List.of(request.messageId()), request.createdAt(), now)).value());
+        long eventPublishedAt = System.nanoTime();
 
         String attemptId = "target-intake-attempt:" + messageIdentity + ":1";
         Instant deadline = request.commandDeadlineAt();
@@ -236,6 +246,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             throw new IllegalStateException("target Intake logical run replay drifted");
         }
         Attempt attempt = ledger.startNextAttempt(logical.agentRunId(), new AttemptAllocation(1, graph, binding), now);
+        long attemptAllocatedAt = System.nanoTime();
         if (!attempt.agentRunId().equals(logical.agentRunId())
                 || !attempt.attemptId().equals(graph.attemptId())
                 || attempt.attemptNo() != 1
@@ -259,9 +270,27 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 activePins.isolatedDomainDbBindingHash(), activation.tenantSurrogate(), request.caseId(), commandId,
                 envelope.commandHash(), envelope.commandEnvelopeHash(), activation.roomEpoch(),
                 activation.roomFencingToken());
+        long contextBuiltAt = System.nanoTime();
         var appended = materialStore.append(admission, context);
+        long materialAppendedAt = System.nanoTime();
+        LOGGER.info(
+                "target_intake_materialize_timing run_id={} authority_ms={} session_ms={} thread_ms={} snapshot_ms={} event_ms={} ledger_ms={} context_ms={} append_ms={} total_ms={}",
+                logicalRunId,
+                elapsedMillis(startedAt, authorityLoadedAt),
+                elapsedMillis(authorityLoadedAt, sessionResolvedAt),
+                elapsedMillis(sessionResolvedAt, threadRegisteredAt),
+                elapsedMillis(threadRegisteredAt, snapshotPublishedAt),
+                elapsedMillis(snapshotPublishedAt, eventPublishedAt),
+                elapsedMillis(eventPublishedAt, attemptAllocatedAt),
+                elapsedMillis(attemptAllocatedAt, contextBuiltAt),
+                elapsedMillis(contextBuiltAt, materialAppendedAt),
+                elapsedMillis(startedAt, materialAppendedAt));
         return new MaterializedIntake(
                 commandId, logicalRunId, event.payloadRef(), appended.admittedAt(), deadline);
+    }
+
+    private static double elapsedMillis(long startedAt, long completedAt) {
+        return (completedAt - startedAt) / 1_000_000.0d;
     }
 
     private MaterializedIntake replayOpening(

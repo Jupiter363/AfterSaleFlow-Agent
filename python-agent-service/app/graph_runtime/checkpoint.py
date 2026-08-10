@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -36,6 +37,8 @@ from app.graph_runtime.persistence_models import (
 )
 from app.graph_runtime.errors import GraphTerminalBindingError
 from app.graph_runtime.ledger import (
+    CheckpointRestoreAuthority,
+    CheckpointRestoreKind,
     CompletedStartCheckpoint,
     PostgresCommandLedger,
     ResultRecord,
@@ -56,6 +59,13 @@ FENCE_CONTEXT_KEY: Final[str] = "__trusted_graph_fence_context__"
 TERMINAL_RESULT_CONTEXT_KEY: Final[str] = "__trusted_graph_terminal_result__"
 ROOM_GRAPH_RESULT_SCHEMA_VERSION: Final[str] = "room-graph-result.v1"
 PENDING_WRITE_OWNER_PREFIX: Final[str] = "grt.pending-write.v1."
+FENCED_LEASE_HORIZON_SECONDS: Final[float] = 30.0
+FENCED_LEASE_SUFFIX_BODY_TIMEOUT_SECONDS: Final[float] = 15.0
+FENCED_LEASE_SUFFIX_MINIMUM_SAFETY_MARGIN_SECONDS: Final[float] = 1.0
+
+SET_LOCAL_FENCED_LEASE_SUFFIX_IDLE_TIMEOUT_SQL: Final[str] = """
+select set_config('idle_in_transaction_session_timeout', %s, true)
+"""
 
 FENCE_LOCK_SQL: Final[str] = """
 select fencing_token
@@ -68,6 +78,23 @@ select fencing_token
    and released_at is null
    and lease_expires_at > clock_timestamp()
  for update
+"""
+
+REFRESH_LOCKED_FENCE_LEASE_SQL: Final[str] = """
+with db_clock as materialized (select clock_timestamp() as now)
+update agent_graph_lease lease
+   set renewed_at = db_clock.now,
+       lease_expires_at = db_clock.now + interval '30 seconds',
+       lease_revision = lease.lease_revision + 1
+  from db_clock
+ where lease.thread_id = %s
+   and lease.command_id = %s
+   and lease.owner_id = %s
+   and lease.fencing_token = %s
+   and lease.cancelled_at is null
+   and lease.released_at is null
+returning lease.fencing_token, lease.lease_revision,
+          lease.renewed_at, lease.lease_expires_at
 """
 
 TARGET_E2E_ROOM_FENCE_SQL: Final[str] = """
@@ -468,24 +495,56 @@ class _PreparedPendingWrites:
 
 
 class FencedPostgresSaver(BaseCheckpointSaver[Any]):
-    """Async saver that atomically checks the durable lease before every write.
+    """Async saver that fences every write before its transaction can commit.
 
-    A pool-backed ``AsyncPostgresSaver`` is used only for reads. Writes always create a direct saver
-    over the already checked connection inside the same explicit transaction.
+    A pool-backed ``AsyncPostgresSaver`` is used only for reads.  Bulk checkpoint mutations remain
+    uncommitted until the same transaction acquires the exact durable lease, performs authoritative
+    bindings, refreshes that lease, and commits.  Keeping the lease row unlocked during bulk SQL
+    lets the independent heartbeat renew without weakening stale-writer rollback.
     """
 
     def __init__(
         self,
         pool: AsyncConnectionPool,
         *,
+        statement_timeout_ms: int,
         acquire_timeout_seconds: float = 3.0,
         reader: BaseCheckpointSaver[Any] | None = None,
         direct_saver_factory: Callable[[Any, Any], AsyncPostgresSaver] | None = None,
         ledger: PostgresCommandLedger | None = None,
     ) -> None:
         super().__init__()
+        if (
+            isinstance(statement_timeout_ms, bool)
+            or not isinstance(statement_timeout_ms, int)
+            or statement_timeout_ms <= 0
+        ):
+            raise GraphPersistenceConfigurationError(
+                "checkpoint statement timeout must be a positive integer"
+            )
+        suffix_body_timeout_seconds = float(FENCED_LEASE_SUFFIX_BODY_TIMEOUT_SECONDS)
+        if (
+            not math.isfinite(suffix_body_timeout_seconds)
+            or suffix_body_timeout_seconds <= 0
+        ):
+            raise GraphPersistenceConfigurationError(
+                "lease-fenced checkpoint suffix timeout must be finite and positive"
+            )
+        statement_timeout_seconds = statement_timeout_ms / 1_000.0
+        reserved_seconds = (
+            suffix_body_timeout_seconds
+            + (2.0 * statement_timeout_seconds)
+            + FENCED_LEASE_SUFFIX_MINIMUM_SAFETY_MARGIN_SECONDS
+        )
+        if reserved_seconds >= FENCED_LEASE_HORIZON_SECONDS:
+            raise GraphPersistenceConfigurationError(
+                "lease-fenced checkpoint suffix timeout and transaction completion "
+                "reserve must remain below the lease horizon"
+            )
         self._pool = pool
         self._acquire_timeout_seconds = acquire_timeout_seconds
+        self._statement_timeout_ms = statement_timeout_ms
+        self._fenced_lease_suffix_body_timeout_seconds = suffix_body_timeout_seconds
         self._reader = reader or AsyncPostgresSaver(pool, serde=self.serde)
         self._uses_native_direct_writes = direct_saver_factory is None
         self._direct_saver_factory = direct_saver_factory or (
@@ -496,10 +555,18 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         fence = self._require_fence(config)
-        found = await self._reader.aget_tuple(config)
-        if found is None:
+        selection = await self._checkpoint_restore_selection(config, fence)
+        if selection is None:
             return None
-        await self._validate_checkpoint_tuple_for_command_or_start(found, fence)
+        selected_config, selected_identity, authority = selection
+        found = await self._reader.aget_tuple(selected_config)
+        if found is None:
+            if authority is not None:
+                raise GraphBindingError("authoritative restore checkpoint is missing")
+            return None
+        if self._require_checkpoint_tuple_identity(found) != selected_identity:
+            raise GraphBindingError("checkpoint reader returned a different restore identity")
+        await self._validate_selected_checkpoint_tuple(found, fence, authority)
         return self._bind_tuple(found, fence)
 
     async def alist(
@@ -517,13 +584,17 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             before_fence = self._require_fence(before)
             if before_fence != fence:
                 raise GraphBindingError("checkpoint list cursor belongs to another fence")
+        selection = await self._checkpoint_restore_selection(config, fence)
+        if selection is None:
+            return
+        selected_config, _, authority = selection
         async for item in self._reader.alist(
-            config,
+            selected_config,
             filter=filter,
             before=before,
             limit=limit,
         ):
-            await self._validate_checkpoint_tuple_for_command_or_start(item, fence)
+            await self._validate_selected_checkpoint_tuple(item, fence, authority)
             yield self._bind_tuple(item, fence)
 
     async def aput(
@@ -558,7 +629,6 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             )
             async with self._connection() as connection:
                 async with connection.transaction():
-                    await self._lock_fence(connection, fence)
                     if materializer is not None:
                         terminal_result, checkpoint_to_save = self._materialize_terminal_result(
                             config,
@@ -604,48 +674,55 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                         raise GraphBindingError(
                             "terminal result conflicts with the saved checkpoint identity"
                         )
-                    await self._bind_command_checkpoint(
-                        connection,
-                        effective_fence,
-                        checkpoint_ns=checkpoint_ns,
-                        checkpoint_id=checkpoint_id,
-                    )
-                    if (
-                        terminal_result is not None
-                        and self._checkpoint_has_applied_revision(checkpoint_to_save)
-                    ):
-                        parent = config.get("configurable") or {}
-                        parent_checkpoint_ns = parent.get("checkpoint_ns", "")
-                        parent_checkpoint_id = parent.get("checkpoint_id")
-                        if (
-                            not isinstance(parent_checkpoint_ns, str)
-                            or len(parent_checkpoint_ns) > 128
-                            or (
-                                parent_checkpoint_id is not None
-                                and (
-                                    not isinstance(parent_checkpoint_id, str)
-                                    or not parent_checkpoint_id
-                                    or len(parent_checkpoint_id) > 128
-                                )
-                            )
-                        ):
-                            raise GraphBindingError("checkpoint parent identity is invalid")
-                        await self._advance_thread_checkpoint(
+                    # Bulk checkpoint/blob SQL above is still uncommitted.  Acquire the
+                    # exact active fence only for the short authoritative bind/refresh
+                    # suffix so a heartbeat never waits behind serialization-sized work.
+                    # Any stale/released/taken-over fence rolls the entire transaction back.
+                    async with self._bounded_fenced_lease_suffix(connection):
+                        await self._lock_fence(connection, effective_fence)
+                        await self._bind_command_checkpoint(
                             connection,
                             effective_fence,
-                            cognitive_revision=cognitive_revision,
                             checkpoint_ns=checkpoint_ns,
                             checkpoint_id=checkpoint_id,
-                            parent_checkpoint_ns=parent_checkpoint_ns,
-                            parent_checkpoint_id=parent_checkpoint_id,
                         )
-                    if terminal_result is not None:
-                        await self._ledger.store_terminal_result(
-                            connection,
-                            fence=effective_fence,
-                            result=terminal_result,
-                            expected_result_schema_version=ROOM_GRAPH_RESULT_SCHEMA_VERSION,
-                        )
+                        if (
+                            terminal_result is not None
+                            and self._checkpoint_has_applied_revision(checkpoint_to_save)
+                        ):
+                            parent = config.get("configurable") or {}
+                            parent_checkpoint_ns = parent.get("checkpoint_ns", "")
+                            parent_checkpoint_id = parent.get("checkpoint_id")
+                            if (
+                                not isinstance(parent_checkpoint_ns, str)
+                                or len(parent_checkpoint_ns) > 128
+                                or (
+                                    parent_checkpoint_id is not None
+                                    and (
+                                        not isinstance(parent_checkpoint_id, str)
+                                        or not parent_checkpoint_id
+                                        or len(parent_checkpoint_id) > 128
+                                    )
+                                )
+                            ):
+                                raise GraphBindingError("checkpoint parent identity is invalid")
+                            await self._advance_thread_checkpoint(
+                                connection,
+                                effective_fence,
+                                cognitive_revision=cognitive_revision,
+                                checkpoint_ns=checkpoint_ns,
+                                checkpoint_id=checkpoint_id,
+                                parent_checkpoint_ns=parent_checkpoint_ns,
+                                parent_checkpoint_id=parent_checkpoint_id,
+                            )
+                        if terminal_result is not None:
+                            await self._ledger.store_terminal_result(
+                                connection,
+                                fence=effective_fence,
+                                result=terminal_result,
+                                expected_result_schema_version=ROOM_GRAPH_RESULT_SCHEMA_VERSION,
+                            )
+                        await self._refresh_locked_fence_lease(connection, effective_fence)
         return bind_fence_context(
             self._without_terminal_result_context(saved),
             effective_fence,
@@ -674,13 +751,20 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             )
             async with self._connection() as connection:
                 async with connection.transaction():
-                    await self._lock_fence(connection, fence)
-                    await self._validate_pending_write_target(connection, config, fence)
                     if prepared is None:
                         saver = self._direct_saver_factory(connection, self.serde)
                         await saver.aput_writes(config, writes, owned_task_id, task_path)
                     else:
                         await self._write_prepared_pending_writes(connection, prepared)
+                    # Pending writes are speculative until checkpoint ownership and the
+                    # exact final fence both succeed in this transaction.  Lock any
+                    # existing checkpoint before the lease so every checkpoint writer
+                    # uses one cross-process checkpoint -> lease order.  A missing
+                    # checkpoint remains the fenced orphan-write case LangGraph needs.
+                    await self._validate_pending_write_target(connection, config, fence)
+                    async with self._bounded_fenced_lease_suffix(connection):
+                        await self._lock_fence(connection, fence)
+                        await self._refresh_locked_fence_lease(connection, fence)
 
     async def avalidate_external_terminal_checkpoint(
         self,
@@ -693,13 +777,17 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         fence = self._require_fence(config)
         async with self._serialized_thread_write(fence.thread_id), self._connection() as connection:
             async with connection.transaction():
-                await self._lock_fence(connection, fence)
                 await self._lock_external_terminal_checkpoint(
                     connection,
                     config,
                     fence,
                     cognitive_revision=cognitive_revision,
                 )
+                # Use checkpoint -> lease everywhere so a stale cross-replica bulk
+                # writer cannot deadlock with result-only terminal validation.
+                async with self._bounded_fenced_lease_suffix(connection):
+                    await self._lock_fence(connection, fence)
+                    await self._refresh_locked_fence_lease(connection, fence)
 
     async def acommit_external_terminal(
         self,
@@ -728,7 +816,6 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         effective_fence = self._terminal_fence(fence, result)
         async with self._serialized_thread_write(fence.thread_id), self._connection() as connection:
             async with connection.transaction():
-                await self._lock_fence(connection, fence)
                 checkpoint_is_terminal_bound = await self._lock_external_terminal_checkpoint(
                     connection,
                     config,
@@ -736,35 +823,40 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                     cognitive_revision=commit.cognitive_revision,
                     terminal_fence=effective_fence,
                 )
-                if not checkpoint_is_terminal_bound:
-                    await self._bind_external_terminal_checkpoint_metadata(
+                # Lock the checkpoint row before the lease, matching aput's final
+                # commit order across replicas and eliminating checkpoint/lease cycles.
+                async with self._bounded_fenced_lease_suffix(connection):
+                    await self._lock_fence(connection, fence)
+                    if not checkpoint_is_terminal_bound:
+                        await self._bind_external_terminal_checkpoint_metadata(
+                            connection,
+                            checkpoint_ns=checkpoint_ns,
+                            checkpoint_id=checkpoint_id,
+                            fence=effective_fence,
+                            cognitive_revision=commit.cognitive_revision,
+                        )
+                    await self._bind_command_checkpoint(
                         connection,
+                        effective_fence,
                         checkpoint_ns=checkpoint_ns,
                         checkpoint_id=checkpoint_id,
-                        fence=effective_fence,
-                        cognitive_revision=commit.cognitive_revision,
                     )
-                await self._bind_command_checkpoint(
-                    connection,
-                    effective_fence,
-                    checkpoint_ns=checkpoint_ns,
-                    checkpoint_id=checkpoint_id,
-                )
-                await self._advance_thread_checkpoint(
-                    connection,
-                    effective_fence,
-                    cognitive_revision=commit.cognitive_revision,
-                    checkpoint_ns=checkpoint_ns,
-                    checkpoint_id=checkpoint_id,
-                    parent_checkpoint_ns=checkpoint_ns,
-                    parent_checkpoint_id=checkpoint_id,
-                )
-                await self._ledger.store_terminal_result(
-                    connection,
-                    fence=effective_fence,
-                    result=result,
-                    expected_result_schema_version=ROOM_GRAPH_RESULT_SCHEMA_VERSION,
-                )
+                    await self._advance_thread_checkpoint(
+                        connection,
+                        effective_fence,
+                        cognitive_revision=commit.cognitive_revision,
+                        checkpoint_ns=checkpoint_ns,
+                        checkpoint_id=checkpoint_id,
+                        parent_checkpoint_ns=checkpoint_ns,
+                        parent_checkpoint_id=checkpoint_id,
+                    )
+                    await self._ledger.store_terminal_result(
+                        connection,
+                        fence=effective_fence,
+                        result=result,
+                        expected_result_schema_version=ROOM_GRAPH_RESULT_SCHEMA_VERSION,
+                    )
+                    await self._refresh_locked_fence_lease(connection, effective_fence)
         rebound = dict(config)
         rebound_configurable = dict(config.get("configurable") or {})
         rebound_configurable.pop(FENCE_CONTEXT_KEY, None)
@@ -779,6 +871,109 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
 
     def _connection(self) -> AbstractAsyncContextManager[Any]:
         return self._pool.connection(timeout=self._acquire_timeout_seconds)
+
+    @asynccontextmanager
+    async def _bounded_fenced_lease_suffix(self, connection: Any) -> AsyncIterator[None]:
+        """Bound exact-lease lock ownership while leaving COMMIT server-authoritative.
+
+        The transaction-local idle timeout releases server-side locks if the client
+        cannot send COMMIT or ROLLBACK.  The aggregate client budget covers only the
+        body from lease acquisition through the final refresh.  Transaction ``__aexit__``
+        therefore performs COMMIT/ROLLBACK outside client cancellation, while the
+        configured PostgreSQL statement timeout remains its authoritative bound.
+        """
+
+        await connection.execute(
+            SET_LOCAL_FENCED_LEASE_SUFFIX_IDLE_TIMEOUT_SQL,
+            (f"{self._statement_timeout_ms}ms",),
+        )
+        try:
+            async with asyncio.timeout(self._fenced_lease_suffix_body_timeout_seconds):
+                yield
+        except TimeoutError as exc:
+            raise GraphFenceError(
+                "lease-fenced checkpoint transaction suffix exceeded its safety horizon"
+            ) from exc
+
+    async def _checkpoint_restore_selection(
+        self,
+        config: RunnableConfig,
+        fence: GraphFenceContext,
+    ) -> (
+        tuple[
+            RunnableConfig,
+            tuple[str, str],
+            CheckpointRestoreAuthority | None,
+        ]
+        | None
+    ):
+        explicit = self._explicit_checkpoint_identity(config)
+        if explicit is not None:
+            return config, explicit, None
+
+        try:
+            async with self._connection() as connection:
+                authority = await self._ledger.load_checkpoint_restore_authority(
+                    connection,
+                    fence=fence,
+                )
+        except GraphTerminalBindingError as error:
+            raise GraphBindingError(
+                "active command checkpoint restore authority is invalid"
+            ) from error
+        if authority is None:
+            return None
+        identity = (authority.checkpoint_ns, authority.checkpoint_id)
+        return self._with_checkpoint_identity(config, identity), identity, authority
+
+    @staticmethod
+    def _explicit_checkpoint_identity(
+        config: RunnableConfig,
+    ) -> tuple[str, str] | None:
+        configurable = config.get("configurable") or {}
+        if "checkpoint_id" not in configurable:
+            return None
+        checkpoint_ns = configurable.get("checkpoint_ns", "")
+        checkpoint_id = configurable.get("checkpoint_id")
+        if (
+            not isinstance(checkpoint_ns, str)
+            or len(checkpoint_ns) > 128
+            or not isinstance(checkpoint_id, str)
+            or not checkpoint_id
+            or len(checkpoint_id) > 128
+        ):
+            raise GraphBindingError("explicit checkpoint identity is invalid")
+        return checkpoint_ns, checkpoint_id
+
+    @staticmethod
+    def _with_checkpoint_identity(
+        config: RunnableConfig,
+        identity: tuple[str, str],
+    ) -> RunnableConfig:
+        selected = dict(config)
+        configurable = dict(config.get("configurable") or {})
+        configurable.update(
+            {
+                "checkpoint_ns": identity[0],
+                "checkpoint_id": identity[1],
+            }
+        )
+        selected["configurable"] = configurable
+        return selected  # type: ignore[return-value]
+
+    async def _validate_selected_checkpoint_tuple(
+        self,
+        item: CheckpointTuple,
+        fence: GraphFenceContext,
+        authority: CheckpointRestoreAuthority | None,
+    ) -> None:
+        if (
+            authority is not None
+            and authority.kind is CheckpointRestoreKind.CURRENT_COMMITTED
+        ):
+            self._validate_checkpoint_tuple(item, fence)
+            return
+        await self._validate_checkpoint_tuple_for_command_or_start(item, fence)
 
     def _prepare_checkpoint_write(
         self,
@@ -847,11 +1042,12 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         connection: Any,
         prepared: _PreparedCheckpointWrite,
     ) -> None:
-        for parameters in prepared.blob_parameters:
-            await connection.execute(
-                AsyncPostgresSaver.UPSERT_CHECKPOINT_BLOBS_SQL,
-                parameters,
-            )
+        if prepared.blob_parameters:
+            async with connection.cursor() as cursor:
+                await cursor.executemany(
+                    AsyncPostgresSaver.UPSERT_CHECKPOINT_BLOBS_SQL,
+                    prepared.blob_parameters,
+                )
         await connection.execute(
             AsyncPostgresSaver.UPSERT_CHECKPOINTS_SQL,
             prepared.checkpoint_parameters,
@@ -979,8 +1175,9 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         connection: Any,
         prepared: _PreparedPendingWrites,
     ) -> None:
-        for parameters in prepared.parameters:
-            await connection.execute(prepared.query, parameters)
+        if prepared.parameters:
+            async with connection.cursor() as cursor:
+                await cursor.executemany(prepared.query, prepared.parameters)
 
     @asynccontextmanager
     async def _serialized_thread_write(self, thread_id: str) -> AsyncIterator[None]:
@@ -1183,6 +1380,48 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             ).fetchone()
             if room_row is None:
                 raise GraphFenceError("Java room authority fence is stale")
+
+    @staticmethod
+    async def _refresh_locked_fence_lease(
+        connection: Any,
+        fence: GraphFenceContext,
+    ) -> None:
+        """Refresh the exact lease immediately before a successful fenced commit.
+
+        ``_lock_fence`` proves that the row is still active after speculative bulk
+        checkpoint mutation and retains its row lock for the authoritative suffix of
+        the transaction.  A stale writer therefore rolls back all uncommitted bulk
+        SQL, while a current writer refreshes with the database clock immediately
+        before commit.
+        """
+
+        row = await (
+            await connection.execute(
+                REFRESH_LOCKED_FENCE_LEASE_SQL,
+                (
+                    fence.thread_id,
+                    fence.command_id,
+                    fence.owner_id,
+                    fence.fencing_token,
+                ),
+            )
+        ).fetchone()
+        revision = None if row is None else row.get("lease_revision")
+        renewed_at = None if row is None else row.get("renewed_at")
+        lease_expires_at = None if row is None else row.get("lease_expires_at")
+        if (
+            row is None
+            or row.get("fencing_token") != fence.fencing_token
+            or not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+            or renewed_at is None
+            or lease_expires_at is None
+            or lease_expires_at <= renewed_at
+        ):
+            raise GraphFenceError(
+                "Graph lease changed, was released, or was cancelled during checkpoint commit"
+            )
 
     async def _bind_command_checkpoint(
         self,
@@ -1740,6 +1979,11 @@ class GraphCheckpointRuntime:
         try:
             await pool.open(wait=True, timeout=checkpoint_config.acquire_timeout_seconds)
             await control_pool.open(wait=True, timeout=control_config.acquire_timeout_seconds)
+            saver = FencedPostgresSaver(
+                pool,
+                statement_timeout_ms=selected.statement_timeout_ms,
+                acquire_timeout_seconds=selected.acquire_timeout_seconds,
+            )
         except BaseException:
             try:
                 await control_pool.close(timeout=control_config.acquire_timeout_seconds)
@@ -1749,10 +1993,7 @@ class GraphCheckpointRuntime:
         return cls(
             pool=pool,
             control_pool=control_pool,
-            saver=FencedPostgresSaver(
-                pool,
-                acquire_timeout_seconds=selected.acquire_timeout_seconds,
-            ),
+            saver=saver,
         )
 
     async def close(self) -> None:

@@ -3,6 +3,7 @@ package com.example.dispute.workflow.targete2e.finalization;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.ActivationGrant;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AcceptedCommandProof;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationDecision;
@@ -40,6 +41,68 @@ class TargetE2eExecutionLaneVerifierTest {
                 verified(fixture));
 
         assertThat(grant).isEqualTo(replay);
+    }
+
+    @Test
+    void retryAttemptUsesCurrentAuthorityWithoutWeakeningOriginOrLogicalLineage() {
+        var retry = TargetE2eFinalizationFixture.validRetry();
+        assertThat(retry.state().run().requestHash())
+                .isNotEqualTo(retry.request().command().requestHash());
+        assertThat(retry.state().run().logicalInputHash())
+                .isEqualTo(retry.request().logicalInputHash());
+        assertThat(verifier.requireAuthorized(
+                        TargetE2eFinalizationFixture.activeDecision(retry),
+                        retry.authorizationRequest(),
+                        retry.request(),
+                        retry.result(),
+                        retry.runtime(),
+                        retry.state(),
+                        verified(retry)))
+                .isNotNull();
+
+        var current = retry.state().attempt();
+        assertRejected(
+                withAttempt(
+                        retry.state(),
+                        copyAttemptAuthority(
+                                current,
+                                "f".repeat(64),
+                                current.commandRequestHash(),
+                                current.logicalInputHash(),
+                                current.persistedCommand())),
+                retry,
+                "attempt request hash");
+        assertRejected(
+                withAttempt(
+                        retry.state(),
+                        copyAttemptAuthority(
+                                current,
+                                current.requestHash(),
+                                current.commandRequestHash(),
+                                current.logicalInputHash(),
+                                TargetE2eFinalizationFixture.valid().request().command())),
+                retry,
+                "persisted graph command");
+        assertRejected(
+                withRun(
+                        retry.state(),
+                        copyRunHashes(
+                                retry.state().run(),
+                                retry.state().run().requestHash(),
+                                "f".repeat(64))),
+                retry,
+                "logical input hash");
+
+        var initial = TargetE2eFinalizationFixture.valid();
+        assertRejected(
+                withRun(
+                        initial.state(),
+                        copyRunHashes(
+                                initial.state().run(),
+                                "f".repeat(64),
+                                initial.state().run().logicalInputHash())),
+                initial,
+                "run request hash");
     }
 
     @Test
@@ -351,6 +414,48 @@ class TargetE2eExecutionLaneVerifierTest {
                 state.threadRegistrationStatus(), state.participantStatus(),
                 state.accessSessionStatus(), state.agentSessionStatus(), state.threadBinding(),
                 state.initialSnapshot(), state.event(), state.graphOutput());
+    }
+
+    private static TargetE2eIntakeFinalizationState withRun(
+            TargetE2eIntakeFinalizationState state,
+            TargetE2eIntakeFinalizationState.LogicalRun run) {
+        return new TargetE2eIntakeFinalizationState(
+                run, state.attempt(), state.epoch(), state.projection(),
+                state.threadRegistrationStatus(), state.participantStatus(),
+                state.accessSessionStatus(), state.agentSessionStatus(), state.threadBinding(),
+                state.initialSnapshot(), state.event(), state.graphOutput());
+    }
+
+    private static TargetE2eIntakeFinalizationState.LogicalRun copyRunHashes(
+            TargetE2eIntakeFinalizationState.LogicalRun value,
+            String requestHash,
+            String logicalInputHash) {
+        return new TargetE2eIntakeFinalizationState.LogicalRun(
+                value.agentRunId(), value.tenantSurrogate(), value.caseId(), value.roomId(),
+                value.roomEpochId(), value.roomType(), value.logicalIdempotencyKey(),
+                value.protocol(), value.executorKind(), value.runStatus(),
+                value.finalizationStatus(), value.roomEpoch(), value.processRevision(),
+                value.fencingToken(), requestHash, logicalInputHash,
+                value.resultReadyAttemptId(), value.committedAttemptId(),
+                value.finalResultHash());
+    }
+
+    private static TargetE2eIntakeFinalizationState.Attempt copyAttemptAuthority(
+            TargetE2eIntakeFinalizationState.Attempt value,
+            String requestHash,
+            String commandRequestHash,
+            String logicalInputHash,
+            RoomGraphCommand persistedCommand) {
+        return new TargetE2eIntakeFinalizationState.Attempt(
+                value.attemptId(), value.agentRunId(), value.attemptNo(), value.attemptStatus(),
+                value.executorKind(), value.provider(), value.modelProfileId(),
+                value.modelVersion(), value.graphKey(), value.graphVersion(),
+                value.checkpointSchemaVersion(), value.checkpointId(), value.promptVersion(),
+                value.outputSchemaVersion(), value.policyVersion(), value.guardrailVersion(),
+                requestHash, value.commandId(), commandRequestHash, logicalInputHash,
+                value.resultHash(), value.finalFrameObserved(), value.lastSequenceNo(),
+                value.latencyMs(), value.completedAt(), persistedCommand,
+                value.persistedResult());
     }
 
     private static TargetE2eIntakeFinalizationState.Attempt copyAttempt(

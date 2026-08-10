@@ -19,6 +19,7 @@ from app.api.graph_lifecycle import (
 )
 from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
+    GraphRetainedCleanupError,
     ProviderRuntimeBinding,
     ShadowExecutorRegistration,
 )
@@ -689,6 +690,40 @@ async def test_shadow_application_runtime_rejects_a_missing_executor_factory() -
 
 
 @pytest.mark.asyncio
+async def test_shadow_startup_rejects_incoherent_readiness_timeout_before_pool_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _shadow_settings().model_copy(
+        update={
+            "graph_readiness_timeout_seconds": 2.0,
+            "graph_pool_acquire_timeout_seconds": 3.0,
+        }
+    )
+    pool_open_calls = 0
+
+    async def forbidden_checkpoint_open(
+        cls: type[Any],
+        connection_string: str,
+        config: Any,
+    ) -> Any:
+        del cls, connection_string, config
+        nonlocal pool_open_calls
+        pool_open_calls += 1
+        raise AssertionError("incoherent Graph readiness geometry reached pool opening")
+
+    monkeypatch.setattr(
+        graph_lifecycle.GraphCheckpointRuntime,
+        "open",
+        classmethod(forbidden_checkpoint_open),
+    )
+
+    with pytest.raises(ValueError, match="Graph readiness timeout geometry"):
+        await GraphApplicationRuntime.open(settings, _bindings())
+
+    assert pool_open_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1167,6 +1202,47 @@ async def test_application_close_preserves_dependency_order_when_drain_fails() -
     assert await runtime.close() is False
     assert events == [
         "drain",
+        "bulkhead_drain",
+        "bulkhead_close",
+        "security_close",
+        "checkpoint_close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_application_close_keeps_graph_pools_open_until_retained_cleanup_drains() -> None:
+    events: list[str] = []
+
+    class RetainedCleanupGate:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @property
+        def accepting(self) -> bool:
+            return False
+
+        async def drain(self, timeout_seconds: float) -> bool:
+            assert timeout_seconds > 0
+            self.calls += 1
+            events.append(f"drain:{self.calls}")
+            if self.calls == 1:
+                raise GraphRetainedCleanupError("retained cleanup still owns pools")
+            return True
+
+    gate = RetainedCleanupGate()
+    runtime = _application_runtime(events=events, gate=cast(Any, gate))
+
+    with pytest.raises(GraphRetainedCleanupError, match="still owns pools"):
+        await runtime.close()
+
+    assert events == ["drain:1"]
+    assert runtime._close_complete is False  # noqa: SLF001
+    assert runtime._closed is True  # noqa: SLF001
+
+    assert await runtime.close() is True
+    assert events == [
+        "drain:1",
+        "drain:2",
         "bulkhead_drain",
         "bulkhead_close",
         "security_close",

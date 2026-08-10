@@ -10,7 +10,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -29,14 +32,20 @@ import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.application.EvidenceAgentTurnCommand;
 import com.example.dispute.room.application.RoomMessageCommand;
 import com.example.dispute.room.application.RoomMessageService;
 import com.example.dispute.room.application.RoomMessageView;
+import com.example.dispute.room.domain.MessageSource;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -44,6 +53,8 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -171,11 +182,32 @@ class EvidenceSubmissionServiceTest {
         EvidenceItemEntity first = evidence("EVIDENCE_HEARING_SUPPLEMENT_1");
         EvidenceItemEntity second = evidence("EVIDENCE_HEARING_SUPPLEMENT_2");
         List<String> batchIds = List.of(first.getId(), second.getId());
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        AtomicReference<EvidenceSubmissionBatchEntity> persistedBatch = new AtomicReference<>();
+        RoomMessageView hearingMessage =
+                new RoomMessageView(
+                        "MESSAGE_HEARING_BATCH",
+                        dispute.getId(),
+                        "ROOM_HEARING",
+                        8,
+                        "USER",
+                        "user-local",
+                        MessageType.PARTY_EVIDENCE_REFERENCE,
+                        "submitted",
+                        batchIds,
+                        null,
+                        Instant.parse("2026-07-06T08:00:00Z"));
         when(caseRepository.findByIdForUpdate(dispute.getId())).thenReturn(Optional.of(dispute));
         when(batchRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "submit-hearing-1"))
-                .thenReturn(Optional.empty());
+                .thenAnswer(invocation -> Optional.ofNullable(persistedBatch.get()));
         when(evidenceRepository.findAllById(batchIds)).thenReturn(List.of(first, second));
-        when(batchRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(batchRepository.save(any()))
+                .thenAnswer(
+                        invocation -> {
+                            EvidenceSubmissionBatchEntity batch = invocation.getArgument(0);
+                            persistedBatch.set(batch);
+                            return batch;
+                        });
         when(roomMessageService.post(
                         eq(dispute.getId()),
                         eq(RoomType.HEARING),
@@ -183,19 +215,10 @@ class EvidenceSubmissionServiceTest {
                         any(),
                         any(),
                         eq("TRACE_HEARING")))
-                .thenReturn(
-                        new RoomMessageView(
-                                "MESSAGE_HEARING_BATCH",
-                                dispute.getId(),
-                                "ROOM_HEARING",
-                                8,
-                                "USER",
-                                "user-local",
-                                MessageType.PARTY_EVIDENCE_REFERENCE,
-                                "submitted",
-                                batchIds,
-                                null,
-                                Instant.parse("2026-07-06T08:00:00Z")));
+                .thenReturn(hearingMessage);
+        when(roomMessageService.readEvidenceSubmissionReplay(
+                        dispute.getId(), "MESSAGE_HEARING_BATCH", actor))
+                .thenReturn(hearingMessage);
 
         var result =
                 service.submit(
@@ -203,11 +226,20 @@ class EvidenceSubmissionServiceTest {
                         new EvidenceSubmissionCommand(
                                 batchIds,
                                 "庭审补充证据"),
-                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        actor,
                         "submit-hearing-1",
                         "TRACE_HEARING");
+        var replay =
+                service.submit(
+                        dispute.getId(),
+                        new EvidenceSubmissionCommand(batchIds, "庭审补充证据"),
+                        actor,
+                        "submit-hearing-1",
+                        "TRACE_HEARING_REPLAY");
 
         assertThat(result.roomMessage().roomId()).isEqualTo("ROOM_HEARING");
+        assertThat(replay.batchId()).isEqualTo(result.batchId());
+        assertThat(replay.roomMessage()).isEqualTo(result.roomMessage());
         assertThat(result.evidenceIds()).containsExactlyElementsOf(batchIds);
         assertThat(first.getSubmissionStatus().name()).isEqualTo("SUBMITTED");
         assertThat(second.getSubmissionStatus().name()).isEqualTo("SUBMITTED");
@@ -226,15 +258,24 @@ class EvidenceSubmissionServiceTest {
                 .isEqualTo(MessageType.PARTY_EVIDENCE_REFERENCE);
         assertThat(commandCaptor.getValue().attachmentRefs())
                 .containsExactlyElementsOf(batchIds);
+        verify(batchRepository, times(1)).save(any());
+        verify(roomMessageService, times(1)).readEvidenceSubmissionReplay(
+                dispute.getId(), "MESSAGE_HEARING_BATCH", actor);
     }
 
     @Test
     void exactReplayReturnsTheOriginalBatchAfterOrderedDeduplicationWithoutWriting() {
         FulfillmentCaseEntity dispute = evidenceCase();
         EvidenceSubmissionBatchEntity existing = existingBatch("same-note");
+        RoomMessageView replayMessage = submissionMessage(
+                existing.getRoomMessageId(), "AGENT_RUN_LEGACY_REPLAY", List.of("EVIDENCE_ONE", "EVIDENCE_TWO"));
         when(caseRepository.findByIdForUpdate(dispute.getId())).thenReturn(Optional.of(dispute));
         when(batchRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "submit-replay"))
                 .thenReturn(Optional.of(existing));
+        when(roomMessageService.readEvidenceSubmissionReplay(
+                        dispute.getId(), existing.getRoomMessageId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER)))
+                .thenReturn(replayMessage);
 
         var result =
                 service.submit(
@@ -249,7 +290,173 @@ class EvidenceSubmissionServiceTest {
         assertThat(result.batchId()).isEqualTo(existing.getId());
         assertThat(result.evidenceIds()).containsExactly("EVIDENCE_ONE", "EVIDENCE_TWO");
         assertThat(result.batchNote()).isEqualTo("same-note");
-        assertNoReplayWrites();
+        assertThat(result.roomMessage().agentRunId()).isEqualTo("AGENT_RUN_LEGACY_REPLAY");
+
+        RoomMessageView legacyWithoutRun = submissionMessage(
+                existing.getRoomMessageId(), null, List.of("EVIDENCE_ONE", "EVIDENCE_TWO"));
+        when(batchRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "submit-replay-without-run"))
+                .thenReturn(Optional.of(existing));
+        when(roomMessageService.readEvidenceSubmissionReplay(
+                        dispute.getId(), existing.getRoomMessageId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER)))
+                .thenReturn(legacyWithoutRun);
+        var replayWithoutRun = service.submit(
+                dispute.getId(),
+                new EvidenceSubmissionCommand(
+                        List.of("EVIDENCE_ONE", "EVIDENCE_TWO"), "same-note"),
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                "submit-replay-without-run",
+                "TRACE_REPLAY_WITHOUT_RUN");
+        assertThat(replayWithoutRun.roomMessage().agentRunId()).isNull();
+
+        verify(roomMessageService, times(2)).readEvidenceSubmissionReplay(
+                dispute.getId(), existing.getRoomMessageId(),
+                new AuthenticatedActor("user-local", ActorRole.USER));
+        verify(batchRepository, never()).save(any());
+        verifyNoInteractions(
+                evidenceRepository,
+                auditRecorder,
+                roomEpochRepository,
+                targetRoomIngress,
+                caseCommandService);
+    }
+
+    @Test
+    void targetSubmissionReturnsAndReplaysTheSamePersistedLogicalRunWithoutDuplicateWrites() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        EvidenceItemEntity evidence = evidence("EVIDENCE_ONE");
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        String runId = "target-evidence-run:authority-test";
+        AtomicInteger materializerCalls = new AtomicInteger();
+        AtomicReference<RoomMessageView> sealedMessage = new AtomicReference<>();
+        AtomicReference<EvidenceSubmissionBatchEntity> transientBatch = new AtomicReference<>();
+        AtomicReference<EvidenceSubmissionBatchEntity> persistedBatch = new AtomicReference<>();
+        CaseRoomEpochEntity epoch = mock(CaseRoomEpochEntity.class);
+        TargetRoomCommandIngress ingress = mock(TargetRoomCommandIngress.class);
+        EvidenceAgentTurnCommand evidenceTurn = mock(EvidenceAgentTurnCommand.class);
+        var event = mock(
+                com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity.class);
+        RoomMessageView pendingMessage = submissionMessage(
+                "MESSAGE_TARGET_SUBMISSION", null, List.of("EVIDENCE_ONE"));
+        RoomMessageView attachedMessage = submissionMessage(
+                "MESSAGE_TARGET_SUBMISSION", runId, List.of("EVIDENCE_ONE"));
+
+        when(caseRepository.findByIdForUpdate(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(batchRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "submit-target"))
+                .thenAnswer(invocation -> Optional.ofNullable(persistedBatch.get()));
+        when(batchRepository.save(any()))
+                .thenAnswer(
+                        invocation -> {
+                            EvidenceSubmissionBatchEntity batch = invocation.getArgument(0);
+                            transientBatch.set(batch);
+                            EvidenceSubmissionBatchEntity managed =
+                                    EvidenceSubmissionBatchEntity.submitted(
+                                            batch.getId(),
+                                            batch.getCaseId(),
+                                            batch.getActorRole(),
+                                            batch.getActorId(),
+                                            batch.getEvidenceIdsJson(),
+                                            batch.getBatchNote(),
+                                            batch.getIdempotencyKey(),
+                                            batch.getSubmittedAt());
+                            persistedBatch.set(managed);
+                            return managed;
+                        });
+        when(evidenceRepository.findAllById(List.of("EVIDENCE_ONE")))
+                .thenReturn(List.of(evidence));
+        when(roomEpochRepository
+                        .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                                eq(dispute.getId()),
+                                eq(com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE),
+                                any()))
+                .thenReturn(Optional.of(epoch));
+        when(epoch.getWriterMode()).thenReturn(WriterMode.TEMPORAL);
+        when(epoch.getProvisioningStatus()).thenReturn(EpochProvisioningStatus.READY);
+        when(epoch.getGraphKey()).thenReturn(TargetTypedRoomProtocol.GRAPH_KEY);
+        when(epoch.getRoomEpoch()).thenReturn(7L);
+        when(epoch.getProcessRevision()).thenReturn(3L);
+        when(targetRoomIngress.getIfAvailable()).thenReturn(ingress);
+        when(roomMessageService.postTargetEvidenceSubmission(
+                        eq(dispute.getId()), any(), eq(actor),
+                        eq("evidence-batch-message:submit-target"), eq("TRACE_TARGET"),
+                        any(RoomMessageService.TargetEvidenceRunMaterializer.class)))
+                .thenAnswer(
+                        invocation -> {
+                            RoomMessageService.TargetEvidenceRunMaterializer materializer =
+                                    invocation.getArgument(5);
+                            materializerCalls.incrementAndGet();
+                            sealedMessage.set(pendingMessage);
+                            assertThat(materializer.materialize(pendingMessage)).isEqualTo(runId);
+                            return attachedMessage;
+                        });
+        when(roomMessageService.prepareTargetEvidenceSubmissionTurn(
+                        dispute.getId(), actor, pendingMessage))
+                .thenReturn(evidenceTurn);
+        when(roomMessageService.recordTargetEvidenceSubmissionEvent(
+                        eq(dispute.getId()), eq(pendingMessage.roomId()), any(), any(),
+                        eq(actor.actorId())))
+                .thenReturn(event);
+        when(event.getId()).thenReturn("EVENT_TARGET_SUBMISSION");
+        when(ingress.materializeEvidenceSubmission(
+                        eq(dispute.getId()), any(), any(), eq(actor),
+                        eq("TRACE_TARGET"), eq(evidenceTurn)))
+                .thenReturn(new TargetRoomCommandIngress.EvidenceSubmissionRunReceipt(runId));
+        when(roomMessageService.readEvidenceSubmissionReplay(
+                        eq(dispute.getId()), any(), eq(actor)))
+                .thenReturn(attachedMessage);
+
+        EvidenceSubmissionCommand command =
+                new EvidenceSubmissionCommand(List.of("EVIDENCE_ONE"), null);
+        var initial = service.submit(
+                dispute.getId(), command, actor, "submit-target", "TRACE_TARGET");
+        var replay = service.submit(
+                dispute.getId(), command, actor, "submit-target", "TRACE_TARGET_REPLAY");
+
+        assertThat(initial.batchId()).isEqualTo(replay.batchId());
+        assertThat(initial.roomMessage().id()).isEqualTo(replay.roomMessage().id());
+        assertThat(initial.roomMessage().agentRunId()).isEqualTo(runId);
+        assertThat(replay.roomMessage().agentRunId()).isEqualTo(runId);
+        assertThat(transientBatch.get()).isNotSameAs(persistedBatch.get());
+        assertThat(transientBatch.get().getRoomMessageId()).isNull();
+        assertThat(persistedBatch.get().getRoomMessageId()).isEqualTo(pendingMessage.id());
+        assertThat(initial.batchId()).isEqualTo(persistedBatch.get().getId());
+        assertThat(materializerCalls).hasValue(1);
+        assertThat(sealedMessage.get()).isSameAs(pendingMessage);
+        assertThat(sealedMessage.get().id()).isEqualTo(pendingMessage.id());
+        assertThat(sealedMessage.get().caseId()).isEqualTo(dispute.getId());
+        assertThat(sealedMessage.get().roomId()).isEqualTo(pendingMessage.roomId());
+        assertThat(sealedMessage.get().senderRole()).isEqualTo(actor.role().name());
+        assertThat(sealedMessage.get().senderId()).isEqualTo(actor.actorId());
+        assertThat(sealedMessage.get().messageType())
+                .isEqualTo(MessageType.PARTY_EVIDENCE_REFERENCE);
+        assertThat(sealedMessage.get().messageSource()).isEqualTo(MessageSource.PARTY_ACTION);
+        assertThat(sealedMessage.get().attachmentRefs()).containsExactly("EVIDENCE_ONE");
+        assertThat(sealedMessage.get().agentRunId()).isNull();
+        assertThat(sealedMessage.get().createdAt()).isNotNull();
+        assertThatThrownBy(
+                        () -> service.submit(
+                                dispute.getId(),
+                                new EvidenceSubmissionCommand(
+                                        List.of("EVIDENCE_ONE"), "different-note"),
+                                actor,
+                                "submit-target",
+                                "TRACE_TARGET_CONFLICT"))
+                .isInstanceOf(IdempotencyConflictException.class);
+
+        verify(batchRepository, times(1)).save(any());
+        verify(roomMessageService, times(1)).postTargetEvidenceSubmission(
+                eq(dispute.getId()), any(), eq(actor),
+                eq("evidence-batch-message:submit-target"), eq("TRACE_TARGET"),
+                any(RoomMessageService.TargetEvidenceRunMaterializer.class));
+        verify(ingress, times(1)).materializeEvidenceSubmission(
+                eq(dispute.getId()), any(), any(), eq(actor),
+                eq("TRACE_TARGET"), eq(evidenceTurn));
+        verify(caseCommandService, times(1)).accept(
+                eq(dispute.getId()), any(), any(), eq(actor),
+                eq("TRACE_TARGET"), any(), isNull());
+        verify(roomMessageService, times(1)).readEvidenceSubmissionReplay(
+                dispute.getId(), pendingMessage.id(), actor);
     }
 
     @Test
@@ -384,7 +591,7 @@ class EvidenceSubmissionServiceTest {
     }
 
     private static EvidenceSubmissionBatchEntity existingBatch(String note) {
-        return EvidenceSubmissionBatchEntity.submitted(
+        EvidenceSubmissionBatchEntity batch = EvidenceSubmissionBatchEntity.submitted(
                 "EVIDENCE_BATCH_REPLAY",
                 "CASE_EVIDENCE_ROOM",
                 ActorRole.USER.name(),
@@ -392,6 +599,25 @@ class EvidenceSubmissionServiceTest {
                 "[\"EVIDENCE_ONE\",\"EVIDENCE_TWO\"]",
                 note,
                 "submit-replay",
+                Instant.parse("2026-07-06T08:00:00Z"));
+        batch.attachRoomMessage("MESSAGE_REPLAY");
+        return batch;
+    }
+
+    private static RoomMessageView submissionMessage(
+            String messageId, String agentRunId, List<String> evidenceIds) {
+        return new RoomMessageView(
+                messageId,
+                "CASE_EVIDENCE_ROOM",
+                "ROOM_EVIDENCE",
+                4,
+                ActorRole.USER.name(),
+                "user-local",
+                MessageType.PARTY_EVIDENCE_REFERENCE,
+                MessageSource.PARTY_ACTION,
+                "submitted",
+                evidenceIds,
+                agentRunId,
                 Instant.parse("2026-07-06T08:00:00Z"));
     }
 

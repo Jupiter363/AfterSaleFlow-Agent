@@ -1939,6 +1939,99 @@ describe("IntakeRoomView", () => {
     wrapper.unmount();
   });
 
+  it("reconciles an accepted party message after stream failure and rolls back a pre-accept failure", async () => {
+    const runId = "run-temporal-accepted-message-failure";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    const acceptedText = "persist this accepted Intake statement";
+    const persistedMessage = {
+      id: "MESSAGE_DURABLE_ACCEPTED",
+      sequence_no: 9,
+      sender_type: "PARTY",
+      sender_role: "USER",
+      sender_id: "user-local",
+      message_type: "PARTY_TEXT",
+      message_text: acceptedText,
+      agent_run_id: runId,
+      pending: false,
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return failedDossierStreamResponse(runId, "discard this provisional dossier");
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const messagesLoader = vi.fn().mockResolvedValue([persistedMessage]);
+    const acceptedWrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: null,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      postMessageAction: vi.fn().mockResolvedValue({
+        run_id: runId,
+        stream_url: streamUrl,
+      }),
+      messagesLoader,
+      turnMemoryLoader: vi.fn().mockResolvedValue(null),
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    acceptedWrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: acceptedText,
+      attachment_refs: [],
+    });
+
+    await vi.waitFor(() => {
+      expect(acceptedWrapper.find("[data-intake-error-dialog]").exists()).toBe(true);
+    });
+
+    const reconciledMessages = acceptedWrapper
+      .findComponent(ConversationStream)
+      .props("messages");
+    expect(messagesLoader).toHaveBeenCalledTimes(1);
+    expect(reconciledMessages).toEqual([persistedMessage]);
+    expect(reconciledMessages.filter((message) => message.id === persistedMessage.id))
+      .toHaveLength(1);
+    expect(acceptedWrapper.get("[data-intake-error-dialog]").text())
+      .toContain("target intake stream failed");
+    expect(acceptedWrapper.text()).not.toContain("discard this provisional dossier");
+    acceptedWrapper.unmount();
+
+    const preAcceptText = "remove this rejected Intake statement";
+    const preAcceptMessagesLoader = vi.fn().mockResolvedValue([]);
+    const preAcceptWrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: null,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      postMessageAction: vi.fn().mockRejectedValue(
+        new Error("request rejected before acceptance"),
+      ),
+      messagesLoader: preAcceptMessagesLoader,
+      turnMemoryLoader: vi.fn().mockResolvedValue(null),
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    preAcceptWrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: preAcceptText,
+      attachment_refs: [],
+    });
+
+    await vi.waitFor(() => {
+      expect(preAcceptWrapper.find("[data-intake-error-dialog]").exists()).toBe(true);
+    });
+
+    expect(preAcceptMessagesLoader).not.toHaveBeenCalled();
+    expect(preAcceptWrapper.findComponent(ConversationStream).props("messages"))
+      .toEqual([]);
+    expect(preAcceptWrapper.get("[data-intake-error-dialog]").text())
+      .toContain("request rejected before acceptance");
+    preAcceptWrapper.unmount();
+  });
+
   it("keeps formal readiness bound to the latest target Intake run", async () => {
     const runA = "run-temporal-overlap-a";
     const runB = "run-temporal-overlap-b";

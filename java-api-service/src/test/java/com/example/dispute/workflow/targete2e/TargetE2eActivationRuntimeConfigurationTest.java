@@ -10,6 +10,8 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.spec.ECGenParameterSpec;
 import java.util.Base64;
+import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eApiAuthority;
+import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochSelectionAuthority;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.context.annotation.Bean;
@@ -147,6 +149,38 @@ class TargetE2eActivationRuntimeConfigurationTest {
         .contains("environment.getProperty(\"app.target-e2e.enabled\", Boolean.class, false)");
     assertThat(authorityRequirement).isGreaterThanOrEqualTo(0);
     assertThat(registrationConstruction).isGreaterThan(authorityRequirement);
+  }
+
+  @Test
+  void targetControlPublishesSingleRoomEpochSelectionAuthorityAndReusesItForHearingMaterializer()
+      throws Exception {
+    String configuration =
+        Files.readString(TARGET_CONTROL_CONFIGURATION).replace("\r\n", "\n");
+
+    assertThat(TargetRoomEpochSelectionAuthority.class)
+        .isAssignableFrom(JdbcTargetE2eApiAuthority.class);
+    assertThat(configuration)
+        .contains(
+            "@Bean\n"
+                + "  JdbcTargetE2eApiAuthority targetRoomEpochSelectionAuthority(\n"
+                + "      DataSource dataSource, Environment environment) {\n"
+                + "    Clock clock = Clock.systemUTC();\n"
+                + "    return new JdbcTargetE2eApiAuthority(\n"
+                + "        dataSource,\n"
+                + "        new JdbcTargetE2eActivationStores(dataSource, clock),\n"
+                + "        required(environment, \"target.e2e.activation.id\"),\n"
+                + "        clock);\n"
+                + "  }")
+        .contains("JdbcTargetE2eApiAuthority targetRoomEpochSelectionAuthority,")
+        .contains(
+            "new TargetHearingInternalStageMaterializer(\n"
+                + "        targetRoomEpochSelectionAuthority,")
+        .doesNotContain("var apiAuthority");
+    assertThat(
+            configuration.split(
+                "JdbcTargetE2eApiAuthority targetRoomEpochSelectionAuthority\\(", -1))
+        .hasSize(2);
+    assertThat(configuration.split("new JdbcTargetE2eApiAuthority\\(", -1)).hasSize(2);
   }
 
   private KeyPair p256() throws Exception {

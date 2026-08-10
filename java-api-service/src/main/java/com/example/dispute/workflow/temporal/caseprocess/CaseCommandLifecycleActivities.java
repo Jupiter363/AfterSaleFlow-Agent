@@ -19,6 +19,14 @@ public interface CaseCommandLifecycleActivities {
     RecordCaseCommandRoutedResult completeCaseCommandRouting(
             RecordCaseCommandRouted request);
 
+    @ActivityMethod(name = "ConvergeTargetIntakeTerminalNoCommit")
+    ConvergeTargetIntakeTerminalNoCommitResult convergeTargetIntakeTerminalNoCommit(
+            ConvergeTargetIntakeTerminalNoCommit request);
+
+    @ActivityMethod(name = "ResolveTargetIntakeTerminalNoCommit")
+    ResolveTargetIntakeTerminalNoCommitResult resolveTargetIntakeTerminalNoCommit(
+            ResolveTargetIntakeTerminalNoCommit request);
+
     enum CommandLifecycleOutcome {
         ORCHESTRATION_ACCEPTED,
         SHADOW_COMPLETED,
@@ -119,6 +127,108 @@ public interface CaseCommandLifecycleActivities {
             }
             if (outcome == null) {
                 throw new IllegalArgumentException("outcome must not be null");
+            }
+        }
+    }
+
+    enum TerminalNoCommitOutcome {
+        TERMINALIZED,
+        IDEMPOTENT_REPLAY
+    }
+
+    record ConvergeTargetIntakeTerminalNoCommit(
+            String schemaVersion,
+            TargetIntakeCommandTerminalNoCommit authority,
+            String caseWorkflowId,
+            String caseWorkflowRunId,
+            String caseWorkflowBuildId) {
+
+        public ConvergeTargetIntakeTerminalNoCommit {
+            if (!"converge-target-intake-terminal-no-commit.v1".equals(schemaVersion)) {
+                throw new IllegalArgumentException(
+                        "schemaVersion must be converge-target-intake-terminal-no-commit.v1");
+            }
+            if (authority == null) {
+                throw new IllegalArgumentException("authority must not be null");
+            }
+            requireText(caseWorkflowId, "caseWorkflowId");
+            requireText(caseWorkflowRunId, "caseWorkflowRunId");
+            requireText(caseWorkflowBuildId, "caseWorkflowBuildId");
+        }
+    }
+
+    record ConvergeTargetIntakeTerminalNoCommitResult(
+            String schemaVersion,
+            TerminalNoCommitOutcome outcome,
+            TargetIntakeCommandTerminalNoCommit authority,
+            String receiptUri,
+            String receiptSha256,
+            long processRevision,
+            long roomRevision,
+            long lastCommandSequence,
+            long lastCaseEventSequence) {
+
+        public ConvergeTargetIntakeTerminalNoCommitResult {
+            if (!"converge-target-intake-terminal-no-commit-result.v1".equals(schemaVersion)) {
+                throw new IllegalArgumentException(
+                        "schemaVersion must be converge-target-intake-terminal-no-commit-result.v1");
+            }
+            if (outcome == null || authority == null) {
+                throw new IllegalArgumentException("terminal-no-commit result is incomplete");
+            }
+            requireText(receiptUri, "receiptUri");
+            if (receiptSha256 == null || !receiptSha256.matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException("receiptSha256 must be a lowercase SHA-256");
+            }
+            if (processRevision < authority.newProcessRevision()
+                    || roomRevision < authority.newRoomRevision()
+                    || lastCommandSequence < authority.caseCommandSequence()
+                    || lastCaseEventSequence < authority.lastCaseEventSequence()) {
+                throw new IllegalArgumentException(
+                        "terminal-no-commit result moved durable authority backward");
+            }
+            if (outcome == TerminalNoCommitOutcome.TERMINALIZED
+                    && (processRevision != authority.newProcessRevision()
+                            || roomRevision != authority.newRoomRevision()
+                            || lastCommandSequence != authority.caseCommandSequence()
+                            || lastCaseEventSequence != authority.lastCaseEventSequence())) {
+                throw new IllegalArgumentException(
+                        "new terminal-no-commit convergence must advance exactly once");
+            }
+        }
+    }
+
+    record ResolveTargetIntakeTerminalNoCommit(
+            String schemaVersion, TargetIntakeCommandTerminalNoCommit authority) {
+
+        public ResolveTargetIntakeTerminalNoCommit {
+            if (!"resolve-target-intake-terminal-no-commit.v1".equals(schemaVersion)) {
+                throw new IllegalArgumentException(
+                        "schemaVersion must be resolve-target-intake-terminal-no-commit.v1");
+            }
+            if (authority == null) {
+                throw new IllegalArgumentException("authority must not be null");
+            }
+        }
+    }
+
+    record ResolveTargetIntakeTerminalNoCommitResult(
+            String schemaVersion,
+            TargetIntakeCommandTerminalNoCommit authority,
+            String receiptUri,
+            String receiptSha256) {
+
+        public ResolveTargetIntakeTerminalNoCommitResult {
+            if (!"resolve-target-intake-terminal-no-commit-result.v1".equals(schemaVersion)) {
+                throw new IllegalArgumentException(
+                        "schemaVersion must be resolve-target-intake-terminal-no-commit-result.v1");
+            }
+            if (authority == null) {
+                throw new IllegalArgumentException("authority must not be null");
+            }
+            requireText(receiptUri, "receiptUri");
+            if (receiptSha256 == null || !receiptSha256.matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException("receiptSha256 must be a lowercase SHA-256");
             }
         }
     }

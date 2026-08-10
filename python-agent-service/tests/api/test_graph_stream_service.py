@@ -12,6 +12,8 @@ from typing import Any, cast
 import httpx
 import anyio
 import pytest
+import app.api.graph_stream_service as graph_stream_service_module
+from psycopg_pool import PoolTimeout
 from pydantic import BaseModel
 
 from app.api.graph_commands import (
@@ -22,6 +24,7 @@ from app.api.graph_commands import (
 from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
     GatewayBackedGraphCommandStreamService,
+    GraphRetainedCleanupError,
     GraphStreamAdmissionGate,
     MAX_CANCEL_DRAIN_SECONDS,
     ProviderRuntimeBinding,
@@ -1029,6 +1032,225 @@ async def test_prefetched_source_is_cancelled_and_closed_on_downstream_disconnec
 
 
 @pytest.mark.asyncio
+async def test_preterminal_cleanup_quiesces_source_heartbeat_and_close_before_abort() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+    source_pull_started = asyncio.Event()
+    source_cancelled = asyncio.Event()
+    release_source = asyncio.Event()
+    heartbeat_started = asyncio.Event()
+    order: list[str] = []
+
+    class OrderedGateway(_Gateway):
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            heartbeat_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                order.append("heartbeat_joined")
+                raise
+            return current.lease
+
+        async def finish_execution_attempt(self, current: GatewayExecution, **kwargs: Any):
+            assert order == ["source_joined", "heartbeat_joined", "source_closed"]
+            order.append("abort")
+            return await super().finish_execution_attempt(current, **kwargs)
+
+    class CheckpointBlockedSource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __aiter__(self) -> CheckpointBlockedSource:
+            return self
+
+        async def __anext__(self) -> AgentStreamEvent:
+            self.calls += 1
+            if self.calls == 1:
+                return _event(admission.command, 0, "attempt_started")
+            source_pull_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                source_cancelled.set()
+                await release_source.wait()
+                order.append("source_joined")
+                raise
+            raise AssertionError("blocked checkpoint source unexpectedly resumed")
+
+        async def aclose(self) -> None:
+            order.append("source_closed")
+
+    gateway = OrderedGateway(admission)
+    service, _ = await _service(gateway, _Executor(), renewal_seconds=0.001)
+    stream = service._renewing_stream(CheckpointBlockedSource(), execution)
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(source_pull_started.wait(), timeout=0.1)
+    await asyncio.wait_for(heartbeat_started.wait(), timeout=0.1)
+    close_task = asyncio.create_task(stream.aclose())
+    await asyncio.wait_for(source_cancelled.wait(), timeout=0.1)
+    assert gateway.finished == 0
+
+    release_source.set()
+    await asyncio.wait_for(close_task, timeout=0.5)
+
+    assert order == ["source_joined", "heartbeat_joined", "source_closed", "abort"]
+    assert gateway.finished == 1
+    assert gateway.finished_statuses == [AttemptStatus.CANCELLED]
+
+
+@pytest.mark.asyncio
+async def test_quiesce_grace_timeout_retains_cleanup_until_exact_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(graph_stream_service_module, "SOURCE_QUIESCE_MAX_SECONDS", 0.0)
+    monkeypatch.setattr(
+        graph_stream_service_module,
+        "SOURCE_QUIESCE_POST_DEADLINE_GRACE_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        graph_stream_service_module,
+        "_RETAINED_ABORT_RETRY_INITIAL_SECONDS",
+        0.001,
+    )
+    admission = _admission(AdmissionAction.ACQUIRE)
+    past_deadline = admission.command.model_copy(
+        update={"deadline_at": datetime.now(timezone.utc) - timedelta(seconds=1)}
+    )
+    admission = replace(admission, command=past_deadline)
+    execution = _execution(admission)
+    release_source = asyncio.Event()
+    source_cancelled = asyncio.Event()
+
+    class SlowCheckpointSource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __aiter__(self) -> SlowCheckpointSource:
+            return self
+
+        async def __anext__(self) -> AgentStreamEvent:
+            self.calls += 1
+            if self.calls == 1:
+                return _event(admission.command, 0, "attempt_started")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                source_cancelled.set()
+                await release_source.wait()
+                raise
+            raise AssertionError("slow checkpoint source unexpectedly resumed")
+
+        async def aclose(self) -> None:
+            return None
+
+    gateway = _Gateway(admission)
+    service, gate = await _service(gateway, _Executor(), renewal_seconds=1)
+    stream = service._renewing_stream(SlowCheckpointSource(), execution)
+    assert (await anext(stream)).event_type == "attempt_started"
+    close_task = asyncio.create_task(stream.aclose())
+    await asyncio.wait_for(source_cancelled.wait(), timeout=0.1)
+
+    with pytest.raises(GraphContractError, match="cleanup grace"):
+        await asyncio.wait_for(close_task, timeout=0.2)
+    assert gateway.finished == 0
+    assert gate.accepting is False
+
+    release_source.set()
+    for _ in range(100):
+        if gateway.finished == 1 and gate.accepting:
+            break
+        await asyncio.sleep(0.001)
+
+    assert gateway.finished == 1
+    assert gateway.finished_statuses == [AttemptStatus.CANCELLED]
+    assert gate.accepting is True
+    assert gate.cleanup_failure is None
+
+
+@pytest.mark.asyncio
+async def test_abort_failure_is_surfaced_while_retained_retry_terminalizes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        graph_stream_service_module,
+        "_RETAINED_ABORT_RETRY_INITIAL_SECONDS",
+        0.001,
+    )
+    monkeypatch.setattr(
+        graph_stream_service_module,
+        "_RETAINED_ABORT_RETRY_MAX_SECONDS",
+        0.001,
+    )
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+
+    class RetryAbortGateway(_Gateway):
+        def __init__(self) -> None:
+            super().__init__(admission)
+            self.abort_calls = 0
+
+        async def finish_execution_attempt(self, current: GatewayExecution, **kwargs: Any):
+            self.abort_calls += 1
+            if self.abort_calls == 1:
+                raise PoolTimeout("abort control pool busy")
+            return await super().finish_execution_attempt(current, **kwargs)
+
+    async def source() -> AsyncIterator[AgentStreamEvent]:
+        yield _event(admission.command, 0, "attempt_started")
+        await asyncio.Event().wait()
+
+    gateway = RetryAbortGateway()
+    service, gate = await _service(gateway, _Executor(), renewal_seconds=1)
+    stream = service._renewing_stream(source(), execution)
+    assert (await anext(stream)).event_type == "attempt_started"
+
+    with pytest.raises(PoolTimeout, match="abort control pool busy"):
+        await stream.aclose()
+
+    for _ in range(100):
+        if gateway.finished == 1 and gate.accepting:
+            break
+        await asyncio.sleep(0.001)
+
+    assert gateway.abort_calls == 2
+    assert gateway.finished == 1
+    assert gate.cleanup_failure is None
+
+
+@pytest.mark.asyncio
+async def test_nontransient_retained_abort_failure_closes_admission_fail_closed() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+
+    class RejectingAbortGateway(_Gateway):
+        async def finish_execution_attempt(self, current: GatewayExecution, **kwargs: Any):
+            raise GraphContractError("abort binding mismatch")
+
+    async def source() -> AsyncIterator[AgentStreamEvent]:
+        yield _event(admission.command, 0, "attempt_started")
+        await asyncio.Event().wait()
+
+    gateway = RejectingAbortGateway(admission)
+    service, gate = await _service(gateway, _Executor(), renewal_seconds=1)
+    stream = service._renewing_stream(source(), execution)
+    assert (await anext(stream)).event_type == "attempt_started"
+
+    with pytest.raises(GraphContractError, match="abort binding mismatch"):
+        await stream.aclose()
+    for _ in range(100):
+        if gate.cleanup_failure is not None:
+            break
+        await asyncio.sleep(0.001)
+
+    assert isinstance(gate.cleanup_failure, GraphContractError)
+    assert gate.accepting is False
+    with pytest.raises(GraphRetainedCleanupError, match="retained Graph cleanup failed"):
+        await gate.drain(0.05)
+
+
+@pytest.mark.asyncio
 async def test_prefetched_source_exception_is_propagated_on_the_next_read() -> None:
     admission = _admission(AdmissionAction.ACQUIRE)
     execution = _execution(admission)
@@ -1879,10 +2101,89 @@ async def test_admission_gate_drain_remains_bounded_when_cancellation_is_suppres
     task = asyncio.create_task(cancellation_resistant_request())
     await entered.wait()
 
-    assert await asyncio.wait_for(gate.drain(0.01), timeout=0.1) is False
+    with pytest.raises(GraphRetainedCleanupError, match="did not transfer or quiesce"):
+        await asyncio.wait_for(gate.drain(0.01), timeout=0.1)
     assert task.done() is False
     release.set()
     await task
+
+
+@pytest.mark.asyncio
+async def test_admission_gate_never_cancels_retained_cleanup_and_keeps_timed_out_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        graph_stream_service_module,
+        "RETAINED_CLEANUP_LIFECYCLE_SECONDS",
+        0.01,
+    )
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    retained_started = asyncio.Event()
+    retained_cancelled = asyncio.Event()
+    release_retained = asyncio.Event()
+
+    async def retained_cleanup() -> None:
+        retained_started.set()
+        try:
+            await release_retained.wait()
+        except asyncio.CancelledError:
+            retained_cancelled.set()
+            raise
+
+    retained_task = asyncio.create_task(retained_cleanup())
+    await asyncio.wait_for(retained_started.wait(), timeout=0.1)
+    await gate.retain_cleanup(retained_task)
+
+    with pytest.raises(GraphRetainedCleanupError, match="lifecycle drain bound"):
+        await asyncio.wait_for(gate.drain(0.001), timeout=0.1)
+
+    assert retained_task.done() is False
+    assert retained_cancelled.is_set() is False
+    assert gate.accepting is False
+    release_retained.set()
+    await asyncio.wait_for(retained_task, timeout=0.1)
+    assert await gate.drain(0.05) is True
+
+
+@pytest.mark.asyncio
+async def test_admission_gate_resnapshots_retained_transfer_before_drain_returns() -> None:
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    request_entered = asyncio.Event()
+    retained_transferred = asyncio.Event()
+    retained_cancelled = asyncio.Event()
+    release_retained = asyncio.Event()
+
+    async def retained_cleanup() -> None:
+        try:
+            await release_retained.wait()
+        except asyncio.CancelledError:
+            retained_cancelled.set()
+            raise
+
+    async def ordinary_request() -> None:
+        token = await gate.enter()
+        request_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await gate.retain_cleanup(asyncio.create_task(retained_cleanup()))
+            retained_transferred.set()
+        finally:
+            await gate.leave(token)
+
+    request_task = asyncio.create_task(ordinary_request())
+    await asyncio.wait_for(request_entered.wait(), timeout=0.1)
+    drain_task = asyncio.create_task(gate.drain(0.01))
+    await asyncio.wait_for(retained_transferred.wait(), timeout=0.1)
+    await asyncio.sleep(0)
+
+    assert request_task.done()
+    assert drain_task.done() is False
+    assert retained_cancelled.is_set() is False
+    release_retained.set()
+    assert await asyncio.wait_for(drain_task, timeout=0.1) is False
 
 
 @pytest.mark.asyncio

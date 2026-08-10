@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import operator
 from typing import Annotated, Any
@@ -10,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
 from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
+from app.agents.evidence_clerk.public_reply import guard_evidence_public_reply
 from app.harness.context_pack import build_context_pack
 from app.harness.evidence_context_assembler import (
     AssembledEvidenceContext,
@@ -28,6 +30,7 @@ from app.schemas import (
 
 
 LOGGER = logging.getLogger(__name__)
+EVIDENCE_TURN_MODEL_NODE_NAME = "evidence_turn"
 
 
 class EvidenceTurnGraphState(TypedDict):
@@ -69,6 +72,7 @@ class EvidenceTurnWorkflow:
         asset_loader: EvidenceAssetLoader | None = None,
     ) -> None:
         self._graph = build_evidence_turn_graph(model_runner, asset_loader)
+        self._async_graph = build_async_evidence_turn_graph(model_runner, asset_loader)
 
     # 所属模块：证据室 Agent > 单轮 LangGraph > Java 调用门面与矩阵落地投影。
     # 具体功能：`run` 以序列化请求初始化图，执行完后把已校验 fact_matrix_patch 合并旧矩阵，将矩阵/人工任务/内部交接写入 memory_frame 与 canvas_operations，再构造 EvidenceTurnResult。
@@ -77,47 +81,15 @@ class EvidenceTurnWorkflow:
     def run(self, request: EvidenceTurnRequest) -> EvidenceTurnResult:
         # 图执行结束后，result 是一个普通 dict；再组装成 EvidenceTurnResult 返回给 Java。
         result = self._graph.invoke(
-            {
-                "request": request.model_dump(mode="json"),
-                "executed_nodes": [],
-                "memory_frame": {},
-            }
+            _initial_graph_state(request)
         )
-        matrix_snapshot = _merge_fact_matrix(
-            result["assembled_context"].working_set.evidence_matrix_snapshot,
-            result["fact_matrix_patch"],
-        )
-        memory_frame = {
-            # **dict 是 Python 字典展开语法：把 result["memory_frame"] 的键值拷贝进新 dict。
-            **result["memory_frame"],
-            "evidence_matrix_snapshot": matrix_snapshot,
-            "fact_matrix_patch": result["fact_matrix_patch"],
-            "human_review_tasks": result["human_review_tasks"],
-            "internal_handoff": result["internal_handoff"],
-        }
-        return EvidenceTurnResult(
-            room_utterance=result["room_utterance"],
-            evidence_requests=result["evidence_requests"],
-            verification_suggestions=result["verification_suggestions"],
-            authenticity_flags=result["authenticity_flags"],
-            evidence_assessments=result["evidence_assessments"],
-            fact_matrix_patch=result["fact_matrix_patch"],
-            human_review_tasks=result["human_review_tasks"],
-            internal_handoff=result["internal_handoff"],
-            memory_frame=memory_frame,
-            canvas_operations=[
-                {
-                    "operation": "REPLACE_EVIDENCE_MATRIX_SNAPSHOT",
-                    "value": matrix_snapshot,
-                },
-                {
-                    "operation": "SET_EVIDENCE_HUMAN_REVIEW_TASKS",
-                    "value": result["human_review_tasks"],
-                },
-            ],
-            referenced_evidence_ids=list(request.context_envelope.current_event.attachment_refs),
-            confidence=float(result["confidence"]),
-        )
+        return _project_evidence_turn_result(result, request)
+
+    async def arun(self, request: EvidenceTurnRequest) -> EvidenceTurnResult:
+        """Run the formal Evidence graph without offloading the model path."""
+
+        result = await self._async_graph.ainvoke(_initial_graph_state(request))
+        return _project_evidence_turn_result(result, request)
 
 
 # 所属模块：证据室 Agent > 单轮 LangGraph > 拓扑构建与编译。
@@ -130,18 +102,82 @@ def build_evidence_turn_graph(
 ):
     """组装证据室图：上下文装配 -> LLM 判断 -> 真实性/一致性护栏。"""
 
+    return _compile_evidence_turn_graph(
+        _reason_with_llm_node(model_runner, asset_loader)
+    )
+
+
+def build_async_evidence_turn_graph(
+    model_runner: Any | None = None,
+    asset_loader: EvidenceAssetLoader | None = None,
+):
+    """Compile the native-async formal Evidence graph."""
+
+    return _compile_evidence_turn_graph(
+        _async_reason_with_llm_node(model_runner, asset_loader)
+    )
+
+
+def _compile_evidence_turn_graph(reason_node: Any):
+    """Compile the shared Evidence topology around one execution-mode reason node."""
+
     builder = StateGraph(EvidenceTurnGraphState)
     builder.add_node("load_context", _load_context)
-    builder.add_node(
-        "reason_with_llm",
-        _reason_with_llm_node(model_runner, asset_loader),
-    )
+    builder.add_node("reason_with_llm", reason_node)
     builder.add_node("apply_authenticity_guardrails", _apply_authenticity_guardrails)
     builder.add_edge(START, "load_context")
     builder.add_edge("load_context", "reason_with_llm")
     builder.add_edge("reason_with_llm", "apply_authenticity_guardrails")
     builder.add_edge("apply_authenticity_guardrails", END)
     return builder.compile()
+
+
+def _initial_graph_state(request: EvidenceTurnRequest) -> EvidenceTurnGraphState:
+    return {
+        "request": request.model_dump(mode="json"),
+        "executed_nodes": [],
+        "memory_frame": {},
+    }
+
+
+def _project_evidence_turn_result(
+    result: EvidenceTurnGraphState,
+    request: EvidenceTurnRequest,
+) -> EvidenceTurnResult:
+    matrix_snapshot = _merge_fact_matrix(
+        result["assembled_context"].working_set.evidence_matrix_snapshot,
+        result["fact_matrix_patch"],
+    )
+    memory_frame = {
+        **result["memory_frame"],
+        "evidence_matrix_snapshot": matrix_snapshot,
+        "fact_matrix_patch": result["fact_matrix_patch"],
+        "human_review_tasks": result["human_review_tasks"],
+        "internal_handoff": result["internal_handoff"],
+    }
+    return EvidenceTurnResult(
+        room_utterance=result["room_utterance"],
+        evidence_requests=result["evidence_requests"],
+        verification_suggestions=result["verification_suggestions"],
+        authenticity_flags=result["authenticity_flags"],
+        evidence_assessments=result["evidence_assessments"],
+        fact_matrix_patch=result["fact_matrix_patch"],
+        human_review_tasks=result["human_review_tasks"],
+        internal_handoff=result["internal_handoff"],
+        memory_frame=memory_frame,
+        canvas_operations=[
+            {
+                "operation": "REPLACE_EVIDENCE_MATRIX_SNAPSHOT",
+                "value": matrix_snapshot,
+            },
+            {
+                "operation": "SET_EVIDENCE_HUMAN_REVIEW_TASKS",
+                "value": result["human_review_tasks"],
+            },
+        ],
+        referenced_evidence_ids=list(request.context_envelope.current_event.attachment_refs),
+        confidence=float(result["confidence"]),
+    )
 
 
 # 所属模块：证据室 Agent > 单轮 LangGraph > load_context 信任边界节点。
@@ -196,37 +232,12 @@ def _reason_with_llm_node(
             asset_manifest = (
                 loaded_assets.manifest if loaded_assets is not None else {"items": []}
             )
-            context_sources = dict(assembled.context_sources)
-            # multimodal_observation 告诉模型：哪些附件实际被加载、哪些只是元数据。
-            # 这样模型不能假装看过未加载的证据图片。
-            context_sources["multimodal_observation"] = {
-                "source": "HARNESS_ASSET_LOADER",
-                "requested_attachment_ids": list(
-                    working_set.current_event.get("attachment_refs", [])
-                ),
-                "manifest": asset_manifest,
-                "trust_note": (
-                    "只有 visual_input_status 为 LOADED 且入库 SHA-256 "
-                    "与下载内容一致的证据实际进入多模态模型。"
-                ),
-            }
-            context_pack = build_context_pack(
-                "evidence_turn",
-                context_sources,
-                actor_role=working_set.actor_role,
+            invocation = _evidence_model_invocation(
+                assembled,
+                agent_context,
+                loaded_assets,
+                asset_manifest,
             )
-            # invocation 字典统一文本和多模态路径；图片只能以 Loader 签发的能力对象进入 Harness。
-            invocation: dict[str, Any] = {
-                "node_name": "evidence_turn",
-                "case_data": assembled.case_data,
-                "output_type": EvidenceTurnLlmOutput,
-                "agent_context": agent_context,
-                "prompt_profile_id": agent_context.prompt_profile_id,
-                "context_pack": context_pack,
-            }
-            if loaded_assets is not None:
-                # Harness 只接受 loader 签发的能力对象，不接受可伪造的原始 parts 列表。
-                invocation["evidence_assets"] = loaded_assets
             generation = model_runner.invoke_structured(
                 **invocation,
             )
@@ -248,6 +259,96 @@ def _reason_with_llm_node(
             raise
 
     return reason_with_llm
+
+
+def _async_reason_with_llm_node(
+    model_runner: Any | None,
+    asset_loader: EvidenceAssetLoader | None,
+):
+    """Create the native-async Evidence model node."""
+
+    async def reason_with_llm(state: EvidenceTurnGraphState) -> dict[str, Any]:
+        assembled = state["assembled_context"]
+        working_set = assembled.working_set
+        agent_context = AgentInvocationContext.model_validate(
+            assembled.agent_context.model_dump(mode="python")
+        )
+        async_invoke = getattr(model_runner, "ainvoke_structured", None)
+        if not callable(async_invoke):
+            raise AgentServiceUnavailable(
+                "evidence clerk native async model runner is unavailable"
+            )
+        try:
+            loaded_assets = (
+                await asyncio.to_thread(asset_loader.load, assembled.raw_envelope)
+                if asset_loader is not None
+                else None
+            )
+            asset_manifest = (
+                loaded_assets.manifest if loaded_assets is not None else {"items": []}
+            )
+            invocation = _evidence_model_invocation(
+                assembled,
+                agent_context,
+                loaded_assets,
+                asset_manifest,
+            )
+            generation = await async_invoke(**invocation)
+            return {
+                "llm_output": generation.value,
+                "asset_manifest": asset_manifest,
+                "executed_nodes": ["reason_with_llm"],
+            }
+        except Exception as failure:
+            LOGGER.exception(
+                "evidence clerk async LLM turn failed closed: case_id=%s actor_role=%s "
+                "agent_invocation_id=%s error_type=%s error=%s",
+                working_set.case_id,
+                working_set.actor_role,
+                agent_context.agent_invocation_id,
+                type(failure).__name__,
+                failure,
+            )
+            raise
+
+    return reason_with_llm
+
+
+def _evidence_model_invocation(
+    assembled: AssembledEvidenceContext,
+    agent_context: AgentInvocationContext,
+    loaded_assets: Any | None,
+    asset_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    working_set = assembled.working_set
+    context_sources = dict(assembled.context_sources)
+    context_sources["multimodal_observation"] = {
+        "source": "HARNESS_ASSET_LOADER",
+        "requested_attachment_ids": list(
+            working_set.current_event.get("attachment_refs", [])
+        ),
+        "manifest": asset_manifest,
+        "trust_note": (
+            "只有 visual_input_status 为 LOADED 且入库 SHA-256 "
+            "与下载内容一致的证据实际进入多模态模型。"
+        ),
+    }
+    context_pack = build_context_pack(
+        EVIDENCE_TURN_MODEL_NODE_NAME,
+        context_sources,
+        actor_role=working_set.actor_role,
+    )
+    invocation: dict[str, Any] = {
+        "node_name": EVIDENCE_TURN_MODEL_NODE_NAME,
+        "case_data": assembled.case_data,
+        "output_type": EvidenceTurnLlmOutput,
+        "agent_context": agent_context,
+        "prompt_profile_id": agent_context.prompt_profile_id,
+        "context_pack": context_pack,
+    }
+    if loaded_assets is not None:
+        invocation["evidence_assets"] = loaded_assets
+    return invocation
 
 
 # 所属模块：证据室 Agent > 单轮 LangGraph > 输出确定性验收节点。
@@ -307,9 +408,7 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         else float(output.confidence)
     )
     return {
-        "room_utterance": _sanitize_non_final(
-            _localize_internal_text(output.room_utterance)
-        ),
+        "room_utterance": guard_evidence_public_reply(output.room_utterance),
         "evidence_requests": [
             item.model_dump(mode="json") for item in evidence_requests[:10]
         ],
@@ -616,10 +715,4 @@ def _sanitize_non_final(text: str) -> str:
     庭审草案和人工审核处理。
     """
 
-    forbidden = ("最终判定", "最终裁决", "责任在", "应当退款", "应当赔付")
-    sanitized = text
-    for phrase in forbidden:
-        sanitized = sanitized.replace(phrase, "证据层面仍需核验")
-    if "不会判断责任" not in sanitized and "不判断责任" not in sanitized:
-        sanitized = sanitized.rstrip("。") + "。本轮只做证据核验，不判断责任或最终方案。"
-    return sanitized
+    return guard_evidence_public_reply(text)

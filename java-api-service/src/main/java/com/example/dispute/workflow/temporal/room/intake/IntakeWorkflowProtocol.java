@@ -7,6 +7,9 @@ public final class IntakeWorkflowProtocol {
   public static final String DOMAIN_EVENT_SIGNAL = "intakeDomainEventCommitted";
   public static final String TARGET_SOURCE_EVENT_SIGNAL = "intakeTargetSourceEventObserved";
   public static final String REQUEST_CONTINUE_AS_NEW_SIGNAL = "intakeRequestContinueAsNew";
+  public static final String RECOVER_TARGET_FINALIZATION_UPDATE = "intakeRecoverTargetFinalization";
+  public static final String RECOVER_TERMINAL_NO_COMMIT_UPDATE =
+      "intakeRecoverTerminalNoCommit";
   public static final String STATE_QUERY = "intakeState";
   public static final String LAST_DECISION_QUERY = "intakeLastCommandDecision";
 

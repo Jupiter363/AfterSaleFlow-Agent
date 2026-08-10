@@ -21,6 +21,8 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 import javax.sql.DataSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 
 /**
@@ -32,6 +34,8 @@ public final class JdbcTargetIntakeCommandMaterialStore implements TargetIntakeC
 
     private static final String MATERIAL_SCHEMA_VERSION = "target-e2e-intake-command-material.v1";
     private static final String CONTEXT_SCHEMA_VERSION = "intake-command-execution-context.v2";
+    private static final Logger LOGGER =
+            LoggerFactory.getLogger(JdbcTargetIntakeCommandMaterialStore.class);
 
     private final DataSource dataSource;
     private final TargetE2EActivationLedger activationLedger;
@@ -53,43 +57,99 @@ public final class JdbcTargetIntakeCommandMaterialStore implements TargetIntakeC
     @Override
     public AppendResult append(CommandAdmission admission, IntakeCommandExecutionContext context) {
         Objects.requireNonNull(admission, "admission");
+        long startedAt = System.nanoTime();
         requireTargetContext(context);
         CanonicalContext canonical = canonicalize(context);
+        long canonicalizedAt = System.nanoTime();
         Connection connection = DataSourceUtils.getConnection(dataSource);
+        long connectionAcquiredAt = System.nanoTime();
         try {
             requireSpringTransaction(connection);
             CommandAdmissionResult admissionResult = activationLedger.admitCommand(connection, admission);
+            long admittedAt = System.nanoTime();
             PersistedMaterial existing = find(connection, admission.activationId(), admission.commandId(), true);
+            long existingReadAt = System.nanoTime();
             if (existing != null) {
                 requireExact(admission, existing);
                 if (!canonical.json().equals(existing.contextCanonicalJson())
                         || !canonical.sha256().equals(existing.contextSha256())) {
                     throw conflict("material replay has different canonical execution context");
                 }
-                return new AppendResult(
+                AppendResult replay = new AppendResult(
                         AppendDisposition.ATTACHED_IDENTICAL,
                         existing.admissionId(),
                         admissionResult.admittedAt(),
                         existing.contextSha256());
+                logAppendTiming(
+                        admission,
+                        true,
+                        startedAt,
+                        canonicalizedAt,
+                        connectionAcquiredAt,
+                        admittedAt,
+                        existingReadAt,
+                        existingReadAt,
+                        existingReadAt);
+                return replay;
             }
             insert(connection, admissionResult.admissionId(), admission, canonical);
+            long insertedAt = System.nanoTime();
             PersistedMaterial stored = find(connection, admission.activationId(), admission.commandId(), true);
+            long verifiedAt = System.nanoTime();
             if (stored == null) {
                 throw new TargetE2EPersistenceException(
                         "INTAKE_MATERIAL_NOT_PERSISTED", "admitted Intake material was not persisted");
             }
             requireExact(admission, stored);
-            return new AppendResult(
+            AppendResult storedResult = new AppendResult(
                     AppendDisposition.STORED,
                     stored.admissionId(),
                     admissionResult.admittedAt(),
                     stored.contextSha256());
+            logAppendTiming(
+                    admission,
+                    false,
+                    startedAt,
+                    canonicalizedAt,
+                    connectionAcquiredAt,
+                    admittedAt,
+                    existingReadAt,
+                    insertedAt,
+                    verifiedAt);
+            return storedResult;
         } catch (SQLException failure) {
             throw new TargetE2EPersistenceException(
                     "INTAKE_MATERIAL_PERSISTENCE_FAILED", failure.getMessage(), failure);
         } finally {
             DataSourceUtils.releaseConnection(connection, dataSource);
         }
+    }
+
+    private static void logAppendTiming(
+            CommandAdmission admission,
+            boolean replay,
+            long startedAt,
+            long canonicalizedAt,
+            long connectionAcquiredAt,
+            long admittedAt,
+            long existingReadAt,
+            long insertedAt,
+            long verifiedAt) {
+        LOGGER.info(
+                "target_intake_material_append_timing command_id={} replay={} canonicalize_ms={} connection_ms={} admission_ms={} existing_lookup_ms={} insert_ms={} verify_ms={} total_ms={}",
+                admission.commandId(),
+                replay,
+                elapsedMillis(startedAt, canonicalizedAt),
+                elapsedMillis(canonicalizedAt, connectionAcquiredAt),
+                elapsedMillis(connectionAcquiredAt, admittedAt),
+                elapsedMillis(admittedAt, existingReadAt),
+                elapsedMillis(existingReadAt, insertedAt),
+                elapsedMillis(insertedAt, verifiedAt),
+                elapsedMillis(startedAt, verifiedAt));
+    }
+
+    private static double elapsedMillis(long startedAt, long completedAt) {
+        return (completedAt - startedAt) / 1_000_000.0d;
     }
 
     @Override

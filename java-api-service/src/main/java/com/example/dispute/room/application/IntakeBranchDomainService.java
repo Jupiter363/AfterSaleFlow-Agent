@@ -16,15 +16,20 @@ import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakePartyCompletionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.FrozenIntakeSubmissionAuthority;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Map;
@@ -209,12 +214,40 @@ public final class IntakeBranchDomainService {
             IntakeConfirmationCommand command,
             OffsetDateTime now,
             TimelineEventMode eventMode) {
+        return confirmRespondent(
+                dispute, intakeRoom, actor, command, now, eventMode, null);
+    }
+
+    public BranchResult confirmRespondent(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity intakeRoom,
+            AuthenticatedActor actor,
+            IntakeConfirmationCommand command,
+            OffsetDateTime now,
+            TimelineEventMode eventMode,
+            RespondentSubmitLineage submitLineage) {
         Objects.requireNonNull(eventMode, "eventMode");
+        if (submitLineage != null && eventMode != TimelineEventMode.FORMAL_TYPED_ONLY) {
+            throw new IllegalArgumentException(
+                    "frozen Submit lineage is only valid for the formal respondent branch");
+        }
         requireParty(dispute, actor, false);
         requireOpenIntake(dispute, intakeRoom);
-        String finalIntakeResultJson = acceptedIntakeResultJson(dispute);
-        assertBilateralMatrixReady(dispute.getId(), finalIntakeResultJson);
-        intakeProgressService.completeRespondent(dispute, actor, now);
+        FrozenSubmissionSource frozenSource = submitLineage == null
+                ? null
+                : requireFrozenSubmissionSource(dispute);
+        String finalIntakeResultJson = frozenSource == null
+                ? acceptedIntakeResultJson(dispute)
+                : frozenSource.dossierJson();
+        if (frozenSource == null) {
+            assertBilateralMatrixReady(dispute.getId(), finalIntakeResultJson);
+        }
+        CaseIntakePartyCompletionEntity completion =
+                intakeProgressService.completeRespondent(dispute, actor, now);
+        FrozenIntakeSubmissionAuthority frozenAuthority = frozenSource == null
+                ? null
+                : frozenAuthority(
+                        dispute, actor, completion, submitLineage, frozenSource);
         participantService.inviteBoth(dispute, actor, now);
         Duration evidenceWindow = disputeProperties.evidenceWindow();
         OffsetDateTime deadline = now.plus(evidenceWindow);
@@ -279,7 +312,9 @@ public final class IntakeBranchDomainService {
                 intakeRoom.getId(),
                 evidenceRoom.getId(),
                 "BILATERAL_FROZEN",
-                null);
+                frozenAuthority == null ? null : frozenAuthority.matrixContentHash(),
+                frozenAuthority,
+                frozenSource == null ? null : frozenSource.matrixCanonicalJson());
     }
 
     public ObjectNodeAuthority requireFormalInitiatorMatrix(FulfillmentCaseEntity dispute) {
@@ -299,6 +334,92 @@ public final class IntakeBranchDomainService {
                 .map(dossier -> dossier.getDossierJson())
                 .filter(json -> json != null && !json.isBlank())
                 .orElse(dispute.getIntakeResultJson());
+    }
+
+    private FrozenSubmissionSource requireFrozenSubmissionSource(
+            FulfillmentCaseEntity dispute) {
+        CaseIntakeDossierEntity dossier = intakeDossierRepository
+                .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE)
+                .orElseThrow(() -> new BadRequestException(
+                        "formal Intake matrix dossier is missing",
+                        Map.of("case_id", dispute.getId())));
+        String dossierJson = dossier.getDossierJson();
+        if (!dispute.getId().equals(dossier.getCaseId())
+                || dossier.getRoomType() != RoomType.INTAKE
+                || dossierJson == null
+                || dossierJson.isBlank()
+                || dossier.getDossierVersion() < 1) {
+            throw new BadRequestException(
+                    "formal Intake matrix dossier is invalid",
+                    Map.of("case_id", dispute.getId()));
+        }
+        try {
+            JsonNode root = objectMapper.readTree(dossierJson);
+            JsonNode selected = root == null ? null : root.path("case_fact_matrix");
+            if (!(selected instanceof ObjectNode matrix)) {
+                throw new BadRequestException(
+                        "formal case_fact_matrix.v2 is missing",
+                        Map.of("case_id", dispute.getId()));
+            }
+            ObjectNode validated = matrixLifecycle.requireBilateralFrozen(dispute);
+            String canonicalMatrix = ContractJson.canonicalString(matrix);
+            if (!canonicalMatrix.equals(ContractJson.canonicalString(validated))) {
+                throw new BadRequestException(
+                        "formal Intake matrix changed while Submit authority was captured",
+                        Map.of("case_id", dispute.getId()));
+            }
+            return new FrozenSubmissionSource(
+                    dossier.getId(),
+                    dossier.getDossierVersion(),
+                    dossierJson,
+                    matrix.deepCopy(),
+                    canonicalMatrix);
+        } catch (JsonProcessingException failure) {
+            throw new BadRequestException(
+                    "formal Intake matrix dossier is invalid",
+                    Map.of("case_id", dispute.getId()));
+        }
+    }
+
+    private static FrozenIntakeSubmissionAuthority frozenAuthority(
+            FulfillmentCaseEntity dispute,
+            AuthenticatedActor actor,
+            CaseIntakePartyCompletionEntity completion,
+            RespondentSubmitLineage submitLineage,
+            FrozenSubmissionSource source) {
+        if (!dispute.getId().equals(completion.getCaseId())
+                || !actor.actorId().equals(completion.getParticipantId())
+                || actor.role() != completion.getParticipantRole()
+                || !FrozenIntakeSubmissionAuthority.COMPLETION_STATUS.equals(
+                        completion.getCompletionStatus())) {
+            throw new IllegalStateException(
+                    "respondent completion does not match Submit authority");
+        }
+        FrozenIntakeSubmissionAuthority authority = FrozenIntakeSubmissionAuthority.capture(
+                submitLineage.tenantSurrogate(),
+                dispute.getId(),
+                actor.actorId(),
+                com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole.valueOf(
+                        actor.role().name()),
+                completion.getId(),
+                completion.getCompletionStatus(),
+                completion.getCompletedAt(),
+                submitLineage.submitOperationKey(),
+                submitLineage.submitCommandId(),
+                submitLineage.submitCommandSequence(),
+                submitLineage.submitRequestHash(),
+                submitLineage.submitEventId(),
+                submitLineage.submitEventRef(),
+                submitLineage.submitEventSequence(),
+                submitLineage.sourceRoomEpoch(),
+                submitLineage.sourceFencingToken(),
+                submitLineage.sourceProcessRevision(),
+                submitLineage.sourceRoomRevision(),
+                source.dossierId(),
+                source.dossierVersion(),
+                source.matrix());
+        authority.requireMatchesMatrix(source.matrix());
+        return authority;
     }
 
     private void assertBilateralMatrixReady(String caseId, String intakeResultJson) {
@@ -405,12 +526,74 @@ public final class IntakeBranchDomainService {
             String intakeRoomId,
             String evidenceRoomId,
             String matrixKind,
-            String matrixHash) {
+            String matrixHash,
+            FrozenIntakeSubmissionAuthority frozenSubmissionAuthority,
+            String frozenMatrixCanonicalJson) {
+
+        public BranchResult(
+                IntakeConfirmationView view,
+                String intakeRoomId,
+                String evidenceRoomId,
+                String matrixKind,
+                String matrixHash) {
+            this(view, intakeRoomId, evidenceRoomId, matrixKind, matrixHash, null, null);
+        }
+
         public BranchResult {
             Objects.requireNonNull(view, "view");
             Objects.requireNonNull(intakeRoomId, "intakeRoomId");
+            if ((frozenSubmissionAuthority == null) != (frozenMatrixCanonicalJson == null)) {
+                throw new IllegalArgumentException(
+                        "frozen authority and canonical matrix must both be absent or present");
+            }
+            if (frozenSubmissionAuthority != null
+                    && (!FrozenIntakeSubmissionAuthority.MATRIX_KIND.equals(matrixKind)
+                            || !frozenSubmissionAuthority.matrixContentHash().equals(matrixHash)
+                            || frozenMatrixCanonicalJson.isBlank())) {
+                throw new IllegalArgumentException(
+                        "respondent branch result does not match frozen matrix authority");
+            }
         }
     }
+
+    public record RespondentSubmitLineage(
+            String tenantSurrogate,
+            String submitOperationKey,
+            String submitCommandId,
+            long submitCommandSequence,
+            String submitRequestHash,
+            String submitEventId,
+            String submitEventRef,
+            long submitEventSequence,
+            long sourceRoomEpoch,
+            long sourceFencingToken,
+            long sourceProcessRevision,
+            long sourceRoomRevision) {
+
+        public RespondentSubmitLineage {
+            Objects.requireNonNull(tenantSurrogate, "tenantSurrogate");
+            Objects.requireNonNull(submitOperationKey, "submitOperationKey");
+            Objects.requireNonNull(submitCommandId, "submitCommandId");
+            Objects.requireNonNull(submitRequestHash, "submitRequestHash");
+            Objects.requireNonNull(submitEventId, "submitEventId");
+            Objects.requireNonNull(submitEventRef, "submitEventRef");
+            if (submitCommandSequence < 1
+                    || submitEventSequence < 1
+                    || sourceRoomEpoch < 0
+                    || sourceFencingToken < 1
+                    || sourceProcessRevision < 1
+                    || sourceRoomRevision < 1) {
+                throw new IllegalArgumentException("respondent Submit lineage is invalid");
+            }
+        }
+    }
+
+    private record FrozenSubmissionSource(
+            String dossierId,
+            long dossierVersion,
+            String dossierJson,
+            ObjectNode matrix,
+            String matrixCanonicalJson) {}
 
     public record ObjectNodeAuthority(String matrixKind, String contentHash) {
         public ObjectNodeAuthority {

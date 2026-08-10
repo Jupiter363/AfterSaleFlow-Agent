@@ -75,7 +75,7 @@ _MAX_MODEL_DOCUMENT_BYTES = 2 * 1024 * 1024
 _MAX_VISIBLE_DELTA_BYTES = 64 * 1024
 _MAX_PROVIDER_LATENCY_MS = 24 * 60 * 60 * 1_000
 _MAX_TOKEN_USAGE = 2_147_483_647
-_BUFFERED_VALIDATED_STREAM_NODE = "intake_turn_case_detail"
+_BUFFERED_INVOKE_OBSERVER_NODE = "intake_turn_case_detail"
 SyncResultT = TypeVar("SyncResultT")
 
 
@@ -134,7 +134,7 @@ def _buffer_intake_observer(
     node_name: str,
 ) -> Iterator[_BufferedIntakeObserver | None]:
     observer = current_stream_observer()
-    if node_name != _BUFFERED_VALIDATED_STREAM_NODE or observer is None:
+    if node_name != _BUFFERED_INVOKE_OBSERVER_NODE or observer is None:
         yield None
         return
     buffered = _BufferedIntakeObserver(observer)
@@ -240,9 +240,6 @@ class GovernedChatModel(BaseChatModel):
         del run_manager
         request = self._request(messages, stop=stop, overrides=kwargs)
         prompt_hash = _prompt_hash(request.messages, request.user_content_parts)
-        buffer_visible_until_completion = (
-            self.policy.node_name == _BUFFERED_VALIDATED_STREAM_NODE
-        )
         attempts_allowed = self._attempts_allowed()
         if attempts_allowed == 0:
             raise ModelRetryBudgetExhausted("provider attempt budget is exhausted")
@@ -251,30 +248,25 @@ class GovernedChatModel(BaseChatModel):
             remaining = attempts_allowed - attempts_used
             bounded_request = _request_with_attempt_budget(request, remaining)
             visible = False
-            buffered_visible: list[ModelTransportVisibleDelta] = []
             completed_result: ModelTransportResult | None = None
             try:
                 self._guard()
-                with _buffer_intake_observer(self.policy.node_name) as buffered_observer:
-                    for update in self._sync_stream(bounded_request):
-                        self._guard()
-                        if completed_result is not None:
-                            raise ModelStreamInterrupted(
-                                "model transport emitted data after completion"
-                            )
-                        if isinstance(update, ModelTransportVisibleDelta):
-                            update = self._validated_visible_delta(update)
-                            if buffer_visible_until_completion:
-                                buffered_visible.append(update)
-                                continue
-                            visible = True
-                            yield self._visible_chunk(update)
-                            continue
-                        if not isinstance(update, ModelTransportCompleted):
-                            raise ModelStreamInterrupted(
-                                "model transport emitted an unknown update"
-                            )
-                        completed_result = self._validated_result(update.result)
+                for update in self._sync_stream(bounded_request):
+                    self._guard()
+                    if completed_result is not None:
+                        raise ModelStreamInterrupted(
+                            "model transport emitted data after completion"
+                        )
+                    if isinstance(update, ModelTransportVisibleDelta):
+                        update = self._validated_visible_delta(update)
+                        visible = True
+                        yield self._visible_chunk(update)
+                        continue
+                    if not isinstance(update, ModelTransportCompleted):
+                        raise ModelStreamInterrupted(
+                            "model transport emitted an unknown update"
+                        )
+                    completed_result = self._validated_result(update.result)
                 if completed_result is None:
                     raise TransientModelTransportError(
                         "model transport stream ended without a completed result"
@@ -283,20 +275,6 @@ class GovernedChatModel(BaseChatModel):
                     completed_result.provider_attempts_used,
                     remaining,
                 )
-                if buffer_visible_until_completion:
-                    buffered_chunks = tuple(
-                        self._visible_chunk(update) for update in buffered_visible
-                    )
-                    final_chunk = self._final_chunk(
-                        completed_result,
-                        attempts_used,
-                        prompt_hash,
-                    )
-                    if buffered_observer is not None:
-                        buffered_observer.release()
-                    yield from buffered_chunks
-                    yield final_chunk
-                    return
                 yield self._final_chunk(completed_result, attempts_used, prompt_hash)
                 return
             except TransientModelTransportError as error:
@@ -324,9 +302,6 @@ class GovernedChatModel(BaseChatModel):
         del run_manager
         request = self._request(messages, stop=stop, overrides=kwargs)
         prompt_hash = _prompt_hash(request.messages, request.user_content_parts)
-        buffer_visible_until_completion = (
-            self.policy.node_name == _BUFFERED_VALIDATED_STREAM_NODE
-        )
         attempts_allowed = self._attempts_allowed()
         if attempts_allowed == 0:
             raise ModelRetryBudgetExhausted("provider attempt budget is exhausted")
@@ -335,31 +310,26 @@ class GovernedChatModel(BaseChatModel):
             remaining = attempts_allowed - attempts_used
             bounded_request = _request_with_attempt_budget(request, remaining)
             visible = False
-            buffered_visible: list[ModelTransportVisibleDelta] = []
             completed_result: ModelTransportResult | None = None
             try:
                 self._guard()
-                with _buffer_intake_observer(self.policy.node_name) as buffered_observer:
-                    async with asyncio.timeout(self._remaining_seconds()):
-                        async for update in self._transport.astream(bounded_request):
-                            self._guard()
-                            if completed_result is not None:
-                                raise ModelStreamInterrupted(
-                                    "model transport emitted data after completion"
-                                )
-                            if isinstance(update, ModelTransportVisibleDelta):
-                                update = self._validated_visible_delta(update)
-                                if buffer_visible_until_completion:
-                                    buffered_visible.append(update)
-                                    continue
-                                visible = True
-                                yield self._visible_chunk(update)
-                                continue
-                            if not isinstance(update, ModelTransportCompleted):
-                                raise ModelStreamInterrupted(
-                                    "model transport emitted an unknown update"
-                                )
-                            completed_result = self._validated_result(update.result)
+                async with asyncio.timeout(self._remaining_seconds()):
+                    async for update in self._transport.astream(bounded_request):
+                        self._guard()
+                        if completed_result is not None:
+                            raise ModelStreamInterrupted(
+                                "model transport emitted data after completion"
+                            )
+                        if isinstance(update, ModelTransportVisibleDelta):
+                            update = self._validated_visible_delta(update)
+                            visible = True
+                            yield self._visible_chunk(update)
+                            continue
+                        if not isinstance(update, ModelTransportCompleted):
+                            raise ModelStreamInterrupted(
+                                "model transport emitted an unknown update"
+                            )
+                        completed_result = self._validated_result(update.result)
                 if completed_result is None:
                     raise TransientModelTransportError(
                         "model transport stream ended without a completed result"
@@ -368,21 +338,6 @@ class GovernedChatModel(BaseChatModel):
                     completed_result.provider_attempts_used,
                     remaining,
                 )
-                if buffer_visible_until_completion:
-                    buffered_chunks = tuple(
-                        self._visible_chunk(update) for update in buffered_visible
-                    )
-                    final_chunk = self._final_chunk(
-                        completed_result,
-                        attempts_used,
-                        prompt_hash,
-                    )
-                    if buffered_observer is not None:
-                        buffered_observer.release()
-                    for chunk in buffered_chunks:
-                        yield chunk
-                    yield final_chunk
-                    return
                 yield self._final_chunk(completed_result, attempts_used, prompt_hash)
                 return
             except TimeoutError as error:

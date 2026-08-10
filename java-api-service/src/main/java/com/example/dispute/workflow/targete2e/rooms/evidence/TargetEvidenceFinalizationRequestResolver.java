@@ -16,11 +16,15 @@ import java.util.Objects;
  */
 public final class TargetEvidenceFinalizationRequestResolver {
   private final TargetEvidenceCommandMaterialStore materialStore;
+  private final TargetEvidenceTurnProposalLoader proposalLoader;
   private final ObjectMapper objectMapper;
 
   public TargetEvidenceFinalizationRequestResolver(
-      TargetEvidenceCommandMaterialStore materialStore, ObjectMapper objectMapper) {
+      TargetEvidenceCommandMaterialStore materialStore,
+      TargetEvidenceTurnProposalLoader proposalLoader,
+      ObjectMapper objectMapper) {
     this.materialStore = Objects.requireNonNull(materialStore, "materialStore");
+    this.proposalLoader = Objects.requireNonNull(proposalLoader, "proposalLoader");
     this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
   }
 
@@ -37,6 +41,9 @@ public final class TargetEvidenceFinalizationRequestResolver {
         .orElseThrow(() -> new IllegalStateException("target Evidence admitted material is absent"));
     var material = snapshot.material();
     var admission = snapshot.admission();
+    require(TargetEvidenceCommandMaterial.SCHEMA_VERSION.equals(material.schemaVersion()),
+        "formal material schema");
+    require(material.evidenceAgentTurnCommand() != null, "formal Evidence turn command");
     require(material.request().equals(request), "stored AgentRun request");
     require(material.activationId().equals(admission.activationId()), "activation id");
     require(material.activationManifestHash().equals(admission.manifestHash()), "activation manifest");
@@ -55,17 +62,21 @@ public final class TargetEvidenceFinalizationRequestResolver {
     require(graph.commandId().equals(command.result().graphResult().commandId()), "result command id");
     require(graph.graphKey().equals(command.result().graphResult().graphKey()), "result graph key");
     require(graph.graphVersion().equals(command.result().graphResult().graphVersion()), "result graph version");
+    TargetEvidenceTurnProposalLoader.LoadedProposal proposal =
+        Objects.requireNonNull(proposalLoader.load(command, snapshot), "loaded Evidence proposal");
 
     String operationId = "target-e2e-evidence:"
         + ContractJson.sha256Hex(objectMapper.valueToTree(java.util.List.of(
-            material.activationId(), graph.commandId(), command.result().resultHash()))).substring(0, 40);
+            material.activationId(), graph.commandId(), command.result().resultHash(),
+            proposal.proposalHash()))).substring(0, 40);
     return new TargetEvidenceFinalizationRequest(
         material.executionLane(), material.activationId(), material.activationManifestHash(),
         snapshot.admissionId(), admission.isolatedDomainDbBindingHash(), material.commandHash(),
         material.commandEnvelopeHash(), material.caseCommandRequestHash(), material.roomFencingToken(),
         material.expectedProcessRevision(), material.expectedRoomRevision(), operationId,
         graph.stageCode(), graph.stageSequence(),
-        graph.actorScope().actorId(), graph.actorScope().actorRole(), graph.actorScope().audience(), command);
+        graph.actorScope().actorId(), graph.actorScope().actorRole(), graph.actorScope().audience(),
+        command, snapshot, proposal);
   }
 
   private static void require(boolean condition, String field) {

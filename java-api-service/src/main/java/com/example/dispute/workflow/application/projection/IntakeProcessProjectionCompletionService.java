@@ -2,26 +2,44 @@ package com.example.dispute.workflow.application.projection;
 
 import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
+import com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher;
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.AuthoritativeProcessObservation;
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.ReconciliationTarget;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionCommand;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionResult;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.infrastructure.persistence.repository.DomainOperationRepository;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceipt;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptCodec;
+import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphCommandEnvelope;
+import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
+import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
+import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
+import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -39,6 +57,8 @@ public class IntakeProcessProjectionCompletionService {
 
     private final NamedParameterJdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
+    private final ObjectMapper materialObjectMapper;
+    private final TargetE2EGraphEnvelopeCodec envelopeCodec;
     private final DomainOperationRepository operationRepository;
     private final FencedProcessProjectionService projectionService;
 
@@ -49,6 +69,11 @@ public class IntakeProcessProjectionCompletionService {
             FencedProcessProjectionService projectionService) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.materialObjectMapper =
+                this.objectMapper
+                        .copy()
+                        .setPropertyNamingStrategy(PropertyNamingStrategies.LOWER_CAMEL_CASE);
+        this.envelopeCodec = new TargetE2EGraphEnvelopeCodec(this.objectMapper);
         this.operationRepository =
                 Objects.requireNonNull(operationRepository, "operationRepository");
         this.projectionService =
@@ -242,6 +267,19 @@ public class IntakeProcessProjectionCompletionService {
             String caseId,
             String selectorPredicate,
             Object selector) {
+        Optional<CompletionEvidence> legacy =
+                loadLegacy(tenantSurrogate, caseId, selectorPredicate, selector);
+        if (legacy.isPresent()) {
+            return legacy;
+        }
+        return loadRecoveredWinner(tenantSurrogate, caseId, selectorPredicate, selector);
+    }
+
+    private Optional<CompletionEvidence> loadLegacy(
+            String tenantSurrogate,
+            String caseId,
+            String selectorPredicate,
+            Object selector) {
         String sql =
                 """
                 select command_row.command_id,
@@ -324,60 +362,256 @@ public class IntakeProcessProjectionCompletionService {
                         sql,
                         parameters,
                         (result, ignored) ->
-                                new CompletionEvidence(
+                                mapCompletionEvidence(
+                                        result,
                                         tenantSurrogate,
                                         caseId,
-                                        result.getString("command_id"),
-                                        result.getString("command_request_hash"),
-                                        result.getLong("case_command_sequence"),
-                                        result.getString("command_type"),
-                                        result.getString("command_status"),
-                                        result.getString("command_result_uri"),
-                                        result.getString("command_result_sha256"),
-                                        result.getLong("expected_process_revision"),
-                                        result.getLong("room_epoch"),
-                                        result.getLong("epoch_process_revision"),
-                                        result.getLong("epoch_room_revision"),
-                                        result.getLong("fencing_token"),
-                                        result.getString("epoch_writer_mode"),
-                                        result.getString("lifecycle_status"),
-                                        result.getString("provisioning_status"),
-                                        result.getString("epoch_workflow_id"),
-                                        result.getString("epoch_run_id"),
-                                        result.getString("epoch_room_run_id"),
-                                        result.getString("epoch_build_id"),
-                                        result.getString("macro_phase"),
-                                        result.getString("current_room"),
-                                        result.getString("room_phase"),
-                                        result.getString("projection_writer_mode"),
-                                        result.getString("writer_activation_status"),
-                                        result.getLong("projection_process_revision"),
-                                        result.getLong("projection_room_epoch"),
-                                        result.getLong("projection_fencing_token"),
-                                        result.getLong("last_command_sequence"),
-                                        result.getLong("last_case_event_sequence"),
-                                        result.getObject(
-                                                "projected_deadline_at", OffsetDateTime.class),
-                                        result.getString("projection_workflow_id"),
-                                        result.getString("projection_run_id"),
-                                        result.getString("projection_build_id"),
-                                        result.getString("formal_operation_key"),
-                                        result.getLong("formal_process_revision"),
-                                        result.getLong("formal_fencing_token"),
-                                        result.getString("formal_result_uri"),
-                                        result.getString("formal_result_sha256"),
-                                        result.getString("formal_event_id"),
-                                        result.getLong("formal_event_sequence"),
-                                        result.getString("formal_event_type"),
-                                        decodeReceipt(
-                                                result.getString("formal_event_json"),
-                                                result.getString("formal_event_type"))));
+                                        CompletionAuthorityKind.LEGACY_EXACT_COMMAND,
+                                        null));
         if (rows.size() > 1) {
             throw rejected(
                     "INTAKE_PROJECTION_EVIDENCE_AMBIGUOUS",
                     "more than one committed Intake finalization matches the command");
         }
         return rows.stream().findFirst();
+    }
+
+    private Optional<CompletionEvidence> loadRecoveredWinner(
+            String tenantSurrogate,
+            String caseId,
+            String selectorPredicate,
+            Object selector) {
+        String sql =
+                """
+                select command_row.command_id,
+                       command_row.request_hash as command_request_hash,
+                       command_row.case_command_sequence,
+                       command_row.command_type,
+                       command_row.command_status,
+                       command_row.result_uri as command_result_uri,
+                       command_row.result_sha256 as command_result_sha256,
+                       command_row.expected_process_revision,
+                       command_row.room_epoch,
+                       epoch.process_revision as epoch_process_revision,
+                       epoch.room_revision as epoch_room_revision,
+                       epoch.fencing_token,
+                       epoch.writer_mode as epoch_writer_mode,
+                       epoch.lifecycle_status,
+                       epoch.provisioning_status,
+                       epoch.temporal_workflow_id as epoch_workflow_id,
+                       epoch.temporal_run_id as epoch_run_id,
+                       epoch.room_temporal_run_id as epoch_room_run_id,
+                       epoch.temporal_build_id as epoch_build_id,
+                       projection.macro_phase,
+                       projection.current_room,
+                       projection.room_phase,
+                       projection.writer_mode as projection_writer_mode,
+                       projection.writer_activation_status,
+                       projection.process_revision as projection_process_revision,
+                       projection.room_epoch as projection_room_epoch,
+                       projection.fencing_token as projection_fencing_token,
+                       projection.last_command_sequence,
+                       projection.last_case_event_sequence,
+                       projection.projected_deadline_at,
+                       projection.temporal_workflow_id as projection_workflow_id,
+                       projection.temporal_run_id as projection_run_id,
+                       projection.temporal_build_id as projection_build_id,
+                       formal_operation.operation_key as formal_operation_key,
+                       formal_operation.process_revision as formal_process_revision,
+                       formal_operation.fencing_token as formal_fencing_token,
+                       formal_operation.result_uri as formal_result_uri,
+                       formal_operation.result_sha256 as formal_result_sha256,
+                       formal_event.id as formal_event_id,
+                       formal_event.sequence_no as formal_event_sequence,
+                       formal_event.event_type as formal_event_type,
+                       cast(formal_event.event_json as text) as formal_event_json,
+                       cast(
+                           jsonb_build_object(
+                               'originalCommand', to_jsonb(command_row),
+                               'epoch', to_jsonb(epoch),
+                               'projection', to_jsonb(projection),
+                               'formalOperation', to_jsonb(formal_operation),
+                               'formalEvent', to_jsonb(formal_event),
+                               'run', to_jsonb(run_row),
+                               'winnerAttempt', to_jsonb(winner_attempt),
+                               'roomBinding', to_jsonb(room_binding),
+                               'activation', to_jsonb(activation_row),
+                               'winnerAdmission', to_jsonb(winner_admission),
+                               'winnerCompletion', to_jsonb(winner_completion),
+                               'manifest', to_jsonb(manifest_row),
+                               'outputSnapshot', to_jsonb(output_snapshot),
+                               'targetReceipt',
+                                   to_jsonb(target_receipt) - 'receipt_canonical_bytes'
+                           ) as text
+                       ) as recovered_candidate_json,
+                       target_receipt.receipt_canonical_bytes,
+                       cast(lineage_proof.attempts_json as text) as recovered_attempts_json
+                  from case_command command_row
+                  join case_room_epoch epoch
+                    on epoch.tenant_surrogate = command_row.tenant_surrogate
+                   and epoch.case_id = command_row.case_id
+                   and epoch.room_type = command_row.room_type
+                   and epoch.room_epoch = command_row.room_epoch
+                  join case_process_projection projection
+                    on projection.case_id = command_row.case_id
+                  join domain_operation formal_operation
+                    on formal_operation.tenant_surrogate = command_row.tenant_surrogate
+                   and formal_operation.case_id = command_row.case_id
+                   and formal_operation.room_type = 'INTAKE'
+                   and formal_operation.room_epoch = command_row.room_epoch
+                   and formal_operation.operation_type = 'INTAKE_TURN_FINALIZE'
+                   and formal_operation.operation_status = 'COMPLETED'
+                  join case_timeline_event formal_event
+                    on formal_event.case_id = command_row.case_id
+                   and formal_operation.result_uri =
+                       'urn:intake:finalization-receipt:' || formal_event.id
+                  join agent_run run_row
+                    on run_row.id = formal_event.event_json -> 'receipt' ->> 'logical_run_id'
+                  join agent_run_attempt winner_attempt
+                    on winner_attempt.agent_run_id = run_row.id
+                   and winner_attempt.id = run_row.committed_attempt_id
+                  join agent_run_attempt root_attempt
+                    on root_attempt.agent_run_id = run_row.id
+                   and root_attempt.attempt_no = 1
+                   and root_attempt.previous_attempt_id is null
+                   and root_attempt.command_id = command_row.command_id
+                  join target_e2e_room_epoch_binding room_binding
+                    on room_binding.epoch_id = run_row.room_epoch_id
+                  join target_e2e_activation activation_row
+                    on activation_row.activation_id = room_binding.activation_id
+                  join target_e2e_command_admission winner_admission
+                    on winner_admission.activation_id = activation_row.activation_id
+                   and winner_admission.command_id = winner_attempt.command_id
+                  join target_e2e_command_completion winner_completion
+                    on winner_completion.admission_id = winner_admission.admission_id
+                  join target_e2e_finalization_receipt target_receipt
+                    on target_receipt.activation_id = activation_row.activation_id
+                   and target_receipt.logical_run_id = run_row.id
+                  join agent_execution_manifest manifest_row
+                    on manifest_row.id = run_row.committed_manifest_id
+                  join immutable_payload_snapshot output_snapshot
+                    on output_snapshot.id = manifest_row.output_snapshot_id
+                  join lateral (
+                      with recursive path_attempt as (
+                          select winner_attempt.*
+                          union all
+                          select predecessor.*
+                            from path_attempt successor
+                            join agent_run_attempt predecessor
+                              on predecessor.agent_run_id = successor.agent_run_id
+                             and predecessor.id = successor.previous_attempt_id
+                             and predecessor.attempt_no = successor.attempt_no - 1
+                           where successor.attempt_no > 1
+                      )
+                      select jsonb_agg(
+                                 jsonb_build_object(
+                                     'attempt', to_jsonb(path_attempt),
+                                     'admission', to_jsonb(path_admission),
+                                     'material', to_jsonb(path_material),
+                                     'contextCanonicalJson',
+                                         path_material.context_canonical_json
+                                 )
+                                 order by path_attempt.attempt_no
+                             ) as attempts_json
+                        from path_attempt
+                        join target_e2e_command_admission path_admission
+                          on path_admission.activation_id = activation_row.activation_id
+                         and path_admission.command_id = path_attempt.command_id
+                        join target_e2e_intake_command_material path_material
+                          on path_material.admission_id = path_admission.admission_id
+                  ) lineage_proof on true
+                 where command_row.tenant_surrogate = :tenantSurrogate
+                   and command_row.case_id = :caseId
+                   and command_row.room_type = 'INTAKE'
+                   and formal_event.event_json -> 'receipt' ->> 'command_id' <>
+                       command_row.command_id
+                   and %s
+                 order by formal_operation.completed_at desc
+                """
+                        .formatted(selectorPredicate);
+        MapSqlParameterSource parameters =
+                new MapSqlParameterSource()
+                        .addValue("tenantSurrogate", tenantSurrogate)
+                        .addValue("caseId", caseId)
+                        .addValue("selector", selector);
+        List<CompletionEvidence> rows =
+                jdbc.query(
+                        sql,
+                        parameters,
+                        (result, ignored) ->
+                                mapCompletionEvidence(
+                                        result,
+                                        tenantSurrogate,
+                                        caseId,
+                                        CompletionAuthorityKind.TARGET_RECOVERED_WINNER_V1,
+                                        new RecoveredWinnerProof(
+                                                result.getString("recovered_candidate_json"),
+                                                result.getBytes("receipt_canonical_bytes"),
+                                                result.getString("recovered_attempts_json"))));
+        if (rows.size() > 1) {
+            throw rejected(
+                    "INTAKE_PROJECTION_EVIDENCE_AMBIGUOUS",
+                    "more than one recovered Intake finalization matches the command");
+        }
+        return rows.stream().findFirst();
+    }
+
+    private CompletionEvidence mapCompletionEvidence(
+            ResultSet result,
+            String tenantSurrogate,
+            String caseId,
+            CompletionAuthorityKind authorityKind,
+            RecoveredWinnerProof recoveredWinnerProof)
+            throws SQLException {
+        return new CompletionEvidence(
+                tenantSurrogate,
+                caseId,
+                result.getString("command_id"),
+                result.getString("command_request_hash"),
+                result.getLong("case_command_sequence"),
+                result.getString("command_type"),
+                result.getString("command_status"),
+                result.getString("command_result_uri"),
+                result.getString("command_result_sha256"),
+                result.getLong("expected_process_revision"),
+                result.getLong("room_epoch"),
+                result.getLong("epoch_process_revision"),
+                result.getLong("epoch_room_revision"),
+                result.getLong("fencing_token"),
+                result.getString("epoch_writer_mode"),
+                result.getString("lifecycle_status"),
+                result.getString("provisioning_status"),
+                result.getString("epoch_workflow_id"),
+                result.getString("epoch_run_id"),
+                result.getString("epoch_room_run_id"),
+                result.getString("epoch_build_id"),
+                result.getString("macro_phase"),
+                result.getString("current_room"),
+                result.getString("room_phase"),
+                result.getString("projection_writer_mode"),
+                result.getString("writer_activation_status"),
+                result.getLong("projection_process_revision"),
+                result.getLong("projection_room_epoch"),
+                result.getLong("projection_fencing_token"),
+                result.getLong("last_command_sequence"),
+                result.getLong("last_case_event_sequence"),
+                result.getObject("projected_deadline_at", OffsetDateTime.class),
+                result.getString("projection_workflow_id"),
+                result.getString("projection_run_id"),
+                result.getString("projection_build_id"),
+                result.getString("formal_operation_key"),
+                result.getLong("formal_process_revision"),
+                result.getLong("formal_fencing_token"),
+                result.getString("formal_result_uri"),
+                result.getString("formal_result_sha256"),
+                result.getString("formal_event_id"),
+                result.getLong("formal_event_sequence"),
+                result.getString("formal_event_type"),
+                decodeReceipt(
+                        result.getString("formal_event_json"),
+                        result.getString("formal_event_type")),
+                authorityKind,
+                recoveredWinnerProof);
     }
 
     private ProjectionOperation findProjectionOperation(
@@ -491,7 +725,6 @@ public class IntakeProcessProjectionCompletionService {
                 || !evidence.formalOperationKey().equals(receipt.operationKey())
                 || !evidence.tenantSurrogate().equals(receipt.tenantSurrogate())
                 || !evidence.caseId().equals(receipt.caseId())
-                || !evidence.commandId().equals(receipt.commandId())
                 || evidence.roomEpoch() != receipt.roomEpoch()
                 || evidence.expectedProcessRevision() != receipt.processRevision()
                 || evidence.formalProcessRevision() != receipt.processRevision()
@@ -506,6 +739,1008 @@ public class IntakeProcessProjectionCompletionService {
                     "INTAKE_PROJECTION_FORMAL_EVIDENCE_INVALID",
                     "committed Intake receipt does not bind the projection transition");
         }
+        switch (evidence.authorityKind()) {
+            case LEGACY_EXACT_COMMAND -> {
+                if (!evidence.commandId().equals(receipt.commandId())
+                        || evidence.recoveredWinnerProof() != null) {
+                    throw rejected(
+                            "INTAKE_PROJECTION_FORMAL_EVIDENCE_INVALID",
+                            "legacy Intake receipt does not bind the original command");
+                }
+            }
+            case TARGET_RECOVERED_WINNER_V1 -> validateRecoveredWinnerAuthority(evidence);
+        }
+    }
+
+    private void validateRecoveredWinnerAuthority(CompletionEvidence evidence) {
+        try {
+            RecoveredWinnerProof proof =
+                    Objects.requireNonNull(
+                            evidence.recoveredWinnerProof(), "recovered winner proof");
+            IntakeFinalizationReceipt formalReceipt = evidence.receipt();
+            if (evidence.commandId().equals(formalReceipt.commandId())) {
+                throw new IllegalArgumentException(
+                        "recovered winner must differ from the original command");
+            }
+
+            JsonNode candidate = readProofObject(proof.candidateJson(), "recovered candidate");
+            JsonNode original = requiredObject(candidate, "originalCommand");
+            JsonNode epoch = requiredObject(candidate, "epoch");
+            JsonNode projection = requiredObject(candidate, "projection");
+            JsonNode formalOperation = requiredObject(candidate, "formalOperation");
+            JsonNode formalEvent = requiredObject(candidate, "formalEvent");
+            JsonNode run = requiredObject(candidate, "run");
+            JsonNode winnerRow = requiredObject(candidate, "winnerAttempt");
+            JsonNode roomBinding = requiredObject(candidate, "roomBinding");
+            JsonNode activation = requiredObject(candidate, "activation");
+            JsonNode winnerAdmission = requiredObject(candidate, "winnerAdmission");
+            JsonNode winnerCompletion = requiredObject(candidate, "winnerCompletion");
+            JsonNode manifest = requiredObject(candidate, "manifest");
+            JsonNode outputSnapshot = requiredObject(candidate, "outputSnapshot");
+            JsonNode targetReceiptRow = requiredObject(candidate, "targetReceipt");
+
+            validateRecoveredOriginalAuthority(
+                    evidence,
+                    original,
+                    epoch,
+                    projection,
+                    formalOperation,
+                    formalEvent);
+            validateRecoveredActivationAuthority(evidence, epoch, roomBinding, activation, run);
+            validateRecoveredRunAuthority(evidence, epoch, run);
+
+            List<ValidatedRecoveredAttempt> attempts = new ArrayList<>();
+            for (JsonNode rawAttempt : readProofArray(proof.attemptsJson(), "attempt lineage")) {
+                attempts.add(
+                        validateRecoveredAttempt(
+                                evidence,
+                                rawAttempt,
+                                activation,
+                                roomBinding,
+                                run));
+            }
+            attempts.sort(
+                    (left, right) ->
+                            Long.compare(
+                                    requiredLong(left.attempt(), "attempt_no"),
+                                    requiredLong(right.attempt(), "attempt_no")));
+            validateRecoveredLineage(evidence, run, winnerRow, attempts);
+
+            ValidatedRecoveredAttempt winner = attempts.get(attempts.size() - 1);
+            validateRecoveredWinnerTerminalAuthority(
+                    evidence,
+                    epoch,
+                    activation,
+                    run,
+                    winner,
+                    winnerAdmission,
+                    winnerCompletion,
+                    manifest,
+                    outputSnapshot,
+                    targetReceiptRow,
+                    proof.targetReceiptCanonicalBytes(),
+                    formalOperation,
+                    formalEvent);
+        } catch (ProjectionWriteRejectedException failure) {
+            throw failure;
+        } catch (RuntimeException failure) {
+            throw rejected(
+                    "INTAKE_PROJECTION_RECOVERED_AUTHORITY_INVALID",
+                    "recovered Intake winner does not have complete canonical authority",
+                    failure);
+        }
+    }
+
+    private void validateRecoveredOriginalAuthority(
+            CompletionEvidence evidence,
+            JsonNode original,
+            JsonNode epoch,
+            JsonNode projection,
+            JsonNode formalOperation,
+            JsonNode formalEvent) {
+        requireText(original, "command_id", evidence.commandId());
+        requireText(original, "tenant_surrogate", evidence.tenantSurrogate());
+        requireText(original, "case_id", evidence.caseId());
+        requireText(original, "command_type", evidence.commandType());
+        requireText(original, "room_type", "INTAKE");
+        requireText(original, "request_hash", evidence.commandRequestHash());
+        requireLong(original, "case_command_sequence", evidence.commandSequence());
+        requireLong(original, "room_epoch", evidence.roomEpoch());
+        requireLong(
+                original, "expected_process_revision", evidence.expectedProcessRevision());
+
+        requireText(epoch, "tenant_surrogate", evidence.tenantSurrogate());
+        requireText(epoch, "case_id", evidence.caseId());
+        requireText(epoch, "room_type", "INTAKE");
+        requireLong(epoch, "room_epoch", evidence.roomEpoch());
+        requireLong(epoch, "process_revision", evidence.epochProcessRevision());
+        requireLong(epoch, "room_revision", evidence.epochRoomRevision());
+        requireLong(epoch, "fencing_token", evidence.fencingToken());
+        requireText(epoch, "writer_mode", evidence.epochWriterMode());
+        requireText(epoch, "temporal_workflow_id", evidence.temporalWorkflowId());
+        requireText(epoch, "temporal_run_id", evidence.temporalRunId());
+        requireText(epoch, "room_temporal_run_id", evidence.roomTemporalRunId());
+        requireText(epoch, "temporal_build_id", evidence.temporalBuildId());
+
+        requireText(projection, "tenant_surrogate", evidence.tenantSurrogate());
+        requireText(projection, "case_id", evidence.caseId());
+        requireText(projection, "macro_phase", evidence.macroPhase());
+        requireText(projection, "current_room", evidence.currentRoom());
+        requireText(projection, "room_phase", evidence.roomPhase());
+        requireText(projection, "writer_mode", evidence.projectionWriterMode());
+        requireText(
+                projection, "writer_activation_status", evidence.writerActivationStatus());
+        requireLong(
+                projection, "process_revision", evidence.projectionProcessRevision());
+        requireLong(projection, "room_epoch", evidence.projectionRoomEpoch());
+        requireLong(projection, "fencing_token", evidence.projectionFencingToken());
+        requireLong(projection, "last_command_sequence", evidence.lastCommandSequence());
+        requireLong(
+                projection, "last_case_event_sequence", evidence.lastCaseEventSequence());
+        requireText(
+                projection, "temporal_workflow_id", evidence.projectionWorkflowId());
+        requireText(projection, "temporal_run_id", evidence.projectionRunId());
+        requireText(projection, "temporal_build_id", evidence.projectionBuildId());
+
+        String formalCaseCommandRowId = optionalText(formalOperation, "case_command_id");
+        if (formalCaseCommandRowId != null
+                && !formalCaseCommandRowId.equals(requiredText(original, "id"))) {
+            throw new IllegalArgumentException(
+                    "formal operation references a foreign case command");
+        }
+        requireText(
+                formalOperation, "tenant_surrogate", evidence.tenantSurrogate());
+        requireText(formalOperation, "case_id", evidence.caseId());
+        requireText(formalOperation, "operation_type", "INTAKE_TURN_FINALIZE");
+        requireText(formalOperation, "room_type", "INTAKE");
+        requireText(formalOperation, "operation_status", "COMPLETED");
+        requireText(
+                formalOperation, "operation_key", evidence.formalOperationKey());
+        requireText(formalOperation, "result_uri", evidence.formalResultUri());
+        requireText(
+                formalOperation, "result_sha256", evidence.formalResultSha256());
+        requireLong(formalOperation, "room_epoch", evidence.roomEpoch());
+        requireLong(
+                formalOperation, "process_revision", evidence.formalProcessRevision());
+        requireLong(
+                formalOperation, "fencing_token", evidence.formalFencingToken());
+        requirePresent(formalOperation, "completed_at");
+
+        requireText(formalEvent, "id", evidence.eventId());
+        requireText(formalEvent, "case_id", evidence.caseId());
+        requireText(formalEvent, "event_type", evidence.eventType());
+        requireText(formalEvent, "room_id", requiredText(epoch, "room_id"));
+        requireLong(formalEvent, "sequence_no", evidence.eventSequence());
+    }
+
+    private void validateRecoveredActivationAuthority(
+            CompletionEvidence evidence,
+            JsonNode epoch,
+            JsonNode roomBinding,
+            JsonNode activation,
+            JsonNode run) {
+        requireText(activation, "contract_version", "target-e2e-activation.v1");
+        requireText(activation, "execution_lane", "TARGET_E2E_CANDIDATE");
+        requireText(activation, "tenant_surrogate", evidence.tenantSurrogate());
+        requireText(activation, "formal_writer", "JAVA_FINALIZER_ONLY");
+        if (!requiredBoolean(activation, "java_domain_commit_allowed")) {
+            throw new IllegalArgumentException("target Java Domain commit is not authorized");
+        }
+        requireNonBlank(activation, "activation_id");
+        requireSha256(activation, "manifest_hash");
+        requireSha256(activation, "isolated_domain_db_binding_hash");
+        requireNonBlank(activation, "graph_output_authority");
+
+        requireText(roomBinding, "epoch_id", requiredText(epoch, "id"));
+        requireText(
+                roomBinding, "activation_id", requiredText(activation, "activation_id"));
+        requireText(
+                roomBinding,
+                "activation_manifest_hash",
+                requiredText(activation, "manifest_hash"));
+        requireText(
+                roomBinding, "execution_lane", requiredText(activation, "execution_lane"));
+        requireText(
+                roomBinding,
+                "isolated_domain_db_binding_hash",
+                requiredText(activation, "isolated_domain_db_binding_hash"));
+        requireText(roomBinding, "tenant_surrogate", evidence.tenantSurrogate());
+        requireText(roomBinding, "case_id", evidence.caseId());
+        requireText(roomBinding, "room_type", "INTAKE");
+        requireLong(roomBinding, "room_epoch", evidence.roomEpoch());
+        requireLong(roomBinding, "room_fencing_token", evidence.fencingToken());
+        requireText(run, "room_epoch_id", requiredText(roomBinding, "epoch_id"));
+    }
+
+    private void validateRecoveredRunAuthority(
+            CompletionEvidence evidence, JsonNode epoch, JsonNode run) {
+        IntakeFinalizationReceipt receipt = evidence.receipt();
+        requireText(run, "id", receipt.logicalRunId());
+        requireText(run, "tenant_surrogate", evidence.tenantSurrogate());
+        requireText(run, "case_id", evidence.caseId());
+        requireText(run, "room_id", requiredText(epoch, "room_id"));
+        requireText(run, "room_type", "INTAKE");
+        requireLong(run, "room_epoch", evidence.roomEpoch());
+        requireLong(run, "process_revision", receipt.processRevision());
+        requireLong(run, "fencing_token", evidence.fencingToken());
+        requireText(run, "protocol", "agent-stream.v2");
+        requireText(run, "executor_kind", "TEMPORAL_ACTIVITY");
+        requireText(run, "lineage_schema_version", "agent-run-lineage.v1");
+        requireText(run, "run_status", "COMPLETED");
+        requireText(run, "finalization_status", "COMMITTED");
+        requireText(
+                run,
+                "result_ready_attempt_id",
+                requiredText(run, "committed_attempt_id"));
+        requireText(run, "committed_attempt_id", receipt.attemptId());
+        requireText(run, "final_result_hash", receipt.resultHash());
+        requireText(run, "request_hash", evidence.commandRequestHash());
+        requireSha256(run, "logical_input_hash");
+        if (requiredLong(run, "attempt_limit") < 1) {
+            throw new IllegalArgumentException("AgentRun attempt limit is invalid");
+        }
+        requireNonBlank(run, "committed_manifest_id");
+        requireSha256(run, "committed_manifest_hash");
+        requirePresent(run, "finalized_at");
+    }
+
+    private ValidatedRecoveredAttempt validateRecoveredAttempt(
+            CompletionEvidence evidence,
+            JsonNode raw,
+            JsonNode activation,
+            JsonNode roomBinding,
+            JsonNode run) {
+        JsonNode attempt = requiredObject(raw, "attempt");
+        JsonNode admission = requiredObject(raw, "admission");
+        JsonNode material = requiredObject(raw, "material");
+        String canonicalContext = requiredText(raw, "contextCanonicalJson");
+        requireText(material, "context_canonical_json", canonicalContext);
+        JsonNode contextDocument =
+                readProofObject(canonicalContext, "target Intake command material");
+        if (!ContractJson.canonicalString(contextDocument).equals(canonicalContext)
+                || !ContractJson.sha256Hex(contextDocument)
+                        .equals(requiredText(material, "context_sha256"))) {
+            throw new IllegalArgumentException(
+                    "target Intake command material is not canonical");
+        }
+
+        IntakeCommandExecutionContext context =
+                treeToValue(
+                        materialObjectMapper,
+                        contextDocument,
+                        IntakeCommandExecutionContext.class,
+                        "target Intake command context");
+        if (!canonicalJsonEquals(
+                        materialObjectMapper.valueToTree(context), contextDocument)
+                || !"intake-command-execution-context.v2".equals(context.schemaVersion())
+                || context.targetAgentRun() == null
+                || context.branchOperation() != null
+                || context.expectedProcessRevision() != null
+                || context.expectedRoomRevision() != null
+                || context.branchPinnedVersions() != null) {
+            throw new IllegalArgumentException(
+                    "target Intake command context is not an exact v2 AgentRun context");
+        }
+        IntakeTargetAgentRunContext target = context.targetAgentRun();
+        ExecuteAgentRunRequest request = target.request();
+
+        JsonNode commandDocument = attempt.required("command_json");
+        if (commandDocument.isTextual()) {
+            commandDocument =
+                    readProofObject(commandDocument.textValue(), "attempt command");
+        }
+        if (!commandDocument.isObject()) {
+            throw new IllegalArgumentException("attempt command is not an object");
+        }
+        RoomGraphCommand command =
+                treeToValue(
+                        objectMapper,
+                        commandDocument,
+                        RoomGraphCommand.class,
+                        "attempt graph command");
+        if (!canonicalJsonEquals(objectMapper.valueToTree(command), commandDocument)
+                || !request.command().equals(command)) {
+            throw new IllegalArgumentException(
+                    "attempt command differs from its immutable execution request");
+        }
+        TargetE2EGraphCommandEnvelope envelope =
+                envelopeCodec.wrapCommand(
+                        target.activationId(), target.roomFencingToken(), command);
+
+        long attemptNo = requiredLong(attempt, "attempt_no");
+        requireText(attempt, "agent_run_id", requiredText(run, "id"));
+        requireText(attempt, "attempt_status", requiredText(attempt, "attempt_status"));
+        requireText(attempt, "executor_kind", "TEMPORAL_ACTIVITY");
+        requireText(
+                attempt,
+                "lineage_schema_version",
+                "agent-run-attempt-lineage.v1");
+        requireText(attempt, "command_id", command.commandId());
+        requireText(attempt, "request_hash", command.requestHash());
+        requireText(attempt, "command_request_hash", command.requestHash());
+        requireText(
+                attempt, "logical_input_hash", requiredText(run, "logical_input_hash"));
+        requireText(attempt, "graph_key", command.graphKey());
+        requireText(attempt, "graph_version", command.graphVersion());
+        requireText(
+                attempt,
+                "checkpoint_schema_version",
+                command.checkpointSchemaVersion());
+        requireText(
+                attempt,
+                "prompt_version",
+                command.invocationContext().promptProfileId());
+        requireText(
+                attempt,
+                "model_profile_id",
+                command.invocationContext().modelProfileId());
+        requireText(
+                attempt,
+                "output_schema_version",
+                command.invocationContext().outputSchemaVersion());
+        requireText(
+                attempt,
+                "policy_version",
+                command.invocationContext().policyVersion());
+        requireText(
+                attempt,
+                "guardrail_version",
+                command.invocationContext().guardrailVersion());
+
+        if (!requiredText(attempt, "id").equals(command.attemptId())
+                || attemptNo != request.attemptNo()
+                || !requiredText(run, "id").equals(request.agentRunId())
+                || requiredLong(run, "attempt_limit") != request.attemptLimit()
+                || !requiredText(run, "protocol").equals(request.streamProtocol())
+                || !requiredText(run, "logical_input_hash")
+                        .equals(request.logicalInputHash())
+                || !sameNullableText(
+                        optionalText(attempt, "previous_attempt_id"),
+                        request.previousAttemptId())
+                || requiredBoolean(attempt, "reset_required") != request.resetRequired()
+                || requiredLong(attempt, "public_sequence_offset")
+                        != request.publicSequenceOffset()) {
+            throw new IllegalArgumentException(
+                    "attempt row differs from its immutable execution request");
+        }
+        if (!evidence.tenantSurrogate().equals(command.tenantSurrogate())
+                || !evidence.caseId().equals(command.caseId())
+                || command.roomType() != RoomType.INTAKE
+                || command.roomEpoch() != evidence.roomEpoch()
+                || command.processRevision() != evidence.receipt().processRevision()
+                || !requiredText(run, "id").equals(command.logicalRunId())) {
+            throw new IllegalArgumentException(
+                    "attempt command differs from the original case authority");
+        }
+
+        requireText(material, "admission_id", requiredText(admission, "admission_id"));
+        requireText(material, "material_schema_version", "target-e2e-intake-command-material.v1");
+        requireText(
+                material,
+                "context_schema_version",
+                "intake-command-execution-context.v2");
+        requireText(
+                admission,
+                "activation_id",
+                requiredText(activation, "activation_id"));
+        requireText(
+                admission,
+                "activation_manifest_hash",
+                requiredText(activation, "manifest_hash"));
+        requireText(
+                admission,
+                "execution_lane",
+                requiredText(activation, "execution_lane"));
+        requireText(
+                admission,
+                "isolated_domain_db_binding_hash",
+                requiredText(activation, "isolated_domain_db_binding_hash"));
+        requireText(admission, "tenant_surrogate", evidence.tenantSurrogate());
+        requireText(admission, "case_id", evidence.caseId());
+        requireText(admission, "command_id", command.commandId());
+        requireText(admission, "command_hash", envelope.commandHash());
+        requireText(
+                admission, "command_envelope_hash", envelope.commandEnvelopeHash());
+        requireLong(admission, "room_epoch", evidence.roomEpoch());
+        requireLong(admission, "room_fencing_token", evidence.fencingToken());
+        requirePresent(admission, "admitted_at");
+
+        for (String field :
+                List.of(
+                        "activation_id",
+                        "activation_manifest_hash",
+                        "execution_lane",
+                        "isolated_domain_db_binding_hash",
+                        "tenant_surrogate",
+                        "case_id",
+                        "command_id",
+                        "command_hash",
+                        "command_envelope_hash")) {
+            requireText(material, field, requiredText(admission, field));
+        }
+        requireText(material, "room_type", "INTAKE");
+        requireLong(material, "room_epoch", evidence.roomEpoch());
+        requireLong(material, "room_fencing_token", evidence.fencingToken());
+        requireText(
+                material,
+                "activation_id",
+                requiredText(roomBinding, "activation_id"));
+
+        String expectedTargetSchema =
+                attemptNo == 1
+                        ? IntakeTargetAgentRunContext.INITIAL_SCHEMA_VERSION
+                        : IntakeTargetAgentRunContext.RETRY_SCHEMA_VERSION;
+        if (!expectedTargetSchema.equals(target.schemaVersion())
+                || !IntakeTargetAgentRunContext.TARGET_LANE.equals(target.executionLane())
+                || !requiredText(activation, "activation_id").equals(target.activationId())
+                || !requiredText(activation, "manifest_hash")
+                        .equals(target.activationManifestHash())
+                || target.roomFencingToken() != evidence.fencingToken()
+                || target.expectedProcessRevision() != evidence.receipt().processRevision()
+                || target.expectedRoomRevision() != evidence.receipt().roomRevision()
+                || !requiredText(activation, "graph_binding_hash")
+                        .equals(target.graphBindingHash())
+                || !requiredText(activation, "graph_code_build_id")
+                        .equals(target.graphCodeBuildId())
+                || !envelope.commandHash().equals(target.commandHash())
+                || !envelope.commandEnvelopeHash().equals(target.commandEnvelopeHash())) {
+            throw new IllegalArgumentException(
+                    "target AgentRun context differs from activation or command authority");
+        }
+        requireText(activation, "case_build_id", target.caseBuildId());
+        requireText(activation, "control_build_id", target.controlBuildId());
+        requireText(activation, "agent_build_id", target.agentBuildId());
+
+        return new ValidatedRecoveredAttempt(
+                attempt, admission, material, context, target, request, command, envelope);
+    }
+
+    private void validateRecoveredLineage(
+            CompletionEvidence evidence,
+            JsonNode run,
+            JsonNode winnerRow,
+            List<ValidatedRecoveredAttempt> attempts) {
+        long winnerAttemptNo = requiredLong(winnerRow, "attempt_no");
+        if (winnerAttemptNo < 2
+                || winnerAttemptNo > requiredLong(run, "attempt_limit")
+                || attempts.size() != winnerAttemptNo) {
+            throw new IllegalArgumentException(
+                    "recovered winner lineage does not contain every bounded attempt");
+        }
+        Set<Long> attemptNumbers = new HashSet<>();
+        Set<String> attemptIds = new HashSet<>();
+        Set<String> commandIds = new HashSet<>();
+        for (int index = 0; index < attempts.size(); index++) {
+            ValidatedRecoveredAttempt current = attempts.get(index);
+            JsonNode row = current.attempt();
+            long expectedAttemptNo = index + 1L;
+            long attemptNo = requiredLong(row, "attempt_no");
+            String attemptId = requiredText(row, "id");
+            String commandId = requiredText(row, "command_id");
+            if (attemptNo != expectedAttemptNo
+                    || !attemptNumbers.add(attemptNo)
+                    || !attemptIds.add(attemptId)
+                    || !commandIds.add(commandId)) {
+                throw new IllegalArgumentException(
+                        "recovered winner lineage is not unique and contiguous");
+            }
+            if (index == 0) {
+                if (optionalText(row, "previous_attempt_id") != null
+                        || !evidence.commandId().equals(commandId)
+                        || !evidence.commandRequestHash()
+                                .equals(current.command().requestHash())
+                        || requiredBoolean(row, "reset_required")
+                        || requiredLong(row, "public_sequence_offset") != 0) {
+                    throw new IllegalArgumentException(
+                            "recovered lineage root does not bind the original case command");
+                }
+            } else {
+                ValidatedRecoveredAttempt predecessor = attempts.get(index - 1);
+                if (!requiredText(predecessor.attempt(), "id")
+                                .equals(optionalText(row, "previous_attempt_id"))
+                        || !requiredText(predecessor.attempt(), "id")
+                                .equals(current.request().previousAttemptId())) {
+                    throw new IllegalArgumentException(
+                            "recovered winner predecessor chain is broken");
+                }
+            }
+            if (index < attempts.size() - 1) {
+                String status = requiredText(row, "attempt_status");
+                if (!"CREATE_NEXT_ATTEMPT".equals(optionalText(row, "termination_code"))
+                        || Set.of("PENDING", "RUNNING", "EXECUTING").contains(status)
+                        || !hasPresent(row, "completed_at")) {
+                    throw new IllegalArgumentException(
+                            "recovered predecessor was not terminally advanced");
+                }
+            }
+        }
+
+        ValidatedRecoveredAttempt winner = attempts.get(attempts.size() - 1);
+        if (!requiredText(winnerRow, "id").equals(requiredText(winner.attempt(), "id"))
+                || !requiredText(run, "committed_attempt_id")
+                        .equals(requiredText(winner.attempt(), "id"))
+                || !evidence.receipt().attemptId()
+                        .equals(requiredText(winner.attempt(), "id"))
+                || !evidence.receipt().commandId().equals(winner.command().commandId())
+                || !"COMPLETED".equals(requiredText(winner.attempt(), "attempt_status"))
+                || !evidence.receipt().resultHash()
+                        .equals(requiredText(winner.attempt(), "result_hash"))
+                || optionalText(winner.attempt(), "termination_code") != null
+                || !hasPresent(winner.attempt(), "completed_at")) {
+            throw new IllegalArgumentException(
+                    "recovered winner does not match the committed AgentRun attempt");
+        }
+    }
+
+    private void validateRecoveredWinnerTerminalAuthority(
+            CompletionEvidence evidence,
+            JsonNode epoch,
+            JsonNode activation,
+            JsonNode run,
+            ValidatedRecoveredAttempt winner,
+            JsonNode winnerAdmission,
+            JsonNode winnerCompletion,
+            JsonNode manifest,
+            JsonNode outputSnapshot,
+            JsonNode targetReceiptRow,
+            byte[] targetReceiptCanonicalBytes,
+            JsonNode formalOperation,
+            JsonNode formalEvent) {
+        IntakeFinalizationReceipt formalReceipt = evidence.receipt();
+        RoomGraphCommand command = winner.command();
+        TargetE2EGraphCommandEnvelope envelope = winner.envelope();
+
+        requireText(
+                winnerAdmission,
+                "admission_id",
+                requiredText(winner.admission(), "admission_id"));
+        for (String field :
+                List.of(
+                        "activation_id",
+                        "activation_manifest_hash",
+                        "execution_lane",
+                        "isolated_domain_db_binding_hash",
+                        "tenant_surrogate",
+                        "case_id",
+                        "command_id",
+                        "command_hash",
+                        "command_envelope_hash")) {
+            requireText(
+                    winnerAdmission, field, requiredText(winner.admission(), field));
+        }
+        requireLong(winnerAdmission, "room_epoch", evidence.roomEpoch());
+        requireLong(
+                winnerAdmission, "room_fencing_token", evidence.fencingToken());
+
+        requireText(
+                winnerCompletion,
+                "admission_id",
+                requiredText(winnerAdmission, "admission_id"));
+        requireText(
+                winnerCompletion,
+                "activation_id",
+                requiredText(activation, "activation_id"));
+        requireText(winnerCompletion, "command_id", command.commandId());
+        requireText(winnerCompletion, "command_hash", envelope.commandHash());
+        requireText(
+                winnerCompletion,
+                "command_envelope_hash",
+                envelope.commandEnvelopeHash());
+        requirePresent(winnerCompletion, "completed_at");
+
+        requireText(activation, "graph_key", command.graphKey());
+        requireText(activation, "graph_version", command.graphVersion());
+        requireText(
+                activation,
+                "graph_checkpoint_schema_version",
+                command.checkpointSchemaVersion());
+
+        TargetE2eFinalizationReceipt targetReceipt =
+                TargetE2eFinalizationReceiptCodec.decodeCanonical(
+                        Objects.requireNonNull(
+                                targetReceiptCanonicalBytes,
+                                "target receipt canonical bytes"));
+        if (!MessageDigest.isEqual(
+                targetReceiptCanonicalBytes,
+                TargetE2eFinalizationReceiptCodec.canonicalBytes(targetReceipt))) {
+            throw new IllegalArgumentException("target receipt bytes changed after decoding");
+        }
+        validateStoredTargetReceipt(
+                evidence,
+                activation,
+                run,
+                winner,
+                targetReceiptRow,
+                targetReceipt);
+        requireText(
+                winnerCompletion, "completion_hash", targetReceipt.receiptHash());
+
+        validateRecoveredManifest(
+                evidence,
+                activation,
+                run,
+                winner,
+                manifest,
+                outputSnapshot,
+                targetReceipt);
+        validateRecoveredFormalEvent(
+                evidence,
+                formalOperation,
+                formalEvent,
+                command,
+                targetReceipt,
+                formalReceipt);
+    }
+
+    private void validateStoredTargetReceipt(
+            CompletionEvidence evidence,
+            JsonNode activation,
+            JsonNode run,
+            ValidatedRecoveredAttempt winner,
+            JsonNode row,
+            TargetE2eFinalizationReceipt receipt) {
+        requireText(row, "schema_version", receipt.schemaVersion());
+        requireNonBlank(row, "receipt_id");
+        requireText(row, "execution_lane", receipt.executionLane());
+        requireText(row, "activation_id", receipt.activationId());
+        requireText(
+                row,
+                "activation_manifest_hash",
+                requiredText(activation, "manifest_hash"));
+        requireText(row, "tenant_surrogate", receipt.tenantSurrogate());
+        requireText(row, "case_id", receipt.caseId());
+        requireText(row, "room_type", receipt.roomType().name());
+        requireLong(row, "room_epoch", receipt.roomEpoch());
+        requireLong(row, "room_fencing_token", receipt.roomFencingToken());
+        requireLong(row, "process_revision", receipt.processRevision());
+        requireLong(row, "stage_sequence", receipt.stageSequence());
+        requireText(row, "logical_run_id", receipt.logicalRunId());
+        requireText(row, "attempt_id", receipt.attemptId());
+        requireText(row, "command_hash", receipt.commandHash());
+        requireText(row, "command_envelope_hash", receipt.commandEnvelopeHash());
+        requireText(row, "graph_key", receipt.graphKey());
+        requireText(row, "graph_version", receipt.graphVersion());
+        requireText(
+                row,
+                "checkpoint_schema_version",
+                receipt.checkpointSchemaVersion());
+        requireText(row, "checkpoint_id", receipt.checkpointId());
+        requireText(row, "result_hash", receipt.resultHash());
+        requireText(row, "proposal_hash", receipt.proposalHash());
+        requireText(row, "result_envelope_hash", receipt.resultEnvelopeHash());
+        requireText(row, "agent_run_manifest_id", receipt.agentRunManifestId());
+        requireText(row, "agent_run_manifest_hash", receipt.agentRunManifestHash());
+        requireText(
+                row,
+                "isolated_domain_db_binding_hash",
+                receipt.isolatedDomainDbBindingHash());
+        requireText(row, "receipt_hash", receipt.receiptHash());
+        requireText(row, "formal_writer", receipt.formalWriter().name());
+        requireText(row, "domain_commit_status", receipt.domainCommitStatus().name());
+        requireInstant(row, "committed_at", receipt.committedAt());
+        requirePresent(row, "recorded_at");
+
+        if (!requiredText(activation, "activation_id").equals(receipt.activationId())
+                || !requiredText(activation, "execution_lane")
+                        .equals(receipt.executionLane())
+                || !requiredText(activation, "isolated_domain_db_binding_hash")
+                        .equals(receipt.isolatedDomainDbBindingHash())
+                || !evidence.tenantSurrogate().equals(receipt.tenantSurrogate())
+                || !evidence.caseId().equals(receipt.caseId())
+                || receipt.roomType() != RoomType.INTAKE
+                || evidence.roomEpoch() != receipt.roomEpoch()
+                || evidence.fencingToken() != receipt.roomFencingToken()
+                || evidence.receipt().processRevision() != receipt.processRevision()
+                || winner.command().stageSequence() != receipt.stageSequence()
+                || !requiredText(run, "id").equals(receipt.logicalRunId())
+                || !requiredText(winner.attempt(), "id").equals(receipt.attemptId())
+                || !winner.envelope().commandHash().equals(receipt.commandHash())
+                || !winner.envelope()
+                        .commandEnvelopeHash()
+                        .equals(receipt.commandEnvelopeHash())
+                || !winner.command().graphKey().equals(receipt.graphKey())
+                || !winner.command().graphVersion().equals(receipt.graphVersion())
+                || !winner.command()
+                        .checkpointSchemaVersion()
+                        .equals(receipt.checkpointSchemaVersion())
+                || !requiredText(winner.attempt(), "checkpoint_id")
+                        .equals(receipt.checkpointId())
+                || !evidence.receipt().resultHash().equals(receipt.resultHash())
+                || !requiredText(run, "committed_manifest_id")
+                        .equals(receipt.agentRunManifestId())
+                || !requiredText(run, "committed_manifest_hash")
+                        .equals(receipt.agentRunManifestHash())) {
+            throw new IllegalArgumentException(
+                    "target receipt differs from recovered winner authority");
+        }
+    }
+
+    private void validateRecoveredManifest(
+            CompletionEvidence evidence,
+            JsonNode activation,
+            JsonNode run,
+            ValidatedRecoveredAttempt winner,
+            JsonNode manifest,
+            JsonNode outputSnapshot,
+            TargetE2eFinalizationReceipt targetReceipt) {
+        RoomGraphCommand command = winner.command();
+        requireText(manifest, "schema_version", "agent-execution-manifest.v1");
+        requireText(manifest, "id", requiredText(run, "committed_manifest_id"));
+        requireText(
+                manifest,
+                "manifest_sha256",
+                requiredText(run, "committed_manifest_hash"));
+        requireText(
+                manifest, "manifest_sha256", targetReceipt.agentRunManifestHash());
+        requireText(manifest, "tenant_surrogate", evidence.tenantSurrogate());
+        requireText(manifest, "case_id", evidence.caseId());
+        requireText(manifest, "room_type", "INTAKE");
+        requireLong(manifest, "room_epoch", evidence.roomEpoch());
+        requireLong(
+                manifest, "process_revision", evidence.receipt().processRevision());
+        requireLong(manifest, "fencing_token", evidence.fencingToken());
+        requireText(manifest, "logical_agent_run_id", requiredText(run, "id"));
+        requireText(
+                manifest, "attempt_id", requiredText(winner.attempt(), "id"));
+        validateRecoveredManifestWorkflow(manifest, activation, run);
+        requireText(manifest, "graph_key", command.graphKey());
+        requireText(manifest, "graph_version", command.graphVersion());
+        requireText(
+                manifest,
+                "checkpoint_schema_version",
+                command.checkpointSchemaVersion());
+        requireText(
+                manifest,
+                "checkpoint_id",
+                requiredText(winner.attempt(), "checkpoint_id"));
+        requireText(
+                manifest,
+                "prompt_version",
+                command.invocationContext().promptProfileId());
+        requireText(
+                manifest,
+                "model_profile_id",
+                command.invocationContext().modelProfileId());
+        requireText(
+                manifest,
+                "provider",
+                requiredText(winner.attempt(), "provider"));
+        requireText(
+                manifest,
+                "model_version",
+                requiredText(winner.attempt(), "model_version"));
+        requireText(
+                manifest,
+                "policy_version",
+                command.invocationContext().policyVersion());
+        requireText(
+                manifest,
+                "guardrail_version",
+                command.invocationContext().guardrailVersion());
+        requireText(manifest, "output_sha256", evidence.receipt().resultHash());
+        requireText(manifest, "traceparent", command.traceparent());
+        requireText(manifest, "terminal_status", "COMPLETED");
+        requirePresent(manifest, "finalized_at");
+
+        requireText(
+                outputSnapshot,
+                "id",
+                requiredText(manifest, "output_snapshot_id"));
+        requireText(
+                outputSnapshot, "tenant_surrogate", evidence.tenantSurrogate());
+        requireText(outputSnapshot, "case_id", evidence.caseId());
+        requireText(outputSnapshot, "room_type", "INTAKE");
+        requireText(outputSnapshot, "snapshot_type", "AGENT_OUTPUT");
+        requireText(outputSnapshot, "source_type", "AGENT_RUN");
+        requireText(outputSnapshot, "source_id", requiredText(run, "id"));
+        requireText(outputSnapshot, "schema_version", "room-graph-result.v1");
+        requireText(
+                outputSnapshot,
+                "content_sha256",
+                evidence.receipt().resultHash());
+    }
+
+    private static void validateRecoveredManifestWorkflow(
+            JsonNode manifest, JsonNode activation, JsonNode run) {
+        requireText(manifest, "workflow_type", AgentRunWorkflow.WORKFLOW_TYPE);
+        requireText(
+                manifest,
+                "workflow_id",
+                TemporalAgentRunV2WorkflowLauncher.workflowId(requiredText(run, "id")));
+        requireNonBlank(manifest, "workflow_run_id");
+        requireText(
+                manifest,
+                "workflow_build_id",
+                requiredText(activation, "agent_build_id"));
+    }
+
+    private void validateRecoveredFormalEvent(
+            CompletionEvidence evidence,
+            JsonNode formalOperation,
+            JsonNode formalEvent,
+            RoomGraphCommand winnerCommand,
+            TargetE2eFinalizationReceipt targetReceipt,
+            IntakeFinalizationReceipt formalReceipt) {
+        requireSha256(formalOperation, "request_hash");
+        String formalRequestHash = requiredText(formalOperation, "request_hash");
+        JsonNode event = requiredObject(formalEvent, "event_json");
+        requireExactFields(
+                event,
+                Set.of(
+                        "schema_version",
+                        "event_type",
+                        "operation_key",
+                        "request_hash",
+                        "result_hash",
+                        "proposal_hash",
+                        "message_id",
+                        "actor_scope_hash",
+                        "receipt"),
+                "formal Intake event");
+        requireText(event, "schema_version", "intake-turn-committed-event.v1");
+        requireText(event, "event_type", evidence.eventType());
+        requireText(event, "operation_key", evidence.formalOperationKey());
+        requireText(event, "request_hash", formalRequestHash);
+        requireText(event, "result_hash", targetReceipt.resultHash());
+        requireText(event, "proposal_hash", formalReceipt.proposalHash());
+        requireText(event, "message_id", formalReceipt.formalMessageId());
+        requireText(event, "actor_scope_hash", formalReceipt.actorScopeHash());
+        if (!canonicalJsonEquals(
+                        objectMapper.valueToTree(formalReceipt), event.required("receipt"))
+                || !formalReceipt.commandId().equals(winnerCommand.commandId())
+                || !formalReceipt.logicalRunId().equals(targetReceipt.logicalRunId())
+                || !formalReceipt.attemptId().equals(targetReceipt.attemptId())
+                || !formalReceipt.resultHash().equals(targetReceipt.resultHash())) {
+            throw new IllegalArgumentException(
+                    "formal Intake event differs from the recovered winning receipt");
+        }
+    }
+
+    private JsonNode readProofObject(String raw, String label) {
+        JsonNode value = readProofJson(raw, label);
+        if (!value.isObject()) {
+            throw new IllegalArgumentException(label + " must be an object");
+        }
+        return value;
+    }
+
+    private List<JsonNode> readProofArray(String raw, String label) {
+        JsonNode value = readProofJson(raw, label);
+        if (!value.isArray() || value.isEmpty()) {
+            throw new IllegalArgumentException(label + " must be a non-empty array");
+        }
+        List<JsonNode> result = new ArrayList<>();
+        value.forEach(result::add);
+        return List.copyOf(result);
+    }
+
+    private JsonNode readProofJson(String raw, String label) {
+        if (raw == null || raw.isBlank()) {
+            throw new IllegalArgumentException(label + " is missing");
+        }
+        try {
+            JsonNode value = objectMapper.readTree(raw);
+            if (value == null) {
+                throw new IllegalArgumentException(label + " is empty");
+            }
+            return value;
+        } catch (JsonProcessingException failure) {
+            throw new IllegalArgumentException(label + " is invalid JSON", failure);
+        }
+    }
+
+    private static <T> T treeToValue(
+            ObjectMapper mapper, JsonNode value, Class<T> type, String label) {
+        try {
+            return mapper.treeToValue(value, type);
+        } catch (JsonProcessingException | IllegalArgumentException failure) {
+            throw new IllegalArgumentException(label + " is invalid", failure);
+        }
+    }
+
+    private static JsonNode requiredObject(JsonNode parent, String field) {
+        JsonNode value = parent.required(field);
+        if (!value.isObject()) {
+            throw new IllegalArgumentException(field + " must be an object");
+        }
+        return value;
+    }
+
+    private static String requiredText(JsonNode parent, String field) {
+        JsonNode value = parent.required(field);
+        if (!value.isTextual() || value.textValue().isBlank()) {
+            throw new IllegalArgumentException(field + " must be non-blank text");
+        }
+        return value.textValue();
+    }
+
+    private static String optionalText(JsonNode parent, String field) {
+        JsonNode value = parent.get(field);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual() || value.textValue().isBlank()) {
+            throw new IllegalArgumentException(field + " must be null or non-blank text");
+        }
+        return value.textValue();
+    }
+
+    private static long requiredLong(JsonNode parent, String field) {
+        JsonNode value = parent.required(field);
+        if (!value.isIntegralNumber() || !value.canConvertToLong()) {
+            throw new IllegalArgumentException(field + " must be an integer");
+        }
+        return value.longValue();
+    }
+
+    private static boolean requiredBoolean(JsonNode parent, String field) {
+        JsonNode value = parent.required(field);
+        if (!value.isBoolean()) {
+            throw new IllegalArgumentException(field + " must be boolean");
+        }
+        return value.booleanValue();
+    }
+
+    private static void requireText(JsonNode parent, String field, String expected) {
+        if (!Objects.equals(requiredText(parent, field), expected)) {
+            throw new IllegalArgumentException(field + " differs from canonical authority");
+        }
+    }
+
+    private static void requireLong(JsonNode parent, String field, long expected) {
+        if (requiredLong(parent, field) != expected) {
+            throw new IllegalArgumentException(field + " differs from canonical authority");
+        }
+    }
+
+    private static void requireNonBlank(JsonNode parent, String field) {
+        requiredText(parent, field);
+    }
+
+    private static void requireSha256(JsonNode parent, String field) {
+        if (!requiredText(parent, field).matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException(field + " must be a lowercase SHA-256");
+        }
+    }
+
+    private static boolean hasPresent(JsonNode parent, String field) {
+        JsonNode value = parent.get(field);
+        return value != null && !value.isNull();
+    }
+
+    private static void requirePresent(JsonNode parent, String field) {
+        if (!hasPresent(parent, field)) {
+            throw new IllegalArgumentException(field + " is missing");
+        }
+    }
+
+    private static void requireInstant(JsonNode parent, String field, Instant expected) {
+        try {
+            Instant actual = OffsetDateTime.parse(requiredText(parent, field)).toInstant();
+            if (!actual.equals(expected)) {
+                throw new IllegalArgumentException(
+                        field + " differs from canonical authority");
+            }
+        } catch (java.time.DateTimeException failure) {
+            throw new IllegalArgumentException(field + " is not an exact timestamp", failure);
+        }
+    }
+
+    private static void requireExactFields(
+            JsonNode parent, Set<String> expected, String label) {
+        Set<String> actual = new HashSet<>();
+        parent.fieldNames().forEachRemaining(actual::add);
+        if (!actual.equals(expected)) {
+            throw new IllegalArgumentException(label + " members are not exact");
+        }
+    }
+
+    private static boolean sameNullableText(String left, String right) {
+        return Objects.equals(left, right);
+    }
+
+    private static boolean canonicalJsonEquals(JsonNode left, JsonNode right) {
+        return ContractJson.canonicalString(left).equals(ContractJson.canonicalString(right));
     }
 
     private void validateFreshProjectionAuthority(CompletionEvidence evidence) {
@@ -728,6 +1963,11 @@ public class IntakeProcessProjectionCompletionService {
         IDEMPOTENT_REPLAY
     }
 
+    private enum CompletionAuthorityKind {
+        LEGACY_EXACT_COMMAND,
+        TARGET_RECOVERED_WINNER_V1
+    }
+
     private record CompletionEvidence(
             String tenantSurrogate,
             String caseId,
@@ -772,7 +2012,37 @@ public class IntakeProcessProjectionCompletionService {
             String eventId,
             long eventSequence,
             String eventType,
-            IntakeFinalizationReceipt receipt) {}
+            IntakeFinalizationReceipt receipt,
+            CompletionAuthorityKind authorityKind,
+            RecoveredWinnerProof recoveredWinnerProof) {}
+
+    private record RecoveredWinnerProof(
+            String candidateJson, byte[] targetReceiptCanonicalBytes, String attemptsJson) {
+
+        private RecoveredWinnerProof {
+            targetReceiptCanonicalBytes =
+                    targetReceiptCanonicalBytes == null
+                            ? null
+                            : targetReceiptCanonicalBytes.clone();
+        }
+
+        @Override
+        public byte[] targetReceiptCanonicalBytes() {
+            return targetReceiptCanonicalBytes == null
+                    ? null
+                    : targetReceiptCanonicalBytes.clone();
+        }
+    }
+
+    private record ValidatedRecoveredAttempt(
+            JsonNode attempt,
+            JsonNode admission,
+            JsonNode material,
+            IntakeCommandExecutionContext context,
+            IntakeTargetAgentRunContext target,
+            ExecuteAgentRunRequest request,
+            RoomGraphCommand command,
+            TargetE2EGraphCommandEnvelope envelope) {}
 
     private record ProjectionOperation(
             String operationType,

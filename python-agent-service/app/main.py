@@ -58,6 +58,7 @@ from app.agents.dispute_intake_officer import DisputeIntakeOfficer
 from app.agents.evaluation_agent import EvaluationAgent
 from app.agents.evidence_clerk import EvidenceClerk
 from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+from app.agents.evidence_clerk.public_reply import EvidencePublicOutputPolicy
 from app.agents.hearing_flow import HearingFlowWorkflows
 from app.agents.model_roles import ModelCriticEvaluator, ModelReviewAnswerer
 from app.agents.review_copilot import ReviewCopilot
@@ -826,6 +827,10 @@ def create_app(
             operation="evidence_turn",
             run_id=resolve_agent_run_id(x_agent_run_id),
             invoke=lambda: resolved_evidence_turn_workflow.run(payload),
+            finalized_visible=lambda result: result.room_utterance,
+            finalized_visible_node="evidence_turn",
+            finalized_visible_field="room_utterance",
+            public_output_policy=EvidencePublicOutputPolicy(),
         )
 
     @app.post("/internal/agents/hearing-flow/intake/questions/stream")

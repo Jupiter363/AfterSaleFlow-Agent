@@ -9,23 +9,41 @@ import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionCommand;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionResult;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionOutcome;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionResult;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
+import com.example.dispute.workflow.activity.domain.ProcessProjectionActivities;
 import com.example.dispute.workflow.infrastructure.outbox.SdkTemporalUpdateGateway;
 import com.example.dispute.workflow.infrastructure.outbox.TemporalUpdateDeliveryException;
 import com.example.dispute.workflow.infrastructure.outbox.TemporalUpdateGateway;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.CommandLifecycleOutcome;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommand;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommandResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRouted;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommitResult;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.TerminalNoCommitOutcome;
 import com.example.dispute.workflow.temporal.caseprocess.CaseDomainEventRef;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessIntakeProjectionRecoveryRequest;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessIntakeProjectionRecoveryResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerEntry;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerState;
@@ -35,9 +53,15 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivi
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessSnapshot;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl;
+import com.example.dispute.workflow.temporal.caseprocess.ProcessedCommandIdentity;
+import com.example.dispute.workflow.temporal.caseprocess.TargetIntakeCommandTerminalNoCommit;
 import com.example.dispute.workflow.temporal.room.common.RoomControlSnapshot;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflow;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomCaseProcessWorkflow;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.UpdateOptions;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
@@ -45,6 +69,7 @@ import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateException;
 import io.temporal.client.WorkflowUpdateStage;
 import io.temporal.common.WorkflowExecutionHistory;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.testing.WorkflowReplayer;
@@ -56,6 +81,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -67,11 +93,13 @@ class CaseProcessWorkflowTest {
   private static final String CASE_ID = "CASE_ProcessWorkflow";
   private static final String WORKFLOW_ID =
       CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID);
+  private static final String RECOVERY_TASK_QUEUE = "case-process-projection-recovery-test";
   private static final Instant OCCURRED_AT = Instant.parse("2026-07-17T08:00:00Z");
 
   private TestWorkflowEnvironment environment;
   private WorkflowClient client;
   private RecordingLedgerActivities ledger;
+  private RecoveryProjectionActivities recoveryProjection;
 
   @BeforeEach
   void setUp() {
@@ -81,7 +109,11 @@ class CaseProcessWorkflowTest {
     Worker caseWorker = environment.newWorker(CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE);
     caseWorker.registerWorkflowImplementationTypes(CaseProcessWorkflowImpl.class);
     ledger = new RecordingLedgerActivities();
-    caseWorker.registerActivitiesImplementations(ledger);
+    recoveryProjection = new RecoveryProjectionActivities();
+    caseWorker.registerActivitiesImplementations(ledger, recoveryProjection);
+    Worker recoveryWorker = environment.newWorker(RECOVERY_TASK_QUEUE);
+    recoveryWorker.registerWorkflowImplementationTypes(RecoveryTargetCaseProcessWorkflow.class);
+    RecoveryTargetCaseProcessWorkflow.reset();
     Worker roomWorker = environment.newWorker(CaseProcessWorkflowProtocol.ROOM_CONTROL_TASK_QUEUE);
     roomWorker.registerWorkflowImplementationTypes(RoomControlWorkflowImpl.class);
     environment.start();
@@ -91,6 +123,152 @@ class CaseProcessWorkflowTest {
   @AfterEach
   void tearDown() {
     environment.close();
+  }
+
+  @Test
+  void exposesAcknowledgedIntakeProjectionCompletionRecoveryUpdateContract() {
+    var update =
+        java.util.Arrays.stream(CaseProcessWorkflow.class.getMethods())
+            .filter(method -> method.getName().equals("recoverIntakeProjectionCompletion"))
+            .findFirst()
+            .orElseThrow(
+                () ->
+                    new AssertionError(
+                        "CaseProcess workflow must expose exact Intake projection recovery"));
+
+    assertThat(update.getParameterTypes())
+        .extracting(Class::getName)
+        .containsExactly(
+            "com.example.dispute.workflow.temporal.caseprocess."
+                + "CaseProcessIntakeProjectionRecoveryRequest");
+    assertThat(update.getReturnType().getName())
+        .isEqualTo(
+            "com.example.dispute.workflow.temporal.caseprocess."
+                + "CaseProcessIntakeProjectionRecoveryResult");
+    assertThat(update.getAnnotation(io.temporal.workflow.UpdateMethod.class)).isNotNull();
+    assertThat(update.getAnnotation(io.temporal.workflow.UpdateMethod.class).name())
+        .isEqualTo("recoverIntakeProjectionCompletion");
+  }
+
+  @Test
+  void terminalNoCommitSignalConvergesOnceAndReplaysWithoutDuplicateAccounting() {
+    CaseProcessWorkflow targetWorkflow =
+        client.newWorkflowStub(
+            CaseProcessWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(WORKFLOW_ID)
+                .setTaskQueue(RECOVERY_TASK_QUEUE)
+                .build());
+    WorkflowClient.start(targetWorkflow::run, (CaseProcessCarryState) null);
+    ProvisionRoomEpochReceipt provisioned =
+        provision(targetWorkflow, projectionRecoveryProvisioning());
+    CaseCommandRef command = projectionRecoveryCommand();
+    ledger.put(command);
+    targetWorkflow.acceptCommand(command);
+    CaseProcessSnapshot before =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 2
+                    && snapshot.observedProcessRevision() == 1
+                    && Long.valueOf(1).equals(snapshot.activeRoomRevision()));
+    TargetIntakeCommandTerminalNoCommit authority =
+        terminalNoCommitAuthority(command, before);
+
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(authority);
+    awaitTerminalNoCommitConvergences(1);
+
+    ConvergeTargetIntakeTerminalNoCommit first = ledger.terminalNoCommitConvergences.getFirst();
+    assertThat(first.authority()).isEqualTo(authority);
+    assertThat(first.caseWorkflowId()).isEqualTo(WORKFLOW_ID);
+    assertThat(first.caseWorkflowRunId()).isEqualTo(provisioned.caseWorkflowRunId());
+    assertThat(first.caseWorkflowBuildId()).isEqualTo("case-process-recovery-test.v1");
+    assertThat(ledger.terminalNoCommitOutcomes)
+        .containsExactly(TerminalNoCommitOutcome.TERMINALIZED);
+    assertTerminalNoCommitAccountingUnchanged(before, targetWorkflow.state());
+
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(authority);
+    awaitTerminalNoCommitConvergences(2);
+    assertThat(ledger.terminalNoCommitOutcomes)
+        .containsExactly(
+            TerminalNoCommitOutcome.TERMINALIZED,
+            TerminalNoCommitOutcome.IDEMPOTENT_REPLAY);
+    assertTerminalNoCommitAccountingUnchanged(before, targetWorkflow.state());
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isZero();
+  }
+
+  @Test
+  void acknowledgedIntakeProjectionRecoveryConsumesBufferedFormalEventExactlyOnceWithoutRoomRedispatch() {
+    PreparedProjectionRecovery prepared = prepareProjectionRecovery();
+    int projectionCallsBeforeRecovery = recoveryProjection.completionCalls.get();
+    int roomEventsBeforeRecovery = RecoveryTargetCaseProcessWorkflow.eventDispatches.get();
+
+    CaseProcessIntakeProjectionRecoveryResult result =
+        prepared.workflow().recoverIntakeProjectionCompletion(prepared.request());
+
+    CaseProcessSnapshot recovered =
+        awaitProcess(
+            prepared.workflow(),
+            snapshot ->
+                snapshot.nextCaseEventSequence() == 2
+                    && snapshot.processedEventCount() == 1
+                    && snapshot.protocolErrorCode() == null);
+    assertThat(result.disposition())
+        .isEqualTo(CaseProcessIntakeProjectionRecoveryResult.Disposition.ADOPTED);
+    assertThat(result.request()).isEqualTo(prepared.request());
+    assertThat(result.projectionResult().outcome())
+        .isEqualTo(CompleteConsumedIntakeProjectionOutcome.APPLIED);
+    assertThat(recoveryProjection.completionCalls.get())
+        .isEqualTo(projectionCallsBeforeRecovery + 1);
+    assertThat(recoveryProjection.applyCalls.get()).isZero();
+    assertThat(recoveryProjection.commands)
+        .containsExactly(prepared.request().projectionCommand(), prepared.request().projectionCommand());
+    assertThat(RecoveryTargetCaseProcessWorkflow.startCalls.get()).isEqualTo(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get())
+        .isEqualTo(roomEventsBeforeRecovery);
+    assertThat(RecoveryTargetCaseProcessWorkflow.closeCalls.get()).isZero();
+    assertThat(recovered.nextCommandSequence()).isEqualTo(2);
+    assertThat(recovered.processedCommandCount()).isEqualTo(1);
+    assertThat(recovered.bufferedEventCount()).isZero();
+    assertThat(recovered.protocolErrorOrigin()).isNull();
+    assertThat(recovered.activeChildWorkflowId())
+        .isEqualTo(prepared.failed().activeChildWorkflowId());
+    assertThat(recovered.activeChildWorkflowRunId())
+        .isEqualTo(prepared.failed().activeChildWorkflowRunId());
+  }
+
+  @Test
+  void exactIntakeProjectionRecoveryReplayReturnsCachedResultWithoutDuplicateAccounting() {
+    PreparedProjectionRecovery prepared = prepareProjectionRecovery();
+    CaseProcessIntakeProjectionRecoveryResult adopted =
+        prepared.workflow().recoverIntakeProjectionCompletion(prepared.request());
+    CaseProcessSnapshot afterAdoption =
+        awaitProcess(
+            prepared.workflow(),
+            snapshot ->
+                snapshot.nextCaseEventSequence() == 2
+                    && snapshot.processedEventCount() == 1
+                    && snapshot.protocolErrorCode() == null);
+    int completionCallsAfterAdoption = recoveryProjection.completionCalls.get();
+    int commandDispatchesAfterAdoption =
+        RecoveryTargetCaseProcessWorkflow.commandDispatches.get();
+    int eventDispatchesAfterAdoption = RecoveryTargetCaseProcessWorkflow.eventDispatches.get();
+
+    CaseProcessIntakeProjectionRecoveryResult replay =
+        prepared.workflow().recoverIntakeProjectionCompletion(prepared.request());
+    CaseProcessSnapshot afterReplay = prepared.workflow().state();
+
+    assertThat(replay).isEqualTo(adopted);
+    assertThat(recoveryProjection.completionCalls.get()).isEqualTo(completionCallsAfterAdoption);
+    assertThat(recoveryProjection.applyCalls.get()).isZero();
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get())
+        .isEqualTo(commandDispatchesAfterAdoption);
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get())
+        .isEqualTo(eventDispatchesAfterAdoption);
+    assertThat(RecoveryTargetCaseProcessWorkflow.closeCalls.get()).isZero();
+    assertThat(afterReplay).isEqualTo(afterAdoption);
   }
 
   @Test
@@ -608,6 +786,56 @@ class CaseProcessWorkflowTest {
   }
 
   @Test
+  void provisioningBoundaryRecoversDurableUnsignaledStreamsBeforeSwitch() {
+    startWorkflow();
+    provision(provisioning(RoomType.EVIDENCE, 0, 1, 0, 0, 0));
+    CaseCommandRef currentRoomCommand = command(1, RoomType.EVIDENCE, 0);
+    CaseDomainEventRef currentRoomEvent = event(1, RoomType.EVIDENCE, 0);
+    ledger.put(currentRoomCommand);
+    ledger.put(currentRoomEvent);
+    ProvisionRoomEpoch nextRoom = provisioning(RoomType.HEARING, 0, 2, 1, 1, 1);
+
+    ProvisionRoomEpochReceipt switchedReceipt = provision(nextRoom);
+
+    CaseProcessSnapshot switched =
+        awaitProcess(
+            snapshot ->
+                snapshot.nextCommandSequence() == 2
+                    && snapshot.nextCaseEventSequence() == 2
+                    && snapshot.activeRoomType() == RoomType.HEARING
+                    && snapshot.activeFencingToken() == 2);
+    assertThat(switched.processedCommandCount()).isEqualTo(1);
+    assertThat(switched.processedEventCount()).isEqualTo(1);
+    assertThat(switched.activeChildWorkflowId()).isEqualTo(nextRoom.roomWorkflowId());
+    assertThat(ledger.commandLoads)
+        .anySatisfy(
+            range -> {
+              assertThat(range.fromSequenceInclusive()).isEqualTo(1);
+              assertThat(range.toSequenceInclusive()).isEqualTo(1);
+            });
+    assertThat(ledger.eventLoads)
+        .anySatisfy(
+            range -> {
+              assertThat(range.fromSequenceInclusive()).isEqualTo(1);
+              assertThat(range.toSequenceInclusive()).isEqualTo(1);
+            });
+    assertThat(provision(nextRoom)).isEqualTo(switchedReceipt);
+
+    ProvisionRoomEpoch staleBoundary = provisioning(RoomType.REVIEW, 0, 3, 1, 0, 0);
+    assertThatThrownBy(() -> provision(staleBoundary))
+        .isInstanceOf(WorkflowUpdateException.class);
+    CaseProcessSnapshot rejected =
+        awaitProcess(
+            snapshot ->
+                "ROOM_EPOCH_SEQUENCE_BOUNDARY_CONFLICT".equals(snapshot.protocolErrorCode()));
+    assertThat(rejected.nextCommandSequence()).isEqualTo(2);
+    assertThat(rejected.nextCaseEventSequence()).isEqualTo(2);
+    assertThat(rejected.activeRoomType()).isEqualTo(RoomType.HEARING);
+    assertThat(rejected.activeFencingToken()).isEqualTo(2);
+    assertThat(rejected.activeChildWorkflowId()).isEqualTo(nextRoom.roomWorkflowId());
+  }
+
+  @Test
   void childStartConflictFailsOnlyTheUpdateAndPreservesTheActiveRoom() {
     ProvisionRoomEpoch first = provisioning(RoomType.EVIDENCE, 0, 1, 0, 0, 0);
     ProvisionRoomEpoch blocked = provisioning(RoomType.HEARING, 0, 2, 0, 0, 0);
@@ -748,6 +976,243 @@ class CaseProcessWorkflowTest {
     assertThat(oldRoom.recentCommandIds()).containsExactly(oldCommand.commandId());
   }
 
+  private PreparedProjectionRecovery prepareProjectionRecovery() {
+    CaseProcessWorkflow recoveryWorkflow =
+        client.newWorkflowStub(
+            CaseProcessWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(WORKFLOW_ID)
+                .setTaskQueue(RECOVERY_TASK_QUEUE)
+                .build());
+    WorkflowClient.start(recoveryWorkflow::run, (CaseProcessCarryState) null);
+    ProvisionRoomEpochReceipt provisioned =
+        provision(recoveryWorkflow, projectionRecoveryProvisioning());
+    CaseCommandRef command = projectionRecoveryCommand();
+    ledger.put(command);
+    recoveryWorkflow.acceptCommand(command);
+    CaseProcessSnapshot afterCommand =
+        awaitProcess(
+            recoveryWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 2
+                    && snapshot.observedProcessRevision() == 1
+                    && Long.valueOf(1).equals(snapshot.activeRoomRevision()));
+    assertThat(afterCommand.activeChildKind()).isEqualTo(ActiveChildKind.TARGET_TYPED_ROOM);
+
+    CaseDomainEventRef event = projectionRecoveryEvent();
+    recoveryWorkflow.domainEventCommitted(event);
+    CaseProcessSnapshot failed =
+        awaitProcess(
+            recoveryWorkflow,
+            snapshot ->
+                "INTAKE_PROCESS_PROJECTION_COMPLETION_FAILED"
+                        .equals(snapshot.protocolErrorCode())
+                    && snapshot.protocolErrorOrigin() == RecoveryErrorOrigin.DOMAIN_EVENT);
+    assertThat(failed.workflowRunId()).isEqualTo(provisioned.caseWorkflowRunId());
+    assertThat(failed.nextCaseEventSequence()).isEqualTo(1);
+    assertThat(failed.processedEventCount()).isZero();
+    assertThat(failed.bufferedEventCount()).isEqualTo(1);
+    assertThat(recoveryProjection.completionCalls.get()).isEqualTo(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isEqualTo(1);
+
+    CompleteConsumedIntakeProjectionCommand projectionCommand =
+        new CompleteConsumedIntakeProjectionCommand(
+            "complete-consumed-intake-projection.v1",
+            TENANT,
+            CASE_ID,
+            event.eventId(),
+            event.caseEventSequence(),
+            event.eventType(),
+            command.caseCommandSequence(),
+            failed.activeRoomEpoch(),
+            failed.activeFencingToken(),
+            failed.observedProcessRevision(),
+            failed.activeRoomRevision(),
+            failed.workflowId(),
+            failed.workflowRunId(),
+            failed.activeChildWorkflowRunId());
+    assertThat(recoveryProjection.commands).containsExactly(projectionCommand);
+    CaseProcessIntakeProjectionRecoveryRequest request =
+        new CaseProcessIntakeProjectionRecoveryRequest(
+            CaseProcessIntakeProjectionRecoveryRequest.SCHEMA_VERSION,
+            failed.workflowId(),
+            failed.workflowRunId(),
+            failed.workflowRunId(),
+            TENANT,
+            CASE_ID,
+            RoomType.INTAKE,
+            failed.activeRoomEpoch(),
+            failed.activeFencingToken(),
+            failed.activeChildWorkflowId(),
+            failed.activeChildWorkflowRunId(),
+            failed.observedProcessRevision(),
+            failed.activeRoomRevision(),
+            failed.nextCommandSequence(),
+            failed.nextCaseEventSequence(),
+            failed.processedCommandCount(),
+            failed.processedEventCount(),
+            new ProcessedCommandIdentity(
+                command.commandId(), command.caseCommandSequence(), command.requestHash()),
+            event,
+            projectionCommand);
+    return new PreparedProjectionRecovery(recoveryWorkflow, request, failed);
+  }
+
+  private void awaitTerminalNoCommitConvergences(int expectedCount) {
+    long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+    while (System.nanoTime() < deadline) {
+      if (ledger.terminalNoCommitConvergences.size() == expectedCount) {
+        return;
+      }
+      sleepBriefly();
+    }
+    throw new AssertionError("terminal-no-commit convergence count did not settle");
+  }
+
+  private static void assertTerminalNoCommitAccountingUnchanged(
+      CaseProcessSnapshot expected, CaseProcessSnapshot actual) {
+    assertThat(actual.observedProcessRevision()).isEqualTo(expected.observedProcessRevision());
+    assertThat(actual.activeRoomRevision()).isEqualTo(expected.activeRoomRevision());
+    assertThat(actual.nextCommandSequence()).isEqualTo(expected.nextCommandSequence());
+    assertThat(actual.nextCaseEventSequence()).isEqualTo(expected.nextCaseEventSequence());
+    assertThat(actual.processedCommandCount()).isEqualTo(expected.processedCommandCount());
+    assertThat(actual.processedEventCount()).isEqualTo(expected.processedEventCount());
+    assertThat(actual.pendingCommandCount()).isZero();
+    assertThat(actual.bufferedEventCount()).isZero();
+    assertThat(actual.recentCommandIds()).isEqualTo(expected.recentCommandIds());
+    assertThat(actual.protocolErrorCode()).isNull();
+  }
+
+  private static TargetIntakeCommandTerminalNoCommit terminalNoCommitAuthority(
+      CaseCommandRef command, CaseProcessSnapshot snapshot) {
+    return new TargetIntakeCommandTerminalNoCommit(
+        TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION,
+        TENANT,
+        CASE_ID,
+        RoomType.INTAKE,
+        snapshot.activeRoomEpoch(),
+        snapshot.activeFencingToken(),
+        snapshot.activeChildWorkflowId(),
+        snapshot.activeChildWorkflowRunId(),
+        snapshot.activeRoomWorkflowBuildId(),
+        "activation-terminal-no-commit",
+        "1".repeat(64),
+        "case-process-recovery-test.v1",
+        snapshot.activeRoomWorkflowBuildId(),
+        "agent-terminal-no-commit.v1",
+        "2".repeat(64),
+        "graph-terminal-no-commit.v1",
+        "3".repeat(64),
+        "4".repeat(64),
+        "5".repeat(64),
+        "6".repeat(64),
+        command.commandId(),
+        command.caseCommandSequence(),
+        command.requestHash(),
+        "message-terminal-no-commit",
+        command.payloadRef().uri(),
+        command.payloadRef().sha256(),
+        command.expectedProcessRevision(),
+        command.expectedProcessRevision() + 1,
+        0,
+        1,
+        0L,
+        0,
+        "logical-run-terminal-no-commit",
+        "attempt-terminal-no-commit-1",
+        "attempt-terminal-no-commit-1",
+        1,
+        AgentRunAttemptStatus.ABORTED,
+        ExecuteAgentRunResult.Outcome.FAILED,
+        "GRAPH_STREAM_PROTOCOL_REJECTED",
+        false,
+        AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
+        3,
+        true,
+        OCCURRED_AT.plusSeconds(2));
+  }
+
+  private static ProvisionRoomEpoch projectionRecoveryProvisioning() {
+    return new ProvisionRoomEpoch(
+        ProvisionRoomEpoch.SCHEMA_VERSION,
+        "epoch-intake-projection-recovery",
+        TENANT,
+        CASE_ID,
+        "room-intake-projection-recovery",
+        RoomType.INTAKE,
+        1,
+        0,
+        0,
+        11,
+        "ACTIVE",
+        "INTAKE",
+        "ACTIVE",
+        WriterMode.TEMPORAL,
+        WORKFLOW_ID,
+        CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.INTAKE, 1),
+        TargetTypedRoomProtocol.SELECTION_SCHEMA_VERSION,
+        TargetTypedRoomProtocol.PROCESS_CONTRACT_VERSION,
+        TargetTypedRoomProtocol.CASE_WORKFLOW_TYPE,
+        "case-process-recovery-test.v1",
+        TargetTypedRoomProtocol.workflowType(RoomType.INTAKE),
+        "intake-room-recovery-test.v1",
+        TargetTypedRoomProtocol.GRAPH_KEY,
+        TargetTypedRoomProtocol.GRAPH_VERSION,
+        TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
+        TargetTypedRoomProtocol.STREAM_PROTOCOL,
+        0,
+        0,
+        1,
+        1,
+        OCCURRED_AT.plusSeconds(3_600),
+        null,
+        null,
+        OCCURRED_AT);
+  }
+
+  private static CaseCommandRef projectionRecoveryCommand() {
+    return new CaseCommandRef(
+        "case-command-ref.v1",
+        "command-intake-projection-recovery",
+        TENANT,
+        CASE_ID,
+        1,
+        CommandType.INTAKE_MESSAGE,
+        RoomType.INTAKE,
+        1,
+        new ActorRef("user-case-process", ActorRole.USER, List.of("intake:message")),
+        new PayloadRef(
+            "intake-command.v1",
+            "urn:test:intake:projection-recovery-command",
+            "c".repeat(64),
+            32),
+        0,
+        OCCURRED_AT.plusSeconds(1),
+        OCCURRED_AT.plusSeconds(3_600),
+        "00-11111111111111111111111111111111-2222222222222222-01",
+        "c".repeat(64));
+  }
+
+  private static CaseDomainEventRef projectionRecoveryEvent() {
+    return new CaseDomainEventRef(
+        "case-domain-event-ref.v1",
+        "event-intake-projection-recovery",
+        TENANT,
+        CASE_ID,
+        1,
+        "INTAKE_TURN_READY_TO_CONFIRM",
+        RoomType.INTAKE,
+        1,
+        new PayloadRef(
+            "intake-formal-event.v1",
+            "urn:test:intake:projection-recovery-event",
+            "d".repeat(64),
+            32),
+        OCCURRED_AT.plusSeconds(2),
+        "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01");
+  }
+
   private TemporalUpdateGateway.DeliveryReceipt startWith(CaseCommandRef command) {
     startWorkflow();
     provision(
@@ -779,7 +1244,12 @@ class CaseProcessWorkflowTest {
   }
 
   private ProvisionRoomEpochReceipt provision(ProvisionRoomEpoch request) {
-    return WorkflowStub.fromTyped(workflow())
+    return provision(workflow(), request);
+  }
+
+  private ProvisionRoomEpochReceipt provision(
+      CaseProcessWorkflow targetWorkflow, ProvisionRoomEpoch request) {
+    return WorkflowStub.fromTyped(targetWorkflow)
         .startUpdate(
             UpdateOptions.newBuilder(ProvisionRoomEpochReceipt.class)
                 .setUpdateName(CaseProcessWorkflowProtocol.PROVISION_ROOM_EPOCH_UPDATE)
@@ -916,12 +1386,17 @@ class CaseProcessWorkflowTest {
   }
 
   private CaseProcessSnapshot awaitProcess(Predicate<CaseProcessSnapshot> predicate) {
+    return awaitProcess(workflow(), predicate);
+  }
+
+  private CaseProcessSnapshot awaitProcess(
+      CaseProcessWorkflow targetWorkflow, Predicate<CaseProcessSnapshot> predicate) {
     long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
     RuntimeException lastFailure = null;
     CaseProcessSnapshot lastSnapshot = null;
     while (System.nanoTime() < deadline) {
       try {
-        CaseProcessSnapshot snapshot = workflow().state();
+        CaseProcessSnapshot snapshot = targetWorkflow.state();
         lastSnapshot = snapshot;
         if (predicate.test(snapshot)) {
           return snapshot;
@@ -1064,6 +1539,162 @@ class CaseProcessWorkflowTest {
         "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01");
   }
 
+  private record PreparedProjectionRecovery(
+      CaseProcessWorkflow workflow,
+      CaseProcessIntakeProjectionRecoveryRequest request,
+      CaseProcessSnapshot failed) {}
+
+  public static final class RecoveryTargetCaseProcessWorkflow
+      extends TargetTypedRoomCaseProcessWorkflow {
+
+    private static final AtomicInteger startCalls = new AtomicInteger();
+    private static final AtomicInteger commandDispatches = new AtomicInteger();
+    private static final AtomicInteger eventDispatches = new AtomicInteger();
+    private static final AtomicInteger closeCalls = new AtomicInteger();
+
+    private static void reset() {
+      startCalls.set(0);
+      commandDispatches.set(0);
+      eventDispatches.set(0);
+      closeCalls.set(0);
+    }
+
+    @Override
+    protected TargetTypedRoomChildHandle startTargetTypedRoomChild(
+        ProvisionRoomEpoch request, String provisioningHash) {
+      startCalls.incrementAndGet();
+      return new RecordingTargetHandle(
+          WorkflowExecution.newBuilder()
+              .setWorkflowId(request.roomWorkflowId())
+              .setRunId("intake-projection-recovery-child-run")
+              .build(),
+          request.roomType(),
+          request.roomEpoch(),
+          request.fencingToken(),
+          request.initialProcessRevision(),
+          request.initialRoomRevision());
+    }
+
+    @Override
+    protected TargetTypedRoomChildHandle restoreTargetTypedRoomChild(
+        ActiveChildDescriptor descriptor) {
+      return new RecordingTargetHandle(
+          WorkflowExecution.newBuilder()
+              .setWorkflowId(descriptor.workflowId())
+              .setRunId(descriptor.startedRunId())
+              .build(),
+          descriptor.roomType(),
+          descriptor.roomEpoch(),
+          descriptor.fencingToken(),
+          descriptor.currentProcessRevision(),
+          descriptor.currentRoomRevision());
+    }
+
+    private static final class RecordingTargetHandle implements TargetTypedRoomChildHandle {
+      private final WorkflowExecution execution;
+      private final RoomType roomType;
+      private final long roomEpoch;
+      private final long fencingToken;
+      private long processRevision;
+      private long roomRevision;
+
+      private RecordingTargetHandle(
+          WorkflowExecution execution,
+          RoomType roomType,
+          long roomEpoch,
+          long fencingToken,
+          long processRevision,
+          long roomRevision) {
+        this.execution = execution;
+        this.roomType = roomType;
+        this.roomEpoch = roomEpoch;
+        this.fencingToken = fencingToken;
+        this.processRevision = processRevision;
+        this.roomRevision = roomRevision;
+      }
+
+      @Override
+      public WorkflowExecution execution() {
+        return execution;
+      }
+
+      @Override
+      public TargetTypedRoomDispatchReceipt commandAccepted(CaseCommandRef command) {
+        commandDispatches.incrementAndGet();
+        processRevision = Math.max(processRevision, command.expectedProcessRevision() + 1);
+        roomRevision++;
+        return receipt();
+      }
+
+      @Override
+      public TargetTypedRoomDispatchReceipt domainEventCommitted(CaseDomainEventRef event) {
+        eventDispatches.incrementAndGet();
+        return receipt();
+      }
+
+      @Override
+      public String initiatorActorScopeHash() {
+        return "a".repeat(64);
+      }
+
+      @Override
+      public String respondentActorScopeHash() {
+        return "b".repeat(64);
+      }
+
+      @Override
+      public void close(String reason) {
+        closeCalls.incrementAndGet();
+      }
+
+      private TargetTypedRoomDispatchReceipt receipt() {
+        return new TargetTypedRoomDispatchReceipt(
+            roomType, roomEpoch, fencingToken, processRevision, roomRevision);
+      }
+    }
+  }
+
+  private static final class RecoveryProjectionActivities implements ProcessProjectionActivities {
+    private final AtomicInteger applyCalls = new AtomicInteger();
+    private final AtomicInteger completionCalls = new AtomicInteger();
+    private final List<CompleteConsumedIntakeProjectionCommand> commands =
+        new CopyOnWriteArrayList<>();
+
+    @Override
+    public ApplyProjectionResult apply(ApplyProjectionCommand command) {
+      applyCalls.incrementAndGet();
+      throw new UnsupportedOperationException("fenced projection is outside this recovery fixture");
+    }
+
+    @Override
+    public CompleteConsumedIntakeProjectionResult completeConsumedIntakeProjection(
+        CompleteConsumedIntakeProjectionCommand command) {
+      commands.add(command);
+      int call = completionCalls.incrementAndGet();
+      if (call == 1) {
+        throw ApplicationFailure.newNonRetryableFailure(
+            "fixture leaves the routed formal event at the acknowledged recovery boundary",
+            "TEST_INTAKE_PROJECTION_COMPLETION_FAILED");
+      }
+      return new CompleteConsumedIntakeProjectionResult(
+          "complete-consumed-intake-projection-result.v1",
+          command.eventId(),
+          command.caseEventSequence(),
+          CompleteConsumedIntakeProjectionOutcome.APPLIED,
+          command.lastCommandSequence(),
+          command.processRevision(),
+          command.roomRevision(),
+          command.roomEpoch(),
+          command.fencingToken(),
+          command.temporalWorkflowId(),
+          command.firstExecutionRunId(),
+          command.activeChildRunId(),
+          "urn:test:intake:projection-recovery-result",
+          "e".repeat(64),
+          OCCURRED_AT.plusSeconds(call));
+    }
+  }
+
   private static final class RecordingLedgerActivities
       implements CaseProcessLedgerActivities, CaseCommandLifecycleActivities {
 
@@ -1077,6 +1708,10 @@ class CaseProcessWorkflowTest {
     private final List<LoadSequenceRange> eventLoads = new CopyOnWriteArrayList<>();
     private final List<SequenceGapReport> gapReports = new CopyOnWriteArrayList<>();
     private final List<ExpireCaseCommand> expirations = new CopyOnWriteArrayList<>();
+    private final List<ConvergeTargetIntakeTerminalNoCommit> terminalNoCommitConvergences =
+        new CopyOnWriteArrayList<>();
+    private final List<TerminalNoCommitOutcome> terminalNoCommitOutcomes =
+        new CopyOnWriteArrayList<>();
     private volatile boolean invalidCommandResponse;
     private volatile boolean invalidEventResponse;
 
@@ -1171,6 +1806,39 @@ class CaseProcessWorkflowTest {
       commandStates.put(request.caseCommandSequence(), CaseCommandLedgerState.SHADOW_COMPLETED);
       return new RecordCaseCommandRoutedResult(
           "record-case-command-routed-result.v1", CommandLifecycleOutcome.SHADOW_COMPLETED);
+    }
+
+    @Override
+    public ConvergeTargetIntakeTerminalNoCommitResult convergeTargetIntakeTerminalNoCommit(
+        ConvergeTargetIntakeTerminalNoCommit request) {
+      if (!terminalNoCommitConvergences.isEmpty()
+          && !terminalNoCommitConvergences.getFirst().authority().equals(request.authority())) {
+        throw ApplicationFailure.newNonRetryableFailure(
+            "terminal-no-commit authority changed", "TerminalNoCommitAuthorityConflict");
+      }
+      TerminalNoCommitOutcome outcome =
+          terminalNoCommitConvergences.isEmpty()
+              ? TerminalNoCommitOutcome.TERMINALIZED
+              : TerminalNoCommitOutcome.IDEMPOTENT_REPLAY;
+      terminalNoCommitConvergences.add(request);
+      terminalNoCommitOutcomes.add(outcome);
+      TargetIntakeCommandTerminalNoCommit authority = request.authority();
+      return new ConvergeTargetIntakeTerminalNoCommitResult(
+          "converge-target-intake-terminal-no-commit-result.v1",
+          outcome,
+          authority,
+          authority.receiptUri(),
+          authority.receiptSha256(),
+          authority.newProcessRevision(),
+          authority.newRoomRevision(),
+          authority.caseCommandSequence(),
+          authority.lastCaseEventSequence());
+    }
+
+    @Override
+    public ResolveTargetIntakeTerminalNoCommitResult resolveTargetIntakeTerminalNoCommit(
+        ResolveTargetIntakeTerminalNoCommit request) {
+      throw new AssertionError("CaseProcess signal convergence must not use Room recovery read");
     }
   }
 }

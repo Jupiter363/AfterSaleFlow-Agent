@@ -14,7 +14,7 @@ import json
 import logging
 import re
 from threading import Event, Lock
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from fastapi.encoders import jsonable_encoder
@@ -45,6 +45,44 @@ class AgentStreamCancelled(RuntimeError):
 
 class AgentStreamLimitExceeded(RuntimeError):
     """供应商响应超过任一受治理流式边界时抛出。"""
+
+
+class AgentStreamProjectionError(RuntimeError):
+    """结构化增量不能唯一绑定到声明的公开 JSON 路径。"""
+
+
+class StreamPublicOutputPolicy(Protocol):
+    @property
+    def visible_text(self) -> str: ...
+
+    def allows_node(self, operation: str, node_name: str) -> bool: ...
+
+    def begin(
+        self,
+        *,
+        operation: str,
+        node_name: str,
+        field_name: str,
+    ) -> tuple[str, ...]: ...
+
+    def accept(
+        self,
+        *,
+        operation: str,
+        node_name: str,
+        field_name: str,
+        delta: str,
+    ) -> tuple[str, ...]: ...
+
+    def finalize(
+        self,
+        *,
+        operation: str,
+        node_name: str,
+        field_name: str,
+        final_text: str,
+        allow_canonical_fallback: bool = False,
+    ) -> tuple[str, ...]: ...
 
 
 class _StrictStreamModel(BaseModel):
@@ -694,17 +732,14 @@ class IncrementalVisibleJsonProjector:
                 # 不可见；这样客户端永远先得到左侧接待官文本，再收到右侧展板更新。
                 specs = (self._root_projection_gate.leading_spec,)
         for spec in specs:
+            if _json_path_has_duplicate_property(self._buffer, spec.field):
+                raise AgentStreamProjectionError(
+                    "visible stream JSON path is duplicated"
+                )
             if spec.value_mode == "json_value":
                 if spec.field in self._emitted_json_fields:
                     continue
-                value = (
-                    _find_complete_json_path_value(self._buffer, spec.field)
-                    if gated_projection
-                    else _find_complete_json_property_value(
-                        self._buffer,
-                        spec.property_name,
-                    )
-                )
+                value = _find_complete_json_path_value(self._buffer, spec.field)
                 if value is None:
                     continue
                 self._emitted_json_fields.add(spec.field)
@@ -719,14 +754,7 @@ class IncrementalVisibleJsonProjector:
                     )
                 )
                 continue
-            prefix = (
-                _find_json_string_path_prefix(self._buffer, spec.field)
-                if gated_projection
-                else _find_json_string_property_prefix(
-                    self._buffer,
-                    spec.property_name,
-                )
-            )
+            prefix = _find_json_string_path_prefix(self._buffer, spec.field)
             if prefix is None:
                 continue
             emitted_length = self._emitted_lengths[spec.field]
@@ -752,10 +780,16 @@ class AgentStreamObserver:
         operation: str,
         run_id: str,
         publish: Callable[[AgentStreamEvent], None],
+        defer_visible_output: bool = False,
+        public_output_policy: StreamPublicOutputPolicy | None = None,
     ) -> None:
+        if defer_visible_output and public_output_policy is not None:
+            raise ValueError("deferred output and a public output policy are exclusive")
         self.operation = operation
         self.run_id = run_id
         self._publish = publish
+        self._defer_visible_output = defer_visible_output
+        self._public_output_policy = public_output_policy
         self._sequence = 0
         self._sequence_lock = Lock()
         self._publish_lock = Lock()
@@ -764,6 +798,7 @@ class AgentStreamObserver:
         self._state_lock = Lock()
         self._visible_output_emitted = False
         self._visible_output_chars = 0
+        self._deferred_usage: list[tuple[str, str, int, dict[str, int]]] = []
         self._cancelled = Event()
 
     # 所属模块：Agent 流式协议 > 事件观察器 > 可见输出状态读取。
@@ -807,7 +842,17 @@ class AgentStreamObserver:
     # 上下游：上游是 LLM `generate` 发现当前 observer；下游是 IncrementalVisibleJsonProjector specs。
     # 系统意义：deny-by-default 防止新节点上线时因忘配流式策略而公开整个输出；必须显式审查后才能添加字段。
     def visible_fields_for(self, node_name: str) -> tuple[VisibleFieldSpec, ...]:
+        if self._defer_visible_output:
+            return ()
+        if self.operation == "evidence_turn":
+            policy = self._public_output_policy
+            if policy is None or not policy.allows_node(self.operation, node_name):
+                return ()
         return VISIBLE_FIELD_REGISTRY.get(self.operation, {}).get(node_name, ())
+
+    def public_output_policy_enabled(self, node_name: str) -> bool:
+        policy = self._public_output_policy
+        return policy is not None and policy.allows_node(self.operation, node_name)
 
     # 所属模块：Agent 流式协议 > 事件观察器 > 可见增量限额与发布。
     # 具体功能：`visible_delta` 忽略空串、检查取消，在锁内累计总可见字符并限额，再按 16KiB 切块为多个 StreamVisibleDeltaEvent。
@@ -816,6 +861,66 @@ class AgentStreamObserver:
     def visible_delta(self, node_name: str, field: str, delta: str) -> None:
         """发布一段可以给用户看的模型文本。"""
 
+        if self._public_output_policy is not None:
+            for public_delta in self._public_output_policy.accept(
+                operation=self.operation,
+                node_name=node_name,
+                field_name=field,
+                delta=delta,
+            ):
+                self._publish_visible_delta(node_name, field, public_delta)
+            return
+        if self._defer_visible_output:
+            self.raise_if_cancelled()
+            return
+        self._publish_visible_delta(node_name, field, delta)
+
+    def begin_public_output(self, node_name: str, field_name: str) -> None:
+        """Publish an explicit policy-owned prefix before any provider invocation."""
+
+        policy = self._public_output_policy
+        if policy is None:
+            raise RuntimeError("a public output policy is not enabled")
+        for public_delta in policy.begin(
+            operation=self.operation,
+            node_name=node_name,
+            field_name=field_name,
+        ):
+            self._publish_visible_delta(node_name, field_name, public_delta)
+
+    def finalize_public_output(
+        self,
+        node_name: str,
+        field_name: str,
+        final_text: str,
+        *,
+        allow_canonical_fallback: bool = False,
+    ) -> None:
+        policy = self._public_output_policy
+        if policy is None:
+            raise RuntimeError("a public output policy is not enabled")
+        for public_delta in policy.finalize(
+            operation=self.operation,
+            node_name=node_name,
+            field_name=field_name,
+            final_text=final_text,
+            allow_canonical_fallback=allow_canonical_fallback,
+        ):
+            self._publish_visible_delta(node_name, field_name, public_delta)
+
+    @property
+    def finalized_public_output(self) -> str | None:
+        policy = self._public_output_policy
+        return policy.visible_text if policy is not None else None
+
+    def finalized_visible_delta(self, node_name: str, field: str, delta: str) -> None:
+        """Publish text extracted from a successfully validated workflow result."""
+
+        if not self._defer_visible_output:
+            raise RuntimeError("finalized visible output mode is not enabled")
+        self._publish_visible_delta(node_name, field, delta)
+
+    def _publish_visible_delta(self, node_name: str, field: str, delta: str) -> None:
         if not delta:
             return
         self.raise_if_cancelled()
@@ -849,13 +954,51 @@ class AgentStreamObserver:
         latency_ms: int,
         token_usage: Mapping[str, int],
     ) -> None:
+        normalized_usage = {key: int(value) for key, value in token_usage.items()}
+        normalized_latency_ms = max(0, latency_ms)
+        if self._defer_visible_output or self._public_output_policy is not None:
+            self.raise_if_cancelled()
+            with self._state_lock:
+                self._deferred_usage.append(
+                    (node_name, model, normalized_latency_ms, normalized_usage)
+                )
+            return
+        self._publish_usage(
+            node_name=node_name,
+            model=model,
+            latency_ms=normalized_latency_ms,
+            token_usage=normalized_usage,
+        )
+
+    def flush_deferred_usage(self) -> None:
+        """Publish buffered audit usage after finalized visible output is known."""
+
+        with self._state_lock:
+            deferred_usage = self._deferred_usage
+            self._deferred_usage = []
+        for node_name, model, latency_ms, token_usage in deferred_usage:
+            self._publish_usage(
+                node_name=node_name,
+                model=model,
+                latency_ms=latency_ms,
+                token_usage=token_usage,
+            )
+
+    def _publish_usage(
+        self,
+        *,
+        node_name: str,
+        model: str,
+        latency_ms: int,
+        token_usage: dict[str, int],
+    ) -> None:
         self._emit(
             StreamUsageEvent(
                 **self._base_fields(),
                 node_name=node_name,
                 model=model,
-                latency_ms=max(0, latency_ms),
-                token_usage={key: int(value) for key, value in token_usage.items()},
+                latency_ms=latency_ms,
+                token_usage=token_usage,
             )
         )
 
@@ -981,8 +1124,24 @@ def workflow_ndjson_response(
     operation: str,
     run_id: str,
     invoke: Callable[[], Any],
+    finalized_visible: Callable[[Any], str] | None = None,
+    finalized_visible_node: str | None = None,
+    finalized_visible_field: str | None = None,
+    public_output_policy: StreamPublicOutputPolicy | None = None,
 ) -> StreamingResponse:
     """Run a synchronous governed workflow and expose its events as NDJSON."""
+
+    if finalized_visible is None:
+        if finalized_visible_node is not None or finalized_visible_field is not None:
+            raise ValueError(
+                "finalized visible node and field require an extraction callback"
+            )
+    elif not finalized_visible_node or not finalized_visible_field:
+        raise ValueError(
+            "finalized visible output requires non-empty node and field names"
+        )
+    if public_output_policy is not None and finalized_visible is None:
+        raise ValueError("a public output policy requires finalized visible extraction")
 
     # FastAPI 的响应是异步的，但当前 workflow/LLM 调用是同步阻塞的。
     # 所以这里用“后台线程跑 workflow + asyncio.Queue 传事件”的桥接模式。
@@ -1033,6 +1192,10 @@ def workflow_ndjson_response(
         operation=operation,
         run_id=run_id,
         publish=publish,
+        defer_visible_output=(
+            finalized_visible is not None and public_output_policy is None
+        ),
+        public_output_policy=public_output_policy,
     )
 
     # 所属模块：Agent 流式协议 > NDJSON 桥接 > 同步生产者线程入口。
@@ -1044,14 +1207,44 @@ def workflow_ndjson_response(
 
         try:
             observer.start()
+            if public_output_policy is not None:
+                assert finalized_visible_node is not None
+                assert finalized_visible_field is not None
+                observer.begin_public_output(
+                    finalized_visible_node,
+                    finalized_visible_field,
+                )
             with bind_stream_observer(observer):
                 result = invoke()
             if not disconnected.is_set():
+                if finalized_visible is not None:
+                    visible_text = finalized_visible(result)
+                    if not isinstance(visible_text, str) or not visible_text:
+                        raise ValueError(
+                            "finalized visible extraction must return non-empty text"
+                        )
+                    assert finalized_visible_node is not None
+                    assert finalized_visible_field is not None
+                    if public_output_policy is not None:
+                        observer.finalize_public_output(
+                            finalized_visible_node,
+                            finalized_visible_field,
+                            visible_text,
+                        )
+                    else:
+                        observer.finalized_visible_delta(
+                            finalized_visible_node,
+                            finalized_visible_field,
+                            visible_text,
+                        )
+                    observer.flush_deferred_usage()
                 observer.final(result)
         except AgentStreamCancelled:
             pass
         except Exception as exception:  # HTTP 流已打开，只能编码成协议内 error 事件。
             if not disconnected.is_set():
+                if public_output_policy is None:
+                    observer.flush_deferred_usage()
                 LOGGER.error(
                     "agent stream workflow failed: operation=%s run_id=%s "
                     "error_type=%s error=%s",
@@ -1169,6 +1362,13 @@ def _public_stream_error(
             False,
             None,
         )
+    if isinstance(exception, AgentStreamProjectionError):
+        return (
+            "AGENT_OUTPUT_SCHEMA_INVALID",
+            "agent returned invalid structured output",
+            False,
+            None,
+        )
     if isinstance(exception, PermissionError):
         return "AGENT_PERMISSION_DENIED", str(exception), False, None
     return "INTERNAL_ERROR", "internal service error", False, None
@@ -1232,18 +1432,87 @@ def _find_json_path_value_start(document: str, field: str) -> int | None:
     return value if status == "found" else None
 
 
+def _json_path_has_duplicate_property(document: str, field: str) -> bool:
+    """Reject duplicate object keys at every object segment of an exact path."""
+
+    segments = tuple(field.split("."))
+    if not segments or any(not segment for segment in segments):
+        raise AgentStreamProjectionError("visible stream JSON path is invalid")
+    root_start = _skip_whitespace(document, 0)
+    for index, segment in enumerate(segments):
+        parent_start = (
+            root_start
+            if index == 0
+            else _find_json_path_value_start(document, ".".join(segments[:index]))
+        )
+        if (
+            parent_start is None
+            or parent_start >= len(document)
+            or document[parent_start] != "{"
+        ):
+            continue
+        starts = _find_json_object_property_value_starts(
+            document,
+            parent_start,
+            segment,
+        )
+        if len(starts) > 1:
+            return True
+    return False
+
+
+def _find_json_object_property_value_starts(
+    document: str,
+    object_start: int,
+    property_name: str,
+) -> tuple[int, ...]:
+    """Return direct-property value starts visible in one partial JSON object."""
+
+    cursor = _skip_whitespace(document, object_start + 1)
+    starts: list[int] = []
+    while cursor < len(document) and document[cursor] != "}":
+        if document[cursor] != '"':
+            return tuple(starts)
+        key, cursor, complete = _decode_json_string(document, cursor)
+        if not complete:
+            return tuple(starts)
+        cursor = _skip_whitespace(document, cursor)
+        if cursor >= len(document) or document[cursor] != ":":
+            return tuple(starts)
+        value_start = _skip_whitespace(document, cursor + 1)
+        if value_start >= len(document):
+            return tuple(starts)
+        if key == property_name:
+            starts.append(value_start)
+        status, value_end = _scan_json_path_value(
+            document,
+            value_start,
+            (),
+            None,
+        )
+        if status != "complete":
+            return tuple(starts)
+        cursor = _skip_whitespace(document, value_end)
+        if cursor >= len(document) or document[cursor] == "}":
+            return tuple(starts)
+        if document[cursor] != ",":
+            return tuple(starts)
+        cursor = _skip_whitespace(document, cursor + 1)
+    return tuple(starts)
+
+
 def _scan_json_path_value(
     document: str,
     index: int,
     path: tuple[str, ...],
-    target_path: tuple[str, ...],
+    target_path: tuple[str, ...] | None,
 ) -> tuple[Literal["found", "complete", "incomplete"], int]:
     """在一个 JSON 值中寻找精确路径；未闭合前缀只返回 incomplete。"""
 
     index = _skip_whitespace(document, index)
     if index >= len(document):
         return "incomplete", index
-    if path == target_path:
+    if target_path is not None and path == target_path:
         return "found", index
 
     token = document[index]
@@ -1267,7 +1536,7 @@ def _scan_json_object_path(
     document: str,
     index: int,
     path: tuple[str, ...],
-    target_path: tuple[str, ...],
+    target_path: tuple[str, ...] | None,
 ) -> tuple[Literal["found", "complete", "incomplete"], int]:
     cursor = _skip_whitespace(document, index + 1)
     if cursor >= len(document):
@@ -1308,7 +1577,7 @@ def _scan_json_array_path(
     document: str,
     index: int,
     path: tuple[str, ...],
-    target_path: tuple[str, ...],
+    target_path: tuple[str, ...] | None,
 ) -> tuple[Literal["found", "complete", "incomplete"], int]:
     cursor = _skip_whitespace(document, index + 1)
     if cursor >= len(document):

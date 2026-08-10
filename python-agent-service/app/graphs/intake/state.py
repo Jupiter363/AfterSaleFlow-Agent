@@ -24,6 +24,7 @@ from app.graphs.intake.errors import IntakeGraphContractError
 
 JsonObject: TypeAlias = dict[str, JsonValue]
 _PUBLIC_DOSSIER_FORMAL_MATRIX_FIELDS = frozenset({"case_fact_matrix", "unilateral_case_matrix"})
+_ATOMIC_PUBLIC_DOSSIER_FIELDS = frozenset({"respondent_attitude"})
 
 
 def merge_intake_dossier(
@@ -63,7 +64,9 @@ def _merge_intake_dossier_objects(
             raise IntakeGraphContractError("INTAKE_DOSSIER_PATCH_INVALID")
         incoming = right[key]
         existing = merged.get(key)
-        if isinstance(existing, Mapping) and isinstance(incoming, Mapping):
+        if top_level and key in _ATOMIC_PUBLIC_DOSSIER_FIELDS:
+            merged[key] = deepcopy(incoming)
+        elif isinstance(existing, Mapping) and isinstance(incoming, Mapping):
             merged[key] = _merge_intake_dossier_objects(
                 existing,
                 incoming,

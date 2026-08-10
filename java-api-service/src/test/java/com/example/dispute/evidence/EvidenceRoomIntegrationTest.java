@@ -13,18 +13,23 @@ import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.common.exception.BadRequestException;
+import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.application.EvidenceCompletionService;
 import com.example.dispute.evidence.application.EvidenceDossierFreezer;
 import com.example.dispute.evidence.domain.EvidenceVerificationStatus;
+import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceSubmissionBatchEntity;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceVerificationEntity;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceDossierItemRepository;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidencePartyCompletionRepository;
+import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceSubmissionBatchRepository;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceVerificationRepository;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
+import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
@@ -38,18 +43,26 @@ import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.domain.PhaseClockStatus;
 import com.example.dispute.room.domain.PhaseClockType;
+import com.example.dispute.room.domain.MessageSenderType;
+import com.example.dispute.room.domain.MessageSource;
+import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.workflow.application.command.CaseCommandService;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
 import com.example.dispute.workflow.application.epoch.TransactionalRoomEpochAllocator;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
@@ -63,6 +76,7 @@ import java.time.ZoneOffset;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -71,6 +85,7 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.transaction.TestTransaction;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -126,16 +141,20 @@ class EvidenceRoomIntegrationTest {
     }
 
     @Autowired private EvidenceCompletionService completionService;
+    @Autowired private AgentRunRepository agentRunRepository;
     @Autowired private FulfillmentCaseRepository caseRepository;
     @Autowired private EvidenceDossierRepository dossierRepository;
     @Autowired private EvidenceItemRepository evidenceRepository;
     @Autowired private EvidenceVerificationRepository verificationRepository;
+    @Autowired private EvidenceSubmissionBatchRepository submissionBatchRepository;
     @Autowired private EvidenceDossierItemRepository dossierItemRepository;
     @Autowired private EvidencePartyCompletionRepository completionRepository;
     @Autowired private CaseRoomRepository roomRepository;
     @Autowired private CasePhaseClockRepository clockRepository;
     @Autowired private NotificationRepository notificationRepository;
     @Autowired private CaseTimelineEventRepository eventRepository;
+    @Autowired private RoomMessageRepository roomMessageRepository;
+    @Autowired private TestEntityManager entityManager;
     @Autowired private RoomEpochAllocator roomEpochAllocator;
     @Autowired private CaseRoomEpochRepository roomEpochRepository;
     @Autowired private CaseProcessProjectionRepository processProjectionRepository;
@@ -145,6 +164,7 @@ class EvidenceRoomIntegrationTest {
     @MockitoBean private IntakeProgressService intakeProgressService;
     @MockitoBean private IntakeMatrixLifecycleService intakeMatrixLifecycleService;
     @MockitoBean private HearingFlowRuntimeService hearingFlowRuntimeService;
+    @MockitoBean private CaseCommandService caseCommandService;
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceRoomIntegrationTest.bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded()」。
     // 具体功能：「EvidenceRoomIntegrationTest.bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded()」：复现“核对完整业务行为（场景方法「bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded」）”场景：驱动 「completionService.complete」、「caseRepository.flush」、「caseRepository.findById」、「clockRepository.findByCaseIdAndClockType」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_EARLY」、「EVIDENCE_INCLUDED」、「EVIDENCE_REJECTED」、「user-local」。
@@ -152,6 +172,111 @@ class EvidenceRoomIntegrationTest {
     // 下游影响：「EvidenceRoomIntegrationTest.bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「EvidenceRoomIntegrationTest.bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_EARLY」、「EVIDENCE_INCLUDED」、「EVIDENCE_REJECTED」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
+    @Test
+    void targetEvidenceSubmissionBindingPersistsExactBatchMessageAndRunAuthority() {
+        String caseId = "CASE_SUBMISSION_BINDING";
+        String messageId = "MESSAGE_SUBMISSION_BINDING";
+        String batchId = "EVIDENCE_BATCH_SUBMISSION_BINDING";
+        String logicalRunId = "target-evidence-run:postgres-binding";
+        seedEvidenceCase(caseId);
+        CaseRoomEntity evidenceRoom =
+                roomRepository
+                        .findByCaseIdAndRoomType(caseId, RoomType.EVIDENCE)
+                        .orElseThrow();
+        var evidenceEpoch =
+                roomEpochRepository
+                        .findByCaseIdAndRoomTypeAndLifecycleStatus(
+                                caseId,
+                                ContractTypes.RoomType.EVIDENCE,
+                                EpochLifecycleStatus.ACTIVE)
+                        .orElseThrow();
+        agentRunRepository.saveAndFlush(
+                AgentRunEntity.logicalV2(
+                        new CreateLogicalRun(
+                                logicalRunId,
+                                "legacy-default",
+                                caseId,
+                                evidenceRoom.getId(),
+                                "EVIDENCE_TURN",
+                                "evidence-submission-binding-run",
+                                AgentRunProtocol.V2,
+                                AgentRunExecutorKind.TEMPORAL_ACTIVITY,
+                                evidenceEpoch.getId(),
+                                ContractTypes.RoomType.EVIDENCE,
+                                evidenceEpoch.getRoomEpoch(),
+                                evidenceEpoch.getProcessRevision(),
+                                evidenceEpoch.getFencingToken(),
+                                "a".repeat(64),
+                                "b".repeat(64),
+                                3,
+                                Instant.parse("2026-07-03T02:00:00Z"),
+                                Instant.parse("2026-07-03T00:10:00Z"))));
+
+        EvidenceSubmissionBatchEntity detachedBatch =
+                EvidenceSubmissionBatchEntity.submitted(
+                        batchId,
+                        caseId,
+                        ActorRole.USER.name(),
+                        "user-local",
+                        "[\"EVIDENCE_SUBMISSION_BINDING\"]",
+                        null,
+                        "submission-binding-key",
+                        Instant.parse("2026-07-03T00:10:00Z"));
+        EvidenceSubmissionBatchEntity savedBatch =
+                submissionBatchRepository.saveAndFlush(detachedBatch);
+        assertThat(savedBatch).isNotSameAs(detachedBatch);
+        entityManager.clear();
+
+        RoomMessageEntity unsavedMessage =
+                evidenceSubmissionMessage(
+                        messageId,
+                        caseId,
+                        evidenceRoom.getId(),
+                        1,
+                        MessageSenderType.PARTY,
+                        ActorRole.USER.name(),
+                        "user-local",
+                        MessageSource.PARTY_ACTION,
+                        MessageType.PARTY_EVIDENCE_REFERENCE);
+        unsavedMessage.attachAgentRun(logicalRunId);
+        unsavedMessage.attachAgentRun(logicalRunId);
+        RoomMessageEntity savedMessage = roomMessageRepository.saveAndFlush(unsavedMessage);
+        assertThat(savedMessage.getAgentRunId()).isEqualTo(logicalRunId);
+        assertThat(roomMessageRepository.count()).isEqualTo(1L);
+        entityManager.clear();
+
+        EvidenceSubmissionBatchEntity managedBatch =
+                submissionBatchRepository.findById(batchId).orElseThrow();
+        managedBatch.attachRoomMessage(messageId);
+        submissionBatchRepository.flush();
+        entityManager.clear();
+
+        assertThat(submissionBatchRepository.findById(batchId).orElseThrow().getRoomMessageId())
+                .isEqualTo(messageId);
+        RoomMessageEntity reloadedMessage =
+                roomMessageRepository.findById(messageId).orElseThrow();
+        assertThat(reloadedMessage.getCaseId()).isEqualTo(caseId);
+        assertThat(reloadedMessage.getRoomId()).isEqualTo(evidenceRoom.getId());
+        assertThat(reloadedMessage.getSenderType()).isEqualTo(MessageSenderType.PARTY);
+        assertThat(reloadedMessage.getSenderRole()).isEqualTo(ActorRole.USER.name());
+        assertThat(reloadedMessage.getSenderId()).isEqualTo("user-local");
+        assertThat(reloadedMessage.getMessageType())
+                .isEqualTo(MessageType.PARTY_EVIDENCE_REFERENCE);
+        assertThat(reloadedMessage.getMessageSource()).isEqualTo(MessageSource.PARTY_ACTION);
+        assertThat(reloadedMessage.getAgentRunId()).isEqualTo(logicalRunId);
+        assertThatThrownBy(() -> reloadedMessage.attachAgentRun("target-evidence-run:different"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("room message already belongs to another agent run");
+        assertThat(roomMessageRepository.findById(messageId).orElseThrow().getAgentRunId())
+                .isEqualTo(logicalRunId);
+
+        TestTransaction.flagForRollback();
+        TestTransaction.end();
+        assertThat(submissionBatchRepository.findById(batchId)).isEmpty();
+        assertThat(roomMessageRepository.findById(messageId)).isEmpty();
+        assertThat(agentRunRepository.findById(logicalRunId)).isEmpty();
+    }
+
     @Test
     void bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded() {
         seedEvidenceCase("CASE_EARLY");
@@ -293,6 +418,35 @@ class EvidenceRoomIntegrationTest {
     // 上游调用：「EvidenceRoomIntegrationTest.seedEvidenceCase(String)」由本测试类中的 「EvidenceRoomIntegrationTest.bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded」、「EvidenceRoomIntegrationTest.deadlineExpiryWithOnePartySealsAndOpensHearing」、「EvidenceRoomIntegrationTest.deadlineExpiryWithoutInitiatorEvidenceDoesNotOpenHearing」 调用。
     // 下游影响：「EvidenceRoomIntegrationTest.seedEvidenceCase(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
     // 系统意义：「EvidenceRoomIntegrationTest.seedEvidenceCase(String)」守住「证据与版本化卷宗」的可执行规格，尤其防止 「ORDER-」、「LOG-」、「user-local」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    private static RoomMessageEntity evidenceSubmissionMessage(
+            String id,
+            String caseId,
+            String roomId,
+            long sequenceNo,
+            MessageSenderType senderType,
+            String senderRole,
+            String senderId,
+            MessageSource messageSource,
+            MessageType messageType) {
+        return RoomMessageEntity.create(
+                id,
+                caseId,
+                roomId,
+                sequenceNo,
+                senderType,
+                senderRole,
+                senderId,
+                "[\"USER\",\"SYSTEM\"]",
+                "[\"user-local\"]",
+                messageSource,
+                messageType,
+                null,
+                "[\"EVIDENCE_SUBMISSION_BINDING\"]",
+                "idem-" + id,
+                Instant.parse("2026-07-03T00:10:00Z"),
+                "TRACE_" + id);
+    }
+
     private void seedEvidenceCase(String caseId) {
         FulfillmentCaseEntity dispute =
                 FulfillmentCaseEntity.imported(

@@ -2,6 +2,7 @@ package com.example.dispute.workflow.targete2e.artifact;
 
 import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
+import com.example.dispute.room.application.EvidenceAgentTurnService;
 import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider;
@@ -22,6 +23,7 @@ import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceFinal
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceFinalizationEvidenceSource;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceFinalizationRequestResolver;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceFormalCommitPort;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnProposalLoader;
 import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewAdvisoryProjectionPort;
 import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewFinalizationFactsProvider;
@@ -44,6 +46,8 @@ import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeHa
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceRoomRegistration;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewRoomRegistration;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.minio.MinioClient;
+import jakarta.persistence.EntityManager;
 import java.time.Clock;
 import javax.sql.DataSource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -67,6 +71,9 @@ public class TargetE2eEvidenceReviewArtifactConfiguration {
     @Bean
     TargetEvidenceRoomRegistration targetE2eEvidenceRoomRegistration(
             DataSource dataSource,
+            MinioClient minioClient,
+            EntityManager entityManager,
+            EvidenceAgentTurnService evidenceAgentTurnService,
             TargetE2EActivationLedger activationLedger,
             ObjectMapper objectMapper,
             TargetE2EGraphEnvelopeCodec codec,
@@ -88,13 +95,20 @@ public class TargetE2eEvidenceReviewArtifactConfiguration {
                         runtime);
         TargetE2eRoomFinalizationStrategy strategy = new TargetE2eEvidenceRoomFinalizationStrategy(
                 materialStore, evidenceSource, targetE2eFinalizationAuthority, runtime);
-        var resolver = new TargetEvidenceFinalizationRequestResolver(materialStore, objectMapper);
+        var proposalLoader =
+                new TargetEvidenceTurnProposalLoader(dataSource, minioClient, objectMapper);
+        var resolver =
+                new TargetEvidenceFinalizationRequestResolver(
+                        materialStore, proposalLoader, objectMapper);
         TargetEvidenceFormalCommitPort formalCommitPort =
                 new JdbcTargetEvidenceFormalCommitPort(objectMapper);
         AgentRunDomainResultCommitter committer = new TargetEvidenceAgentRunDomainResultCommitter(
                 dataSource,
+                entityManager,
+                evidenceAgentTurnService,
                 resolver,
-                new TargetEvidenceFinalizationAdapter(formalCommitPort));
+                new TargetEvidenceFinalizationAdapter(formalCommitPort),
+                objectMapper);
         TargetEvidenceCommandBridgeActivities bridge =
                 new TargetEvidenceCommandBridgeActivity(materialStore);
         return new TargetEvidenceRoomRegistration(materialStore, bridge, committer, strategy);

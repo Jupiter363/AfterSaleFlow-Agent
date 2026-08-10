@@ -43,7 +43,31 @@ public interface RoomEpochAllocator {
             String macroPhase,
             String roomPhase,
             OffsetDateTime projectedDeadlineAt,
-            OffsetDateTime occurredAt) {
+            OffsetDateTime occurredAt,
+            String projectionRef,
+            String projectionSha256) {
+
+        public TransitionRoomEpoch(
+                String caseId,
+                RoomType expectedRoomType,
+                String nextRoomId,
+                RoomType nextRoomType,
+                String macroPhase,
+                String roomPhase,
+                OffsetDateTime projectedDeadlineAt,
+                OffsetDateTime occurredAt) {
+            this(
+                    caseId,
+                    expectedRoomType,
+                    nextRoomId,
+                    nextRoomType,
+                    macroPhase,
+                    roomPhase,
+                    projectedDeadlineAt,
+                    occurredAt,
+                    null,
+                    null);
+        }
 
         public TransitionRoomEpoch {
             requireText(caseId, "caseId");
@@ -56,6 +80,11 @@ public interface RoomEpochAllocator {
             requireText(macroPhase, "macroPhase");
             requireText(roomPhase, "roomPhase");
             Objects.requireNonNull(occurredAt, "occurredAt must not be null");
+            requireProjectionPair(projectionRef, projectionSha256);
+        }
+
+        public boolean hasProjectionAuthority() {
+            return projectionRef != null;
         }
     }
 
@@ -112,6 +141,22 @@ public interface RoomEpochAllocator {
     private static void requireText(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " must not be blank");
+        }
+    }
+
+    private static void requireProjectionPair(String projectionRef, String projectionSha256) {
+        if ((projectionRef == null) != (projectionSha256 == null)) {
+            throw new IllegalArgumentException(
+                    "projectionRef and projectionSha256 must both be absent or present");
+        }
+        if (projectionRef == null) {
+            return;
+        }
+        if (projectionRef.isBlank() || projectionRef.length() > 1024) {
+            throw new IllegalArgumentException("projectionRef is invalid");
+        }
+        if (!projectionSha256.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("projectionSha256 must be lowercase SHA-256");
         }
     }
 }

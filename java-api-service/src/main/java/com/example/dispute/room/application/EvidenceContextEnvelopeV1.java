@@ -8,6 +8,8 @@ package com.example.dispute.room.application;
 
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.workflow.contract.v1.FrozenIntakeSubmissionAuthority;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.List;
@@ -33,9 +35,38 @@ public record EvidenceContextEnvelopeV1(
         @JsonProperty("current_event") CurrentEvent currentEvent,
         @JsonProperty("visible_evidence") List<VisibleEvidence> visibleEvidence,
         @JsonProperty("private_conversation") PrivateConversation privateConversation,
-        @JsonProperty("room_policy") RoomPolicy roomPolicy) {
+        @JsonProperty("room_policy") RoomPolicy roomPolicy,
+        @JsonProperty("frozen_submission")
+                @JsonInclude(JsonInclude.Include.NON_NULL)
+                FrozenSubmission frozenSubmission) {
 
     public static final String SCHEMA_VERSION = "evidence_context_envelope.v1";
+    public static final String FROZEN_SUBMISSION_SCHEMA_VERSION =
+            "evidence_context_envelope.v2";
+
+    /** Source-compatible constructor for legacy callers and persisted v1 requests. */
+    public EvidenceContextEnvelopeV1(
+            String schemaVersion,
+            String capturedAt,
+            CaseSnapshot caseSnapshot,
+            IntakeDossierSnapshot intakeDossierSnapshot,
+            ActorSnapshot actorSnapshot,
+            CurrentEvent currentEvent,
+            List<VisibleEvidence> visibleEvidence,
+            PrivateConversation privateConversation,
+            RoomPolicy roomPolicy) {
+        this(
+                schemaVersion,
+                capturedAt,
+                caseSnapshot,
+                intakeDossierSnapshot,
+                actorSnapshot,
+                currentEvent,
+                visibleEvidence,
+                privateConversation,
+                roomPolicy,
+                null);
+    }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceContextEnvelopeV1.EvidenceContextEnvelopeV1(String,String,String,CaseSnapshot,IntakeDossierSnapshot,ActorSnapshot,CurrentEvent,List,PrivateConversation,RoomPolicy)」。
     // 具体功能：「EvidenceContextEnvelopeV1.EvidenceContextEnvelopeV1(String,String,String,CaseSnapshot,IntakeDossierSnapshot,ActorSnapshot,CurrentEvent,List,PrivateConversation,RoomPolicy)」：在不可变「EvidenceContextEnvelopeV1」写入组件前校验 「SCHEMA_VERSION」(String)、「schemaVersion」(String)、「capturedAt」(String)、「caseSnapshot」(CaseSnapshot)、「intakeDossierSnapshot」(IntakeDossierSnapshot)、「actorSnapshot」(ActorSnapshot)、「currentEvent」(CurrentEvent)、「visibleEvidence」(List)、「privateConversation」(PrivateConversation)、「roomPolicy」(RoomPolicy)，非法输入会抛出 「IllegalArgumentException」；并通过 「Objects.requireNonNull」 做标准化或防御性复制。
@@ -44,7 +75,8 @@ public record EvidenceContextEnvelopeV1(
     // 系统意义：「EvidenceContextEnvelopeV1.EvidenceContextEnvelopeV1(String,String,String,CaseSnapshot,IntakeDossierSnapshot,ActorSnapshot,CurrentEvent,List,PrivateConversation,RoomPolicy)」在对象进入事务、消息或 Temporal history 前拒绝非法值，可避免错误数据在异步链路中延迟爆炸。
     // Java 语法：record 紧凑构造器省略参数列表；构造体结束后，参数会自动赋给同名不可变组件。
     public EvidenceContextEnvelopeV1 {
-        if (!SCHEMA_VERSION.equals(schemaVersion)) {
+        boolean freezeBound = FROZEN_SUBMISSION_SCHEMA_VERSION.equals(schemaVersion);
+        if (!SCHEMA_VERSION.equals(schemaVersion) && !freezeBound) {
             throw new IllegalArgumentException("unsupported evidence context envelope schema");
         }
         Objects.requireNonNull(capturedAt, "capturedAt must not be null");
@@ -54,6 +86,21 @@ public record EvidenceContextEnvelopeV1(
         Objects.requireNonNull(privateConversation, "privateConversation must not be null");
         Objects.requireNonNull(roomPolicy, "roomPolicy must not be null");
         visibleEvidence = visibleEvidence == null ? List.of() : List.copyOf(visibleEvidence);
+        if (freezeBound != (frozenSubmission != null)) {
+            throw new IllegalArgumentException(
+                    "evidence context schema does not match frozen Submit authority");
+        }
+        if (freezeBound
+                && (intakeDossierSnapshot != null
+                        || roomPolicy.roomType() != RoomType.EVIDENCE
+                        || !caseSnapshot.caseId().equals(frozenSubmission.authority().caseId()))) {
+            throw new IllegalArgumentException(
+                    "freeze-bound evidence context does not match its Evidence case");
+        }
+    }
+
+    public boolean freezeBound() {
+        return FROZEN_SUBMISSION_SCHEMA_VERSION.equals(schemaVersion);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】类型「CaseSnapshot」。
@@ -219,6 +266,27 @@ public record EvidenceContextEnvelopeV1(
     // 协作关系：由同模块控制器、应用服务或框架生命周期创建和调用。
     // 边界意义：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     // Java 语法：record 用于不可变数据载体，编译器会生成组件访问器和值语义方法。
+    /** Immutable matrix authority carried separately from the epoch-specific Agent invocation. */
+    public record FrozenSubmission(
+            @JsonProperty("evidence_room_epoch") long evidenceRoomEpoch,
+            @JsonProperty("evidence_fencing_token") long evidenceFencingToken,
+            @JsonProperty("projection_ref") String projectionRef,
+            @JsonProperty("projection_sha256") String projectionSha256,
+            FrozenIntakeSubmissionAuthority authority,
+            JsonNode matrix) {
+
+        public FrozenSubmission {
+            if (evidenceRoomEpoch < 0 || evidenceFencingToken < 1) {
+                throw new IllegalArgumentException(
+                        "Evidence epoch and fencing authority are invalid");
+            }
+            authority = Objects.requireNonNull(authority, "authority must not be null");
+            matrix = Objects.requireNonNull(matrix, "matrix must not be null").deepCopy();
+            authority.requireProjectionPair(projectionRef, projectionSha256);
+            authority.requireMatchesMatrix(matrix);
+        }
+    }
+
     public record RoomPolicy(
             @JsonProperty("room_id") String roomId,
             @JsonProperty("room_type") RoomType roomType,

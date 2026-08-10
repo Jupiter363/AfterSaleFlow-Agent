@@ -381,7 +381,7 @@ class Settings(BaseSettings):
         gt=0,
         le=360,
     )
-    graph_readiness_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    graph_readiness_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
     graph_jwks_url: AnyHttpUrl | None = None
     graph_jwks_refresh_seconds: float = Field(default=30.0, ge=5, le=3600)
     graph_jwks_timeout_seconds: float = Field(default=2.0, gt=0, le=30)

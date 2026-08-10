@@ -19,6 +19,8 @@ import org.springframework.data.repository.query.Param;
 // 边界意义：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
 // Java 语法：interface 只定义能力契约，调用方依赖接口而不是具体适配器。
 public interface CaseTimelineEventRepository extends JpaRepository<CaseTimelineEventEntity, String> {
+    Optional<CaseTimelineEventEntity> findByIdAndCaseId(String id, String caseId);
+
     // 所属模块：【房间协作与权限 / 仓储接口层】「CaseTimelineEventRepository.findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(String,long)」。
     // 具体功能：「CaseTimelineEventRepository.findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(String,long)」：声明按案件标识、序号编号GreaterThan访问案件时间线事件的 Spring Data 查询，由框架根据方法签名生成 SQL，并以「List<CaseTimelineEventEntity>」返回。
     // 上游调用：「CaseTimelineEventRepository.findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(String,long)」的上游调用点包括 「CaseEventService.replay」、「CaseEventService.catchUp」、「IntakeRoomServiceIntegrationTest.acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline」、「RoomMessageAndEventServiceTest.replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser」。

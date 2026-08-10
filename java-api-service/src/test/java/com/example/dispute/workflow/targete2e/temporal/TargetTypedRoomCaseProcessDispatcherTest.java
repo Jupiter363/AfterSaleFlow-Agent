@@ -190,6 +190,48 @@ class TargetTypedRoomCaseProcessDispatcherTest {
     assertThat(start.workflowBuildId()).isEqualTo("local-d96956b7-control");
     assertThat(start.executionLane()).isEqualTo(ExecutionLane.TARGET_E2E_CANDIDATE);
     assertThat(start.targetE2eCandidate()).isTrue();
+    assertThat(start.schemaVersion()).isEqualTo(EvidenceRoomStart.LEGACY_SCHEMA_VERSION);
+    assertThat(start.projectionRef()).isNull();
+  }
+
+  @Test
+  void targetEvidenceStartCopiesOnlyAnExactFrozenProjectionPairIntoV2() {
+    String projectionRef =
+        "urn:after-sale-flow:intake-event:EVIB_TARGET_EVIDENCE_FROZEN"
+            + "#/result/frozen_submission/matrix";
+    String projectionSha256 = "d".repeat(64);
+    ProvisionRoomEpoch request = targetEvidenceProvision(projectionRef, projectionSha256);
+    var participants =
+        new TargetEvidenceParticipantBindingActivities.Binding(
+            request.tenantSurrogate(),
+            request.caseId(),
+            request.roomEpoch(),
+            request.fencingToken(),
+            "user-local",
+            "merchant-local",
+            "c".repeat(64));
+
+    EvidenceRoomStart start =
+        TargetTypedRoomCaseProcessDispatcher.targetEvidenceStart(request, participants);
+
+    assertThat(start.schemaVersion())
+        .isEqualTo(EvidenceRoomStart.FROZEN_SUBMISSION_SCHEMA_VERSION);
+    assertThat(start.freezeBound()).isTrue();
+    assertThat(start.projectionRef()).isEqualTo(projectionRef);
+    assertThat(start.projectionSha256()).isEqualTo(projectionSha256);
+  }
+
+  @Test
+  void targetEvidenceProvisionRejectsOneSidedFrozenProjectionAuthority() {
+    String projectionRef =
+        "urn:after-sale-flow:intake-event:EVIB_TARGET_EVIDENCE_FROZEN"
+            + "#/result/frozen_submission/matrix";
+    String projectionSha256 = "d".repeat(64);
+
+    assertThatThrownBy(() -> targetEvidenceProvision(projectionRef, null))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> targetEvidenceProvision(null, projectionSha256))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
@@ -590,6 +632,11 @@ class TargetTypedRoomCaseProcessDispatcherTest {
   }
 
   private static ProvisionRoomEpoch targetEvidenceProvision() {
+    return targetEvidenceProvision(null, null);
+  }
+
+  private static ProvisionRoomEpoch targetEvidenceProvision(
+      String projectionRef, String projectionSha256) {
     String tenant = "tenant-run001";
     String caseId = "QA_TARGET_EVIDENCE_1";
     long roomEpoch = 2;
@@ -626,8 +673,8 @@ class TargetTypedRoomCaseProcessDispatcherTest {
         10,
         12,
         requestedAt.plusSeconds(3_600),
-        null,
-        null,
+        projectionRef,
+        projectionSha256,
         requestedAt);
   }
 
@@ -868,6 +915,20 @@ class TargetTypedRoomCaseProcessDispatcherTest {
       return new RecordCaseCommandRoutedResult(
           "record-case-command-routed-result.v1",
           CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+    }
+
+    @Override
+    public CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommitResult
+        convergeTargetIntakeTerminalNoCommit(
+            CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommit request) {
+      throw new AssertionError("terminal-no-commit convergence is outside this fixture");
+    }
+
+    @Override
+    public CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommitResult
+        resolveTargetIntakeTerminalNoCommit(
+            CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommit request) {
+      throw new AssertionError("terminal-no-commit recovery is outside this fixture");
     }
   }
 

@@ -3,7 +3,11 @@ package com.example.dispute.workflow.temporal.room.intake;
 import static com.example.dispute.workflow.temporal.room.intake.IntakeProtocolValidation.requireHash;
 import static com.example.dispute.workflow.temporal.room.intake.IntakeProtocolValidation.requireIdentifier;
 
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationReceipt;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.util.Objects;
 
 /** Authoritative read result; only ABSENT_TERMINAL permits cancellation to forget the command. */
@@ -11,14 +15,38 @@ public record IntakeAgentRunFinalizationReadResult(
     String schemaVersion,
     Resolution resolution,
     FinalizationLocator locator,
-    TurnFinalizationReceipt receipt) {
+    TurnFinalizationReceipt receipt,
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+        TerminalNoCommitEvidence terminalNoCommitEvidence) {
+
+  public static final String LEGACY_SCHEMA_VERSION =
+      "intake-agent-run-finalization-read-result.v1";
+  public static final String SCHEMA_VERSION = "intake-agent-run-finalization-read-result.v2";
+
+  public IntakeAgentRunFinalizationReadResult(
+      String schemaVersion,
+      Resolution resolution,
+      FinalizationLocator locator,
+      TurnFinalizationReceipt receipt) {
+    this(schemaVersion, resolution, locator, receipt, null);
+  }
 
   public IntakeAgentRunFinalizationReadResult {
-    if (!"intake-agent-run-finalization-read-result.v1".equals(schemaVersion)) {
+    boolean legacy = LEGACY_SCHEMA_VERSION.equals(schemaVersion);
+    if (!legacy && !SCHEMA_VERSION.equals(schemaVersion)) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-agent-run-finalization-read-result.v1");
+          "schemaVersion must be intake-agent-run-finalization-read-result.v1 or .v2");
     }
     Objects.requireNonNull(resolution, "resolution must not be null");
+    if (legacy) {
+      if (resolution == Resolution.TERMINAL_NO_COMMIT || terminalNoCommitEvidence != null) {
+        throw new IllegalArgumentException("v1 finalization read cannot carry terminal evidence");
+      }
+    } else if (resolution != Resolution.TERMINAL_NO_COMMIT
+        || terminalNoCommitEvidence == null) {
+      throw new IllegalArgumentException(
+          "v2 finalization read requires terminal-no-commit evidence");
+    }
     if (resolution == Resolution.COMMITTED) {
       Objects.requireNonNull(locator, "committed result requires a locator");
       Objects.requireNonNull(receipt, "committed result requires a receipt");
@@ -34,6 +62,10 @@ public record IntakeAgentRunFinalizationReadResult(
   public void requireMatches(
       IntakeAgentRunFinalizationReadRequest request, boolean allowWinningAttempt) {
     Objects.requireNonNull(request, "request");
+    if (resolution == Resolution.TERMINAL_NO_COMMIT) {
+      terminalNoCommitEvidence.requireMatches(request);
+      return;
+    }
     if (resolution != Resolution.COMMITTED) {
       return;
     }
@@ -86,7 +118,101 @@ public record IntakeAgentRunFinalizationReadResult(
   public enum Resolution {
     COMMITTED,
     PENDING,
-    ABSENT_TERMINAL
+    ABSENT_TERMINAL,
+    TERMINAL_NO_COMMIT
+  }
+
+  /** Exact durable proof that execution completed publicly but formal finalization was rejected. */
+  public record TerminalNoCommitEvidence(
+      String schemaVersion,
+      String logicalRunId,
+      String rootAttemptId,
+      String terminalAttemptId,
+      long terminalAttemptNo,
+      AgentRunAttemptStatus terminalAttemptStatus,
+      String stopReason,
+      String finalizationStatus,
+      String errorCode,
+      long terminalSequenceNo,
+      ExecuteAgentRunResult completedAudit) {
+
+    public static final String SCHEMA_VERSION =
+        "intake-agent-run-terminal-no-commit-evidence.v1";
+
+    public TerminalNoCommitEvidence {
+      if (!SCHEMA_VERSION.equals(schemaVersion)) {
+        throw new IllegalArgumentException(
+            "schemaVersion must be intake-agent-run-terminal-no-commit-evidence.v1");
+      }
+      requireIdentifier(logicalRunId, "logicalRunId");
+      requireIdentifier(rootAttemptId, "rootAttemptId");
+      requireIdentifier(terminalAttemptId, "terminalAttemptId");
+      if (terminalAttemptNo < 1 || terminalSequenceNo < 1) {
+        throw new IllegalArgumentException("terminal attempt and sequence must be positive");
+      }
+      Objects.requireNonNull(terminalAttemptStatus, "terminalAttemptStatus must not be null");
+      if (!"FINALIZATION_REJECTED".equals(stopReason)
+          || !"UNCOMMITTED".equals(finalizationStatus)) {
+        throw new IllegalArgumentException(
+            "terminal evidence must be an uncommitted finalization rejection");
+      }
+      requireIdentifier(errorCode, "errorCode");
+      Objects.requireNonNull(completedAudit, "completedAudit must not be null");
+      if (completedAudit.outcome() != ExecuteAgentRunResult.Outcome.COMPLETED
+          || !logicalRunId.equals(completedAudit.agentRunId())
+          || !logicalRunId.equals(completedAudit.logicalRunId())
+          || !terminalAttemptId.equals(completedAudit.attemptId())
+          || terminalAttemptNo != completedAudit.attemptNo()
+          || completedAudit.graphResult() == null
+          || completedAudit.resultHash() == null
+          || terminalSequenceNo != Math.incrementExact(completedAudit.lastSequenceNo())) {
+        throw new IllegalArgumentException(
+            "terminal evidence conflicts with the completed AgentRun audit");
+      }
+      AgentRunAttemptStatus expectedStatus =
+          completedAudit.publicOutputEmitted()
+              ? AgentRunAttemptStatus.ABORTED
+              : AgentRunAttemptStatus.FAILED;
+      if (terminalAttemptStatus != expectedStatus) {
+        throw new IllegalArgumentException(
+            "terminal attempt status conflicts with completed public output");
+      }
+    }
+
+    public ExecuteAgentRunResult terminalResult() {
+      return new ExecuteAgentRunResult(
+          ExecuteAgentRunResult.SCHEMA_VERSION,
+          logicalRunId,
+          logicalRunId,
+          terminalAttemptId,
+          terminalAttemptNo,
+          ExecuteAgentRunResult.Outcome.FAILED,
+          null,
+          null,
+          terminalSequenceNo,
+          completedAudit.publicOutputEmitted(),
+          errorCode,
+          false,
+          AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
+          completedAudit.completedAt());
+    }
+
+    private void requireMatches(IntakeAgentRunFinalizationReadRequest request) {
+      IntakeWorkflowCommand command = request.command();
+      IntakeTargetAgentRunContext target = command.executionContext().targetAgentRun();
+      IntakeAgentRunChildState child = request.childState();
+      if (!logicalRunId.equals(child.logicalRunId())
+          || !logicalRunId.equals(target.request().logicalRunId())
+          || !rootAttemptId.equals(child.attemptId())
+          || !rootAttemptId.equals(target.request().attemptId())
+          || terminalAttemptNo < target.request().attemptNo()
+          || terminalAttemptNo > target.request().attemptLimit()
+          || (terminalAttemptNo == target.request().attemptNo()
+              && !terminalAttemptId.equals(rootAttemptId))) {
+        throw new IllegalArgumentException(
+            "terminal evidence does not match the exact Intake child lookup");
+      }
+    }
   }
 
   public record FinalizationLocator(

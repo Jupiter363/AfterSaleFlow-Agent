@@ -20,7 +20,7 @@ public final class IntakeAgentRunFinalizationReadActivitiesAdapter
     if (result == null) {
       throw new IllegalStateException("finalization read port returned no resolution");
     }
-    result.requireMatches(request);
+    result.requireMatches(request, request.allowsWinningAttempt());
     return result;
   }
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import datetime as dt
 import hashlib
@@ -25,6 +26,7 @@ ledger = importlib.import_module("ledger")
 p9_gate = importlib.import_module("p9_gate")
 provision = importlib.import_module("provision")
 teardown = importlib.import_module("teardown")
+LOCAL_SOURCE_PROVISIONER = ROOT / ".local-dev" / "provision-local-target.py"
 
 
 def _decode(segment: str) -> bytes:
@@ -39,6 +41,40 @@ def _compose_service(compose: str, service: str) -> str:
     )
     assert match is not None, f"missing Compose service: {service}"
     return match.group("body")
+
+
+def _local_source_identity_namespace() -> dict[str, object]:
+    source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    selected_names = {
+        "CANDIDATE_SHA_PATTERN",
+        "COMPILED_WORKTREE_BINDING_PATTERN",
+    }
+    selected_functions = {
+        "component_digest",
+        "require_compiled_worktree_binding",
+        "sha256_bytes",
+        "temporal_build_id",
+    }
+    selected: list[ast.stmt] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id in selected_names
+            for target in node.targets
+        ):
+            selected.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name in selected_functions:
+            selected.append(node)
+    namespace: dict[str, object] = {"hashlib": hashlib, "re": re}
+    exec(
+        compile(
+            ast.Module(body=selected, type_ignores=[]),
+            str(LOCAL_SOURCE_PROVISIONER),
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace
 
 
 def test_all_java_roles_use_the_target_artifact_and_control_mounts_activation_material() -> None:
@@ -858,3 +894,110 @@ def test_provisioning_outputs_only_public_runtime_material_to_activation_mount()
     assert "TARGET_E2E_ISOLATION_ATTESTATION_KEY_ID" in source
     assert "TARGET_E2E_SYNTHETIC_FIXTURE_SHA256" in source
     assert "TARGET_E2E_GRAPH_ACTIVATION_BINDING_HASH" in source
+
+
+def test_local_source_build_identity_is_exact_deterministic_and_binding_sensitive() -> (
+    None
+):
+    namespace = _local_source_identity_namespace()
+    temporal_build_id = namespace["temporal_build_id"]
+    component_digest = namespace["component_digest"]
+    assert callable(temporal_build_id)
+    assert callable(component_digest)
+    candidate = "a" * 40
+    first_binding = "b" * 64
+    second_binding = "c" * 64
+    shared_prefix_first_binding = "d" * 16 + "e" * 48
+    shared_prefix_second_binding = "d" * 16 + "f" * 48
+
+    first_control = temporal_build_id(candidate, first_binding, "control")
+    first_agent = temporal_build_id(candidate, first_binding, "agent")
+    assert first_control == temporal_build_id(candidate, first_binding, "control")
+    assert first_agent == temporal_build_id(candidate, first_binding, "agent")
+    assert first_control != first_agent
+    assert first_binding in first_control
+    assert first_binding in first_agent
+    assert first_control != temporal_build_id(candidate, second_binding, "control")
+    assert first_agent != temporal_build_id(candidate, second_binding, "agent")
+    for changed_index in range(len(first_binding)):
+        changed_binding = (
+            first_binding[:changed_index]
+            + "c"
+            + first_binding[changed_index + 1 :]
+        )
+        assert temporal_build_id(candidate, changed_binding, "control") != first_control
+        assert temporal_build_id(candidate, changed_binding, "agent") != first_agent
+    shared_prefix_first_control = temporal_build_id(
+        candidate, shared_prefix_first_binding, "control"
+    )
+    shared_prefix_second_control = temporal_build_id(
+        candidate, shared_prefix_second_binding, "control"
+    )
+    shared_prefix_first_agent = temporal_build_id(
+        candidate, shared_prefix_first_binding, "agent"
+    )
+    shared_prefix_second_agent = temporal_build_id(
+        candidate, shared_prefix_second_binding, "agent"
+    )
+    assert shared_prefix_first_control != shared_prefix_second_control
+    assert shared_prefix_first_agent != shared_prefix_second_agent
+    assert shared_prefix_first_binding in shared_prefix_first_control
+    assert shared_prefix_first_binding in shared_prefix_first_agent
+
+    provisioner_source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+    launcher_source = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        re.search(
+            r"\b[A-Za-z_][A-Za-z0-9_]*binding[A-Za-z0-9_]*\s*"
+            r"\[\s*(?:0\s*)?:\s*16\s*\]",
+            provisioner_source,
+            re.IGNORECASE,
+        )
+        is None
+    )
+    assert (
+        re.search(
+            r"\$[A-Za-z_][A-Za-z0-9_]*binding[A-Za-z0-9_]*\s*"
+            r"\.Substring\(\s*0\s*,\s*16\s*\)",
+            launcher_source,
+            re.IGNORECASE,
+        )
+        is None
+    )
+
+    for component in (
+        "java-api",
+        "java-control",
+        "java-agent",
+        "python-agent",
+        "frontend",
+    ):
+        first_digest = component_digest(candidate, first_binding, component)
+        assert first_digest == component_digest(candidate, first_binding, component)
+        assert first_digest != component_digest(candidate, second_binding, component)
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", first_digest)
+
+
+@pytest.mark.parametrize(
+    "binding",
+    ["", "a" * 63, "a" * 65, "A" * 64, "g" * 64],
+)
+def test_local_source_build_identity_rejects_malformed_binding(binding: str) -> None:
+    namespace = _local_source_identity_namespace()
+    require_binding = namespace["require_compiled_worktree_binding"]
+    assert callable(require_binding)
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        require_binding(binding)
+
+    source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+    assert 'parser.add_argument("--compiled-worktree-binding", required=True)' in source
+
+
+def test_local_source_graph_code_identity_remains_independent() -> None:
+    source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+    assert "target_binding, registry_hash = provision._target_binding(candidate)" in source
+    assert "provision._target_binding(compiled_worktree_binding)" not in source
+    assert '"compiledWorktreeBinding": compiled_worktree_binding' in source
+    assert '"compiled_worktree_binding": compiled_worktree_binding' in source

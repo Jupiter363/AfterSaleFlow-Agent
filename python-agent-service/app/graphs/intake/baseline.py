@@ -394,25 +394,52 @@ def normalize_model_matrix_fact_key_payload(
         raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
 
     replacements: dict[str, str] = {}
+    removed: set[str] = set()
     for row in rows:
         fact_key = row["fact_key"]
         if not fact_key.startswith("FACT_") or fact_key in authorized_fact_ids:
             continue
+        source_scope = row.get("source_scope")
+        if source_scope == "PREVIOUS_MATRIX":
+            removed.add(fact_key)
+            continue
+        if source_scope not in {
+            "CURRENT_SOURCE",
+            "PREVIOUS_AND_CURRENT_SOURCE",
+        }:
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
         replacement = f"NEW_{fact_key.removeprefix('FACT_')}"
         if replacement in proposed_keys or replacement in replacements.values():
             raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
         replacements[fact_key] = replacement
 
-    if not replacements:
+    if not replacements and not removed:
         return normalized
 
+    normalized_rows: list[dict[str, Any]] = []
     for row in rows:
         fact_key = row["fact_key"]
+        if fact_key in removed:
+            continue
         if fact_key in replacements:
             row["fact_key"] = replacements[fact_key]
-    normalized["summary_source_fact_keys"] = [
-        replacements.get(fact_key, fact_key) for fact_key in summary_keys
+            if row.get("source_scope") == "PREVIOUS_AND_CURRENT_SOURCE":
+                row["source_scope"] = "CURRENT_SOURCE"
+        normalized_rows.append(row)
+    normalized_summary_keys = [
+        replacements.get(fact_key, fact_key)
+        for fact_key in summary_keys
+        if fact_key not in removed
     ]
+    remaining_keys = {row["fact_key"] for row in normalized_rows}
+    if (
+        not normalized_rows
+        or not normalized_summary_keys
+        or any(fact_key not in remaining_keys for fact_key in normalized_summary_keys)
+    ):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+    normalized["fact_rows"] = normalized_rows
+    normalized["summary_source_fact_keys"] = normalized_summary_keys
     return normalized
 
 
@@ -452,7 +479,7 @@ def _canonicalize_intake_baseline_historical_matrix_carry(
     request: IntakeTurnRequest,
     output: IntakeCaseDetailLlmOutput,
 ) -> IntakeCaseDetailLlmOutput:
-    """Restore prior actor semantics for an exact previous-matrix carry row."""
+    """Restore immutable bindings and actor semantics for exact historical rows."""
 
     matrix = output.case_matrix_delta
     previous_detail = request.previous_case_detail
@@ -481,13 +508,17 @@ def _canonicalize_intake_baseline_historical_matrix_carry(
     actor_role = request.agent_context.actor_role
     changed = False
     for row in rows:
-        if not isinstance(row, dict) or row.get("source_scope") != "PREVIOUS_MATRIX":
+        if not isinstance(row, dict):
             continue
         previous_row = previous_by_id.get(row.get("fact_key"))
-        if previous_row is None or any(
-            row.get(field) != previous_row.get(field)
-            for field in ("category", "fact_target", "materiality")
-        ):
+        if previous_row is None:
+            continue
+        for field in ("category", "fact_target", "materiality"):
+            authoritative_value = deepcopy(previous_row.get(field))
+            if row.get(field) != authoritative_value:
+                row[field] = authoritative_value
+                changed = True
+        if row.get("source_scope") != "PREVIOUS_MATRIX":
             continue
         positions = previous_row.get("positions")
         previous_position = (
@@ -511,28 +542,66 @@ def _canonicalize_intake_baseline_historical_matrix_carry(
         raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_PATCH_INVALID") from error
 
 
-def _fact_ids(value: Any) -> frozenset[str]:
-    ids: set[str] = set()
+def _selected_previous_matrix(
+    detail: Mapping[str, Any],
+) -> tuple[str, Mapping[str, Any]] | None:
+    matrix_keys = [
+        key
+        for key in ("case_fact_matrix", "unilateral_case_matrix")
+        if key in detail
+    ]
+    if len(matrix_keys) > 1:
+        raise IntakeGraphContractError("INTAKE_BASELINE_PREVIOUS_DETAIL_INVALID")
+    if not matrix_keys:
+        return None
+    matrix_key = matrix_keys[0]
+    matrix = detail.get(matrix_key)
+    if not isinstance(matrix, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_PREVIOUS_DETAIL_INVALID")
+    _selected_matrix_fact_ids(matrix)
+    return matrix_key, matrix
 
-    def visit(candidate: Any) -> None:
-        if isinstance(candidate, Mapping):
-            fact_id = candidate.get("fact_id")
-            if isinstance(fact_id, str):
-                ids.add(fact_id)
-            for child in candidate.values():
-                visit(child)
-        elif isinstance(candidate, list | tuple):
-            for child in candidate:
-                visit(child)
 
-    visit(value)
-    return frozenset(ids)
+def _selected_matrix_fact_ids(matrix: Mapping[str, Any]) -> frozenset[str]:
+    rows = matrix.get("fact_rows")
+    if not isinstance(rows, list) or not rows:
+        raise IntakeGraphContractError("INTAKE_BASELINE_PREVIOUS_DETAIL_INVALID")
+    fact_ids: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise IntakeGraphContractError("INTAKE_BASELINE_PREVIOUS_DETAIL_INVALID")
+        fact_id = row.get("fact_id")
+        if (
+            not isinstance(fact_id, str)
+            or not fact_id.startswith("FACT_")
+            or fact_id in fact_ids
+        ):
+            raise IntakeGraphContractError("INTAKE_BASELINE_PREVIOUS_DETAIL_INVALID")
+        fact_ids.add(fact_id)
+    return frozenset(fact_ids)
+
+
+def _domain_owned_matrix(
+    state: Mapping[str, Any],
+) -> tuple[str, Mapping[str, Any]] | None:
+    dossier = state.get("dossier_draft")
+    if dossier is None:
+        return None
+    if not isinstance(dossier, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_PREVIOUS_DETAIL_INVALID")
+    return _selected_previous_matrix(dossier)
 
 
 def intake_baseline_authorized_fact_ids(state: Mapping[str, Any]) -> frozenset[str]:
-    """Return stable fact IDs from the semantic previous-detail context."""
+    """Return stable fact IDs from the selected committed previous matrix."""
 
-    return _fact_ids(_previous_case_detail(state))
+    detail = _previous_case_detail(state)
+    if detail is None:
+        return frozenset()
+    selected = _selected_previous_matrix(detail)
+    if selected is None:
+        return frozenset()
+    return _selected_matrix_fact_ids(selected[1])
 
 
 def _target_missing_field_identifiers(missing_fields: Any) -> list[str]:
@@ -646,6 +715,12 @@ def _previous_case_detail(state: Mapping[str, Any]) -> dict[str, Any] | None:
         detail = deepcopy(dict(raw))
     else:
         raise IntakeGraphContractError("INTAKE_BASELINE_PREVIOUS_DETAIL_INVALID")
+    domain_matrix = _domain_owned_matrix(state)
+    if domain_matrix is not None:
+        matrix_key, matrix = domain_matrix
+        detail.pop("case_fact_matrix", None)
+        detail.pop("unilateral_case_matrix", None)
+        detail[matrix_key] = deepcopy(dict(matrix))
     return detail or None
 
 

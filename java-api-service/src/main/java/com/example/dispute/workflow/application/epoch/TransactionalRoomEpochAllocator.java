@@ -150,6 +150,9 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
 
         if (active.getRoomType() == command.nextRoomType()) {
             requireCompatibleRoom(active, command.nextRoomId());
+            if (command.hasProjectionAuthority()) {
+                requireProjectionAuthority(projection, command);
+            }
             return allocation(active);
         }
         if (active.getRoomType() != command.expectedRoomType()) {
@@ -187,21 +190,41 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                         command.occurredAt());
         epochRepository.saveAndFlush(next);
         persistTargetBinding(next, selection);
-        projection.switchTo(
-                active.getRoomEpoch(),
-                active.getFencingToken(),
-                command.macroPhase(),
-                command.nextRoomType().name(),
-                command.roomPhase(),
-                next.getWriterMode(),
-                nextProcessRevision,
-                nextRoomEpoch,
-                nextFencingToken,
-                command.projectedDeadlineAt(),
-                next.getTemporalWorkflowId(),
-                next.getTemporalRunId(),
-                next.getTemporalBuildId(),
-                command.occurredAt());
+        if (command.hasProjectionAuthority()) {
+            projection.switchTo(
+                    active.getRoomEpoch(),
+                    active.getFencingToken(),
+                    command.macroPhase(),
+                    command.nextRoomType().name(),
+                    command.roomPhase(),
+                    next.getWriterMode(),
+                    nextProcessRevision,
+                    nextRoomEpoch,
+                    nextFencingToken,
+                    command.projectedDeadlineAt(),
+                    next.getTemporalWorkflowId(),
+                    next.getTemporalRunId(),
+                    next.getTemporalBuildId(),
+                    command.occurredAt(),
+                    command.projectionRef(),
+                    command.projectionSha256());
+        } else {
+            projection.switchTo(
+                    active.getRoomEpoch(),
+                    active.getFencingToken(),
+                    command.macroPhase(),
+                    command.nextRoomType().name(),
+                    command.roomPhase(),
+                    next.getWriterMode(),
+                    nextProcessRevision,
+                    nextRoomEpoch,
+                    nextFencingToken,
+                    command.projectedDeadlineAt(),
+                    next.getTemporalWorkflowId(),
+                    next.getTemporalRunId(),
+                    next.getTemporalBuildId(),
+                    command.occurredAt());
+        }
         projectionRepository.saveAndFlush(projection);
         enqueueProvisioning(next, projection, command.occurredAt());
         return allocation(next);
@@ -464,6 +487,17 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
             throw failure(
                     "ROOM_EPOCH_IDEMPOTENCY_CONFLICT",
                     "the persisted room epoch belongs to a different room instance");
+        }
+    }
+
+    private static void requireProjectionAuthority(
+            CaseProcessProjectionEntity projection, TransitionRoomEpoch command) {
+        if (!Objects.equals(projection.getProjectionRef(), command.projectionRef())
+                || !Objects.equals(
+                        projection.getProjectionSha256(), command.projectionSha256())) {
+            throw failure(
+                    "ROOM_EPOCH_PROJECTION_AUTHORITY_CONFLICT",
+                    "the active room epoch is bound to different projection authority");
         }
     }
 

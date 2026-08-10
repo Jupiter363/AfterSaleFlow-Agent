@@ -5,7 +5,11 @@ from typing import Any
 
 import pytest
 
-from app.graph_runtime.errors import GraphLeaseLostError, GraphLeaseUnavailableError
+from app.graph_runtime.errors import (
+    GraphContractError,
+    GraphLeaseLostError,
+    GraphLeaseUnavailableError,
+)
 from app.graph_runtime.lease import (
     LEASE_DURATION,
     LEASE_RENEWAL_INTERVAL,
@@ -187,8 +191,11 @@ async def test_active_other_owner_is_not_stealable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_renewal_requires_same_owner_token_and_unexpired_database_lease() -> None:
+async def test_renewal_requires_exact_command_deadline_after_lock_and_before_database_clock() -> (
+    None
+):
     connection = _Connection([_row()])
+    command_deadline_at = NOW + timedelta(minutes=2)
 
     renewed = await PostgresLeaseRepository().renew(
         connection,
@@ -196,18 +203,35 @@ async def test_renewal_requires_same_owner_token_and_unexpired_database_lease() 
         command_id="command-1",
         owner_id="worker-1",
         fencing_token=1,
+        command_deadline_at=command_deadline_at,
     )
 
     assert renewed.fencing_token == 1
     sql = connection.calls[0][0]
+    assert "join agent_graph_command command" in sql
+    assert "command.thread_id = lease.thread_id" in sql
+    assert "command.command_id = lease.command_id" in sql
+    assert "command.deadline_at = %s" in sql
+    assert "for update of lease" in sql
+    assert "from locked_lease" in sql
+    assert sql.index("for update of lease") < sql.index("clock_timestamp()")
     assert "lease.fencing_token = %s" in sql
     assert "lease.lease_expires_at > db_clock.now" in sql
+    assert "locked_lease.command_deadline_at > db_clock.now" in sql
     assert "lease.cancelled_at is null" in sql
+    assert connection.calls[0][1] == (
+        THREAD,
+        "command-1",
+        "worker-1",
+        1,
+        command_deadline_at,
+    )
 
 
 @pytest.mark.asyncio
-async def test_failed_renewal_is_immediate_lease_loss() -> None:
+async def test_after_deadline_zero_row_is_immediate_lease_loss() -> None:
     connection = _Connection([None])
+    command_deadline_at = NOW - timedelta(microseconds=1)
 
     with pytest.raises(GraphLeaseLostError):
         await PostgresLeaseRepository().renew(
@@ -216,7 +240,47 @@ async def test_failed_renewal_is_immediate_lease_loss() -> None:
             command_id="command-1",
             owner_id="worker-stale",
             fencing_token=1,
+            command_deadline_at=command_deadline_at,
         )
+
+    assert len(connection.calls) == 1
+    assert connection.calls[0][1][-1] is command_deadline_at
+
+
+@pytest.mark.asyncio
+async def test_renewal_omitting_authoritative_deadline_fails_at_signature() -> None:
+    connection = _Connection([_row()])
+
+    with pytest.raises(TypeError, match="command_deadline_at"):
+        await PostgresLeaseRepository().renew(  # type: ignore[call-arg]
+            connection,
+            thread_id=THREAD,
+            command_id="command-1",
+            owner_id="worker-1",
+            fencing_token=1,
+        )
+
+    assert connection.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_deadline", (None, NOW.replace(tzinfo=None), "2026-07-19"))
+async def test_renewal_rejects_missing_or_non_authoritative_deadline_before_sql(
+    invalid_deadline: Any,
+) -> None:
+    connection = _Connection([_row()])
+
+    with pytest.raises(GraphContractError, match="timezone-aware command deadline"):
+        await PostgresLeaseRepository().renew(
+            connection,
+            thread_id=THREAD,
+            command_id="command-1",
+            owner_id="worker-1",
+            fencing_token=1,
+            command_deadline_at=invalid_deadline,
+        )
+
+    assert connection.calls == []
 
 
 @pytest.mark.asyncio

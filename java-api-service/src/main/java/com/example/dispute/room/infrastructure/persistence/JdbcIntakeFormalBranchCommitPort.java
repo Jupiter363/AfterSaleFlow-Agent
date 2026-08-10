@@ -6,6 +6,7 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.IntakeBranchDomainService;
 import com.example.dispute.room.application.IntakeBranchDomainService.BranchResult;
+import com.example.dispute.room.application.IntakeBranchDomainService.RespondentSubmitLineage;
 import com.example.dispute.room.application.IntakeBranchDomainService.TimelineEventMode;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.domain.RoomType;
@@ -20,6 +21,7 @@ import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.FrozenIntakeSubmissionAuthority;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitReceipt;
@@ -283,11 +285,32 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
         AuthenticatedActor actor =
                 new AuthenticatedActor(authority.actorId(), ActorRole.valueOf(authority.actorRole()));
 
-        BranchResult result = applyBranch(request, resolved, dispute, intakeRoom, actor, now);
         long eventSequence = nextEventSequence(request.envelope().caseId());
+        EventCoordinates eventCoordinates = eventCoordinates(request, eventSequence);
+        RevisionRows expectedRevisions = expectedRevisions(request);
+        BranchResult result = applyBranch(
+                request,
+                resolved,
+                dispute,
+                intakeRoom,
+                actor,
+                eventCoordinates,
+                expectedRevisions,
+                now);
         RevisionRows revisions = advanceProjection(request, dispute, result, eventSequence, now);
+        if (!expectedRevisions.equals(revisions)) {
+            throw rejected(
+                    "INTAKE_BRANCH_REVISION_INVARIANT",
+                    "branch projection did not commit the pre-authorized event revisions");
+        }
         EventReceipt event = writeCommittedEvent(
-                request, result, authority, revisions, dispute, eventSequence, now);
+                request,
+                result,
+                authority,
+                revisions,
+                dispute,
+                eventCoordinates,
+                now);
         markCommandApplied(command, event, now);
         completeOperation(operation, event, now);
         BranchCommitReceipt receipt = new BranchCommitReceipt(
@@ -311,6 +334,8 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
             FulfillmentCaseEntity dispute,
             CaseRoomEntity intakeRoom,
             AuthenticatedActor actor,
+            EventCoordinates eventCoordinates,
+            RevisionRows expectedRevisions,
             OffsetDateTime now) {
         return switch (request.operation()) {
             case INITIATOR_ACCEPT -> {
@@ -345,8 +370,33 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                         actor,
                         requiredConfirmation(resolved),
                         now,
-                        TimelineEventMode.FORMAL_TYPED_ONLY);
-                domainService.requireFormalBilateralMatrix(dispute);
+                        TimelineEventMode.FORMAL_TYPED_ONLY,
+                        new RespondentSubmitLineage(
+                                request.envelope().tenantSurrogate(),
+                                request.operationKey(),
+                                request.envelope().commandId(),
+                                request.envelope().commandSequence(),
+                                request.requestHash(),
+                                eventCoordinates.eventId(),
+                                eventCoordinates.eventRef(),
+                                eventCoordinates.sequence(),
+                                request.envelope().roomEpoch(),
+                                request.envelope().fencingToken(),
+                                expectedRevisions.processRevision(),
+                                expectedRevisions.roomRevision()));
+                IntakeBranchDomainService.ObjectNodeAuthority matrix =
+                        domainService.requireFormalBilateralMatrix(dispute);
+                FrozenIntakeSubmissionAuthority frozen = Objects.requireNonNull(
+                        result.frozenSubmissionAuthority(),
+                        "respondent branch frozen submission authority");
+                if (!FrozenIntakeSubmissionAuthority.MATRIX_KIND.equals(matrix.matrixKind())
+                        || !frozen.matrixContentHash().equals(matrix.contentHash())) {
+                    throw rejected(
+                            "INTAKE_RESPONDENT_FROZEN_MATRIX_MISMATCH",
+                            "respondent Submit authority differs from the formal bilateral matrix");
+                }
+                requireFrozenSubmitBinding(
+                        request, actor, eventCoordinates, expectedRevisions, frozen);
                 yield result;
             }
         };
@@ -448,6 +498,9 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                     "INTAKE_RESPONDENT_EPOCH_ALLOCATOR_MISSING",
                     "respondent formal commit requires the target room epoch allocator");
         }
+        FrozenIntakeSubmissionAuthority frozen = Objects.requireNonNull(
+                result.frozenSubmissionAuthority(),
+                "respondent branch frozen submission authority");
         advanceRespondentProjectionSequence(request, eventSequence, now);
         RoomEpochAllocator.RoomEpochAllocation allocation = Objects.requireNonNull(
                 roomEpochAllocator.transition(
@@ -459,7 +512,9 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                                 dispute.getCaseStatus().name(),
                                 "OPEN",
                                 result.view().deadlineAt(),
-                                now)),
+                                now,
+                                frozen.projectionRef(),
+                                frozen.projectionSha256())),
                 "respondent evidence epoch allocation");
         if (!request.envelope().caseId().equals(allocation.caseId())
                 || allocation.roomType() != ContractTypes.RoomType.EVIDENCE
@@ -866,18 +921,73 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
         }
     }
 
+    private void appendFrozenSubmission(
+            BranchCommitRequest request,
+            BranchResult result,
+            AuthorityRows actorAuthority,
+            RevisionRows revisions,
+            EventCoordinates eventCoordinates,
+            ObjectNode resultFacts) {
+        if (request.operation() != BranchOperation.RESPONDENT_CONFIRM) {
+            if (result.frozenSubmissionAuthority() != null
+                    || result.frozenMatrixCanonicalJson() != null) {
+                throw rejected(
+                        "INTAKE_FROZEN_SUBMISSION_UNEXPECTED",
+                        "only respondent Submit can persist frozen matrix authority");
+            }
+            return;
+        }
+        FrozenIntakeSubmissionAuthority frozen = Objects.requireNonNull(
+                result.frozenSubmissionAuthority(),
+                "respondent branch frozen submission authority");
+        requireFrozenSubmitBinding(
+                request,
+                new AuthenticatedActor(
+                        actorAuthority.actorId(), ActorRole.valueOf(actorAuthority.actorRole())),
+                eventCoordinates,
+                revisions,
+                frozen);
+        try {
+            JsonNode matrix = objectMapper.readTree(Objects.requireNonNull(
+                    result.frozenMatrixCanonicalJson(),
+                    "respondent branch canonical frozen matrix"));
+            if (!result.frozenMatrixCanonicalJson()
+                            .equals(ContractJson.canonicalString(matrix))
+                    || !FrozenIntakeSubmissionAuthority.MATRIX_KIND.equals(result.matrixKind())
+                    || !frozen.matrixContentHash().equals(result.matrixHash())) {
+                throw new IllegalArgumentException(
+                        "respondent branch matrix material is not canonical");
+            }
+            frozen.requireMatchesMatrix(matrix);
+            frozen.requireProjectionPair(frozen.projectionRef(), frozen.projectionSha256());
+            ObjectNode frozenSubmission = resultFacts.putObject("frozen_submission");
+            frozenSubmission.set("authority", objectMapper.valueToTree(frozen));
+            frozenSubmission.set("matrix", matrix);
+        } catch (JsonProcessingException | IllegalArgumentException failure) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_FROZEN_SUBMISSION_INVALID",
+                    "respondent Submit frozen matrix authority is invalid",
+                    failure);
+        }
+    }
+
     private EventReceipt writeCommittedEvent(
             BranchCommitRequest request,
             BranchResult result,
             AuthorityRows authority,
             RevisionRows revisions,
             FulfillmentCaseEntity dispute,
-            long sequence,
+            EventCoordinates eventCoordinates,
             OffsetDateTime now) {
-        String eventId = deterministicId("EVIB_", request.operationKey(), "event");
-        String eventRef = EVENT_REF_PREFIX + eventId;
+        String eventId = eventCoordinates.eventId();
+        String eventRef = eventCoordinates.eventRef();
+        long sequence = eventCoordinates.sequence();
         ObjectNode resultFacts = objectMapper.createObjectNode();
-        resultFacts.put("schema_version", "intake-branch-result.v1");
+        resultFacts.put(
+                "schema_version",
+                result.frozenSubmissionAuthority() == null
+                        ? "intake-branch-result.v1"
+                        : "intake-branch-result.v2");
         resultFacts.put("operation", request.operation().name());
         resultFacts.put("case_id", request.envelope().caseId());
         resultFacts.put("case_status", dispute.getCaseStatus().name());
@@ -899,6 +1009,8 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
         if (result.matrixHash() != null) {
             resultFacts.put("matrix_hash", result.matrixHash());
         }
+        appendFrozenSubmission(
+                request, result, authority, revisions, eventCoordinates, resultFacts);
         String resultHash = ContractJson.sha256Hex(resultFacts);
 
         ObjectNode eventJson = objectMapper.createObjectNode();
@@ -906,7 +1018,7 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
         eventJson.put("event_id", eventId);
         eventJson.put("event_ref", eventRef);
         eventJson.put("event_sequence", sequence);
-        eventJson.put("event_type", eventType(request.operation()).name());
+        eventJson.put("event_type", eventCoordinates.eventType().name());
         eventJson.put("party", request.envelope().party().name());
         eventJson.put("command_id", request.envelope().commandId());
         eventJson.put("tenant_surrogate", request.envelope().tenantSurrogate());
@@ -1097,9 +1209,10 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                     || json.required("room_revision").asLong()
                             != result.required("room_revision").asLong()) {
                 throw rejected(
-                        "INTAKE_BRANCH_RECEIPT_HASH_INVALID",
-                        "persisted branch receipt hash is invalid");
+                    "INTAKE_BRANCH_RECEIPT_HASH_INVALID",
+                    "persisted branch receipt hash is invalid");
             }
+            validateStoredFrozenSubmission(request, json, result);
             IntakeDomainEventRef event = new IntakeDomainEventRef(
                     "intake-domain-event-ref.v1",
                     json.required("event_id").asText(),
@@ -1144,12 +1257,132 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
         }
     }
 
+    private void validateStoredFrozenSubmission(
+            BranchCommitRequest request, JsonNode event, JsonNode result)
+            throws JsonProcessingException {
+        JsonNode frozenSubmission = result.get("frozen_submission");
+        if (request.operation() != BranchOperation.RESPONDENT_CONFIRM) {
+            if (frozenSubmission != null
+                    || !"intake-branch-result.v1".equals(
+                            result.path("schema_version").asText())) {
+                throw rejected(
+                        "INTAKE_BRANCH_RECEIPT_INVALID",
+                        "non-respondent branch receipt contains frozen Submit authority");
+            }
+            return;
+        }
+        String resultSchema = result.path("schema_version").asText();
+        if ("intake-branch-result.v1".equals(resultSchema) && frozenSubmission == null) {
+            // Historical respondent receipts remain replayable, but cannot authorize hydration.
+            return;
+        }
+        if (!"intake-branch-result.v2".equals(resultSchema)) {
+            throw rejected(
+                    "INTAKE_BRANCH_RECEIPT_INVALID",
+                    "respondent branch receipt has an unsupported frozen Submit schema");
+        }
+        if (!(frozenSubmission instanceof ObjectNode frozenObject)
+                || frozenObject.size() != 2
+                || !frozenObject.path("authority").isObject()
+                || !frozenObject.path("matrix").isObject()) {
+            throw rejected(
+                    "INTAKE_BRANCH_RECEIPT_INVALID",
+                    "respondent branch receipt has no exact frozen Submit material");
+        }
+        JsonNode authorityDocument = frozenObject.required("authority");
+        JsonNode matrix = frozenObject.required("matrix");
+        FrozenIntakeSubmissionAuthority frozen =
+                objectMapper.treeToValue(authorityDocument, FrozenIntakeSubmissionAuthority.class);
+        if (!ContractJson.canonicalString(authorityDocument)
+                        .equals(ContractJson.canonicalString(objectMapper.valueToTree(frozen)))
+                || !FrozenIntakeSubmissionAuthority.MATRIX_KIND.equals(
+                        result.required("matrix_kind").asText())
+                || !frozen.matrixContentHash().equals(
+                        result.required("matrix_hash").asText())) {
+            throw rejected(
+                    "INTAKE_BRANCH_RECEIPT_INVALID",
+                    "persisted frozen Submit authority is not canonical");
+        }
+        frozen.requireMatchesMatrix(matrix);
+        frozen.requireProjectionPair(frozen.projectionRef(), frozen.projectionSha256());
+        requireFrozenSubmitEventBinding(
+                request,
+                new EventCoordinates(
+                        event.required("event_id").asText(),
+                        event.required("event_ref").asText(),
+                        event.required("event_sequence").asLong(),
+                        IntakeDomainEventType.valueOf(event.required("event_type").asText())),
+                new RevisionRows(
+                        event.required("process_revision").asLong(),
+                        event.required("room_revision").asLong()),
+                frozen);
+    }
+
     private long nextEventSequence(String caseId) {
         Long value = jdbc.queryForObject(
                 "select coalesce(max(sequence_no), 0) + 1 from case_timeline_event where case_id = :caseId",
                 Map.of("caseId", caseId),
                 Long.class);
         return Objects.requireNonNull(value, "next event sequence");
+    }
+
+    private static RevisionRows expectedRevisions(BranchCommitRequest request) {
+        return new RevisionRows(
+                Math.addExact(request.envelope().processRevision(), 1),
+                Math.addExact(request.envelope().roomRevision(), 1));
+    }
+
+    private static EventCoordinates eventCoordinates(
+            BranchCommitRequest request, long sequence) {
+        String eventId = deterministicId("EVIB_", request.operationKey(), "event");
+        return new EventCoordinates(
+                eventId,
+                EVENT_REF_PREFIX + eventId,
+                sequence,
+                eventType(request.operation()));
+    }
+
+    private static void requireFrozenSubmitBinding(
+            BranchCommitRequest request,
+            AuthenticatedActor actor,
+            EventCoordinates eventCoordinates,
+            RevisionRows revisions,
+            FrozenIntakeSubmissionAuthority frozen) {
+        requireFrozenSubmitEventBinding(request, eventCoordinates, revisions, frozen);
+        if (!actor.actorId().equals(frozen.respondentActorId())
+                || !actor.role().name().equals(frozen.respondentActorRole().name())) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_FROZEN_SUBMISSION_INVALID",
+                    "respondent Submit actor differs from frozen authority");
+        }
+    }
+
+    private static void requireFrozenSubmitEventBinding(
+            BranchCommitRequest request,
+            EventCoordinates eventCoordinates,
+            RevisionRows revisions,
+            FrozenIntakeSubmissionAuthority frozen) {
+        ActivityEnvelope envelope = request.envelope();
+        if (request.operation() != BranchOperation.RESPONDENT_CONFIRM
+                || envelope.party() != IntakeParty.RESPONDENT
+                || !envelope.tenantSurrogate().equals(frozen.tenantSurrogate())
+                || !envelope.caseId().equals(frozen.caseId())
+                || !request.operationKey().equals(frozen.submitOperationKey())
+                || !envelope.commandId().equals(frozen.submitCommandId())
+                || envelope.commandSequence() != frozen.submitCommandSequence()
+                || !request.requestHash().equals(frozen.submitRequestHash())
+                || !eventCoordinates.eventId().equals(frozen.submitEventId())
+                || !eventCoordinates.eventRef().equals(frozen.submitEventRef())
+                || eventCoordinates.sequence() != frozen.submitEventSequence()
+                || !eventCoordinates.eventType().name().equals(frozen.submitEventType())
+                || envelope.roomEpoch() != frozen.sourceRoomEpoch()
+                || envelope.fencingToken() != frozen.sourceFencingToken()
+                || revisions.processRevision() != frozen.sourceProcessRevision()
+                || revisions.roomRevision() != frozen.sourceRoomRevision()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_FROZEN_SUBMISSION_INVALID",
+                    "respondent Submit event differs from frozen matrix authority");
+        }
     }
 
     private MapSqlParameterSource parameters(BranchCommitRequest request) {
@@ -1276,6 +1509,12 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
             long version) {}
 
     private record RevisionRows(long processRevision, long roomRevision) {}
+
+    private record EventCoordinates(
+            String eventId,
+            String eventRef,
+            long sequence,
+            IntakeDomainEventType eventType) {}
 
     private record EventReceipt(IntakeDomainEventRef event, String resultHash) {}
 

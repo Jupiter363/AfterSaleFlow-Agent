@@ -672,15 +672,12 @@ def _proposal_matrix_is_attested_by_current_pending_context(
             or previous.get("proposal_hash") != proposal.get("proposal_hash")
         ):
             return False
-        # The promoted shortcut is intentionally limited to a genuine M0 opening:
-        # no formal authority entered this graph and the deterministic finalizer
-        # consumed no prior matrix.  If either authority exists, fall back to the
-        # full matrix validator so a self-consistent, re-hashed capsule cannot
-        # smuggle an invented M1/Mn into the authority chain.
-        if (
-            previous.get("authority_input_matrix") is not None
-            or _ingress_matrix_authority_anchor_hash(state) is not None
-        ):
+        # A current promoted capsule may attest its own proposal only when the
+        # central Java-commit selector says this exact formal candidate became
+        # the next parent.  Non-persisted respondent candidates fall through and
+        # are validated against their retained authority input instead.
+        committed = _selected_committed_baseline_matrix(state, previous)
+        if committed != previous.get("formal_matrix"):
             return False
         _require_promoted_current_capsule_attestation(state, previous, proposal)
         return True
@@ -1012,13 +1009,7 @@ def _matrix_proposal_context(state: IntakeGraphStateV2) -> Any:
         if context is None:
             return state.get("dossier_draft")
         if _is_baseline_context_envelope(context):
-            _validate_baseline_context_envelope(
-                context,
-                require_bound=True,
-                state=state,
-            )
-            _require_baseline_previous_result_lineage(state, context)
-            return context["snapshot"]
+            return _committed_baseline_context(state, context)
         if not isinstance(context, Mapping):
             raise IntakeGraphContractError("INTAKE_BASELINE_PREVIOUS_DETAIL_INVALID")
         return context
@@ -1035,6 +1026,178 @@ def _has_verified_baseline_context(state: IntakeGraphStateV2) -> bool:
         state=state,
     )
     _require_baseline_previous_result_lineage(state, context)
+    return True
+
+
+def _committed_baseline_context(
+    state: IntakeGraphStateV2 | Mapping[str, Any],
+    envelope: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project one bound private capsule through the Java matrix commit contract."""
+
+    typed_state = cast(IntakeGraphStateV2, state)
+    selected = _selected_committed_baseline_matrix(typed_state, envelope)
+    snapshot = envelope.get("snapshot")
+    if not isinstance(snapshot, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID")
+    context = deepcopy(dict(snapshot))
+    context.pop("case_fact_matrix", None)
+    context.pop("unilateral_case_matrix", None)
+    if selected is not None:
+        context["case_fact_matrix"] = selected
+    return context
+
+
+def _selected_committed_baseline_matrix(
+    state: IntakeGraphStateV2,
+    envelope: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Select only the matrix that Java persists for the bound terminal turn."""
+
+    _validate_baseline_context_envelope(
+        envelope,
+        require_bound=True,
+        state=state,
+    )
+    _require_baseline_previous_result_lineage(state, envelope)
+    result = state.get("result_json")
+    if not isinstance(result, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_RESULT_MISSING")
+    matrix_patch = result.get("matrix_patch")
+    _require_pending_normalized_matrix_patch(envelope, matrix_patch)
+
+    private_binding = envelope.get("private_binding")
+    if not isinstance(private_binding, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID")
+    request = _matrix_derivation_request_base(
+        envelope,
+        expected_private_binding=private_binding,
+    )
+    actor_role = request.agent_context.actor_role
+    initiator_role = _trusted_initiator_role(state)
+    respondent_role = _respondent_role(initiator_role)
+    if actor_role != private_binding.get("audience") or actor_role not in {
+        initiator_role,
+        respondent_role,
+    }:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID")
+
+    authority_input = envelope.get("authority_input_matrix")
+    formal_matrix = envelope.get("formal_matrix")
+    if authority_input is not None and not isinstance(authority_input, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID")
+    if not isinstance(formal_matrix, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID")
+
+    if matrix_patch is None:
+        selected = authority_input
+    else:
+        opening = _bound_envelope_has_respondent_opening_receipt(
+            state,
+            envelope,
+            turn_source=request.turn_source,
+        )
+        if actor_role == initiator_role:
+            if opening:
+                raise IntakeGraphContractError(
+                    "INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID"
+                )
+            selected = formal_matrix
+        else:
+            if not isinstance(matrix_patch, Mapping) or matrix_patch.get(
+                "schema_version"
+            ) != "case_fact_matrix.delta.v2":
+                raise IntakeGraphContractError(
+                    "INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID"
+                )
+            readiness = result.get("readiness")
+            missing_fields = result.get("missing_fields")
+            if opening:
+                selected = formal_matrix
+            elif readiness == "READY_TO_CONFIRM":
+                if not isinstance(missing_fields, list) or missing_fields:
+                    raise IntakeGraphContractError(
+                        "INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID"
+                    )
+                selected = formal_matrix
+            elif readiness in {"INCOMPLETE", "NEEDS_REVIEW"}:
+                selected = authority_input
+            else:
+                raise IntakeGraphContractError(
+                    "INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID"
+                )
+
+    if selected is None:
+        return None
+    _validate_baseline_formal_matrix(
+        selected,
+        expected_case_id=private_binding["case_id"],
+    )
+    return deepcopy(dict(selected))
+
+
+def _bound_envelope_has_respondent_opening_receipt(
+    state: Mapping[str, Any],
+    envelope: Mapping[str, Any],
+    *,
+    turn_source: str,
+) -> bool:
+    """Recognize opening only from its immutable event and source receipts."""
+
+    source_lineage = envelope.get("source_lineage")
+    records = state.get("node_results")
+    if not isinstance(source_lineage, Mapping) or not isinstance(records, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID")
+    event_ref = source_lineage.get("source_ref")
+    event_key = (
+        "event:" + hashlib.sha256(event_ref.encode("utf-8")).hexdigest()
+        if isinstance(event_ref, str)
+        else None
+    )
+    event = records.get(event_key) if event_key is not None else None
+    message_id = event.get("message_id") if isinstance(event, Mapping) else None
+    source_key = (
+        "message:" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()
+        if isinstance(message_id, str)
+        else None
+    )
+    source = records.get(source_key) if source_key is not None else None
+    event_is_marked = isinstance(event, Mapping) and (
+        event.get("source_type") == RESPONDENT_OPENING_MARKER
+        or event.get("control_marker") == RESPONDENT_OPENING_MARKER
+    )
+    source_is_marked = isinstance(source, Mapping) and (
+        source.get("source_type") == RESPONDENT_OPENING_MARKER
+        or source.get("control_marker") == RESPONDENT_OPENING_MARKER
+    )
+    requested_opening = turn_source == RESPONDENT_OPENING_MARKER
+    if not requested_opening:
+        if event_is_marked or source_is_marked:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID")
+        return False
+
+    source_refs = event.get("source_refs") if isinstance(event, Mapping) else None
+    if (
+        source_lineage.get("kind") != "EVENT"
+        or source_lineage.get("sequence") != 1
+        or not isinstance(event, Mapping)
+        or event.get("kind") != "EVENT"
+        or event.get("stable_id") != event_ref
+        or event.get("content_hash") != source_lineage.get("source_turn_hash")
+        or event.get("sequence") != 1
+        or event.get("source_type") != RESPONDENT_OPENING_MARKER
+        or event.get("control_marker") != RESPONDENT_OPENING_MARKER
+        or not isinstance(source_refs, (list, tuple))
+        or message_id not in source_refs
+        or not isinstance(source, Mapping)
+        or source.get("kind") != "RESPONDENT_OPENING_SOURCE"
+        or source.get("stable_id") != message_id
+        or source.get("content_hash") != source_lineage.get("source_turn_hash")
+        or source.get("sequence") != 1
+        or source.get("source_type") != RESPONDENT_OPENING_MARKER
+        or source.get("control_marker") != RESPONDENT_OPENING_MARKER
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID")
     return True
 
 
@@ -1169,9 +1332,9 @@ def _verified_capsule_authority_succeeds_ingress(
         state=state,
     )
     _require_baseline_previous_result_lineage(state, previous)
-    formal_matrix = previous.get("formal_matrix")
+    formal_matrix = _selected_committed_baseline_matrix(state, previous)
     return (
-        isinstance(formal_matrix, Mapping)
+        formal_matrix is not None
         and formal_matrix.get("content_hash") == active_formal_hash
         and previous.get("authority_anchor_hash") == ingress_formal_hash
     )
@@ -1762,6 +1925,22 @@ def _validate_frozen_fact_row(
         initiator_role,
         _FROZEN_POSITION_FIELDS,
     )
+    respondent = _formal_child_object(
+        positions,
+        respondent_role,
+        _FROZEN_POSITION_FIELDS,
+    )
+    if allow_bilateral_successor:
+        _validate_bilateral_position(initiator, declared_sources=declared_sources)
+        _validate_bilateral_position(respondent, declared_sources=declared_sources)
+        alignment = _formal_child_object(
+            row,
+            "party_alignment",
+            _FROZEN_ALIGNMENT_FIELDS,
+        )
+        _validate_bilateral_alignment(row, alignment)
+        return row, fact_id, materiality == "CORE"
+
     initiator_sources = _formal_identifier_list(
         initiator,
         "source_refs",
@@ -1778,20 +1957,6 @@ def _validate_frozen_fact_row(
     if initiator.get("asserted_value") is not None:
         _formal_text(initiator, "asserted_value", 2_000)
 
-    respondent = _formal_child_object(
-        positions,
-        respondent_role,
-        _FROZEN_POSITION_FIELDS,
-    )
-    if allow_bilateral_successor:
-        _validate_bilateral_position(respondent, declared_sources=declared_sources)
-        alignment = _formal_child_object(
-            row,
-            "party_alignment",
-            _FROZEN_ALIGNMENT_FIELDS,
-        )
-        _validate_bilateral_alignment(row, alignment)
-        return row, fact_id, materiality == "CORE"
     if (
         respondent.get("stance") != "NOT_ADDRESSED"
         or respondent.get("position_summary") != "该方尚未直接陈述。"
@@ -2672,13 +2837,7 @@ def unwrap_verified_baseline_previous_case_detail(
     previous = state.get("baseline_previous_case_detail")
     if not _is_baseline_context_envelope(previous):
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
-    _validate_baseline_context_envelope(
-        previous,
-        require_bound=True,
-        state=state,
-    )
-    _require_baseline_previous_result_lineage(state, previous)
-    return deepcopy(dict(previous["snapshot"]))
+    return _committed_baseline_context(state, previous)
 
 
 def _baseline_private_binding(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -3166,6 +3325,47 @@ def _pre_model_state_for_pending_derivation(
     return candidate, True
 
 
+def _rewind_promoted_respondent_opening_pre_model_state(
+    state: IntakeGraphStateV2,
+    candidate: dict[str, Any],
+    *,
+    envelope: Mapping[str, Any],
+    response_removed: bool,
+) -> None:
+    """Remove only the exact current opening promotion from replay state."""
+
+    previous = state.get("baseline_previous_case_detail")
+    result = state.get("result_json")
+    if previous is None and result is None:
+        return
+
+    terminal_draft = state.get("terminal_draft")
+    if (
+        not response_removed
+        or state.get("route") != "respondent_opening"
+        or "baseline_pending_case_detail" not in state
+        or state.get("baseline_pending_case_detail") is not None
+        or not isinstance(previous, Mapping)
+        or dict(previous) != dict(envelope)
+        or not isinstance(terminal_draft, Mapping)
+        or not isinstance(result, Mapping)
+        or dict(terminal_draft) != dict(result)
+    ):
+        raise IntakeGraphContractError(
+            "INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID"
+        )
+    _validate_baseline_context_envelope(
+        envelope,
+        require_bound=True,
+        state=state,
+    )
+    _require_pending_envelope_matches_proposal(state, envelope, result)
+    _require_baseline_previous_result_lineage(state, envelope)
+    _require_pending_public_dossier_matches_state(state, envelope)
+    candidate["baseline_previous_case_detail"] = None
+    candidate["result_json"] = None
+
+
 def _matches_derivation_request_forward_compaction(
     authoritative: Mapping[str, Any],
     actual: Mapping[str, Any],
@@ -3220,6 +3420,12 @@ def _require_pending_derivation_request_matches_pre_model_state(
         allow_response_absent=allow_response_absent,
     )
     if request.turn_source == RESPONDENT_OPENING_MARKER:
+        _rewind_promoted_respondent_opening_pre_model_state(
+            state,
+            pre_model_state,
+            envelope=envelope,
+            response_removed=response_removed,
+        )
         authority_input = envelope.get("authority_input_matrix")
         dossier = pre_model_state.get("dossier_draft")
         if not isinstance(authority_input, Mapping) or not isinstance(dossier, Mapping):

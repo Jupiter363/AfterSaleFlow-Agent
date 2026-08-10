@@ -888,7 +888,7 @@ def test_unclassified_service_failure_is_not_automatically_retried() -> None:
     assert len(service.calls) == 1
 
 
-def test_target_reconciliation_returns_exact_result_envelope_without_proposal_bytes() -> None:
+def test_target_reconciliation_reads_exact_durable_result_while_admission_is_unavailable() -> None:
     command = _target_command()
     activation_id = f"p9act.v1.{'a' * 32}"
     command_hash = target_e2e_command_hash(command)
@@ -1057,6 +1057,10 @@ def test_target_reconciliation_returns_exact_result_envelope_without_proposal_by
             )
 
     service = TargetService(_response(command))
+
+    def forbidden_command_admission_readiness() -> bool:
+        raise AssertionError("durable reconciliation must not consult command admission readiness")
+
     app = FastAPI()
     app.include_router(
         create_graph_reconciliation_router(
@@ -1067,7 +1071,7 @@ def test_target_reconciliation_returns_exact_result_envelope_without_proposal_by
                 envelope_verifier=Verifier(_verified_reconciliation(command)),
                 thread_identity_resolver=ThreadResolver(),
                 reconciliation_service=service,
-                ready=lambda: True,
+                ready=forbidden_command_admission_readiness,
                 target_e2e_envelope_verifier=TargetVerifier(),
                 target_e2e_thread_identity_resolver=TargetThreadResolver(),
             )

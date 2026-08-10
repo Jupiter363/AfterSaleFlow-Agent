@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.agentstream.application.AgentStreamProtocolException;
 import com.example.dispute.agentstream.infrastructure.AgentNdjsonStreamClient;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -174,11 +175,88 @@ class TargetE2EGraphStreamVisibilityTest {
                             + "\"delta\":\"not-public\"}")))
         .isInstanceOf(AgentStreamProtocolException.class)
         .hasMessageContaining("non-public field");
+
+    var evidenceNode = state();
+    parse(evidenceNode, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
+    assertThatThrownBy(
+            () ->
+                parse(
+                    evidenceNode,
+                    event(
+                        1,
+                        "visible_delta",
+                        "{\"node\":\"evidence_turn\",\"field\":\"room_utterance\","
+                            + "\"delta\":\"not-public\"}")))
+        .isInstanceOf(AgentStreamProtocolException.class)
+        .hasMessageContaining("non-public field");
+  }
+
+  @Test
+  void permitsOnlyEvidenceRoomUtteranceForTheEvidenceRoom() {
+    var allowed = state(RoomType.EVIDENCE);
+    parse(allowed, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
+
+    assertThat(
+            parse(
+                    allowed,
+                    event(
+                        1,
+                        "visible_delta",
+                        "{\"node\":\"evidence_turn\",\"field\":\"room_utterance\","
+                            + "\"delta\":\"public\"}"))
+                .eventType())
+        .isEqualTo(StreamEventType.VISIBLE_DELTA);
+
+    assertEvidenceFieldRejected("evidence_turn", "reasoning_content");
+    assertEvidenceFieldRejected("evidence_turn", "unknown_field");
+    assertEvidenceFieldRejected("intake_turn_case_detail", "room_utterance");
+    assertEvidenceFieldRejected("unknown_node", "room_utterance");
+  }
+
+  @Test
+  void hearingAndReviewRoomsExposeNoVisibleFields() {
+    assertThat(TargetE2EGraphStreamVisibility.frozenPolicy(RoomType.HEARING)).isEmpty();
+    assertThat(TargetE2EGraphStreamVisibility.frozenPolicy(RoomType.REVIEW)).isEmpty();
+
+    for (RoomType roomType : Set.of(RoomType.HEARING, RoomType.REVIEW)) {
+      assertRoomFieldRejected(roomType, "evidence_turn", "room_utterance");
+      assertRoomFieldRejected(roomType, "intake_turn_case_detail", "room_utterance");
+    }
+  }
+
+  private static void assertEvidenceFieldRejected(String node, String field) {
+    assertRoomFieldRejected(RoomType.EVIDENCE, node, field);
+  }
+
+  private static void assertRoomFieldRejected(RoomType roomType, String node, String field) {
+    var state = state(roomType);
+    parse(state, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
+    assertThatThrownBy(
+            () ->
+                parse(
+                    state,
+                    event(
+                        1,
+                        "visible_delta",
+                        "{\"node\":\""
+                            + node
+                            + "\",\"field\":\""
+                            + field
+                            + "\",\"delta\":\"not-public\"}")))
+        .isInstanceOf(AgentStreamProtocolException.class)
+        .hasMessageContaining("non-public field");
   }
 
   private static AgentNdjsonStreamClient.V2ProtocolState state() {
+    return state(RoomType.INTAKE);
+  }
+
+  private static AgentNdjsonStreamClient.V2ProtocolState state(RoomType roomType) {
     return new AgentNdjsonStreamClient.V2ProtocolState(
-        "run-1", "attempt-1", Audience.USER, TargetE2EGraphStreamVisibility.frozenPolicy());
+        "run-1",
+        "attempt-1",
+        Audience.USER,
+        TargetE2EGraphStreamVisibility.frozenPolicy(roomType));
   }
 
   private static com.example.dispute.workflow.contract.v1.AgentStreamEvent parse(

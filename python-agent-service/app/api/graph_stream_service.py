@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, replace
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -17,6 +18,7 @@ from app.graph_runtime.errors import (
     GraphLeaseLostError,
     GraphNewAgentAttemptRequiredError,
     GraphVersionUnavailableError,
+    normalize_transient_persistence_error,
 )
 from app.graph_runtime.gateway import (
     AdmissionAction,
@@ -36,6 +38,15 @@ from app.security.invocation_envelope import VerifiedInvocation
 
 TERMINAL_STREAM_EVENTS = frozenset({"attempt_aborted", "final", "error"})
 MAX_CANCEL_DRAIN_SECONDS = 1.0
+SOURCE_QUIESCE_MAX_SECONDS = 15.0
+SOURCE_QUIESCE_POST_DEADLINE_GRACE_SECONDS = 10.0
+RETAINED_CLEANUP_LIFECYCLE_SECONDS = 30.0
+_RETAINED_ABORT_RETRY_INITIAL_SECONDS = 0.05
+_RETAINED_ABORT_RETRY_MAX_SECONDS = 0.5
+
+
+class GraphRetainedCleanupError(GraphContractError):
+    """Lifecycle cannot close PostgreSQL while exact-fence cleanup still owns it."""
 
 
 class GraphGatewayPort(Protocol):
@@ -199,6 +210,7 @@ class ExactShadowExecutorRegistry:
 class _AdmissionToken:
     task: asyncio.Task[Any]
     serial: int
+    retained_cleanup: bool = False
 
 
 @dataclass(slots=True)
@@ -217,10 +229,19 @@ class GraphStreamAdmissionGate:
         self._condition = asyncio.Condition()
         self._tokens: set[_AdmissionToken] = set()
         self._next_serial = 0
+        self._cleanup_failure: BaseException | None = None
 
     @property
     def accepting(self) -> bool:
-        return self._accepting
+        return (
+            self._accepting
+            and self._cleanup_failure is None
+            and not any(token.retained_cleanup for token in self._tokens)
+        )
+
+    @property
+    def cleanup_failure(self) -> BaseException | None:
+        return self._cleanup_failure
 
     async def start(self) -> None:
         async with self._condition:
@@ -231,7 +252,7 @@ class GraphStreamAdmissionGate:
         if task is None:
             raise GraphGatewayDisabledError("GRAPH_STREAM_TASK_MISSING")
         async with self._condition:
-            if not self._accepting:
+            if not self.accepting:
                 raise GraphGatewayDisabledError("GRAPH_GATEWAY_DRAINING")
             self._next_serial += 1
             token = _AdmissionToken(task, self._next_serial)
@@ -240,6 +261,37 @@ class GraphStreamAdmissionGate:
 
     async def leave(self, token: _AdmissionToken) -> None:
         async with self._condition:
+            self._tokens.discard(token)
+            self._condition.notify_all()
+
+    async def retain_cleanup(self, task: asyncio.Task[Any]) -> _AdmissionToken:
+        """Keep deferred exact-fence cleanup visible to readiness and lifecycle drain."""
+
+        async with self._condition:
+            self._next_serial += 1
+            token = _AdmissionToken(task, self._next_serial, retained_cleanup=True)
+            self._tokens.add(token)
+        task.add_done_callback(
+            lambda completed: asyncio.create_task(
+                self._complete_retained_cleanup(token, completed)
+            )
+        )
+        return token
+
+    async def _complete_retained_cleanup(
+        self,
+        token: _AdmissionToken,
+        task: asyncio.Task[Any],
+    ) -> None:
+        failure: BaseException | None = None
+        try:
+            failure = task.exception()
+        except asyncio.CancelledError as error:
+            failure = error
+        async with self._condition:
+            if failure is not None and not isinstance(failure, asyncio.CancelledError):
+                self._cleanup_failure = failure
+                self._accepting = False
             self._tokens.discard(token)
             self._condition.notify_all()
 
@@ -252,18 +304,69 @@ class GraphStreamAdmissionGate:
             try:
                 async with asyncio.timeout(timeout_seconds):
                     await self._condition.wait_for(lambda: not self._tokens)
+                    if self._cleanup_failure is not None:
+                        raise GraphRetainedCleanupError(
+                            "retained Graph cleanup failed"
+                        ) from self._cleanup_failure
                     return True
             except TimeoutError:
-                pending = tuple({token.task for token in self._tokens if token.task is not current})
-        for task in pending:
+                ordinary = tuple(
+                    {
+                        token.task
+                        for token in self._tokens
+                        if token.task is not current and not token.retained_cleanup
+                    }
+                )
+        for task in ordinary:
             task.cancel()
-        if pending:
-            done, _ = await asyncio.wait(
-                pending,
+        if ordinary:
+            done, still_running = await asyncio.wait(
+                ordinary,
                 timeout=min(timeout_seconds, MAX_CANCEL_DRAIN_SECONDS),
             )
             if done:
                 await asyncio.gather(*done, return_exceptions=True)
+            if still_running:
+                raise GraphRetainedCleanupError(
+                    "Graph request did not transfer or quiesce before lifecycle drain"
+                )
+        # An ordinary request can register retained cleanup from its shielded
+        # cancellation path.  Snapshot only after every cancelled request has
+        # joined, under the condition lock, so pool close cannot race that transfer.
+        async with self._condition:
+            retained = tuple(
+                {
+                    token.task
+                    for token in self._tokens
+                    if token.task is not current and token.retained_cleanup
+                }
+            )
+            cleanup_failure = self._cleanup_failure
+        if cleanup_failure is not None:
+            raise GraphRetainedCleanupError(
+                "retained Graph cleanup failed"
+            ) from cleanup_failure
+        if retained:
+            # Retained cleanup is the sole remaining owner of an exact durable
+            # fence.  Never cancel it before the Graph pools close.  Shield it under
+            # a distinct lifecycle bound; timeout leaves the task retained and
+            # forces close/readiness to fail loudly so a later close can drain it.
+            retained_group = asyncio.gather(*retained, return_exceptions=True)
+            try:
+                async with asyncio.timeout(RETAINED_CLEANUP_LIFECYCLE_SECONDS):
+                    results = await asyncio.shield(retained_group)
+            except TimeoutError as error:
+                raise GraphRetainedCleanupError(
+                    "retained Graph cleanup exceeded lifecycle drain bound"
+                ) from error
+            failure = next(
+                (result for result in results if isinstance(result, BaseException)),
+                None,
+            )
+            if failure is not None:
+                raise GraphRetainedCleanupError(
+                    "retained Graph cleanup failed"
+                ) from failure
         return False
 
 
@@ -381,9 +484,9 @@ class GatewayBackedGraphCommandStreamService:
             )
         except BaseException as error:
             with anyio.CancelScope(shield=True):
-                await self._best_effort_abort(execution, error)
                 if source is not None:
-                    await _close_iterator_safely(source)
+                    await _close_iterator_bounded(source)
+                await self._abort_preterminal(execution, error)
             raise
         renewing_stream = self._renewing_stream(
             validated,
@@ -489,10 +592,12 @@ class GatewayBackedGraphCommandStreamService:
     ) -> AsyncIterator[AgentStreamEvent]:
         iterator: AsyncIterator[AgentStreamEvent] | None = None
         next_event: asyncio.Task[AgentStreamEvent] | None = None
+        source_close: asyncio.Task[None] | None = None
         heartbeat_stop = asyncio.Event()
         heartbeat_state = _LeaseHeartbeatState(execution)
         heartbeat: asyncio.Task[None] | None = None
         terminal_seen = False
+        cleanup_transferred = False
         try:
             iterator = source.__aiter__()
             next_event = asyncio.create_task(anext(iterator))
@@ -641,32 +746,105 @@ class GatewayBackedGraphCommandStreamService:
                         # here.  In particular, a terminal source failure before durable
                         # completion must not be obscured by a deferred heartbeat failure.
                         execution = heartbeat_state.execution
-                        # Persist the cancellation fence before touching provider tasks. A task
-                        # that suppresses cancellation can no longer checkpoint with the old token.
-                        await self._best_effort_abort(execution, failure)
+                        try:
+                            # A prefetched source may be inside a lease-fenced checkpoint
+                            # transaction.  It must release that row before durable abort
+                            # attempts to cancel the same fence; otherwise cleanup can
+                            # deadlock with its own writer and strand an EXECUTING command.
+                            await _join_task_before_command_deadline(
+                                next_event,
+                                execution,
+                                cancel=True,
+                                operation="prefetched Graph source",
+                            )
+                            next_event = None
+                            # Once checkpoint/provider work has quiesced, freeze and
+                            # join renewal before source close or durable abort.  A
+                            # late successful renew must not race the cancellation
+                            # fence or repopulate its process-local lease cache.
+                            heartbeat_stop.set()
+                            await _join_task_before_command_deadline(
+                                heartbeat,
+                                execution,
+                                cancel=True,
+                                operation="Graph lease heartbeat",
+                            )
+                            heartbeat = None
+                            if iterator is not None:
+                                source_close = asyncio.create_task(_close_iterator(iterator))
+                                await _join_task_before_command_deadline(
+                                    source_close,
+                                    execution,
+                                    cancel=False,
+                                    operation="Graph source close",
+                                )
+                                source_close = None
+                                iterator = None
+                        except BaseException as cleanup_error:
+                            # The request-level grace is exhausted, but cleanup
+                            # ownership cannot be discarded: retain a task that
+                            # waits for source/heartbeat/close ownership, then runs
+                            # the exact abort.  Admission/readiness remains closed
+                            # while it is pending; lifecycle drain owns the task.
+                            deferred = asyncio.create_task(
+                                self._complete_deferred_preterminal_cleanup(
+                                    next_event=next_event,
+                                    iterator=iterator,
+                                    source_close=source_close,
+                                    heartbeat=heartbeat,
+                                    heartbeat_stop=heartbeat_stop,
+                                    heartbeat_state=heartbeat_state,
+                                    failure=failure,
+                                )
+                            )
+                            await self._gate.retain_cleanup(deferred)
+                            next_event = None
+                            iterator = None
+                            source_close = None
+                            heartbeat = None
+                            cleanup_transferred = True
+                            raise cleanup_error
+                        execution = heartbeat_state.execution
+                        try:
+                            await self._abort_preterminal(execution, failure)
+                        except BaseException as abort_error:
+                            # The exact abort is idempotent in the gateway, so an
+                            # ambiguous/transient first failure retains one lifecycle-
+                            # owned completion attempt while the original cleanup
+                            # failure remains visible to this caller.
+                            deferred_abort = asyncio.create_task(
+                                self._complete_deferred_abort(execution, failure)
+                            )
+                            await self._gate.retain_cleanup(deferred_abort)
+                            cleanup_transferred = True
+                            raise abort_error
                 heartbeat_stop.set()
-                await _cancel_task(next_event)
-                next_event = None
-                if iterator is not None:
-                    await _close_iterator_safely(iterator)
-                    iterator = None
+                if not cleanup_transferred:
+                    await _cancel_task(next_event)
+                    next_event = None
+                    if iterator is not None:
+                        await _close_iterator_safely(iterator)
+                        iterator = None
             if failure is error:
                 raise
             raise failure from error
         finally:
             with anyio.CancelScope(shield=True):
                 heartbeat_stop.set()
-                await _cancel_task(next_event)
+                if not cleanup_transferred:
+                    await _cancel_task(next_event)
                 heartbeat_joined = await _cancel_task(heartbeat)
                 execution = heartbeat_state.execution
                 try:
-                    if iterator is not None:
+                    if iterator is not None and not cleanup_transferred:
                         await _close_iterator_bounded(iterator)
                 finally:
                     # A renewal task can commit just as a final/error path becomes
                     # terminal.  Join it and close the source first, then clear the
                     # exact fence once so a late renewal cannot reinsert the cache.
-                    if heartbeat_joined:
+                    if cleanup_transferred:
+                        pass
+                    elif heartbeat_joined:
                         self._gateway.cleanup_execution_lease(execution)
                     elif heartbeat is not None:
                         _cleanup_execution_lease_after_heartbeat(
@@ -827,24 +1005,86 @@ class GatewayBackedGraphCommandStreamService:
                 waiter.cancel()
             await asyncio.gather(*waiters, return_exceptions=True)
 
-    async def _best_effort_abort(
+    async def _abort_preterminal(
         self,
         execution: GatewayExecution,
         error: BaseException,
     ) -> None:
         cancelled = isinstance(error, (asyncio.CancelledError, GeneratorExit))
         code = "GRAPH_STREAM_CANCELLED" if cancelled else "GRAPH_STREAM_INTERRUPTED"
+        # Source and heartbeat ownership have already been joined by the caller.
+        # The control pool and database statement/lock limits bound this exact-fence
+        # transaction.  Its failure is authoritative cleanup failure and must not be
+        # swallowed while the command could still be EXECUTING.
+        await self._gateway.finish_execution_attempt(
+            execution,
+            status=(AttemptStatus.CANCELLED if cancelled else AttemptStatus.FAILED),
+            error_code=code,
+            error_classification="STREAM_INTERRUPTED",
+        )
+
+    async def _complete_deferred_preterminal_cleanup(
+        self,
+        *,
+        next_event: asyncio.Task[AgentStreamEvent] | None,
+        iterator: AsyncIterator[AgentStreamEvent] | None,
+        source_close: asyncio.Task[None] | None,
+        heartbeat: asyncio.Task[None] | None,
+        heartbeat_stop: asyncio.Event,
+        heartbeat_state: _LeaseHeartbeatState,
+        failure: BaseException,
+    ) -> None:
+        """Retain source ownership until exact-fence abort can run without a row-lock race."""
+
         try:
-            await _await_cleanup_bounded(
-                self._gateway.finish_execution_attempt(
-                    execution,
-                    status=(AttemptStatus.CANCELLED if cancelled else AttemptStatus.FAILED),
-                    error_code=code,
-                    error_classification="STREAM_INTERRUPTED",
+            await _join_retained_cleanup_task(next_event, cancel=True)
+            heartbeat_stop.set()
+            await _join_retained_cleanup_task(heartbeat, cancel=True)
+            if source_close is not None:
+                await _join_retained_cleanup_task(source_close, cancel=False)
+            elif iterator is not None:
+                await _close_iterator(iterator)
+            await self._retry_retained_abort(heartbeat_state.execution, failure)
+        finally:
+            self._gateway.cleanup_execution_lease(heartbeat_state.execution)
+
+    async def _complete_deferred_abort(
+        self,
+        execution: GatewayExecution,
+        failure: BaseException,
+    ) -> None:
+        """Complete an idempotent exact-fence abort after its first failure was surfaced."""
+
+        try:
+            await self._retry_retained_abort(execution, failure)
+        finally:
+            self._gateway.cleanup_execution_lease(execution)
+
+    async def _retry_retained_abort(
+        self,
+        execution: GatewayExecution,
+        failure: BaseException,
+    ) -> None:
+        """Own retry/adoption until exact terminal state or definitive takeover."""
+
+        delay_seconds = _RETAINED_ABORT_RETRY_INITIAL_SECONDS
+        while True:
+            try:
+                await self._abort_preterminal(execution, failure)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if (
+                    not isinstance(error, GraphLeaseLostError)
+                    and normalize_transient_persistence_error(error) is None
+                ):
+                    raise
+                await asyncio.sleep(delay_seconds)
+                delay_seconds = min(
+                    delay_seconds * 2,
+                    _RETAINED_ABORT_RETRY_MAX_SECONDS,
                 )
-            )
-        except BaseException:
-            return
 
 
 class _Executor:
@@ -869,6 +1109,60 @@ async def _cancel_task(task: asyncio.Task[Any] | None) -> bool:
         # stream path that initiated teardown, not to this cleanup join.
         return True
     return True
+
+
+async def _join_task_before_command_deadline(
+    task: asyncio.Task[Any] | None,
+    execution: GatewayExecution,
+    *,
+    cancel: bool,
+    operation: str,
+) -> None:
+    """Join one source-owned task before any exact-fence abort may begin.
+
+    Provider/checkpoint cancellation can take longer than the generic one-second
+    HTTP cleanup allowance while psycopg completes protocol cancellation and rolls
+    back its transaction.  Wait through the smaller of the remaining signed command
+    lifetime and the source-quiesce cap, then retain a fixed post-deadline grace for
+    psycopg cancellation and rollback.  On timeout the caller transfers the still-
+    owned task to service cleanup; it must not concurrently close the iterator or
+    mutate the durable lease after this helper fails.
+    """
+
+    if task is None:
+        return
+    if cancel and not task.done() and task.cancelling() == 0:
+        task.cancel()
+    deadline = execution.admission.command.deadline_at
+    remaining_before_deadline = max(
+        0.0,
+        (deadline - datetime.now(deadline.tzinfo)).total_seconds(),
+    )
+    timeout_seconds = (
+        min(remaining_before_deadline, SOURCE_QUIESCE_MAX_SECONDS)
+        + SOURCE_QUIESCE_POST_DEADLINE_GRACE_SECONDS
+    )
+    if not task.done():
+        done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
+        if task not in done:
+            raise GraphContractError(
+                f"{operation} did not quiesce within command cleanup grace"
+            )
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def _join_retained_cleanup_task(
+    task: asyncio.Task[Any] | None,
+    *,
+    cancel: bool,
+) -> None:
+    """Join cleanup ownership until completion or lifecycle cancellation."""
+
+    if task is None:
+        return
+    if cancel and not task.done() and task.cancelling() == 0:
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 async def _close_iterator(iterator: AsyncIterator[Any]) -> None:

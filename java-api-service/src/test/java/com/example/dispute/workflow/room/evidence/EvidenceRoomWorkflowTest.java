@@ -126,6 +126,50 @@ class EvidenceRoomWorkflowTest {
 
     assertThat(decoded.executionLane()).isEqualTo(ExecutionLane.LEGACY);
     assertThat(decoded.targetE2eCandidate()).isFalse();
+    assertThat(decoded.projectionRef()).isNull();
+    assertThat(decoded.projectionSha256()).isNull();
+    assertThat(legacyPayload.has("projectionRef")).isFalse();
+    assertThat(legacyPayload.has("projectionSha256")).isFalse();
+  }
+
+  @Test
+  void freezeBoundStartRetainsExactProjectionPairInSnapshot() {
+    Instant openedAt = Instant.ofEpochMilli(environment.currentTimeMillis());
+    String projectionRef =
+        "urn:after-sale-flow:intake-event:EVIB_EVIDENCE_FROZEN"
+            + "#/result/frozen_submission/matrix";
+    String projectionSha256 = "a".repeat(64);
+    EvidenceRoomStart freezeBound =
+        new EvidenceRoomStart(
+            EvidenceRoomStart.FROZEN_SUBMISSION_SCHEMA_VERSION,
+            "TENANT_P5_SYNTHETIC_TIMER",
+            CASE_ID,
+            "ROOM_P5_EVIDENCE_TIMER",
+            EPOCH,
+            11,
+            INITIATOR,
+            RESPONDENT,
+            openedAt,
+            openedAt.plus(Duration.ofHours(2)),
+            1,
+            4,
+            6,
+            "target-e2e-evidence-build",
+            ExecutionLane.TARGET_E2E_CANDIDATE,
+            projectionRef,
+            projectionSha256);
+    StartedWorkflow started = start("freeze-bound-snapshot", freezeBound);
+
+    try {
+      EvidenceRoomSnapshot snapshot =
+          awaitState(started.workflow(), EvidenceRoomSnapshot::freezeBound);
+      assertThat(snapshot.schemaVersion())
+          .isEqualTo(EvidenceRoomSnapshot.FROZEN_SUBMISSION_SCHEMA_VERSION);
+      assertThat(snapshot.projectionRef()).isEqualTo(projectionRef);
+      assertThat(snapshot.projectionSha256()).isEqualTo(projectionSha256);
+    } finally {
+      WorkflowStub.fromTyped(started.workflow()).cancel();
+    }
   }
 
   @Test

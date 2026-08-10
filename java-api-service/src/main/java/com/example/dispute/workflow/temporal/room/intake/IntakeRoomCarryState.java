@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.temporal.room.intake;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.util.List;
 
 /** Bounded state handed to the next Intake run by Continue-As-New. */
@@ -30,7 +31,12 @@ public record IntakeRoomCarryState(
     List<ObservedEvent> observedEvents,
     List<IntakeThreadInitialization> threadInitializations,
     IntakeAgentRunChildState targetAgentRunChild,
-    List<ObservedTargetSourceEvent> observedTargetSourceEvents) {
+    List<ObservedTargetSourceEvent> observedTargetSourceEvents,
+    IntakeTerminalNoCommitRecoveryResult completedTerminalNoCommitRecovery,
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+        IntakeAgentRunFinalizationRecoveryRequest completedTargetFinalizationRecoveryRequest,
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+        IntakeAgentRunFinalizationRecoveryResult completedTargetFinalizationRecoveryResult) {
 
   public static final int MAX_OBSERVED = 256;
   public static final int MAX_THREAD_INITIALIZATIONS = 2;
@@ -88,7 +94,10 @@ public record IntakeRoomCarryState(
         observedEvents,
         threadInitializations,
         null,
-        List.of());
+        List.of(),
+        null,
+        null,
+        null);
   }
 
   public IntakeRoomCarryState(
@@ -145,15 +154,143 @@ public record IntakeRoomCarryState(
         observedEvents,
         threadInitializations,
         targetAgentRunChild,
-        List.of());
+        List.of(),
+        null,
+        null,
+        null);
+  }
+
+  public IntakeRoomCarryState(
+      String schemaVersion,
+      IntakeRoomPhase roomPhase,
+      IntakeParty activeParty,
+      long nextCommandSequence,
+      long nextEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      boolean initiatorComplete,
+      boolean respondentUnlocked,
+      boolean respondentComplete,
+      IntakeParty readinessParty,
+      String lastEventId,
+      String lastEventRef,
+      String lastEventHash,
+      IntakeAgentRunRef lastAgentRunRef,
+      IntakeGraphExecutionRef lastGraphExecutionRef,
+      IntakeTerminalReason terminalReason,
+      long processRevision,
+      long roomRevision,
+      String protocolErrorCode,
+      int runGeneration,
+      IntakeCommandDecision lastDecision,
+      List<ObservedCommand> observedCommands,
+      List<ObservedEvent> observedEvents,
+      List<IntakeThreadInitialization> threadInitializations,
+      IntakeAgentRunChildState targetAgentRunChild,
+      List<ObservedTargetSourceEvent> observedTargetSourceEvents) {
+    this(
+        schemaVersion,
+        roomPhase,
+        activeParty,
+        nextCommandSequence,
+        nextEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        initiatorComplete,
+        respondentUnlocked,
+        respondentComplete,
+        readinessParty,
+        lastEventId,
+        lastEventRef,
+        lastEventHash,
+        lastAgentRunRef,
+        lastGraphExecutionRef,
+        terminalReason,
+        processRevision,
+        roomRevision,
+        protocolErrorCode,
+        runGeneration,
+        lastDecision,
+        observedCommands,
+        observedEvents,
+        threadInitializations,
+        targetAgentRunChild,
+        observedTargetSourceEvents,
+        null,
+        null,
+        null);
+  }
+
+  public IntakeRoomCarryState(
+      String schemaVersion,
+      IntakeRoomPhase roomPhase,
+      IntakeParty activeParty,
+      long nextCommandSequence,
+      long nextEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      boolean initiatorComplete,
+      boolean respondentUnlocked,
+      boolean respondentComplete,
+      IntakeParty readinessParty,
+      String lastEventId,
+      String lastEventRef,
+      String lastEventHash,
+      IntakeAgentRunRef lastAgentRunRef,
+      IntakeGraphExecutionRef lastGraphExecutionRef,
+      IntakeTerminalReason terminalReason,
+      long processRevision,
+      long roomRevision,
+      String protocolErrorCode,
+      int runGeneration,
+      IntakeCommandDecision lastDecision,
+      List<ObservedCommand> observedCommands,
+      List<ObservedEvent> observedEvents,
+      List<IntakeThreadInitialization> threadInitializations,
+      IntakeAgentRunChildState targetAgentRunChild,
+      List<ObservedTargetSourceEvent> observedTargetSourceEvents,
+      IntakeTerminalNoCommitRecoveryResult completedTerminalNoCommitRecovery) {
+    this(
+        schemaVersion,
+        roomPhase,
+        activeParty,
+        nextCommandSequence,
+        nextEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        initiatorComplete,
+        respondentUnlocked,
+        respondentComplete,
+        readinessParty,
+        lastEventId,
+        lastEventRef,
+        lastEventHash,
+        lastAgentRunRef,
+        lastGraphExecutionRef,
+        terminalReason,
+        processRevision,
+        roomRevision,
+        protocolErrorCode,
+        runGeneration,
+        lastDecision,
+        observedCommands,
+        observedEvents,
+        threadInitializations,
+        targetAgentRunChild,
+        observedTargetSourceEvents,
+        completedTerminalNoCommitRecovery,
+        null,
+        null);
   }
 
   public IntakeRoomCarryState {
     if (!"intake-room-carry-state.v1".equals(schemaVersion)
         && !"intake-room-carry-state.v2".equals(schemaVersion)
-        && !"intake-room-carry-state.v3".equals(schemaVersion)) {
+        && !"intake-room-carry-state.v3".equals(schemaVersion)
+        && !"intake-room-carry-state.v4".equals(schemaVersion)
+        && !"intake-room-carry-state.v5".equals(schemaVersion)) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-room-carry-state.v1, v2, or v3");
+          "schemaVersion must be intake-room-carry-state.v1, v2, v3, v4, or v5");
     }
     if ("intake-room-carry-state.v1".equals(schemaVersion) && targetAgentRunChild != null) {
       throw new IllegalArgumentException("v1 carry state cannot contain target child identity");
@@ -186,12 +323,42 @@ public record IntakeRoomCarryState(
       throw new IllegalArgumentException("intake observation cache exceeds the bound");
     }
     if (!"intake-room-carry-state.v3".equals(schemaVersion)
+        && !"intake-room-carry-state.v4".equals(schemaVersion)
+        && !"intake-room-carry-state.v5".equals(schemaVersion)
         && !observedTargetSourceEvents.isEmpty()) {
       throw new IllegalArgumentException(
           "target source event observations require intake-room-carry-state.v3");
     }
     if (threadInitializations.size() > MAX_THREAD_INITIALIZATIONS) {
       throw new IllegalArgumentException("intake thread initialization cache exceeds the bound");
+    }
+    if (completedTerminalNoCommitRecovery != null
+        && !"intake-room-carry-state.v4".equals(schemaVersion)
+        && !"intake-room-carry-state.v5".equals(schemaVersion)) {
+      throw new IllegalArgumentException(
+          "terminal-no-commit recovery cache requires intake-room-carry-state.v4");
+    }
+    boolean targetRecoveryRequestPresent = completedTargetFinalizationRecoveryRequest != null;
+    boolean targetRecoveryResultPresent = completedTargetFinalizationRecoveryResult != null;
+    if (targetRecoveryRequestPresent != targetRecoveryResultPresent) {
+      throw new IllegalArgumentException(
+          "target finalization recovery carry cache must contain both request and result");
+    }
+    boolean v5 = "intake-room-carry-state.v5".equals(schemaVersion);
+    if (!v5 && targetRecoveryRequestPresent) {
+      throw new IllegalArgumentException(
+          "target finalization recovery carry cache requires intake-room-carry-state.v5");
+    }
+    if (v5
+        && (!targetRecoveryRequestPresent
+            || !IntakeAgentRunFinalizationRecoveryRequest.V2_SCHEMA_VERSION.equals(
+                completedTargetFinalizationRecoveryRequest.schemaVersion())
+            || !IntakeAgentRunFinalizationRecoveryResult.V2_SCHEMA_VERSION.equals(
+                completedTargetFinalizationRecoveryResult.schemaVersion())
+            || !completedTargetFinalizationRecoveryRequest.equals(
+                completedTargetFinalizationRecoveryResult.request()))) {
+      throw new IllegalArgumentException(
+          "v5 carry state requires an exact v2 target finalization recovery cache");
     }
   }
 

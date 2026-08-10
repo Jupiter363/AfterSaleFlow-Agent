@@ -110,6 +110,10 @@ _BUFFERED_STRUCTURED_NODES = frozenset(
 # Pydantic validation. Its user-visible text therefore travels only in the
 # workflow's final response, after those guardrails have succeeded.
 _WORKFLOW_FINAL_VISIBLE_NODES = frozenset({"evidence_turn"})
+_INTAKE_PREPARATION_TIMEOUT_SECONDS = 15.0
+_INTAKE_PREPARATION_MAX_RESPONSE_BYTES = 16 * 1024
+_INTAKE_PREPARATION_FRESHNESS_SECONDS = 5.0
+_SHARED_ASYNC_KEEPALIVE_EXPIRY_SECONDS = 15 * 60.0
 
 
 # 所属模块：LLM 网关 > 节点资源治理 > 生成预算查询。
@@ -348,6 +352,36 @@ class StructuredLlmClient(Protocol):
         governed_request: GovernedProviderRequest | None = None,
     ) -> Iterator[StructuredStreamUpdate]: ...
 
+    async def agenerate(
+        self,
+        *,
+        node_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        output_type: type[T],
+        user_content_parts: list[dict[str, Any]] | None = None,
+        governed_request: GovernedProviderRequest | None = None,
+    ) -> StructuredGeneration: ...
+
+    def agenerate_stream(
+        self,
+        *,
+        node_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        output_type: type[T],
+        visible_fields: tuple[VisibleFieldSpec, ...] = (),
+        user_content_parts: list[dict[str, Any]] | None = None,
+        governed_request: GovernedProviderRequest | None = None,
+    ) -> AsyncIterator[StructuredStreamUpdate]: ...
+
+
+def _public_output_policy_enabled(observer: Any, node_name: str) -> bool:
+    """Probe the optional streaming-policy capability without widening wrappers."""
+
+    policy_check = getattr(observer, "public_output_policy_enabled", None)
+    return bool(policy_check(node_name)) if callable(policy_check) else False
+
 
 class LiteLlmProxyClient:
     """LiteLLM 代理客户端。
@@ -387,6 +421,10 @@ class LiteLlmProxyClient:
         self._async_client_closing = False
         self._async_client_closed = False
         self._async_client_close_task: asyncio.Task[None] | None = None
+        self._intake_preparation_lock = asyncio.Lock()
+        self._intake_preparation_task: asyncio.Task[None] | None = None
+        self._intake_preparation_succeeded_at: float | None = None
+        self._intake_preparation_clock = time.monotonic
         self._health_lock = threading.Lock()
         self._health_cached_at = 0.0
         self._health_cached_result: dict[str, Any] | None = None
@@ -401,6 +439,9 @@ class LiteLlmProxyClient:
         return httpx.AsyncClient(
             timeout=self._timeout,
             transport=self._async_transport,
+            limits=httpx.Limits(
+                keepalive_expiry=_SHARED_ASYNC_KEEPALIVE_EXPIRY_SECONDS,
+            ),
         )
 
     async def aopen(self) -> None:
@@ -411,6 +452,103 @@ class LiteLlmProxyClient:
                 raise AgentServiceUnavailable("LLM async client has been closed")
             if self._async_client is None:
                 self._async_client = self._build_async_client()
+
+    async def aprepare_intake_infrastructure(self) -> None:
+        """Refresh one bounded provider proof while coalescing nearby callers."""
+
+        async with self._intake_preparation_lock:
+            if self._async_client_closing or self._async_client_closed:
+                raise AgentServiceUnavailable(
+                    "LiteLLM intake infrastructure preparation failed"
+                ) from None
+            now = self._intake_preparation_clock()
+            succeeded_at = self._intake_preparation_succeeded_at
+            if (
+                succeeded_at is not None
+                and now - succeeded_at < _INTAKE_PREPARATION_FRESHNESS_SECONDS
+            ):
+                return
+            task = self._intake_preparation_task
+            if task is None or task.done():
+                task = asyncio.create_task(self._run_intake_infrastructure_preparation())
+                task.add_done_callback(self._consume_intake_preparation_task_result)
+                self._intake_preparation_task = task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise AgentServiceUnavailable(
+                "LiteLLM intake infrastructure preparation failed"
+            ) from None
+        finally:
+            if task.done():
+                async with self._intake_preparation_lock:
+                    if self._intake_preparation_task is task:
+                        self._intake_preparation_task = None
+
+    @staticmethod
+    def _consume_intake_preparation_task_result(task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    async def _run_intake_infrastructure_preparation(self) -> None:
+        deadline_seconds = min(
+            float(self._timeout),
+            _INTAKE_PREPARATION_TIMEOUT_SECONDS,
+        )
+        try:
+            if deadline_seconds <= 0:
+                raise ValueError("intake preparation deadline must be positive")
+            async with asyncio.timeout(deadline_seconds):
+                async with self._lease_async_client() as client:
+                    response = await _apost_with_limited_response(
+                        client,
+                        self._chat_completions_url(),
+                        headers=self._provider_headers(None),
+                        json_body={
+                            "model": self._model,
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": "Return exactly OK.",
+                                },
+                                {"role": "user", "content": "OK"},
+                            ],
+                            "temperature": 0,
+                            "max_tokens": 3,
+                            "enable_thinking": False,
+                        },
+                        max_body_bytes=_INTAKE_PREPARATION_MAX_RESPONSE_BYTES,
+                        deadline_seconds=deadline_seconds,
+                    )
+                response.raise_for_status()
+                self._require_intake_infrastructure_preparation_payload(response.json())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise AgentServiceUnavailable(
+                "LiteLLM intake infrastructure preparation failed"
+            ) from None
+        async with self._intake_preparation_lock:
+            self._intake_preparation_succeeded_at = self._intake_preparation_clock()
+
+    @staticmethod
+    def _require_intake_infrastructure_preparation_payload(payload: object) -> None:
+        if not isinstance(payload, dict):
+            raise ValueError("intake preparation payload is not an object")
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("intake preparation choices are missing")
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise ValueError("intake preparation choice is invalid")
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise ValueError("intake preparation message is invalid")
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("intake preparation content is invalid")
 
     @asynccontextmanager
     async def _lease_async_client(self) -> AsyncIterator[httpx.AsyncClient]:
@@ -581,25 +719,31 @@ class LiteLlmProxyClient:
 
         # ContextVar 让同一同步调用栈感知外层流请求；没有绑定时保持传统非流式行为。
         observer = current_stream_observer()
-        if observer is not None and node_name not in _BUFFERED_STRUCTURED_NODES:
+        if observer is not None and (
+            node_name not in _BUFFERED_STRUCTURED_NODES
+            or _public_output_policy_enabled(observer, node_name)
+        ):
             completed: StructuredGeneration | None = None
-            for update in self.generate_stream(
-                node_name=node_name,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                output_type=output_type,
-                visible_fields=observer.visible_fields_for(node_name),
-                user_content_parts=user_content_parts,
-                governed_request=governed_request,
-            ):
-                if isinstance(update, StructuredStreamDelta):
-                    observer.visible_delta(
-                        node_name,
-                        update.field,
-                        update.delta,
-                    )
-                else:
-                    completed = update.generation
+            try:
+                for update in self.generate_stream(
+                    node_name=node_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    output_type=output_type,
+                    visible_fields=observer.visible_fields_for(node_name),
+                    user_content_parts=user_content_parts,
+                    governed_request=governed_request,
+                ):
+                    if isinstance(update, StructuredStreamDelta):
+                        observer.visible_delta(
+                            node_name,
+                            update.field,
+                            update.delta,
+                        )
+                    else:
+                        completed = update.generation
+            except AgentServiceUnavailable as error:
+                self._raise_single_stream_attempt_failure(error, governed_request)
             if completed is None:
                 raise AgentServiceUnavailable("LLM stream ended without a result")
             observer.usage(
@@ -766,6 +910,30 @@ class LiteLlmProxyClient:
     ) -> StructuredGeneration:
         """Native async equivalent of ``generate`` without thread-pool offload."""
 
+        observer = current_stream_observer()
+        if observer is not None and _public_output_policy_enabled(observer, node_name):
+            completed: StructuredGeneration | None = None
+            try:
+                async for update in self.agenerate_stream(
+                    node_name=node_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    output_type=output_type,
+                    visible_fields=observer.visible_fields_for(node_name),
+                    user_content_parts=user_content_parts,
+                    governed_request=governed_request,
+                ):
+                    observer.raise_if_cancelled()
+                    if isinstance(update, StructuredStreamDelta):
+                        observer.visible_delta(node_name, update.field, update.delta)
+                    else:
+                        completed = update.generation
+            except AgentServiceUnavailable as error:
+                self._raise_single_stream_attempt_failure(error, governed_request)
+            if completed is None:
+                raise AgentServiceUnavailable("LLM stream ended without a result")
+            return completed
+
         started = time.perf_counter()
         provider_attempts_used = 0
         repairs_used = 0
@@ -900,6 +1068,7 @@ class LiteLlmProxyClient:
     ) -> AsyncIterator[StructuredStreamUpdate]:
         """Perform one native async provider stream and parse one final JSON document."""
 
+        stream_observer = current_stream_observer()
         state = _AsyncStructuredStreamState(
             node_name=node_name,
             output_type=output_type,
@@ -938,6 +1107,8 @@ class LiteLlmProxyClient:
                         response,
                         max_line_bytes=_MAX_STREAM_EVENT_BYTES,
                     ):
+                        if stream_observer is not None:
+                            stream_observer.raise_if_cancelled()
                         if state.elapsed_seconds() > request_timeout:
                             raise AgentServiceUnavailable(
                                 "LiteLLM proxy stream exceeded the request deadline"
@@ -1065,9 +1236,18 @@ class LiteLlmProxyClient:
                             raise AgentServiceUnavailable(
                                 "LiteLLM proxy returned a stream error"
                             )
-                        if payload.get("model") is not None:
-                            model_reported = True
+                        payload_reports_model = payload.get("model") is not None
                         model = _provider_model(payload, model)
+                        if payload_reports_model:
+                            if (
+                                governed_request is not None
+                                and model != governed_request.model
+                            ):
+                                raise AgentProviderContractError(
+                                    "LiteLLM proxy stream model conflicts with the "
+                                    "governed model binding"
+                                )
+                            model_reported = True
                         if payload.get("usage") is not None:
                             if not isinstance(payload["usage"], dict):
                                 raise AgentServiceUnavailable(
@@ -1097,6 +1277,11 @@ class LiteLlmProxyClient:
                         )
                         if not content_delta:
                             continue
+                        if governed_request is not None and not model_reported:
+                            raise AgentProviderContractError(
+                                "LiteLLM proxy stream emitted content before the "
+                                "governed model identifier"
+                            )
                         try:
                             delta_bytes = len(content_delta.encode("utf-8"))
                         except UnicodeEncodeError as exception:
@@ -1130,7 +1315,7 @@ class LiteLlmProxyClient:
 
         content = content_buffer.getvalue()
         if governed_request is not None and not model_reported:
-            raise AgentServiceUnavailable(
+            raise AgentProviderContractError(
                 "LiteLLM proxy stream omitted the governed model identifier"
             )
         if not done_received:
@@ -1416,6 +1601,22 @@ class LiteLlmProxyClient:
         governed_request: GovernedProviderRequest | None,
     ) -> str:
         return governed_request.model if governed_request is not None else self._model
+
+    @staticmethod
+    def _raise_single_stream_attempt_failure(
+        error: AgentServiceUnavailable,
+        governed_request: GovernedProviderRequest | None,
+    ) -> None:
+        if (
+            governed_request is None
+            or error.provider_attempts_used
+            >= governed_request.provider_attempts_remaining
+        ):
+            raise error
+        raise AgentServiceUnavailable(
+            "LLM streaming request failed",
+            provider_attempts_used=governed_request.provider_attempts_remaining,
+        ) from error
 
     def _provider_headers(
         self,
@@ -1736,9 +1937,14 @@ class _AsyncStructuredStreamState:
     def accept(self, payload: object) -> list[StructuredStreamDelta]:
         if not isinstance(payload, dict) or payload.get("error") is not None:
             raise AgentServiceUnavailable("LiteLLM proxy returned an invalid stream event")
-        if payload.get("model") is not None:
-            self.model_reported = True
+        payload_reports_model = payload.get("model") is not None
         self.model = _provider_model(payload, self.model)
+        if payload_reports_model:
+            if self.require_model_identity and self.model != self.default_model:
+                raise AgentProviderContractError(
+                    "LiteLLM proxy stream model conflicts with the governed model binding"
+                )
+            self.model_reported = True
         if payload.get("usage") is not None:
             if not isinstance(payload["usage"], dict):
                 raise AgentServiceUnavailable(
@@ -1764,6 +1970,10 @@ class _AsyncStructuredStreamState:
         content_delta = _stream_text_content(delta_payload.get("content"))
         if not content_delta:
             return []
+        if self.require_model_identity and not self.model_reported:
+            raise AgentProviderContractError(
+                "LiteLLM proxy stream emitted content before the governed model identifier"
+            )
         try:
             delta_bytes = len(content_delta.encode("utf-8"))
         except UnicodeEncodeError as exception:
@@ -1791,7 +2001,7 @@ class _AsyncStructuredStreamState:
     def completed(self) -> StructuredStreamCompleted:
         content = self._buffer.getvalue()
         if self.require_model_identity and not self.model_reported:
-            raise AgentServiceUnavailable(
+            raise AgentProviderContractError(
                 "LiteLLM proxy stream omitted the governed model identifier"
             )
         if not self.done_received:

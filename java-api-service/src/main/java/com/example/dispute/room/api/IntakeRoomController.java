@@ -10,6 +10,8 @@ import com.example.dispute.common.api.ApiResponse;
 import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.room.application.IntakeConfirmationView;
+import com.example.dispute.room.application.IntakeInfrastructurePreparationService;
+import com.example.dispute.room.application.IntakeInfrastructurePreparationView;
 import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.application.IntakeStatusView;
@@ -40,6 +42,7 @@ public class IntakeRoomController {
 
     private final IntakeRoomService service;
     private final IntakeProgressService progressService;
+    private final IntakeInfrastructurePreparationService preparationService;
     private final Clock clock;
 
     // 所属模块：【房间协作与权限 / HTTP 接口层】「IntakeRoomController.IntakeRoomController(IntakeRoomService,Clock)」。
@@ -51,10 +54,34 @@ public class IntakeRoomController {
     public IntakeRoomController(
             IntakeRoomService service,
             IntakeProgressService progressService,
+            IntakeInfrastructurePreparationService preparationService,
             Clock clock) {
         this.service = service;
         this.progressService = progressService;
+        this.preparationService = preparationService;
         this.clock = clock;
+    }
+
+    @PostMapping("/preparation")
+    public ApiResponse<IntakeInfrastructurePreparationView> prepareInfrastructure(
+            @PathVariable
+                    @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
+                    String caseId,
+            @RequestHeader("Idempotency-Key")
+                    @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
+                    String idempotencyKey,
+            Authentication authentication,
+            HttpServletRequest servletRequest) {
+        String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
+        String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
+        return ApiResponse.success(
+                preparationService.prepare(
+                        caseId,
+                        (AuthenticatedActor) authentication.getPrincipal(),
+                        idempotencyKey),
+                requestId,
+                traceId,
+                Instant.now(clock));
     }
 
     @GetMapping("/status")

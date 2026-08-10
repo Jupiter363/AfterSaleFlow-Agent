@@ -12,6 +12,7 @@ import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
 import AgentStreamErrorDialog from "../../components/room/AgentStreamErrorDialog.vue";
 import AgentStreamingMessage from "../../components/room/AgentStreamingMessage.vue";
 import PhaseCountdown from "../../components/room/PhaseCountdown.vue";
+import { prepareCommittedIntakeAndNavigate } from "../../services/intakePreparationTransition";
 import { actor } from "../../state/actor";
 import {
   disputeStore,
@@ -37,6 +38,9 @@ const selectedId = ref(props.initialCases[0]?.id || null);
 const intakeOpen = ref(false);
 const creating = ref(false);
 const importingExternal = ref(false);
+const preparingIntake = ref(false);
+const preparationCaseId = ref("");
+const preparationError = ref("");
 const deletingCase = ref(false);
 const openingStage = ref("");
 const stageNavigationError = ref("");
@@ -462,7 +466,12 @@ function normalizeImportedCase(item) {
 
 // 业务位置：【前端案件页面】simulateExternalImport：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 async function simulateExternalImport() {
-  if (!canImportExternal.value || importingExternal.value) return;
+  if (
+    !canImportExternal.value ||
+    importingExternal.value ||
+    preparingIntake.value ||
+    preparationCaseId.value
+  ) return;
   const initiatorRole = actor.role === "MERCHANT" ? "MERCHANT" : "USER";
   const command = {
     count: 1,
@@ -490,13 +499,17 @@ async function simulateExternalImport() {
         descriptor,
         agentLabel: "外部案件导入助手",
         senderRole: "SYSTEM",
-        onFinal: applyExternalImportResult,
+        onFinal: async (finalResult) => {
+          const caseId = await applyExternalImportResult(finalResult);
+          await prepareCommittedCase(caseId);
+        },
         onError: (failure) => {
           importStreamError.value = failure.message;
         },
       });
     } else {
-      await applyExternalImportResult(result);
+      const caseId = await applyExternalImportResult(result);
+      await prepareCommittedCase(caseId);
     }
   } catch (failure) {
     importError.value = failure.message;
@@ -516,18 +529,50 @@ async function applyExternalImportResult(result) {
       ...existing.filter((item) => !importedIds.has(item.id)),
     ];
     selectedId.value = imported[0].id;
+    return imported[0].id;
   } else {
     await loadDisputes(actor);
     localCases.value = [...disputeStore.list.data];
     selectedId.value = localCases.value[0]?.id || null;
+    throw new Error("外部导入未返回可确认的案件标识");
   }
 }
 
-// 业务位置：【前端案件页面】dismissImportStreamError：切换与 Agent 流事件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function dismissImportStreamError() {
   const previous = importStreamError.value;
   importStreamError.value = "";
   if (importError.value === previous) importError.value = "";
+}
+
+async function prepareCommittedCase(caseId) {
+  preparationCaseId.value = caseId;
+  preparationError.value = "";
+  preparingIntake.value = true;
+  try {
+    await prepareCommittedIntakeAndNavigate({
+      actor: { id: actor.id, role: actor.role },
+      caseId,
+      router,
+    });
+    return true;
+  } catch (failure) {
+    preparationError.value =
+      failure?.message || "案件已创建，但接待环境暂不可用";
+    return false;
+  } finally {
+    preparingIntake.value = false;
+  }
+}
+
+async function retryIntakePreparation() {
+  if (!preparationCaseId.value || preparingIntake.value) return;
+  await prepareCommittedCase(preparationCaseId.value);
+}
+
+function returnToCaseList() {
+  preparationError.value = "";
+  preparationCaseId.value = "";
+  intakeOpen.value = false;
 }
 
 // 业务位置：【前端案件页面】openDeleteCaseConfirmation：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
@@ -593,7 +638,12 @@ async function confirmDeleteCase() {
 
 // 业务位置：【前端案件页面】createDispute：把 路由参数、API 数据和状态仓库 组装为本块需要的 当前阶段业务数据，供 用户可操作的案件视图 使用。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 async function createDispute() {
-  if (!canInitiateDispute.value) return;
+  if (
+    !canInitiateDispute.value ||
+    creating.value ||
+    preparingIntake.value ||
+    preparationCaseId.value
+  ) return;
   creating.value = true;
   createError.value = "";
   const requestedAmount = Number.parseFloat(intakeForm.value.requestedAmount);
@@ -619,7 +669,9 @@ async function createDispute() {
     const created = props.createAction
       ? await props.createAction(command)
       : await disputeApi.create(actor, command);
-    await router.push(`/disputes/${created.id}/intake`);
+    const caseId = created?.id || created?.case_id || created?.caseId;
+    if (!caseId) throw new Error("案件创建未返回可确认的案件标识");
+    await prepareCommittedCase(caseId);
   } catch (failure) {
     createError.value = failure.message;
   } finally {
@@ -682,6 +734,34 @@ onBeforeUnmount(() => {
       title="外部案件生成失败"
       @dismiss="dismissImportStreamError"
     />
+    <section
+      v-if="preparingIntake || preparationError"
+      class="overview-page__preparation"
+      data-intake-preparation-transition
+    >
+      <p v-if="preparingIntake" role="status" data-intake-preparation-loading>
+        案件已创建，正在准备接待环境…
+      </p>
+      <template v-else>
+        <p class="overview-page__error" role="alert">
+          案件已创建，但接待环境暂不可用：{{ preparationError }}
+        </p>
+        <button
+          type="button"
+          data-retry-intake-preparation
+          @click="retryIntakePreparation"
+        >
+          重试准备
+        </button>
+        <button
+          type="button"
+          data-return-case-list
+          @click="returnToCaseList"
+        >
+          返回案件列表
+        </button>
+      </template>
+    </section>
 
     <section
       v-if="selectedCase"
@@ -707,11 +787,17 @@ onBeforeUnmount(() => {
           class="overview-page__import"
           type="button"
           data-simulate-external-import
-          :disabled="importingExternal"
+          :disabled="importingExternal || preparingIntake || Boolean(preparationCaseId)"
           @click="simulateExternalImport"
         >
           <span aria-hidden="true">⇢</span>
-          {{ importingExternal ? "外部系统导入中" : "导入外部争议" }}
+          {{
+            preparingIntake
+              ? "接待环境准备中"
+              : importingExternal
+                ? "外部系统导入中"
+                : "导入外部争议"
+          }}
         </button>
         <button
           v-if="canInitiateDispute"
@@ -974,8 +1060,18 @@ onBeforeUnmount(() => {
         <p v-if="createError" class="intake-launcher__error" role="alert">{{ createError }}</p>
         <footer>
           <span>创建后进入争议接待室，AI 判断仍需由当事人确认。</span>
-          <button type="submit" data-submit-dispute :disabled="creating">
-            {{ creating ? "接待官正在建档…" : "进入接待室" }}
+          <button
+            type="submit"
+            data-submit-dispute
+            :disabled="creating || preparingIntake || Boolean(preparationCaseId)"
+          >
+            {{
+              preparingIntake
+                ? "接待环境准备中…"
+                : creating
+                  ? "接待官正在建档…"
+                  : "进入接待室"
+            }}
           </button>
         </footer>
       </form>

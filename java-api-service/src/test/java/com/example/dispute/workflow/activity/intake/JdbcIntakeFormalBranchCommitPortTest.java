@@ -29,7 +29,10 @@ import com.example.dispute.workflow.application.intake.IntakeFinalizationPersist
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver.ResolvedBranchCommand;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
+import com.example.dispute.workflow.contract.v1.FrozenIntakeSubmissionAuthority;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocation;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
@@ -41,8 +44,10 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -51,6 +56,8 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.HexFormat;
+import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
@@ -59,6 +66,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.TransientDataAccessResourceException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -422,7 +430,7 @@ class JdbcIntakeFormalBranchCommitPortTest {
     }
 
     @Test
-    void respondentConfirmationCommitsTheFormalReceiptAndTransitionsToEvidence() {
+    void respondentConfirmationFreezesTheExactMatrixAndReplaysWithoutAnotherEpoch() throws Exception {
         Fixture fixture = fixture("RESPONDENT", BranchOperation.RESPONDENT_CONFIRM);
         insertFixture(fixture);
         insertInitiatorCompletion(fixture);
@@ -446,14 +454,31 @@ class JdbcIntakeFormalBranchCommitPortTest {
                 .transition(any());
 
         BranchCommitReceipt receipt = harness.port().commit(fixture.request());
+        BranchCommitReceipt replay = harness.port().commit(fixture.request());
 
+        assertThat(replay).isEqualTo(receipt);
         assertThat(receipt.operation().processRevision())
                 .isEqualTo(fixture.envelope().processRevision() + 1);
         assertThat(receipt.operation().roomRevision())
                 .isEqualTo(fixture.envelope().roomRevision() + 1);
         verify(harness.domainService()).confirmRespondent(
-                any(), any(), any(), any(), any(), eq(TimelineEventMode.FORMAL_TYPED_ONLY));
-        verify(harness.roomEpochAllocator()).transition(any());
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                eq(TimelineEventMode.FORMAL_TYPED_ONLY),
+                any());
+        ArgumentCaptor<TransitionRoomEpoch> transition =
+                ArgumentCaptor.forClass(TransitionRoomEpoch.class);
+        verify(harness.roomEpochAllocator(), times(1)).transition(transition.capture());
+        FrozenIntakeSubmissionAuthority expected = Objects.requireNonNull(
+                harness.branchResult().frozenSubmissionAuthority());
+        assertThat(transition.getValue().projectionRef()).isEqualTo(expected.projectionRef());
+        assertThat(transition.getValue().projectionSha256())
+                .isEqualTo(expected.matrixContentHash());
+        assertThat(transition.getValue().projectionSha256())
+                .isNotEqualTo(expected.authorityHash());
         assertThat(count("select count(*) from domain_operation where case_id = ?", fixture.caseId()))
                 .isEqualTo(1);
         assertThat(count("select count(*) from case_timeline_event where case_id = ?",
@@ -462,6 +487,48 @@ class JdbcIntakeFormalBranchCommitPortTest {
         assertThat(scalar("select command_status from case_command where command_id = ?",
                         fixture.envelope().commandId()))
                 .isEqualTo("APPLIED");
+        JsonNode storedEvent = objectMapper.readTree(scalar(
+                "select event_json::text from case_timeline_event where case_id = ?",
+                fixture.caseId()));
+        FrozenIntakeSubmissionAuthority stored = objectMapper.treeToValue(
+                storedEvent.at("/result/frozen_submission/authority"),
+                FrozenIntakeSubmissionAuthority.class);
+        JsonNode storedMatrix = storedEvent.at("/result/frozen_submission/matrix");
+        assertThat(storedEvent.at("/result/schema_version").asText())
+                .isEqualTo("intake-branch-result.v2");
+        assertThat(stored).isEqualTo(expected);
+        assertThat(ContractJson.canonicalString(storedMatrix))
+                .isEqualTo(harness.branchResult().frozenMatrixCanonicalJson());
+        stored.requireMatchesMatrix(storedMatrix);
+        stored.requireProjectionPair(
+                stored.projectionRef(), stored.matrixContentHash());
+    }
+
+    @Test
+    void frozenSubmissionAuthorityRejectsHashDriftAndReboundMatrixIdentity() {
+        Fixture fixture = fixture("RESPONDENT_MATRIX_REJECT", BranchOperation.RESPONDENT_CONFIRM);
+        ObjectNode matrix = frozenMatrix(fixture.caseId());
+        FrozenIntakeSubmissionAuthority authority = frozenAuthority(fixture, matrix);
+
+        ObjectNode drifted = matrix.deepCopy();
+        drifted.put("unexpected_mutation", true);
+        assertThatThrownBy(() -> authority.requireMatchesMatrix(drifted))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("content_hash");
+
+        ObjectNode rebound = matrix.deepCopy();
+        String original = rebound.path("matrix_id").asText();
+        char replacement = original.charAt("CASE_MATRIX_".length()) == 'A' ? 'B' : 'A';
+        rebound.put(
+                "matrix_id",
+                "CASE_MATRIX_"
+                        + replacement
+                        + original.substring("CASE_MATRIX_".length() + 1));
+        rebound.remove("content_hash");
+        rebound.put("content_hash", ContractJson.sha256Hex(rebound));
+        assertThatThrownBy(() -> frozenAuthority(fixture, rebound))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("matrix_id");
     }
 
     private static Harness harness(Fixture fixture) {
@@ -488,6 +555,12 @@ class JdbcIntakeFormalBranchCommitPortTest {
         when(dispute.getCaseStatus()).thenReturn(resultStatus);
         when(dispute.getCurrentRoom()).thenReturn(currentRoom);
         when(dispute.getCurrentDeadlineAt()).thenReturn(null);
+        ObjectNode frozenMatrix = fixture.operation() == BranchOperation.RESPONDENT_CONFIRM
+                ? frozenMatrix(fixture.caseId())
+                : null;
+        FrozenIntakeSubmissionAuthority frozenAuthority = frozenMatrix == null
+                ? null
+                : frozenAuthority(fixture, frozenMatrix);
         BranchResult result = new BranchResult(
                 new IntakeConfirmationView(
                         fixture.caseId(),
@@ -500,12 +573,18 @@ class JdbcIntakeFormalBranchCommitPortTest {
                 fixture.operation() == BranchOperation.RESPONDENT_CONFIRM
                         ? "ROOM_EVIDENCE_" + fixture.caseId()
                         : null,
-                fixture.operation() == BranchOperation.INITIATOR_ACCEPT
-                        ? "INITIATOR_FROZEN"
-                        : null,
-                fixture.operation() == BranchOperation.INITIATOR_ACCEPT
-                        ? "d".repeat(64)
-                        : null);
+                switch (fixture.operation()) {
+                    case INITIATOR_ACCEPT -> "INITIATOR_FROZEN";
+                    case RESPONDENT_CONFIRM -> FrozenIntakeSubmissionAuthority.MATRIX_KIND;
+                    default -> null;
+                },
+                switch (fixture.operation()) {
+                    case INITIATOR_ACCEPT -> "d".repeat(64);
+                    case RESPONDENT_CONFIRM -> frozenAuthority.matrixContentHash();
+                    default -> null;
+                },
+                frozenAuthority,
+                frozenMatrix == null ? null : ContractJson.canonicalString(frozenMatrix));
         switch (fixture.operation()) {
             case INITIATOR_ACCEPT -> {
                 doAnswer(ignored -> {
@@ -536,10 +615,10 @@ class JdbcIntakeFormalBranchCommitPortTest {
                             return result;
                         })
                         .when(domainService)
-                        .confirmRespondent(any(), any(), any(), any(), any(), any());
+                        .confirmRespondent(any(), any(), any(), any(), any(), any(), any());
                 when(domainService.requireFormalBilateralMatrix(dispute))
                         .thenReturn(new IntakeBranchDomainService.ObjectNodeAuthority(
-                                "BILATERAL_FROZEN", "e".repeat(64)));
+                                "BILATERAL_FROZEN", frozenAuthority.matrixContentHash()));
             }
         }
         JdbcIntakeFormalBranchCommitPort port = new JdbcIntakeFormalBranchCommitPort(
@@ -552,7 +631,7 @@ class JdbcIntakeFormalBranchCommitPortTest {
                 roomEpochAllocator,
                 objectMapper,
                 Clock.fixed(NOW, ZoneOffset.UTC));
-        return new Harness(port, domainService, dispute, roomEpochAllocator);
+        return new Harness(port, domainService, dispute, roomEpochAllocator, result);
     }
 
     private static void applyDomainMutation(
@@ -978,6 +1057,62 @@ class JdbcIntakeFormalBranchCommitPortTest {
         }
     }
 
+    private static ObjectNode frozenMatrix(String caseId) {
+        ObjectNode matrix = objectMapper.createObjectNode();
+        matrix.put("schema_version", FrozenIntakeSubmissionAuthority.MATRIX_SCHEMA_VERSION);
+        matrix.put("case_id", caseId);
+        matrix.put("matrix_version", 3);
+        matrix.put("matrix_kind", FrozenIntakeSubmissionAuthority.MATRIX_KIND);
+        ObjectNode partyMap = matrix.putObject("party_map");
+        partyMap.put("initiator_role", "USER");
+        partyMap.put("respondent_role", "MERCHANT");
+        ObjectNode row = matrix.putArray("fact_rows").addObject();
+        row.put("fact_id", "FACT_" + sha256(caseId).substring(0, 24).toUpperCase(Locale.ROOT));
+        ObjectNode respondent = row.putObject("positions").putObject("MERCHANT");
+        respondent.put("stance", "CONFIRM");
+        respondent.put("source_type", "DIRECT_PARTY_STATEMENT");
+        respondent.putArray("source_refs").add("SUBMIT_SOURCE_" + caseId);
+        row.putObject("party_alignment").put("status", "AGREED");
+        row.put("requires_resolution", false);
+        matrix.put(
+                "matrix_id",
+                "CASE_MATRIX_"
+                        + ContractJson.sha256Hex(matrix)
+                                .substring(0, 20)
+                                .toUpperCase(Locale.ROOT));
+        matrix.put("content_hash", ContractJson.sha256Hex(matrix));
+        return matrix;
+    }
+
+    private static FrozenIntakeSubmissionAuthority frozenAuthority(
+            Fixture fixture, ObjectNode matrix) {
+        String eventId = "EVIB_"
+                + sha256(fixture.request().operationKey() + ":event").substring(0, 59);
+        String eventRef = "urn:after-sale-flow:intake-event:" + eventId;
+        return FrozenIntakeSubmissionAuthority.capture(
+                fixture.tenant(),
+                fixture.caseId(),
+                fixture.actorId(),
+                ContractTypes.ActorRole.valueOf(fixture.actorRole()),
+                "INTAKE_COMPLETE_" + sha256(fixture.caseId()).substring(0, 48),
+                FrozenIntakeSubmissionAuthority.COMPLETION_STATUS,
+                NOW,
+                fixture.request().operationKey(),
+                fixture.envelope().commandId(),
+                fixture.envelope().commandSequence(),
+                fixture.request().requestHash(),
+                eventId,
+                eventRef,
+                1,
+                fixture.envelope().roomEpoch(),
+                fixture.envelope().fencingToken(),
+                fixture.envelope().processRevision() + 1,
+                fixture.envelope().roomRevision() + 1,
+                "INTAKE_DOSSIER_" + sha256(fixture.caseId()).substring(0, 48),
+                3,
+                matrix);
+    }
+
     private record Fixture(
             String caseId,
             String tenant,
@@ -993,5 +1128,6 @@ class JdbcIntakeFormalBranchCommitPortTest {
             JdbcIntakeFormalBranchCommitPort port,
             IntakeBranchDomainService domainService,
             FulfillmentCaseEntity dispute,
-            RoomEpochAllocator roomEpochAllocator) {}
+            RoomEpochAllocator roomEpochAllocator,
+            BranchResult branchResult) {}
 }

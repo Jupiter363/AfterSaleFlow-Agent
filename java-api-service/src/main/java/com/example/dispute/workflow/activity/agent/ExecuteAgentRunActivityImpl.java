@@ -21,6 +21,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Executes one idempotent graph command and leaves formal domain finalization to a later Activity. */
 public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivity {
@@ -28,6 +30,7 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
     public static final String RETRYABLE_FAILURE_TYPE = "AgentRunRetryableFailure";
     public static final String NON_RETRYABLE_FAILURE_TYPE = "AgentRunNonRetryableFailure";
 
+    private static final Logger LOG = LoggerFactory.getLogger(ExecuteAgentRunActivityImpl.class);
     private static final AtomicLong HEARTBEAT_THREAD_SEQUENCE = new AtomicLong();
 
     private final AgentRunLedger ledger;
@@ -276,7 +279,7 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                                 : AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                         completedAt);
         try {
-            ledger.recordAttemptFailureResult(status, result);
+            result = ledger.recordAttemptFailureResult(status, result);
         } catch (RuntimeException persistenceFailure) {
             throw ApplicationFailure.newNonRetryableFailure(
                     "agent run terminal failure could not be persisted",
@@ -406,17 +409,37 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
             AgentRunLedger.Attempt attempt,
             AgentRunActivityContext context) {
         int allowedAttempts = allowedActivityAttempts(request.command());
+        Instant observedAt = clock.instant();
+        boolean deadlineOpen = observedAt.isBefore(request.command().deadlineAt());
         boolean executionWindowClosed =
                 allowedAttempts < 1
                         || context.temporalAttempt() > allowedAttempts
-                        || !clock.instant().isBefore(request.command().deadlineAt());
+                        || !deadlineOpen;
         boolean existingVisibleAttempt =
                 attempt.status() == AgentRunAttemptStatus.RESULT_READY
                         || attempt.publicOutputEmitted()
                         || attempt.finalFrameObserved();
-        return executionWindowClosed || existingVisibleAttempt
+        ExecutionMode mode = executionWindowClosed || existingVisibleAttempt
                 ? ExecutionMode.RECONCILE_ONLY
                 : ExecutionMode.EXECUTE_OR_RECONCILE;
+        LOG.info(
+                "agent_run_execution_mode logical_run_id={} attempt_id={} command_id={} mode={} "
+                        + "allowed_activity_attempts={} temporal_attempt={} observed_at={} deadline_at={} "
+                        + "deadline_open={} attempt_status={} public_output_emitted={} "
+                        + "final_frame_observed={}",
+                request.logicalRunId(),
+                request.attemptId(),
+                request.command().commandId(),
+                mode,
+                allowedAttempts,
+                context.temporalAttempt(),
+                observedAt,
+                request.command().deadlineAt(),
+                deadlineOpen,
+                attempt.status(),
+                attempt.publicOutputEmitted(),
+                attempt.finalFrameObserved());
+        return mode;
     }
 
     private ApplicationFailure retryFailure(

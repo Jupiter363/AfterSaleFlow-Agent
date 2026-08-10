@@ -3,6 +3,8 @@ package com.example.dispute.workflow.targete2e.rooms.evidence;
 import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter.CommitCommand;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterialStore.MaterialSnapshot;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnProposalLoader.LoadedProposal;
 import java.util.Objects;
 
 /** Exact target-lane bindings required before Java writes formal Evidence facts. */
@@ -24,7 +26,9 @@ public record TargetEvidenceFinalizationRequest(
     String actorId,
     ActorRole actorRole,
     Audience audience,
-    CommitCommand command) {
+    CommitCommand command,
+    MaterialSnapshot material,
+    LoadedProposal proposal) {
   public TargetEvidenceFinalizationRequest {
     if (!TargetEvidenceCommandMaterial.TARGET_LANE.equals(executionLane)
         || activationId == null || activationId.isBlank() || admissionId == null || admissionId.isBlank()
@@ -41,5 +45,27 @@ public record TargetEvidenceFinalizationRequest(
       throw new IllegalArgumentException("target Evidence finalization request is invalid");
     }
     command = Objects.requireNonNull(command, "command");
+    material = Objects.requireNonNull(material, "material");
+    proposal = Objects.requireNonNull(proposal, "proposal");
+    var graph = command.request().command();
+    var admitted = material.material();
+    if (!TargetEvidenceCommandMaterial.SCHEMA_VERSION.equals(admitted.schemaVersion())
+        || admitted.evidenceAgentTurnCommand() == null
+        || !admitted.request().equals(command.request())
+        || !material.admissionId().equals(admissionId)
+        || !proposal.commandId().equals(graph.commandId())
+        || !proposal.logicalRunId().equals(graph.logicalRunId())
+        || !proposal.attemptId().equals(graph.attemptId())
+        || !proposal.tenantSurrogate().equals(graph.tenantSurrogate())
+        || !proposal.caseId().equals(graph.caseId())
+        || proposal.roomEpoch() != graph.roomEpoch()
+        || proposal.fencingToken() != roomFencingToken
+        || !proposal.threadId().equals(graph.threadId())
+        || !proposal.actorId().equals(actorId)
+        || !proposal.actorRole().equals(actorRole.name())
+        || !proposal.inputHash().equals(graph.domainSnapshotRef().sha256())
+        || !proposal.roomUtterance().equals(proposal.evidenceTurnResult().roomUtterance())) {
+      throw new IllegalArgumentException("target Evidence material or proposal binding is invalid");
+    }
   }
 }

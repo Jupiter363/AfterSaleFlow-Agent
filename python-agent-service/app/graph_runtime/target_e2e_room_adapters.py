@@ -33,6 +33,10 @@ from app.graph_runtime.checkpoint import (
     bind_fence_context,
 )
 from app.graph_runtime.errors import GraphContractError
+from app.graph_runtime.evidence_turn_executor import (
+    CompiledEvidenceTurnExecutor,
+    EvidenceTurnWorkflowPort,
+)
 from app.graph_runtime.gateway import GatewayExecution
 from app.graph_runtime.gateway import GatewayAdmission
 from app.graph_runtime.identity import RoomType, ThreadRecord
@@ -43,13 +47,12 @@ from app.graph_runtime.registry import RegistryRecord
 from app.graph_runtime.result import NeedsReviewDraft, ResultBindings
 from app.graph_runtime.target_e2e import TargetE2ERoomProposalSource
 from app.graph_runtime.target_e2e_composite import TargetE2ERoomProvider
-from app.graphs.evidence.contracts import EvidenceAdmissionVerifier, EvidenceGraphContractError
+from app.graphs.evidence.contracts import EvidenceGraphContractError
 from app.graphs.evidence.lcel import TargetEvidenceAsset, TargetEvidenceAssetLoader
 from app.graphs.evidence.lcel import EvidenceAssessmentDraft
 from app.graphs.evidence.target_e2e import (
     TargetEvidenceManifestLoader,
     TargetEvidenceProposalStore,
-    build_target_evidence_provider,
 )
 from app.graphs.hearing.contracts import HearingOperation
 from app.graphs.hearing.target_e2e import (
@@ -135,9 +138,8 @@ class TargetE2EIntakeExchange(Protocol):
 class TargetE2ESpecializedRoomDependencies:
     """Explicit lifecycle handoff required to run the non-Intake room graphs."""
 
-    evidence_verifier: EvidenceAdmissionVerifier
     object_store: TargetE2EImmutableObjectStore | None
-    evidence_model: Any | None
+    evidence_workflow: EvidenceTurnWorkflowPort
     hearing_decoder: TargetE2EHearingInvocationDecoder
     object_store_factory: TargetE2EImmutableObjectStoreFactory | None = None
 
@@ -590,25 +592,17 @@ class _ExecutionScopedEvidenceProvider:
         self,
         *,
         saver: FencedPostgresSaver,
-        bulkhead: Any,
         dependencies: TargetE2ESpecializedRoomDependencies,
     ) -> None:
-        self._saver = saver
-        self._bulkhead = bulkhead
         self._dependencies = dependencies
+        self._executor = CompiledEvidenceTurnExecutor(
+            saver=saver,
+            workflow=dependencies.evidence_workflow,
+        )
 
     def stream(self, execution: GatewayExecution) -> AsyncIterator[AgentStreamEvent]:
         store = self._dependencies.store_for_execution(execution)
-        model = self._dependencies.evidence_model or _deterministic_evidence_model()
-        return build_target_evidence_provider(
-            verifier=self._dependencies.evidence_verifier,
-            model=model,
-            manifest_loader=TargetE2EObjectEvidenceManifestLoader(store),
-            asset_loader=TargetE2EObjectEvidenceAssetLoader(store),
-            proposal_store=TargetE2EObjectEvidenceProposalStore(store),
-            checkpointer=self._saver,
-            bulkhead=self._bulkhead,
-        ).stream(execution)
+        return self._executor.stream(execution, store=store)
 
 
 class _ExecutionScopedHearingProvider:
@@ -665,7 +659,6 @@ def build_target_e2e_specialized_room_providers(
     return (
         _ExecutionScopedEvidenceProvider(
             saver=saver,
-            bulkhead=bulkhead,
             dependencies=dependencies,
         ),
         _ExecutionScopedHearingProvider(saver=saver, dependencies=dependencies),

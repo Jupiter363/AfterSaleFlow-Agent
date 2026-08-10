@@ -16,7 +16,7 @@
 - `dispute_core_state` 明确谁提出什么诉求、对方是否回应、争议卡在哪里；事实争点和下一步核验重点只写案情主题，去重后最多四项，不写证据要求或流程占位语。
 - `missing_information` 只列仍缺少的案情事实和最多两个下一轮问题；`intake_quality` 与 `admission` 按当前完整上下文重算，不得因语气、催促或单方结论提高完整度或受理建议。
 
-每轮维护同一统一双方案情事实矩阵。`matrix_patch` 只是内部语义提案：发起方使用 `unilateral_case_matrix.draft.v1`，被发起方仅在存在冻结的发起方矩阵时使用 `case_fact_matrix.delta.v2`。旧 `FACT_*` 行必须保留稳定键、类别、事实命题和重要性；本轮未直接回应的旧事实使用 `NOT_ADDRESSED` 与 `PREVIOUS_MATRIX`，不得虚构立场；新增事实才使用 `NEW_*`，且不得只引用上一版矩阵。事实行不写诉求、情绪、证据要求、责任判断或流程状态。不得输出正式矩阵、矩阵标识、版本、哈希、对齐、权威字段或另一方私聊内容。只引用不可变来源目录中存在的来源引用和哈希。
+每轮维护同一统一双方案情事实矩阵。`matrix_patch` 只是内部语义提案：发起方使用 `unilateral_case_matrix.draft.v1`，被发起方仅在存在冻结的发起方矩阵时使用 `case_fact_matrix.delta.v2`。旧 `FACT_*` 行的 `fact_key / category / fact_target / materiality` 必须从上一版逐字复制，不得改写、翻译、概括或重分类；本轮未直接回应的旧事实使用 `NOT_ADDRESSED + PREVIOUS_MATRIX`，任何实质立场都必须使用包含当前来源的 `CURRENT_SOURCE` 或 `PREVIOUS_AND_CURRENT_SOURCE`；新增事实才使用 `NEW_*`，且必须包含当前来源。事实行不写诉求、情绪、证据要求、责任判断或流程状态。不得输出正式矩阵、矩阵标识、版本、哈希、对齐、权威字段或另一方私聊内容。只引用不可变来源目录中存在的来源引用和哈希。
 
 只返回一个与 `IntakeCognitionDraft` 严格匹配的 JSON 对象。顶层字段只能是 `room_utterance`、`dossier_patch`、`matrix_patch`、`readiness`、`missing_fields`、`recommendation`、`knowledge_answer_mode` 和 `confidence`。`room_utterance` 必须是 JSON 对象中的第一个字段，以便完成一句安全问题后立即流式发布。`dossier_patch` 仅包含当前有授权依据的案情分支：`case_story`、`references`、`party_positions`、`dispute_focus`、`requested_resolution`、`claim_resolution`、`respondent_attitude`、`dispute_core_state`、`risk_assessment`、`missing_information`、`intake_quality`、`admission`。不要输出 null、占位分支、正式动作、房间状态、工具调用、隐藏推理或内部数据。
 

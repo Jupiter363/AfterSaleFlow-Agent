@@ -7,10 +7,12 @@
 package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -18,8 +20,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.example.dispute.common.exception.GlobalExceptionHandler;
+import com.example.dispute.common.exception.BusinessException;
+import com.example.dispute.common.exception.ForbiddenException;
+import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.ActorRole;
+import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.CommonConfiguration;
 import com.example.dispute.config.HeaderAuthenticationFilter;
 import com.example.dispute.config.JsonAccessDeniedHandler;
@@ -31,21 +37,42 @@ import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.room.api.IntakeRoomController;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeConfirmationView;
+import com.example.dispute.room.application.IntakeInfrastructurePreparationService;
+import com.example.dispute.room.application.IntakeInfrastructurePreparationView;
 import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.application.IntakeStatusView;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.workflow.projection.intake.IntakeProcessProjectionView;
 import com.example.dispute.workflow.projection.intake.IntakeProcessProjectionView.VersionPins;
+import com.example.dispute.workflow.activity.system.IntakeInfrastructurePreparationWorkflow;
+import com.example.dispute.workflow.activity.system.TemporalWorkerProbeActivities.IntakeInfrastructurePreparationResult;
+import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowExecutionAlreadyStarted;
+import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
 import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 
 // 所属模块：【房间协作与权限 / 自动化测试层】类型「IntakeRoomControllerTest」。
 // 类型职责：集中验证接待房间的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「confirmsAdmissionWithoutLegacyConfirmationNoteInput」。
@@ -68,6 +95,407 @@ class IntakeRoomControllerTest {
     @Autowired private MockMvc mockMvc;
     @MockitoBean private IntakeRoomService service;
     @MockitoBean private IntakeProgressService progressService;
+    @MockitoBean private IntakeInfrastructurePreparationService preparationService;
+
+    @Test
+    void preparationIsStrictAuthorizedRepeatSafeAndLeavesFormalOpeningUntouched()
+            throws Exception {
+        assertPreparationServiceIsReadOnlyStageBoundAndFailClosed();
+        assertTemporalPreparationRetriesFailureAndJoinsSuccessfulIdentity();
+        String key = "intake-preparation:CASE_test";
+        when(preparationService.prepare(eq("CASE_test"), any(), eq(key)))
+                .thenReturn(IntakeInfrastructurePreparationView.ready());
+        when(preparationService.prepare(eq("CASE_legacy"), any(), eq(key)))
+                .thenReturn(IntakeInfrastructurePreparationView.notRequired());
+        when(preparationService.prepare(eq("CASE_forbidden"), any(), eq(key)))
+                .thenThrow(new ForbiddenException("intake preparation is unavailable"));
+        when(preparationService.prepare(eq("CASE_unavailable"), any(), eq(key)))
+                .thenThrow(
+                        new BusinessException(
+                                ErrorCode.AGENT_SERVICE_UNAVAILABLE,
+                                "intake infrastructure preparation is unavailable",
+                                Map.of(
+                                        "reason_code",
+                                        IntakeInfrastructurePreparationService
+                                                .REASON_UNAVAILABLE)));
+
+        mockMvc.perform(
+                        post("/api/disputes/CASE_test/intake/preparation")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "merchant-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT")
+                                .header("Idempotency-Key", key))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.schema_version")
+                        .value("intake-infrastructure-preparation.v1"))
+                .andExpect(jsonPath("$.data.status").value("READY"));
+
+        mockMvc.perform(
+                        post("/api/disputes/CASE_legacy/intake/preparation")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "merchant-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT")
+                                .header("Idempotency-Key", key))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("NOT_REQUIRED"));
+
+        mockMvc.perform(
+                        post("/api/disputes/CASE_forbidden/intake/preparation")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "merchant-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT")
+                                .header("Idempotency-Key", key))
+                .andExpect(status().isForbidden());
+
+        mockMvc.perform(
+                        post("/api/disputes/CASE_unavailable/intake/preparation")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "merchant-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT")
+                                .header("Idempotency-Key", key))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("AGENT_SERVICE_UNAVAILABLE"))
+                .andExpect(jsonPath("$.details.reason_code")
+                        .value("INTAKE_INFRASTRUCTURE_PREPARATION_UNAVAILABLE"));
+
+        mockMvc.perform(
+                        post("/api/disputes/CASE_test/intake/preparation")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "merchant-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT")
+                                .header("Idempotency-Key", "short"))
+                .andExpect(status().isBadRequest());
+
+        verify(preparationService).prepare(eq("CASE_test"), any(), eq(key));
+        verifyNoInteractions(service);
+    }
+
+    private static void assertPreparationServiceIsReadOnlyStageBoundAndFailClosed() {
+        String key = "intake-preparation:CASE_test";
+        AuthenticatedActor merchant = new AuthenticatedActor("merchant-local", ActorRole.MERCHANT);
+        IntakeProgressService progress = org.mockito.Mockito.mock(IntakeProgressService.class);
+        PlatformTransactionManager transactions =
+                org.mockito.Mockito.mock(PlatformTransactionManager.class);
+        IntakeInfrastructurePreparationService.TargetPreparation target =
+                org.mockito.Mockito.mock(
+                        IntakeInfrastructurePreparationService.TargetPreparation.class);
+        AtomicReference<TransactionDefinition> definition = new AtomicReference<>();
+        AtomicBoolean transactionActive = new AtomicBoolean();
+        AtomicLong nowNanos = new AtomicLong();
+        AtomicInteger pauses = new AtomicInteger();
+        when(transactions.getTransaction(any())).thenAnswer(invocation -> {
+            assertThat(transactionActive.compareAndSet(false, true)).isTrue();
+            definition.set(invocation.getArgument(0));
+            return new SimpleTransactionStatus();
+        });
+        org.mockito.Mockito.doAnswer(invocation -> {
+                    assertThat(transactionActive.compareAndSet(true, false)).isTrue();
+                    return null;
+                })
+                .when(transactions)
+                .commit(any());
+        org.mockito.Mockito.doAnswer(invocation -> {
+                    assertThat(transactionActive.compareAndSet(true, false)).isTrue();
+                    return null;
+                })
+                .when(transactions)
+                .rollback(any());
+        IntakeInfrastructurePreparationService application =
+                new IntakeInfrastructurePreparationService(
+                        progress,
+                        transactions,
+                        List.of(target),
+                        java.time.Duration.ofMillis(100),
+                        java.time.Duration.ofMillis(10),
+                        nowNanos::get,
+                        delay -> {
+                            assertThat(transactionActive).isFalse();
+                            pauses.incrementAndGet();
+                            nowNanos.addAndGet(delay.toNanos());
+                        });
+
+        when(progress.status("CASE_legacy", merchant))
+                .thenAnswer(invocation -> {
+                    assertThat(transactionActive).isTrue();
+                    return preparationStatus(true, "CURRENT", "LEGACY");
+                });
+        assertThat(application.prepare("CASE_legacy", merchant, key))
+                .isEqualTo(IntakeInfrastructurePreparationView.notRequired());
+        verifyNoInteractions(target);
+        assertThat(definition.get().isReadOnly()).isTrue();
+        assertThat(definition.get().getPropagationBehavior())
+                .isEqualTo(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+        AtomicInteger targetProjectionReads = new AtomicInteger();
+        when(progress.status("CASE_target", merchant))
+                .thenAnswer(invocation -> {
+                    assertThat(transactionActive).isTrue();
+                    return targetProjectionReads.getAndIncrement() == 0
+                            ? preparationStatus(true, "PROCESSING", "UNKNOWN")
+                            : preparationStatus(true, "CURRENT", "TEMPORAL");
+                });
+        AtomicReference<java.time.Duration> remoteBudget = new AtomicReference<>();
+        org.mockito.Mockito.doAnswer(invocation -> {
+                    assertThat(transactionActive).isFalse();
+                    remoteBudget.set(invocation.getArgument(1));
+                    return null;
+                })
+                .when(target)
+                .prepare(eq(key), any(java.time.Duration.class));
+        assertThat(application.prepare("CASE_target", merchant, key))
+                .isEqualTo(IntakeInfrastructurePreparationView.ready());
+        assertThat(targetProjectionReads).hasValue(2);
+        assertThat(pauses).hasValue(1);
+        assertThat(remoteBudget).hasValue(java.time.Duration.ofMillis(90));
+        verify(target).prepare(key, java.time.Duration.ofMillis(90));
+
+        when(progress.status("CASE_wrong_stage", merchant))
+                .thenAnswer(invocation -> {
+                    assertThat(transactionActive).isTrue();
+                    return preparationStatus(false, "PROCESSING", "UNKNOWN");
+                });
+        int pausesBeforeForbidden = pauses.get();
+        assertThatThrownBy(() -> application.prepare("CASE_wrong_stage", merchant, key))
+                .isInstanceOf(ForbiddenException.class);
+        assertThat(pauses).hasValue(pausesBeforeForbidden);
+        verify(progress).status("CASE_wrong_stage", merchant);
+        assertThatThrownBy(() -> application.prepare(
+                        "CASE_target",
+                        new AuthenticatedActor("system", ActorRole.SYSTEM),
+                        key))
+                .isInstanceOf(ForbiddenException.class);
+
+        org.mockito.Mockito.doThrow(new IllegalStateException("private transport detail"))
+                .when(target)
+                .prepare(
+                        eq("intake-preparation:CASE_failure"),
+                        any(java.time.Duration.class));
+        assertThatThrownBy(() -> application.prepare(
+                        "CASE_target", merchant, "intake-preparation:CASE_failure"))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(failure -> {
+                    BusinessException business = (BusinessException) failure;
+                    assertThat(business.errorCode())
+                            .isEqualTo(ErrorCode.AGENT_SERVICE_UNAVAILABLE);
+                    assertThat(business.details())
+                            .containsEntry(
+                                    "reason_code",
+                                    IntakeInfrastructurePreparationService.REASON_UNAVAILABLE);
+                });
+
+        AtomicInteger timeoutReads = new AtomicInteger();
+        when(progress.status("CASE_timeout", merchant))
+                .thenAnswer(invocation -> {
+                    assertThat(transactionActive).isTrue();
+                    timeoutReads.incrementAndGet();
+                    return preparationStatus(true, "PROCESSING", "UNKNOWN");
+                });
+        int pausesBeforeTimeout = pauses.get();
+        assertThatThrownBy(() -> application.prepare(
+                        "CASE_timeout", merchant, "intake-preparation:CASE_timeout"))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(failure -> assertThat(((BusinessException) failure).details())
+                        .containsEntry(
+                                "reason_code",
+                                IntakeInfrastructurePreparationService.REASON_UNAVAILABLE));
+        assertThat(timeoutReads).hasValue(10);
+        assertThat(pauses.get() - pausesBeforeTimeout).isEqualTo(10);
+        verify(target, org.mockito.Mockito.never())
+                .prepare(
+                        eq("intake-preparation:CASE_timeout"),
+                        any(java.time.Duration.class));
+        assertThat(transactionActive).isFalse();
+    }
+
+    private static IntakeStatusView preparationStatus(
+            boolean canUseIntake, String projectionState, String writerMode) {
+        return new IntakeStatusView(
+                "CASE_test",
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                "OPEN",
+                "OPEN",
+                false,
+                canUseIntake,
+                false,
+                null,
+                new IntakeProcessProjectionView(
+                        "intake-process-projection.v1",
+                        projectionState,
+                        writerMode,
+                        1,
+                        1,
+                        1,
+                        1,
+                        "INTAKE",
+                        "NONE",
+                        "READY",
+                        null,
+                        null,
+                        null,
+                        null,
+                        VersionPins.unavailable(),
+                        null));
+    }
+
+    private static void assertTemporalPreparationRetriesFailureAndJoinsSuccessfulIdentity()
+            throws Exception {
+        assertFailedExecutionCanRetryWithTheSameStableIdentity();
+        assertRunningAndSuccessfulExecutionJoinTheSameStableIdentity();
+    }
+
+    private static void assertFailedExecutionCanRetryWithTheSameStableIdentity()
+            throws Exception {
+        java.time.Duration remainingBudget = java.time.Duration.ofSeconds(17);
+        WorkflowClient client = org.mockito.Mockito.mock(WorkflowClient.class);
+        IntakeInfrastructurePreparationWorkflow workflow =
+                org.mockito.Mockito.mock(IntakeInfrastructurePreparationWorkflow.class);
+        WorkflowStub execution = org.mockito.Mockito.mock(WorkflowStub.class);
+        List<WorkflowOptions> options = new java.util.ArrayList<>();
+        AtomicInteger acceptedStarts = new AtomicInteger();
+        when(client.newWorkflowStub(
+                        eq(IntakeInfrastructurePreparationWorkflow.class),
+                        any(WorkflowOptions.class)))
+                .thenAnswer(invocation -> {
+                    options.add(invocation.getArgument(1));
+                    return workflow;
+                });
+        when(execution.getResult(
+                        org.mockito.ArgumentMatchers.anyLong(),
+                        eq(TimeUnit.NANOSECONDS),
+                        eq(IntakeInfrastructurePreparationResult.class)))
+                .thenThrow(new IllegalStateException("prior execution failed"))
+                .thenReturn(IntakeInfrastructurePreparationResult.ready());
+        try (MockedStatic<WorkflowStub> workflowStubs =
+                        org.mockito.Mockito.mockStatic(WorkflowStub.class);
+                MockedStatic<WorkflowClient> workflowStarts =
+                        org.mockito.Mockito.mockStatic(
+                                WorkflowClient.class,
+                                invocation -> {
+                                    if (invocation.getMethod().getName().equals("start")) {
+                                        int accepted = acceptedStarts.incrementAndGet();
+                                        return WorkflowExecution.newBuilder()
+                                                .setWorkflowId("failed-retry")
+                                                .setRunId("run-" + accepted)
+                                                .build();
+                                    }
+                                    return null;
+                                })) {
+            workflowStubs.when(() -> WorkflowStub.fromTyped(workflow)).thenReturn(execution);
+            IntakeInfrastructurePreparationService.TargetPreparation preparation =
+                    IntakeInfrastructurePreparationService.temporal(client);
+
+            assertThatThrownBy(
+                            () -> preparation.prepare(
+                                    "intake-preparation:retry", remainingBudget))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("prior execution failed");
+            preparation.prepare("intake-preparation:retry", remainingBudget);
+        }
+
+        assertThat(acceptedStarts).hasValue(2);
+        verify(execution, org.mockito.Mockito.times(2))
+                .getResult(
+                        org.mockito.ArgumentMatchers.longThat(
+                                timeout -> timeout > 0
+                                        && timeout <= remainingBudget.toNanos()),
+                        eq(TimeUnit.NANOSECONDS),
+                        eq(IntakeInfrastructurePreparationResult.class));
+        assertStableFailedOnlyOptions(options, remainingBudget);
+    }
+
+    private static void assertRunningAndSuccessfulExecutionJoinTheSameStableIdentity()
+            throws Exception {
+        java.time.Duration remainingBudget = java.time.Duration.ofSeconds(17);
+        WorkflowClient client = org.mockito.Mockito.mock(WorkflowClient.class);
+        IntakeInfrastructurePreparationWorkflow workflow =
+                org.mockito.Mockito.mock(IntakeInfrastructurePreparationWorkflow.class);
+        WorkflowStub started = org.mockito.Mockito.mock(WorkflowStub.class);
+        WorkflowStub existing = org.mockito.Mockito.mock(WorkflowStub.class);
+        WorkflowExecution execution = WorkflowExecution.newBuilder()
+                .setWorkflowId("joined")
+                .setRunId("run-1")
+                .build();
+        List<WorkflowOptions> options = new java.util.ArrayList<>();
+        AtomicInteger startAttempts = new AtomicInteger();
+        AtomicInteger acceptedStarts = new AtomicInteger();
+        when(client.newWorkflowStub(
+                        eq(IntakeInfrastructurePreparationWorkflow.class),
+                        any(WorkflowOptions.class)))
+                .thenAnswer(invocation -> {
+                    options.add(invocation.getArgument(1));
+                    return workflow;
+                });
+        when(client.newUntypedWorkflowStub(anyString())).thenReturn(existing);
+        when(started.getResult(
+                        org.mockito.ArgumentMatchers.anyLong(),
+                        eq(TimeUnit.NANOSECONDS),
+                        eq(IntakeInfrastructurePreparationResult.class)))
+                .thenReturn(IntakeInfrastructurePreparationResult.ready());
+        when(existing.getResult(
+                        org.mockito.ArgumentMatchers.anyLong(),
+                        eq(TimeUnit.NANOSECONDS),
+                        eq(IntakeInfrastructurePreparationResult.class)))
+                .thenReturn(IntakeInfrastructurePreparationResult.ready());
+        try (MockedStatic<WorkflowStub> workflowStubs =
+                        org.mockito.Mockito.mockStatic(WorkflowStub.class);
+                MockedStatic<WorkflowClient> workflowStarts =
+                        org.mockito.Mockito.mockStatic(
+                                WorkflowClient.class,
+                                invocation -> {
+                                    if (!invocation.getMethod().getName().equals("start")) {
+                                        return null;
+                                    }
+                                    if (startAttempts.incrementAndGet() == 1) {
+                                        acceptedStarts.incrementAndGet();
+                                        return execution;
+                                    }
+                                    throw new WorkflowExecutionAlreadyStarted(
+                                            execution,
+                                            IntakeInfrastructurePreparationWorkflow.WORKFLOW_TYPE,
+                                            null);
+                                })) {
+            workflowStubs.when(() -> WorkflowStub.fromTyped(workflow)).thenReturn(started);
+            IntakeInfrastructurePreparationService.TargetPreparation preparation =
+                    IntakeInfrastructurePreparationService.temporal(client);
+
+            preparation.prepare("intake-preparation:join", remainingBudget);
+            preparation.prepare("intake-preparation:join", remainingBudget);
+            preparation.prepare("intake-preparation:join", remainingBudget);
+        }
+
+        assertThat(startAttempts).hasValue(3);
+        assertThat(acceptedStarts).hasValue(1);
+        verify(existing, org.mockito.Mockito.times(2))
+                .getResult(
+                        org.mockito.ArgumentMatchers.longThat(
+                                timeout -> timeout > 0
+                                        && timeout <= remainingBudget.toNanos()),
+                        eq(TimeUnit.NANOSECONDS),
+                        eq(IntakeInfrastructurePreparationResult.class));
+        verify(started)
+                .getResult(
+                        org.mockito.ArgumentMatchers.longThat(
+                                timeout -> timeout > 0
+                                        && timeout <= remainingBudget.toNanos()),
+                        eq(TimeUnit.NANOSECONDS),
+                        eq(IntakeInfrastructurePreparationResult.class));
+        assertStableFailedOnlyOptions(options, remainingBudget);
+    }
+
+    private static void assertStableFailedOnlyOptions(
+            List<WorkflowOptions> options, java.time.Duration remainingBudget) {
+        assertThat(options).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(options)
+                .extracting(WorkflowOptions::getWorkflowId)
+                .containsOnly(options.getFirst().getWorkflowId());
+        assertThat(options)
+                .extracting(WorkflowOptions::getWorkflowIdReusePolicy)
+                .containsOnly(
+                        WorkflowIdReusePolicy
+                                .WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY);
+        assertThat(options)
+                .extracting(WorkflowOptions::getTaskQueue)
+                .containsOnly("agent-execution");
+        assertThat(options)
+                .extracting(WorkflowOptions::getWorkflowExecutionTimeout)
+                .containsOnly(remainingBudget);
+    }
 
     @Test
     void statusAddsSanitizedVersionedProjectionWithoutChangingLegacyFields() throws Exception {

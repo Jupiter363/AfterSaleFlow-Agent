@@ -1,7 +1,12 @@
 package com.example.dispute.workflow.targete2e.rooms.evidence;
 
 import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter;
+import com.example.dispute.agentstream.application.AgentRunFinalizationContext;
+import com.example.dispute.room.application.EvidenceAgentTurnService;
+import com.example.dispute.room.application.RoomMessageView;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.EntityManager;
 import java.sql.Connection;
 import java.util.Objects;
 import javax.sql.DataSource;
@@ -10,16 +15,26 @@ import org.springframework.jdbc.datasource.DataSourceUtils;
 /** Target-only registry entry; it is intentionally not a Spring component in the normal artifact. */
 public final class TargetEvidenceAgentRunDomainResultCommitter implements AgentRunDomainResultCommitter {
   private final DataSource dataSource;
+  private final EntityManager entityManager;
+  private final EvidenceAgentTurnService evidenceAgentTurnService;
   private final TargetEvidenceFinalizationRequestResolver requestResolver;
   private final TargetEvidenceFinalizationAdapter finalizer;
+  private final ObjectMapper objectMapper;
 
   public TargetEvidenceAgentRunDomainResultCommitter(
       DataSource dataSource,
+      EntityManager entityManager,
+      EvidenceAgentTurnService evidenceAgentTurnService,
       TargetEvidenceFinalizationRequestResolver requestResolver,
-      TargetEvidenceFinalizationAdapter finalizer) {
+      TargetEvidenceFinalizationAdapter finalizer,
+      ObjectMapper objectMapper) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+    this.entityManager = Objects.requireNonNull(entityManager, "entityManager");
+    this.evidenceAgentTurnService =
+        Objects.requireNonNull(evidenceAgentTurnService, "evidenceAgentTurnService");
     this.requestResolver = Objects.requireNonNull(requestResolver, "requestResolver");
     this.finalizer = Objects.requireNonNull(finalizer, "finalizer");
+    this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
   }
 
   @Override
@@ -35,13 +50,27 @@ public final class TargetEvidenceAgentRunDomainResultCommitter implements AgentR
         || !command.result().resultHash().equals(command.manifest().output().sha256())) {
       throw new IllegalArgumentException("target Evidence outer finalization binding is invalid");
     }
+    var graph = command.request().command();
+    var turnCommand = request.material().material().evidenceAgentTurnCommand();
+    AgentRunFinalizationContext finalization = new AgentRunFinalizationContext(
+        command.request().agentRunId(),
+        graph.caseId(),
+        turnCommand.contextEnvelope().roomPolicy().roomId(),
+        "EVIDENCE_TURN",
+        graph.traceparent(),
+        request.formalOperationId(),
+        objectMapper.valueToTree(turnCommand));
+    RoomMessageView formalMessage = Objects.requireNonNull(
+        evidenceAgentTurnService.finalizeTargetResult(
+            finalization, turnCommand, request.proposal().evidenceTurnResultJson()),
+        "Evidence formal service returned no message");
+    entityManager.flush();
     Connection transaction = DataSourceUtils.getConnection(dataSource);
     try {
       if (!DataSourceUtils.isConnectionTransactional(transaction, dataSource) || transaction.getAutoCommit()) {
         throw new IllegalStateException("target Evidence formal commit requires the outer transaction");
       }
-      var committed = finalizer.finalizeInTransaction(transaction, request);
-      var graph = command.request().command();
+      var committed = finalizer.finalizeInTransaction(transaction, request, formalMessage);
       return new CommitReceipt(committed.formalObjectId(), graph.caseId(), graph.roomEpoch(), graph.processRevision(),
           request.stageCode(), request.stageSequence(), request.actorId(), request.actorRole(), request.audience(),
           request.command().manifest().fencingToken(), command.result().resultHash());

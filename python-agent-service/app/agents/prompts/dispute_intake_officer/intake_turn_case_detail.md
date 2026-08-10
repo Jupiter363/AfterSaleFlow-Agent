@@ -50,12 +50,12 @@
 `case_matrix_delta.schema_version` 固定为 `case_fact_matrix.delta.v2`。它与增量展板不同：每轮都必须覆盖 `previous_case_detail.case_fact_matrix.fact_rows` 中的全部既有事实，并加入本轮新事实；只表达当前方立场，不得写成已证实事实。
 
 - 每行表示一个可单独确认或反驳的事实命题，不要把诉求、情绪、证据要求、责任判断或流程状态当作事实。
-- `fact_key`：本轮新增事实使用稳定临时键 `NEW_*`；上一版 `previous_case_detail.case_fact_matrix.fact_rows` 已存在的事实必须原样沿用其 `fact_id`，不得重新编号，也不得改变 `category` 或 `fact_target`。确需修正命题时新增 `NEW_*` 行。
+- `fact_key`：本轮新增事实使用稳定临时键 `NEW_*`；上一版 `previous_case_detail.case_fact_matrix.fact_rows` 已存在的事实必须原样沿用其 `fact_id`。对每个旧 `FACT_*`，必须从上一版逐字复制 `fact_key / category / fact_target / materiality`，不得改写、翻译、概括、重分类或重新编号；确需修正命题时新增 `NEW_*` 行。
 - `category` 取 `ORDER / PRODUCT_PAGE / PAYMENT / FULFILLMENT / LOGISTICS / PRODUCT_STATE / COMMUNICATION / AFTER_SALES / TIME / OTHER`。
 - `materiality` 取 `CORE / SUPPORTING / CONTEXT`。`FACT_*` 行无论使用 `CURRENT_SOURCE`、`PREVIOUS_MATRIX` 还是 `PREVIOUS_AND_CURRENT_SOURCE`，都必须与上一版冻结事实的 `materiality` 完全一致，不得重分类。
 - `stance` 取 `CONFIRM / DENY / PARTIAL / UNKNOWN / NOT_ADDRESSED`，只表示当前参与方对命题的直接立场。当前方未涉及旧事实时用 `NOT_ADDRESSED + PREVIOUS_MATRIX`；新事实不得使用 `NOT_ADDRESSED`。
 - `fact_target` 是中性、可核验的事实主题；`position_summary` 明确当前参与方怎么说；`asserted_value` 写当前方给出的具体值，`UNKNOWN/NOT_ADDRESSED` 时可为空。
-- `source_scope`：`NEW_*` 禁止使用 `PREVIOUS_MATRIX`；`NEW_*` 使用 `PREVIOUS_AND_CURRENT_SOURCE` 合法，但因不存在上一版事实，只提供当前授权来源，不得虚构历史来源。旧事实本轮未涉及用 `PREVIOUS_MATRIX`；旧事实被本轮补充或更正用 `PREVIOUS_AND_CURRENT_SOURCE`，被发起方首次直接回应旧事实时可以用 `CURRENT_SOURCE`。
+- `source_scope`：`PREVIOUS_MATRIX` 只允许用于 `NOT_ADDRESSED` 且完全沿用上一版立场的旧事实。只要本轮输出 `CONFIRM / DENY / PARTIAL / UNKNOWN` 等实质立场，就必须包含当前消息来源：首次回应旧事实使用 `CURRENT_SOURCE`，同时沿用历史立场来源时使用 `PREVIOUS_AND_CURRENT_SOURCE`；不得为实质立场使用纯 `PREVIOUS_MATRIX`。`NEW_*` 必须使用包含当前来源的 scope，禁止使用纯 `PREVIOUS_MATRIX`，也不得虚构历史来源。
 - 只有双方明确存在共同范围时填写 `agreed_statement`，仍有差异时同时填写 `conflict_summary`；不要计算 `party_alignment` 或 `requires_resolution`。
 - 当前方是被发起方且本轮明确回应发起方诉求时输出 `respondent_claim`，记录其直接态度、回应和可选替代方案；仅补充事实时该字段为空，编排层会保留此前已经形成的直接诉求态度；发起方阶段该字段为空。
 - `summary_source_fact_keys` 只列确实支撑本轮 `case_story.one_sentence_summary` 的事实键，至少一项；不得为了凑数引用无关事实。

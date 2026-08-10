@@ -44,17 +44,33 @@ public final class TrustedGraphTransportFactory {
 
     public static GraphTransportBundle create(
             GraphTlsClientMaterial material, Duration connectTimeout) {
-        return create(material, connectTimeout, null);
+        return create(material, connectTimeout, null, null);
     }
 
     /** Creates a transport whose proof is usable only for one canonical HTTPS base URI. */
     public static GraphTransportBundle createForEndpoint(
             GraphTlsClientMaterial material, Duration connectTimeout, URI baseUri) {
-        return create(material, connectTimeout, requireTargetBaseUri(baseUri));
+        return create(material, connectTimeout, requireTargetBaseUri(baseUri), null);
+    }
+
+    /** Creates one endpoint-bound client with continuous command-admission readiness. */
+    public static GraphTransportBundle createForEndpoint(
+            GraphTlsClientMaterial material,
+            Duration connectTimeout,
+            URI baseUri,
+            GraphReadinessCoordinator.Settings readinessSettings) {
+        return create(
+                material,
+                connectTimeout,
+                requireTargetBaseUri(baseUri),
+                Objects.requireNonNull(readinessSettings, "readinessSettings"));
     }
 
     private static GraphTransportBundle create(
-            GraphTlsClientMaterial material, Duration connectTimeout, URI boundBaseUri) {
+            GraphTlsClientMaterial material,
+            Duration connectTimeout,
+            URI boundBaseUri,
+            GraphReadinessCoordinator.Settings readinessSettings) {
         Objects.requireNonNull(material, "material");
         Duration boundedTimeout = requireConnectTimeout(connectTimeout);
         char[] keyPassword = material.copyKeyStorePassword();
@@ -89,10 +105,19 @@ public final class TrustedGraphTransportFactory {
 
             MutualTlsProof proof =
                     new MutualTlsProof(UUID.randomUUID().toString(), boundBaseUri);
+            GraphReadinessHandshake readinessHandshake = boundBaseUri == null
+                    ? null
+                    : new GraphReadinessHandshake(httpClient, proof, boundBaseUri);
+            GraphReadinessCoordinator readinessCoordinator = readinessSettings == null
+                    ? null
+                    : new GraphReadinessCoordinator(readinessHandshake, readinessSettings);
             return new GraphTransportBundle(
-                    new JdkGraphCommandHttpTransport(httpClient, proof),
-                    new JdkGraphReconciliationHttpTransport(httpClient, proof),
-                    proof);
+                    new JdkGraphCommandHttpTransport(httpClient, proof, readinessCoordinator),
+                    new JdkGraphReconciliationHttpTransport(
+                            httpClient, proof, readinessCoordinator),
+                    proof,
+                    readinessHandshake,
+                    readinessCoordinator);
         } catch (GeneralSecurityException | IOException exception) {
             throw new IllegalArgumentException("Graph TLS client material was rejected", exception);
         } finally {

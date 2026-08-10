@@ -135,52 +135,112 @@ async def test_legacy_adapter_refuses_thread_pool_async_fallback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_intake_async_stream_buffers_validated_generation_before_visible_projection() -> None:
-    class BufferedIntakeClient:
+async def test_intake_async_stream_exposes_provider_delta_before_completion() -> None:
+    class LiveIntakeClient:
         def __init__(self) -> None:
             self.agenerate_calls = 0
             self.agenerate_stream_calls = 0
+            self.stream_completed = False
 
-        async def agenerate(self, **kwargs) -> StructuredGeneration:
+        async def agenerate(self, **_kwargs) -> StructuredGeneration:
             self.agenerate_calls += 1
-            return StructuredGeneration(
-                value=kwargs["output_type"](answer="validated intake"),
-                model="buffered-intake-model",
-                latency_ms=5,
-                token_usage={"input": 3, "output": 2, "total": 5},
-            )
+            raise AssertionError("Intake streaming must not use the non-streaming client")
 
-        async def agenerate_stream(self, **_kwargs):
+        async def agenerate_stream(self, **kwargs):
             self.agenerate_stream_calls += 1
-            raise AssertionError("intake must not consume the raw provider stream")
-            yield  # pragma: no cover - keeps this an async iterator
-
-    client = BufferedIntakeClient()
-    transport = StructuredClientTransport(client)
-
-    updates = [
-        update
-        async for update in transport.astream(
-            _request(
-                visible=True,
-                node_name="intake_turn_case_detail",
-                model="buffered-intake-model",
+            yield StructuredStreamDelta(
+                kind="visible_delta",
+                field="answer",
+                delta="live intake",
             )
-        )
-    ]
+            self.stream_completed = True
+            yield StructuredStreamCompleted(
+                kind="completed",
+                generation=StructuredGeneration(
+                    value=kwargs["output_type"](answer="live intake"),
+                    model="live-intake-model",
+                    latency_ms=5,
+                    token_usage={"input": 3, "output": 2, "total": 5},
+                ),
+            )
 
-    assert client.agenerate_calls == 1
-    assert client.agenerate_stream_calls == 0
-    assert [type(update) for update in updates] == [
-        ModelTransportVisibleDelta,
-        ModelTransportCompleted,
-    ]
-    assert (updates[0].field, updates[0].delta) == ("answer", "validated intake")
-    completed = updates[1]
+    client = LiveIntakeClient()
+    transport = StructuredClientTransport(client)
+    updates = transport.astream(
+        _request(
+            visible=True,
+            node_name="intake_turn_case_detail",
+            model="live-intake-model",
+        )
+    )
+
+    first = await anext(updates)
+
+    assert isinstance(first, ModelTransportVisibleDelta)
+    assert (first.field, first.delta) == ("answer", "live intake")
+    assert client.stream_completed is False
+    assert client.agenerate_calls == 0
+    assert client.agenerate_stream_calls == 1
+
+    completed = await anext(updates)
     assert isinstance(completed, ModelTransportCompleted)
-    assert json.loads(completed.result.json_document) == {"answer": "validated intake"}
-    assert completed.result.model == "buffered-intake-model"
+    assert json.loads(completed.result.json_document) == {"answer": "live intake"}
+    assert completed.result.model == "live-intake-model"
     assert completed.result.token_usage == {"input": 3, "output": 2, "total": 5}
+    with pytest.raises(StopAsyncIteration):
+        await anext(updates)
+
+
+@pytest.mark.parametrize(
+    "reported_model",
+    [
+        pytest.param(None, id="missing-model"),
+        pytest.param("wrong-model", id="wrong-model"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_governed_async_stream_rejects_content_before_exact_model_binding(
+    reported_model,
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        payload = {
+            "choices": [
+                {
+                    "delta": {"content": '{"answer":"must-not-be-visible"}'},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 1,
+                "total_tokens": 3,
+            },
+        }
+        if reported_model is not None:
+            payload["model"] = reported_model
+        return httpx.Response(
+            200,
+            content=f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n".encode(),
+        )
+
+    mock = httpx.MockTransport(handler)
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "pinned-model",
+        "key",
+        transport=mock,
+        async_transport=mock,
+    )
+    transport = StructuredClientTransport(client)
+    updates = []
+
+    with pytest.raises(ModelTransportOutputError):
+        async for update in transport.astream(
+            _request(visible=True, model="pinned-model")
+        ):
+            updates.append(update)
+
+    assert updates == []
 
 
 @pytest.mark.asyncio

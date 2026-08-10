@@ -71,6 +71,12 @@ async function mountOverview(
   deleteSimulatedCaseAction = null,
   initialCases = cases,
 ) {
+  if (!vi.isMockFunction(disputeApi.prepareIntake)) {
+    vi.spyOn(disputeApi, "prepareIntake").mockResolvedValue({
+      schema_version: "intake-infrastructure-preparation.v1",
+      status: "READY",
+    });
+  }
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -804,6 +810,205 @@ describe("DisputeOverviewView", () => {
     expect(importedTicket.attributes("data-source-system")).toBe(
       "TEMPLATE_SIMULATED_OMS",
     );
+  });
+
+  it("prepares both committed entry paths once before navigation and retries preparation only", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    const callOrder = [];
+    let resolveExternalPreparation;
+    const prepareIntake = vi.spyOn(disputeApi, "prepareIntake")
+      .mockImplementationOnce((_actor, caseId) => {
+        callOrder.push(`prepare-invalid:${caseId}`);
+        return new Promise((resolve) => {
+          resolveExternalPreparation = () => resolve({
+            schema_version: "intake-infrastructure-preparation.v1",
+            status: "ready",
+          });
+        });
+      })
+      .mockImplementationOnce(async (_actor, caseId) => {
+        callOrder.push(`prepare-ready:${caseId}`);
+        return {
+          schema_version: "intake-infrastructure-preparation.v1",
+          status: "READY",
+        };
+      })
+      .mockImplementationOnce(async (_actor, caseId) => {
+        callOrder.push(`prepare-not-required:${caseId}`);
+        return {
+          schema_version: "intake-infrastructure-preparation.v1",
+          status: "NOT_REQUIRED",
+        };
+      })
+      .mockImplementationOnce(async (_actor, caseId) => {
+        callOrder.push(`prepare-stream-final:${caseId}`);
+        return {
+          schema_version: "intake-infrastructure-preparation.v1",
+          status: "READY",
+        };
+      });
+    const simulateExternalImportAction = vi.fn(async () => {
+      callOrder.push("external-commit");
+      return {
+        items: [{
+          id: "CASE_PREPARED_EXTERNAL",
+          source_type: "EXTERNAL_IMPORT",
+          case_status: "INTAKE_PENDING",
+          current_room: "INTAKE",
+          initiator_role: "USER",
+        }],
+      };
+    });
+    const external = await mountOverview(null, simulateExternalImportAction);
+    const externalPush = vi.spyOn(external.router, "push");
+
+    await external.wrapper.get("[data-simulate-external-import]").trigger("click");
+    await flushPromises();
+
+    expect(callOrder).toEqual([
+      "external-commit",
+      "prepare-invalid:CASE_PREPARED_EXTERNAL",
+    ]);
+    expect(external.router.currentRoute.value.path).toBe("/disputes");
+    expect(externalPush).not.toHaveBeenCalled();
+    expect(external.wrapper.get("[data-intake-preparation-loading]").text())
+      .toContain("案件已创建，正在准备接待环境");
+    await external.wrapper.get("[data-simulate-external-import]").trigger("click");
+    expect(simulateExternalImportAction).toHaveBeenCalledTimes(1);
+
+    resolveExternalPreparation();
+    await flushPromises();
+
+    expect(external.wrapper.get("[data-intake-preparation-transition]").text())
+      .toContain("案件已创建，但接待环境暂不可用");
+    expect(simulateExternalImportAction).toHaveBeenCalledTimes(1);
+
+    await external.wrapper.get("[data-retry-intake-preparation]").trigger("click");
+    await flushPromises();
+
+    expect(simulateExternalImportAction).toHaveBeenCalledTimes(1);
+    expect(prepareIntake).toHaveBeenCalledTimes(2);
+    expect(prepareIntake.mock.calls[0][2]).toBe(
+      "intake-preparation:CASE_PREPARED_EXTERNAL",
+    );
+    expect(prepareIntake.mock.calls[1][2]).toBe(prepareIntake.mock.calls[0][2]);
+    expect(externalPush).toHaveBeenCalledTimes(1);
+    expect(external.router.currentRoute.value.path).toBe(
+      "/disputes/CASE_PREPARED_EXTERNAL/intake",
+    );
+    external.wrapper.unmount();
+
+    const createAction = vi.fn(async () => {
+      callOrder.push("manual-commit");
+      return { id: "CASE_PREPARED_MANUAL" };
+    });
+    const manual = await mountOverview(createAction);
+    const manualPush = vi.spyOn(manual.router, "push");
+    await manual.wrapper.get("[data-start-dispute]").trigger("click");
+    await manual.wrapper.get("[data-intake-order]").setValue("ORDER-PREPARED");
+    await manual.wrapper.get("[data-intake-merchant]").setValue("merchant-local");
+    await manual.wrapper
+      .get("[data-intake-description]")
+      .setValue("提交后只准备基础设施，再进入接待室。");
+    await manual.wrapper.get(".intake-launcher__card").trigger("submit");
+    await flushPromises();
+
+    expect(callOrder.slice(-2)).toEqual([
+      "manual-commit",
+      "prepare-not-required:CASE_PREPARED_MANUAL",
+    ]);
+    expect(createAction).toHaveBeenCalledTimes(1);
+    expect(prepareIntake.mock.calls[2][2]).toBe(
+      "intake-preparation:CASE_PREPARED_MANUAL",
+    );
+    expect(manualPush).toHaveBeenCalledTimes(1);
+    expect(manual.router.currentRoute.value.path).toBe(
+      "/disputes/CASE_PREPARED_MANUAL/intake",
+    );
+    manual.wrapper.unmount();
+
+    const streamedRunId = "AGENT_RUN_EXTERNAL_IMPORT_PREPARED";
+    const streamUrl = `/api/agent-runs/${streamedRunId}/events`;
+    const streamedImportAction = vi.fn().mockResolvedValue({
+      accepted_run: { run_id: streamedRunId, stream_url: streamUrl },
+    });
+    const streamFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        [
+          `id: 0\nevent: start\ndata: ${JSON.stringify({
+            schemaVersion: "agent_stream.v1",
+            runId: streamedRunId,
+            sequence: 0,
+            type: "start",
+          })}\n\n`,
+          `id: 1\nevent: final\ndata: ${JSON.stringify({
+            schemaVersion: "agent_stream.v1",
+            runId: streamedRunId,
+            sequence: 1,
+            type: "final",
+            response: {
+              items: [{
+                id: "CASE_PREPARED_STREAM_IMPORT",
+                source_type: "EXTERNAL_IMPORT",
+                case_status: "INTAKE_PENDING",
+                current_room: "INTAKE",
+                initiator_role: "USER",
+              }],
+            },
+          })}\n\n`,
+        ].join(""),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ),
+    );
+    const streamed = await mountOverview(null, streamedImportAction);
+    const streamedPush = vi.spyOn(streamed.router, "push");
+
+    await streamed.wrapper.get("[data-simulate-external-import]").trigger("click");
+    await flushPromises();
+
+    expect(streamedImportAction).toHaveBeenCalledTimes(1);
+    expect(streamFetch).toHaveBeenCalledTimes(1);
+    expect(String(streamFetch.mock.calls[0][0])).toContain(
+      `${streamUrl}?last_event_id=-1`,
+    );
+    await vi.waitFor(() => {
+      expect(prepareIntake).toHaveBeenCalledTimes(4);
+    });
+    expect(prepareIntake.mock.calls[3][1]).toBe(
+      "CASE_PREPARED_STREAM_IMPORT",
+    );
+    expect(callOrder.at(-1)).toBe(
+      "prepare-stream-final:CASE_PREPARED_STREAM_IMPORT",
+    );
+    expect(streamedPush).toHaveBeenCalledTimes(1);
+    expect(streamed.router.currentRoute.value.path).toBe(
+      "/disputes/CASE_PREPARED_STREAM_IMPORT/intake",
+    );
+
+    const viewSource = fs.readFileSync(
+      path.resolve(__dirname, "DisputeOverviewView.vue"),
+      "utf8",
+    );
+    const transitionSource = fs.readFileSync(
+      path.resolve(__dirname, "../../services/intakePreparationTransition.js"),
+      "utf8",
+    );
+    const apiSource = fs.readFileSync(
+      path.resolve(__dirname, "../../api/disputes.js"),
+      "utf8",
+    );
+    expect(viewSource).not.toContain("ensureOpening");
+    expect(viewSource).toContain("consumeAgentRun");
+    expect(viewSource).toContain("onFinal: async (finalResult)");
+    expect(viewSource).toContain("dismissImportStreamError");
+    expect(viewSource).toContain("clearAgentStreams");
+    expect(transitionSource).not.toContain("consumeAgentRun");
+    expect(transitionSource).not.toContain("last_event_id");
+    expect(transitionSource).not.toContain("loadActiveAgentRuns");
+    expect(apiSource).toContain("/intake/preparation");
+    expect(apiSource).toContain("timeoutMs: 35_000");
+    expect(apiSource).toContain('"Idempotency-Key": idempotencyKey');
   });
 
   // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。

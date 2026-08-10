@@ -470,7 +470,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
 
     @Override
     @Transactional
-    public void recordAttemptFailureResult(
+    public ExecuteAgentRunResult recordAttemptFailureResult(
             AgentRunAttemptStatus status, ExecuteAgentRunResult result) {
         if (result == null) {
             throw new IllegalArgumentException("result must not be null");
@@ -482,15 +482,55 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                         .orElseThrow(() -> new IllegalStateException("AgentRun attempt was not found"));
         requireEqual(attempt.getAgentRunId(), result.agentRunId(), "agentRunId");
         requireEqual(attempt.getAttemptNo(), result.attemptNo(), "attemptNo");
+        ExecuteAgentRunResult replay = durableFailureResult(attempt);
+        if (replay != null) {
+            long storedSequence = replay.lastSequenceNo();
+            long incomingSequence = result.lastSequenceNo();
+            boolean exactSequence = incomingSequence == storedSequence;
+            boolean appendedTerminalSequence = storedSequence > 0
+                    && incomingSequence == storedSequence - 1;
+            if (!exactSequence && !appendedTerminalSequence) {
+                throw new IllegalStateException(
+                        "durableFailureResultSequence conflicts with the persisted AgentRun state");
+            }
+            ExecuteAgentRunResult expected = exactSequence
+                    ? result
+                    : withLastSequence(result, storedSequence);
+            requireEqual(replay, expected, "durableFailureResult");
+            requireDurableFailureReplayState(run, attempt, status, replay);
+            return replay;
+        }
         AgentRunAttemptStatus previousStatus = attempt.getAttemptStatus();
-        attempt.recordFailureResult(status, result, json(result));
+        if (result.recoveryAction() == AgentRunRecoveryAction.FAIL_LOGICAL_RUN
+                && previousStatus != AgentRunAttemptStatus.RUNNING) {
+            throw new IllegalStateException(
+                    "Activity failure terminal requires a running attempt without a durable result");
+        }
+        FailureTerminalPosition terminal = result.recoveryAction()
+                        == AgentRunRecoveryAction.FAIL_LOGICAL_RUN
+                ? requireActivityFailureTerminalPosition(run, attempt, result)
+                : null;
+        ExecuteAgentRunResult durableResult = terminal != null
+                ? withLastSequence(result, terminal.sequenceNo())
+                : result;
+        if (terminal != null && terminal.appendRequired()) {
+            attempt.recordFailureResultWithTerminal(
+                    status, result, durableResult, json(durableResult));
+        } else {
+            attempt.recordFailureResult(status, durableResult, json(durableResult));
+        }
         if (previousStatus == status) {
-            return;
+            return durableResult;
         }
         run.markV2AttemptFailed(
                 status,
-                result.recoveryAction() == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
-                result.completedAt());
+                durableResult.recoveryAction() == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
+                durableResult.completedAt());
+        if (terminal != null && terminal.appendRequired()) {
+            persistFailureTerminalError(
+                    run, attempt, durableResult, terminal);
+        }
+        return durableResult;
     }
 
     @Override
@@ -594,6 +634,205 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             throw new IllegalStateException(
                     "persisted AgentRun failure result cannot be decoded", exception);
         }
+    }
+
+    private void requireDurableFailureReplayState(
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            AgentRunAttemptStatus suppliedStatus,
+            ExecuteAgentRunResult replay) {
+        if (replay.recoveryAction() != AgentRunRecoveryAction.FAIL_LOGICAL_RUN) {
+            return;
+        }
+        requireEqual(
+                attempt.getAttemptStatus(), suppliedStatus, "durableFailureAttemptStatus");
+        requireEqual(replay.retryable(), false, "durableFailureRetryable");
+        requireEqual(run.getRunStatus(), suppliedStatus.name(), "durableFailureRunStatus");
+        requireEqual(run.getFinalizationStatus(), "UNCOMMITTED", "durableFailureFinalizationStatus");
+        requireEqual(run.getResultReadyAttemptId(), null, "durableFailureResultReadyAttemptId");
+        requireEqual(run.getCommittedAttemptId(), null, "durableFailureCommittedAttemptId");
+        requireEqual(run.getFinalResultHash(), null, "durableFailureFinalResultHash");
+
+        long highWatermark = eventRepository.findMaxV2Sequence(run.getId(), attempt.getId());
+        requireEqual(highWatermark, replay.lastSequenceNo(), "durableFailureHighWatermark");
+        AgentRunStreamEventEntity persisted = eventRepository
+                .findV2Event(run.getId(), attempt.getId(), highWatermark)
+                .orElseThrow(() -> new IllegalStateException(
+                        "durable failure terminal event is missing"));
+        persisted.requireCompatibilityBinding();
+        persisted.canonicalPayloadHash(streamObjectMapper);
+        AgentStreamEvent terminal;
+        try {
+            terminal = streamObjectMapper.readValue(
+                    persisted.getPayloadJson(), AgentStreamEvent.class);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "durable failure terminal event is invalid", exception);
+        }
+        Audience audience = requireV2Audience(run);
+        requireEqual(persisted.getAgentRunId(), run.getId(), "durableFailureStoredRunId");
+        requireEqual(
+                persisted.getAgentRunAttemptId(),
+                attempt.getId(),
+                "durableFailureStoredAttemptId");
+        requireEqual(
+                persisted.getSequenceNo(), highWatermark, "durableFailureStoredSequenceNo");
+        requireEqual(
+                persisted.getStreamProtocol(),
+                AgentRunProtocol.V2.wireValue(),
+                "durableFailureStoredProtocol");
+        requireEqual(
+                persisted.getEventType(),
+                StreamEventType.ERROR.wireValue(),
+                "durableFailureStoredEventType");
+        requireEqual(persisted.getAudience(), audience, "durableFailureStoredAudience");
+        requireEqual(terminal.runId(), run.getId(), "durableFailureRunId");
+        requireEqual(terminal.attemptId(), attempt.getId(), "durableFailureAttemptId");
+        requireEqual(terminal.sequenceNo(), highWatermark, "durableFailureSequenceNo");
+        requireEqual(
+                terminal.schemaVersion(),
+                AgentRunProtocol.V2.wireValue(),
+                "durableFailureProtocol");
+        requireEqual(terminal.eventType(), StreamEventType.ERROR, "durableFailureEventType");
+        requireEqual(terminal.audience(), audience, "durableFailureAudience");
+        requireEqual(
+                terminal.payload().errorCode(), replay.errorCode(), "durableFailureErrorCode");
+        requireEqual(
+                terminal.payload().retryable(), replay.retryable(), "durableFailureErrorRetryable");
+    }
+
+    private FailureTerminalPosition requireActivityFailureTerminalPosition(
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            ExecuteAgentRunResult result) {
+        if (!AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
+                || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
+            throw new IllegalStateException(
+                    "Activity failure terminal requires a Temporal AgentRun V2");
+        }
+        requireEqual(run.getId(), result.logicalRunId(), "logicalRunId");
+        requireEqual(run.getRunStatus(), "RUNNING", "runStatus");
+        requireEqual(run.getFinalizationStatus(), "UNCOMMITTED", "finalizationStatus");
+        requireEqual(run.getResultReadyAttemptId(), null, "resultReadyAttemptId");
+        requireEqual(run.getCommittedAttemptId(), null, "committedAttemptId");
+        requireEqual(run.getFinalResultHash(), null, "finalResultHash");
+        requireEqual(
+                attempt.getAttemptStatus(), AgentRunAttemptStatus.RUNNING, "attemptStatus");
+        requireEqual(
+                result.recoveryAction(),
+                AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
+                "recoveryAction");
+        requireEqual(result.retryable(), false, "retryable");
+
+        long highWatermark = eventRepository.findMaxV2Sequence(run.getId(), attempt.getId());
+        requireEqual(highWatermark, attempt.getLastSequenceNo(), "activityFailureHighWatermark");
+        requireEqual(highWatermark, result.lastSequenceNo(), "activityFailureResultSequenceNo");
+        AgentRunStreamEventEntity persisted = eventRepository
+                .findV2Event(run.getId(), attempt.getId(), highWatermark)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Activity failure source high-watermark event is missing"));
+        persisted.requireCompatibilityBinding();
+        persisted.canonicalPayloadHash(streamObjectMapper);
+        AgentStreamEvent lastEvent;
+        try {
+            lastEvent = streamObjectMapper.readValue(
+                    persisted.getPayloadJson(), AgentStreamEvent.class);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "Activity failure source event is invalid", exception);
+        }
+        Audience audience = requireV2Audience(run);
+        requireEqual(persisted.getAgentRunId(), run.getId(), "activityFailureStoredRunId");
+        requireEqual(
+                persisted.getAgentRunAttemptId(),
+                attempt.getId(),
+                "activityFailureStoredAttemptId");
+        requireEqual(
+                persisted.getSequenceNo(), highWatermark, "activityFailureStoredSequenceNo");
+        requireEqual(
+                persisted.getStreamProtocol(),
+                AgentRunProtocol.V2.wireValue(),
+                "activityFailureStoredProtocol");
+        requireEqual(persisted.getAudience(), audience, "activityFailureStoredAudience");
+        requireEqual(lastEvent.runId(), run.getId(), "activityFailureRunId");
+        requireEqual(lastEvent.attemptId(), attempt.getId(), "activityFailureAttemptId");
+        requireEqual(lastEvent.sequenceNo(), highWatermark, "activityFailureSequenceNo");
+        requireEqual(
+                lastEvent.eventType().wireValue(),
+                persisted.getEventType(),
+                "activityFailureEventType");
+        requireEqual(lastEvent.audience(), audience, "activityFailureAudience");
+        if (lastEvent.eventType() == StreamEventType.ERROR) {
+            requireEqual(
+                    lastEvent.payload().errorCode(),
+                    result.errorCode(),
+                    "activityFailureExistingErrorCode");
+            requireEqual(
+                    lastEvent.payload().retryable(),
+                    result.retryable(),
+                    "activityFailureExistingErrorRetryable");
+            return new FailureTerminalPosition(highWatermark, audience, false);
+        }
+        if (lastEvent.eventType() == StreamEventType.FINAL
+                || lastEvent.eventType() == StreamEventType.ATTEMPT_ABORTED) {
+            throw new IllegalStateException(
+                    "Activity failure source already has a terminal stream event");
+        }
+        return new FailureTerminalPosition(
+                Math.addExact(highWatermark, 1L), audience, true);
+    }
+
+    private void persistFailureTerminalError(
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            ExecuteAgentRunResult result,
+            FailureTerminalPosition position) {
+        AgentStreamEvent terminal = new AgentStreamEvent(
+                AgentRunProtocol.V2.wireValue(),
+                run.getId(),
+                attempt.getId(),
+                position.sequenceNo(),
+                StreamEventType.ERROR,
+                position.audience(),
+                result.completedAt(),
+                new AgentStreamEvent.Payload(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        result.errorCode(),
+                        false));
+        entityManager.flush();
+        AgentRunV2StreamStore.AppendReceipt receipt =
+                recoveryEventStore.appendRecoveryErrorInCurrentTransaction(terminal);
+        requireEqual(receipt.inserted(), true, "activityFailureTerminalInserted");
+        requireEqual(
+                receipt.durableHighWatermark(),
+                position.sequenceNo(),
+                "activityFailureTerminalHighWatermark");
+    }
+
+    private static ExecuteAgentRunResult withLastSequence(
+            ExecuteAgentRunResult source, long lastSequenceNo) {
+        return new ExecuteAgentRunResult(
+                source.schemaVersion(),
+                source.agentRunId(),
+                source.logicalRunId(),
+                source.attemptId(),
+                source.attemptNo(),
+                source.outcome(),
+                source.graphResult(),
+                source.resultHash(),
+                lastSequenceNo,
+                source.publicOutputEmitted(),
+                source.errorCode(),
+                source.retryable(),
+                source.recoveryAction(),
+                source.completedAt());
     }
 
     private Binding requireVerifiedBinding(
@@ -941,6 +1180,9 @@ public class JpaAgentRunLedger implements AgentRunLedger {
 
     private record PublicPreludeEvent(
             AgentStreamEvent event, String canonicalJson, String payloadHash) {}
+
+    private record FailureTerminalPosition(
+            long sequenceNo, Audience audience, boolean appendRequired) {}
 
     private record RecoveryTerminalPosition(long sequenceNo, Audience audience) {}
 

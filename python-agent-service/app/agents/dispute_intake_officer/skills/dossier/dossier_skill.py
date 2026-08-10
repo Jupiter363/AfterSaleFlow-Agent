@@ -32,6 +32,8 @@ ORIGINAL_STATEMENT_MISSING = "外部系统未提供发起方原话"
 ORIGINAL_STATEMENT_POLICY = "INITIATOR_INPUTS_V1"
 SUBJECTIVE_RESPONDENT_SOURCE = "发起方单方陈述（主观）"
 DIRECT_RESPONDENT_SOURCE = "被发起方接待室直接陈述"
+RESPONDENT_AUTHORED_CURRENT_MESSAGE = "RESPONDENT_AUTHORED_CURRENT_MESSAGE"
+DIRECT_RESPONDENT_CONFIDENCE = 0.65
 SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE = (
     "仅表示从发起方单方陈述中提取态度的明确度，不代表事实真实性。"
 )
@@ -60,6 +62,8 @@ _DIRECT_ATTITUDE_CLAUSE_BOUNDARY = re.compile(
     r"[。！？!?；;，,\n]+|\b(?:but|however|nevertheless|yet)\b",
     re.IGNORECASE,
 )
+_DIRECT_ATTITUDE_COORDINATION_BOUNDARY = re.compile(r"[；;，,]+")
+_DIRECT_ATTITUDE_AUTHORITATIVE_BOUNDARY = re.compile(r"[。！？!?\r\n]+")
 _DIRECT_ATTITUDE_SIGNAL_EN = re.compile(
     r"\b(?:partially\s+(?:agree|agreed|accept|accepted)|agree|agreed|agrees|accept|"
     r"accepted|accepts|reject|rejected|rejects|refuse|refused|refuses|disagree|"
@@ -78,6 +82,45 @@ _DIRECT_ATTITUDE_SIGNAL_ZH = re.compile(
 )
 _DIRECT_ATTITUDE_SELF_ZH = re.compile(
     r"^\s*(?:我|本人|我方|我们|本方|本公司|我司)(?P<body>.*)$"
+)
+_DIRECT_ATTITUDE_THIRD_PARTY_ZH = (
+    r"(?:用户|买家|客户|消费者|对方|商家|卖家|店铺|商户|客服|平台|第三方)"
+)
+_DIRECT_ATTITUDE_ATTRIBUTION_ZH = re.compile(
+    rf"(?:的是|由)\s*{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}"
+    rf"|(?:据|按|根据)\s*{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}"
+    rf"|{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}.{{0,12}}"
+    r"(?:说|表示|回复|回应|答复|声称|称|认为|提出|建议)"
+)
+_DIRECT_ATTITUDE_THIRD_PARTY_PROPOSAL_OBJECT_ZH = re.compile(
+    rf"(?:由\s*)?{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}\s*(?:所\s*)?(?:提出|建议)的"
+)
+_DIRECT_ATTITUDE_DEFERRED_ATTRIBUTION_ZH = re.compile(
+    rf"[（(]\s*(?:以上|上述|前述|该内容|这些内容)?\s*(?:为|是|属于)?\s*"
+    rf"{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}\s*(?:的)?\s*"
+    r"(?:意见|观点|立场|态度|看法)\s*[）)]"
+    rf"|(?:以上|上述|前述|该内容|这些内容|以上内容|上述内容)\s*"
+    rf"(?:为|是|属于)\s*{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}\s*(?:的)?\s*"
+    r"(?:意见|观点|立场|态度|看法)"
+)
+_DIRECT_ATTITUDE_ATTRIBUTION_EN = re.compile(
+    r"\b(?:the\s+)?(?:buyer|customer|consumer|merchant|seller|store|counterparty)\b"
+    r".{0,24}\b(?:agree|agreed|accept|accepted|reject|rejected|refuse|refused|"
+    r"disagree|disagreed|offer|offered|propose|proposed|suggest|suggested)\b"
+    r"|\b(?:agree|agreed|accept|accepted|reject|rejected|refuse|refused|"
+    r"disagree|disagreed|offer|offered|propose|proposed|suggest|suggested)\b"
+    r".{0,12}\bby\s+(?:the\s+)?"
+    r"(?:buyer|customer|consumer|merchant|seller|store|counterparty)\b",
+    re.IGNORECASE,
+)
+_DIRECT_ATTITUDE_DEFERRED_ATTRIBUTION_EN = re.compile(
+    r"\(\s*(?:the\s+)?(?:counterparty|buyer|customer|merchant|seller)(?:'s)?\s+"
+    r"(?:opinion|view|position|attitude)\s*\)"
+    r"|\b(?:the\s+)?(?:above|foregoing|preceding)\s+"
+    r"(?:is|was|reflects)\s+(?:the\s+)?"
+    r"(?:counterparty|buyer|customer|merchant|seller)(?:'s)?\s+"
+    r"(?:opinion|view|position|attitude)\b",
+    re.IGNORECASE,
 )
 _REPORTED_RESPONDENT_ATTITUDE_TERM_EN = (
     r"partially\s+(?:agreed|accepted)|agreed|accepted|rejected|refused|disagreed|"
@@ -101,6 +144,24 @@ _REPORTED_ATTITUDE_POST_NEGATION_EN = re.compile(
 class DirectRespondentAttitudeDetection:
     state: Literal["NONE", "SUBSTANTIVE", "UNRESOLVED"]
     candidate: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _IntakeQualityAuthority:
+    order_reference: bool
+    after_sales_reference: bool
+    logistics_reference: bool
+    authoritative_story: bool
+    authoritative_event: bool
+    initiator_position: bool
+    respondent_state: bool
+    requested_resolution: bool
+    normalized_request: bool
+    conflict_type: bool
+    core_conflict: bool
+    action_target: bool
+    action_path: bool
+
 
 CASE_DETAIL_TOP_LEVEL_FIELDS = frozenset(
     {
@@ -126,10 +187,48 @@ CASE_DETAIL_MAX_DEPTH = 12
 CASE_DETAIL_MAX_NODES = 5_000
 CASE_DETAIL_MAX_TEXT_CHARACTERS = 200_000
 
+# The quality score is persisted authority, so its six prompt-defined components
+# have fixed maxima and are derived from the normalized dossier rather than model
+# supplied score, breakdown, threshold, or ready fields.
+_QUALITY_SCORE_COMPONENT_MAXIMA = {
+    "references": 15,
+    "event_story": 20,
+    "party_positions": 20,
+    "requested_resolution": 15,
+    "risk_and_conflicts": 15,
+    "next_action_clarity": 15,
+}
+_QUALITY_UNKNOWN_CODES = frozenset(
+    {
+        "",
+        "UNKNOWN",
+        "UNSPECIFIED",
+        "NOT_PROVIDED",
+        "PLATFORM_UNKNOWN",
+        "NONE",
+        "N/A",
+        "NA",
+        "TBD",
+    }
+)
+_QUALITY_METADATA_KEYS = frozenset(
+    {"id", "message_id", "schema_version", "source", "time_hint", "type"}
+)
+_QUALITY_CONFLICT_TYPES = frozenset(
+    {
+        "CLAIM_UNANSWERED",
+        "CLAIM_ACCEPTED_PENDING_VERIFICATION",
+        "CLAIM_PARTIALLY_ACCEPTED",
+        "CLAIM_REJECTED_WITH_FACT_DISPUTE",
+        "CLAIM_WITH_EVIDENCE_GAP",
+    }
+)
+
 FIELD_DISPLAY_LABELS = {
     "ORDER_REFERENCE": "订单号",
     "AFTER_SALES_REFERENCE": "售后单号",
     "LOGISTICS_REFERENCE": "物流单号",
+    "REQUESTED_RESOLUTION": "明确的处理诉求",
     "order_reference_confirmation": "订单号核对",
     "after_sales_reference_confirmation": "售后单号核对",
     "logistics_reference_confirmation": "物流单号核对",
@@ -201,14 +300,7 @@ class CaseDetailDossierSkill:
             raise ValueError("provide only llm_case_matrix_delta")
         effective_matrix_delta = llm_case_matrix_delta or llm_unilateral_case_matrix
         if llm_case_detail is None and llm_scroll_snapshot:
-            return self._legacy_passthrough(
-                llm_dossier_patch=llm_dossier_patch,
-                llm_scroll_snapshot=llm_scroll_snapshot,
-                llm_canvas_operations=llm_canvas_operations,
-                llm_admission_recommendation=llm_admission_recommendation,
-                llm_missing_fields=llm_missing_fields,
-                llm_confidence=llm_confidence,
-            )
+            llm_case_detail = llm_scroll_snapshot
 
         previous = _case_detail_fields_only(request.previous_case_detail or {})
         bounded_llm_case_detail = _case_detail_fields_only(llm_case_detail or {})
@@ -276,17 +368,25 @@ class CaseDetailDossierSkill:
             if field not in missing and not _is_evidence_material_request(field)
         )
         missing.extend(field for field in llm_missing_from_detail if field not in missing)
-        score = _clamp_score(
-            detail.get("intake_quality", {}).get("score")
-            if isinstance(detail.get("intake_quality"), dict)
-            else None
+        claim = _quality_mapping(detail.get("claim_resolution"))
+        if (
+            _known_resolution_code(claim.get("requested_resolution")) is None
+            and "REQUESTED_RESOLUTION" not in missing
+        ):
+            missing.append("REQUESTED_RESOLUTION")
+        missing_info["blocking_gaps"] = _human_missing_fields(missing)
+        _normalize_next_verification_focus(detail)
+        score_breakdown = _derive_intake_quality_breakdown(
+            detail,
+            request=request,
+            missing=missing,
         )
+        score = sum(score_breakdown.values())
         quality = _ensure_dict(detail, "intake_quality")
+        quality["score_breakdown"] = score_breakdown
         quality["score"] = score
         quality["threshold"] = self.readiness_threshold
-        quality["ready_for_next_step"] = (
-            score >= self.readiness_threshold and not missing
-        )
+        quality["ready_for_next_step"] = score >= self.readiness_threshold and not missing
         if quality["ready_for_next_step"]:
             missing = []
             quality["improvement_reason"] = "信息完整度已达到提交阈值。"
@@ -299,7 +399,6 @@ class CaseDetailDossierSkill:
                 str(quality.get("improvement_reason") or "")
             )
 
-        missing_info["blocking_gaps"] = _human_missing_fields(missing)
         if quality["ready_for_next_step"]:
             missing_info["next_questions"] = []
             if previous_remark_status == "READY_PENDING_REMARK_INVITE":
@@ -316,8 +415,10 @@ class CaseDetailDossierSkill:
         else:
             _ensure_handoff_notes(detail, remark_status="NOT_READY")
             if not missing_info.get("next_questions"):
-                missing_info["next_questions"] = [_question_for_missing(missing)]
-        _normalize_next_verification_focus(detail)
+                question = _question_for_missing(missing) or _question_for_quality_gap(
+                    score_breakdown
+                )
+                missing_info["next_questions"] = [question]
         _record_handoff_remark_if_needed(
             detail,
             request,
@@ -652,6 +753,15 @@ CLAIM_RESOLUTION_LABELS = {
     "OTHER": "其他处理",
     "UNKNOWN": "待确认处理",
 }
+
+
+def _known_resolution_code(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    code = value.strip().upper()
+    if code == "UNKNOWN" or code not in CLAIM_RESOLUTION_LABELS:
+        return None
+    return code
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
@@ -1013,13 +1123,7 @@ def _enforce_claim_resolution(
             else:
                 claim[field_name] = copy.deepcopy(defaults.get(field_name))
     else:
-        claim["initiator_role"] = _party_role_or_default(
-            str(
-                claim.get("initiator_role")
-                or getattr(initial, "initiator_role", None)
-                or current.role
-            )
-        )
+        claim["initiator_role"] = initiator_role
         inferred_resolution = _requested_resolution_from_claim_text(current_text)
         if inferred_resolution is not None:
             claim["requested_resolution"] = inferred_resolution
@@ -1027,7 +1131,9 @@ def _enforce_claim_resolution(
             claim["request_reason"] = current_text
 
     initiator_role = _party_role_or_default(str(claim.get("initiator_role") or ""))
-    requested_resolution = str(claim.get("requested_resolution") or "UNKNOWN")
+    requested_resolution = _known_resolution_code(
+        claim.get("requested_resolution")
+    ) or "UNKNOWN"
     request_reason = str(claim.get("request_reason") or "")
     claim["initiator_role"] = initiator_role
     claim["requested_resolution"] = requested_resolution
@@ -1216,9 +1322,16 @@ def _enforce_respondent_attitude_source(
         if isinstance(previous_matrix, dict)
         else {}
     )
+    enforced_claim = detail.get("claim_resolution")
+    enforced_initiator_role = (
+        enforced_claim.get("initiator_role")
+        if isinstance(enforced_claim, dict)
+        else None
+    )
     initiator_role = _party_role_or_default(
-        getattr(initial, "initiator_role", None)
-        or previous_party_map.get("initiator_role")
+        previous_party_map.get("initiator_role")
+        or enforced_initiator_role
+        or getattr(initial, "initiator_role", None)
         or (current.role if current is not None else None)
     )
     actor_role = str(request.agent_context.actor_role or "").upper()
@@ -1232,7 +1345,10 @@ def _enforce_respondent_attitude_source(
         expected_respondent_role=_opposite_party(initiator_role),
     )
     if current is not None and actor_role == _opposite_party(initiator_role):
-        detection = detect_direct_respondent_attitude(current.text)
+        detection = detect_direct_respondent_attitude(
+            current.text,
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        )
         if detection.state == "UNRESOLVED":
             raise AgentOutputSchemaError(
                 "intake_turn_case_detail",
@@ -1246,6 +1362,7 @@ def _enforce_respondent_attitude_source(
                 else _default_respondent_attitude(
                     initial,
                     allow_subjective_seed=False,
+                    initiator_role=initiator_role,
                 )
             )
             return
@@ -1318,6 +1435,7 @@ def _enforce_respondent_attitude_source(
         detail["respondent_attitude"] = _default_respondent_attitude(
             initial,
             allow_subjective_seed=False,
+            initiator_role=initiator_role,
         )
         _clear_ungrounded_counterparty_position(detail, initiator_role)
         return
@@ -1359,20 +1477,82 @@ def _has_explicit_respondent_report(text: str, initiator_role: str) -> bool:
     )
 
 
-def detect_direct_respondent_attitude(text: str) -> DirectRespondentAttitudeDetection:
-    """Classify only explicit self-authored respondent attitude clauses."""
+def _direct_attitude_clauses(text: str) -> list[tuple[str, str | None]]:
+    clauses: list[tuple[str, str | None]] = []
+    cursor = 0
+    preceding_boundary: str | None = None
+    for boundary in _DIRECT_ATTITUDE_CLAUSE_BOUNDARY.finditer(text):
+        clause = text[cursor : boundary.start()].strip()
+        if clause:
+            clauses.append((clause, preceding_boundary))
+        preceding_boundary = boundary.group(0)
+        cursor = boundary.end()
+    clause = text[cursor:].strip()
+    if clause:
+        clauses.append((clause, preceding_boundary))
+    return clauses
+
+
+def _direct_attitude_semantic_clause_zh(clause: str) -> str:
+    return _DIRECT_ATTITUDE_THIRD_PARTY_PROPOSAL_OBJECT_ZH.sub(
+        "第三方方案",
+        clause,
+    )
+
+
+def detect_direct_respondent_attitude(
+    text: str,
+    *,
+    source_authority: str | None = None,
+) -> DirectRespondentAttitudeDetection:
+    """Classify direct attitude under an explicit current-message authority."""
 
     normalized = str(text or "").strip()
     if not normalized:
         return DirectRespondentAttitudeDetection("NONE")
+    if (
+        _DIRECT_ATTITUDE_SIGNAL_ZH.search(normalized) is not None
+        and _DIRECT_ATTITUDE_DEFERRED_ATTRIBUTION_ZH.search(normalized) is not None
+    ) or (
+        _DIRECT_ATTITUDE_SIGNAL_EN.search(normalized) is not None
+        and _DIRECT_ATTITUDE_DEFERRED_ATTRIBUTION_EN.search(normalized) is not None
+    ):
+        return DirectRespondentAttitudeDetection("UNRESOLVED")
     resolved: list[str] = []
     unresolved_signal = False
-    for clause in _DIRECT_ATTITUDE_CLAUSE_BOUNDARY.split(normalized):
-        clause = clause.strip()
-        if not clause:
-            continue
+    carry_chinese_subject = False
+    for clause, preceding_boundary in _direct_attitude_clauses(normalized):
+        inherited_chinese_subject = (
+            carry_chinese_subject
+            and preceding_boundary is not None
+            and _DIRECT_ATTITUDE_COORDINATION_BOUNDARY.fullmatch(preceding_boundary)
+            is not None
+            and _DIRECT_ATTITUDE_SIGNAL_ZH.match(clause) is not None
+        )
+        authoritative_omitted_chinese_subject = (
+            source_authority == RESPONDENT_AUTHORED_CURRENT_MESSAGE
+            and (
+                preceding_boundary is None
+                or _DIRECT_ATTITUDE_AUTHORITATIVE_BOUNDARY.fullmatch(
+                    preceding_boundary
+                )
+                is not None
+            )
+            and _DIRECT_ATTITUDE_SIGNAL_ZH.match(clause) is not None
+            and _DIRECT_ATTITUDE_ATTRIBUTION_ZH.search(
+                _direct_attitude_semantic_clause_zh(clause)
+            )
+            is None
+        )
+        carry_chinese_subject = _DIRECT_ATTITUDE_SELF_ZH.match(clause) is not None
         if _DIRECT_ATTITUDE_SIGNAL_ZH.search(clause):
-            code = _direct_respondent_attitude_clause_zh(clause)
+            code = _direct_respondent_attitude_clause_zh(
+                clause,
+                inherited_subject=(
+                    inherited_chinese_subject
+                    or authoritative_omitted_chinese_subject
+                ),
+            )
             if code is None:
                 unresolved_signal = True
             elif code != "NONE":
@@ -1385,45 +1565,74 @@ def detect_direct_respondent_attitude(text: str) -> DirectRespondentAttitudeDete
             elif code != "NONE":
                 resolved.append(code)
     codes = set(resolved)
-    if len(codes) > 1:
+    if unresolved_signal:
         return DirectRespondentAttitudeDetection("UNRESOLVED")
-    if codes:
+    code = _reduce_direct_respondent_attitude_codes(codes)
+    if code is not None:
         return DirectRespondentAttitudeDetection(
             "SUBSTANTIVE",
             {
-                "attitude": next(iter(codes)),
+                "attitude": code,
                 "position": normalized,
-                "confidence": 0.65,
+                "confidence": DIRECT_RESPONDENT_CONFIDENCE,
             },
         )
-    if unresolved_signal:
+    if codes:
         return DirectRespondentAttitudeDetection("UNRESOLVED")
     return DirectRespondentAttitudeDetection("NONE")
 
 
-def _direct_respondent_attitude_clause_zh(clause: str) -> str | None:
-    subject = _DIRECT_ATTITUDE_SELF_ZH.match(clause)
-    if subject is None:
-        return None
-    body = subject.group("body").strip()
-    if re.search(r"(?:并非|不是|没有|未)\s*(?:不同意|不接受|拒绝|不支持)", body):
-        return None
-    if re.search(r"(?:并不|没有|未|不)\s*(?:同意|接受|支持|愿意)", body):
-        return "DISAGREE"
-    if re.search(r"部分(?:同意|接受)|只(?:同意|接受)", body):
-        return "PARTIALLY_AGREE"
-    if re.search(r"不同意|不接受|拒绝|不支持", body):
-        return "DISAGREE"
-    if re.search(r"同意|接受|支持|愿意", body):
-        return "AGREE"
-    if re.search(r"提出|建议|替代方案", body):
+def _reduce_direct_respondent_attitude_codes(codes: set[str]) -> str | None:
+    if len(codes) == 1:
+        return next(iter(codes))
+    if codes == {"DISAGREE", "ALTERNATIVE_PROPOSED"}:
         return "ALTERNATIVE_PROPOSED"
-    if re.search(r"要求补充|需要更多信息", body):
-        return "NEED_MORE_INFO"
     return None
 
 
+def _direct_respondent_attitude_clause_zh(
+    clause: str,
+    *,
+    inherited_subject: bool = False,
+) -> str | None:
+    semantic_clause = _direct_attitude_semantic_clause_zh(clause)
+    if _DIRECT_ATTITUDE_ATTRIBUTION_ZH.search(semantic_clause) is not None:
+        return None
+    subject = _DIRECT_ATTITUDE_SELF_ZH.match(semantic_clause)
+    if subject is None:
+        if not inherited_subject:
+            return None
+        body = semantic_clause.strip()
+    else:
+        body = subject.group("body").strip()
+    if re.search(r"(?:并非|不是|没有|未)\s*(?:不同意|不接受|拒绝|不支持)", body):
+        return None
+    codes: set[str] = set()
+    remaining_body = body
+    negative_positive = re.compile(r"(?:并不|没有|未|不)\s*(?:同意|接受|支持|愿意)")
+    if negative_positive.search(remaining_body):
+        codes.add("DISAGREE")
+        remaining_body = negative_positive.sub("", remaining_body)
+    partial = re.compile(r"部分(?:同意|接受)|只(?:同意|接受)")
+    if partial.search(remaining_body):
+        codes.add("PARTIALLY_AGREE")
+        remaining_body = partial.sub("", remaining_body)
+    disagreement = re.compile(r"不同意|不接受|拒绝|不支持")
+    if disagreement.search(remaining_body):
+        codes.add("DISAGREE")
+        remaining_body = disagreement.sub("", remaining_body)
+    if re.search(r"同意|接受|支持|愿意", remaining_body):
+        codes.add("AGREE")
+    if re.search(r"提出|建议|替代方案", body):
+        codes.add("ALTERNATIVE_PROPOSED")
+    if re.search(r"要求补充|需要更多信息", body):
+        codes.add("NEED_MORE_INFO")
+    return _reduce_direct_respondent_attitude_codes(codes)
+
+
 def _direct_respondent_attitude_clause_en(clause: str) -> str | None:
+    if _DIRECT_ATTITUDE_ATTRIBUTION_EN.search(clause) is not None:
+        return None
     subject = _DIRECT_ATTITUDE_SELF_EN.match(clause)
     if subject is None:
         return None
@@ -1481,7 +1690,7 @@ def _direct_respondent_attitude_clause_en(clause: str) -> str | None:
             if negated:
                 return None
             codes.add("NEED_MORE_INFO")
-    return next(iter(codes)) if len(codes) == 1 else None
+    return _reduce_direct_respondent_attitude_codes(codes)
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
@@ -1957,10 +2166,13 @@ def _default_respondent_attitude(
     lobby_seed: Any,
     *,
     allow_subjective_seed: bool = True,
+    initiator_role: str | None = None,
 ) -> dict[str, Any]:
     seed = getattr(lobby_seed, "respondent_attitude_seed", None)
-    initiator_role = _party_role_or_default(getattr(lobby_seed, "initiator_role", None))
-    respondent_role = _opposite_party(initiator_role)
+    normalized_initiator_role = _party_role_or_default(
+        initiator_role or getattr(lobby_seed, "initiator_role", None)
+    )
+    respondent_role = _opposite_party(normalized_initiator_role)
     seed_values = (
         seed.model_dump(mode="python")
         if seed is not None and hasattr(seed, "model_dump")
@@ -2296,10 +2508,10 @@ def _normalize_next_verification_focus(detail: dict[str, Any]) -> None:
         else ""
     )
     candidates = [
-        *_list_values(core.get("next_verification_focus")),
-        *_list_values(dispute_focus.get("facts_to_verify")),
-        *_list_values(missing.get("blocking_gaps")),
-        *_list_values(missing.get("nice_to_have_gaps")),
+        *_quality_focus_values(core.get("next_verification_focus")),
+        *_quality_focus_values(dispute_focus.get("facts_to_verify")),
+        *_quality_focus_values(missing.get("blocking_gaps")),
+        *_quality_focus_values(missing.get("nice_to_have_gaps")),
     ]
     core["next_verification_focus"] = _canonical_verification_focus(
         candidates,
@@ -2468,6 +2680,171 @@ def _ensure_dict(container: dict[str, Any], key: str) -> dict[str, Any]:
 def _first_match(pattern: re.Pattern[str], text: str) -> str:
     match = pattern.search(text or "")
     return match.group(0).upper() if match else ""
+
+
+def _quality_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _quality_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return value.strip().upper() not in _QUALITY_UNKNOWN_CODES
+
+
+def _quality_meaningful_value(
+    value: Any,
+    *,
+    seen: set[int] | None = None,
+) -> bool:
+    if isinstance(value, str):
+        return _quality_text(value)
+    if not isinstance(value, dict | list | tuple):
+        return False
+    if seen is None:
+        seen = set()
+    identity = id(value)
+    if identity in seen:
+        return False
+    seen.add(identity)
+    if isinstance(value, dict):
+        nested = (
+            item
+            for key, item in value.items()
+            if str(key).strip().lower() not in _QUALITY_METADATA_KEYS
+        )
+    else:
+        nested = iter(value)
+    return any(_quality_meaningful_value(item, seen=seen) for item in nested)
+
+
+def _quality_items(value: Any) -> bool:
+    return isinstance(value, list) and any(
+        _quality_meaningful_value(item) for item in value
+    )
+
+
+def _quality_focus_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if _quality_text(value) else []
+    if not isinstance(value, list):
+        return []
+    return [
+        item.strip()
+        for item in value
+        if isinstance(item, str) and _quality_text(item)
+    ]
+
+
+def _authoritative_intake_source_records(
+    request: IntakeTurnRequest,
+) -> tuple[tuple[str, str], ...]:
+    records: list[tuple[str, str]] = []
+    initial = request.initial_case_facts
+    form_description = str(getattr(initial, "form_description", None) or "").strip()
+    if _quality_text(form_description):
+        form_source = str(getattr(initial, "form_source", None) or "INITIAL_FORM")
+        records.append((form_source, form_description))
+    for message in request.initiator_statement_transcript:
+        if _quality_text(message.text):
+            records.append((message.message_id, message.text))
+    current = request.current_user_message
+    if (
+        current is not None
+        and not _transcript_contains_current(request)
+        and _quality_text(current.text)
+    ):
+        records.append((current.message_id, current.text))
+    return tuple(records)
+
+
+def _build_intake_quality_authority(
+    detail: dict[str, Any],
+    *,
+    request: IntakeTurnRequest,
+    missing: list[str],
+) -> _IntakeQualityAuthority:
+    references = _quality_mapping(detail.get("references"))
+    records = _authoritative_intake_source_records(request)
+    claim = _quality_mapping(detail.get("claim_resolution"))
+    initiator_role = str(claim.get("initiator_role") or "").upper()
+    initiator_position = initiator_role in {"USER", "MERCHANT"} and any(
+        _quality_text(claim.get(key))
+        for key in ("normalized_statement", "original_statement", "request_reason")
+    )
+    attitude = _quality_mapping(detail.get("respondent_attitude"))
+    respondent_state = (
+        initiator_role in {"USER", "MERCHANT"}
+        and str(attitude.get("respondent_role") or "").upper()
+        == _opposite_party(initiator_role)
+        and str(attitude.get("attitude") or "").upper() in RESPONDENT_ATTITUDE_CODES
+        and _quality_text(attitude.get("position"))
+    )
+    resolution = _known_resolution_code(claim.get("requested_resolution"))
+    normalized_request = resolution is not None and _quality_text(
+        claim.get("normalized_statement")
+    )
+    core = _quality_mapping(detail.get("dispute_core_state"))
+    conflict_type = str(core.get("conflict_type") or "").upper()
+    known_conflict = conflict_type in _QUALITY_CONFLICT_TYPES
+    missing_question = _question_for_missing(missing)
+    return _IntakeQualityAuthority(
+        order_reference=_quality_text(references.get("order_reference")),
+        after_sales_reference=_quality_text(references.get("after_sales_reference")),
+        logistics_reference=_quality_text(references.get("logistics_reference")),
+        authoritative_story=bool(records),
+        authoritative_event=any(_quality_text(identifier) for identifier, _ in records),
+        initiator_position=initiator_position,
+        respondent_state=respondent_state,
+        requested_resolution=resolution is not None,
+        normalized_request=normalized_request,
+        conflict_type=known_conflict,
+        core_conflict=known_conflict and _quality_text(core.get("core_conflict")),
+        action_target=bool(missing) or (known_conflict and resolution is not None),
+        action_path=(
+            bool(missing_question)
+            if missing
+            else known_conflict and resolution is not None
+        ),
+    )
+
+
+def _derive_intake_quality_breakdown(
+    detail: dict[str, Any],
+    *,
+    request: IntakeTurnRequest,
+    missing: list[str],
+) -> dict[str, int]:
+    """Score only request-bound authority using the six fixed prompt maxima."""
+
+    authority = _build_intake_quality_authority(
+        detail,
+        request=request,
+        missing=missing,
+    )
+    breakdown = {
+        "references": (
+            (6 if authority.order_reference else 0)
+            + (3 if authority.after_sales_reference else 0)
+            + (6 if authority.logistics_reference else 0)
+        ),
+        "event_story": (10 if authority.authoritative_story else 0)
+        + (10 if authority.authoritative_event else 0),
+        "party_positions": (10 if authority.initiator_position else 0)
+        + (10 if authority.respondent_state else 0),
+        "requested_resolution": (10 if authority.requested_resolution else 0)
+        + (5 if authority.normalized_request else 0),
+        "risk_and_conflicts": (8 if authority.conflict_type else 0)
+        + (7 if authority.core_conflict else 0),
+        "next_action_clarity": (8 if authority.action_target else 0)
+        + (7 if authority.action_path else 0),
+    }
+    if any(
+        score < 0 or score > _QUALITY_SCORE_COMPONENT_MAXIMA[component]
+        for component, score in breakdown.items()
+    ):
+        raise AssertionError("derived intake quality component exceeded its fixed maximum")
+    return breakdown
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
@@ -2701,8 +3078,24 @@ def _question_for_missing(missing: list[str]) -> str:
     questions = {
         "ORDER_REFERENCE": "请补充订单号或平台可识别的订单引用。",
         "LOGISTICS_REFERENCE": "请补充物流单号或平台可识别的物流引用。",
+        "REQUESTED_RESOLUTION": "请明确希望获得的处理方式。",
     }
     return " ".join(
         questions.get(field, f"请补充{_human_field_label(field)}。")
         for field in missing
     )
+
+
+def _question_for_quality_gap(breakdown: dict[str, int]) -> str:
+    questions = {
+        "references": "请继续补充可核验的业务引用。",
+        "event_story": "请继续补充可核验的事件经过。",
+        "party_positions": "请继续补充当事方的已知立场。",
+        "requested_resolution": "请明确希望获得的处理方式。",
+        "risk_and_conflicts": "请继续补充需要核验的争议事实。",
+        "next_action_clarity": "请继续补充下一步需要核验的事项。",
+    }
+    for component, maximum in _QUALITY_SCORE_COMPONENT_MAXIMA.items():
+        if breakdown.get(component, 0) < maximum:
+            return questions[component]
+    return "请继续补充可核验的案件事实。"

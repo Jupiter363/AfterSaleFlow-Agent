@@ -187,19 +187,40 @@ select {LEASE_COLUMNS}, db_clock.now as database_now
 """
 
 RENEW_SQL: Final[str] = f"""
-with db_clock as materialized (select clock_timestamp() as now)
+with locked_lease as materialized (
+    select lease.ctid as lease_ctid,
+           command.deadline_at as command_deadline_at
+      from agent_graph_lease lease
+      join agent_graph_command command
+        on command.thread_id = lease.thread_id
+       and command.command_id = lease.command_id
+     where lease.thread_id = %s
+       and lease.command_id = %s
+       and lease.owner_id = %s
+       and lease.fencing_token = %s
+       and lease.released_at is null
+       and lease.cancelled_at is null
+       and command.deadline_at = %s
+     for update of lease
+),
+db_clock as materialized (
+    -- This CTE depends on the locked row, so the authoritative clock is read
+    -- after any checkpoint transaction releases the lease-row lock.  A renew
+    -- that was admitted before the deadline but obtained the lock afterwards
+    -- therefore cannot refresh the lease.
+    select clock_timestamp() as now
+      from locked_lease
+)
 update agent_graph_lease lease
    set renewed_at = db_clock.now,
        lease_expires_at = db_clock.now + interval '30 seconds',
        lease_revision = lease.lease_revision + 1
-  from db_clock
- where lease.thread_id = %s
-   and lease.command_id = %s
-   and lease.owner_id = %s
-   and lease.fencing_token = %s
+  from locked_lease, db_clock
+ where lease.ctid = locked_lease.lease_ctid
    and lease.released_at is null
    and lease.cancelled_at is null
    and lease.lease_expires_at > db_clock.now
+   and locked_lease.command_deadline_at > db_clock.now
 returning {LEASE_COLUMNS}
 """
 
@@ -313,13 +334,28 @@ class PostgresLeaseRepository:
         command_id: str,
         owner_id: str,
         fencing_token: int,
+        command_deadline_at: datetime,
     ) -> LeaseRecord:
         self._validate_key(thread_id, command_id, owner_id)
         self._validate_fence(fencing_token)
+        if (
+            not isinstance(command_deadline_at, datetime)
+            or command_deadline_at.tzinfo is None
+            or command_deadline_at.utcoffset() is None
+        ):
+            raise GraphContractError(
+                "lease renewal requires an authoritative timezone-aware command deadline"
+            )
         row = await (
             await connection.execute(
                 RENEW_SQL,
-                (thread_id, command_id, owner_id, fencing_token),
+                (
+                    thread_id,
+                    command_id,
+                    owner_id,
+                    fencing_token,
+                    command_deadline_at,
+                ),
             )
         ).fetchone()
         if row is None:

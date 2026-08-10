@@ -30,7 +30,9 @@ from app.agents.dispute_intake_officer.case_fact_matrix import (
 from app.graph_runtime.state_lens import StateLens
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
+    DIRECT_RESPONDENT_CONFIDENCE,
     DIRECT_RESPONDENT_SOURCE,
+    RESPONDENT_AUTHORED_CURRENT_MESSAGE,
     SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
     SUBJECTIVE_RESPONDENT_SOURCE,
     attributed_reported_respondent_attitude,
@@ -1584,10 +1586,18 @@ def _normalize_model_respondent_attitude(
         ):
             return _without_respondent_attitude_patch(draft)
         raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING")
-    grounded_attitude, grounded_position = grounded
-    if proposed != grounded_attitude:
+    if proposed != grounded.attitude:
         raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_CONFLICT")
-    return _pin_model_respondent_attitude_position(draft, grounded_position)
+    if grounded.current_message_id is not None:
+        return _pin_model_direct_respondent_attitude_authority(
+            draft,
+            respondent_role=grounded.respondent_role,
+            grounded_attitude=grounded.attitude,
+            grounded_position=grounded.position,
+            grounded_confidence=grounded.confidence,
+            current_message_id=grounded.current_message_id,
+        )
+    return _pin_model_respondent_attitude_position(draft, grounded.position)
 
 
 def _prior_authoritative_respondent_attitude(
@@ -1849,9 +1859,24 @@ def _coalesced_string_list(
     return []
 
 
+@dataclass(frozen=True, slots=True)
+class _AuthorizedTurnSource:
+    message_id: str | None
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class _GroundedRespondentAttitude:
+    attitude: str
+    position: str
+    confidence: float
+    respondent_role: str
+    current_message_id: str | None
+
+
 def _grounded_respondent_attitude(
     state: IntakeGraphStateV2,
-) -> tuple[str, str] | None:
+) -> _GroundedRespondentAttitude | None:
     private = state.get("bindings", {}).get("private", {})
     authority = state.get("node_results", {}).get(MATRIX_AUTHORITY_RECORD_KEY)
     if (
@@ -1865,15 +1890,20 @@ def _grounded_respondent_attitude(
         raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID")
     actor_role = authority["actor_role"]
     initiator_role = authority["initiator_role"]
-    source_text = _current_authorized_turn_text(
+    source = _current_authorized_turn_source(
         state,
         actor_role,
         allow_initial_form=actor_role == initiator_role,
     )
-    if not source_text:
+    if source is None:
         return None
     if actor_role != initiator_role:
-        detection = detect_direct_respondent_attitude(source_text)
+        if source.message_id is None:
+            raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID")
+        detection = detect_direct_respondent_attitude(
+            source.text,
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        )
         if detection.state == "UNRESOLVED":
             raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
         if detection.state == "NONE":
@@ -1882,65 +1912,115 @@ def _grounded_respondent_attitude(
         if not isinstance(candidate, Mapping):
             raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
         attitude = candidate.get("attitude")
-        if attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDES:
+        confidence = candidate.get("confidence")
+        if (
+            attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDES
+            or isinstance(confidence, bool)
+            or not isinstance(confidence, int | float)
+            or confidence != DIRECT_RESPONDENT_CONFIDENCE
+        ):
             raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
-        return cast(str, attitude), source_text
-    reported = attributed_reported_respondent_attitude(source_text, initiator_role)
-    return _grounded_attitude_value(
+        return _GroundedRespondentAttitude(
+            attitude=cast(str, attitude),
+            position=source.text,
+            confidence=float(confidence),
+            respondent_role=actor_role,
+            current_message_id=source.message_id,
+        )
+    reported = attributed_reported_respondent_attitude(source.text, initiator_role)
+    grounded = _grounded_attitude_value(
         reported,
-        fallback_position=source_text,
+        fallback_position=source.text,
+    )
+    if grounded is None:
+        return None
+    return _GroundedRespondentAttitude(
+        attitude=grounded[0],
+        position=grounded[1],
+        confidence=grounded[2],
+        respondent_role=("MERCHANT" if initiator_role == "USER" else "USER"),
+        current_message_id=None,
     )
 
 
-def _current_authorized_turn_text(
+def _current_authorized_turn_source(
     state: IntakeGraphStateV2,
     actor_role: str,
     *,
     allow_initial_form: bool,
-) -> str:
-    human_messages = [
-        message
-        for message in state.get("messages", {}).values()
-        if isinstance(message, Mapping)
-        and message.get("role") == "HUMAN"
-        and message.get("audience") == actor_role
-        and isinstance(message.get("content"), str)
-        and message["content"].strip()
-    ]
+) -> _AuthorizedTurnSource | None:
+    messages = state.get("messages", {})
+    if not isinstance(messages, Mapping):
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID")
+    human_messages: list[tuple[int, str, str]] = []
+    for key, message in messages.items():
+        if (
+            not isinstance(message, Mapping)
+            or message.get("role") != "HUMAN"
+            or message.get("audience") != actor_role
+        ):
+            continue
+        message_id = message.get("message_id")
+        content = message.get("content")
+        sequence = message.get("sequence")
+        if (
+            not isinstance(key, str)
+            or not isinstance(message_id, str)
+            or key != message_id
+            or _IDENTIFIER.fullmatch(message_id) is None
+            or not isinstance(content, str)
+            or not content.strip()
+            or isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence < 0
+        ):
+            raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID")
+        human_messages.append((sequence, message_id, content.strip()))
     if human_messages:
-        current = max(
-            human_messages,
-            key=lambda message: (message.get("sequence", 0), message.get("message_id", "")),
-        )
-        return cast(str, current["content"]).strip()
+        latest_sequence = max(message[0] for message in human_messages)
+        current = [message for message in human_messages if message[0] == latest_sequence]
+        if len(current) != 1:
+            raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID")
+        _, message_id, text = current[0]
+        return _AuthorizedTurnSource(message_id=message_id, text=text)
     if not allow_initial_form:
-        return ""
+        return None
     summary = state.get("memory_summary", "")
     if not isinstance(summary, str) or not summary:
-        return ""
+        return None
     try:
         memory = json.loads(summary)
     except (TypeError, json.JSONDecodeError):
-        return ""
+        return None
     initial = memory.get("authorized_initial_case_facts") if isinstance(memory, dict) else None
     description = initial.get("form_description") if isinstance(initial, Mapping) else None
-    return description.strip() if isinstance(description, str) else ""
+    if not isinstance(description, str) or not description.strip():
+        return None
+    return _AuthorizedTurnSource(message_id=None, text=description.strip())
 
 
 def _grounded_attitude_value(
     reported: Mapping[str, Any] | None,
     *,
     fallback_position: str,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, float] | None:
     if not isinstance(reported, Mapping):
         return None
     attitude = reported.get("attitude")
     if attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDES:
         return None
     position = reported.get("position")
+    confidence = reported.get("confidence")
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, int | float)
+        or not 0 <= confidence <= 1
+    ):
+        return None
     return (
         cast(str, attitude),
         position.strip() if isinstance(position, str) and position.strip() else fallback_position,
+        float(confidence),
     )
 
 
@@ -1964,6 +2044,50 @@ def _pin_model_respondent_attitude_position(
     if position_field is None:
         raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
     attitude[position_field] = grounded_position
+    return IntakeCognitionDraft.model_validate(normalized)
+
+
+def _pin_model_direct_respondent_attitude_authority(
+    draft: IntakeCognitionDraft,
+    *,
+    respondent_role: str,
+    grounded_attitude: str,
+    grounded_position: str,
+    grounded_confidence: float,
+    current_message_id: str,
+) -> IntakeCognitionDraft:
+    if grounded_confidence != DIRECT_RESPONDENT_CONFIDENCE:
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
+    normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+    dossier_patch = normalized.get("dossier_patch")
+    attitude = dossier_patch.get("respondent_attitude") if isinstance(dossier_patch, dict) else None
+    if not isinstance(attitude, dict):
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
+    if not any(
+        isinstance(attitude.get(field), str) and attitude[field].strip()
+        for field in ("position_summary", "position", "note")
+    ):
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
+    canonical: dict[str, Any] = {
+        "respondent_role": respondent_role,
+        "attitude": grounded_attitude,
+        "position": grounded_position,
+        "confidence": grounded_confidence,
+        "source": DIRECT_RESPONDENT_SOURCE,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": current_message_id,
+        },
+    }
+    if "confidence" in attitude:
+        confidence = attitude["confidence"]
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, int | float)
+            or not 0 <= confidence <= 1
+        ):
+            raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
+    dossier_patch["respondent_attitude"] = canonical
     return IntakeCognitionDraft.model_validate(normalized)
 
 

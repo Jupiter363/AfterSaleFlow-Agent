@@ -144,6 +144,82 @@ public class CaseProcessProjectionEntity {
             String temporalRunId,
             String temporalBuildId,
             OffsetDateTime projectedAt) {
+        switchToInternal(
+                expectedRoomEpoch,
+                expectedFencingToken,
+                macroPhase,
+                currentRoom,
+                roomPhase,
+                writerMode,
+                newProcessRevision,
+                newRoomEpoch,
+                newFencingToken,
+                projectedDeadlineAt,
+                temporalWorkflowId,
+                temporalRunId,
+                temporalBuildId,
+                projectedAt,
+                false,
+                null,
+                null);
+    }
+
+    public void switchTo(
+            long expectedRoomEpoch,
+            long expectedFencingToken,
+            String macroPhase,
+            String currentRoom,
+            String roomPhase,
+            WriterMode writerMode,
+            long newProcessRevision,
+            long newRoomEpoch,
+            long newFencingToken,
+            OffsetDateTime projectedDeadlineAt,
+            String temporalWorkflowId,
+            String temporalRunId,
+            String temporalBuildId,
+            OffsetDateTime projectedAt,
+            String projectionRef,
+            String projectionSha256) {
+        validateProjectionPair(projectionRef, projectionSha256);
+        switchToInternal(
+                expectedRoomEpoch,
+                expectedFencingToken,
+                macroPhase,
+                currentRoom,
+                roomPhase,
+                writerMode,
+                newProcessRevision,
+                newRoomEpoch,
+                newFencingToken,
+                projectedDeadlineAt,
+                temporalWorkflowId,
+                temporalRunId,
+                temporalBuildId,
+                projectedAt,
+                true,
+                projectionRef,
+                projectionSha256);
+    }
+
+    private void switchToInternal(
+            long expectedRoomEpoch,
+            long expectedFencingToken,
+            String macroPhase,
+            String currentRoom,
+            String roomPhase,
+            WriterMode writerMode,
+            long newProcessRevision,
+            long newRoomEpoch,
+            long newFencingToken,
+            OffsetDateTime projectedDeadlineAt,
+            String temporalWorkflowId,
+            String temporalRunId,
+            String temporalBuildId,
+            OffsetDateTime projectedAt,
+            boolean replaceProjectionPair,
+            String projectionRef,
+            String projectionSha256) {
         requireExpectedTuple(expectedRoomEpoch, expectedFencingToken);
         if (newProcessRevision <= processRevision) {
             throw new IllegalArgumentException("process revision must advance during an epoch switch");
@@ -166,6 +242,10 @@ public class CaseProcessProjectionEntity {
         this.temporalWorkflowId = temporalWorkflowId;
         this.temporalRunId = temporalRunId;
         this.temporalBuildId = required(temporalBuildId, "temporalBuildId");
+        if (replaceProjectionPair) {
+            this.projectionRef = projectionRef;
+            this.projectionSha256 = projectionSha256;
+        }
         this.projectedAt = nextProjectedAt;
         updatedAt = nextProjectedAt;
     }
@@ -232,6 +312,22 @@ public class CaseProcessProjectionEntity {
                 && (isBlank(temporalWorkflowId) || fencingToken < 1)) {
             throw new IllegalArgumentException(
                     "TEMPORAL projections require a workflow and positive fence");
+        }
+    }
+
+    private static void validateProjectionPair(String projectionRef, String projectionSha256) {
+        if ((projectionRef == null) != (projectionSha256 == null)) {
+            throw new IllegalArgumentException(
+                    "projectionRef and projectionSha256 must both be absent or present");
+        }
+        if (projectionRef == null) {
+            return;
+        }
+        if (projectionRef.isBlank() || projectionRef.length() > 1024) {
+            throw new IllegalArgumentException("projectionRef is invalid");
+        }
+        if (!projectionSha256.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("projectionSha256 must be lowercase SHA-256");
         }
     }
 

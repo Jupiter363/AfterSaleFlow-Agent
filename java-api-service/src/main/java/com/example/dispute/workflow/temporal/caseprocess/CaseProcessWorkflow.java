@@ -29,11 +29,34 @@ public interface CaseProcessWorkflow {
   @UpdateValidatorMethod(updateName = CaseProcessWorkflowProtocol.PROVISION_ROOM_EPOCH_UPDATE)
   void validateProvisionRoomEpoch(ProvisionRoomEpoch request);
 
+  @UpdateMethod(
+      name = CaseProcessWorkflowProtocol.RECOVER_INTAKE_PROJECTION_COMPLETION_UPDATE)
+  default CaseProcessIntakeProjectionRecoveryResult recoverIntakeProjectionCompletion(
+      CaseProcessIntakeProjectionRecoveryRequest request) {
+    throw new UnsupportedOperationException(
+        "Intake projection completion recovery is not supported by this CaseProcess workflow");
+  }
+
+  @UpdateValidatorMethod(
+      updateName = CaseProcessWorkflowProtocol.RECOVER_INTAKE_PROJECTION_COMPLETION_UPDATE)
+  default void validateRecoverIntakeProjectionCompletion(
+      CaseProcessIntakeProjectionRecoveryRequest request) {
+    throw new UnsupportedOperationException(
+        "Intake projection completion recovery is not supported by this CaseProcess workflow");
+  }
+
   @SignalMethod(name = CaseProcessWorkflowProtocol.DOMAIN_EVENT_SIGNAL)
   void domainEventCommitted(CaseDomainEventRef event);
 
   @SignalMethod(name = CaseProcessWorkflowProtocol.TARGET_ROOM_PROGRESS_SIGNAL)
   void targetRoomProgressed(TargetRoomProgressReceipt receipt);
+
+  @SignalMethod(name = CaseProcessWorkflowProtocol.TARGET_INTAKE_TERMINAL_NO_COMMIT_SIGNAL)
+  default void targetIntakeCommandTerminalNoCommit(
+      TargetIntakeCommandTerminalNoCommit authority) {
+    throw new UnsupportedOperationException(
+        "target Intake terminal-no-commit convergence is not supported");
+  }
 
   @SignalMethod(name = CaseProcessWorkflowProtocol.RETRY_SEQUENCE_GAP_SIGNAL)
   void retrySequenceGap();

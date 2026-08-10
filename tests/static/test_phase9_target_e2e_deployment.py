@@ -1046,3 +1046,91 @@ def test_application_contract_gates_keep_infrastructure_only_from_claiming_pass(
     assert '"status": "INFRASTRUCTURE_READY_ONLY"' in readiness_source
     assert '"target_lane_runnable": False' in readiness_source
     assert "runtime_measurement_hash" in readiness_source
+
+
+def test_local_source_dirty_manifest_is_closed_complete_and_fully_hashed() -> None:
+    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
+        encoding="utf-8"
+    )
+    required_paths = {
+        ".local-dev/launch-source.ps1",
+        ".local-dev/provision-local-target.py",
+        "java-api-service/src/main/java/com/example/dispute/room/application/EvidenceAgentTurnService.java",
+        "java-api-service/src/main/java/com/example/dispute/room/application/EvidenceContextEnvelopeFactory.java",
+        "java-api-service/src/main/java/com/example/dispute/room/application/EvidenceContextEnvelopeV1.java",
+        "java-api-service/src/main/java/com/example/dispute/room/application/IntakeBranchDomainService.java",
+        "java-api-service/src/main/java/com/example/dispute/room/infrastructure/persistence/JdbcIntakeFormalBranchCommitPort.java",
+        "java-api-service/src/main/java/com/example/dispute/room/infrastructure/persistence/repository/CaseTimelineEventRepository.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/application/epoch/RoomEpochAllocator.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/application/epoch/TransactionalRoomEpochAllocator.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/contract/v1/FrozenIntakeSubmissionAuthority.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/entity/CaseProcessProjectionEntity.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomCaseProcessDispatcher.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomSnapshot.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomStart.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomWorkflowImpl.java",
+        "java-api-service/src/test/java/com/example/dispute/room/EvidenceAgentTurnServiceTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/activity/intake/JdbcIntakeFormalBranchCommitPortTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/room/RoomEpochAllocatorIntegrationTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceRoomWorkflowTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomCaseProcessDispatcherTest.java",
+        "python-agent-service/app/harness/evidence_context_assembler.py",
+        "python-agent-service/app/schemas/final_agents.py",
+        "python-agent-service/tests/agents/test_evidence_clerk_turn.py",
+        "tests/static/test_local_source_process_ownership.py",
+        "tests/static/test_phase9_target_e2e_contract.py",
+        "tests/static/test_phase9_target_e2e_deployment.py",
+        "tests/static/test_phase9_target_e2e_provisioning.py",
+    }
+
+    for path in required_paths:
+        assert f'"{path}"' in launcher
+    assert "$dirtySourceBindings = @($dirtySourceEntries" in launcher
+    assert '$_.Path + "|" + $_.Sha256' in launcher
+    assert "$dirtyJavaSourceBindings" not in launcher
+    assert "TARGET_E2E_DIRTY_SOURCE_AUTHORITY_REJECTED" in launcher
+    assert "TARGET_E2E_DIRTY_SOURCE_AUTHORITY_DRIFT" in launcher
+
+
+def test_local_source_launcher_passes_binding_and_gates_before_mutation() -> None:
+    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
+        encoding="utf-8"
+    )
+    gate = launcher.index(
+        "$sourceTopologyOwnershipGate = Invoke-SourceTopologyOwnershipGate"
+    )
+    migration = launcher.index("Invoke-DomainMigrationPreflight", gate)
+    provision = launcher.index(
+        '& "D:\\miniconda\\python.exe" $provisioner', gate
+    )
+    temporal_routing = launcher.index("Ensure-TemporalDefaultBuildId `", gate)
+
+    assert gate < migration < provision < temporal_routing
+    assert "--compiled-worktree-binding $expectedJavaSourceBinding" in launcher
+    assert (
+        "[string]$targetState.compiled_worktree_binding -cne "
+        "$expectedJavaSourceBinding"
+    ) in launcher
+    assert (
+        "[string]$targetState.activation_id -ceq $retainedActivationId"
+    ) in launcher
+    rollback_marker = "SOURCE_TOPOLOGY_STOPPED_BEFORE_IRREVERSIBLE_PROVISION"
+    assert launcher.index(rollback_marker, gate) < migration
+    assert "OwnershipRollbackBoundary = $sourceTopologyRollbackBoundary" in launcher
+
+
+def test_local_source_clean_launch_retains_exact_overlay_replay_semantics() -> None:
+    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "$dirtySourceEntries = @()" in launcher
+    assert (
+        '$expectedJavaSourceBinding = Get-TargetE2eSourceBindingHash `\n'
+        '    -Value ((@("HEAD|$candidateSha") + $dirtySourceBindings) -join "`n")'
+        in launcher
+    )
+    assert "$mustBuildJavaOverlay =" in launcher
+    assert "$canonicalCompiledSourceSha -cne $candidateSha" in launcher
+    assert "$canonicalWorktreeBinding -cne $expectedJavaSourceBinding" in launcher
+    assert "$validatedTargetClasses = if ($null -eq $stagedTargetClasses)" in launcher

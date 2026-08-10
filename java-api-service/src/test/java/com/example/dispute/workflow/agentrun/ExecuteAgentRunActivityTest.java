@@ -201,6 +201,9 @@ class ExecuteAgentRunActivityTest {
                             true,
                             null);
                 });
+        when(ledger.recordAttemptFailureResult(
+                        eq(AgentRunAttemptStatus.ABORTED), any()))
+                .thenAnswer(invocation -> invocation.getArgument(1));
         ExecuteAgentRunActivityImpl activity = activity(ledger, gateway, () -> context(1));
 
         ExecuteAgentRunResult result = activity.execute(request);
@@ -231,6 +234,12 @@ class ExecuteAgentRunActivityTest {
                         4,
                         true,
                         null));
+        when(ledger.recordAttemptFailureResult(
+                        eq(AgentRunAttemptStatus.ABORTED), any()))
+                .thenAnswer(invocation -> {
+                    ExecuteAgentRunResult source = invocation.getArgument(1);
+                    return withLastSequence(source, source.lastSequenceNo() + 1);
+                });
         ExecuteAgentRunActivityImpl activity = activity(ledger, gateway, () -> context(3));
 
         ExecuteAgentRunResult result = activity.execute(request);
@@ -239,7 +248,9 @@ class ExecuteAgentRunActivityTest {
         assertThat(result.retryable()).isFalse();
         assertThat(result.recoveryAction())
                 .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
-        verify(ledger).recordAttemptFailureResult(AgentRunAttemptStatus.ABORTED, result);
+        assertThat(result.lastSequenceNo()).isEqualTo(5);
+        verify(ledger).recordAttemptFailureResult(
+                AgentRunAttemptStatus.ABORTED, withLastSequence(result, 4));
     }
 
     @Test
@@ -288,6 +299,12 @@ class ExecuteAgentRunActivityTest {
                         0,
                         false,
                         null));
+        when(ledger.recordAttemptFailureResult(
+                        eq(AgentRunAttemptStatus.FAILED), any()))
+                .thenAnswer(invocation -> {
+                    ExecuteAgentRunResult source = invocation.getArgument(1);
+                    return withLastSequence(source, source.lastSequenceNo() + 1);
+                });
 
         ExecuteAgentRunResult result =
                 activity(
@@ -301,7 +318,9 @@ class ExecuteAgentRunActivityTest {
                 .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
         assertThat(result.retryable()).isFalse();
         assertThat(result.completedAt()).isEqualTo(NOW);
-        verify(ledger).recordAttemptFailureResult(AgentRunAttemptStatus.FAILED, result);
+        assertThat(result.lastSequenceNo()).isEqualTo(1);
+        verify(ledger).recordAttemptFailureResult(
+                AgentRunAttemptStatus.FAILED, withLastSequence(result, 0));
     }
 
     @Test
@@ -540,6 +559,25 @@ class ExecuteAgentRunActivityTest {
                 result.recoveryAction().name(),
                 result.errorCode(),
                 result);
+    }
+
+    private static ExecuteAgentRunResult withLastSequence(
+            ExecuteAgentRunResult source, long lastSequenceNo) {
+        return new ExecuteAgentRunResult(
+                source.schemaVersion(),
+                source.agentRunId(),
+                source.logicalRunId(),
+                source.attemptId(),
+                source.attemptNo(),
+                source.outcome(),
+                source.graphResult(),
+                source.resultHash(),
+                lastSequenceNo,
+                source.publicOutputEmitted(),
+                source.errorCode(),
+                source.retryable(),
+                source.recoveryAction(),
+                source.completedAt());
     }
 
     private static AgentRunLedger.Attempt attempt(

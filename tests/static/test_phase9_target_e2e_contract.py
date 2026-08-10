@@ -787,3 +787,24 @@ def test_examples_contain_no_secret_bearing_members() -> None:
 
     for path in CONTRACT_ROOT.glob("fixtures/**/*.json"):
         visit(_json(path))
+
+
+def test_local_source_activation_binds_worktree_without_replacing_graph_identity() -> (
+    None
+):
+    provisioner = (ROOT / ".local-dev" / "provision-local-target.py").read_text(
+        encoding="utf-8"
+    )
+    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"compiledWorktreeBinding": compiled_worktree_binding' in provisioner
+    assert '"compiled_worktree_binding": compiled_worktree_binding' in provisioner
+    assert (
+        "target_binding, registry_hash = provision._target_binding(candidate)"
+        in provisioner
+    )
+    assert "provision._target_binding(compiled_worktree_binding)" not in provisioner
+    assert "--compiled-worktree-binding $expectedJavaSourceBinding" in launcher
+    assert "Local target activation provisioning did not create fresh authority." in launcher

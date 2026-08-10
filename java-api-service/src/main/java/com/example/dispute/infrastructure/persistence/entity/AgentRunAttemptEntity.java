@@ -518,6 +518,42 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         resultJson = encoded;
     }
 
+    /** Records one failed Activity result together with Java's exact next global terminal. */
+    public void recordFailureResultWithTerminal(
+            AgentRunAttemptStatus status,
+            ExecuteAgentRunResult sourceResult,
+            ExecuteAgentRunResult terminalResult,
+            String serializedTerminalResult) {
+        if (resultJson != null) {
+            throw new IllegalStateException("durable Activity failure result already exists");
+        }
+        requireDurableFailureResult(status, sourceResult);
+        long terminalSequence = Math.addExact(sourceResult.lastSequenceNo(), 1L);
+        ExecuteAgentRunResult expected = new ExecuteAgentRunResult(
+                sourceResult.schemaVersion(),
+                sourceResult.agentRunId(),
+                sourceResult.logicalRunId(),
+                sourceResult.attemptId(),
+                sourceResult.attemptNo(),
+                sourceResult.outcome(),
+                sourceResult.graphResult(),
+                sourceResult.resultHash(),
+                terminalSequence,
+                sourceResult.publicOutputEmitted(),
+                sourceResult.errorCode(),
+                sourceResult.retryable(),
+                sourceResult.recoveryAction(),
+                sourceResult.completedAt());
+        requireEqual(expected, terminalResult, "terminalResult");
+        recordFailure(
+                status,
+                terminalResult.errorCode(),
+                terminalResult.recoveryAction(),
+                terminalResult.completedAt());
+        lastSequenceNo = terminalSequence;
+        resultJson = required(serializedTerminalResult, "serializedTerminalResult");
+    }
+
     public void requireDurableFailureResult(ExecuteAgentRunResult result) {
         requireDurableFailureResult(attemptStatus, result);
         requireEqual(errorCode, result.errorCode(), "errorCode");

@@ -1,11 +1,13 @@
 package com.example.dispute.workflow.targete2e.graph;
 
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
- * Frozen public stream boundary for the target Intake Graph.
+ * Frozen public stream boundary for target room Graphs.
  *
  * <p>The graph binary and this Java reader are deployed as one target-E2E contract. Registry
  * configuration may repeat this exact policy for auditability, but it may not add, remove, or
@@ -48,6 +50,11 @@ public final class TargetE2EGraphStreamVisibility {
               "case_detail.missing_information",
               "case_detail.intake_quality"));
 
+  private static final Map<String, Set<String>> EVIDENCE_VISIBLE_FIELDS =
+      Map.of("evidence_turn", Set.of("room_utterance"));
+
+  private static final Map<String, Set<String>> NO_VISIBLE_FIELDS = Map.of();
+
   private TargetE2EGraphStreamVisibility() {}
 
   /**
@@ -66,7 +73,24 @@ public final class TargetE2EGraphStreamVisibility {
     return INTAKE_VISIBLE_FIELDS;
   }
 
+  /**
+   * Validates the registry/build template before selecting the room-specific public boundary.
+   */
+  public static Map<String, Set<String>> requireExactPolicy(
+      RoomType roomType, Map<String, Set<String>> configured) {
+    requireExactPolicy(configured);
+    return frozenPolicy(roomType);
+  }
+
   public static Map<String, Set<String>> frozenPolicy() {
     return INTAKE_VISIBLE_FIELDS;
+  }
+
+  public static Map<String, Set<String>> frozenPolicy(RoomType roomType) {
+    return switch (Objects.requireNonNull(roomType, "roomType")) {
+      case INTAKE -> INTAKE_VISIBLE_FIELDS;
+      case EVIDENCE -> EVIDENCE_VISIBLE_FIELDS;
+      case HEARING, REVIEW -> NO_VISIBLE_FIELDS;
+    };
   }
 }

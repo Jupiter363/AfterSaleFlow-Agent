@@ -1,26 +1,36 @@
-package com.example.dispute.workflow.activity.agent;
+package com.example.dispute.workflow.infrastructure.agent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
-import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationHttpTransport;
-import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationTransportException;
-import com.example.dispute.workflow.infrastructure.agent.GraphTransportSecurityProof;
-import com.example.dispute.workflow.infrastructure.agent.JdkGraphReconciliationHttpTransport;
+import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.sun.net.httpserver.HttpServer;
 import io.temporal.client.ActivityCanceledException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpHeaders;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class JdkGraphReconciliationHttpTransportTest {
 
@@ -146,7 +156,7 @@ class JdkGraphReconciliationHttpTransportTest {
             assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
 
             ActivityCanceledException cancelled = new ActivityCanceledException();
-            cancellation.requestCancellation(cancelled);
+            requestCancellation(cancellation, cancelled);
 
             assertThatThrownBy(task::get)
                     .isInstanceOf(ExecutionException.class)
@@ -155,6 +165,103 @@ class JdkGraphReconciliationHttpTransportTest {
             release.countDown();
             server.stop(0);
             serverExecutor.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void cancellationBeforeBodySubscriptionCancelsLaterSubscriptionWithoutConsumption()
+            throws Exception {
+        HttpClient client = mock(HttpClient.class);
+        when(client.followRedirects()).thenReturn(HttpClient.Redirect.NEVER);
+        CompletableFuture<HttpResponse<byte[]>> exchange = new CompletableFuture<>();
+        AtomicReference<HttpResponse.BodySubscriber<byte[]>> subscriber =
+                new AtomicReference<>();
+        CountDownLatch subscriberCreated = new CountDownLatch(1);
+        when(client.<byte[]>sendAsync(any(HttpRequest.class), any()))
+                .thenAnswer(invocation -> {
+                    HttpResponse.BodyHandler<byte[]> handler = invocation.getArgument(1);
+                    subscriber.set(handler.apply(responseInfo()));
+                    subscriberCreated.countDown();
+                    return exchange;
+                });
+        JdkGraphReconciliationHttpTransport transport =
+                new JdkGraphReconciliationHttpTransport(
+                        client, GraphTransportSecurityProof.unverified(), null, System::nanoTime);
+        AgentRunCancellationToken cancellation = new AgentRunCancellationToken();
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var task = executor.submit(() -> transport.exchange(
+                    request(
+                            URI.create("http://graph.example.test/reconcile"),
+                            Duration.ofSeconds(2),
+                            1024),
+                    cancellation));
+            assertThat(subscriberCreated.await(2, TimeUnit.SECONDS)).isTrue();
+
+            ActivityCanceledException cancelled = new ActivityCanceledException();
+            requestCancellation(cancellation, cancelled);
+            assertThatThrownBy(task::get)
+                    .isInstanceOf(ExecutionException.class)
+                    .hasCause(cancelled);
+
+            RecordingSubscription subscription = new RecordingSubscription();
+            ByteBuffer lateBody = ByteBuffer.wrap(new byte[] {1, 2, 3});
+            subscriber.get().onSubscribe(subscription);
+            subscriber.get().onNext(List.of(lateBody));
+
+            assertThat(subscription.cancelCalls()).isEqualTo(1);
+            assertThat(subscription.requestCalls()).isZero();
+            assertThat(lateBody.position()).isZero();
+            assertThat(exchange.isCancelled()).isTrue();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void totalDeadlineCancelsLateBodySubscriptionWithoutConsumingIt() throws Exception {
+        HttpClient client = mock(HttpClient.class);
+        when(client.followRedirects()).thenReturn(HttpClient.Redirect.NEVER);
+        CompletableFuture<HttpResponse<byte[]>> exchange = new CompletableFuture<>();
+        AtomicReference<HttpResponse.BodySubscriber<byte[]>> subscriber =
+                new AtomicReference<>();
+        CountDownLatch subscriberCreated = new CountDownLatch(1);
+        when(client.<byte[]>sendAsync(any(HttpRequest.class), any()))
+                .thenAnswer(invocation -> {
+                    HttpResponse.BodyHandler<byte[]> handler = invocation.getArgument(1);
+                    subscriber.set(handler.apply(responseInfo()));
+                    subscriberCreated.countDown();
+                    return exchange;
+                });
+        AtomicLong now = new AtomicLong();
+        JdkGraphReconciliationHttpTransport transport =
+                new JdkGraphReconciliationHttpTransport(
+                        client, GraphTransportSecurityProof.unverified(), null, now::get);
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var task = executor.submit(() -> transport.exchange(
+                    request(
+                            URI.create("http://graph.example.test/reconcile"),
+                            Duration.ofMillis(150),
+                            1024),
+                    new AgentRunCancellationToken()));
+            assertThat(subscriberCreated.await(2, TimeUnit.SECONDS)).isTrue();
+            now.set(Duration.ofMillis(151).toNanos());
+
+            assertThatThrownBy(task::get)
+                    .isInstanceOf(ExecutionException.class)
+                    .hasCauseInstanceOf(GraphReconciliationTransportException.class)
+                    .hasRootCauseInstanceOf(java.util.concurrent.TimeoutException.class);
+
+            RecordingSubscription subscription = new RecordingSubscription();
+            ByteBuffer lateBody = ByteBuffer.wrap(new byte[] {4, 5, 6});
+            subscriber.get().onSubscribe(subscription);
+            subscriber.get().onNext(List.of(lateBody));
+
+            assertThat(subscription.cancelCalls()).isEqualTo(1);
+            assertThat(subscription.requestCalls()).isZero();
+            assertThat(lateBody.position()).isZero();
+            assertThat(exchange.isCancelled()).isTrue();
         }
     }
 
@@ -172,5 +279,52 @@ class JdkGraphReconciliationHttpTransportTest {
                 body,
                 Duration.ofSeconds(10),
                 maximumResponseBytes);
+    }
+
+    private static GraphReconciliationHttpTransport.Request request(
+            URI uri, Duration timeout, int maximumResponseBytes) {
+        return new GraphReconciliationHttpTransport.Request(
+                uri,
+                Map.of("Content-Type", "application/json; charset=utf-8"),
+                "{}".getBytes(StandardCharsets.UTF_8),
+                timeout,
+                maximumResponseBytes);
+    }
+
+    private static HttpResponse.ResponseInfo responseInfo() {
+        HttpResponse.ResponseInfo info = mock(HttpResponse.ResponseInfo.class);
+        when(info.statusCode()).thenReturn(200);
+        when(info.headers()).thenReturn(HttpHeaders.of(Map.of(), (_name, _value) -> true));
+        when(info.version()).thenReturn(HttpClient.Version.HTTP_1_1);
+        return info;
+    }
+
+    private static void requestCancellation(
+            AgentRunCancellationToken cancellation, RuntimeException failure) {
+        ReflectionTestUtils.invokeMethod(cancellation, "requestCancellation", failure);
+    }
+
+    private static final class RecordingSubscription implements Flow.Subscription {
+
+        private final AtomicInteger requestCalls = new AtomicInteger();
+        private final AtomicInteger cancelCalls = new AtomicInteger();
+
+        @Override
+        public void request(long count) {
+            requestCalls.incrementAndGet();
+        }
+
+        @Override
+        public void cancel() {
+            cancelCalls.incrementAndGet();
+        }
+
+        int requestCalls() {
+            return requestCalls.get();
+        }
+
+        int cancelCalls() {
+            return cancelCalls.get();
+        }
     }
 }

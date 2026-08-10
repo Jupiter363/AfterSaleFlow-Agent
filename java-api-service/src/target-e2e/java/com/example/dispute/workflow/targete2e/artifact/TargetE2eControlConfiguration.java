@@ -123,6 +123,17 @@ public class TargetE2eControlConfiguration {
   }
 
   @Bean
+  JdbcTargetE2eApiAuthority targetRoomEpochSelectionAuthority(
+      DataSource dataSource, Environment environment) {
+    Clock clock = Clock.systemUTC();
+    return new JdbcTargetE2eApiAuthority(
+        dataSource,
+        new JdbcTargetE2eActivationStores(dataSource, clock),
+        required(environment, "target.e2e.activation.id"),
+        clock);
+  }
+
+  @Bean
   @Primary
   EvaluationAgentClient targetDeterministicEvaluationAgentClient(ObjectMapper objectMapper) {
     return new TargetDeterministicEvaluationAgentClient(objectMapper);
@@ -372,6 +383,7 @@ public class TargetE2eControlConfiguration {
   TargetHearingInternalStageMaterializer targetHearingInternalStageMaterializer(
       DataSource dataSource,
       Environment environment,
+      JdbcTargetE2eApiAuthority targetRoomEpochSelectionAuthority,
       AgentRunLedger agentRunLedger,
       TargetHearingCommandMaterialStore targetHearingCommandMaterialStore,
       MinioClient minioClient,
@@ -380,13 +392,8 @@ public class TargetE2eControlConfiguration {
     var objectIndex = new JdbcTargetE2eRoomObjectIndex(dataSource);
     var payloadPublisher = new MinioTargetE2eRoomCommandPayloadPublisher(
         minioClient, objectMapper, "target-e2e-intake-activation", "room-command-inputs", objectIndex);
-    var apiAuthority = new JdbcTargetE2eApiAuthority(
-        dataSource,
-        new JdbcTargetE2eActivationStores(dataSource, clock),
-        required(environment, "target.e2e.activation.id"),
-        clock);
     return new TargetHearingInternalStageMaterializer(
-        apiAuthority,
+        targetRoomEpochSelectionAuthority,
         targetHearingRuntimePins(environment),
         agentRunLedger,
         new AgentRunCommandBindingFactory(objectMapper),

@@ -23,6 +23,7 @@ public final class JdkGraphCommandHttpTransport implements GraphCommandHttpTrans
 
     private final HttpClient httpClient;
     private final GraphTransportSecurityProof transportProof;
+    private final GraphReadinessCoordinator readinessCoordinator;
 
     public JdkGraphCommandHttpTransport(HttpClient httpClient) {
         this(httpClient, GraphTransportSecurityProof.unverified());
@@ -30,8 +31,16 @@ public final class JdkGraphCommandHttpTransport implements GraphCommandHttpTrans
 
     JdkGraphCommandHttpTransport(
             HttpClient httpClient, GraphTransportSecurityProof transportProof) {
+        this(httpClient, transportProof, null);
+    }
+
+    JdkGraphCommandHttpTransport(
+            HttpClient httpClient,
+            GraphTransportSecurityProof transportProof,
+            GraphReadinessCoordinator readinessCoordinator) {
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.transportProof = Objects.requireNonNull(transportProof, "transportProof");
+        this.readinessCoordinator = readinessCoordinator;
         if (httpClient.followRedirects() != HttpClient.Redirect.NEVER) {
             throw new IllegalArgumentException("Graph command transport must not follow redirects");
         }
@@ -41,6 +50,10 @@ public final class JdkGraphCommandHttpTransport implements GraphCommandHttpTrans
     @Override
     public GraphTransportSecurityProof transportProof() {
         return transportProof;
+    }
+
+    HttpClient httpClient() {
+        return httpClient;
     }
 
     @Override
@@ -57,8 +70,10 @@ public final class JdkGraphCommandHttpTransport implements GraphCommandHttpTrans
                 .timeout(request.timeout())
                 .POST(HttpRequest.BodyPublishers.ofByteArray(request.body()));
         request.headers().forEach(builder::header);
-        CompletableFuture<HttpResponse<InputStream>> future = httpClient.sendAsync(
-                builder.build(), HttpResponse.BodyHandlers.ofInputStream());
+        HttpRequest httpRequest = builder.build();
+        CompletableFuture<HttpResponse<InputStream>> future = readinessCoordinator == null
+                ? send(httpRequest)
+                : readinessCoordinator.submitCommand(() -> send(httpRequest));
         AtomicReference<InputStream> activeBody = new AtomicReference<>();
 
         try (AgentRunCancellationToken.Registration ignored =
@@ -89,6 +104,10 @@ public final class JdkGraphCommandHttpTransport implements GraphCommandHttpTrans
                 activeBody.set(null);
             }
         }
+    }
+
+    private CompletableFuture<HttpResponse<InputStream>> send(HttpRequest request) {
+        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream());
     }
 
     private static HttpResponse<InputStream> await(

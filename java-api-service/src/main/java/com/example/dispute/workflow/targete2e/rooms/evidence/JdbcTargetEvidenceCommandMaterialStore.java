@@ -99,7 +99,10 @@ public final class JdbcTargetEvidenceCommandMaterialStore implements TargetEvide
 
   private Canonical canonical(TargetEvidenceCommandMaterial material) {
     JsonNode value = mapper.valueToTree(material);
-    return new Canonical(ContractJson.canonicalString(value), ContractJson.sha256Hex(value));
+    return new Canonical(
+        material.schemaVersion(),
+        ContractJson.canonicalString(value),
+        ContractJson.sha256Hex(value));
   }
 
   private TargetEvidenceCommandMaterial deserialize(Row row) {
@@ -160,7 +163,7 @@ public final class JdbcTargetEvidenceCommandMaterialStore implements TargetEvide
           command_hash, command_envelope_hash, room_type, room_epoch, room_fencing_token,
           material_schema_version, material_canonical_json, material_sha256)
         values (?, ?, ?, 'TARGET_E2E_CANDIDATE', ?, ?, ?, ?, ?, ?, 'EVIDENCE', ?, ?,
-                'target-e2e-evidence-command-material.v1', ?, ?)
+                ?, ?, ?)
         """;
     try (PreparedStatement s = c.prepareStatement(sql)) {
       int i = 1;
@@ -168,7 +171,7 @@ public final class JdbcTargetEvidenceCommandMaterialStore implements TargetEvide
       s.setString(i++, a.isolatedDomainDbBindingHash()); s.setString(i++, a.tenantSurrogate());
       s.setString(i++, a.caseId()); s.setString(i++, a.commandId()); s.setString(i++, a.commandHash());
       s.setString(i++, a.commandEnvelopeHash()); s.setLong(i++, a.roomEpoch()); s.setLong(i++, a.roomFencingToken());
-      s.setString(i++, m.json); s.setString(i, m.sha256); s.executeUpdate();
+      s.setString(i++, m.schemaVersion); s.setString(i++, m.json); s.setString(i, m.sha256); s.executeUpdate();
     }
   }
 
@@ -229,7 +232,7 @@ public final class JdbcTargetEvidenceCommandMaterialStore implements TargetEvide
         r.getString(7), r.getString(8), r.getString(9), r.getLong(10), r.getLong(11), r.getString(12), r.getString(13), r.getTimestamp(14).toInstant());
   }
   private static TargetE2EPersistenceException conflict(String message) { return new TargetE2EPersistenceException("EVIDENCE_MATERIAL_CONFLICT", message); }
-  private record Canonical(String json, String sha256) {}
+  private record Canonical(String schemaVersion, String json, String sha256) {}
   private record Row(String admissionId, String activationId, String manifestHash, String databaseBindingHash, String tenant, String caseId, String commandId, String commandHash, String envelopeHash, long epoch, long fence, String canonicalJson, String sha256, Instant storedAt) {}
   private record RouteRow(CommandAdmission admission, Row material) {}
 }

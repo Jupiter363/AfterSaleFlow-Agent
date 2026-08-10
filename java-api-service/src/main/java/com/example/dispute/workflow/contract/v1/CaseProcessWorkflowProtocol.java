@@ -15,8 +15,12 @@ public final class CaseProcessWorkflowProtocol {
   public static final String ROOM_CONTROL_TASK_QUEUE = TemporalTaskQueues.ROOM_CONTROL;
   public static final String ACCEPT_COMMAND_UPDATE = "acceptCommand";
   public static final String PROVISION_ROOM_EPOCH_UPDATE = "provisionRoomEpoch";
+  public static final String RECOVER_INTAKE_PROJECTION_COMPLETION_UPDATE =
+      "recoverIntakeProjectionCompletion";
   public static final String DOMAIN_EVENT_SIGNAL = "domainEventCommitted";
   public static final String TARGET_ROOM_PROGRESS_SIGNAL = "targetRoomProgressed";
+  public static final String TARGET_INTAKE_TERMINAL_NO_COMMIT_SIGNAL =
+      "targetIntakeCommandTerminalNoCommit";
   public static final String RETRY_SEQUENCE_GAP_SIGNAL = "retrySequenceGap";
   public static final String REQUEST_CONTINUE_AS_NEW_SIGNAL = "requestContinueAsNew";
   public static final String PROCESS_STATE_QUERY = "processState";

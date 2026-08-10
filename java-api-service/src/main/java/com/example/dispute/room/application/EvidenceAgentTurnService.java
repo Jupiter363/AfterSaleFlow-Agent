@@ -37,10 +37,13 @@ import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemory
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -48,6 +51,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -70,6 +74,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
     private static final String AGENT_SENDER_ROLE = "CUSTOMER_SERVICE";
     private static final String AGENT_SENDER_ID = "evidence-clerk";
     private static final String OPENING_IDEMPOTENCY_VERSION = "dossier-v3";
+    private static final String FROZEN_OPENING_IDEMPOTENCY_VERSION = "freeze-v1";
     private static final List<String> SUPERSEDED_GENERIC_OPENING_MARKERS =
             List.of(
                     "您好！我是您的证据书记官",
@@ -201,10 +206,78 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             return null;
         }
 
+        PreparedParticipantTurn prepared =
+                prepareParticipantTurn(
+                        caseId,
+                        roomType,
+                        actor,
+                        message,
+                        sourceMessageId,
+                        sourceMessageCreatedAt);
+        if (agentRunCoordinator != null) {
+            return startStreamingRun(
+                    prepared.context(),
+                    prepared.session(),
+                    prepared.turnNo(),
+                    actor,
+                    prepared.command(),
+                    traceId,
+                    requestId,
+                    turnIdempotencyKey(
+                            prepared.context().dispute(),
+                            prepared.session().agentSession(),
+                            actor.role(),
+                            prepared.turnNo()));
+        }
+        EvidenceAgentTurnResult result = safeRun(prepared.command(), traceId, requestId);
+        contextEnvelopeFactory.requireCurrentFrozenSubmission(
+                prepared.context().dispute(),
+                prepared.context().room(),
+                prepared.command().contextEnvelope());
+        persistAgentTurn(
+                prepared.context(),
+                prepared.session(),
+                prepared.turnNo(),
+                actor.role(),
+                message.attachmentRefs(),
+                result,
+                allowedFactIds(prepared.command().contextEnvelope()),
+                traceId);
+        return null;
+    }
+
+    @Transactional
+    public EvidenceAgentTurnCommand prepareTargetSubmissionTurn(
+            String caseId,
+            AuthenticatedActor actor,
+            RoomMessageCommand message,
+            String sourceMessageId,
+            Instant sourceMessageCreatedAt) {
+        if (!isParty(actor.role())
+                || message.messageType() != MessageType.PARTY_EVIDENCE_REFERENCE) {
+            throw new IllegalArgumentException(
+                    "target Evidence submission requires a party evidence-reference message");
+        }
+        return prepareParticipantTurn(
+                        caseId,
+                        RoomType.EVIDENCE,
+                        actor,
+                        message,
+                        sourceMessageId,
+                        sourceMessageCreatedAt)
+                .command();
+    }
+
+    private PreparedParticipantTurn prepareParticipantTurn(
+            String caseId,
+            RoomType roomType,
+            AuthenticatedActor actor,
+            RoomMessageCommand message,
+            String sourceMessageId,
+            Instant sourceMessageCreatedAt) {
         TurnContext context = prepare(caseId, roomType);
         SessionContext session = resolveSession(caseId, actor, RoomType.EVIDENCE);
         int turnNo = memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
-        // 文本和附件引用先写入该当事方的私有记忆；Agent 失败不能撤销已经接收的举证陈述。
         memoryRepository.save(
                 RoomTurnMemoryEntity.participantTurn(
                         "MEMORY_" + compactUuid(),
@@ -217,9 +290,6 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                         session.agentSession(),
                         session.accessSession(),
                         "{}"));
-
-        // EnvelopeFactory 根据 CaseAccessSession 裁剪证据原件、核验和历史消息。
-        // Python 只能看到 envelope 中的内容，不能凭 evidenceId 自行读取 Java/MinIO。
         EvidenceAgentTurnCommand command =
                 new EvidenceAgentTurnCommand(
                         contextEnvelopeFactory.create(
@@ -236,29 +306,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                                 turnNo,
                                 sourceMessageCreatedAt),
                         invocationContext(session, roomType));
-        if (agentRunCoordinator != null) {
-            return startStreamingRun(
-                    context,
-                    session,
-                    turnNo,
-                    actor,
-                    command,
-                    traceId,
-                    requestId,
-                    turnIdempotencyKey(
-                            context.dispute(), session.agentSession(), actor.role(), turnNo));
-        }
-        EvidenceAgentTurnResult result = safeRun(command, traceId, requestId);
-        persistAgentTurn(
-                context,
-                session,
-                turnNo,
-                actor.role(),
-                message.attachmentRefs(),
-                result,
-                allowedFactIds(command.contextEnvelope()),
-                traceId);
-        return null;
+        return new PreparedParticipantTurn(context, session, turnNo, command);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnService.startStreamingRun(TurnContext,SessionContext,int,AuthenticatedActor,EvidenceAgentTurnCommand,String,String,String)」。
@@ -327,6 +375,28 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
     public void finalizeResult(AgentRunFinalizationContext finalization, JsonNode rawResult) {
         EvidenceAgentTurnCommand command =
                 objectMapper.convertValue(finalization.request(), EvidenceAgentTurnCommand.class);
+        finalizeResult(finalization, command, rawResult, false);
+    }
+
+    @Transactional
+    public RoomMessageView finalizeTargetResult(
+            AgentRunFinalizationContext finalization,
+            EvidenceAgentTurnCommand command,
+            JsonNode rawResult) {
+        return finalizeResult(finalization, command, rawResult, true);
+    }
+
+    private RoomMessageView finalizeResult(
+            AgentRunFinalizationContext finalization,
+            EvidenceAgentTurnCommand command,
+            JsonNode rawResult,
+            boolean targetFormalAuthority) {
+        if (!finalization.caseId().equals(command.agentContext().caseId())
+                || !finalization.caseId().equals(
+                        command.contextEnvelope().caseSnapshot().caseId())) {
+            throw new IllegalStateException(
+                    "evidence finalization differs from its persisted command authority");
+        }
         EvidenceAgentTurnResult result =
                 objectMapper.convertValue(rawResult, EvidenceAgentTurnResult.class);
         EvidenceContextEnvelopeV1 envelope = command.contextEnvelope();
@@ -342,22 +412,25 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
         }
         RoomType actualRoom = envelope.roomPolicy().roomType();
         TurnContext context = prepare(finalization.caseId(), actualRoom);
+        contextEnvelopeFactory.requireCurrentFrozenSubmission(
+                context.dispute(), context.room(), envelope);
         int turnNo = envelope.currentEvent().turnNo();
         if ("ROOM_OPENING".equals(envelope.currentEvent().eventType())) {
-            persistOpeningAgentTurn(
-                    context,
-                    session,
-                    audienceParty,
-                    turnNo,
-                    result,
-                    finalization.runId(),
-                    finalization.traceId(),
-                    finalization.idempotencyKey());
-            return;
+            return view(
+                    persistOpeningAgentTurn(
+                            context,
+                            session,
+                            audienceParty,
+                            turnNo,
+                            result,
+                            finalization.runId(),
+                            finalization.traceId(),
+                            finalization.idempotencyKey(),
+                            targetFormalAuthority));
         }
         // 普通回合会继续校验 assessment 只能覆盖当前可见和本轮附件，
         // 随后在同一事务中保存核验版本、Agent 记忆和房间消息。
-        persistAgentTurn(
+        return persistAgentTurn(
                 context,
                 session,
                 turnNo,
@@ -366,7 +439,8 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 result,
                 finalization.runId(),
                 allowedFactIds(envelope),
-                finalization.traceId());
+                finalization.traceId(),
+                targetFormalAuthority);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnService.ensureOpening(String,RoomType,AuthenticatedActor,String,String)」。
@@ -391,7 +465,12 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
 
         TurnContext context = prepare(caseId, RoomType.EVIDENCE);
         SessionContext session = resolveSession(caseId, actor, RoomType.EVIDENCE);
-        String idempotencyKey = openingIdempotencyKey(caseId, session.agentSession());
+        EvidenceContextEnvelopeV1.FrozenSubmission frozenSubmission =
+                contextEnvelopeFactory.resolveFrozenSubmission(
+                        context.dispute(), context.room());
+        String idempotencyKey =
+                openingIdempotencyKey(
+                        caseId, session.agentSession(), frozenSubmission);
         var existing =
                 messageRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey);
         if (existing.isPresent()) {
@@ -399,7 +478,8 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
         }
         List<RoomMessageEntity> visibleConversation =
                 visibleActorScopedConversationMessages(context.room(), session.accessSession());
-        if (!visibleConversation.isEmpty()
+        if (frozenSubmission == null
+                && !visibleConversation.isEmpty()
                 && !isOnlySupersededOpeningMessages(visibleConversation)) {
             return view(visibleConversation.getFirst());
         }
@@ -419,9 +499,12 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                                 null,
                                 List.of(),
                                 turnNo,
-                                clock.instant()),
+                                clock.instant(),
+                                frozenSubmission),
                         session.agentContext());
         EvidenceAgentTurnResult result = safeRun(command, traceId, requestId);
+        contextEnvelopeFactory.requireCurrentFrozenSubmission(
+                context.dispute(), context.room(), command.contextEnvelope());
         RoomMessageEntity saved =
                 persistOpeningAgentTurn(
                         context,
@@ -456,7 +539,12 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
         }
         TurnContext context = prepare(caseId, RoomType.EVIDENCE);
         SessionContext session = resolveSession(caseId, actor, RoomType.EVIDENCE);
-        String idempotencyKey = openingIdempotencyKey(caseId, session.agentSession());
+        EvidenceContextEnvelopeV1.FrozenSubmission frozenSubmission =
+                contextEnvelopeFactory.resolveFrozenSubmission(
+                        context.dispute(), context.room());
+        String idempotencyKey =
+                openingIdempotencyKey(
+                        caseId, session.agentSession(), frozenSubmission);
         var existing = messageRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey);
         if (existing.isPresent()) {
             return view(existing.orElseThrow());
@@ -469,7 +557,8 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
         }
         List<RoomMessageEntity> visibleConversation =
                 visibleActorScopedConversationMessages(context.room(), session.accessSession());
-        if (!visibleConversation.isEmpty()
+        if (frozenSubmission == null
+                && !visibleConversation.isEmpty()
                 && !isOnlySupersededOpeningMessages(visibleConversation)) {
             return view(visibleConversation.getFirst());
         }
@@ -488,7 +577,8 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                                 null,
                                 List.of(),
                                 turnNo,
-                                clock.instant()),
+                                clock.instant(),
+                                frozenSubmission),
                         session.agentContext());
         return startStreamingRun(
                 context,
@@ -515,6 +605,40 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             String runId,
             String traceId,
             String idempotencyKey) {
+        return persistOpeningAgentTurn(
+                context,
+                session,
+                audienceParty,
+                turnNo,
+                result,
+                runId,
+                traceId,
+                idempotencyKey,
+                false);
+    }
+
+    private RoomMessageEntity persistOpeningAgentTurn(
+            TurnContext context,
+            SessionContext session,
+            ActorRole audienceParty,
+            int turnNo,
+            EvidenceAgentTurnResult result,
+            String runId,
+            String traceId,
+            String idempotencyKey,
+            boolean targetFormalAuthority) {
+        Optional<RoomMessageEntity> existing =
+                messageRepository.findByCaseIdAndIdempotencyKey(
+                        context.dispute().getId(), idempotencyKey);
+        if (existing.isPresent()) {
+            requireExactAgentMessage(
+                    existing.orElseThrow(),
+                    context.room(),
+                    result.roomUtterance(),
+                    runId,
+                    targetFormalAuthority);
+            return existing.orElseThrow();
+        }
         String memorySnapshotJson = json(defaultObject(result.memoryPatch()));
         memoryRepository.save(
                 RoomTurnMemoryEntity.agentTurn(
@@ -541,7 +665,8 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                         turnNo,
                         traceId,
                         idempotencyKey,
-                        runId);
+                        runId,
+                        targetFormalAuthority);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnService.resolveSession(String,AuthenticatedActor,RoomType)」。
@@ -659,7 +784,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
     // 上游调用：「EvidenceAgentTurnService.persistAgentTurn(TurnContext,SessionContext,int,ActorRole,List,EvidenceAgentTurnResult,String)」的上游调用点包括 「EvidenceAgentTurnService.continueFromParticipantMessage」、「EvidenceAgentTurnService.finalizeResult」、「EvidenceAgentTurnService.persistAgentTurn」。
     // 下游影响：「EvidenceAgentTurnService.persistAgentTurn(TurnContext,SessionContext,int,ActorRole,List,EvidenceAgentTurnResult,String)」向下依次触达 「persistAgentTurn」、「compactUuid」。
     // 系统意义：「EvidenceAgentTurnService.persistAgentTurn(TurnContext,SessionContext,int,ActorRole,List,EvidenceAgentTurnResult,String)」负责主链路中的“Agent轮次”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
-    private void persistAgentTurn(
+    private RoomMessageView persistAgentTurn(
             TurnContext context,
             SessionContext session,
             int turnNo,
@@ -668,7 +793,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             EvidenceAgentTurnResult result,
             Set<String> allowedFactIds,
             String traceId) {
-        persistAgentTurn(
+        return persistAgentTurn(
                 context,
                 session,
                 turnNo,
@@ -677,7 +802,8 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 result,
                 "EVIDENCE_RUN_" + compactUuid(),
                 allowedFactIds,
-                traceId);
+                traceId,
+                false);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnService.persistAgentTurn(TurnContext,SessionContext,int,ActorRole,List,EvidenceAgentTurnResult,String,String)」。
@@ -685,7 +811,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
     // 上游调用：「EvidenceAgentTurnService.persistAgentTurn(TurnContext,SessionContext,int,ActorRole,List,EvidenceAgentTurnResult,String,String)」的上游调用点包括 「EvidenceAgentTurnService.continueFromParticipantMessage」、「EvidenceAgentTurnService.finalizeResult」、「EvidenceAgentTurnService.persistAgentTurn」。
     // 下游影响：「EvidenceAgentTurnService.persistAgentTurn(TurnContext,SessionContext,int,ActorRole,List,EvidenceAgentTurnResult,String,String)」向下依次触达 「memoryRepository.save」、「RoomTurnMemoryEntity.agentTurn」、「context.dispute」、「session.accessSession」。
     // 系统意义：「EvidenceAgentTurnService.persistAgentTurn(TurnContext,SessionContext,int,ActorRole,List,EvidenceAgentTurnResult,String,String)」负责主链路中的“Agent轮次”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
-    private void persistAgentTurn(
+    private RoomMessageView persistAgentTurn(
             TurnContext context,
             SessionContext session,
             int turnNo,
@@ -695,6 +821,44 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             String runId,
             Set<String> allowedFactIds,
             String traceId) {
+        return persistAgentTurn(
+                context,
+                session,
+                turnNo,
+                audienceParty,
+                currentAttachmentRefs,
+                result,
+                runId,
+                allowedFactIds,
+                traceId,
+                false);
+    }
+
+    private RoomMessageView persistAgentTurn(
+            TurnContext context,
+            SessionContext session,
+            int turnNo,
+            ActorRole audienceParty,
+            List<String> currentAttachmentRefs,
+            EvidenceAgentTurnResult result,
+            String runId,
+            Set<String> allowedFactIds,
+            String traceId,
+            boolean targetFormalAuthority) {
+        String idempotencyKey =
+                turnIdempotencyKey(context.dispute(), session.agentSession(), audienceParty, turnNo);
+        Optional<RoomMessageEntity> existing =
+                messageRepository.findByCaseIdAndIdempotencyKey(
+                        context.dispute().getId(), idempotencyKey);
+        if (existing.isPresent()) {
+            requireExactAgentMessage(
+                    existing.orElseThrow(),
+                    context.room(),
+                    result.roomUtterance(),
+                    runId,
+                    targetFormalAuthority);
+            return view(existing.orElseThrow());
+        }
         Set<String> allowedAttachmentIds =
                 validateEvidenceAssessmentCoverage(
                         context.dispute().getId(),
@@ -725,7 +889,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                         session.agentSession(),
                         session.accessSession(),
                         "{}"));
-        appendAgentMessage(
+        RoomMessageEntity persistedMessage = appendAgentMessage(
                 context.dispute(),
                 context.room(),
                 session.agentSession(),
@@ -733,8 +897,9 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 result.roomUtterance(),
                 turnNo,
                 traceId,
-                turnIdempotencyKey(context.dispute(), session.agentSession(), audienceParty, turnNo),
-                runId);
+                idempotencyKey,
+                runId,
+                targetFormalAuthority);
         persistEvidenceVerifications(
                 context.dispute().getId(),
                 allowedAttachmentIds,
@@ -748,6 +913,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                     allowedAttachmentIds,
                     session.agentSession().getActorId());
         }
+        return view(persistedMessage);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnService.freezeHearingSupplementDossier(TurnContext,Set,String)」。
@@ -1259,12 +1425,43 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             String traceId,
             String idempotencyKey,
             String runId) {
+        return appendAgentMessage(
+                dispute,
+                room,
+                agentSession,
+                audienceParty,
+                utterance,
+                turnNo,
+                traceId,
+                idempotencyKey,
+                runId,
+                false);
+    }
+
+    private RoomMessageEntity appendAgentMessage(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity room,
+            AgentConversationSessionEntity agentSession,
+            ActorRole audienceParty,
+            String utterance,
+            int turnNo,
+            String traceId,
+            String idempotencyKey,
+            String runId,
+            boolean targetFormalAuthority) {
         var existing =
                 messageRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey);
         if (existing.isPresent()) {
-            return existing.get();
+            requireExactAgentMessage(
+                    existing.orElseThrow(),
+                    room,
+                    utterance,
+                    runId,
+                    targetFormalAuthority);
+            return existing.orElseThrow();
         }
         boolean hearingSupplement = room.getRoomType() == RoomType.HEARING;
+        String senderRole = AGENT_ROLE;
         String audienceJson =
                 hearingSupplement ? hearingSupplementAudienceJson() : audienceJson(audienceParty);
         String audienceActorIdsJson =
@@ -1277,7 +1474,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                                 room.getId(),
                                 sequence,
                                 MessageSenderType.AGENT,
-                                hearingSupplement ? AGENT_ROLE : AGENT_SENDER_ROLE,
+                                senderRole,
                                 AGENT_SENDER_ID,
                                 audienceJson,
                                 audienceActorIdsJson,
@@ -1298,6 +1495,27 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 audienceActorIdsJson,
                 AGENT_SENDER_ID);
         return saved;
+    }
+
+    private static void requireExactAgentMessage(
+            RoomMessageEntity message,
+            CaseRoomEntity room,
+            String utterance,
+            String runId,
+            boolean targetFormalAuthority) {
+        String expectedRole = AGENT_ROLE;
+        boolean exact = message.getRoomId().equals(room.getId())
+                && expectedRole.equals(message.getSenderRole())
+                && AGENT_SENDER_ID.equals(message.getSenderId())
+                && message.getMessageSource()
+                        == com.example.dispute.room.domain.MessageSource.AGENT_LLM
+                && message.getMessageType() == MessageType.AGENT_MESSAGE
+                && Objects.equals(utterance, message.getMessageText())
+                && Objects.equals(runId, message.getAgentRunId());
+        if (!exact) {
+            throw new IllegalStateException(
+                    "evidence Agent message replay differs from persisted finalization");
+        }
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnService.visibleActorScopedConversationMessages(CaseRoomEntity,CaseAccessSessionEntity)」。
@@ -1420,6 +1638,29 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 + caseId
                 + ":"
                 + agentSession.getId();
+    }
+
+    private static String openingIdempotencyKey(
+            String caseId,
+            AgentConversationSessionEntity agentSession,
+            EvidenceContextEnvelopeV1.FrozenSubmission frozenSubmission) {
+        if (frozenSubmission == null) {
+            return openingIdempotencyKey(caseId, agentSession);
+        }
+        ObjectNode authority = JsonNodeFactory.instance.objectNode();
+        authority.put("schema_version", "evidence-opening-idempotency.v1");
+        authority.put("case_id", caseId);
+        authority.put("evidence_room_epoch", frozenSubmission.evidenceRoomEpoch());
+        authority.put("evidence_fencing_token", frozenSubmission.evidenceFencingToken());
+        authority.put("projection_ref", frozenSubmission.projectionRef());
+        authority.put("matrix_id", frozenSubmission.authority().matrixId());
+        authority.put("matrix_version", frozenSubmission.authority().matrixVersion());
+        authority.put("matrix_content_hash", frozenSubmission.projectionSha256());
+        authority.put("agent_session_id", agentSession.getId());
+        return "agent-evidence-opening:"
+                + FROZEN_OPENING_IDEMPOTENCY_VERSION
+                + ":"
+                + ContractJson.sha256Hex(authority);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnService.turnIdempotencyKey(FulfillmentCaseEntity,AgentConversationSessionEntity,ActorRole,int)」。
@@ -1578,6 +1819,12 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
     // 边界意义：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     // Java 语法：record 用于不可变数据载体，编译器会生成组件访问器和值语义方法。
     private record TurnContext(FulfillmentCaseEntity dispute, CaseRoomEntity room) {}
+
+    private record PreparedParticipantTurn(
+            TurnContext context,
+            SessionContext session,
+            int turnNo,
+            EvidenceAgentTurnCommand command) {}
 
     // 所属模块：【房间协作与权限 / 应用编排层】类型「SessionContext」。
     // 类型职责：定义会话上下文跨层传递时使用的不可变数据契约；本类型显式提供 框架生成的默认访问器。

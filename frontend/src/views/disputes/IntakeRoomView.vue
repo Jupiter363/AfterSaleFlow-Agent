@@ -2691,13 +2691,15 @@ async function postMessage(command) {
   submitting.value = true;
   error.value = "";
   const optimisticId = appendOptimisticPartyMessage(command, snapshot);
+  let requestAccepted = false;
+  let finalizationContext = null;
   try {
     const submit =
       props.postMessageAction ||
       ((payload) => roomApi.postMessage(snapshot.actor, snapshot.caseId, "INTAKE", payload));
     const result = await submit(command);
+    requestAccepted = true;
     const descriptor = extractAgentRunDescriptor(result);
-    let finalizationContext = null;
     if (descriptor) {
       finalizationContext = createIntakeRunFinalizationContext(descriptor.runId);
       if (finalizationContext.requiresFormalReadiness) {
@@ -2744,9 +2746,27 @@ async function postMessage(command) {
     }
   } catch (failure) {
     if (!isCurrentWorkspace(snapshot)) return;
-    removeOptimisticMessage(optimisticId);
+    if (finalizationContext) {
+      discardProvisionalIntakeRun(finalizationContext, snapshot);
+    }
+    let reconciliationFailure = null;
+    if (requestAccepted) {
+      try {
+        // A resolved POST is the acceptance boundary. Replace the optimistic
+        // row only with the room's persisted message list; never promote the
+        // local row to durable state after downstream generation fails.
+        await refreshMessages(snapshot);
+      } catch (refreshFailure) {
+        reconciliationFailure = refreshFailure;
+        removeOptimisticMessage(optimisticId);
+      }
+    } else {
+      removeOptimisticMessage(optimisticId);
+    }
     resetStreamedCaseDetail();
-    error.value = failure.message;
+    error.value = reconciliationFailure
+      ? `${failure.message}；消息已受理，但持久化状态刷新失败：${reconciliationFailure.message}`
+      : failure.message;
     agentState.value = "ERROR";
     void checkModelConnection();
   } finally {

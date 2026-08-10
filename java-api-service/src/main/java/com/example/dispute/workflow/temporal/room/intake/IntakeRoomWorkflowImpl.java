@@ -21,8 +21,17 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommitResult;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
+import com.example.dispute.workflow.temporal.caseprocess.TargetIntakeCommandTerminalNoCommit;
+import io.temporal.activity.ActivityOptions;
 import io.temporal.failure.ActivityFailure;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.failure.CanceledFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.CancellationScope;
@@ -31,6 +40,7 @@ import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.ContinueAsNewOptions;
 import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
+import io.temporal.common.RetryOptions;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -57,8 +67,16 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       "intake-room-agent-run-late-commit-reconciliation-v1";
   private static final String AGENT_RUN_TERMINAL_NO_COMMIT_RELEASE_CHANGE_ID =
       "intake-room-agent-run-terminal-no-commit-release-v1";
+  private static final String AGENT_RUN_FINALIZATION_REJECTED_RELEASE_CHANGE_ID =
+      "intake-room-agent-run-finalization-rejected-terminal-no-commit-v1";
+  private static final String AGENT_RUN_PENDING_FINALIZATION_RECOVERY_CHANGE_ID =
+      "intake-room-agent-run-pending-finalization-recovery-v1";
   private static final String AGENT_RUN_TERMINAL_NO_COMMIT_RECOVERY_CHANGE_ID =
       "intake-room-agent-run-terminal-no-commit-recovery-v1";
+  private static final String AGENT_RUN_TERMINAL_NO_COMMIT_PARENT_CONVERGENCE_CHANGE_ID =
+      "intake-room-agent-run-terminal-no-commit-parent-convergence-v1";
+  private static final String AGENT_RUN_TERMINAL_NO_COMMIT_PARENT_CONVERGENCE_V2_CHANGE_ID =
+      "intake-room-agent-run-terminal-no-commit-parent-convergence-v2";
   private static final String AGENT_RUN_CANCELLATION_CLEAR_GUARD_CHANGE_ID =
       "intake-room-agent-run-cancellation-clear-guard-v1";
   private static final String AGENT_RUN_RESOLVED_CHILD_CARRY_GUARD_CHANGE_ID =
@@ -82,8 +100,24 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       Duration.ofMillis(200);
   private static final Duration FINALIZATION_RECONCILIATION_READ_TIMEOUT =
       Duration.ofSeconds(5);
+  private static final String TARGET_FINALIZATION_RECOVERY_FAILURE =
+      "INTAKE_TARGET_FINALIZATION_RECOVERY_FAILED";
 
   private final ArrayDeque<InboxItem> inbox = new ArrayDeque<>();
+  private final CaseCommandLifecycleActivities caseCommandLifecycleActivities =
+      Workflow.newActivityStub(
+          CaseCommandLifecycleActivities.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(CASE_CONTROL)
+              .setStartToCloseTimeout(Duration.ofSeconds(10))
+              .setScheduleToCloseTimeout(Duration.ofSeconds(30))
+              .setRetryOptions(
+                  RetryOptions.newBuilder()
+                      .setInitialInterval(Duration.ofSeconds(1))
+                      .setMaximumInterval(Duration.ofSeconds(5))
+                      .setMaximumAttempts(3)
+                      .build())
+              .build());
   private final Map<String, CommandObservation> commandObservations = new LinkedHashMap<>();
   private final Map<String, EventObservation> eventObservations = new LinkedHashMap<>();
   private final Map<String, TargetIntakeSourceEventRef> targetSourceEventObservations =
@@ -117,6 +151,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private IntakeActivityExecutionState activityExecution;
   private IntakeAgentRunChildState targetAgentRunChild;
   private IntakeAgentRunFinalizationReadResult authoritativeCommittedTargetFinalization;
+  private IntakeAgentRunFinalizationRecoveryRequest activeTargetFinalizationRecovery;
+  private IntakeAgentRunFinalizationRecoveryRequest completedTargetFinalizationRecoveryRequest;
+  private IntakeAgentRunFinalizationRecoveryResult completedTargetFinalizationRecoveryResult;
+  private IntakeTerminalNoCommitRecoveryRequest completedTerminalNoCommitRecoveryRequest;
+  private IntakeTerminalNoCommitRecoveryResult completedTerminalNoCommitRecoveryResult;
   private TargetAgentRunPreCommandState targetAgentRunPreCommandState;
   private int sharedActivityRetriesRemaining;
   private boolean activityExecutionAuthorized;
@@ -233,6 +272,159 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   @Override
   public void requestContinueAsNew() {
     continueAsNewRequested = true;
+  }
+
+  @Override
+  public IntakeAgentRunFinalizationRecoveryResult recoverTargetFinalization(
+      IntakeAgentRunFinalizationRecoveryRequest request) {
+    requireTargetFinalizationRecovery(request, false);
+    if (completedTargetFinalizationRecoveryResult != null) {
+      return completedTargetFinalizationRecoveryResult;
+    }
+    activeTargetFinalizationRecovery = request;
+    try {
+      IntakeWorkflowCommand command = pendingWorkflowCommand();
+      if (request.isTerminalNoCommitRecovery()) {
+        return recoverPendingFinalizationRejection(request, command);
+      }
+      IntakeAgentRunFinalizationReadResult finalization;
+      if (request.matchesAlreadyAdopted(
+          targetAgentRunChild, authoritativeCommittedTargetFinalization)) {
+        finalization = authoritativeCommittedTargetFinalization;
+      } else {
+        finalization =
+            readTargetFinalization(
+                command,
+                IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION,
+                FINALIZATION_RECONCILIATION_READ_TIMEOUT);
+        requireExpectedRecoveryFinalization(request, finalization);
+        requireTargetFinalizationRecovery(request, true);
+        commitTargetFinalization(finalization);
+      }
+      requireExpectedRecoveryFinalization(request, finalization);
+      IntakeAgentRunChildState adoptedChildState = request.committedChildState();
+      if (!adoptedChildState.equals(targetAgentRunChild)
+          || !finalization.equals(authoritativeCommittedTargetFinalization)) {
+        throw new IllegalStateException("target finalization recovery adoption changed authority");
+      }
+      IntakeDomainEventRef committedEvent = finalization.receipt().committedEvent();
+      processEvent(committedEvent, finalization.receipt().operation().operationKey());
+      EventObservation observation = eventObservations.get(committedEvent.eventId());
+      if (observation == null || !observation.applied()) {
+        throw new IllegalStateException("target finalization recovery event was not applied");
+      }
+      IntakeAgentRunFinalizationRecoveryResult recovered =
+          new IntakeAgentRunFinalizationRecoveryResult(
+              IntakeAgentRunFinalizationRecoveryResult.SCHEMA_VERSION,
+              request,
+              adoptedChildState,
+              finalization);
+      completedTargetFinalizationRecoveryRequest = request;
+      completedTargetFinalizationRecoveryResult = recovered;
+      return recovered;
+    } catch (CanceledFailure failure) {
+      throw failure;
+    } catch (ActivityFailure failure) {
+      rethrowTargetFinalizationRecoveryCancellation(failure);
+      throw targetFinalizationRecoveryFailure(failure);
+    } catch (RuntimeException failure) {
+      throw targetFinalizationRecoveryFailure(failure);
+    } finally {
+      activeTargetFinalizationRecovery = null;
+    }
+  }
+
+  private IntakeAgentRunFinalizationRecoveryResult recoverPendingFinalizationRejection(
+      IntakeAgentRunFinalizationRecoveryRequest request, IntakeWorkflowCommand command) {
+    IntakeAgentRunFinalizationReadResult finalization =
+        readTargetFinalization(
+            command,
+            IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION,
+            FINALIZATION_RECONCILIATION_READ_TIMEOUT);
+    requireExpectedRecoveryFinalization(request, finalization);
+    requireTargetFinalizationRecovery(request, true);
+    if (Workflow.getVersion(
+            AGENT_RUN_PENDING_FINALIZATION_RECOVERY_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+        != 1) {
+      throw new IllegalStateException("pending terminal finalization recovery is not enabled");
+    }
+    IntakeAgentRunChildState terminalChild = request.terminalNoCommitChildState();
+    if (!settleFinalizationRejectedTargetAgentRun(command, finalization)) {
+      throw new IllegalStateException("pending terminal finalization recovery did not converge");
+    }
+    TargetIntakeCommandTerminalNoCommit authority =
+        completedTerminalNoCommitRecoveryRequest == null
+            ? null
+            : completedTerminalNoCommitRecoveryRequest.authority();
+    if (authority == null
+        || !command.commandId().equals(authority.commandId())
+        || pendingCommand != null
+        || targetAgentRunChild != null
+        || processRevision != authority.newProcessRevision()
+        || roomRevision != authority.newRoomRevision()
+        || nextEventSequence - 1 != authority.lastCaseEventSequence()) {
+      throw new IllegalStateException("pending terminal finalization recovery changed authority");
+    }
+    IntakeAgentRunFinalizationRecoveryResult recovered =
+        new IntakeAgentRunFinalizationRecoveryResult(
+            IntakeAgentRunFinalizationRecoveryResult.V2_SCHEMA_VERSION,
+            request,
+            terminalChild,
+            finalization,
+            IntakeAgentRunFinalizationRecoveryResult.Disposition.TERMINAL_NO_COMMIT_CONVERGED,
+            authority);
+    completedTargetFinalizationRecoveryRequest = request;
+    completedTargetFinalizationRecoveryResult = recovered;
+    return recovered;
+  }
+
+  @Override
+  public void validateRecoverTargetFinalization(
+      IntakeAgentRunFinalizationRecoveryRequest request) {
+    requireTargetFinalizationRecovery(request, false);
+  }
+
+  @Override
+  public IntakeTerminalNoCommitRecoveryResult recoverTerminalNoCommit(
+      IntakeTerminalNoCommitRecoveryRequest request) {
+    requireTerminalNoCommitRecovery(request);
+    if (completedTerminalNoCommitRecoveryResult != null) {
+      return completedTerminalNoCommitRecoveryResult;
+    }
+    ResolveTargetIntakeTerminalNoCommitResult resolved =
+        caseCommandLifecycleActivities.resolveTargetIntakeTerminalNoCommit(
+            new ResolveTargetIntakeTerminalNoCommit(
+                "resolve-target-intake-terminal-no-commit.v1", request.authority()));
+    requireTerminalNoCommitRecovery(request);
+    if (resolved == null || !request.authority().equals(resolved.authority())) {
+      throw new IllegalArgumentException(
+          "terminal-no-commit authority read returned conflicting evidence");
+    }
+    TargetIntakeCommandTerminalNoCommit authority = request.authority();
+    if (processRevision == authority.expectedProcessRevision()
+        && roomRevision == authority.expectedRoomRevision()) {
+      processRevision = authority.newProcessRevision();
+      roomRevision = authority.newRoomRevision();
+    } else if (processRevision != authority.newProcessRevision()
+        || roomRevision != authority.newRoomRevision()) {
+      throw new IllegalStateException("terminal-no-commit Room coordinates changed");
+    }
+    signalTerminalNoCommit(authority);
+    protocolErrorCode = null;
+    IntakeTerminalNoCommitRecoveryResult recovered =
+        new IntakeTerminalNoCommitRecoveryResult(
+            IntakeTerminalNoCommitRecoveryResult.SCHEMA_VERSION,
+            IntakeTerminalNoCommitRecoveryResult.Disposition.EMITTED,
+            request,
+            resolved);
+    completedTerminalNoCommitRecoveryRequest = request;
+    completedTerminalNoCommitRecoveryResult = recovered;
+    return recovered;
+  }
+
+  @Override
+  public void validateRecoverTerminalNoCommit(IntakeTerminalNoCommitRecoveryRequest request) {
+    requireTerminalNoCommitRecovery(request);
   }
 
   @Override
@@ -555,6 +747,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         if (pendingCommand != null
             && pendingCommand.commandId().equals(command.commandId())
             && command.executionContext() != null
+            && activeTargetFinalizationRecovery == null
             && activeOrchestration == null) {
           startOrchestration(command);
         }
@@ -621,7 +814,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       }
       targetAgentRunPreCommandState =
           new TargetAgentRunPreCommandState(
-              command.commandId(), roomPhase, activeParty, readinessParty);
+              command.commandId(),
+              roomPhase,
+              activeParty,
+              readinessParty,
+              nextEventSequence - 1);
     }
 
     nextCommandSequence++;
@@ -944,8 +1141,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       ExecuteAgentRunResult result = childResult.get();
       requireTargetChildResult(command, target, result, winningAttemptEnabled);
       if (result.outcome() != ExecuteAgentRunResult.Outcome.COMPLETED) {
-        terminateTargetAgentRunWithoutCommit(
-            command, "TARGET_AGENT_RUN_" + result.outcome().name());
+        terminateTargetAgentRunWithoutCommit(command, target, result);
         return;
       }
       targetAgentRunChild = targetAgentRunChild.resultReady(result.resultHash());
@@ -976,12 +1172,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       IntakeWorkflowCommand command,
       IntakeAgentRunFinalizationReadRequest.Mode mode,
       Duration readWindow) {
-    IntakeAgentRunFinalizationReadRequest request =
-        new IntakeAgentRunFinalizationReadRequest(
-            "intake-agent-run-finalization-read-request.v1",
-            mode,
-            command,
-            targetAgentRunChild);
+    IntakeAgentRunFinalizationReadRequest request = targetFinalizationReadRequest(command, mode);
     IntakeAgentRunFinalizationReadResult result =
         Workflow.newActivityStub(
                 IntakeAgentRunFinalizationReadActivities.class,
@@ -995,7 +1186,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private void reconcileLateCommittedTargetAgentRun(IntakeWorkflowCommand incoming) {
-    if (pendingCommand == null
+    if (activeTargetFinalizationRecovery != null
+        || pendingCommand == null
         || pendingCommand.commandId().equals(incoming.commandId())
         || targetAgentRunChild == null
         || !targetAgentRunChild.unresolved()
@@ -1273,8 +1465,37 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         yield terminateTargetAgentRunWithoutCommit(
             command, "TARGET_AGENT_RUN_FINALIZATION_ABSENT");
       }
+      case TERMINAL_NO_COMMIT ->
+          settleFinalizationRejectedTargetAgentRun(command, result);
       case PENDING -> false;
     };
+  }
+
+  private boolean settleFinalizationRejectedTargetAgentRun(
+      IntakeWorkflowCommand command,
+      IntakeAgentRunFinalizationReadResult result) {
+    if (Workflow.getVersion(
+            AGENT_RUN_FINALIZATION_REJECTED_RELEASE_CHANGE_ID,
+            Workflow.DEFAULT_VERSION,
+            1)
+        != 1) {
+      return false;
+    }
+    if (command.executionContext() == null
+        || !command.executionContext().isTargetAgentRun()
+        || result.terminalNoCommitEvidence() == null) {
+      protocolErrorCode = "TARGET_AGENT_RUN_TERMINAL_RELEASE_IDENTITY_MISMATCH";
+      return false;
+    }
+    IntakeTargetAgentRunContext target = command.executionContext().targetAgentRun();
+    ExecuteAgentRunResult terminalResult = result.terminalNoCommitEvidence().terminalResult();
+    try {
+      requireTargetChildResult(command, target, terminalResult, winningAttemptEnabled);
+    } catch (IllegalArgumentException mismatch) {
+      protocolErrorCode = "TARGET_AGENT_RUN_TERMINAL_RELEASE_IDENTITY_MISMATCH";
+      return false;
+    }
+    return terminateTargetAgentRunWithoutCommit(command, target, terminalResult);
   }
 
   private void commitTargetFinalization(IntakeAgentRunFinalizationReadResult result) {
@@ -1313,6 +1534,159 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       recordTerminalTargetAgentRunDecision(
           terminalCommand, "TARGET_AGENT_RUN_TERMINAL_NO_COMMIT");
     }
+  }
+
+  private boolean terminateTargetAgentRunWithoutCommit(
+      IntakeWorkflowCommand command,
+      IntakeTargetAgentRunContext target,
+      ExecuteAgentRunResult result) {
+    if (Workflow.getVersion(
+            AGENT_RUN_TERMINAL_NO_COMMIT_PARENT_CONVERGENCE_CHANGE_ID,
+            Workflow.DEFAULT_VERSION,
+            1)
+        != 1) {
+      return terminateTargetAgentRunWithoutCommit(
+          command, "TARGET_AGENT_RUN_" + result.outcome().name());
+    }
+    if (result.outcome() != ExecuteAgentRunResult.Outcome.FAILED
+        || result.retryable()
+        || result.recoveryAction()
+            != com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction
+                .FAIL_LOGICAL_RUN) {
+      protocolErrorCode = "TARGET_AGENT_RUN_TERMINAL_RELEASE_IDENTITY_MISMATCH";
+      return false;
+    }
+    long terminalProcessRevision = Math.incrementExact(target.expectedProcessRevision());
+    long terminalRoomRevision = Math.incrementExact(target.expectedRoomRevision());
+    var graphCommand = target.request().command();
+    var eventRef = graphCommand.eventRef();
+    TargetAgentRunPreCommandState preCommandState = targetAgentRunPreCommandState;
+    if (processRevision != target.expectedProcessRevision()
+        || roomRevision != target.expectedRoomRevision()
+        || eventRef == null
+        || preCommandState == null
+        || !preCommandState.commandId().equals(command.commandId())) {
+      protocolErrorCode = "TARGET_AGENT_RUN_TERMINAL_RELEASE_IDENTITY_MISMATCH";
+      return false;
+    }
+    boolean useV2Authority =
+        Workflow.getVersion(
+                AGENT_RUN_TERMINAL_NO_COMMIT_PARENT_CONVERGENCE_V2_CHANGE_ID,
+                Workflow.DEFAULT_VERSION,
+                1)
+            == 1;
+    TargetIntakeCommandTerminalNoCommit authority =
+        new TargetIntakeCommandTerminalNoCommit(
+            useV2Authority
+                ? TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION
+                : TargetIntakeCommandTerminalNoCommit.LEGACY_SCHEMA_VERSION,
+            start.tenantSurrogate(),
+            start.caseId(),
+            com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.INTAKE,
+            start.roomEpoch(),
+            start.fencingToken(),
+            Workflow.getInfo().getWorkflowId(),
+            Workflow.getInfo().getFirstExecutionRunId(),
+            start.workflowBuildId(),
+            target.activationId(),
+            target.activationManifestHash(),
+            target.caseBuildId(),
+            target.controlBuildId(),
+            target.agentBuildId(),
+            target.graphBindingHash(),
+            target.graphCodeBuildId(),
+            target.commandHash(),
+            target.commandEnvelopeHash(),
+            target.request().logicalInputHash(),
+            useV2Authority ? graphCommand.requestHash() : null,
+            command.commandId(),
+            command.sequence(),
+            command.requestHash(),
+            eventRef.artifactId(),
+            command.payloadRef(),
+            command.payloadHash(),
+            target.expectedProcessRevision(),
+            terminalProcessRevision,
+            target.expectedRoomRevision(),
+            terminalRoomRevision,
+            useV2Authority ? preCommandState.lastCaseEventSequence() : null,
+            nextEventSequence - 1,
+            result.logicalRunId(),
+            target.request().attemptId(),
+            result.attemptId(),
+            result.attemptNo(),
+            result.publicOutputEmitted()
+                ? AgentRunAttemptStatus.ABORTED
+                : AgentRunAttemptStatus.FAILED,
+            result.outcome(),
+            result.errorCode(),
+            result.retryable(),
+            result.recoveryAction(),
+            result.lastSequenceNo(),
+            result.publicOutputEmitted(),
+            result.completedAt());
+    if (pendingCommand == null
+        || !pendingCommand.commandId().equals(command.commandId())
+        || targetAgentRunChild == null
+        || !targetAgentRunChild.commandId().equals(command.commandId())
+        || targetAgentRunChild.status()
+            == IntakeAgentRunChildState.Status.RECEIPT_COMMITTED
+        || authoritativeCommittedTargetFinalization != null) {
+      protocolErrorCode = "TARGET_AGENT_RUN_TERMINAL_RELEASE_IDENTITY_MISMATCH";
+      return false;
+    }
+    try {
+      targetAgentRunChild.requireMatches(command, target);
+      targetAgentRunChild = targetAgentRunChild.terminalNoCommit();
+    } catch (IllegalArgumentException | IllegalStateException mismatch) {
+      protocolErrorCode = "TARGET_AGENT_RUN_TERMINAL_RELEASE_IDENTITY_MISMATCH";
+      return false;
+    }
+    if (!releaseTargetAgentRunWithoutCommit(command.commandId())) {
+      return false;
+    }
+    processRevision = terminalProcessRevision;
+    roomRevision = terminalRoomRevision;
+    recordTerminalTargetAgentRunDecision(command, result.errorCode());
+    protocolErrorCode = result.errorCode();
+    signalTerminalNoCommit(authority);
+    cacheTerminalNoCommitEmission(authority);
+    return true;
+  }
+
+  private void signalTerminalNoCommit(TargetIntakeCommandTerminalNoCommit authority) {
+    CaseProcessWorkflow parent =
+        Workflow.newExternalWorkflowStub(
+            CaseProcessWorkflow.class,
+            CaseProcessWorkflowProtocol.caseWorkflowId(
+                authority.tenantSurrogate(), authority.caseId()));
+    parent.targetIntakeCommandTerminalNoCommit(authority);
+  }
+
+  private void cacheTerminalNoCommitEmission(
+      TargetIntakeCommandTerminalNoCommit authority) {
+    IntakeTerminalNoCommitRecoveryRequest request =
+        new IntakeTerminalNoCommitRecoveryRequest(
+            TargetIntakeCommandTerminalNoCommit.LEGACY_SCHEMA_VERSION.equals(
+                    authority.schemaVersion())
+                ? IntakeTerminalNoCommitRecoveryRequest.LEGACY_SCHEMA_VERSION
+                : IntakeTerminalNoCommitRecoveryRequest.SCHEMA_VERSION,
+            Workflow.getInfo().getWorkflowId(),
+            Workflow.getInfo().getRunId(),
+            authority);
+    ResolveTargetIntakeTerminalNoCommitResult resolved =
+        new ResolveTargetIntakeTerminalNoCommitResult(
+            "resolve-target-intake-terminal-no-commit-result.v1",
+            authority,
+            authority.receiptUri(),
+            authority.receiptSha256());
+    completedTerminalNoCommitRecoveryRequest = request;
+    completedTerminalNoCommitRecoveryResult =
+        new IntakeTerminalNoCommitRecoveryResult(
+            IntakeTerminalNoCommitRecoveryResult.SCHEMA_VERSION,
+            IntakeTerminalNoCommitRecoveryResult.Disposition.ALREADY_EMITTED,
+            request,
+            resolved);
   }
 
   private boolean terminateTargetAgentRunWithoutCommit(
@@ -1437,6 +1811,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private void startOrchestration(IntakeWorkflowCommand command) {
+    if (activeTargetFinalizationRecovery != null) {
+      throw new IllegalStateException("target finalization recovery is already running");
+    }
     if (activeOrchestration != null) {
       throw new IllegalStateException("an Intake Activity orchestration is already running");
     }
@@ -1492,6 +1869,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       }
     } else {
       deferredCancellation = command;
+    }
+    if (activeTargetFinalizationRecovery != null) {
+      return true;
     }
     if (activeOrchestration != null) {
       activeCancellationRequested = true;
@@ -1623,6 +2003,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
                       authoritativeCommittedTargetFinalization = null;
                       yield CancellationReconciliation.absent(command.operationKey());
                     }
+                    case TERMINAL_NO_COMMIT ->
+                        settleTargetFinalization(command, result)
+                            ? CancellationReconciliation.absent(command.operationKey())
+                            : CancellationReconciliation.unresolved();
                     case PENDING -> CancellationReconciliation.unresolved();
                   };
             });
@@ -1864,11 +2248,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     try {
       IntakeWorkflowCommand command = pendingWorkflowCommand();
       IntakeAgentRunFinalizationReadRequest request =
-          new IntakeAgentRunFinalizationReadRequest(
-              "intake-agent-run-finalization-read-request.v1",
-              IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION,
-              command,
-              targetAgentRunChild);
+          targetFinalizationReadRequest(
+              command, IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION);
       authoritativeCommittedTargetFinalization.requireMatches(request, winningAttemptEnabled);
       return targetAgentRunChild.equals(
           targetAgentRunChild.committed(
@@ -1876,6 +2257,205 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     } catch (IllegalArgumentException | IllegalStateException mismatch) {
       return false;
     }
+  }
+
+  private IntakeAgentRunFinalizationReadRequest targetFinalizationReadRequest(
+      IntakeWorkflowCommand command, IntakeAgentRunFinalizationReadRequest.Mode mode) {
+    return winningAttemptEnabled
+        ? IntakeAgentRunFinalizationReadRequest.winningAttempt(mode, command, targetAgentRunChild)
+        : IntakeAgentRunFinalizationReadRequest.exact(mode, command, targetAgentRunChild);
+  }
+
+  private void requireTerminalNoCommitRecovery(
+      IntakeTerminalNoCommitRecoveryRequest request) {
+    Objects.requireNonNull(request, "request must not be null");
+    TargetIntakeCommandTerminalNoCommit authority = request.authority();
+    if (!IntakeTerminalNoCommitRecoveryRequest.SCHEMA_VERSION.equals(
+            request.schemaVersion())
+        || authority == null
+        || !TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(
+            authority.schemaVersion())) {
+      throw new IllegalArgumentException(
+          "terminal-no-commit recovery requires v2 request and authority");
+    }
+    if (completedTerminalNoCommitRecoveryRequest != null
+        || completedTerminalNoCommitRecoveryResult != null) {
+      if (!request.equals(completedTerminalNoCommitRecoveryRequest)
+          || completedTerminalNoCommitRecoveryResult == null) {
+        throw new IllegalArgumentException("terminal-no-commit recovery replay conflicts");
+      }
+      return;
+    }
+    if (start == null
+        || !Workflow.getInfo().getWorkflowId().equals(request.workflowId())
+        || !Workflow.getInfo().getRunId().equals(request.workflowRunId())) {
+      throw new IllegalArgumentException("terminal-no-commit recovery workflow is stale");
+    }
+    if (!Workflow.getInfo().getFirstExecutionRunId().equals(authority.roomWorkflowRunId())
+        || !start.tenantSurrogate().equals(authority.tenantSurrogate())
+        || !start.caseId().equals(authority.caseId())
+        || start.roomEpoch() != authority.roomEpoch()
+        || start.fencingToken() != authority.fencingToken()
+        || !start.workflowBuildId().equals(authority.roomWorkflowBuildId())
+        || nextCommandSequence != authority.caseCommandSequence() + 1
+        || nextEventSequence - 1 != authority.lastCaseEventSequence()) {
+      throw new IllegalArgumentException("terminal-no-commit recovery room authority is stale");
+    }
+    if (pendingCommand != null
+        || targetAgentRunChild != null
+        || authoritativeCommittedTargetFinalization != null
+        || targetAgentRunPreCommandState != null
+        || activeOrchestration != null
+        || activeCancellationScope != null
+        || activeOrchestrationCommandId != null
+        || activityExecution != null) {
+      throw new IllegalStateException("terminal-no-commit recovery requires released Room state");
+    }
+    CommandObservation observation = commandObservations.get(authority.commandId());
+    if (observation == null || observation.decision() == null) {
+      throw new IllegalStateException("terminal-no-commit rejected command observation is absent");
+    }
+    IntakeWorkflowCommand command = observation.command();
+    IntakeCommandDecision decision = observation.decision();
+    IntakeTargetAgentRunContext target =
+        command.executionContext() == null ? null : command.executionContext().targetAgentRun();
+    var targetRequest = target == null ? null : target.request();
+    var graph = targetRequest == null ? null : targetRequest.command();
+    var message = graph == null ? null : graph.eventRef();
+    String retainedTerminalReason = "TARGET_AGENT_RUN_" + authority.agentRunOutcome().name();
+    if (!"REJECTED".equals(decision.status())
+        || decision.reasonCode() == null
+        || (!decision.reasonCode().equals(authority.errorCode())
+            && !decision.reasonCode().equals(retainedTerminalReason))
+        || command.sequence() != authority.caseCommandSequence()
+        || !command.requestHash().equals(authority.commandRequestHash())
+        || !command.payloadRef().equals(authority.messageRef())
+        || !command.payloadHash().equals(authority.messageHash())
+        || target == null
+        || targetRequest == null
+        || graph == null
+        || !target.activationId().equals(authority.activationId())
+        || !target.activationManifestHash().equals(authority.activationManifestHash())
+        || !target.caseBuildId().equals(authority.caseBuildId())
+        || !target.controlBuildId().equals(authority.controlBuildId())
+        || !target.agentBuildId().equals(authority.agentBuildId())
+        || !target.graphBindingHash().equals(authority.graphBindingHash())
+        || !target.graphCodeBuildId().equals(authority.graphCodeBuildId())
+        || !target.commandHash().equals(authority.commandHash())
+        || !target.commandEnvelopeHash().equals(authority.commandEnvelopeHash())
+        || !targetRequest.logicalInputHash().equals(authority.logicalInputHash())
+        || !graph.requestHash().equals(authority.agentRunExecutionRequestHash())
+        || !targetRequest.logicalRunId().equals(authority.logicalRunId())
+        || !targetRequest.attemptId().equals(authority.rootAttemptId())
+        || target.expectedProcessRevision() != authority.expectedProcessRevision()
+        || target.expectedRoomRevision() != authority.expectedRoomRevision()
+        || message == null
+        || !message.artifactId().equals(authority.messageId())) {
+      throw new IllegalArgumentException("terminal-no-commit rejected authority conflicts");
+    }
+    boolean sourceCoordinates =
+        processRevision == authority.expectedProcessRevision()
+            && roomRevision == authority.expectedRoomRevision();
+    boolean targetCoordinates =
+        processRevision == authority.newProcessRevision()
+            && roomRevision == authority.newRoomRevision();
+    if (!sourceCoordinates || targetCoordinates) {
+      if (!targetCoordinates) {
+        throw new IllegalStateException("terminal-no-commit Room revisions are stale");
+      }
+    }
+    boolean formalEventApplied =
+        eventObservations.values().stream()
+            .anyMatch(
+                observed ->
+                    observed.applied()
+                        && observed.event().commandId().equals(authority.commandId()));
+    if (formalEventApplied) {
+      throw new IllegalStateException("terminal-no-commit command already has a formal event");
+    }
+  }
+
+  private void requireTargetFinalizationRecovery(
+      IntakeAgentRunFinalizationRecoveryRequest request, boolean handlerRevalidation) {
+    Objects.requireNonNull(request, "request must not be null");
+    if (completedTargetFinalizationRecoveryRequest != null) {
+      if (!completedTargetFinalizationRecoveryRequest.equals(request)
+          || completedTargetFinalizationRecoveryResult == null) {
+        throw new IllegalArgumentException("target finalization recovery replay conflicts");
+      }
+      return;
+    }
+    if (activeTargetFinalizationRecovery != null
+        && (!handlerRevalidation || !activeTargetFinalizationRecovery.equals(request))) {
+      throw new IllegalStateException("target finalization recovery is already running");
+    }
+    if (start == null) {
+      throw new IllegalStateException("target finalization recovery requires an initialized room");
+    }
+    if (roomPhase == IntakeRoomPhase.COMPLETED || terminalReason != null) {
+      throw new IllegalStateException("target finalization recovery requires a nonterminal room");
+    }
+    if (!winningAttemptEnabled) {
+      throw new IllegalStateException("target finalization recovery requires v2 winning authority");
+    }
+    if (pendingCommand == null
+        || pendingCommand.executionContext() == null
+        || !pendingCommand.executionContext().isTargetAgentRun()
+        || targetAgentRunChild == null
+        || targetAgentRunPreCommandState == null
+        || !targetAgentRunPreCommandState.commandId().equals(pendingCommand.commandId())) {
+      throw new IllegalStateException("target finalization recovery state is unavailable");
+    }
+    if (activeOrchestration != null
+        || activeCancellationScope != null
+        || activeOrchestrationCommandId != null
+        || activeCancellationRequested
+        || activityExecution != null
+        || (deferredCancellation != null && !handlerRevalidation)) {
+      throw new IllegalStateException("target finalization recovery requires idle orchestration");
+    }
+    request.requireMatches(
+        Workflow.getInfo().getWorkflowId(),
+        Workflow.getInfo().getRunId(),
+        start,
+        pendingWorkflowCommand(),
+        targetAgentRunChild,
+        authoritativeCommittedTargetFinalization,
+        processRevision,
+        roomRevision,
+        targetAgentRunPreCommandState.lastCaseEventSequence());
+  }
+
+  private static void requireExpectedRecoveryFinalization(
+      IntakeAgentRunFinalizationRecoveryRequest request,
+      IntakeAgentRunFinalizationReadResult finalization) {
+    IntakeAgentRunFinalizationReadResult.Resolution expectedResolution =
+        request.isTerminalNoCommitRecovery()
+            ? IntakeAgentRunFinalizationReadResult.Resolution.TERMINAL_NO_COMMIT
+            : IntakeAgentRunFinalizationReadResult.Resolution.COMMITTED;
+    if (finalization == null
+        || finalization.resolution() != expectedResolution
+        || !request.expectedFinalization().equals(finalization)) {
+      throw new IllegalArgumentException(
+          "target finalization recovery read does not match expected authority");
+    }
+  }
+
+  private static void rethrowTargetFinalizationRecoveryCancellation(ActivityFailure failure) {
+    Throwable current = failure.getCause();
+    while (current != null) {
+      if (current instanceof CanceledFailure canceled) {
+        throw canceled;
+      }
+      current = current.getCause();
+    }
+  }
+
+  private static ApplicationFailure targetFinalizationRecoveryFailure(RuntimeException failure) {
+    return ApplicationFailure.newNonRetryableFailureWithCause(
+        "target finalization recovery failed after acceptance",
+        TARGET_FINALIZATION_RECOVERY_FAILURE,
+        failure);
   }
 
   private static boolean cancellationReconciliationEnabled() {
@@ -2660,6 +3240,15 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     runGeneration = carry.runGeneration();
     lastDecision = carry.lastDecision();
     targetAgentRunChild = carry.targetAgentRunChild();
+    completedTerminalNoCommitRecoveryResult = carry.completedTerminalNoCommitRecovery();
+    completedTerminalNoCommitRecoveryRequest =
+        completedTerminalNoCommitRecoveryResult == null
+            ? null
+            : completedTerminalNoCommitRecoveryResult.request();
+    completedTargetFinalizationRecoveryRequest =
+        carry.completedTargetFinalizationRecoveryRequest();
+    completedTargetFinalizationRecoveryResult =
+        carry.completedTargetFinalizationRecoveryResult();
     carry.observedCommands()
         .forEach(
             observed ->
@@ -2727,9 +3316,14 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         return false;
       }
     }
+    boolean carryPendingFinalizationRecovery = hasCompletedPendingFinalizationRecoveryCache();
     IntakeRoomCarryState carry =
         new IntakeRoomCarryState(
-            targetSourceEventObservations.isEmpty()
+            carryPendingFinalizationRecovery
+                ? "intake-room-carry-state.v5"
+                : completedTerminalNoCommitRecoveryResult != null
+                ? "intake-room-carry-state.v4"
+                : targetSourceEventObservations.isEmpty()
                 ? targetAgentRunChild == null
                     ? "intake-room-carry-state.v1"
                     : "intake-room-carry-state.v2"
@@ -2774,11 +3368,41 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
                     event ->
                         new IntakeRoomCarryState.ObservedTargetSourceEvent(
                             "intake-observed-target-source-event.v1", event))
-                .toList());
+                .toList(),
+            completedTerminalNoCommitRecoveryResult,
+            carryPendingFinalizationRecovery
+                ? completedTargetFinalizationRecoveryRequest
+                : null,
+            carryPendingFinalizationRecovery
+                ? completedTargetFinalizationRecoveryResult
+                : null);
     ContinueAsNewOptions options =
         ContinueAsNewOptions.newBuilder().setMemo(Map.of(CARRY_STATE_MEMO_KEY, carry)).build();
     Workflow.continueAsNew(options, start.withCarryState(carry));
     return true;
+  }
+
+  private boolean hasCompletedPendingFinalizationRecoveryCache() {
+    if (completedTargetFinalizationRecoveryRequest == null
+        && completedTargetFinalizationRecoveryResult == null) {
+      return false;
+    }
+    if (completedTargetFinalizationRecoveryRequest == null
+        || completedTargetFinalizationRecoveryResult == null
+        || !completedTargetFinalizationRecoveryRequest.equals(
+            completedTargetFinalizationRecoveryResult.request())) {
+      throw new IllegalStateException("target finalization recovery cache is incomplete");
+    }
+    boolean v2Request =
+        IntakeAgentRunFinalizationRecoveryRequest.V2_SCHEMA_VERSION.equals(
+            completedTargetFinalizationRecoveryRequest.schemaVersion());
+    boolean v2Result =
+        IntakeAgentRunFinalizationRecoveryResult.V2_SCHEMA_VERSION.equals(
+            completedTargetFinalizationRecoveryResult.schemaVersion());
+    if (v2Request != v2Result) {
+      throw new IllegalStateException("target finalization recovery cache schema conflicts");
+    }
+    return v2Request;
   }
 
   private boolean matchesEnvelope(IntakeWorkflowCommand command) {
@@ -2837,12 +3461,16 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       String commandId,
       IntakeRoomPhase roomPhase,
       IntakeParty activeParty,
-      IntakeParty readinessParty) {
+      IntakeParty readinessParty,
+      long lastCaseEventSequence) {
 
     private TargetAgentRunPreCommandState {
       Objects.requireNonNull(commandId, "commandId must not be null");
       Objects.requireNonNull(roomPhase, "roomPhase must not be null");
       Objects.requireNonNull(activeParty, "activeParty must not be null");
+      if (lastCaseEventSequence < 0) {
+        throw new IllegalArgumentException("lastCaseEventSequence must not be negative");
+      }
     }
   }
 

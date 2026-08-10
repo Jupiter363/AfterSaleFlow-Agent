@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.targete2e.rooms.evidence;
 
+import com.example.dispute.room.application.RoomMessageView;
 import java.sql.Connection;
 
 /**
@@ -9,7 +10,10 @@ import java.sql.Connection;
  */
 @FunctionalInterface
 public interface TargetEvidenceFormalCommitPort {
-  CommitResult commit(Connection transaction, TargetEvidenceFinalizationRequest request);
+  CommitResult commit(
+      Connection transaction,
+      TargetEvidenceFinalizationRequest request,
+      RoomMessageView formalMessage);
 
   record CommitResult(String formalObjectId, String formalCommitHash) {
     public CommitResult {

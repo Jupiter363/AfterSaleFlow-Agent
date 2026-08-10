@@ -239,6 +239,7 @@ public class RoomMessageEntity extends AbstractEntity {
     // 下游影响：「RoomMessageEntity.getSequenceNo()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「long」交给调用方。
     // 系统意义：「RoomMessageEntity.getSequenceNo()」直接影响 PostgreSQL 事实投影；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     public long getSequenceNo() { return sequenceNo; }
+    public MessageSenderType getSenderType() { return senderType; }
     // 所属模块：【房间协作与权限 / JPA 实体层】「RoomMessageEntity.getSenderRole()」。
     // 具体功能：「RoomMessageEntity.getSenderRole()」：读取「RoomMessageEntity」中的「senderRole」状态，向 JPA、应用服务或序列化层返回「String」。
     // 上游调用：「RoomMessageEntity.getSenderRole()」的上游调用点包括 「EvidenceAgentTurnService.isSupersededOpeningMessage」、「EvidenceAgentTurnService.visibleToAccessSession」、「EvidenceAgentTurnService.view」、「EvidenceAgentTurnService.isPartySender」。

@@ -59,8 +59,12 @@ public interface AgentRunLedger {
             AgentRunRecoveryAction recoveryAction,
             Instant completedAt);
 
-    /** Persists the exact Activity failure result so a lost completion can be replayed verbatim. */
-    void recordAttemptFailureResult(
+    /**
+     * Persists the Activity failure result and its replay-safe global terminal atomically.
+     *
+     * @return the exact durable result, including a terminal sequence appended by the ledger
+     */
+    ExecuteAgentRunResult recordAttemptFailureResult(
             AgentRunAttemptStatus status, ExecuteAgentRunResult result);
 
     Optional<AgentRunFinalizationReceipt> committedReceipt(String agentRunId);

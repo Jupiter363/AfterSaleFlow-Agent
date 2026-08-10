@@ -15,6 +15,7 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.domain.MessageSenderType;
+import com.example.dispute.room.domain.MessageSource;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.PermissionScope;
 import com.example.dispute.room.domain.RoomStatus;
@@ -53,6 +54,12 @@ import org.springframework.transaction.annotation.Transactional;
 // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Service
 public class RoomMessageService {
+
+    @FunctionalInterface
+    public interface TargetEvidenceRunMaterializer {
+
+        String materialize(RoomMessageView sealedMessage);
+    }
 
     private final FulfillmentCaseRepository caseRepository;
     private final CaseRoomRepository roomRepository;
@@ -154,17 +161,19 @@ public class RoomMessageService {
             String idempotencyKey,
             String traceId) {
         return post(
-                caseId, roomType, command, actor, idempotencyKey, traceId, false);
+                caseId, roomType, command, actor, idempotencyKey, traceId, false, null);
     }
 
-    /** Persists the submission fact while the target Evidence command bridge owns agent dispatch. */
+    /** Materializes the target run before inserting its immutable submission message once. */
     @Transactional
     public RoomMessageView postTargetEvidenceSubmission(
             String caseId,
             RoomMessageCommand command,
             AuthenticatedActor actor,
             String idempotencyKey,
-            String traceId) {
+            String traceId,
+            TargetEvidenceRunMaterializer runMaterializer) {
+        Objects.requireNonNull(runMaterializer, "runMaterializer");
         return post(
                 caseId,
                 RoomType.EVIDENCE,
@@ -172,7 +181,73 @@ public class RoomMessageService {
                 actor,
                 idempotencyKey,
                 traceId,
-                true);
+                true,
+                runMaterializer);
+    }
+
+    /** Freezes the formal Clerk turn from the exact sealed target Evidence submission message. */
+    public EvidenceAgentTurnCommand prepareTargetEvidenceSubmissionTurn(
+            String caseId, AuthenticatedActor actor, RoomMessageView message) {
+        Objects.requireNonNull(message, "message");
+        boolean exact = caseId.equals(message.caseId())
+                && actor.actorId().equals(message.senderId())
+                && actor.role().name().equals(message.senderRole())
+                && message.messageType() == MessageType.PARTY_EVIDENCE_REFERENCE
+                && message.messageSource() == MessageSource.PARTY_ACTION
+                && message.createdAt() != null;
+        if (!exact) {
+            throw new IllegalArgumentException(
+                    "target Evidence turn requires the exact sealed party evidence-reference message");
+        }
+        return evidenceAgentTurnService.prepareTargetSubmissionTurn(
+                caseId,
+                actor,
+                new RoomMessageCommand(
+                        message.messageType(), message.messageText(), message.attachmentRefs()),
+                message.id(),
+                message.createdAt());
+    }
+
+    /** Reads the exact persisted submission message used as same-batch replay authority. */
+    @Transactional(readOnly = true)
+    public RoomMessageView readEvidenceSubmissionReplay(
+            String caseId, String roomMessageId, AuthenticatedActor actor) {
+        return view(requireExactEvidenceSubmissionMessage(caseId, roomMessageId, actor, true));
+    }
+
+    private RoomMessageEntity requireExactEvidenceSubmissionMessage(
+            String caseId,
+            String roomMessageId,
+            AuthenticatedActor actor,
+            boolean allowHearingReplay) {
+        if (caseId == null || caseId.isBlank()
+                || roomMessageId == null || roomMessageId.isBlank()) {
+            throw new IllegalArgumentException(
+                    "evidence submission message authority is incomplete");
+        }
+        RoomMessageEntity message = messageRepository
+                .findById(roomMessageId)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "evidence submission message was not found"));
+        CaseRoomEntity room = roomRepository
+                .findById(message.getRoomId())
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "evidence submission room was not found"));
+        boolean submissionRoom = room.getRoomType() == RoomType.EVIDENCE
+                || (allowHearingReplay && room.getRoomType() == RoomType.HEARING);
+        boolean exact = caseId.equals(message.getCaseId())
+                && caseId.equals(room.getCaseId())
+                && submissionRoom
+                && actor.actorId().equals(message.getSenderId())
+                && actor.role().name().equals(message.getSenderRole())
+                && message.getSenderType() == MessageSenderType.PARTY
+                && message.getMessageType() == MessageType.PARTY_EVIDENCE_REFERENCE
+                && message.getMessageSource() == MessageSource.PARTY_ACTION;
+        if (!exact) {
+            throw new IllegalStateException(
+                    "evidence submission message authority drifted");
+        }
+        return message;
     }
 
     /** Records the durable, idempotent browser fact that the target Evidence command references. */
@@ -200,7 +275,8 @@ public class RoomMessageService {
             AuthenticatedActor actor,
             String idempotencyKey,
             String traceId,
-            boolean suppressLegacyEvidenceAgent) {
+            boolean suppressLegacyEvidenceAgent,
+            TargetEvidenceRunMaterializer targetEvidenceRunMaterializer) {
         FulfillmentCaseEntity dispute =
                 caseRepository
                         .findByIdForUpdate(caseId)
@@ -218,12 +294,22 @@ public class RoomMessageService {
                         .findByCaseIdAndRoomType(dispute.getId(), roomType)
                         .orElseThrow(() -> new IllegalArgumentException("room not found"));
         boolean targetEvidence = roomType == RoomType.EVIDENCE && isTargetEvidenceEpoch(caseId);
+        if (targetEvidenceRunMaterializer != null && !targetEvidence) {
+            throw new IllegalStateException(
+                    "target Evidence run materializer requires an active target Evidence epoch");
+        }
         return messageRepository
                 .findByCaseIdAndIdempotencyKey(caseId, idempotencyKey)
                 .map(
                         existing -> {
                             assertSameImmutableRequest(
                                     existing, requestedRoom, command, actor);
+                            if (targetEvidenceRunMaterializer != null
+                                    && (existing.getAgentRunId() == null
+                                            || existing.getAgentRunId().isBlank())) {
+                                throw new IllegalStateException(
+                                        "target Evidence submission replay has no logical run authority");
+                            }
                             return view(existing);
                         })
                 .orElseGet(
@@ -236,7 +322,8 @@ public class RoomMessageService {
                                         idempotencyKey,
                                         traceId,
                                         intakeIngressSelection,
-                                        suppressLegacyEvidenceAgent || targetEvidence));
+                                        suppressLegacyEvidenceAgent || targetEvidence,
+                                        targetEvidenceRunMaterializer));
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomMessageService.list(String,RoomType,AuthenticatedActor)」。
@@ -320,9 +407,6 @@ public class RoomMessageService {
                     caseRepository.findById(caseId)
                             .orElseThrow(() -> new IllegalArgumentException("case not found"));
             intakeProgressService.assertEvidenceAccess(dispute, actor);
-            if (isTargetEvidenceEpoch(caseId)) {
-                return null;
-            }
             return evidenceAgentTurnService.ensureOpeningOrStart(
                     caseId, roomType, actor, traceId, requestId);
         }
@@ -429,7 +513,8 @@ public class RoomMessageService {
             String idempotencyKey,
             String traceId,
             IntakeIngressSelection intakeIngressSelection,
-            boolean suppressLegacyEvidenceAgent) {
+            boolean suppressLegacyEvidenceAgent,
+            TargetEvidenceRunMaterializer targetEvidenceRunMaterializer) {
         if (room.getRoomStatus() != RoomStatus.OPEN) {
             throw new IllegalStateException("room is not open");
         }
@@ -507,6 +592,15 @@ public class RoomMessageService {
                                     intakeIngressSelection.targetGrant()));
             message.attachAgentRun(receipt.runId());
         }
+        if (targetEvidenceRunMaterializer != null) {
+            validateTargetEvidenceDraft(dispute, room, message, actor);
+            String logicalRunId = targetEvidenceRunMaterializer.materialize(view(message));
+            if (logicalRunId == null || logicalRunId.isBlank()) {
+                throw new IllegalStateException(
+                        "target Evidence run materializer returned no logical run authority");
+            }
+            message.attachAgentRun(logicalRunId);
+        }
         RoomMessageEntity saved = messageRepository.save(message);
         eventService.recordRoomMessage(
                 dispute.getId(),
@@ -517,6 +611,30 @@ public class RoomMessageService {
                 audienceActorIdsJson,
                 actor.actorId());
         return view(saved);
+    }
+
+    private void validateTargetEvidenceDraft(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity room,
+            RoomMessageEntity message,
+            AuthenticatedActor actor) {
+        boolean exact = message.getId() != null
+                && !message.getId().isBlank()
+                && dispute.getId().equals(message.getCaseId())
+                && dispute.getId().equals(room.getCaseId())
+                && room.getId().equals(message.getRoomId())
+                && room.getRoomType() == RoomType.EVIDENCE
+                && message.getSenderType() == MessageSenderType.PARTY
+                && actor.role().name().equals(message.getSenderRole())
+                && actor.actorId().equals(message.getSenderId())
+                && message.getMessageType() == MessageType.PARTY_EVIDENCE_REFERENCE
+                && message.getMessageSource() == MessageSource.PARTY_ACTION
+                && message.getAgentRunId() == null
+                && message.getCreatedAt() != null;
+        if (!exact) {
+            throw new IllegalStateException(
+                    "target Evidence submission message authority drifted before persistence");
+        }
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomMessageService.hearingRoundForPartyMessage(FulfillmentCaseEntity,CaseRoomEntity,RoomMessageCommand,AuthenticatedActor)」。

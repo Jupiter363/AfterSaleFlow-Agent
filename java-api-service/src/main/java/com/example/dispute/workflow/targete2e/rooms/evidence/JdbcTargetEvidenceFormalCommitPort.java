@@ -1,5 +1,8 @@
 package com.example.dispute.workflow.targete2e.rooms.evidence;
 
+import com.example.dispute.room.application.RoomMessageView;
+import com.example.dispute.room.domain.MessageSource;
+import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -20,7 +23,9 @@ import java.util.Objects;
  * state and never advances revisions a second time.
  */
 public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceFormalCommitPort {
-  private static final String SENDER_ID = "target-e2e-evidence-clerk";
+  private static final String SENDER_ROLE = "EVIDENCE_CLERK";
+  private static final String SENDER_ID = "evidence-clerk";
+  private static final String SENDER_TYPE = "AGENT";
   private static final String MESSAGE_SOURCE = "AGENT_LLM";
   private static final String MESSAGE_TYPE = "AGENT_MESSAGE";
   private final ObjectMapper objectMapper;
@@ -30,30 +35,17 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
   }
 
   @Override
-  public CommitResult commit(Connection transaction, TargetEvidenceFinalizationRequest request) {
+  public CommitResult commit(
+      Connection transaction,
+      TargetEvidenceFinalizationRequest request,
+      RoomMessageView formalMessage) {
     Objects.requireNonNull(transaction, "transaction");
     Objects.requireNonNull(request, "request");
+    Objects.requireNonNull(formalMessage, "formalMessage");
     try {
       requireCallerTransaction(transaction);
       var graph = request.command().request().command();
       require(graph.roomType() == RoomType.EVIDENCE, "graph room type is not Evidence");
-
-      String idempotencyKey = "target-e2e-evidence-final:" + request.formalOperationId();
-      String messageText =
-          "Evidence analysis completed and is pending the normal review workflow."
-              + " Proposal hash: "
-              + request.command().result().resultHash()
-              + ".";
-      String formalObjectId =
-          "EVD_FINAL_"
-              + ContractJson.sha256Hex(
-                      objectMapper.valueToTree(
-                          List.of(
-                              request.formalOperationId(),
-                              request.commandHash(),
-                              request.command().result().resultHash())))
-                  .substring(0, 32);
-      String resultUri = "urn:target-e2e:evidence-finalization:" + formalObjectId;
 
       Admission admission = lockAdmission(transaction, request.admissionId());
       requireAdmission(request, graph, admission);
@@ -61,13 +53,16 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       requireRootCommandLineage(request.command().request(), rootCommandId);
       Command command = lockCommand(transaction, graph.tenantSurrogate(), rootCommandId);
       requireCommand(request, graph, command);
-      String formalCommitHash = formalHash(request, formalObjectId, command.sequence());
       Epoch epoch = lockEpoch(transaction, graph.tenantSurrogate(), graph.caseId(), graph.roomEpoch());
       requireEpochBinding(request, graph, epoch);
       Projection projection = lockProjection(transaction, graph.caseId());
       requireProjectionBinding(request, graph, projection);
       String roomId = lockEvidenceRoom(transaction, epoch.roomId(), graph.caseId());
-      Existing existing = findExisting(transaction, graph.caseId(), idempotencyKey);
+      Existing existing = lockFormalMessage(transaction, formalMessage.id());
+      requireFormalMessage(request, formalMessage, existing, roomId);
+      String formalObjectId = existing.id();
+      String resultUri = "urn:target-e2e:evidence-formal-message:" + formalObjectId;
+      String formalCommitHash = formalHash(request, existing, command.sequence());
 
       if ("APPLIED".equals(command.status())) {
         requireReplayState(
@@ -75,29 +70,14 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
             command,
             epoch,
             projection,
-            existing,
-            formalObjectId,
-            roomId,
-            messageText,
             resultUri,
             formalCommitHash);
         return new CommitResult(formalObjectId, formalCommitHash);
       }
       require("ORCHESTRATION_ACCEPTED".equals(command.status()),
           "case command is not ready for Evidence formalization");
-      require(existing == null, "Evidence formal fact exists before command application");
       requireInitialCoordinates(request, epoch, projection);
 
-      long nextSequence = nextSequence(transaction, roomId);
-      insert(
-          transaction,
-          formalObjectId,
-          graph.caseId(),
-          roomId,
-          nextSequence,
-          idempotencyKey,
-          messageText,
-          request.command().request().agentRunId());
       advanceEpoch(transaction, epoch.id(), request);
       advanceProjection(transaction, graph.caseId(), request);
       applyCommand(transaction, command, request, graph, resultUri, formalCommitHash);
@@ -399,24 +379,8 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       Command command,
       Epoch epoch,
       Projection projection,
-      Existing existing,
-      String formalObjectId,
-      String roomId,
-      String messageText,
       String resultUri,
       String formalCommitHash) {
-    require(existing != null, "applied Evidence command has no formal fact");
-    require(formalObjectId.equals(existing.id()), "Evidence formal object id drifted");
-    require(roomId.equals(existing.roomId()), "Evidence formal room drifted");
-    require(existing.sequence() > 0, "Evidence formal sequence is invalid");
-    require(SENDER_ID.equals(existing.senderId()), "Evidence formal sender drifted");
-    require(MESSAGE_SOURCE.equals(existing.messageSource()), "Evidence formal source drifted");
-    require(MESSAGE_TYPE.equals(existing.messageType()), "Evidence formal message type drifted");
-    require(messageText.equals(existing.messageText()), "Evidence formal message drifted");
-    require(
-        request.command().request().agentRunId().equals(existing.agentRunId()),
-        "Evidence formal AgentRun drifted");
-    require(SENDER_ID.equals(existing.createdBy()), "Evidence formal creator drifted");
     require(
         resultUri.equals(command.resultUri()) && formalCommitHash.equals(command.resultHash()),
         "Evidence applied command result drifted");
@@ -448,77 +412,95 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
     }
   }
 
-  private static Existing findExisting(
-      Connection transaction, String caseId, String idempotencyKey) throws SQLException {
+  private static Existing lockFormalMessage(Connection transaction, String messageId)
+      throws SQLException {
     try (PreparedStatement statement = transaction.prepareStatement("""
-        select id, room_id, sequence_no, sender_id, message_source, message_type,
-               message_text, agent_run_id, created_by
+        select id, case_id, room_id, sequence_no, sender_type, sender_role, sender_id,
+               message_source, message_type, message_text, agent_run_id, idempotency_key, created_by
           from room_message
-         where case_id = ? and idempotency_key = ?
+         where id = ?
          for update
         """)) {
-      statement.setString(1, caseId);
-      statement.setString(2, idempotencyKey);
+      statement.setString(1, messageId);
       try (ResultSet row = statement.executeQuery()) {
-        if (!row.next()) return null;
+        require(row.next(), "target Evidence formal message is absent");
         Existing existing =
             new Existing(
                 row.getString(1),
                 row.getString(2),
-                row.getLong(3),
-                row.getString(4),
+                row.getString(3),
+                row.getLong(4),
                 row.getString(5),
                 row.getString(6),
                 row.getString(7),
                 row.getString(8),
-                row.getString(9));
-        require(!row.next(), "target Evidence formal operation is ambiguous");
+                row.getString(9),
+                row.getString(10),
+                row.getString(11),
+                row.getString(12),
+                row.getString(13));
+        require(!row.next(), "target Evidence formal message is ambiguous");
         return existing;
       }
     }
   }
 
-  private static long nextSequence(Connection transaction, String roomId) throws SQLException {
-    try (PreparedStatement statement = transaction.prepareStatement("""
-        select coalesce(max(sequence_no), 0) from room_message where room_id = ?
-        """)) {
-      statement.setString(1, roomId);
-      try (ResultSet row = statement.executeQuery()) {
-        require(row.next(), "target Evidence sequence read failed");
-        return Math.addExact(row.getLong(1), 1L);
-      }
-    }
+  private static void requireFormalMessage(
+      TargetEvidenceFinalizationRequest request,
+      RoomMessageView formalMessage,
+      Existing existing,
+      String roomId) {
+    var graph = request.command().request().command();
+    require(formalMessage.id().equals(existing.id()), "Evidence formal object id drifted");
+    require(graph.caseId().equals(formalMessage.caseId())
+            && graph.caseId().equals(existing.caseId()),
+        "Evidence formal case drifted");
+    require(roomId.equals(formalMessage.roomId()) && roomId.equals(existing.roomId()),
+        "Evidence formal room drifted");
+    require(formalMessage.sequenceNo() > 0
+            && formalMessage.sequenceNo() == existing.sequence(),
+        "Evidence formal sequence drifted");
+    require(SENDER_TYPE.equals(existing.senderType()), "Evidence formal sender type drifted");
+    require(SENDER_ROLE.equals(formalMessage.senderRole())
+            && SENDER_ROLE.equals(existing.senderRole()),
+        "Evidence formal sender role drifted");
+    require(SENDER_ID.equals(formalMessage.senderId()) && SENDER_ID.equals(existing.senderId()),
+        "Evidence formal sender drifted");
+    require(formalMessage.messageSource() == MessageSource.AGENT_LLM
+            && MESSAGE_SOURCE.equals(existing.messageSource()),
+        "Evidence formal source drifted");
+    require(formalMessage.messageType() == MessageType.AGENT_MESSAGE
+            && MESSAGE_TYPE.equals(existing.messageType()),
+        "Evidence formal message type drifted");
+    require(request.proposal().roomUtterance().equals(formalMessage.messageText())
+            && formalMessage.messageText().equals(existing.messageText()),
+        "Evidence formal message drifted");
+    require(request.command().request().agentRunId().equals(formalMessage.agentRunId())
+            && formalMessage.agentRunId().equals(existing.agentRunId()),
+        "Evidence formal AgentRun drifted");
+    require(expectedMessageIdempotencyKey(request).equals(existing.idempotencyKey()),
+        "Evidence formal idempotency authority drifted");
+    require(SENDER_ID.equals(existing.createdBy()), "Evidence formal creator drifted");
   }
 
-  private static void insert(
-      Connection transaction,
-      String id,
-      String caseId,
-      String roomId,
-      long sequence,
-      String idempotencyKey,
-      String messageText,
-      String agentRunId)
-      throws SQLException {
-    try (PreparedStatement statement = transaction.prepareStatement("""
-        insert into room_message (
-          id, case_id, room_id, sequence_no, sender_type, sender_role, sender_id,
-          audience_json, audience_actor_ids_json, message_source, message_type, message_text,
-          attachment_refs_json, agent_run_id, idempotency_key, created_at, trace_id, created_by)
-        values (?, ?, ?, ?, 'AGENT', 'EVIDENCE_CLERK', ?, '[]'::jsonb, '[]'::jsonb,
-          'AGENT_LLM', 'AGENT_MESSAGE', ?, '[]'::jsonb, ?, ?, now(), null, ?)
-        """)) {
-      statement.setString(1, id);
-      statement.setString(2, caseId);
-      statement.setString(3, roomId);
-      statement.setLong(4, sequence);
-      statement.setString(5, SENDER_ID);
-      statement.setString(6, messageText);
-      statement.setString(7, agentRunId);
-      statement.setString(8, idempotencyKey);
-      statement.setString(9, SENDER_ID);
-      require(statement.executeUpdate() == 1, "target Evidence formal fact was not inserted");
-    }
+  private static String expectedMessageIdempotencyKey(
+      TargetEvidenceFinalizationRequest request) {
+    var turn = request.material().material().evidenceAgentTurnCommand();
+    var context = turn.agentContext();
+    var event = turn.contextEnvelope().currentEvent();
+    require("PARTY_MESSAGE".equals(event.eventType()),
+        "Evidence formal event type drifted");
+    require(context.agentSessionId() != null && !context.agentSessionId().isBlank(),
+        "Evidence formal agent session is invalid");
+    require(event.turnNo() > 0, "Evidence formal turn number is invalid");
+    return "agent-evidence-turn:"
+        + request.command().request().command().caseId()
+        + ":"
+        + context.agentSessionId()
+        + ":"
+        + request.actorRole().name()
+        + ":"
+        + event.turnNo();
   }
 
   private static void advanceEpoch(
@@ -610,12 +592,24 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
   }
 
   private String formalHash(
-      TargetEvidenceFinalizationRequest request, String formalObjectId, long commandSequence) {
+      TargetEvidenceFinalizationRequest request, Existing message, long commandSequence) {
+    var proposal = request.proposal();
     return ContractJson.sha256Hex(
         objectMapper.valueToTree(
             List.of(
-                "target-e2e-evidence-formal-commit.v2",
-                formalObjectId,
+                "target-e2e-evidence-formal-commit.v3",
+                message.id(),
+                message.caseId(),
+                message.roomId(),
+                message.sequence(),
+                message.senderType(),
+                message.senderRole(),
+                message.senderId(),
+                message.messageSource(),
+                message.messageType(),
+                message.messageText(),
+                message.agentRunId(),
+                message.idempotencyKey(),
                 request.activationId(),
                 request.activationManifestHash(),
                 request.admissionId(),
@@ -623,12 +617,21 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
                 request.commandHash(),
                 request.commandEnvelopeHash(),
                 request.caseCommandRequestHash(),
+                request.formalOperationId(),
                 commandSequence,
                 request.roomFencingToken(),
                 request.expectedProcessRevision(),
                 request.expectedRoomRevision(),
                 request.actorId(),
                 request.actorRole().name(),
+                proposal.payloadRef(),
+                proposal.payloadHash(),
+                proposal.proposalHash(),
+                proposal.roomUtteranceSha256(),
+                ContractJson.sha256Hex(proposal.evidenceTurnResultJson()),
+                proposal.usage().inputTokens(),
+                proposal.usage().outputTokens(),
+                proposal.usage().totalTokens(),
                 request.command().result().resultHash())));
   }
 
@@ -699,12 +702,16 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
 
   private record Existing(
       String id,
+      String caseId,
       String roomId,
       long sequence,
+      String senderType,
+      String senderRole,
       String senderId,
       String messageSource,
       String messageType,
       String messageText,
       String agentRunId,
+      String idempotencyKey,
       String createdBy) {}
 }

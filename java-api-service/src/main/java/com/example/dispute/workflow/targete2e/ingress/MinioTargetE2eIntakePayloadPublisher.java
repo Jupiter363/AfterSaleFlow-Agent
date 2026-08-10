@@ -7,6 +7,8 @@ import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.minio.BucketExistsArgs;
 import io.minio.PutObjectArgs;
 import io.minio.MinioClient;
 import java.io.ByteArrayInputStream;
@@ -28,6 +30,8 @@ public final class MinioTargetE2eIntakePayloadPublisher
   private final MinioClient minio;
   private final String bucket;
   private final String prefix;
+  private volatile PreparationState preparationState = PreparationState.NEW;
+  private IllegalStateException preparationFailure;
 
   public MinioTargetE2eIntakePayloadPublisher(
       MinioClient minio, String bucket, String prefix) {
@@ -42,8 +46,34 @@ public final class MinioTargetE2eIntakePayloadPublisher
     this.prefix = prefix;
   }
 
+  /** Performs the write-free target API readiness proof exactly once on this publisher. */
+  public synchronized MinioTargetE2eIntakePayloadPublisher prepare() {
+    if (preparationState == PreparationState.READY) {
+      return this;
+    }
+    if (preparationState == PreparationState.FAILED) {
+      throw preparationFailure;
+    }
+    try {
+      initializeCanonicalValidation();
+      if (!minio.bucketExists(BucketExistsArgs.builder().bucket(bucket).build())) {
+        throw new IllegalStateException("target Intake payload bucket is missing");
+      }
+      preparationState = PreparationState.READY;
+      return this;
+    } catch (Exception failure) {
+      preparationFailure =
+          new IllegalStateException("target Intake payload readiness failed", failure);
+      preparationState = PreparationState.FAILED;
+      throw preparationFailure;
+    }
+  }
+
   @Override
   public StoredPayload publish(PublishRequest request) {
+    if (preparationState != PreparationState.READY) {
+      throw new IllegalStateException("target Intake payload publisher is not ready");
+    }
     Objects.requireNonNull(request, "request");
     String hashField = HASH_FIELDS.get(request.schemaVersion());
     if (hashField == null && !IntakeBranchCommand.SCHEMA_VERSION.equals(request.schemaVersion())) {
@@ -89,6 +119,23 @@ public final class MinioTargetE2eIntakePayloadPublisher
         payload.length);
   }
 
+  private static void initializeCanonicalValidation() {
+    ObjectNode selfHashed =
+        MAPPER
+            .createObjectNode()
+            .put("schema_version", "intake-domain-snapshot.v2")
+        .put("snapshot_hash", "0".repeat(64));
+    String selfHash = IntakeContractHashes.canonicalHashExcluding(selfHashed, "snapshot_hash");
+    selfHashed.put("snapshot_hash", selfHash);
+    requireCanonicalSelfHash(
+        ContractJson.canonicalize(selfHashed), "snapshot_hash", selfHash);
+
+    ObjectNode branch =
+        MAPPER.createObjectNode().put("schema_version", IntakeBranchCommand.SCHEMA_VERSION);
+    requireCanonicalBranchHash(
+        ContractJson.canonicalize(branch), ContractJson.sha256Hex(branch));
+  }
+
   static void requireCanonicalSelfHash(byte[] payload, String hashField, String expectedHash) {
     try {
       JsonNode document = MAPPER.readTree(payload);
@@ -125,5 +172,11 @@ public final class MinioTargetE2eIntakePayloadPublisher
       }
       throw new IllegalArgumentException("target Intake branch payload hash is invalid", failure);
     }
+  }
+
+  private enum PreparationState {
+    NEW,
+    READY,
+    FAILED
   }
 }

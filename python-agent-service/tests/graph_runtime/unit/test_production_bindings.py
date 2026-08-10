@@ -12,15 +12,23 @@ from typing import Any, TypedDict, cast
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from langchain_core.messages import AIMessageChunk
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
+from app.agents.evidence_clerk.workflow import EVIDENCE_TURN_MODEL_NODE_NAME
 import app.graph_runtime.intake_executor as intake_executor
 import app.graph_runtime.production_bindings as production_bindings
-from app.api.graph_lifecycle import GraphExecutorKernel
+import app.llm as llm_module
+from app.api.graph_lifecycle import (
+    GraphApplicationRuntime,
+    GraphExecutorKernel,
+    GraphRuntimeHandle,
+    create_graph_readiness_router,
+)
 from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
     GatewayBackedGraphCommandStreamService,
@@ -87,7 +95,7 @@ from app.security.invocation_envelope import (
     VerifiedReconciliation,
     invocation_binding_claims,
 )
-from app.llm import GovernedProviderRequest, LiteLlmProxyClient
+from app.llm import AgentServiceUnavailable, GovernedProviderRequest, LiteLlmProxyClient
 from app.model_runtime.transports import (
     ModelTransportCompleted,
     ModelTransportRequest,
@@ -763,6 +771,353 @@ def test_executor_factory_registers_a_real_exact_compiled_executor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_target_intake_preparation_is_explicit_shared_coalesced_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients: list[Any] = []
+    preparation_requests: list[dict[str, Any]] = []
+    real_async_client = httpx.AsyncClient
+    first_request_entered = asyncio.Event()
+    release_first_request = asyncio.Event()
+    block_first_request = True
+    clock = [100.0]
+    response_payload: list[object] = [
+        {"choices": [{"message": {"role": "assistant", "content": "OK"}}]}
+    ]
+
+    class FakeResponse:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class FakeAsyncClient:
+        def __init__(
+            self,
+            *,
+            timeout: float,
+            transport: object,
+            limits: httpx.Limits | None = None,
+        ) -> None:
+            self.timeout = timeout
+            self.transport = transport
+            self.limits = limits
+            self.posts: list[dict[str, Any]] = []
+            self.closed = False
+            clients.append(self)
+
+        async def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            json: dict[str, Any],
+            timeout: float,
+        ) -> FakeResponse:
+            self.posts.append(
+                {
+                    "url": url,
+                    "headers": dict(headers),
+                    "json": deepcopy(json),
+                    "timeout": timeout,
+                }
+            )
+            return FakeResponse(self.payload)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    async def fake_limited_response(
+        client: object,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json_body: dict[str, Any],
+        max_body_bytes: int,
+        deadline_seconds: float,
+    ) -> FakeResponse:
+        nonlocal block_first_request
+        preparation_requests.append(
+            {
+                "client": client,
+                "url": url,
+                "headers": dict(headers),
+                "json": deepcopy(json_body),
+                "max_body_bytes": max_body_bytes,
+                "deadline_seconds": deadline_seconds,
+            }
+        )
+        if block_first_request:
+            block_first_request = False
+            first_request_entered.set()
+            await release_first_request.wait()
+        return FakeResponse(response_payload[0])
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        llm_module,
+        "_apost_with_limited_response",
+        fake_limited_response,
+    )
+    client = LiteLlmProxyClient(
+        "http://model-runtime:4000",
+        "qwen3.7-plus-target",
+        "test-startup-key",
+        timeout_seconds=120.0,
+    )
+    client._intake_preparation_clock = lambda: clock[0]
+
+    await client.aopen()
+    opened_client = clients[-1]
+    recorder_calls: list[str] = []
+
+    class ExplodingRecorder:
+        def record_provider_call(self, _intent: object) -> None:
+            recorder_calls.append("sync")
+
+        async def arecord_provider_call(self, _intent: object) -> None:
+            recorder_calls.append("async")
+
+    recorder_token = llm_module._ACTIVE_PROVIDER_CALL_RECORDER.set(ExplodingRecorder())
+    first_waiter = asyncio.create_task(client.aprepare_intake_infrastructure())
+    await first_request_entered.wait()
+    second_waiter = asyncio.create_task(client.aprepare_intake_infrastructure())
+    await asyncio.sleep(0)
+    assert len(preparation_requests) == 1
+    first_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_waiter
+    release_first_request.set()
+    await second_waiter
+    clock[0] += 4.999
+    await client.aprepare_intake_infrastructure()
+    async with client._lease_async_client() as leased_client:
+        assert leased_client is opened_client
+
+    assert opened_client.posts == []
+    assert len(preparation_requests) == 1
+    post = preparation_requests[0]
+    assert post == {
+        "client": opened_client,
+        "url": "http://model-runtime:4000/v1/chat/completions",
+        "headers": {"Authorization": "Bearer test-startup-key"},
+        "json": {
+            "model": "qwen3.7-plus-target",
+            "messages": [
+                {"role": "system", "content": "Return exactly OK."},
+                {"role": "user", "content": "OK"},
+            ],
+            "temperature": 0,
+            "max_tokens": 3,
+            "enable_thinking": False,
+        },
+        "max_body_bytes": 16_384,
+        "deadline_seconds": 15.0,
+    }
+    assert opened_client.timeout == 120.0
+    assert opened_client.limits is not None
+    assert opened_client.limits.keepalive_expiry == 900.0
+    clock[0] += 0.01
+    await client.aprepare_intake_infrastructure()
+    assert len(preparation_requests) == 2
+    await client.aclose()
+    assert opened_client.closed is True
+
+    failed = LiteLlmProxyClient(
+        "http://model-runtime:4000",
+        "qwen3.7-plus-target",
+        "test-startup-key",
+        timeout_seconds=7.0,
+    )
+    failed._intake_preparation_clock = lambda: clock[0]
+    await failed.aopen()
+    failed_client = clients[-1]
+    response_payload[0] = {
+        "choices": [],
+        "sensitive_response": "MUST_NOT_ESCAPE",
+    }
+    with pytest.raises(
+        AgentServiceUnavailable,
+        match="^LiteLLM intake infrastructure preparation failed$",
+    ) as error:
+        await failed.aprepare_intake_infrastructure()
+    assert "MUST_NOT_ESCAPE" not in str(error.value)
+    assert failed_client.posts == []
+    assert len(preparation_requests) == 3
+    assert preparation_requests[-1]["client"] is failed_client
+    assert preparation_requests[-1]["deadline_seconds"] == 7.0
+    response_payload[0] = {
+        "choices": [{"message": {"role": "assistant", "content": "OK"}}]
+    }
+    await failed.aprepare_intake_infrastructure()
+    await failed.aprepare_intake_infrastructure()
+    assert len(preparation_requests) == 4
+    await failed.aclose()
+
+    endpoint_client = LiteLlmProxyClient(
+        "http://model-runtime:4000",
+        "qwen3.7-plus-target",
+        "test-startup-key",
+        timeout_seconds=15.0,
+    )
+    endpoint_client._intake_preparation_clock = lambda: clock[0]
+    await endpoint_client.aopen()
+    endpoint_calls: list[str] = []
+
+    async def prepare_endpoint_infrastructure() -> None:
+        endpoint_calls.append("prepare")
+        await endpoint_client.aprepare_intake_infrastructure()
+
+    endpoint_gate = SimpleNamespace(accepting=True)
+    endpoint_runtime = GraphApplicationRuntime(
+        checkpoint_runtime=cast(Any, object()),
+        persistence_probe=cast(Any, object()),
+        durable_bulkhead=cast(Any, object()),
+        security_runtime=cast(
+            Any,
+            SimpleNamespace(readiness=lambda: SimpleNamespace(ready=True)),
+        ),
+        gateway=cast(Any, object()),
+        stream_service=cast(Any, object()),
+        reconciliation_service=cast(Any, object()),
+        admission_gate=cast(Any, endpoint_gate),
+        execution_verifier=cast(Any, object()),
+        reconciliation_verifier=cast(Any, object()),
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        intake_infrastructure_preparer=prepare_endpoint_infrastructure,
+    )
+    handle = GraphRuntimeHandle(settings=_settings())
+    handle._mode = GraphGatewayMode.TARGET_E2E_CANDIDATE
+    handle._runtime = cast(Any, endpoint_runtime)
+    app = FastAPI()
+    app.include_router(create_graph_readiness_router(handle))
+    async with real_async_client(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as api_client:
+        prepared = await api_client.post("/ready/intake-preparation")
+        assert prepared.status_code == 200
+        assert prepared.headers["content-type"] == "application/json"
+        assert prepared.json() == {
+            "schema_version": "intake-infrastructure-preparation.v1",
+            "status": "READY",
+        }
+        duplicate = await api_client.post("/ready/intake-preparation")
+        assert duplicate.status_code == 200
+        assert endpoint_calls == ["prepare", "prepare"]
+        assert len(preparation_requests) == 5
+        body_rejected = await api_client.post(
+            "/ready/intake-preparation",
+            json={"case_id": "must-not-be-authority"},
+        )
+        assert body_rejected.status_code == 400
+        assert len(preparation_requests) == 5
+        endpoint_gate.accepting = False
+        unavailable = await api_client.post("/ready/intake-preparation")
+        assert unavailable.status_code == 503
+        assert unavailable.json()["status"] == "UNAVAILABLE"
+        endpoint_gate.accepting = True
+        handle._mode = GraphGatewayMode.SHADOW
+        wrong_mode = await api_client.post("/ready/intake-preparation")
+        assert wrong_mode.status_code == 503
+        assert len(preparation_requests) == 5
+        handle._mode = GraphGatewayMode.TARGET_E2E_CANDIDATE
+        endpoint_runtime._intake_infrastructure_preparer = None
+        no_default_provider = await api_client.post("/ready/intake-preparation")
+        assert no_default_provider.status_code == 503
+        assert no_default_provider.json() == {
+            "schema_version": "intake-infrastructure-preparation.v1",
+            "status": "UNAVAILABLE",
+        }
+        assert len(preparation_requests) == 5
+    await endpoint_client.aclose()
+    llm_module._ACTIVE_PROVIDER_CALL_RECORDER.reset(recorder_token)
+    assert recorder_calls == []
+
+    events: list[str] = []
+
+    class BoundClient:
+        def __init__(
+            self,
+            _base_url: str,
+            model: str,
+            _api_key: str,
+            _timeout_seconds: float,
+        ) -> None:
+            self.governed_provider = "litellm"
+            self.governed_model = model
+
+        async def aopen(self) -> None:
+            events.append("client_open")
+
+        async def aprepare_intake_infrastructure(self) -> None:
+            events.append("intake_preparation")
+
+        async def aclose(self) -> None:
+            events.append("client_close")
+
+    class BoundExchange:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def aopen(self) -> None:
+            events.append("exchange_open")
+
+        async def aclose(self) -> None:
+            events.append("exchange_close")
+
+    monkeypatch.setattr(production_bindings, "LiteLlmProxyClient", BoundClient)
+    monkeypatch.setattr(production_bindings, "JavaIntakeExchangeClient", BoundExchange)
+    runtime = build_graph_runtime_bindings(
+        _target_settings(),
+        target_e2e_specialized_provider_factory=lambda _kernel: (),
+    )
+    assert runtime.resource_opener is not None
+    await runtime.resource_opener()
+    assert events == ["exchange_open", "client_open"]
+    assert runtime.intake_infrastructure_preparer is not None
+    await runtime.intake_infrastructure_preparer()
+    assert events == ["exchange_open", "client_open", "intake_preparation"]
+    assert runtime.resource_closer is not None
+    await runtime.resource_closer()
+
+    class IntakePreparationFailed(RuntimeError):
+        pass
+
+    class FailingBoundClient(BoundClient):
+        async def aprepare_intake_infrastructure(self) -> None:
+            raise IntakePreparationFailed("fixed preparation failure")
+
+    monkeypatch.setattr(
+        production_bindings,
+        "LiteLlmProxyClient",
+        FailingBoundClient,
+    )
+    failed_runtime = build_graph_runtime_bindings(
+        _target_settings(),
+        target_e2e_specialized_provider_factory=lambda _kernel: (),
+    )
+    assert failed_runtime.resource_opener is not None
+    await failed_runtime.resource_opener()
+    assert failed_runtime.intake_infrastructure_preparer is not None
+    with pytest.raises(IntakePreparationFailed, match="fixed preparation failure"):
+        await failed_runtime.intake_infrastructure_preparer()
+
+    shadow_runtime = build_graph_runtime_bindings(_settings())
+    assert shadow_runtime.resource_opener is None
+    assert shadow_runtime.intake_infrastructure_preparer is None
+    custom_runtime = build_graph_runtime_bindings(
+        _target_settings(),
+        target_e2e_provider_factory=lambda _kernel: (),
+    )
+    assert custom_runtime.intake_infrastructure_preparer is None
+
+
+@pytest.mark.asyncio
 async def test_target_e2e_default_intake_uses_configured_structured_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -782,6 +1137,9 @@ async def test_target_e2e_default_intake_uses_configured_structured_client(
 
         async def aopen(self) -> None:
             captured["client_opened"] = True
+
+        async def aprepare_intake_infrastructure(self) -> None:
+            captured["intake_preparation"] = True
 
         async def aclose(self) -> None:
             captured["client_closed"] = True
@@ -863,6 +1221,10 @@ async def test_target_e2e_default_intake_uses_configured_structured_client(
     assert captured["intake_provider"] == "litellm"
     assert captured["intake_model"] == "qwen3.7-plus-target"
     assert captured["client_opened"] is True
+    assert "intake_preparation" not in captured
+    assert runtime.intake_infrastructure_preparer is not None
+    await runtime.intake_infrastructure_preparer()
+    assert captured["intake_preparation"] is True
     assert captured["exchange_opened"] is True
 
     assert runtime.resource_closer is not None
@@ -881,23 +1243,50 @@ def test_target_e2e_composite_registers_the_exact_intake_provider_binding() -> N
                 yield execution
 
     settings = _target_settings()
+    kernel = GraphExecutorKernel(
+        saver=cast(Any, InMemorySaver()),
+        gateway=cast(Any, object()),
+        durable_bulkhead=cast(Any, object()),
+    )
+    providers = tuple(Provider(room_type) for room_type in RoomType)
     registration = _target_e2e_executor_registration(
         settings.graph_target_e2e_bindings[0],
-        GraphExecutorKernel(
-            saver=cast(Any, InMemorySaver()),
-            gateway=cast(Any, object()),
-            durable_bulkhead=cast(Any, object()),
-        ),
-        providers=tuple(Provider(room_type) for room_type in RoomType),
+        kernel,
+        providers=providers,
         intake_provider="litellm",
         intake_model="qwen3.7-plus-target",
+        evidence_provider="litellm",
+        evidence_model="qwen3.7-plus-target",
     )
 
     intake_binding = registration.provider_binding_for("INTAKE")
     assert intake_binding.provider == "litellm"
     assert intake_binding.model == "qwen3.7-plus-target"
     assert intake_binding.allowed_nodes == frozenset({BASELINE_INTAKE_NODE_NAME})
+    evidence_binding = registration.provider_binding_for("EVIDENCE")
+    assert evidence_binding.provider == "litellm"
+    assert evidence_binding.model == "qwen3.7-plus-target"
+    assert evidence_binding.allowed_nodes == frozenset({EVIDENCE_TURN_MODEL_NODE_NAME})
     assert registration.provider_binding_for("HEARING") is registration.provider_binding
+    assert registration.provider_binding_for("REVIEW") is registration.provider_binding
+
+    for evidence_provider, evidence_model in (
+        ("litellm", None),
+        (None, "qwen3.7-plus-target"),
+    ):
+        with pytest.raises(
+            GraphContractError,
+            match="target-E2E Evidence provider binding is incomplete",
+        ):
+            _target_e2e_executor_registration(
+                settings.graph_target_e2e_bindings[0],
+                kernel,
+                providers=providers,
+                intake_provider="litellm",
+                intake_model="qwen3.7-plus-target",
+                evidence_provider=evidence_provider,
+                evidence_model=evidence_model,
+            )
 
 
 def test_target_e2e_explicit_provider_factory_bypasses_live_model_client(

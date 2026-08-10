@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     CaseDetailDossierSkill,
     DIRECT_RESPONDENT_SOURCE,
     ORIGINAL_STATEMENT_SEPARATOR,
+    RESPONDENT_AUTHORED_CURRENT_MESSAGE,
     SUBJECTIVE_RESPONDENT_SOURCE,
     SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
     _canonical_verification_focus,
@@ -19,6 +21,7 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     _enforce_respondent_attitude_source,
     _question_targets_resolved_intake_field,
     _reported_attitude_position,
+    detect_direct_respondent_attitude,
 )
 from app.llm import AgentOutputSchemaError
 from app.schemas import IntakeTurnRequest
@@ -708,6 +711,42 @@ def test_initiator_attributed_attitude_canonicalizes_the_entire_provider_branch(
         ("Our company accepts Y.", "AGREE", True),
         ("我方并不同意Y。", "DISAGREE", False),
         ("我方没有同意Y。", "DISAGREE", True),
+        pytest.param(
+            "我方先说明处理边界。不接受该请求。",
+            "DISAGREE",
+            False,
+            id="authoritative-hard-boundary-zero-subject",
+        ),
+        pytest.param(
+            "不接受该请求。",
+            "DISAGREE",
+            False,
+            id="authoritative-first-clause-zero-subject",
+        ),
+        pytest.param(
+            "我方不接受对方提出的处理方案。",
+            "DISAGREE",
+            False,
+            id="self-attitude-with-third-party-proposal-object",
+        ),
+        pytest.param(
+            "不接受对方提出的处理方案。",
+            "DISAGREE",
+            False,
+            id="omitted-self-with-third-party-proposal-object",
+        ),
+        pytest.param(
+            "我方不接受原处理请求并提出替代方案。",
+            "ALTERNATIVE_PROPOSED",
+            True,
+            id="single-clause-consistent-alternative",
+        ),
+        pytest.param(
+            "我方不接受原处理请求。提出替代方案。",
+            "ALTERNATIVE_PROPOSED",
+            False,
+            id="cross-clause-consistent-alternative",
+        ),
     ],
 )
 def test_direct_respondent_adversarial_substantive_signal_updates_current_grounding(
@@ -794,17 +833,68 @@ def test_direct_respondent_adversarial_substantive_signal_updates_current_ground
     }
 
 
+def test_direct_respondent_hard_boundary_subject_requires_exact_authority() -> None:
+    texts = (
+        "不接受该请求。",
+        "我方先说明处理边界。不接受该请求。",
+    )
+
+    for text in texts:
+        assert detect_direct_respondent_attitude(text).state == "UNRESOLVED"
+        assert (
+            detect_direct_respondent_attitude(
+                text,
+                source_authority="UNVERIFIED_RESPONDENT_MESSAGE",
+            ).state
+            == "UNRESOLVED"
+        )
+
+        detection = detect_direct_respondent_attitude(
+            text,
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        )
+        assert detection.state == "SUBSTANTIVE"
+        assert detection.candidate == {
+            "attitude": "DISAGREE",
+            "position": text,
+            "confidence": 0.65,
+        }
+
+
 @pytest.mark.parametrize(
     "text",
     [
         "建议Y的是对方，不是我方。",
         "同意Y的是对方，我方未表态。",
         "The buyer accepted Y; our company only recorded it.",
-        "We do not disagree with Y.",
+        pytest.param(
+            "We do not disagree with Y.",
+            id="unsupported-double-negation",
+        ),
         "We do not accept Y.",
         "I have not accepted Y.",
         "We accept no Y.",
         "We do not propose Y.",
+        pytest.param(
+            "我方同意方案A。不同意方案B。",
+            id="true-mixed-codes",
+        ),
+        pytest.param(
+            "我方同意方案A。对方表示不同意方案B。",
+            id="resolved-plus-third-party-attribution",
+        ),
+        pytest.param(
+            "我方仅记录对方表示同意方案A。",
+            id="first-person-reported-speech",
+        ),
+        pytest.param(
+            "我方不接受该请求。（对方意见）",
+            id="deferred-parenthetical-attribution",
+        ),
+        pytest.param(
+            "我方不接受该请求。以上是对方的意见。",
+            id="deferred-trailing-attribution",
+        ),
     ],
 )
 def test_direct_respondent_adversarial_unresolved_signal_fails_closed(
@@ -984,9 +1074,9 @@ def test_intake_turn_preserves_model_room_utterance_verbatim(
     assert result.dossier_patch["case_detail"]["case_story"]["title"] == (
         "物流显示签收但用户称未收到商品"
     )
-    assert result.scroll_snapshot["intake_quality"]["ready_for_next_step"] is (
-        score >= 80
-    )
+    quality = result.scroll_snapshot["intake_quality"]
+    assert quality["score"] == sum(quality["score_breakdown"].values()) == 100
+    assert quality["ready_for_next_step"] is True
 
 
 def test_respondent_message_keeps_initiator_claim_but_isolates_original_statement() -> None:
@@ -1320,6 +1410,517 @@ class CaseDetailRunner:
         )
 
 
+def _complete_scoring_case_detail(model_score: int) -> dict[str, object]:
+    model_breakdown = {
+        "references": 0,
+        "event_story": 0,
+        "party_positions": 0,
+        "requested_resolution": 0,
+        "risk_and_conflicts": 0,
+        "next_action_clarity": 0,
+    }
+    if model_score > 85:
+        model_breakdown = {key: 999 for key in model_breakdown}
+    return {
+        "schema_version": "intake_case_detail.v1",
+        "case_story": {
+            "title": "履约争议",
+            "one_sentence_summary": "发起方报告履约状态与实际情况不一致。",
+            "event_timeline": [
+                {
+                    "time_hint": "履约后",
+                    "event": "当事方发现履约状态存在差异",
+                    "source": "PARTY_MESSAGE",
+                }
+            ],
+        },
+        "party_positions": {
+            "user_claim": "发起方请求核验履约状态并处理争议。",
+            "merchant_claim": "",
+            "platform_observation": "需要核对履约记录与当事方陈述。",
+        },
+        "dispute_focus": {
+            "core_issue": "FULFILLMENT_STATUS_CONFLICT",
+            "key_conflicts": ["FULFILLMENT_RECORD_CONFLICT"],
+            "facts_to_verify": ["FULFILLMENT_RECORD"],
+        },
+        "requested_resolution": {
+            "requested_outcome": "REFUND",
+            "expected_resolution_text": "发起方请求退款。",
+        },
+        "risk_assessment": {
+            "case_grade": "MEDIUM",
+            "risk_signals": ["FULFILLMENT_CONFLICT"],
+            "reasoning": "履约记录与当事方陈述需要核验。",
+        },
+        "missing_information": {
+            "blocking_gaps": [],
+            "nice_to_have_gaps": [],
+            "next_questions": [],
+        },
+        "intake_quality": {
+            "score": model_score,
+            "threshold": 1,
+            "ready_for_next_step": model_score > 0,
+            "score_breakdown": model_breakdown,
+        },
+        "admission": {
+            "recommendation": "ACCEPTED",
+            "confidence": 1.0,
+        },
+    }
+
+
+def _sparse_scoring_case_detail(model_score: int) -> dict[str, object]:
+    return {
+        "schema_version": "intake_case_detail.v1",
+        "case_story": {
+            "one_sentence_summary": "发起方报告履约状态需要核验。",
+        },
+        "missing_information": {
+            "blocking_gaps": [],
+            "nice_to_have_gaps": [],
+            "next_questions": [],
+        },
+        "intake_quality": {
+            "score": model_score,
+            "threshold": 1,
+            "ready_for_next_step": model_score > 0,
+            "score_breakdown": {},
+        },
+        "admission": {
+            "recommendation": "NEED_MORE_INFO",
+            "confidence": 0.0,
+        },
+    }
+
+
+def _render_provider_case_detail(
+    *,
+    request: IntakeTurnRequest,
+    case_detail: dict[str, object],
+):
+    return CaseDetailDossierSkill().render(
+        request=request,
+        room_utterance="已完成结构化案件梳理。",
+        llm_case_detail=case_detail,
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.0,
+    )
+
+
+def test_sparse_and_rich_provider_presentations_share_quality_authority() -> None:
+    request = _request()
+    sparse = _render_provider_case_detail(
+        request=request,
+        case_detail=_sparse_scoring_case_detail(0),
+    )
+    rich = _render_provider_case_detail(
+        request=request,
+        case_detail=_complete_scoring_case_detail(100),
+    )
+
+    sparse_quality = sparse.scroll_snapshot["intake_quality"]
+    rich_quality = rich.scroll_snapshot["intake_quality"]
+    assert {
+        "score_breakdown": sparse_quality["score_breakdown"],
+        "score": sparse_quality["score"],
+        "ready": sparse_quality["ready_for_next_step"],
+        "recommendation": sparse.admission_recommendation,
+    } == {
+        "score_breakdown": rich_quality["score_breakdown"],
+        "score": rich_quality["score"],
+        "ready": rich_quality["ready_for_next_step"],
+        "recommendation": rich.admission_recommendation,
+    }
+
+
+def _render_scoring_case_detail(
+    *,
+    model_score: int,
+    request: IntakeTurnRequest | None = None,
+    blocking_gaps: list[str] | None = None,
+    admission_recommendation: str = "ACCEPTED",
+):
+    case_detail = _complete_scoring_case_detail(model_score)
+    case_detail["missing_information"]["blocking_gaps"] = list(blocking_gaps or [])
+    return CaseDetailDossierSkill().render(
+        request=request or _request(),
+        room_utterance="已完成结构化案件梳理。",
+        llm_case_detail=case_detail,
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation=admission_recommendation,
+        llm_missing_fields=[],
+        llm_confidence=1.0,
+    )
+
+
+@pytest.mark.parametrize("model_score", [75, 0, 100])
+def test_case_detail_quality_is_derived_independently_of_model_score(
+    model_score: int,
+) -> None:
+    rendered = _render_scoring_case_detail(model_score=model_score)
+    quality = rendered.scroll_snapshot["intake_quality"]
+
+    assert quality["score_breakdown"] == {
+        "references": 15,
+        "event_story": 20,
+        "party_positions": 20,
+        "requested_resolution": 15,
+        "risk_and_conflicts": 15,
+        "next_action_clarity": 15,
+    }
+    assert quality["score"] == sum(quality["score_breakdown"].values()) == 100
+    assert quality["threshold"] == 85
+    assert quality["ready_for_next_step"] is True
+    assert rendered.admission_recommendation == "ACCEPTED"
+
+
+@pytest.mark.parametrize("missing_authority", ["trusted_reference", "blocking_gap"])
+def test_case_detail_quality_missing_authority_remains_incomplete(
+    missing_authority: str,
+) -> None:
+    request = _request()
+    blocking_gaps: list[str] = []
+    if missing_authority == "trusted_reference":
+        request = _request(
+            previous_case_detail={
+                "schema_version": "intake_case_detail.v1",
+                "references": {
+                    "order_reference": "ORDER_GENERIC_1",
+                    "after_sales_reference": "AS_GENERIC_1",
+                    "logistics_reference": "",
+                },
+                "claim_resolution": {
+                    "initiator_role": "USER",
+                    "requested_resolution": "REFUND",
+                },
+            }
+        )
+    else:
+        blocking_gaps = ["COUNTERPARTY_RESPONSE"]
+
+    rendered = _render_scoring_case_detail(
+        model_score=100,
+        request=request,
+        blocking_gaps=blocking_gaps,
+    )
+    quality = rendered.scroll_snapshot["intake_quality"]
+
+    assert quality["score"] == sum(quality["score_breakdown"].values())
+    assert quality["ready_for_next_step"] is False
+    assert rendered.admission_recommendation == "NEED_MORE_INFO"
+    assert rendered.missing_fields
+
+
+def test_not_admissible_recommendation_requires_deterministic_incompleteness() -> None:
+    ready = _render_scoring_case_detail(
+        model_score=0,
+        admission_recommendation="NOT_ADMISSIBLE",
+    )
+    incomplete = _render_scoring_case_detail(
+        model_score=100,
+        blocking_gaps=["COUNTERPARTY_RESPONSE"],
+        admission_recommendation="NOT_ADMISSIBLE",
+    )
+
+    assert ready.admission_recommendation == "ACCEPTED"
+    assert incomplete.admission_recommendation == "NOT_ADMISSIBLE"
+    assert incomplete.scroll_snapshot["intake_quality"]["ready_for_next_step"] is False
+
+
+def _render_legacy_scoring_snapshot(
+    *,
+    model_score: int,
+    request: IntakeTurnRequest,
+):
+    return CaseDetailDossierSkill().render(
+        request=request,
+        room_utterance="已完成结构化案件梳理。",
+        llm_case_detail=None,
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=_complete_scoring_case_detail(model_score),
+        llm_canvas_operations=[],
+        llm_admission_recommendation="ACCEPTED",
+        llm_missing_fields=[],
+        llm_confidence=1.0,
+    )
+
+
+def test_legacy_scroll_snapshot_uses_canonical_quality_authority() -> None:
+    missing_reference_request = _request(
+        previous_case_detail={
+            "schema_version": "intake_case_detail.v1",
+            "references": {
+                "order_reference": "ORDER_GENERIC_1",
+                "after_sales_reference": "AS_GENERIC_1",
+                "logistics_reference": "",
+            },
+            "claim_resolution": {
+                "initiator_role": "USER",
+                "requested_resolution": "REFUND",
+            },
+        }
+    )
+
+    forged_high = _render_legacy_scoring_snapshot(
+        model_score=100,
+        request=missing_reference_request,
+    )
+    complete_low = _render_legacy_scoring_snapshot(
+        model_score=0,
+        request=_request(),
+    )
+
+    assert forged_high.scroll_snapshot["intake_quality"]["ready_for_next_step"] is False
+    assert forged_high.admission_recommendation == "NEED_MORE_INFO"
+    assert forged_high.missing_fields
+    complete_quality = complete_low.scroll_snapshot["intake_quality"]
+    assert complete_quality["score"] == 100
+    assert complete_quality["score"] == sum(
+        complete_quality["score_breakdown"].values()
+    )
+    assert complete_quality["ready_for_next_step"] is True
+    assert complete_low.admission_recommendation == "ACCEPTED"
+
+
+def test_placeholder_only_provider_collections_do_not_change_authoritative_score() -> None:
+    case_detail = _complete_scoring_case_detail(100)
+    case_detail["case_story"]["event_timeline"] = [
+        {},
+        {"event": "UNKNOWN", "source": "USER_MESSAGE"},
+    ]
+    case_detail["risk_assessment"] = {
+        "case_grade": "MEDIUM",
+        "risk_signals": [{}, {"signal": "UNKNOWN", "source": "MODEL"}],
+        "reasoning": "UNKNOWN",
+    }
+    case_detail["dispute_focus"]["facts_to_verify"] = [
+        {},
+        {"fact": "UNKNOWN", "source": "MODEL"},
+    ]
+    case_detail["dispute_core_state"] = {
+        "facts_in_dispute": [{}, {"fact": "UNKNOWN"}],
+        "next_verification_focus": ["UNKNOWN"],
+    }
+
+    rendered = CaseDetailDossierSkill().render(
+        request=_request(),
+        room_utterance="已完成结构化案件梳理。",
+        llm_case_detail=case_detail,
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="ACCEPTED",
+        llm_missing_fields=[],
+        llm_confidence=1.0,
+    )
+    quality = rendered.scroll_snapshot["intake_quality"]
+
+    assert quality["score_breakdown"] == {
+        "references": 15,
+        "event_story": 20,
+        "party_positions": 20,
+        "requested_resolution": 15,
+        "risk_and_conflicts": 15,
+        "next_action_clarity": 15,
+    }
+    assert quality["score"] == sum(quality["score_breakdown"].values()) == 100
+    assert quality["ready_for_next_step"] is True
+    assert rendered.admission_recommendation == "ACCEPTED"
+
+
+@pytest.mark.parametrize("provider_resolution", ["ARBITRARY", {}, "UNKNOWN"])
+def test_unresolved_or_non_string_resolution_is_missing_and_scores_zero(
+    provider_resolution: object,
+) -> None:
+    request = _request(
+        current_user_message={
+            "message_id": "MESSAGE_UNRESOLVED_RESOLUTION",
+            "sequence_no": 2,
+            "role": "USER",
+            "source": "ROOM_MESSAGE",
+            "text": "我补充了新的履约状态。",
+        },
+        previous_case_detail={
+            "schema_version": "intake_case_detail.v1",
+            "references": {
+                "order_reference": "ORDER_GENERIC_1",
+                "after_sales_reference": "AS_GENERIC_1",
+                "logistics_reference": "LOG_GENERIC_1",
+            },
+            "claim_resolution": {
+                "initiator_role": "USER",
+                "requested_resolution": "UNKNOWN",
+            },
+        },
+    )
+    case_detail = _complete_scoring_case_detail(100)
+    case_detail["claim_resolution"] = {
+        "initiator_role": "USER",
+        "requested_resolution": copy.deepcopy(provider_resolution),
+    }
+    case_detail["requested_resolution"] = {
+        "requested_outcome": copy.deepcopy(provider_resolution),
+    }
+
+    rendered = _render_provider_case_detail(
+        request=request,
+        case_detail=case_detail,
+    )
+    quality = rendered.scroll_snapshot["intake_quality"]
+    questions = rendered.scroll_snapshot["missing_information"]["next_questions"]
+
+    assert quality["score_breakdown"]["requested_resolution"] == 0
+    assert quality["score"] == sum(quality["score_breakdown"].values()) == 85
+    assert quality["ready_for_next_step"] is False
+    assert rendered.admission_recommendation == "NEED_MORE_INFO"
+    assert rendered.missing_fields
+    assert questions and all(isinstance(question, str) and question for question in questions)
+
+
+@pytest.mark.parametrize(
+    ("trusted_role", "provider_role"),
+    [("USER", "MERCHANT"), ("MERCHANT", "USER")],
+)
+def test_provider_cannot_replace_trusted_initiator_role(
+    trusted_role: str,
+    provider_role: str,
+) -> None:
+    case_id = f"CASE_{trusted_role.lower()}_initiator_role_authority"
+    actor_id = f"{trusted_role}_local_role_authority"
+    context = _agent_context(case_id)
+    context.update(
+        {
+            "actor_id": actor_id,
+            "actor_role": trusted_role,
+            "permission_level": f"PARTY_{trusted_role}",
+            "scope_type": "INTAKE_INITIATOR_PRIVATE",
+            "allowed_actor_ids": [actor_id],
+            "allowed_actor_roles": [trusted_role],
+            "prompt_profile_id": f"DISPUTE_INTAKE_OFFICER:{trusted_role}:v1",
+        }
+    )
+    request = _request(
+        case_id=case_id,
+        current_user_message={
+            "message_id": f"MESSAGE_{trusted_role}_CLAIM_AUTHORITY",
+            "sequence_no": 2,
+            "role": trusted_role,
+            "source": "ROOM_MESSAGE",
+            "text": "我方明确要求退款。",
+        },
+        previous_case_detail={
+            "schema_version": "intake_case_detail.v1",
+            "references": {
+                "order_reference": "ORDER_ROLE_AUTHORITY",
+                "after_sales_reference": "AS_ROLE_AUTHORITY",
+                "logistics_reference": "LOG_ROLE_AUTHORITY",
+            },
+            "claim_resolution": {
+                "initiator_role": trusted_role,
+                "requested_resolution": "REFUND",
+            },
+        },
+        agent_context=context,
+    )
+    case_detail = _sparse_scoring_case_detail(0)
+    case_detail["claim_resolution"] = {
+        "initiator_role": provider_role,
+        "requested_resolution": "REFUND",
+    }
+
+    rendered = _render_provider_case_detail(
+        request=request,
+        case_detail=case_detail,
+    )
+
+    assert rendered.scroll_snapshot["claim_resolution"]["initiator_role"] == trusted_role
+    assert rendered.scroll_snapshot["respondent_attitude"]["respondent_role"] == (
+        "MERCHANT" if trusted_role == "USER" else "USER"
+    )
+
+
+def test_merchant_initiator_score_is_structural_and_replay_stable() -> None:
+    case_id = "CASE_merchant_scoring_authority"
+    context = _agent_context(case_id)
+    context.update(
+        {
+            "actor_id": "MERCHANT_local_1",
+            "actor_role": "MERCHANT",
+            "permission_level": "PARTY_MERCHANT",
+            "scope_type": "INTAKE_INITIATOR_PRIVATE",
+            "allowed_actor_ids": ["MERCHANT_local_1"],
+            "allowed_actor_roles": ["MERCHANT"],
+            "prompt_profile_id": "DISPUTE_INTAKE_OFFICER:MERCHANT:v1",
+        }
+    )
+    request = _request(
+        case_id=case_id,
+        current_user_message={
+            "message_id": "MESSAGE_MERCHANT_INITIATOR",
+            "sequence_no": 2,
+            "role": "MERCHANT",
+            "source": "ROOM_MESSAGE",
+            "text": "我方请求核验履约状态并退还相应款项。",
+        },
+        previous_case_detail={
+            "schema_version": "intake_case_detail.v1",
+            "references": {
+                "order_reference": "ORDER_GENERIC_MERCHANT",
+                "after_sales_reference": "AS_GENERIC_MERCHANT",
+                "logistics_reference": "LOG_GENERIC_MERCHANT",
+            },
+            "claim_resolution": {
+                "initiator_role": "MERCHANT",
+                "requested_resolution": "REFUND",
+            },
+        },
+        agent_context=context,
+    )
+    case_detail = _sparse_scoring_case_detail(0)
+
+    def render_quality() -> dict[str, object]:
+        rendered = CaseDetailDossierSkill().render(
+            request=request,
+            room_utterance="已完成结构化案件梳理。",
+            llm_case_detail=case_detail,
+            llm_dossier_patch=None,
+            llm_scroll_snapshot=None,
+            llm_canvas_operations=[],
+            llm_admission_recommendation="NEED_MORE_INFO",
+            llm_missing_fields=[],
+            llm_confidence=0.0,
+        )
+        return rendered.scroll_snapshot["intake_quality"]
+
+    first = render_quality()
+    replay = render_quality()
+    user = _render_provider_case_detail(
+        request=_request(),
+        case_detail=_sparse_scoring_case_detail(100),
+    ).scroll_snapshot["intake_quality"]
+
+    assert first["score"] == 100
+    assert first["ready_for_next_step"] is True
+    assert replay == first
+    assert {
+        "score_breakdown": first["score_breakdown"],
+        "score": first["score"],
+        "ready": first["ready_for_next_step"],
+    } == {
+        "score_breakdown": user["score_breakdown"],
+        "score": user["score"],
+        "ready": user["ready_for_next_step"],
+    }
+
+
 # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
 # 具体功能：`test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail` 验证接待信息在固定案例中的输出、边界和失败行为；关键协作调用：`CaseDetailRunner`、`run`、`IntakeTurnWorkflow`。
 # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`。
@@ -1332,7 +1933,7 @@ def test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail(
 
     assert runner.calls[0]["node_name"] == "intake_turn_case_detail"
     assert result.scroll_snapshot["schema_version"] == "intake_case_detail.v1"
-    assert result.scroll_snapshot["intake_quality"]["score"] == 86
+    assert result.scroll_snapshot["intake_quality"]["score"] == 100
     assert result.scroll_snapshot["intake_quality"]["ready_for_next_step"] is True
     assert result.admission_recommendation == "ACCEPTED"
     assert result.scroll_snapshot["claim_resolution"]["requested_resolution"] == "REFUND"
@@ -1364,7 +1965,8 @@ def test_intake_case_detail_readiness_is_gated_by_score_and_required_references(
 
     result = IntakeTurnWorkflow(model_runner=runner).run(request)
 
-    assert result.scroll_snapshot["intake_quality"]["score"] == 92
+    quality = result.scroll_snapshot["intake_quality"]
+    assert quality["score"] == sum(quality["score_breakdown"].values()) == 85
     assert result.scroll_snapshot["intake_quality"]["ready_for_next_step"] is False
     assert result.admission_recommendation == "NEED_MORE_INFO"
     assert "ORDER_REFERENCE" in result.missing_fields

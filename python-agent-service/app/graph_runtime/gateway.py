@@ -10,10 +10,14 @@ from enum import StrEnum
 import hmac
 from typing import Any, Final, Protocol, TypeVar
 
+from psycopg import errors as psycopg_errors
+
 from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
 from app.graph_runtime.errors import (
     GraphCommandAbortedError,
     GraphCommandCancelledError,
+    GraphCommandDeadlineError,
+    GraphCommandStateError,
     GraphContractError,
     GraphGatewayDisabledError,
     GraphNewAgentAttemptRequiredError,
@@ -441,6 +445,7 @@ class GraphCommandGateway:
                     command_id=admission.binding.command_id,
                     owner_id=owner_id,
                     fencing_token=acquisition.lease.fencing_token,
+                    command_deadline_at=admission.command.deadline_at,
                 )
         fence = GraphFenceContext(
             thread_id=admission.binding.thread_id,
@@ -760,6 +765,7 @@ class GraphCommandGateway:
         operation: Callable[[], Awaitable[_ControlPlaneResult]],
         *,
         retry_permitted: Callable[[], bool] | None = None,
+        retry_lock_contention_until_command_deadline: bool = False,
     ) -> _ControlPlaneResult:
         """Retry only proven transient control-plane failures inside a live lease window.
 
@@ -770,8 +776,32 @@ class GraphCommandGateway:
 
         retries = 0
         delay_seconds = _CONTROL_PLANE_RETRY_INITIAL_SECONDS
+        monotonic_deadline: float | None = None
+        if retry_lock_contention_until_command_deadline:
+            signed_deadline = execution.admission.command.deadline_at
+            now = datetime.now(signed_deadline.tzinfo)
+            remaining_seconds = (signed_deadline - now).total_seconds()
+            if remaining_seconds <= 0:
+                raise GraphCommandDeadlineError()
+            monotonic_deadline = asyncio.get_running_loop().time() + remaining_seconds
         while True:
             try:
+                if monotonic_deadline is not None:
+                    remaining_seconds = (
+                        monotonic_deadline - asyncio.get_running_loop().time()
+                    )
+                    if remaining_seconds <= 0:
+                        raise GraphCommandDeadlineError()
+                    try:
+                        # Renewal is an idempotent owner/fence CAS.  Bound its
+                        # complete pool-acquire/transaction/row-lock await by the
+                        # one monotonic projection of the signed command deadline,
+                        # not a fresh wall-clock allowance per retry.  External
+                        # task cancellation still propagates unchanged.
+                        async with asyncio.timeout_at(monotonic_deadline):
+                            return await operation()
+                    except TimeoutError as error:
+                        raise GraphCommandDeadlineError() from error
                 return await operation()
             except asyncio.CancelledError:
                 raise
@@ -780,13 +810,27 @@ class GraphCommandGateway:
                     raise
                 if retry_permitted is not None and not retry_permitted():
                     raise
-                if retries >= _CONTROL_PLANE_RETRY_LIMIT:
-                    raise
-                lease = self._latest_lease(execution)
-                deadline = lease.lease_expires_at - _CONTROL_PLANE_LEASE_SAFETY_MARGIN
-                now = datetime.now(lease.lease_expires_at.tzinfo)
-                remaining_seconds = (deadline - now).total_seconds()
+                if monotonic_deadline is not None:
+                    # A checkpoint transaction can legitimately retain the exact
+                    # lease row while it atomically persists one batch.  The cached
+                    # pre-transaction lease expiry is not authority for that wait:
+                    # the checkpoint transaction refreshes the row before commit.
+                    # RENEW_SQL then reads the database clock only after acquiring
+                    # that row and enforces the exact durable command deadline.
+                    # Continue retries only inside the original monotonic budget.
+                    remaining_seconds = (
+                        monotonic_deadline - asyncio.get_running_loop().time()
+                    )
+                else:
+                    if retries >= _CONTROL_PLANE_RETRY_LIMIT:
+                        raise
+                    lease = self._latest_lease(execution)
+                    deadline = lease.lease_expires_at - _CONTROL_PLANE_LEASE_SAFETY_MARGIN
+                    now = datetime.now(deadline.tzinfo)
+                    remaining_seconds = (deadline - now).total_seconds()
                 if delay_seconds >= remaining_seconds:
+                    if monotonic_deadline is not None:
+                        raise GraphCommandDeadlineError() from error
                     raise
                 retries += 1
                 await asyncio.sleep(delay_seconds)
@@ -807,9 +851,14 @@ class GraphCommandGateway:
                         command_id=execution.fence.command_id,
                         owner_id=execution.fence.owner_id,
                         fencing_token=execution.fence.fencing_token,
+                        command_deadline_at=execution.admission.command.deadline_at,
                     )
 
-        lease = await self._retry_control_plane_operation(execution, renew)
+        lease = await self._retry_control_plane_operation(
+            execution,
+            renew,
+            retry_lock_contention_until_command_deadline=True,
+        )
         return self._remember_lease(execution, lease)
 
     async def record_provider_call(self, execution: GatewayExecution) -> GatewayExecution:
@@ -851,57 +900,212 @@ class GraphCommandGateway:
         error_classification: str,
     ) -> GatewayExecution:
         self._require_shadow()
-        async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-            async with connection.transaction():
-                lease = await self._leases.cancel(
-                    connection,
-                    thread_id=execution.fence.thread_id,
-                    active_command_id=execution.fence.command_id,
-                    expected_fencing_token=execution.fence.fencing_token,
-                    cancellation_command_id=execution.fence.command_id,
-                )
-                current = await self._ledger.load(
-                    connection,
-                    thread_id=execution.admission.binding.thread_id,
-                    command_id=execution.admission.binding.command_id,
-                )
-                self._ledger.require_same_binding(
-                    current.binding,
-                    execution.admission.binding,
-                )
-                if current.status in {
-                    CommandStatus.RESULT_CHECKPOINTED,
-                    CommandStatus.COMPLETED,
-                }:
-                    command = current
-                    attempt = execution.attempt
-                else:
-                    command_status = (
-                        CommandStatus.CANCELLED
-                        if status is AttemptStatus.CANCELLED
-                        else CommandStatus.ABORTED
-                    )
-                    command = await self._ledger.terminate(
+        mutation_started = False
+
+        async def finish_once() -> GatewayExecution:
+            nonlocal mutation_started
+            async with self._pool.connection(
+                timeout=self._acquire_timeout_seconds
+            ) as connection:
+                async with connection.transaction():
+                    current = await self._ledger.load(
                         connection,
-                        binding=execution.admission.binding,
-                        status=command_status,
-                        error_code=error_code,
-                        error_classification=error_classification,
+                        thread_id=execution.admission.binding.thread_id,
+                        command_id=execution.admission.binding.command_id,
                     )
-                    attempt = await self._ledger.finish_attempt(
+                    self._ledger.require_same_binding(
+                        current.binding,
+                        execution.admission.binding,
+                    )
+                    durable_attempt = await self._ledger.latest_attempt(
                         connection,
-                        execution.attempt,
+                        thread_id=execution.admission.binding.thread_id,
+                        command_id=execution.admission.binding.command_id,
+                    )
+                    replay = self._completed_attempt_abort_adoption(
+                        execution,
+                        command=current,
+                        attempt=durable_attempt,
                         status=status,
                         error_code=error_code,
                         error_classification=error_classification,
                     )
-        admission = replace(
-            execution.admission,
-            record=command,
-            action=self._admission_action(command.status),
+                    if replay is not None:
+                        command, attempt = replay
+                        lease = execution.lease
+                    else:
+                        try:
+                            lease = await self._leases.cancel(
+                                connection,
+                                thread_id=execution.fence.thread_id,
+                                active_command_id=execution.fence.command_id,
+                                expected_fencing_token=execution.fence.fencing_token,
+                                cancellation_command_id=execution.fence.command_id,
+                            )
+                        except Exception as error:
+                            # PostgreSQL lock timeout is proven pre-mutation and may
+                            # take the normal bounded retry.  Any other failure after
+                            # issuing CANCEL_SQL has ambiguous commit authority; the
+                            # next attempt must first adopt exact durable terminal state.
+                            if type(error) is not psycopg_errors.LockNotAvailable:
+                                mutation_started = True
+                            raise
+                        mutation_started = True
+                        current = await self._ledger.load(
+                            connection,
+                            thread_id=execution.admission.binding.thread_id,
+                            command_id=execution.admission.binding.command_id,
+                        )
+                        self._ledger.require_same_binding(
+                            current.binding,
+                            execution.admission.binding,
+                        )
+                        if current.status in {
+                            CommandStatus.RESULT_CHECKPOINTED,
+                            CommandStatus.COMPLETED,
+                        }:
+                            durable_attempt = await self._ledger.latest_attempt(
+                                connection,
+                                thread_id=execution.admission.binding.thread_id,
+                                command_id=execution.admission.binding.command_id,
+                            )
+                            adopted = self._completed_attempt_abort_adoption(
+                                execution,
+                                command=current,
+                                attempt=durable_attempt,
+                                status=status,
+                                error_code=error_code,
+                                error_classification=error_classification,
+                            )
+                            if adopted is None:
+                                raise GraphCommandStateError(
+                                    "durable result could not be adopted during cleanup"
+                                )
+                            command, attempt = adopted
+                        else:
+                            command_status = (
+                                CommandStatus.CANCELLED
+                                if status is AttemptStatus.CANCELLED
+                                else CommandStatus.ABORTED
+                            )
+                            command = await self._ledger.terminate(
+                                connection,
+                                binding=execution.admission.binding,
+                                status=command_status,
+                                error_code=error_code,
+                                error_classification=error_classification,
+                            )
+                            attempt = await self._ledger.finish_attempt(
+                                connection,
+                                execution.attempt,
+                                status=status,
+                                error_code=error_code,
+                                error_classification=error_classification,
+                            )
+            admission = replace(
+                execution.admission,
+                record=command,
+                action=self._admission_action(command.status),
+            )
+            self.cleanup_execution_lease(execution)
+            return replace(execution, admission=admission, attempt=attempt, lease=lease)
+
+        try:
+            return await self._retry_control_plane_operation(
+                execution,
+                finish_once,
+                retry_permitted=lambda: not mutation_started,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if not mutation_started:
+                raise
+            # Resolve an ambiguous first transaction by adopting the exact durable
+            # terminal record, or perform the still-required mutation if it rolled
+            # back.  This second pass is what makes retained cleanup replay-safe.
+            return await finish_once()
+
+    @staticmethod
+    def _completed_attempt_abort_adoption(
+        execution: GatewayExecution,
+        *,
+        command: CommandRecord,
+        attempt: AttemptRecord | None,
+        status: AttemptStatus,
+        error_code: str,
+        error_classification: str,
+    ) -> tuple[CommandRecord, AttemptRecord] | None:
+        expected_command_status = (
+            CommandStatus.CANCELLED
+            if status is AttemptStatus.CANCELLED
+            else CommandStatus.ABORTED
         )
-        self.cleanup_execution_lease(execution)
-        return replace(execution, admission=admission, attempt=attempt, lease=lease)
+        result_terminal_statuses = {
+            CommandStatus.RESULT_CHECKPOINTED,
+            CommandStatus.COMPLETED,
+        }
+        if command.status not in result_terminal_statuses and not command.terminal:
+            return None
+        attempt_identity_mismatch = (
+            attempt is None
+            or attempt.attempt_id != execution.attempt.attempt_id
+            or attempt.thread_id != execution.fence.thread_id
+            or attempt.command_id != execution.fence.command_id
+            or attempt.owner_id != execution.fence.owner_id
+            or attempt.fencing_token != execution.fence.fencing_token
+        )
+        if attempt_identity_mismatch:
+            raise GraphCommandStateError(
+                "durable command cleanup replay differs from its exact attempt fence"
+            )
+        assert attempt is not None
+        durable_result_adoption = (
+            command.status in result_terminal_statuses
+            and attempt.status is AttemptStatus.COMPLETED
+            and command.fencing_token == execution.fence.fencing_token
+            and command.committed_checkpoint_ns is not None
+            and command.committed_checkpoint_id is not None
+            and command.result_ref is not None
+            and command.result_hash is not None
+            and command.error_code is None
+            and command.error_classification is None
+            and attempt.error_code is None
+            and attempt.error_classification is None
+        )
+        if durable_result_adoption:
+            # The terminal checkpoint/result transaction can commit and release
+            # its lease before the durable signal resumes this stream task.  Adopt
+            # that exact completed attempt; cleanup must never overwrite it with an
+            # abort merely because signal scheduling lagged the database commit.
+            return command, attempt
+        if command.status in result_terminal_statuses:
+            raise GraphCommandStateError(
+                "durable result cleanup replay has an incomplete terminal binding"
+            )
+        if command.status is expected_command_status and (
+            attempt.status is status
+            and attempt.error_code == error_code
+            and attempt.error_classification == error_classification
+            and command.error_code == error_code
+            and command.error_classification == error_classification
+        ):
+            return command, attempt
+        definitive_takeover = (
+            command.status is CommandStatus.ABORTED
+            and attempt.status is AttemptStatus.LEASE_LOST
+            and command.error_code == attempt.error_code
+            and command.error_classification == attempt.error_classification
+            and command.error_code
+            in {"GRAPH_LEASE_DISPLACED", "GRAPH_EXECUTION_LEASE_LOST"}
+            and command.error_classification
+            in {"LEASE_EXPIRED_TAKEOVER", "LEASE_LOST"}
+        )
+        if not definitive_takeover:
+            raise GraphCommandStateError(
+                "durable command terminal state conflicts with exact-fence cleanup replay"
+            )
+        return command, attempt
 
     async def inspect_recovery(
         self,

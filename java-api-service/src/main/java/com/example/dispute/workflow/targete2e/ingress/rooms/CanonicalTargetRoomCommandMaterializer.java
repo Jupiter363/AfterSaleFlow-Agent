@@ -9,6 +9,7 @@ import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.common.trace.W3cTraceContext;
+import com.example.dispute.room.application.EvidenceAgentTurnCommand;
 import com.example.dispute.workflow.application.command.AcceptCaseCommand;
 import com.example.dispute.workflow.application.command.CaseCommandRequestHasher;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelectionContext.TrafficSource;
@@ -72,6 +73,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
     private final MinioTargetE2eRoomCommandPayloadPublisher payloads;
     private final TargetE2eRoomObjectIndex objectIndex;
     private final TargetE2eEvidenceManifestPublisher evidenceManifestPublisher;
+    private final TargetE2eEvidenceTurnInvocationPublisher evidenceTurnInvocationPublisher;
     private final TargetE2eReviewInvocationPublisher reviewInvocationPublisher;
     private final JdbcTargetReviewInvocationFactsLoader reviewFacts;
     private final TargetEvidenceCommandMaterialStore evidence;
@@ -91,6 +93,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
             MinioTargetE2eRoomCommandPayloadPublisher payloads,
             TargetE2eRoomObjectIndex objectIndex,
             TargetE2eEvidenceManifestPublisher evidenceManifestPublisher,
+            TargetE2eEvidenceTurnInvocationPublisher evidenceTurnInvocationPublisher,
             TargetE2eReviewInvocationPublisher reviewInvocationPublisher,
             JdbcTargetReviewInvocationFactsLoader reviewFacts,
             TargetEvidenceCommandMaterialStore evidence,
@@ -108,6 +111,8 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         this.payloads = Objects.requireNonNull(payloads, "payloads");
         this.objectIndex = Objects.requireNonNull(objectIndex, "objectIndex");
         this.evidenceManifestPublisher = Objects.requireNonNull(evidenceManifestPublisher, "evidenceManifestPublisher");
+        this.evidenceTurnInvocationPublisher = Objects.requireNonNull(
+                evidenceTurnInvocationPublisher, "evidenceTurnInvocationPublisher");
         this.reviewInvocationPublisher = Objects.requireNonNull(reviewInvocationPublisher, "reviewInvocationPublisher");
         this.reviewFacts = Objects.requireNonNull(reviewFacts, "reviewFacts");
         this.evidence = Objects.requireNonNull(evidence, "evidence");
@@ -121,10 +126,53 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
     @Override
     public void materialize(
             String caseId, String commandId, AcceptCaseCommand command, AuthenticatedActor actor, String traceId) {
-        if (!isMaterializedCommand(command.commandType()) || command.roomType() == RoomType.HEARING) return;
+        materialize(caseId, commandId, command, actor, traceId, null);
+    }
+
+    @Override
+    public EvidenceSubmissionRunReceipt materializeEvidenceSubmission(
+            String caseId,
+            String commandId,
+            AcceptCaseCommand command,
+            AuthenticatedActor actor,
+            String traceId,
+            EvidenceAgentTurnCommand evidenceAgentTurnCommand) {
+        String logicalRunId = materialize(
+                caseId,
+                commandId,
+                command,
+                actor,
+                traceId,
+                Objects.requireNonNull(evidenceAgentTurnCommand, "evidenceAgentTurnCommand"));
+        if (logicalRunId == null || logicalRunId.isBlank()) {
+            throw new IllegalStateException(
+                    "target Evidence submission did not materialize a logical run");
+        }
+        return new EvidenceSubmissionRunReceipt(logicalRunId);
+    }
+
+    private String materialize(
+            String caseId,
+            String commandId,
+            AcceptCaseCommand command,
+            AuthenticatedActor actor,
+            String traceId,
+            EvidenceAgentTurnCommand evidenceAgentTurnCommand) {
+        if (!isMaterializedCommand(command.commandType()) || command.roomType() == RoomType.HEARING) return null;
+        if (command.commandType() == CommandType.EVIDENCE_SUBMIT
+                && evidenceAgentTurnCommand == null) {
+            throw new IllegalArgumentException(
+                    "target Evidence submission requires formal Evidence turn authority");
+        }
+        if (evidenceAgentTurnCommand != null
+                && (command.commandType() != CommandType.EVIDENCE_SUBMIT
+                        || command.roomType() != RoomType.EVIDENCE)) {
+            throw new IllegalArgumentException(
+                    "formal Evidence turn authority is only valid for Evidence submission");
+        }
         CaseRoomEpochEntity epoch = epochs.findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
                 caseId, command.roomType(), command.roomEpoch()).orElse(null);
-        if (epoch == null || !isTargetEpoch(epoch)) return;
+        if (epoch == null || !isTargetEpoch(epoch)) return null;
         if (epoch.getProcessRevision() != command.expectedProcessRevision()) {
             throw new IllegalStateException("target room command process revision is stale");
         }
@@ -136,21 +184,38 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         requireGrant(epoch, grant);
         if (command.commandType() == CommandType.PARTY_EVIDENCE_COMPLETE) {
             materializeEvidenceCompletion(caseId, commandId, command, actor, traceId, epoch, grant);
-            return;
+            return null;
         }
         Instant now = clock.instant();
         String identity = stableToken(epoch.getTenantSurrogate() + "\n" + caseId + "\n" + commandId);
         String logicalRunId = "target-" + command.roomType().name().toLowerCase() + "-run:" + identity;
         String attemptId = logicalRunId + ":1";
+        RoomGraphCommand.SnapshotRef eventRef = new RoomGraphCommand.SnapshotRef(
+                "case-command:" + commandId, command.payloadRef().schemaVersion(), command.payloadRef().uri(),
+                command.payloadRef().sha256(), command.payloadRef().sizeBytes());
         MinioTargetE2eRoomCommandPayloadPublisher.PublishedObject domain;
         JdbcTargetReviewInvocationFactsLoader.Facts loadedReview = null;
-        TargetE2eEvidenceManifestPublisher.Published evidencePublished = null;
+        TargetE2eEvidenceTurnInvocationPublisher.Published evidencePublished = null;
         if (command.roomType() == RoomType.EVIDENCE) {
-            evidencePublished = evidenceManifestPublisher.publish(new TargetE2eEvidenceManifestPublisher.Input(
-                    grant.activationId(), epoch.getTenantSurrogate(), caseId, epoch.getRoomEpoch(), epoch.getFencingToken(),
-                    commandId, logicalRunId, attemptId, evidenceThreadId(epoch, actor), actor.actorId(), actor.role().name(),
-                    command.deadlineAt(), now, pins));
-            domain = evidencePublished.manifest();
+            RoomGraphCommand provisional = graph(
+                    commandId,
+                    logicalRunId,
+                    attemptId,
+                    epoch,
+                    command,
+                    actor,
+                    traceId,
+                    new RoomGraphCommand.SnapshotRef(
+                            "target-evidence-turn-invocation:" + commandId,
+                            TargetE2eEvidenceTurnInvocationPublisher.SCHEMA_VERSION,
+                            "urn:target-e2e:object:target-evidence-turn-invocation:" + commandId,
+                            "0".repeat(64),
+                            1),
+                    eventRef,
+                    now);
+            evidencePublished = evidenceTurnInvocationPublisher.publish(
+                    provisional, epoch.getFencingToken(), evidenceAgentTurnCommand);
+            domain = evidencePublished.invocation();
         } else if (command.roomType() == RoomType.REVIEW) {
             loadedReview = reviewFacts.load(graph(commandId, logicalRunId, attemptId, epoch, command, actor, traceId,
                     new RoomGraphCommand.SnapshotRef("review-invocation:" + commandId, "target-e2e-review-invocation.v1",
@@ -161,9 +226,6 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
                     source(command, actor, epoch, "DOMAIN_SNAPSHOT"));
         }
         // The command payload is the immutable event authority. Do not wrap or republish it.
-        RoomGraphCommand.SnapshotRef eventRef = new RoomGraphCommand.SnapshotRef(
-                "case-command:" + commandId, command.payloadRef().schemaVersion(), command.payloadRef().uri(),
-                command.payloadRef().sha256(), command.payloadRef().sizeBytes());
         RoomGraphCommand skeleton = graph(commandId, logicalRunId, attemptId, epoch, command, actor, traceId,
                 new RoomGraphCommand.SnapshotRef("review-invocation:" + commandId, "target-e2e-review-invocation.v1",
                     "urn:target-e2e:object:review-invocation:" + commandId, "0".repeat(64), 1), eventRef, now);
@@ -174,7 +236,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         Authority exchangeAuthority = authority(grant.activationId(), epoch, graph, envelope.commandHash(), envelope.commandEnvelopeHash());
         if (command.roomType() == RoomType.REVIEW) reviewInvocationPublisher.bind(exchangeAuthority, graph, domain);
         else if (evidencePublished == null) payloads.bind(exchangeAuthority, graph, domain, TargetE2eRoomObjectIndex.Kind.COMMAND_INPUT);
-        else evidenceManifestPublisher.bind(exchangeAuthority, graph, evidencePublished);
+        else evidenceTurnInvocationPublisher.bind(exchangeAuthority, graph, evidencePublished);
         AgentRunCommandBindingFactory.Binding binding = bindings.bind(new AgentRunCommandBindingFactory.Context(
                 epoch.getRoomId(), caseId + ":" + epoch.getRoomEpoch(), command.commandType().name(), commandId), graph);
         LogicalRun logical = ledger.createOrLoad(new CreateLogicalRun(logicalRunId, epoch.getTenantSurrogate(), caseId,
@@ -196,7 +258,15 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         CommandAdmission admission = new CommandAdmission(grant.activationId(), grant.activationManifestHash(),
                 grant.isolatedDomainDbBindingHash(), epoch.getTenantSurrogate(), caseId, commandId,
                 envelope.commandHash(), envelope.commandEnvelopeHash(), epoch.getRoomEpoch(), epoch.getFencingToken());
-        append(command, admission, request, envelope, epoch, caseCommandRequestHash);
+        append(
+                command,
+                admission,
+                request,
+                envelope,
+                epoch,
+                caseCommandRequestHash,
+                evidenceAgentTurnCommand);
+        return logical.agentRunId();
     }
 
     private void materializeEvidenceCompletion(
@@ -232,13 +302,15 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
 
     private void append(AcceptCaseCommand command, CommandAdmission admission, ExecuteAgentRunRequest request,
             TargetE2EGraphCommandEnvelope envelope, CaseRoomEpochEntity epoch,
-            String caseCommandRequestHash) {
+            String caseCommandRequestHash,
+            EvidenceAgentTurnCommand evidenceAgentTurnCommand) {
         switch (command.roomType()) {
             case EVIDENCE -> evidence.append(admission, new TargetEvidenceCommandMaterial(
                     TargetEvidenceCommandMaterial.SCHEMA_VERSION, TargetEvidenceCommandMaterial.TARGET_LANE,
                     admission.activationId(), admission.manifestHash(), epoch.getFencingToken(),
                     epoch.getProcessRevision(), epoch.getRoomRevision(), envelope.commandHash(),
-                    envelope.commandEnvelopeHash(), caseCommandRequestHash, request));
+                    envelope.commandEnvelopeHash(), caseCommandRequestHash, request,
+                    evidenceAgentTurnCommand));
             case HEARING -> hearing.append(new TargetHearingCommandMaterial(
                     TargetHearingCommandMaterial.SCHEMA_VERSION, admission, request,
                     envelope.commandHash(), envelope.commandEnvelopeHash()));
@@ -266,7 +338,8 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
                 new RoomGraphCommand.ActorScope(actor.actorId(), mapRole(actor.role()), audience(actor.role()),
                         List.of("case:" + epoch.getCaseId() + ":command:" + command.commandType().name())),
                 epoch.getProcessRevision(), graphStageCode(command.roomType()), epoch.getProcessRevision(), domain, event,
-                invocation, new RoomGraphCommand.RetryBudget(2, 3, 1), command.deadlineAt(), traceparent(traceId),
+                invocation, new RoomGraphCommand.RetryBudget(2, 3, 1), command.deadlineAt(),
+                traceparent(expectedTraceId(traceId)),
                 "0".repeat(64));
         ObjectNode canonical = mapper.valueToTree(provisional);
         canonical.remove("request_hash");

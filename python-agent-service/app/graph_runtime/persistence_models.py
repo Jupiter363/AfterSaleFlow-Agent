@@ -257,7 +257,7 @@ class GraphReadinessConfig:
     expected_environment_generation: str | None = None
     expected_restore_verification_hash: str | None = None
     schema: str = "graph_runtime"
-    timeout_seconds: float = 2.0
+    timeout_seconds: float = 10.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.mode, GraphGatewayMode):

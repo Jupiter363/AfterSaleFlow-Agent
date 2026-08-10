@@ -19,6 +19,7 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.RoomMessageCommand;
+import com.example.dispute.room.application.EvidenceAgentTurnCommand;
 import com.example.dispute.room.application.RoomMessageService;
 import com.example.dispute.room.application.RoomMessageView;
 import com.example.dispute.room.domain.MessageType;
@@ -220,7 +221,7 @@ public class EvidenceSubmissionService {
         }
         Instant submittedAt = clock.instant();
         EvidenceSubmissionBatchEntity batch =
-                EvidenceSubmissionBatchEntity.submitted(
+                batchRepository.save(EvidenceSubmissionBatchEntity.submitted(
                         "EVIDENCE_BATCH_" + compactUuid(),
                         dispute.getId(),
                         actor.role().name(),
@@ -228,8 +229,7 @@ public class EvidenceSubmissionService {
                         json(evidenceIds),
                         command.batchNote(),
                         idempotencyKey,
-                        submittedAt);
-        batchRepository.save(batch);
+                        submittedAt));
         OffsetDateTime submittedOffset = OffsetDateTime.ofInstant(submittedAt, ZoneOffset.UTC);
         for (EvidenceItemEntity item : evidences) {
             item.markSubmittedForParties(batch.getId(), submittedOffset, actor.actorId());
@@ -246,7 +246,21 @@ public class EvidenceSubmissionService {
                                         evidenceIds),
                                 actor,
                                 "evidence-batch-message:" + idempotencyKey,
-                                traceId)
+                                traceId,
+                                sealedMessage -> {
+                                    EvidenceAgentTurnCommand evidenceTurnCommand =
+                                            roomMessageService.prepareTargetEvidenceSubmissionTurn(
+                                                    dispute.getId(), actor, sealedMessage);
+                                    return submitTargetCommand(
+                                            dispute,
+                                            batch,
+                                            sealedMessage,
+                                            evidenceIds,
+                                            actor,
+                                            traceId,
+                                            targetEpoch.orElseThrow(),
+                                            evidenceTurnCommand);
+                                })
                         : roomMessageService.post(
                         dispute.getId(),
                         submissionRoom(dispute),
@@ -268,10 +282,6 @@ public class EvidenceSubmissionService {
                 Map.of(
                         "evidence_count", evidenceIds.size(),
                         "room_message_id", message.id()));
-        targetEpoch.ifPresent(
-                epoch ->
-                        submitTargetCommand(
-                                dispute, batch, message, evidenceIds, actor, traceId, epoch));
         return view(batch, message);
     }
 
@@ -290,17 +300,20 @@ public class EvidenceSubmissionService {
             throw new IdempotencyConflictException(
                     "evidence submission idempotency key is bound to a different request");
         }
-        return viewWithoutMessage(existing);
+        RoomMessageView message = roomMessageService.readEvidenceSubmissionReplay(
+                existing.getCaseId(), existing.getRoomMessageId(), actor);
+        return view(existing, message);
     }
 
-    private void submitTargetCommand(
+    private String submitTargetCommand(
             FulfillmentCaseEntity dispute,
             EvidenceSubmissionBatchEntity batch,
             RoomMessageView message,
             List<String> evidenceIds,
             AuthenticatedActor actor,
             String traceId,
-            CaseRoomEpochEntity epoch) {
+            CaseRoomEpochEntity epoch,
+            EvidenceAgentTurnCommand evidenceTurnCommand) {
         String commandId = "evidence-submit:" + batch.getId();
         Map<String, Object> fact =
                 Map.of(
@@ -328,9 +341,17 @@ public class EvidenceSubmissionService {
                 epoch.getProcessRevision(),
                 requireFutureDeadline(dispute));
         TargetRoomCommandIngress ingress = requireTargetIngress(Optional.of(epoch));
-        ingress.materialize(dispute.getId(), commandId, command, actor, traceId);
+        TargetRoomCommandIngress.EvidenceSubmissionRunReceipt receipt =
+                ingress.materializeEvidenceSubmission(
+                        dispute.getId(),
+                        commandId,
+                        command,
+                        actor,
+                        traceId,
+                        evidenceTurnCommand);
         caseCommandService.accept(
                 dispute.getId(), commandId, command, actor, traceId, commandId, null);
+        return receipt.logicalRunId();
     }
 
     private Optional<CaseRoomEpochEntity> currentTargetEvidenceEpoch(String caseId) {

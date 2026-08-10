@@ -433,7 +433,7 @@ async def test_ainvoke_uses_native_async_transport_only() -> None:
     ],
 )
 @pytest.mark.asyncio
-async def test_intake_async_stream_withholds_visible_until_completed_policy_validation(
+async def test_intake_async_stream_keeps_provisional_visible_on_terminal_policy_rejection(
     invalid_result,
 ) -> None:
     transport = RecordingTransport()
@@ -454,11 +454,14 @@ async def test_intake_async_stream_withholds_visible_until_completed_policy_vali
         async for chunk in model._astream(_messages()):
             chunks.append(chunk)
 
-    assert chunks == []
+    assert [chunk.generation_info for chunk in chunks] == [
+        {"governed_event": "visible_delta"}
+    ]
+    assert "must stay buffered" in str(chunks)
 
 
 @pytest.mark.asyncio
-async def test_intake_async_stream_releases_visible_then_final_after_policy_validation() -> None:
+async def test_intake_async_stream_emits_visible_then_validated_final() -> None:
     transport = RecordingTransport()
     transport.stream_attempts = [
         [
@@ -483,7 +486,7 @@ async def test_intake_async_stream_releases_visible_then_final_after_policy_vali
     )
 
 
-def test_intake_sync_stream_withholds_visible_until_completed_policy_validation() -> None:
+def test_intake_sync_stream_keeps_provisional_visible_on_terminal_policy_rejection() -> None:
     transport = RecordingTransport()
     transport.stream_attempts = [
         [
@@ -504,7 +507,10 @@ def test_intake_sync_stream_withholds_visible_until_completed_policy_validation(
         for chunk in model._stream(_messages()):
             chunks.append(chunk)
 
-    assert chunks == []
+    assert [chunk.generation_info for chunk in chunks] == [
+        {"governed_event": "visible_delta"}
+    ]
+    assert "must stay buffered" in str(chunks)
 
 
 @pytest.mark.asyncio
@@ -531,24 +537,50 @@ async def test_non_intake_async_stream_retains_live_visible_behavior() -> None:
 
 
 @pytest.mark.asyncio
-async def test_intake_retry_discards_the_failed_attempt_buffer() -> None:
+async def test_intake_stream_does_not_retry_after_provisional_visible_output() -> None:
     class RetryTransport(RecordingTransport):
         async def astream(self, request):
             self.astream_calls += 1
             self.requests.append(request)
-            if self.astream_calls == 1:
-                yield ModelTransportVisibleDelta(
-                    field="answer",
-                    delta="stale failed attempt",
-                )
-                raise TransientModelTransportError(
-                    "retryable before public release",
-                    provider_attempts_used=1,
-                )
-            yield ModelTransportVisibleDelta(field="answer", delta="fresh retry")
-            yield ModelTransportCompleted(result=transport_result(answer="fresh retry"))
+            yield ModelTransportVisibleDelta(
+                field="answer",
+                delta="published provisional output",
+            )
+            raise TransientModelTransportError(
+                "retry is forbidden after public release",
+                provider_attempts_used=1,
+            )
 
     transport = RetryTransport()
+    model = _model(
+        transport,
+        attempts=2,
+        node_name="intake_turn_case_detail",
+        visible=True,
+    )
+
+    chunks = []
+    with pytest.raises(governed_module.ModelStreamInterrupted):
+        async for chunk in model._astream(_messages()):
+            chunks.append(chunk)
+
+    assert transport.astream_calls == 1
+    assert [chunk.generation_info for chunk in chunks] == [
+        {"governed_event": "visible_delta"}
+    ]
+    assert "published provisional output" in str(chunks)
+
+
+@pytest.mark.asyncio
+async def test_intake_stream_retries_before_any_provisional_visible_output() -> None:
+    transport = RecordingTransport()
+    transport.stream_attempts = [
+        TransientModelTransportError("connect", provider_attempts_used=1),
+        [
+            ModelTransportVisibleDelta(field="answer", delta="fresh retry"),
+            ModelTransportCompleted(result=transport_result(answer="fresh retry")),
+        ],
+    ]
     model = _model(
         transport,
         attempts=2,
@@ -563,7 +595,6 @@ async def test_intake_retry_discards_the_failed_attempt_buffer() -> None:
         {"governed_event": "visible_delta"},
         {"governed_event": "completed"},
     ]
-    assert "stale failed attempt" not in str(chunks)
     assert "fresh retry" in str(chunks)
 
 

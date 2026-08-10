@@ -32,7 +32,7 @@ from app.model_runtime.profiles import (
 )
 from app.model_runtime.runnable_factory import ModelNodeSpec, build_model_node
 from app.model_runtime.transports import StructuredClientTransport
-from app.streaming import VisibleFieldSpec
+from app.streaming import VisibleFieldSpec, current_stream_observer
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -202,6 +202,71 @@ class HarnessModelRunner:
             context=prepared.context,
             messages=messages,
         )
+
+    async def ainvoke_structured(
+        self,
+        *,
+        node_name: str,
+        case_data: dict[str, Any],
+        output_type: type[T],
+        context_sections: list[PromptSection] | None = None,
+        context_pack: ContextPack | None = None,
+        max_input_tokens: int | None = None,
+        agent_context: AgentInvocationContext | None = None,
+        prompt_profile_id: str | None = None,
+        evidence_assets: LoadedEvidenceAssets | None = None,
+    ) -> HarnessGeneration[T]:
+        """Execute one governed structured invocation on the native async model path."""
+
+        user_content_parts = (
+            validated_evidence_content_parts(evidence_assets)
+            if evidence_assets is not None
+            else ()
+        )
+        prepared = self._prepare(
+            node_name=node_name,
+            case_data=case_data,
+            output_type=output_type,
+            context_sections=context_sections,
+            context_pack=context_pack,
+            max_input_tokens=max_input_tokens,
+            agent_context=agent_context,
+            prompt_profile_id=prompt_profile_id,
+        )
+        built = self._build_node(
+            node_name=node_name,
+            output_type=output_type,
+            prepared=prepared,
+            visible_fields=(),
+            user_content_parts=user_content_parts,
+        )
+        capture = InvocationMetadataCapture()
+        state = {"human_prompt": prepared.user_prompt}
+        patch = await built.runnable.ainvoke(
+            state,
+            config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
+        )
+        value = output_type.model_validate(patch["value"])
+        messages = tuple(built.prompt.invoke(state).messages)
+        metadata = capture.metadata
+        generation = HarnessGeneration(
+            value=value,
+            model=str(metadata["model"]),
+            latency_ms=int(metadata["latency_ms"]),
+            token_usage=dict(metadata["token_usage"]),
+            context=prepared.context,
+            messages=messages,
+        )
+        observer = current_stream_observer()
+        if observer is not None:
+            observer.raise_if_cancelled()
+            observer.usage(
+                node_name=node_name,
+                model=generation.model,
+                latency_ms=generation.latency_ms,
+                token_usage=generation.token_usage,
+            )
+        return generation
 
     # 所属模块：Agent Harness > 模型执行中枢 > 单次调用流式适配。
     # 具体功能：`invoke_structured_stream` 复用与非流式完全相同的裁剪/Prompt/身份规则，消费一次 `llm.generate_stream`，把可见字段增量映射为 HarnessStreamDelta，最终映射为已校验 HarnessGeneration。

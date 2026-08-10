@@ -180,7 +180,8 @@ public final class TargetE2eAgentRunV2RetryPreparation
         source.schemaVersion(), source.executionLane(), source.activationId(),
         source.activationManifestHash(), source.roomFencingToken(),
         source.expectedProcessRevision(), source.expectedRoomRevision(), sealed.commandHash(),
-        sealed.commandEnvelopeHash(), source.caseCommandRequestHash(), request));
+        sealed.commandEnvelopeHash(), source.caseCommandRequestHash(), request,
+        source.evidenceAgentTurnCommand()));
     rebind(previous.admission(), source.request().command(), admission, command, sealed);
   }
 

@@ -76,7 +76,7 @@ public final class TargetE2EAgentGraphCommandClient implements AgentGraphCommand
       RoomGraphCommand command = request.command();
       GraphStreamVisibilityPolicy.Binding binding =
           GraphStreamVisibilityPolicy.Binding.from(command);
-      Map<String, Set<String>> visibleFields =
+      Map<String, Set<String>> configuredVisibleFields =
           GraphStreamVisibilityPolicy.immutablePolicy(
               Objects.requireNonNull(
                   visibilityPolicy.allowedVisibleFields(binding),
@@ -86,6 +86,9 @@ public final class TargetE2EAgentGraphCommandClient implements AgentGraphCommand
       TargetE2ESealedGraphCommand sealed =
           codec.sealCommand(
               activationId, roomFencingToken, command, registryBinding, signer);
+      Map<String, Set<String>> visibleFields =
+          TargetE2EGraphStreamVisibility.requireExactPolicy(
+              sealed.envelope().command().roomType(), configuredVisibleFields);
       TargetE2EGraphResultEnvelope result =
           proposalClient.execute(
               sealed,

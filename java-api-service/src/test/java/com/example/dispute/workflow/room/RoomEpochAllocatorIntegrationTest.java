@@ -236,6 +236,127 @@ class RoomEpochAllocatorIntegrationTest {
                 .isZero();
         assertThat(activeEpochCount(caseId)).isEqualTo(1);
         assertThat(selector.calls()).isEqualTo(4);
+        assertThat(jdbc.queryForObject(
+                        "select projection_ref is null and projection_sha256 is null from case_process_projection where case_id = ?",
+                        Boolean.class,
+                        caseId))
+                .isTrue();
+    }
+
+    @Test
+    void transitionPersistsAndReplaysOneExactFrozenProjectionPair() {
+        String caseId = "CASE_ALLOC_FROZEN_PROJECTION";
+        String projectionRef =
+                "urn:after-sale-flow:intake-event:EVIB_FROZEN#/result/frozen_submission/matrix";
+        String projectionSha256 = "a".repeat(64);
+        insertCaseAndRooms(caseId, RoomType.INTAKE, RoomType.EVIDENCE);
+        inTransaction(() -> allocator.activate(activate(caseId, RoomType.INTAKE, NOW)));
+        TransitionRoomEpoch command = new TransitionRoomEpoch(
+                caseId,
+                RoomType.INTAKE,
+                roomId(caseId, RoomType.EVIDENCE),
+                RoomType.EVIDENCE,
+                "EVIDENCE_OPEN",
+                "OPEN",
+                NOW.plusHours(1),
+                NOW.plusMinutes(1),
+                projectionRef,
+                projectionSha256);
+
+        RoomEpochAllocation inserted = inTransaction(() -> allocator.transition(command));
+        RoomEpochAllocation replayed = inTransaction(() -> allocator.transition(command));
+
+        assertThat(replayed.epochId()).isEqualTo(inserted.epochId());
+        assertThat(countEpochs(caseId)).isEqualTo(2);
+        assertThat(jdbc.queryForObject(
+                        "select projection_ref from case_process_projection where case_id = ?",
+                        String.class,
+                        caseId))
+                .isEqualTo(projectionRef);
+        assertThat(jdbc.queryForObject(
+                        "select projection_sha256 from case_process_projection where case_id = ?",
+                        String.class,
+                        caseId))
+                .isEqualTo(projectionSha256);
+        assertThatThrownBy(() -> inTransaction(() -> allocator.transition(
+                        new TransitionRoomEpoch(
+                                caseId,
+                                RoomType.INTAKE,
+                                roomId(caseId, RoomType.EVIDENCE),
+                                RoomType.EVIDENCE,
+                                "EVIDENCE_OPEN",
+                                "OPEN",
+                                NOW.plusHours(1),
+                                NOW.plusMinutes(1),
+                                projectionRef,
+                                "b".repeat(64)))))
+                .isInstanceOfSatisfying(
+                        RoomEpochAllocationException.class,
+                        failure -> assertThat(failure.reasonCode())
+                                .isEqualTo("ROOM_EPOCH_PROJECTION_AUTHORITY_CONFLICT"));
+        assertThatThrownBy(() -> new TransitionRoomEpoch(
+                        caseId,
+                        RoomType.INTAKE,
+                        roomId(caseId, RoomType.EVIDENCE),
+                        RoomType.EVIDENCE,
+                        "EVIDENCE_OPEN",
+                        "OPEN",
+                        NOW.plusHours(1),
+                        NOW.plusMinutes(1),
+                        projectionRef,
+                        null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("both be absent or present");
+    }
+
+    @Test
+    void legacyTransitionAndReplayPreserveExistingFrozenProjectionAuthority() {
+        String caseId = "CASE_ALLOC_FROZEN_THEN_LEGACY";
+        String projectionRef =
+                "urn:after-sale-flow:intake-event:EVIB_RETAINED#/result/frozen_submission/matrix";
+        String projectionSha256 = "c".repeat(64);
+        insertCaseAndRooms(
+                caseId, RoomType.INTAKE, RoomType.EVIDENCE, RoomType.HEARING);
+        inTransaction(() -> allocator.activate(activate(caseId, RoomType.INTAKE, NOW)));
+        inTransaction(() -> allocator.transition(
+                new TransitionRoomEpoch(
+                        caseId,
+                        RoomType.INTAKE,
+                        roomId(caseId, RoomType.EVIDENCE),
+                        RoomType.EVIDENCE,
+                        "EVIDENCE_OPEN",
+                        "OPEN",
+                        NOW.plusHours(1),
+                        NOW.plusMinutes(1),
+                        projectionRef,
+                        projectionSha256)));
+        TransitionRoomEpoch legacy = transition(
+                caseId,
+                RoomType.EVIDENCE,
+                RoomType.HEARING,
+                NOW.plusMinutes(2));
+
+        RoomEpochAllocation inserted = inTransaction(() -> allocator.transition(legacy));
+        RoomEpochAllocation replayed = inTransaction(() -> allocator.transition(legacy));
+
+        assertThat(replayed.epochId()).isEqualTo(inserted.epochId());
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from case_room_epoch where case_id = ? and room_type = 'HEARING'",
+                        Long.class,
+                        caseId))
+                .isEqualTo(1L);
+        assertThat(countEpochs(caseId)).isEqualTo(3);
+        assertThat(jdbc.queryForObject(
+                        "select projection_ref from case_process_projection where case_id = ?",
+                        String.class,
+                        caseId))
+                .isEqualTo(projectionRef);
+        assertThat(jdbc.queryForObject(
+                        "select projection_sha256 from case_process_projection where case_id = ?",
+                        String.class,
+                        caseId))
+                .isEqualTo(projectionSha256);
+        assertThat(selector.calls()).isEqualTo(3);
     }
 
     @Test

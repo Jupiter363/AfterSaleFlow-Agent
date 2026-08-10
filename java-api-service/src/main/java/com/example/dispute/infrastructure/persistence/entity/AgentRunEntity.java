@@ -749,6 +749,10 @@ public class AgentRunEntity extends AbstractEntity {
         return runStatus;
     }
 
+    public String getStopReason() {
+        return stopReason;
+    }
+
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「AgentRunEntity.getInputRefsJson()」。
     // 具体功能：「AgentRunEntity.getInputRefsJson()」：读取「AgentRunEntity」中的「inputRefsJson」状态，向 JPA、应用服务或序列化层返回「String」。
     // 上游调用：「AgentRunEntity.getInputRefsJson()」由使用「AgentRunEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。

@@ -284,6 +284,48 @@ public class CaseCommandEntity extends AbstractEntity {
         updatedAt = failedAt;
     }
 
+    public void markAcceptedOrchestrationTerminalNoCommit(
+            String reasonCode,
+            String terminalReceiptUri,
+            String terminalReceiptSha256,
+            OffsetDateTime failedAt) {
+        Objects.requireNonNull(reasonCode, "reasonCode must not be null");
+        Objects.requireNonNull(terminalReceiptUri, "terminalReceiptUri must not be null");
+        Objects.requireNonNull(terminalReceiptSha256, "terminalReceiptSha256 must not be null");
+        Objects.requireNonNull(failedAt, "failedAt must not be null");
+        if (reasonCode.isBlank() || reasonCode.length() > 64) {
+            throw new IllegalArgumentException("reasonCode is invalid");
+        }
+        if (terminalReceiptUri.isBlank()
+                || terminalReceiptUri.length() > 1024
+                || !terminalReceiptSha256.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("terminal receipt identity is invalid");
+        }
+        if (commandStatus == CommandStatus.FAILED) {
+            if (!reasonCode.equals(statusReasonCode)
+                    || !terminalReceiptUri.equals(resultUri)
+                    || !terminalReceiptSha256.equals(resultSha256)
+                    || appliedAt != null) {
+                throw new IllegalStateException(
+                        "failed command is bound to another terminal authority");
+            }
+            return;
+        }
+        if (commandStatus != CommandStatus.ORCHESTRATION_ACCEPTED) {
+            throw new IllegalStateException(
+                    "only an accepted orchestration can terminate without a commit");
+        }
+        if (resultUri != null || resultSha256 != null || appliedAt != null) {
+            throw new IllegalStateException(
+                    "accepted orchestration already carries terminal result authority");
+        }
+        commandStatus = CommandStatus.FAILED;
+        statusReasonCode = reasonCode;
+        resultUri = terminalReceiptUri;
+        resultSha256 = terminalReceiptSha256;
+        updatedAt = failedAt;
+    }
+
     public void markExpired(String reasonCode, OffsetDateTime expiredAt) {
         Objects.requireNonNull(reasonCode, "reasonCode must not be null");
         Objects.requireNonNull(expiredAt, "expiredAt must not be null");

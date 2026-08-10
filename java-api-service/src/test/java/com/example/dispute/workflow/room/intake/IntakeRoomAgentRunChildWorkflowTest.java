@@ -6,8 +6,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.GraphStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
@@ -17,6 +19,10 @@ import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommitResult;
+import com.example.dispute.workflow.temporal.caseprocess.TargetIntakeCommandTerminalNoCommit;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
@@ -32,11 +38,16 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunChildIds;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunChildState;
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationRecoveryRequest;
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationRecoveryResult;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReadActivities;
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReadActivitiesAdapter;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReadRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReadResult;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReadResult.FinalizationLocator;
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReadResult.TerminalNoCommitEvidence;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeCommandDecision;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventRef;
@@ -52,16 +63,33 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
+import com.example.dispute.workflow.temporal.room.intake.IntakeTerminalNoCommitRecoveryRequest;
+import com.example.dispute.workflow.temporal.room.intake.IntakeTerminalNoCommitRecoveryResult;
 import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.common.interceptors.WorkerInterceptorBase;
+import io.temporal.common.interceptors.WorkflowInboundCallsInterceptor;
+import io.temporal.common.interceptors.WorkflowInboundCallsInterceptorBase;
+import io.temporal.common.interceptors.WorkflowOutboundCallsInterceptor;
+import io.temporal.common.interceptors.WorkflowOutboundCallsInterceptorBase;
 import io.temporal.failure.ApplicationFailure;
+import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
+import io.temporal.worker.WorkerFactoryOptions;
+import io.temporal.workflow.UpdateMethod;
+import io.temporal.workflow.QueryMethod;
+import io.temporal.workflow.SignalMethod;
 import io.temporal.workflow.Workflow;
+import io.temporal.workflow.WorkflowInterface;
+import io.temporal.workflow.WorkflowMethod;
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -89,6 +117,8 @@ class IntakeRoomAgentRunChildWorkflowTest {
   private static final String RESULT_HASH = "7".repeat(64);
   private static final String PROPOSAL_HASH = "8".repeat(64);
   private static final int POST_COMMIT_RECONCILIATION_ATTEMPTS = 5;
+  private static final String TERMINAL_NO_COMMIT_PARENT_CONVERGENCE_V2_CHANGE_ID =
+      "intake-room-agent-run-terminal-no-commit-parent-convergence-v2";
   private static final String GAP_FIRST_COMMAND_ID = "CMD:P9:DEFER:GAP:1";
   private static final String GAP_SECOND_COMMAND_ID = "CMD:P9:DEFER:GAP:2";
   private static final String GAP_BAD_COMMAND_ID = "CMD:P9:DEFER:BAD:2";
@@ -1427,6 +1457,981 @@ class IntakeRoomAgentRunChildWorkflowTest {
   }
 
   @Test
+  void versionedFinalizationReadReturnsRecoveredWinningAttemptForWorkflowValidation() {
+    IntakeWorkflowCommand command = targetCommand(WINNING_FIRST_COMMAND_ID, 1, 0);
+    IntakeAgentRunChildState childState =
+        IntakeAgentRunChildState.pending(
+                IntakeAgentRunChildIds.forCommand(command),
+                command.executionContext().targetAgentRun())
+            .resultReady(WINNING_RESULT_HASH);
+    IntakeAgentRunFinalizationReadRequest legacyRequest =
+        new IntakeAgentRunFinalizationReadRequest(
+            "intake-agent-run-finalization-read-request.v1",
+            IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION,
+            command,
+            childState);
+    IntakeAgentRunFinalizationReadResult winningResult =
+        WinningAttemptFinalizationReads.finalizationResult(
+            legacyRequest, WinningMismatch.NONE, true);
+    IntakeAgentRunFinalizationReadActivitiesAdapter adapter =
+        new IntakeAgentRunFinalizationReadActivitiesAdapter(ignored -> winningResult);
+    IntakeAgentRunFinalizationReadRequest versionedRequest =
+        new IntakeAgentRunFinalizationReadRequest(
+            "intake-agent-run-finalization-read-request.v2",
+            IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION,
+            command,
+            childState);
+
+    assertThat(adapter.readFinalization(versionedRequest)).isSameAs(winningResult);
+  }
+
+  @Test
+  void legacyFinalizationReadRejectsRecoveredWinningAttempt() {
+    IntakeWorkflowCommand command = targetCommand(WINNING_FIRST_COMMAND_ID, 1, 0);
+    IntakeAgentRunChildState childState =
+        IntakeAgentRunChildState.pending(
+                IntakeAgentRunChildIds.forCommand(command),
+                command.executionContext().targetAgentRun())
+            .resultReady(WINNING_RESULT_HASH);
+    IntakeAgentRunFinalizationReadRequest legacyRequest =
+        new IntakeAgentRunFinalizationReadRequest(
+            "intake-agent-run-finalization-read-request.v1",
+            IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION,
+            command,
+            childState);
+    IntakeAgentRunFinalizationReadResult winningResult =
+        WinningAttemptFinalizationReads.finalizationResult(
+            legacyRequest, WinningMismatch.NONE, true);
+    IntakeAgentRunFinalizationReadActivitiesAdapter adapter =
+        new IntakeAgentRunFinalizationReadActivitiesAdapter(ignored -> winningResult);
+
+    assertThatThrownBy(() -> adapter.readFinalization(legacyRequest))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage(
+            "committed AgentRun finalization receipt does not match its exact lookup");
+  }
+
+  @Test
+  void exposesAcknowledgedProviderFreeTargetFinalizationRecoveryUpdateContract() {
+    Method update =
+        Arrays.stream(IntakeRoomWorkflow.class.getMethods())
+            .filter(method -> method.getName().equals("recoverTargetFinalization"))
+            .findFirst()
+            .orElseThrow(
+                () ->
+                    new AssertionError(
+                        "Intake Room workflow must expose provider-free finalization recovery"));
+
+    assertThat(update.getParameterTypes())
+        .extracting(Class::getName)
+        .containsExactly(
+            "com.example.dispute.workflow.temporal.room.intake."
+                + "IntakeAgentRunFinalizationRecoveryRequest");
+    assertThat(update.getReturnType().getName())
+        .isEqualTo(
+            "com.example.dispute.workflow.temporal.room.intake."
+                + "IntakeAgentRunFinalizationRecoveryResult");
+    assertThat(update.getAnnotation(UpdateMethod.class)).isNotNull();
+    assertThat(update.getAnnotation(UpdateMethod.class).name())
+        .isEqualTo("intakeRecoverTargetFinalization");
+  }
+
+  @Test
+  void abortedGraphStreamPublishesOneTerminalNoCommitReceiptAndAdvancesReservedCoordinates() {
+    assertLegacyTerminalNoCommitMarkerPath();
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-terminal-no-commit-future";
+      String roomWorkflowId =
+          CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.INTAKE, EPOCH);
+      String caseWorkflowId = CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID);
+      TerminalReceiptSinkWorkflowImpl.reset();
+      AbortedAgentRunWorkflow.reset();
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(AbortedAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerWorkflowImplementationTypes(TerminalReceiptSinkWorkflowImpl.class);
+      environment.start();
+
+      TerminalReceiptSinkWorkflow sink =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  TerminalReceiptSinkWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(caseWorkflowId)
+                      .setTaskQueue(CASE_CONTROL)
+                      .build());
+      WorkflowClient.start(sink::run);
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(roomWorkflowId)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      String roomRunId = WorkflowClient.start(workflow::run, targetStart()).getRunId();
+      IntakeWorkflowCommand command = targetCommand();
+
+      workflow.commandAccepted(command);
+
+      IntakeRoomSnapshot state =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.pendingCommand() == null
+                      && snapshot.processRevision() == 1
+                      && snapshot.roomRevision() == 1);
+      List<TargetIntakeCommandTerminalNoCommit> receipts = awaitReceipts(sink, 1);
+      TargetIntakeCommandTerminalNoCommit receipt = receipts.getFirst();
+      assertThat(state.protocolErrorCode()).isEqualTo("GRAPH_STREAM_PROTOCOL_REJECTED");
+      assertThat(receipt.commandId()).isEqualTo(command.commandId());
+      assertThat(receipt.commandRequestHash()).isEqualTo(command.requestHash());
+      assertThat(receipt.logicalRunId()).isEqualTo(LOGICAL_RUN_ID);
+      assertThat(receipt.terminalAttemptStatus()).isEqualTo(AgentRunAttemptStatus.ABORTED);
+      assertThat(receipt.errorCode()).isEqualTo("GRAPH_STREAM_PROTOCOL_REJECTED");
+      assertThat(receipt.roomWorkflowRunId()).isEqualTo(roomRunId);
+      assertThat(receipt.expectedProcessRevision()).isZero();
+      assertThat(receipt.newProcessRevision()).isEqualTo(1);
+      assertThat(receipt.expectedRoomRevision()).isZero();
+      assertThat(receipt.newRoomRevision()).isEqualTo(1);
+      assertThat(receipt.expectedLastCaseEventSequence()).isZero();
+      assertThat(receipt.lastCaseEventSequence()).isZero();
+      assertThat(receipt.agentRunExecutionRequestHash())
+          .isEqualTo(targetRequest(command).command().requestHash());
+      assertThatThrownBy(
+              () ->
+                  new IntakeTerminalNoCommitRecoveryRequest(
+                      IntakeTerminalNoCommitRecoveryRequest.LEGACY_SCHEMA_VERSION,
+                      roomWorkflowId,
+                      roomRunId,
+                      receipt))
+          .isInstanceOf(IllegalArgumentException.class);
+
+      workflow.commandAccepted(command);
+      environment.sleep(Duration.ofSeconds(1));
+      assertThat(sink.receipts()).containsExactly(receipt);
+      assertThat(AbortedAgentRunWorkflow.requests).containsExactly(targetRequest(command));
+
+      IntakeWorkflowCommand subsequent = targetCommand("CMD:P9:TERMINAL:NEXT:2", 2, 1);
+      workflow.commandAccepted(subsequent);
+      IntakeRoomSnapshot afterSubsequent =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.pendingCommand() == null
+                      && snapshot.processRevision() == 2
+                      && snapshot.roomRevision() == 2);
+      List<TargetIntakeCommandTerminalNoCommit> afterSubsequentReceipts =
+          awaitReceipts(sink, 2);
+      assertThat(afterSubsequent.protocolErrorCode())
+          .isEqualTo("GRAPH_STREAM_PROTOCOL_REJECTED");
+      assertThat(afterSubsequentReceipts)
+          .extracting(TargetIntakeCommandTerminalNoCommit::commandId)
+          .containsExactly(command.commandId(), subsequent.commandId());
+      assertThat(AbortedAgentRunWorkflow.requests)
+          .containsExactly(targetRequest(command), targetRequest(subsequent));
+
+      workflow.commandAccepted(subsequent);
+      environment.sleep(Duration.ofSeconds(1));
+      assertThat(sink.receipts()).hasSize(2);
+      assertThat(AbortedAgentRunWorkflow.requests).hasSize(2);
+    }
+  }
+
+  @Test
+  void completedPublicResultRejectedDuringFinalizationConvergesTerminalNoCommitAndAdmitsNextCommandOnce() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-finalization-rejected-terminal-no-commit";
+      String roomWorkflowId =
+          CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.INTAKE, EPOCH);
+      String caseWorkflowId = CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID);
+      TerminalReceiptSinkWorkflowImpl.reset();
+      FinalizationRejectedThenCompletedAgentRunWorkflow.reset();
+      FinalizationRejectedReads.reset();
+      RecordingFinalizationReads.requests.clear();
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(
+          FinalizationRejectedThenCompletedAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerWorkflowImplementationTypes(TerminalReceiptSinkWorkflowImpl.class);
+      controlWorker.registerActivitiesImplementations(new FinalizationRejectedReads());
+      environment.start();
+
+      TerminalReceiptSinkWorkflow sink =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  TerminalReceiptSinkWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(caseWorkflowId)
+                      .setTaskQueue(CASE_CONTROL)
+                      .build());
+      WorkflowClient.start(sink::run);
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(roomWorkflowId)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      WorkflowClient.start(workflow::run, targetStart());
+      IntakeWorkflowCommand first = targetCommand(LIFECYCLE_FIRST_COMMAND_ID, 1, 0);
+
+      workflow.commandAccepted(first);
+
+      IntakeRoomSnapshot released =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.pendingCommand() == null
+                      && snapshot.processRevision() == 1
+                      && snapshot.roomRevision() == 1);
+      TargetIntakeCommandTerminalNoCommit receipt = awaitReceipts(sink, 1).getFirst();
+      assertThat(released.roomPhase()).isEqualTo(IntakeRoomPhase.OPEN);
+      assertThat(released.processedEventCount()).isZero();
+      assertThat(released.protocolErrorCode())
+          .isEqualTo("INTAKE_RESPONDENT_MATRIX_NOT_READY");
+      assertThat(receipt.errorCode()).isEqualTo("INTAKE_RESPONDENT_MATRIX_NOT_READY");
+      assertThat(receipt.terminalAttemptStatus()).isEqualTo(AgentRunAttemptStatus.ABORTED);
+      assertThat(receipt.lastSequenceNo()).isEqualTo(2);
+      assertThat(workflow.lastCommandDecision().status()).isEqualTo("REJECTED");
+
+      workflow.commandAccepted(first);
+      environment.sleep(Duration.ofSeconds(1));
+      assertThat(sink.receipts()).containsExactly(receipt);
+      assertThat(FinalizationRejectedThenCompletedAgentRunWorkflow.requests).hasSize(1);
+      assertThat(FinalizationRejectedReads.requests).hasSize(1);
+
+      IntakeWorkflowCommand second = targetCommand(LIFECYCLE_SECOND_COMMAND_ID, 2, 1);
+      workflow.commandAccepted(second);
+      IntakeRoomSnapshot continued =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.pendingCommand() == null
+                      && snapshot.processRevision() == 2
+                      && snapshot.roomRevision() == 2
+                      && snapshot.lastGraphExecutionRef() != null
+                      && second.commandId().equals(
+                          snapshot.lastGraphExecutionRef().graphCommandId()));
+      assertThat(continued.protocolErrorCode()).isNull();
+      assertThat(workflow.lastCommandDecision().status()).isEqualTo("ACCEPTED");
+      assertThat(FinalizationRejectedThenCompletedAgentRunWorkflow.requests)
+          .extracting(request -> request.command().commandId())
+          .containsExactly(first.commandId(), second.commandId());
+      assertThat(sink.receipts()).containsExactly(receipt);
+
+      workflow.commandAccepted(second);
+      environment.sleep(Duration.ofSeconds(1));
+      assertThat(FinalizationRejectedThenCompletedAgentRunWorkflow.requests).hasSize(2);
+      assertThat(RecordingFinalizationReads.requests).hasSize(1);
+    }
+  }
+
+  @Test
+  void pendingFinalizationRejectedRecoveryUpdateConvergesAndCachesAcknowledgedResult() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-pending-finalization-recovery-update";
+      String roomWorkflowId =
+          CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.INTAKE, EPOCH);
+      String caseWorkflowId = CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID);
+      TerminalReceiptSinkWorkflowImpl.reset();
+      FinalizationRejectedThenCompletedAgentRunWorkflow.reset();
+      PendingFinalizationRejectedReads.reset();
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(
+          FinalizationRejectedThenCompletedAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerWorkflowImplementationTypes(TerminalReceiptSinkWorkflowImpl.class);
+      controlWorker.registerActivitiesImplementations(new PendingFinalizationRejectedReads());
+      environment.start();
+
+      TerminalReceiptSinkWorkflow sink =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  TerminalReceiptSinkWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(caseWorkflowId)
+                      .setTaskQueue(CASE_CONTROL)
+                      .build());
+      WorkflowClient.start(sink::run);
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(roomWorkflowId)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      String roomRunId = WorkflowClient.start(workflow::run, targetStart()).getRunId();
+      IntakeWorkflowCommand command = targetCommand(LIFECYCLE_FIRST_COMMAND_ID, 1, 0);
+
+      workflow.commandAccepted(command);
+      environment.sleep(Duration.ofSeconds(4));
+      IntakeRoomSnapshot stranded =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.pendingCommand() != null
+                      && command.commandId().equals(snapshot.pendingCommand().commandId())
+                      && "INTAKE_ACTIVITY_RECEIPT_INVALID".equals(snapshot.protocolErrorCode()));
+      int readsBeforeUpdate = PendingFinalizationRejectedReads.requests.size();
+      assertThat(readsBeforeUpdate).isPositive();
+      assertThat(sink.receipts()).isEmpty();
+
+      IntakeAgentRunChildState pendingChild =
+          IntakeAgentRunChildState.pending(
+              IntakeAgentRunChildIds.forCommand(command),
+              command.executionContext().targetAgentRun());
+      IntakeAgentRunFinalizationReadRequest readRequest =
+          IntakeAgentRunFinalizationReadRequest.winningAttempt(
+              IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION,
+              command,
+              pendingChild);
+      IntakeAgentRunFinalizationReadResult expected =
+          FinalizationRejectedReads.terminalNoCommitResult(readRequest);
+      long sourceLastCaseEventSequence = stranded.nextEventSequence() - 1;
+      IntakeAgentRunFinalizationRecoveryRequest request =
+          new IntakeAgentRunFinalizationRecoveryRequest(
+              IntakeAgentRunFinalizationRecoveryRequest.V2_SCHEMA_VERSION,
+              roomWorkflowId,
+              roomRunId,
+              TENANT,
+              CASE_ID,
+              EPOCH,
+              FENCE,
+              command,
+              pendingChild,
+              expected,
+              stranded.processRevision(),
+              stranded.roomRevision(),
+              sourceLastCaseEventSequence);
+
+      PendingFinalizationRejectedReads.enableTerminalEvidence();
+      IntakeAgentRunFinalizationRecoveryResult recovered =
+          workflow.recoverTargetFinalization(request);
+
+      assertThat(recovered.schemaVersion())
+          .isEqualTo(IntakeAgentRunFinalizationRecoveryResult.V2_SCHEMA_VERSION);
+      assertThat(recovered.request()).isEqualTo(request);
+      assertThat(recovered.finalization()).isEqualTo(expected);
+      assertThat(recovered.adoptedChildState()).isEqualTo(request.terminalNoCommitChildState());
+      assertThat(recovered.disposition())
+          .isEqualTo(
+              IntakeAgentRunFinalizationRecoveryResult.Disposition
+                  .TERMINAL_NO_COMMIT_CONVERGED);
+      assertThat(recovered.terminalNoCommitAuthority().errorCode())
+          .isEqualTo("INTAKE_RESPONDENT_MATRIX_NOT_READY");
+      assertThat(recovered.terminalNoCommitAuthority().expectedLastCaseEventSequence())
+          .isEqualTo(sourceLastCaseEventSequence);
+      assertThat(PendingFinalizationRejectedReads.requests)
+          .hasSize(readsBeforeUpdate + 1);
+      assertThat(awaitReceipts(sink, 1))
+          .containsExactly(recovered.terminalNoCommitAuthority());
+      IntakeRoomSnapshot released = workflow.state();
+      assertThat(released.pendingCommand()).isNull();
+      assertThat(released.processRevision()).isEqualTo(stranded.processRevision() + 1);
+      assertThat(released.roomRevision()).isEqualTo(stranded.roomRevision() + 1);
+      assertThat(released.nextEventSequence()).isEqualTo(stranded.nextEventSequence());
+
+      IntakeAgentRunFinalizationRecoveryResult replay =
+          workflow.recoverTargetFinalization(request);
+      assertThat(replay).isEqualTo(recovered);
+      assertThat(PendingFinalizationRejectedReads.requests)
+          .hasSize(readsBeforeUpdate + 1);
+      assertThat(sink.receipts()).containsExactly(recovered.terminalNoCommitAuthority());
+
+      IntakeAgentRunFinalizationRecoveryRequest changed =
+          new IntakeAgentRunFinalizationRecoveryRequest(
+              IntakeAgentRunFinalizationRecoveryRequest.V2_SCHEMA_VERSION,
+              roomWorkflowId,
+              roomRunId,
+              TENANT,
+              CASE_ID,
+              EPOCH,
+              FENCE,
+              command,
+              pendingChild,
+              expected,
+              stranded.processRevision(),
+              stranded.roomRevision(),
+              sourceLastCaseEventSequence + 1);
+      assertThatThrownBy(() -> workflow.recoverTargetFinalization(changed))
+          .isInstanceOf(RuntimeException.class);
+      assertThat(PendingFinalizationRejectedReads.requests)
+          .hasSize(readsBeforeUpdate + 1);
+      assertThat(sink.receipts()).containsExactly(recovered.terminalNoCommitAuthority());
+
+      workflow.requestContinueAsNew();
+      awaitState(workflow, snapshot -> snapshot.runGeneration() == 1);
+      IntakeRoomStart continuedStart = currentIntakeRoomStart(environment, roomWorkflowId);
+      IntakeRoomCarryState continuedCarry = continuedStart.carryState();
+      assertThat(continuedCarry).isNotNull();
+      assertThat(continuedCarry.schemaVersion()).isEqualTo("intake-room-carry-state.v5");
+      assertThat(continuedCarry.completedTargetFinalizationRecoveryRequest())
+          .isEqualTo(request);
+      assertThat(continuedCarry.completedTargetFinalizationRecoveryResult())
+          .isEqualTo(recovered);
+      assertThat(PendingFinalizationRejectedReads.requests)
+          .hasSize(readsBeforeUpdate + 1);
+      assertThat(sink.receipts()).containsExactly(recovered.terminalNoCommitAuthority());
+      assertThat(workflow.recoverTargetFinalization(request)).isEqualTo(recovered);
+      assertThat(PendingFinalizationRejectedReads.requests)
+          .hasSize(readsBeforeUpdate + 1);
+      assertThat(sink.receipts()).containsExactly(recovered.terminalNoCommitAuthority());
+    }
+  }
+
+  @Test
+  void historicalRejectedCommandRecoveryReadsOnceEmitsOnceAndSurvivesContinueAsNew() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-terminal-no-commit-history";
+      String roomWorkflowId =
+          CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.INTAKE, EPOCH);
+      String caseWorkflowId = CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID);
+      TerminalReceiptSinkWorkflowImpl.reset();
+      RecoveryAuthorityReads.reset();
+      IntakeWorkflowCommand command = targetCommand();
+      IntakeRoomCarryState carry =
+          historicalTerminalNoCommitCarry(command, "TARGET_AGENT_RUN_FAILED");
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(
+          LegacyTerminalNoCommitBootstrapWorkflowImpl.class, IntakeRoomWorkflowImpl.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerWorkflowImplementationTypes(TerminalReceiptSinkWorkflowImpl.class);
+      controlWorker.registerActivitiesImplementations(new RecoveryAuthorityReads());
+      environment.start();
+
+      TerminalReceiptSinkWorkflow sink =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  TerminalReceiptSinkWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(caseWorkflowId)
+                      .setTaskQueue(CASE_CONTROL)
+                      .build());
+      WorkflowClient.start(sink::run);
+      LegacyTerminalNoCommitBootstrapWorkflow bootstrap =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  LegacyTerminalNoCommitBootstrapWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(roomWorkflowId)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      String firstRunId =
+          WorkflowClient.start(bootstrap::run, targetStart().withCarryState(carry)).getRunId();
+      IntakeRoomWorkflow workflow =
+          environment.getWorkflowClient().newWorkflowStub(IntakeRoomWorkflow.class, roomWorkflowId);
+      awaitState(workflow, snapshot -> snapshot.runGeneration() == 1);
+      String currentRunId = currentRunId(environment, roomWorkflowId);
+      TargetIntakeCommandTerminalNoCommit authority =
+          terminalRecoveryAuthority(
+              command,
+              roomWorkflowId,
+              firstRunId,
+              "GRAPH_STREAM_PROTOCOL_REJECTED");
+      assertThat(authority.terminalAttemptStatus()).isEqualTo(AgentRunAttemptStatus.ABORTED);
+      assertThat(authority.agentRunOutcome()).isEqualTo(ExecuteAgentRunResult.Outcome.FAILED);
+      assertThat(carry.observedCommands())
+          .singleElement()
+          .extracting(observed -> observed.decision().reasonCode())
+          .isEqualTo("TARGET_AGENT_RUN_FAILED");
+      RecoveryAuthorityReads.expected = authority;
+      IntakeTerminalNoCommitRecoveryRequest request =
+          new IntakeTerminalNoCommitRecoveryRequest(
+              IntakeTerminalNoCommitRecoveryRequest.SCHEMA_VERSION,
+              roomWorkflowId,
+              currentRunId,
+              authority);
+      IntakeTerminalNoCommitRecoveryRequest drifted =
+          new IntakeTerminalNoCommitRecoveryRequest(
+              request.schemaVersion(),
+              request.workflowId(),
+              request.workflowRunId(),
+              terminalRecoveryAuthority(
+                  command, roomWorkflowId, firstRunId, "OTHER_TERMINAL_ERROR"));
+      TargetIntakeCommandTerminalNoCommit legacyAuthority =
+          legacyTerminalRecoveryAuthority(
+              command,
+              roomWorkflowId,
+              firstRunId,
+              "GRAPH_STREAM_PROTOCOL_REJECTED");
+
+      assertThat(authority.schemaVersion())
+          .isEqualTo("target-intake-command-terminal-no-commit.v2");
+      assertThat(authority.agentRunExecutionRequestHash())
+          .isEqualTo(command.executionContext().targetAgentRun().request().command().requestHash());
+      assertThat(authority.agentRunExecutionRequestHash())
+          .isNotEqualTo(authority.commandEnvelopeHash());
+      assertThat(authority.expectedLastCaseEventSequence()).isEqualTo(13);
+      assertThat(authority.lastCaseEventSequence()).isEqualTo(15);
+      assertThatThrownBy(
+              () ->
+                  new IntakeTerminalNoCommitRecoveryRequest(
+                      request.schemaVersion(),
+                      request.workflowId(),
+                      request.workflowRunId(),
+                      legacyAuthority))
+          .isInstanceOf(IllegalArgumentException.class);
+      assertThat(RecoveryAuthorityReads.invocations.get()).isZero();
+      assertThat(sink.receipts()).isEmpty();
+      RecoveryAuthorityReads.rejectNext();
+      IntakeRoomSnapshot beforeRejectedResolve = workflow.state();
+      assertThatThrownBy(() -> workflow.recoverTerminalNoCommit(request))
+          .isInstanceOf(RuntimeException.class);
+      IntakeRoomSnapshot afterRejectedResolve = workflow.state();
+      assertThat(afterRejectedResolve.processRevision())
+          .isEqualTo(beforeRejectedResolve.processRevision());
+      assertThat(afterRejectedResolve.roomRevision())
+          .isEqualTo(beforeRejectedResolve.roomRevision());
+      assertThat(afterRejectedResolve.nextEventSequence())
+          .isEqualTo(beforeRejectedResolve.nextEventSequence());
+      assertThat(afterRejectedResolve.protocolErrorCode())
+          .isEqualTo(beforeRejectedResolve.protocolErrorCode());
+      assertThat(RecoveryAuthorityReads.invocations.get()).isEqualTo(1);
+      assertThat(sink.receipts()).isEmpty();
+
+      IntakeTerminalNoCommitRecoveryResult first = workflow.recoverTerminalNoCommit(request);
+      IntakeTerminalNoCommitRecoveryResult replay = workflow.recoverTerminalNoCommit(request);
+
+      assertThat(replay).isEqualTo(first);
+      assertThat(first.disposition())
+          .isEqualTo(IntakeTerminalNoCommitRecoveryResult.Disposition.EMITTED);
+      assertThat(RecoveryAuthorityReads.invocations.get()).isEqualTo(2);
+      assertThat(awaitReceipts(sink, 1)).containsExactly(authority);
+      IntakeRoomSnapshot recovered = workflow.state();
+      assertThat(recovered.processRevision()).isEqualTo(1);
+      assertThat(recovered.roomRevision()).isEqualTo(1);
+      assertThat(recovered.protocolErrorCode()).isNull();
+
+      assertThatThrownBy(() -> workflow.recoverTerminalNoCommit(drifted))
+          .isInstanceOf(RuntimeException.class);
+      assertThat(RecoveryAuthorityReads.invocations.get()).isEqualTo(2);
+      assertThat(sink.receipts()).containsExactly(authority);
+
+      workflow.requestContinueAsNew();
+      awaitState(workflow, snapshot -> snapshot.runGeneration() == 2);
+      assertThat(workflow.recoverTerminalNoCommit(request)).isEqualTo(first);
+      assertThat(RecoveryAuthorityReads.invocations.get()).isEqualTo(2);
+      assertThat(sink.receipts()).containsExactly(authority);
+    }
+  }
+
+  @Test
+  void historicalRecoveryRejectsForeignRetainedReasonBeforeAuthorityRead() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-terminal-no-commit-foreign-reason";
+      String roomWorkflowId =
+          CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.INTAKE, EPOCH);
+      String caseWorkflowId = CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID);
+      TerminalReceiptSinkWorkflowImpl.reset();
+      RecoveryAuthorityReads.reset();
+      IntakeWorkflowCommand command = targetCommand();
+      IntakeRoomCarryState carry =
+          historicalTerminalNoCommitCarry(command, "TARGET_AGENT_RUN_FOREIGN");
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(
+          LegacyTerminalNoCommitBootstrapWorkflowImpl.class, IntakeRoomWorkflowImpl.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerWorkflowImplementationTypes(TerminalReceiptSinkWorkflowImpl.class);
+      controlWorker.registerActivitiesImplementations(new RecoveryAuthorityReads());
+      environment.start();
+
+      TerminalReceiptSinkWorkflow sink =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  TerminalReceiptSinkWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(caseWorkflowId)
+                      .setTaskQueue(CASE_CONTROL)
+                      .build());
+      WorkflowClient.start(sink::run);
+      LegacyTerminalNoCommitBootstrapWorkflow bootstrap =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  LegacyTerminalNoCommitBootstrapWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(roomWorkflowId)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      String firstRunId =
+          WorkflowClient.start(bootstrap::run, targetStart().withCarryState(carry)).getRunId();
+      IntakeRoomWorkflow workflow =
+          environment.getWorkflowClient().newWorkflowStub(IntakeRoomWorkflow.class, roomWorkflowId);
+      awaitState(workflow, snapshot -> snapshot.runGeneration() == 1);
+      TargetIntakeCommandTerminalNoCommit authority =
+          terminalRecoveryAuthority(
+              command,
+              roomWorkflowId,
+              firstRunId,
+              "GRAPH_STREAM_PROTOCOL_REJECTED");
+      RecoveryAuthorityReads.expected = authority;
+      IntakeTerminalNoCommitRecoveryRequest request =
+          new IntakeTerminalNoCommitRecoveryRequest(
+              IntakeTerminalNoCommitRecoveryRequest.SCHEMA_VERSION,
+              roomWorkflowId,
+              currentRunId(environment, roomWorkflowId),
+              authority);
+
+      assertThatThrownBy(() -> workflow.recoverTerminalNoCommit(request))
+          .isInstanceOf(RuntimeException.class);
+      assertThat(RecoveryAuthorityReads.invocations.get()).isZero();
+      assertThat(sink.receipts()).isEmpty();
+    }
+  }
+
+  @Test
+  void providerFreeRecoveryAdoptsExpiredWinningReceiptAndReplaysWithoutSideEffects() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-provider-free-finalization-recovery";
+      String workflowId =
+          CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.INTAKE, EPOCH);
+      WinningAttemptAgentRunWorkflow.reset();
+      RecoverableWinningAttemptFinalizationReads finalizationReads =
+          new RecoverableWinningAttemptFinalizationReads();
+      SnapshotOnlyActivities providerActivities = new SnapshotOnlyActivities();
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(WinningAttemptAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerActivitiesImplementations(finalizationReads, providerActivities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(workflowId)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      String runId = WorkflowClient.start(workflow::run, targetStart()).getRunId();
+      workflow.targetSourceEventObserved(
+          cursor(1, "EVENT_P9_RECOVERY_SOURCE_1", "INTAKE_PROJECTION_READY"));
+      awaitState(workflow, snapshot -> snapshot.nextEventSequence() == 2);
+
+      IntakeWorkflowCommand command = targetCommand(WINNING_FIRST_COMMAND_ID, 1, 0);
+      workflow.commandAccepted(command);
+      environment.sleep(Duration.ofSeconds(4));
+      IntakeRoomSnapshot unresolved =
+          awaitState(
+              workflow,
+              snapshot ->
+                  "TARGET_AGENT_RUN_FINALIZATION_UNRESOLVED"
+                          .equals(snapshot.protocolErrorCode())
+                      && finalizationReads.requests.size()
+                          == POST_COMMIT_RECONCILIATION_ATTEMPTS + 1);
+      assertThat(unresolved.pendingCommandId()).isEqualTo(command.commandId());
+      assertThat(WinningAttemptAgentRunWorkflow.requests).containsExactly(targetRequest(command));
+      assertThat(WinningAttemptAgentRunWorkflow.results.getFirst().attemptId())
+          .isEqualTo(WINNING_ATTEMPT_ID);
+      assertThat(finalizationReads.requests)
+          .hasSize(POST_COMMIT_RECONCILIATION_ATTEMPTS + 1);
+
+      IntakeAgentRunFinalizationRecoveryRequest request =
+          recoveryRequest(workflowId, runId, command);
+      IntakeAgentRunFinalizationRecoveryRequest wrongRun =
+          new IntakeAgentRunFinalizationRecoveryRequest(
+              request.schemaVersion(),
+              request.roomWorkflowId(),
+              runId + "-foreign",
+              request.tenantSurrogate(),
+              request.caseId(),
+              request.roomEpoch(),
+              request.fencingToken(),
+              request.pendingCommand(),
+              request.childState(),
+              request.expectedFinalization());
+      IntakeWorkflowCommand foreignCommand =
+          targetCommand(WINNING_SECOND_COMMAND_ID, 1, 0);
+      IntakeAgentRunFinalizationRecoveryRequest wrongCommand =
+          recoveryRequest(workflowId, runId, foreignCommand);
+
+      finalizationReads.requests.clear();
+      assertThatThrownBy(() -> workflow.recoverTargetFinalization(wrongRun))
+          .isInstanceOf(RuntimeException.class);
+      assertThatThrownBy(() -> workflow.recoverTargetFinalization(wrongCommand))
+          .isInstanceOf(RuntimeException.class);
+      assertThat(finalizationReads.requests).isEmpty();
+
+      environment.sleep(Duration.ofMinutes(10));
+      finalizationReads.allowCommittedReceipt();
+      IntakeAgentRunFinalizationReadRequest readRequest =
+          IntakeAgentRunFinalizationReadRequest.winningAttempt(
+              IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION,
+              command,
+              request.childState());
+      IntakeAgentRunFinalizationRecoveryRequest wrongWinningAttempt =
+          recoveryRequest(
+              workflowId,
+              runId,
+              command,
+              request.childState(),
+              WinningAttemptFinalizationReads.finalizationResult(
+                  readRequest, WinningMismatch.ATTEMPT, true));
+      assertThatThrownBy(() -> workflow.recoverTargetFinalization(wrongWinningAttempt))
+          .isInstanceOf(RuntimeException.class)
+          .hasStackTraceContaining(
+              "target finalization recovery read does not match expected authority");
+      assertThat(finalizationReads.requests).hasSize(1);
+      assertThat(workflow.state().pendingCommandId()).isEqualTo(command.commandId());
+
+      finalizationReads.requests.clear();
+      IntakeAgentRunFinalizationRecoveryResult recovered =
+          workflow.recoverTargetFinalization(request);
+      assertThat(recovered.request()).isEqualTo(request);
+      assertThat(recovered.adoptedChildState()).isEqualTo(request.committedChildState());
+      assertThat(recovered.finalization()).isEqualTo(request.expectedFinalization());
+      assertThat(request.sourceProcessRevision()).isNull();
+      assertThat(request.sourceRoomRevision()).isNull();
+      assertThat(request.sourceLastCaseEventSequence()).isNull();
+      assertThat(recovered.disposition()).isNull();
+      assertThat(recovered.terminalNoCommitAuthority()).isNull();
+      var converter = environment.getWorkflowClient().getOptions().getDataConverter();
+      assertThat(converter.toPayload(request).orElseThrow().getData().toStringUtf8())
+          .doesNotContain(
+              "\"sourceProcessRevision\"",
+              "\"sourceRoomRevision\"",
+              "\"sourceLastCaseEventSequence\"");
+      assertThat(converter.toPayload(recovered).orElseThrow().getData().toStringUtf8())
+          .doesNotContain("\"disposition\"", "\"terminalNoCommitAuthority\"");
+      assertThat(finalizationReads.requests).hasSize(1);
+      assertThat(finalizationReads.requests.getFirst().schemaVersion())
+          .isEqualTo(IntakeAgentRunFinalizationReadRequest.WINNING_ATTEMPT_SCHEMA_VERSION);
+      assertThat(finalizationReads.requests.getFirst().mode())
+          .isEqualTo(IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION);
+
+      IntakeRoomSnapshot adopted = workflow.state();
+      assertThat(adopted.pendingCommand()).isNull();
+      assertThat(adopted.processedCommandCount()).isEqualTo(1);
+      assertThat(adopted.processedEventCount()).isEqualTo(1);
+      assertThat(adopted.nextEventSequence()).isEqualTo(3);
+      assertThat(adopted.lastEventId())
+          .isEqualTo(request.expectedFinalization().receipt().committedEvent().eventId());
+      assertThat(adopted.lastAgentRunRef().attemptId()).isEqualTo(WINNING_ATTEMPT_ID);
+      assertThat(adopted.protocolErrorCode()).isNull();
+
+      IntakeAgentRunFinalizationRecoveryResult replayed =
+          workflow.recoverTargetFinalization(request);
+      assertThat(replayed).isEqualTo(recovered);
+      assertThat(finalizationReads.requests).hasSize(1);
+      assertThatThrownBy(() -> workflow.recoverTargetFinalization(wrongRun))
+          .isInstanceOf(RuntimeException.class);
+      assertThat(finalizationReads.requests).hasSize(1);
+      assertThat(workflow.state()).isEqualTo(adopted);
+      assertThat(WinningAttemptAgentRunWorkflow.requests).containsExactly(targetRequest(command));
+      assertThat(providerActivities.snapshotRequests).isEmpty();
+      assertThat(providerActivities.graphRequests).isEmpty();
+      assertThat(providerActivities.finalizationRequests).isEmpty();
+      assertThat(providerActivities.acceptRequests).isEmpty();
+      assertThat(providerActivities.cancelRequests).isEmpty();
+    }
+  }
+
+  @Test
+  void recoveryAuthorityRejectsForeignRoomChildAndReceiptProof() {
+    String workflowId =
+        CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.INTAKE, EPOCH);
+    String runId = "RUN_P9_RECOVERY_AUTHORITY";
+    IntakeWorkflowCommand command = targetCommand(WINNING_FIRST_COMMAND_ID, 1, 0);
+    IntakeAgentRunChildState childState = winningResultReadyChild(command);
+    IntakeAgentRunFinalizationReadResult expected = winningFinalization(command, childState);
+
+    assertThatThrownBy(
+            () ->
+                new IntakeAgentRunFinalizationRecoveryRequest(
+                    IntakeAgentRunFinalizationRecoveryRequest.SCHEMA_VERSION,
+                    CaseProcessWorkflowProtocol.roomWorkflowId(
+                        "CASE_P9_FOREIGN", RoomType.INTAKE, EPOCH),
+                    runId,
+                    TENANT,
+                    CASE_ID,
+                    EPOCH,
+                    FENCE,
+                    command,
+                    childState,
+                    expected))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () ->
+                new IntakeAgentRunFinalizationRecoveryRequest(
+                    IntakeAgentRunFinalizationRecoveryRequest.SCHEMA_VERSION,
+                    workflowId,
+                    runId,
+                    "tenant-p9-foreign",
+                    CASE_ID,
+                    EPOCH,
+                    FENCE,
+                    command,
+                    childState,
+                    expected))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () ->
+                new IntakeAgentRunFinalizationRecoveryRequest(
+                    IntakeAgentRunFinalizationRecoveryRequest.SCHEMA_VERSION,
+                    CaseProcessWorkflowProtocol.roomWorkflowId(
+                        CASE_ID, RoomType.INTAKE, EPOCH + 1),
+                    runId,
+                    TENANT,
+                    CASE_ID,
+                    EPOCH + 1,
+                    FENCE,
+                    command,
+                    childState,
+                    expected))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () ->
+                new IntakeAgentRunFinalizationRecoveryRequest(
+                    IntakeAgentRunFinalizationRecoveryRequest.SCHEMA_VERSION,
+                    workflowId,
+                    runId,
+                    TENANT,
+                    CASE_ID,
+                    EPOCH,
+                    FENCE + 1,
+                    command,
+                    childState,
+                    expected))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    IntakeAgentRunChildState pendingChild =
+        IntakeAgentRunChildState.pending(
+            IntakeAgentRunChildIds.forCommand(command),
+            command.executionContext().targetAgentRun());
+    assertThatThrownBy(
+            () ->
+                recoveryRequest(workflowId, runId, command, pendingChild, expected))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    assertThatThrownBy(
+            () ->
+                recoveryRequest(
+                    workflowId,
+                    runId,
+                    command,
+                    childState,
+                    finalizationWithActivation(
+                        expected, "p9act.v1." + "b".repeat(32))))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    IntakeWorkflowCommand foreignLogicalRunCommand =
+        targetCommand(WINNING_SECOND_COMMAND_ID, 1, 0);
+    IntakeAgentRunChildState foreignLogicalRunChild =
+        winningResultReadyChild(foreignLogicalRunCommand);
+    assertThatThrownBy(
+            () ->
+                recoveryRequest(
+                    workflowId,
+                    runId,
+                    command,
+                    childState,
+                    winningFinalization(foreignLogicalRunCommand, foreignLogicalRunChild)))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    IntakeAgentRunFinalizationReadRequest readRequest =
+        IntakeAgentRunFinalizationReadRequest.winningAttempt(
+            IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION,
+            command,
+            childState);
+    for (WinningMismatch mismatch :
+        List.of(
+            WinningMismatch.COMMAND,
+            WinningMismatch.GRAPH,
+            WinningMismatch.OPERATION,
+            WinningMismatch.RESULT)) {
+      IntakeAgentRunFinalizationReadResult mismatched =
+          WinningAttemptFinalizationReads.finalizationResult(readRequest, mismatch, true);
+      assertThatThrownBy(
+              () -> recoveryRequest(workflowId, runId, command, childState, mismatched))
+          .as("foreign winning proof %s", mismatch)
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+  }
+
+  @Test
+  void recoveryRejectsMissingPendingAndActiveOrchestrationWithoutAnotherRead() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-recovery-state-guards";
+      String workflowId =
+          CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.INTAKE, EPOCH);
+      WinningAttemptAgentRunWorkflow.reset();
+      BlockingFinalizationReads.reset();
+      RecordingFinalizationReads.requests.clear();
+      SnapshotOnlyActivities providerActivities = new SnapshotOnlyActivities();
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(WinningAttemptAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerActivitiesImplementations(
+          new BlockingFinalizationReads(), providerActivities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(workflowId)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      String runId = WorkflowClient.start(workflow::run, targetStart()).getRunId();
+      IntakeWorkflowCommand command = targetCommand(WINNING_FIRST_COMMAND_ID, 1, 0);
+      IntakeAgentRunFinalizationRecoveryRequest request =
+          recoveryRequest(workflowId, runId, command);
+
+      assertThatThrownBy(() -> workflow.recoverTargetFinalization(request))
+          .isInstanceOf(RuntimeException.class);
+      assertThat(RecordingFinalizationReads.requests).isEmpty();
+      assertThat(WinningAttemptAgentRunWorkflow.requests).isEmpty();
+
+      try {
+        workflow.commandAccepted(command);
+        assertThat(BlockingFinalizationReads.awaitStarted()).isTrue();
+        assertThatThrownBy(() -> workflow.recoverTargetFinalization(request))
+            .isInstanceOf(RuntimeException.class);
+        assertThat(RecordingFinalizationReads.requests).isEmpty();
+        assertThat(WinningAttemptAgentRunWorkflow.requests)
+            .containsExactly(targetRequest(command));
+        assertThat(providerActivities.snapshotRequests).isEmpty();
+        assertThat(providerActivities.graphRequests).isEmpty();
+        assertThat(providerActivities.finalizationRequests).isEmpty();
+      } finally {
+        BlockingFinalizationReads.release();
+      }
+    }
+  }
+
+  @Test
   void targetChildIdentityUsesCanonicalAgentRunIdAndUnresolvedChildCannotContinueAsNew() {
     IntakeWorkflowCommand command = targetCommand("C".repeat(128));
     assertThat(IntakeAgentRunChildIds.forCommand(command))
@@ -1446,10 +2451,11 @@ class IntakeRoomAgentRunChildWorkflowTest {
   private static IntakeRoomSnapshot awaitState(
       IntakeRoomWorkflow workflow,
       java.util.function.Predicate<IntakeRoomSnapshot> predicate) {
+    IntakeRoomSnapshot last = null;
     for (int attempt = 0; attempt < 20; attempt++) {
-      IntakeRoomSnapshot state = workflow.state();
-      if (predicate.test(state)) {
-        return state;
+      last = workflow.state();
+      if (predicate.test(last)) {
+        return last;
       }
       try {
         Thread.sleep(25);
@@ -1458,7 +2464,195 @@ class IntakeRoomAgentRunChildWorkflowTest {
         throw new AssertionError(interrupted);
       }
     }
-    throw new AssertionError("workflow did not reach the expected state");
+    throw new AssertionError(
+        "workflow did not reach the expected state; phase="
+            + last.roomPhase()
+            + ", pending="
+            + (last.pendingCommand() != null)
+            + ", processRevision="
+            + last.processRevision()
+            + ", roomRevision="
+            + last.roomRevision()
+            + ", protocolError="
+            + last.protocolErrorCode());
+  }
+
+  private static String currentRunId(
+      TestWorkflowEnvironment environment, String workflowId) {
+    return environment
+        .getWorkflowServiceStubs()
+        .blockingStub()
+        .describeWorkflowExecution(
+            io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionRequest.newBuilder()
+                .setNamespace(environment.getWorkflowClient().getOptions().getNamespace())
+                .setExecution(
+                    io.temporal.api.common.v1.WorkflowExecution.newBuilder()
+                        .setWorkflowId(workflowId)
+                        .build())
+                .build())
+        .getWorkflowExecutionInfo()
+        .getExecution()
+        .getRunId();
+  }
+
+  private static IntakeRoomStart currentIntakeRoomStart(
+      TestWorkflowEnvironment environment, String workflowId) {
+    String runId = currentRunId(environment, workflowId);
+    var history =
+        environment
+            .getWorkflowServiceStubs()
+            .blockingStub()
+            .getWorkflowExecutionHistory(
+                io.temporal.api.workflowservice.v1.GetWorkflowExecutionHistoryRequest.newBuilder()
+                    .setNamespace(environment.getWorkflowClient().getOptions().getNamespace())
+                    .setExecution(
+                        io.temporal.api.common.v1.WorkflowExecution.newBuilder()
+                            .setWorkflowId(workflowId)
+                            .setRunId(runId)
+                            .build())
+                    .build())
+            .getHistory();
+    var input = history.getEvents(0).getWorkflowExecutionStartedEventAttributes().getInput();
+    return environment
+        .getWorkflowClient()
+        .getOptions()
+        .getDataConverter()
+        .fromPayload(input.getPayloads(0), IntakeRoomStart.class, IntakeRoomStart.class);
+  }
+
+  private static List<TargetIntakeCommandTerminalNoCommit> awaitReceipts(
+      TerminalReceiptSinkWorkflow workflow, int expectedCount) {
+    for (int attempt = 0; attempt < 20; attempt++) {
+      List<TargetIntakeCommandTerminalNoCommit> receipts = workflow.receipts();
+      if (receipts.size() == expectedCount) {
+        return receipts;
+      }
+      try {
+        Thread.sleep(25);
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        throw new AssertionError(interrupted);
+      }
+    }
+    throw new AssertionError("terminal-no-commit receipt count did not converge");
+  }
+
+  private static void assertLegacyTerminalNoCommitMarkerPath() {
+    TestEnvironmentOptions options =
+        TestEnvironmentOptions.newBuilder()
+            .setWorkerFactoryOptions(
+                WorkerFactoryOptions.newBuilder()
+                    .setWorkerInterceptors(new LegacyTerminalNoCommitVersionInterceptor())
+                    .build())
+            .build();
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance(options)) {
+      String roomQueue = "phase9-intake-terminal-no-commit-legacy-marker";
+      String roomWorkflowId =
+          CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.INTAKE, EPOCH);
+      String caseWorkflowId = CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID);
+      AbortedAgentRunWorkflow.reset();
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(AbortedAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerWorkflowImplementationTypes(TerminalReceiptSinkWorkflowImpl.class);
+      environment.start();
+
+      TerminalReceiptSinkWorkflow sink =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  TerminalReceiptSinkWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(caseWorkflowId)
+                      .setTaskQueue(CASE_CONTROL)
+                      .build());
+      WorkflowClient.start(sink::run);
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(roomWorkflowId)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      String roomRunId = WorkflowClient.start(workflow::run, targetStart()).getRunId();
+      IntakeWorkflowCommand command = targetCommand();
+
+      workflow.commandAccepted(command);
+
+      TargetIntakeCommandTerminalNoCommit legacy = awaitReceipts(sink, 1).getFirst();
+      assertThat(legacy.schemaVersion())
+          .isEqualTo(TargetIntakeCommandTerminalNoCommit.LEGACY_SCHEMA_VERSION);
+      assertThat(legacy.agentRunExecutionRequestHash()).isNull();
+      assertThat(legacy.expectedLastCaseEventSequence()).isNull();
+      assertThat(legacy.lastCaseEventSequence()).isZero();
+      assertThat(legacy.commandId()).isEqualTo(command.commandId());
+      assertThat(AbortedAgentRunWorkflow.requests).containsExactly(targetRequest(command));
+      IntakeTerminalNoCommitRecoveryRequest expectedLegacyRequest =
+          new IntakeTerminalNoCommitRecoveryRequest(
+              IntakeTerminalNoCommitRecoveryRequest.LEGACY_SCHEMA_VERSION,
+              roomWorkflowId,
+              roomRunId,
+              legacy);
+      assertThatThrownBy(
+              () ->
+                  new IntakeTerminalNoCommitRecoveryRequest(
+                      IntakeTerminalNoCommitRecoveryRequest.SCHEMA_VERSION,
+                      roomWorkflowId,
+                      roomRunId,
+                      legacy))
+          .isInstanceOf(IllegalArgumentException.class);
+
+      workflow.requestContinueAsNew();
+      awaitState(workflow, snapshot -> snapshot.runGeneration() == 1);
+      IntakeRoomStart continuedStart = currentIntakeRoomStart(environment, roomWorkflowId);
+      IntakeRoomCarryState continuedCarry = continuedStart.carryState();
+      assertThat(continuedCarry).isNotNull();
+      assertThat(continuedCarry.schemaVersion()).isEqualTo("intake-room-carry-state.v4");
+      IntakeTerminalNoCommitRecoveryResult carriedResult =
+          continuedCarry.completedTerminalNoCommitRecovery();
+      assertThat(carriedResult).isNotNull();
+      assertThat(carriedResult.request()).isEqualTo(expectedLegacyRequest);
+      assertThat(carriedResult.request().schemaVersion())
+          .isEqualTo(IntakeTerminalNoCommitRecoveryRequest.LEGACY_SCHEMA_VERSION);
+      assertThat(carriedResult.request().authority()).isEqualTo(legacy);
+      assertThat(carriedResult.request().authority().schemaVersion())
+          .isEqualTo(TargetIntakeCommandTerminalNoCommit.LEGACY_SCHEMA_VERSION);
+      var converter = environment.getWorkflowClient().getOptions().getDataConverter();
+      String legacyAuthorityJson =
+          converter.toPayload(legacy).orElseThrow().getData().toStringUtf8();
+      String exactLegacyRequestJson =
+          "{\"schemaVersion\":\"intake-terminal-no-commit-recovery-request.v1\""
+              + ",\"workflowId\":\""
+              + roomWorkflowId
+              + "\",\"workflowRunId\":\""
+              + roomRunId
+              + "\",\"authority\":"
+              + legacyAuthorityJson
+              + "}";
+      String carriedRequestJson =
+          converter
+              .toPayload(carriedResult.request())
+              .orElseThrow()
+              .getData()
+              .toStringUtf8();
+      assertThat(carriedRequestJson).isEqualTo(exactLegacyRequestJson);
+      assertThat(
+              converter
+                  .toPayload(expectedLegacyRequest)
+                  .orElseThrow()
+                  .getData()
+                  .toStringUtf8())
+          .isEqualTo(exactLegacyRequestJson);
+      assertThatThrownBy(
+              () -> workflow.recoverTerminalNoCommit(carriedResult.request()))
+          .isInstanceOf(RuntimeException.class);
+      assertThat(AbortedAgentRunWorkflow.requests).containsExactly(targetRequest(command));
+    }
   }
 
   private static IntakeRoomWorkflow startWinningWorkflow(
@@ -1798,6 +2992,76 @@ class IntakeRoomAgentRunChildWorkflowTest {
     return command.executionContext().targetAgentRun().request();
   }
 
+  private static IntakeAgentRunChildState winningResultReadyChild(
+      IntakeWorkflowCommand command) {
+    return IntakeAgentRunChildState.pending(
+            IntakeAgentRunChildIds.forCommand(command),
+            command.executionContext().targetAgentRun())
+        .resultReady(WINNING_RESULT_HASH);
+  }
+
+  private static IntakeAgentRunFinalizationReadResult winningFinalization(
+      IntakeWorkflowCommand command, IntakeAgentRunChildState childState) {
+    IntakeAgentRunFinalizationReadRequest readRequest =
+        IntakeAgentRunFinalizationReadRequest.winningAttempt(
+            IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION,
+            command,
+            childState);
+    return WinningAttemptFinalizationReads.finalizationResult(
+        readRequest, WinningMismatch.NONE, true);
+  }
+
+  private static IntakeAgentRunFinalizationReadResult finalizationWithActivation(
+      IntakeAgentRunFinalizationReadResult finalization, String activationId) {
+    FinalizationLocator locator = finalization.locator();
+    return new IntakeAgentRunFinalizationReadResult(
+        finalization.schemaVersion(),
+        finalization.resolution(),
+        new FinalizationLocator(
+            locator.schemaVersion(),
+            locator.executionLane(),
+            activationId,
+            locator.activationManifestHash(),
+            locator.roomFencingToken(),
+            locator.logicalRunId(),
+            locator.attemptId(),
+            locator.resultHash(),
+            locator.proposalHash(),
+            locator.checkpointId(),
+            locator.operationKey(),
+            locator.agentRunManifestId(),
+            locator.agentRunManifestHash(),
+            locator.isolatedDomainDbBindingHash(),
+            locator.receiptHash()),
+        finalization.receipt());
+  }
+
+  private static IntakeAgentRunFinalizationRecoveryRequest recoveryRequest(
+      String workflowId, String runId, IntakeWorkflowCommand command) {
+    IntakeAgentRunChildState childState = winningResultReadyChild(command);
+    return recoveryRequest(
+        workflowId, runId, command, childState, winningFinalization(command, childState));
+  }
+
+  private static IntakeAgentRunFinalizationRecoveryRequest recoveryRequest(
+      String workflowId,
+      String runId,
+      IntakeWorkflowCommand command,
+      IntakeAgentRunChildState childState,
+      IntakeAgentRunFinalizationReadResult expectedFinalization) {
+    return new IntakeAgentRunFinalizationRecoveryRequest(
+        IntakeAgentRunFinalizationRecoveryRequest.SCHEMA_VERSION,
+        workflowId,
+        runId,
+        TENANT,
+        CASE_ID,
+        EPOCH,
+        FENCE,
+        command,
+        childState,
+        expectedFinalization);
+  }
+
   private static ExecuteAgentRunRequest targetRequest(
       IntakeWorkflowCommand command, long deadlineEpochMillis) {
     return targetRequest(command, deadlineEpochMillis, 0);
@@ -1901,6 +3165,129 @@ class IntakeRoomAgentRunChildWorkflowTest {
         child);
   }
 
+  private static IntakeRoomCarryState historicalTerminalNoCommitCarry(
+      IntakeWorkflowCommand command, String retainedReasonCode) {
+    IntakeCommandDecision rejected =
+        new IntakeCommandDecision(
+            "intake-command-decision.v1",
+            command.commandId(),
+            command.sequence(),
+            "REJECTED",
+            retainedReasonCode,
+            IntakeRoomPhase.OPEN,
+            command.requestHash());
+    return new IntakeRoomCarryState(
+        "intake-room-carry-state.v1",
+        IntakeRoomPhase.OPEN,
+        IntakeParty.INITIATOR,
+        command.sequence() + 1,
+        16,
+        1,
+        0,
+        false,
+        false,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        0,
+        0,
+        retainedReasonCode,
+        1,
+        rejected,
+        List.of(
+            new IntakeRoomCarryState.ObservedCommand(
+                "intake-observed-command.v1", command, rejected)),
+        List.of(),
+        List.of());
+  }
+
+  private static TargetIntakeCommandTerminalNoCommit terminalRecoveryAuthority(
+      IntakeWorkflowCommand command,
+      String roomWorkflowId,
+      String firstRunId,
+      String errorCode) {
+    return terminalRecoveryAuthority(
+        TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION,
+        command,
+        roomWorkflowId,
+        firstRunId,
+        errorCode);
+  }
+
+  private static TargetIntakeCommandTerminalNoCommit legacyTerminalRecoveryAuthority(
+      IntakeWorkflowCommand command,
+      String roomWorkflowId,
+      String firstRunId,
+      String errorCode) {
+    return terminalRecoveryAuthority(
+        TargetIntakeCommandTerminalNoCommit.LEGACY_SCHEMA_VERSION,
+        command,
+        roomWorkflowId,
+        firstRunId,
+        errorCode);
+  }
+
+  private static TargetIntakeCommandTerminalNoCommit terminalRecoveryAuthority(
+      String schemaVersion,
+      IntakeWorkflowCommand command,
+      String roomWorkflowId,
+      String firstRunId,
+      String errorCode) {
+    IntakeTargetAgentRunContext target = command.executionContext().targetAgentRun();
+    ExecuteAgentRunRequest request = target.request();
+    boolean useV2Authority = TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(schemaVersion);
+    return new TargetIntakeCommandTerminalNoCommit(
+        schemaVersion,
+        TENANT,
+        CASE_ID,
+        RoomType.INTAKE,
+        EPOCH,
+        FENCE,
+        roomWorkflowId,
+        firstRunId,
+        CONTROL_BUILD,
+        target.activationId(),
+        target.activationManifestHash(),
+        target.caseBuildId(),
+        target.controlBuildId(),
+        target.agentBuildId(),
+        target.graphBindingHash(),
+        target.graphCodeBuildId(),
+        target.commandHash(),
+        target.commandEnvelopeHash(),
+        request.logicalInputHash(),
+        useV2Authority ? request.command().requestHash() : null,
+        command.commandId(),
+        command.sequence(),
+        command.requestHash(),
+        request.command().eventRef().artifactId(),
+        command.payloadRef(),
+        command.payloadHash(),
+        target.expectedProcessRevision(),
+        target.expectedProcessRevision() + 1,
+        target.expectedRoomRevision(),
+        target.expectedRoomRevision() + 1,
+        useV2Authority ? 13L : null,
+        15,
+        request.logicalRunId(),
+        request.attemptId(),
+        request.attemptId(),
+        request.attemptNo(),
+        AgentRunAttemptStatus.ABORTED,
+        ExecuteAgentRunResult.Outcome.FAILED,
+        errorCode,
+        false,
+        AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
+        1,
+        true,
+        Instant.parse("2026-08-10T00:00:00Z"));
+  }
+
   private static String hash(long value) {
     return Long.toString(Math.abs(value) % 10).repeat(64);
   }
@@ -1936,6 +3323,234 @@ class IntakeRoomAgentRunChildWorkflowTest {
 
     private static WinningMismatch[] rejections() {
       return new WinningMismatch[] {ATTEMPT, COMMAND, GRAPH, OPERATION, RESULT, REVISION};
+    }
+  }
+
+  private static final class LegacyTerminalNoCommitVersionInterceptor
+      extends WorkerInterceptorBase {
+
+    @Override
+    public WorkflowInboundCallsInterceptor interceptWorkflow(
+        WorkflowInboundCallsInterceptor next) {
+      return new WorkflowInboundCallsInterceptorBase(next) {
+        @Override
+        public void init(WorkflowOutboundCallsInterceptor outboundCalls) {
+          super.init(
+              new WorkflowOutboundCallsInterceptorBase(outboundCalls) {
+                @Override
+                public int getVersion(String changeId, int minSupported, int maxSupported) {
+                  if (TERMINAL_NO_COMMIT_PARENT_CONVERGENCE_V2_CHANGE_ID.equals(changeId)) {
+                    return Workflow.DEFAULT_VERSION;
+                  }
+                  return super.getVersion(changeId, minSupported, maxSupported);
+                }
+              });
+        }
+      };
+    }
+  }
+
+  @WorkflowInterface
+  public interface TerminalReceiptSinkWorkflow {
+
+    @WorkflowMethod(name = "Phase9TerminalReceiptSink")
+    void run();
+
+    @SignalMethod(name = CaseProcessWorkflowProtocol.TARGET_INTAKE_TERMINAL_NO_COMMIT_SIGNAL)
+    void terminalNoCommit(TargetIntakeCommandTerminalNoCommit authority);
+
+    @QueryMethod(name = "terminalNoCommitReceipts")
+    List<TargetIntakeCommandTerminalNoCommit> receipts();
+  }
+
+  public static final class TerminalReceiptSinkWorkflowImpl
+      implements TerminalReceiptSinkWorkflow {
+    private final List<TargetIntakeCommandTerminalNoCommit> receipts = new ArrayList<>();
+
+    private static void reset() {}
+
+    @Override
+    public void run() {
+      Workflow.await(() -> false);
+    }
+
+    @Override
+    public void terminalNoCommit(TargetIntakeCommandTerminalNoCommit authority) {
+      TargetIntakeCommandTerminalNoCommit sameCommand =
+          receipts.stream()
+              .filter(existing -> existing.commandId().equals(authority.commandId()))
+              .findFirst()
+              .orElse(null);
+      if (sameCommand == null) {
+        receipts.add(authority);
+        return;
+      }
+      if (!sameCommand.equals(authority)) {
+        throw ApplicationFailure.newNonRetryableFailure(
+            "terminal-no-commit signal authority changed", "TerminalNoCommitSignalConflict");
+      }
+    }
+
+    @Override
+    public List<TargetIntakeCommandTerminalNoCommit> receipts() {
+      return List.copyOf(receipts);
+    }
+  }
+
+  @WorkflowInterface
+  public interface LegacyTerminalNoCommitBootstrapWorkflow {
+
+    @WorkflowMethod(name = "Phase9LegacyTerminalNoCommitBootstrap")
+    void run(IntakeRoomStart start);
+  }
+
+  public static final class LegacyTerminalNoCommitBootstrapWorkflowImpl
+      implements LegacyTerminalNoCommitBootstrapWorkflow {
+
+    @Override
+    public void run(IntakeRoomStart start) {
+      IntakeRoomWorkflow continued = Workflow.newContinueAsNewStub(IntakeRoomWorkflow.class);
+      continued.run(start);
+    }
+  }
+
+  public static final class AbortedAgentRunWorkflow implements AgentRunWorkflow {
+    private static final List<ExecuteAgentRunRequest> requests = new CopyOnWriteArrayList<>();
+
+    private static void reset() {
+      requests.clear();
+    }
+
+    @Override
+    public ExecuteAgentRunResult run(ExecuteAgentRunRequest request) {
+      requests.add(request);
+      return new ExecuteAgentRunResult(
+          ExecuteAgentRunResult.SCHEMA_VERSION,
+          request.agentRunId(),
+          request.logicalRunId(),
+          request.attemptId(),
+          request.attemptNo(),
+          ExecuteAgentRunResult.Outcome.FAILED,
+          null,
+          null,
+          1,
+          true,
+          "GRAPH_STREAM_PROTOCOL_REJECTED",
+          false,
+          AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
+          Instant.ofEpochMilli(Workflow.currentTimeMillis()));
+    }
+
+    @Override
+    public ExecuteAgentRunResult executeAttempt(ExecuteAgentRunRequest request) {
+      return run(request);
+    }
+
+    @Override
+    public void validateAttempt(ExecuteAgentRunRequest request) {}
+  }
+
+  public static final class FinalizationRejectedThenCompletedAgentRunWorkflow
+      implements AgentRunWorkflow {
+    private static final List<ExecuteAgentRunRequest> requests = new CopyOnWriteArrayList<>();
+
+    private static void reset() {
+      requests.clear();
+    }
+
+    @Override
+    public ExecuteAgentRunResult run(ExecuteAgentRunRequest request) {
+      requests.add(request);
+      if (LIFECYCLE_FIRST_COMMAND_ID.equals(request.command().commandId())) {
+        throw ApplicationFailure.newNonRetryableFailure(
+            "READY_TO_CONFIRM cannot freeze an unresolved respondent placeholder",
+            "INTAKE_RESPONDENT_MATRIX_NOT_READY");
+      }
+      RoomGraphResult graph = RecordingAgentRunWorkflow.graphResult(request);
+      return new ExecuteAgentRunResult(
+          ExecuteAgentRunResult.SCHEMA_VERSION,
+          request.agentRunId(),
+          request.logicalRunId(),
+          request.attemptId(),
+          request.attemptNo(),
+          ExecuteAgentRunResult.Outcome.COMPLETED,
+          graph,
+          graph.outputHash(),
+          1,
+          true,
+          null,
+          false,
+          null,
+          Instant.ofEpochMilli(Workflow.currentTimeMillis()));
+    }
+
+    @Override
+    public ExecuteAgentRunResult executeAttempt(ExecuteAgentRunRequest request) {
+      return run(request);
+    }
+
+    @Override
+    public void validateAttempt(ExecuteAgentRunRequest request) {}
+  }
+
+  private static final class RecoveryAuthorityReads implements CaseCommandLifecycleActivities {
+    private static final AtomicInteger invocations = new AtomicInteger();
+    private static volatile TargetIntakeCommandTerminalNoCommit expected;
+    private static volatile boolean rejectNext;
+
+    private static void reset() {
+      invocations.set(0);
+      expected = null;
+      rejectNext = false;
+    }
+
+    private static void rejectNext() {
+      rejectNext = true;
+    }
+
+    @Override
+    public CaseCommandLifecycleActivities.ExpireCaseCommandResult expireCaseCommand(
+        CaseCommandLifecycleActivities.ExpireCaseCommand request) {
+      throw new AssertionError("terminal-no-commit recovery must not expire a command");
+    }
+
+    @Override
+    public CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult recordCaseCommandRouted(
+        CaseCommandLifecycleActivities.RecordCaseCommandRouted request) {
+      throw new AssertionError("terminal-no-commit recovery must not route a command");
+    }
+
+    @Override
+    public CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult completeCaseCommandRouting(
+        CaseCommandLifecycleActivities.RecordCaseCommandRouted request) {
+      throw new AssertionError("terminal-no-commit recovery must not complete routing");
+    }
+
+    @Override
+    public CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommitResult
+        convergeTargetIntakeTerminalNoCommit(
+            CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommit request) {
+      throw new AssertionError("Room recovery must not converge the parent command directly");
+    }
+
+    @Override
+    public ResolveTargetIntakeTerminalNoCommitResult resolveTargetIntakeTerminalNoCommit(
+        ResolveTargetIntakeTerminalNoCommit request) {
+      invocations.incrementAndGet();
+      if (expected == null || !expected.equals(request.authority())) {
+        throw new IllegalArgumentException("terminal-no-commit recovery authority drifted");
+      }
+      if (rejectNext) {
+        rejectNext = false;
+        throw ApplicationFailure.newNonRetryableFailure(
+            "terminal-no-commit source coordinates drifted",
+            "TARGET_INTAKE_TERMINAL_NO_COMMIT_SOURCE_STALE");
+      }
+      return new ResolveTargetIntakeTerminalNoCommitResult(
+          "resolve-target-intake-terminal-no-commit-result.v1",
+          expected,
+          expected.receiptUri(),
+          expected.receiptSha256());
     }
   }
 
@@ -2384,6 +3999,32 @@ class IntakeRoomAgentRunChildWorkflowTest {
     }
   }
 
+  private static final class RecoverableWinningAttemptFinalizationReads
+      implements IntakeAgentRunFinalizationReadActivities {
+    private final List<IntakeAgentRunFinalizationReadRequest> requests =
+        new CopyOnWriteArrayList<>();
+    private volatile boolean committedReceiptAvailable;
+
+    private void allowCommittedReceipt() {
+      committedReceiptAvailable = true;
+    }
+
+    @Override
+    public IntakeAgentRunFinalizationReadResult readFinalization(
+        IntakeAgentRunFinalizationReadRequest request) {
+      requests.add(request);
+      if (!committedReceiptAvailable) {
+        return new IntakeAgentRunFinalizationReadResult(
+            "intake-agent-run-finalization-read-result.v1",
+            IntakeAgentRunFinalizationReadResult.Resolution.PENDING,
+            null,
+            null);
+      }
+      return WinningAttemptFinalizationReads.finalizationResult(
+          request, WinningMismatch.NONE, true);
+    }
+  }
+
   private static final class BlockingFinalizationReads
       implements IntakeAgentRunFinalizationReadActivities {
     private static volatile CountDownLatch started = new CountDownLatch(1);
@@ -2421,6 +4062,100 @@ class IntakeRoomAgentRunChildWorkflowTest {
         throw new AssertionError("interrupted while blocking finalization read", interrupted);
       }
       return delegate.readFinalization(request);
+    }
+  }
+
+  private static final class FinalizationRejectedReads
+      implements IntakeAgentRunFinalizationReadActivities {
+    private static final List<IntakeAgentRunFinalizationReadRequest> requests =
+        new CopyOnWriteArrayList<>();
+    private final RecordingFinalizationReads committed = new RecordingFinalizationReads();
+
+    private static void reset() {
+      requests.clear();
+    }
+
+    @Override
+    public IntakeAgentRunFinalizationReadResult readFinalization(
+        IntakeAgentRunFinalizationReadRequest request) {
+      requests.add(request);
+      if (!LIFECYCLE_FIRST_COMMAND_ID.equals(request.command().commandId())) {
+        return committed.readFinalization(request);
+      }
+      return terminalNoCommitResult(request);
+    }
+
+    private static IntakeAgentRunFinalizationReadResult terminalNoCommitResult(
+        IntakeAgentRunFinalizationReadRequest request) {
+      ExecuteAgentRunRequest agentRequest =
+          request.command().executionContext().targetAgentRun().request();
+      RoomGraphResult graph = RecordingAgentRunWorkflow.graphResult(agentRequest);
+      Instant completedAt = Instant.parse("2026-08-10T16:07:06.400Z");
+      ExecuteAgentRunResult completedAudit =
+          new ExecuteAgentRunResult(
+              ExecuteAgentRunResult.SCHEMA_VERSION,
+              agentRequest.agentRunId(),
+              agentRequest.logicalRunId(),
+              agentRequest.attemptId(),
+              agentRequest.attemptNo(),
+              ExecuteAgentRunResult.Outcome.COMPLETED,
+              graph,
+              graph.outputHash(),
+              1,
+              true,
+              null,
+              false,
+              null,
+              completedAt);
+      TerminalNoCommitEvidence evidence =
+          new TerminalNoCommitEvidence(
+              TerminalNoCommitEvidence.SCHEMA_VERSION,
+              agentRequest.logicalRunId(),
+              agentRequest.attemptId(),
+              agentRequest.attemptId(),
+              agentRequest.attemptNo(),
+              AgentRunAttemptStatus.ABORTED,
+              "FINALIZATION_REJECTED",
+              "UNCOMMITTED",
+              "INTAKE_RESPONDENT_MATRIX_NOT_READY",
+              2,
+              completedAudit);
+      return new IntakeAgentRunFinalizationReadResult(
+          IntakeAgentRunFinalizationReadResult.SCHEMA_VERSION,
+          IntakeAgentRunFinalizationReadResult.Resolution.TERMINAL_NO_COMMIT,
+          null,
+          null,
+          evidence);
+    }
+  }
+
+  private static final class PendingFinalizationRejectedReads
+      implements IntakeAgentRunFinalizationReadActivities {
+    private static final List<IntakeAgentRunFinalizationReadRequest> requests =
+        new CopyOnWriteArrayList<>();
+    private static volatile boolean terminalEvidenceEnabled;
+
+    private static void reset() {
+      requests.clear();
+      terminalEvidenceEnabled = false;
+    }
+
+    private static void enableTerminalEvidence() {
+      terminalEvidenceEnabled = true;
+    }
+
+    @Override
+    public IntakeAgentRunFinalizationReadResult readFinalization(
+        IntakeAgentRunFinalizationReadRequest request) {
+      requests.add(request);
+      if (!terminalEvidenceEnabled) {
+        return new IntakeAgentRunFinalizationReadResult(
+            IntakeAgentRunFinalizationReadResult.LEGACY_SCHEMA_VERSION,
+            IntakeAgentRunFinalizationReadResult.Resolution.PENDING,
+            null,
+            null);
+      }
+      return FinalizationRejectedReads.terminalNoCommitResult(request);
     }
   }
 

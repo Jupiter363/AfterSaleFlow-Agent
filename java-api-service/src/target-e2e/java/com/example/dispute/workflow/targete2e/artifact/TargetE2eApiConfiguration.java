@@ -32,6 +32,7 @@ import com.example.dispute.workflow.targete2e.ingress.rooms.MinioTargetE2eRoomCo
 import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
 import com.example.dispute.workflow.targete2e.ingress.rooms.TargetE2eHearingInvocationPublisher;
 import com.example.dispute.workflow.targete2e.ingress.rooms.TargetE2eEvidenceManifestPublisher;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetE2eEvidenceTurnInvocationPublisher;
 import com.example.dispute.workflow.targete2e.ingress.rooms.TargetE2eReviewInvocationPublisher;
 import com.example.dispute.workflow.targete2e.ingress.rooms.JdbcTargetReviewInvocationFactsLoader;
 import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigningKey;
@@ -58,15 +59,19 @@ import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegist
 import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
+import com.example.dispute.room.application.IntakeInfrastructurePreparationService;
+import com.example.dispute.room.application.IntakeInfrastructurePreparationService.TargetPreparation;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.MinioClient;
+import io.temporal.client.WorkflowClient;
 import java.nio.file.Path;
 import java.time.Clock;
 import javax.sql.DataSource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -100,6 +105,12 @@ public class TargetE2eApiConfiguration {
   }
 
   @Bean
+  TargetPreparation targetE2eIntakeInfrastructurePreparation(
+      WorkflowClient workflowClient) {
+    return IntakeInfrastructurePreparationService.temporal(workflowClient);
+  }
+
+  @Bean
   ImportedCaseIdFactory targetE2eImportedCaseIdFactory(
       DataSource dataSource, Environment environment, Clock clock) {
     // The signed activation row is the authority for prefix, capacity, and fixture binding.
@@ -110,9 +121,12 @@ public class TargetE2eApiConfiguration {
   }
 
   @Bean
+  @Lazy(false)
   IntakeImmutablePayloadPublisher targetE2eIntakePayloadPublisher(MinioClient minioClient) {
-    return new MinioTargetE2eIntakePayloadPublisher(
-        minioClient, "target-e2e-intake-activation", "browser-messages");
+    MinioTargetE2eIntakePayloadPublisher publisher =
+        new MinioTargetE2eIntakePayloadPublisher(
+            minioClient, INTAKE_EXCHANGE_BUCKET, INTAKE_EXCHANGE_PAYLOAD_PREFIX);
+    return publisher.prepare();
   }
 
   @Bean
@@ -269,6 +283,14 @@ public class TargetE2eApiConfiguration {
   }
 
   @Bean
+  TargetE2eEvidenceTurnInvocationPublisher targetE2eEvidenceTurnInvocationPublisher(
+      MinioTargetE2eRoomCommandPayloadPublisher payloadPublisher,
+      TargetE2eRoomObjectIndex objectIndex,
+      ObjectMapper objectMapper) {
+    return new TargetE2eEvidenceTurnInvocationPublisher(payloadPublisher, objectIndex, objectMapper);
+  }
+
+  @Bean
   TargetE2eReviewInvocationPublisher targetE2eReviewInvocationPublisher(
       MinioTargetE2eRoomCommandPayloadPublisher payloadPublisher,
       TargetE2eRoomObjectIndex objectIndex,
@@ -283,6 +305,7 @@ public class TargetE2eApiConfiguration {
   }
 
   @Bean
+  @Lazy(false)
   TargetIntakeRuntimePins targetIntakeRuntimePins(Environment environment) {
     return new TargetIntakeRuntimePins(
         required(environment, "target.e2e.case-build-id"),
@@ -301,6 +324,7 @@ public class TargetE2eApiConfiguration {
   }
 
   @Bean
+  @Lazy(false)
   TargetIntakeMaterializer targetIntakeMaterializer(
       @Qualifier("targetE2eIntakePayloadPublisher")
           IntakeImmutablePayloadPublisher payloadPublisher,
@@ -328,6 +352,7 @@ public class TargetE2eApiConfiguration {
   }
 
   @Bean
+  @Lazy(false)
   TargetTemporalIntakeIngress targetTemporalIntakeIngress(
       CaseCommandService commandService, TargetIntakeMaterializer materializer) {
     return new CanonicalTargetTemporalIntakeIngress(commandService, materializer);
@@ -355,12 +380,13 @@ public class TargetE2eApiConfiguration {
       MinioTargetE2eRoomCommandPayloadPublisher payloads,
       TargetE2eRoomObjectIndex objectIndex,
       TargetE2eEvidenceManifestPublisher evidenceManifestPublisher,
+      TargetE2eEvidenceTurnInvocationPublisher evidenceTurnInvocationPublisher,
       TargetE2eReviewInvocationPublisher reviewInvocationPublisher,
       JdbcTargetReviewInvocationFactsLoader reviewFacts,
       ObjectMapper objectMapper,
       Clock clock) {
     return new CanonicalTargetRoomCommandMaterializer(
-        epochs, authority, pins, ledger, bindings, new TargetE2EGraphEnvelopeCodec(objectMapper), payloads, objectIndex, evidenceManifestPublisher, reviewInvocationPublisher, reviewFacts,
+        epochs, authority, pins, ledger, bindings, new TargetE2EGraphEnvelopeCodec(objectMapper), payloads, objectIndex, evidenceManifestPublisher, evidenceTurnInvocationPublisher, reviewInvocationPublisher, reviewFacts,
         evidence, evidenceCompletion, hearing, review, objectMapper, clock);
   }
 

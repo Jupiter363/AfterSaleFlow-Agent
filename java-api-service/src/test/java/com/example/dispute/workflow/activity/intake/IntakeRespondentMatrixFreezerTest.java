@@ -424,27 +424,59 @@ class IntakeRespondentMatrixFreezerTest {
     }
 
     @Test
-    void rejectsUnknownReboundMissingAndCollidingFacts() throws Exception {
+    void canonicalizesParentAliasAndRejectsInvalidFactAuthority() throws Exception {
+        ObjectNode parent = initiatorMatrix();
+        String canonicalId = parent.at("/fact_rows/0/fact_id").asText();
+
+        ObjectNode stableAlias = (ObjectNode) completeDelta();
+        ObjectNode stableAliasRow = (ObjectNode) stableAlias.at("/fact_rows/0");
+        stableAliasRow.put("fact_key", "FACT_INTAKE_PRIVATE_ALIAS");
+        stableAliasRow.put("source_scope", "PREVIOUS_AND_CURRENT_SOURCE");
+        stableAlias.withArray("summary_source_fact_keys")
+                .set(0, JSON.getNodeFactory().textNode("FACT_INTAKE_PRIVATE_ALIAS"));
+        ObjectNode stableAliasCandidate =
+                freezer.deriveCandidate(parent, stableAlias, respondentAuthority());
+        assertThat(stableAliasCandidate.path("fact_rows").size()).isEqualTo(2);
+        assertThat(stableAliasCandidate.at("/fact_rows/0/fact_id").asText())
+                .isEqualTo(canonicalId);
+        assertThat(stableAliasCandidate.at("/case_overview/summary_source_fact_ids/0").asText())
+                .isEqualTo(canonicalId);
+        assertThat(stableAliasCandidate.at("/fact_rows/0/origin/source_refs/0").asText())
+                .isEqualTo("MESSAGE_INITIATOR_1");
+        assertThat(stableAliasCandidate.at("/fact_rows/0/origin/source_refs/1").asText())
+                .isEqualTo("MESSAGE_RESPONDENT_2");
+        assertThat(stableAliasCandidate
+                        .at("/fact_rows/0/positions/MERCHANT/source_refs/0")
+                        .asText())
+                .isEqualTo("MESSAGE_RESPONDENT_2");
+
         ObjectNode unknown = (ObjectNode) completeDelta();
-        ((ObjectNode) unknown.at("/fact_rows/0")).put("fact_key", "FACT_UNKNOWN");
-        ((com.fasterxml.jackson.databind.node.ArrayNode) unknown.path("summary_source_fact_keys"))
+        ObjectNode unknownRow = (ObjectNode) unknown.at("/fact_rows/0");
+        unknownRow.put("fact_key", "FACT_UNKNOWN");
+        unknownRow.put("category", "LOGISTICS");
+        unknownRow.put("fact_target", "An unmatched logistics fact.");
+        unknown.withArray("summary_source_fact_keys")
                 .set(0, JSON.getNodeFactory().textNode("FACT_UNKNOWN"));
         assertRejected(
                 "INTAKE_RESPONDENT_MATRIX_FACT_UNKNOWN",
-                () -> freezer.deriveCandidate(initiatorMatrix(), unknown, respondentAuthority()));
+                () -> freezer.deriveCandidate(parent, unknown, respondentAuthority()));
 
         ObjectNode rebound = (ObjectNode) completeDelta();
-        ((ObjectNode) rebound.at("/fact_rows/0")).put("materiality", "SUPPORTING");
+        ObjectNode reboundRow = (ObjectNode) rebound.at("/fact_rows/0");
+        reboundRow.put("fact_key", "FACT_INTAKE_REBOUND_ALIAS");
+        reboundRow.put("materiality", "SUPPORTING");
+        rebound.withArray("summary_source_fact_keys")
+                .set(0, JSON.getNodeFactory().textNode("FACT_INTAKE_REBOUND_ALIAS"));
         assertRejected(
                 "INTAKE_RESPONDENT_MATRIX_FACT_REBOUND",
-                () -> freezer.deriveCandidate(initiatorMatrix(), rebound, respondentAuthority()));
+                () -> freezer.deriveCandidate(parent, rebound, respondentAuthority()));
 
         ObjectNode missing = (ObjectNode) completeDelta();
         missing.withArray("fact_rows").remove(0);
         missing.withArray("summary_source_fact_keys").remove(0);
         assertRejected(
                 "INTAKE_RESPONDENT_MATRIX_PRIOR_FACT_MISSING",
-                () -> freezer.deriveCandidate(initiatorMatrix(), missing, respondentAuthority()));
+                () -> freezer.deriveCandidate(parent, missing, respondentAuthority()));
 
         ObjectNode collision = (ObjectNode) completeDelta();
         ObjectNode newRow = (ObjectNode) collision.at("/fact_rows/1");
@@ -452,8 +484,18 @@ class IntakeRespondentMatrixFreezerTest {
         newRow.put("fact_target", "Whether the promised installation was delivered.");
         assertRejected(
                 "INTAKE_RESPONDENT_MATRIX_NEW_FACT_COLLISION",
-                () -> freezer.deriveCandidate(
-                        initiatorMatrix(), collision, respondentAuthority()));
+                () -> freezer.deriveCandidate(parent, collision, respondentAuthority()));
+
+        ObjectNode duplicateAlias = (ObjectNode) completeDelta();
+        ObjectNode duplicateAliasRow = (ObjectNode) duplicateAlias.at("/fact_rows/1");
+        duplicateAliasRow.put("fact_key", "FACT_INTAKE_DUPLICATE_ALIAS");
+        duplicateAliasRow.put("category", "FULFILLMENT");
+        duplicateAliasRow.put("fact_target", "Whether the promised installation was delivered.");
+        duplicateAlias.withArray("summary_source_fact_keys")
+                .set(1, JSON.getNodeFactory().textNode("FACT_INTAKE_DUPLICATE_ALIAS"));
+        assertRejected(
+                "INTAKE_RESPONDENT_MATRIX_FACT_DUPLICATE",
+                () -> freezer.deriveCandidate(parent, duplicateAlias, respondentAuthority()));
 
         ObjectNode duplicateParent = initiatorMatrix();
         ObjectNode duplicateRow = ((ObjectNode) duplicateParent.at("/fact_rows/0"))

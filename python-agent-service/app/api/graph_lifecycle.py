@@ -12,7 +12,7 @@ import socket
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.api.graph_commands import (
@@ -35,6 +35,7 @@ from app.api.graph_reconciliation_service import (
 from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
     GatewayBackedGraphCommandStreamService,
+    GraphRetainedCleanupError,
     GraphStreamAdmissionGate,
 )
 from app.config import Settings
@@ -46,6 +47,7 @@ from app.graph_runtime.gateway import GraphCommandGateway, ImmutableInputAuthori
 from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.persistence_models import (
     GraphGatewayMode,
+    GraphPersistenceConfigurationError,
     GraphPoolConfig,
     GraphReadinessConfig,
     GraphReadinessReport,
@@ -94,7 +96,10 @@ from app.security.transport_identity import AsgiMtlsIdentityResolver
 
 
 GRAPH_READY_PATH = "/ready/graph"
+INTAKE_INFRASTRUCTURE_PREPARATION_PATH = "/ready/intake-preparation"
+_INTAKE_INFRASTRUCTURE_PREPARATION_SCHEMA = "intake-infrastructure-preparation.v1"
 GRAPH_SHUTDOWN_DRAIN_SECONDS = 5.0
+_GRAPH_READINESS_CLEANUP_RESERVE_SECONDS = 1.0
 _SHADOW_BULKHEAD_GLOBAL_LIMIT = 32
 _SHADOW_BULKHEAD_TENANT_LIMIT = 16
 _SHADOW_BULKHEAD_ROOM_LIMIT = 8
@@ -104,6 +109,29 @@ _SHADOW_BULKHEAD_ROOM_QUEUE_LIMIT = 100
 _SHADOW_BULKHEAD_PERMIT_LEASE_SECONDS = 20
 _SHADOW_BULKHEAD_WAIT_TIMEOUT_SECONDS = 5.0
 _SHADOW_BULKHEAD_POLL_INTERVAL_SECONDS = 0.05
+
+
+def _validate_graph_readiness_timeout_geometry(
+    *,
+    pool_config: GraphPoolConfig,
+    readiness_config: GraphReadinessConfig,
+) -> None:
+    statement_timeout_seconds = pool_config.statement_timeout_ms / 1_000
+    minimum_aggregate_seconds = (
+        pool_config.acquire_timeout_seconds
+        + statement_timeout_seconds
+        + _GRAPH_READINESS_CLEANUP_RESERVE_SECONDS
+    )
+    if readiness_config.timeout_seconds <= minimum_aggregate_seconds:
+        raise GraphPersistenceConfigurationError(
+            "Graph readiness timeout geometry requires aggregate timeout "
+            "to be strictly greater than pool acquire timeout, statement timeout, "
+            "and cleanup reserve; "
+            f"aggregate={readiness_config.timeout_seconds}, "
+            f"acquire={pool_config.acquire_timeout_seconds}, "
+            f"statement={statement_timeout_seconds}, "
+            f"cleanup={_GRAPH_READINESS_CLEANUP_RESERVE_SECONDS}"
+        )
 
 
 def _shadow_bulkhead_config() -> PostgresBulkheadConfig:
@@ -150,6 +178,7 @@ class GraphRuntimeBindings:
     executor_registry_factory: ExecutorRegistryFactory
     resource_opener: Callable[[], Awaitable[None]] | None = None
     resource_closer: Callable[[], Awaitable[None]] | None = None
+    intake_infrastructure_preparer: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +220,8 @@ class GraphRuntimeInstance(Protocol):
     def ready(self) -> bool: ...
 
     async def check_readiness(self) -> GraphRuntimeReadiness: ...
+
+    async def prepare_intake_infrastructure(self) -> None: ...
 
     async def close(self) -> bool: ...
 
@@ -266,6 +297,7 @@ class GraphApplicationRuntime:
         target_e2e_verifier: TargetE2EInvocationVerifier | None = None,
         mode: GraphGatewayMode = GraphGatewayMode.SHADOW,
         resource_closer: Callable[[], Awaitable[None]] | None = None,
+        intake_infrastructure_preparer: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._checkpoint_runtime = checkpoint_runtime
         self._persistence_probe = persistence_probe
@@ -280,6 +312,7 @@ class GraphApplicationRuntime:
         self.target_e2e_verifier = target_e2e_verifier
         self._mode = mode
         self._resource_closer = resource_closer
+        self._intake_infrastructure_preparer = intake_infrastructure_preparer
         self._persistence_ready = True
         self._bulkhead_ready = True
         self._closed = False
@@ -319,10 +352,6 @@ class GraphApplicationRuntime:
                 settings.graph_idle_in_transaction_timeout_seconds * 1_000
             ),
         )
-        checkpoint_runtime = await GraphCheckpointRuntime.open(
-            settings.graph_database_dsn.get_secret_value(),
-            pool_config,
-        )
         readiness_config = GraphReadinessConfig(
             mode=mode,
             expected_database=settings.graph_database_name,
@@ -331,6 +360,14 @@ class GraphApplicationRuntime:
             expected_restore_verification_hash=(settings.graph_expected_restore_verification_hash),
             schema=settings.graph_database_schema,
             timeout_seconds=settings.graph_readiness_timeout_seconds,
+        )
+        _validate_graph_readiness_timeout_geometry(
+            pool_config=pool_config,
+            readiness_config=readiness_config,
+        )
+        checkpoint_runtime = await GraphCheckpointRuntime.open(
+            settings.graph_database_dsn.get_secret_value(),
+            pool_config,
         )
         checkpoint_probe = GraphPersistenceReadinessProbe(
             readiness_config,
@@ -513,6 +550,7 @@ class GraphApplicationRuntime:
                 target_e2e_verifier=target_e2e_verifier,
                 mode=mode,
                 resource_closer=bindings.resource_closer,
+                intake_infrastructure_preparer=bindings.intake_infrastructure_preparer,
             )
             await gate.start()
             return runtime
@@ -622,6 +660,18 @@ class GraphApplicationRuntime:
             ),
         )
 
+    async def prepare_intake_infrastructure(self) -> None:
+        preparer = self._intake_infrastructure_preparer
+        if (
+            self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE
+            or preparer is None
+            or not self.ready
+        ):
+            raise GraphGatewayDisabledError("GRAPH_INTAKE_PREPARATION_UNAVAILABLE")
+        await preparer()
+        if not self.ready:
+            raise GraphGatewayDisabledError("GRAPH_INTAKE_PREPARATION_UNAVAILABLE")
+
     async def close(self) -> bool:
         async with self._close_lock:
             if self._close_complete:
@@ -630,24 +680,29 @@ class GraphApplicationRuntime:
             drained = False
             bulkhead_drained = False
             try:
+                drained = await self._admission_gate.drain(GRAPH_SHUTDOWN_DRAIN_SECONDS)
+            except GraphRetainedCleanupError:
+                # Retained exact-fence cleanup still owns Graph PostgreSQL.  Keep
+                # pools open and leave close retryable; readiness is already closed
+                # by the admission gate and the shutdown failure is authoritative.
+                self._drained = False
+                raise
+            try:
                 try:
-                    drained = await self._admission_gate.drain(GRAPH_SHUTDOWN_DRAIN_SECONDS)
+                    await self._durable_bulkhead.drain()
+                    bulkhead_drained = True
                 finally:
                     try:
-                        await self._durable_bulkhead.drain()
-                        bulkhead_drained = True
+                        await self._durable_bulkhead.close()
                     finally:
                         try:
-                            await self._durable_bulkhead.close()
+                            if self._resource_closer is not None:
+                                await self._resource_closer()
                         finally:
                             try:
-                                if self._resource_closer is not None:
-                                    await self._resource_closer()
+                                await self._security_runtime.close()
                             finally:
-                                try:
-                                    await self._security_runtime.close()
-                                finally:
-                                    await self._checkpoint_runtime.close()
+                                await self._checkpoint_runtime.close()
             finally:
                 self._drained = drained and bulkhead_drained
                 self._close_complete = True
@@ -878,6 +933,14 @@ class GraphRuntimeHandle:
             raise GraphGatewayDisabledError("GRAPH_GATEWAY_NOT_READY")
         return runtime
 
+    async def prepare_intake_infrastructure(self) -> None:
+        if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            raise GraphGatewayDisabledError("GRAPH_INTAKE_PREPARATION_UNAVAILABLE")
+        runtime = self.require_runtime()
+        await runtime.prepare_intake_infrastructure()
+        if not self.ready:
+            raise GraphGatewayDisabledError("GRAPH_INTAKE_PREPARATION_UNAVAILABLE")
+
     def require_target_e2e_lifecycle_binding(self) -> TargetE2ELifecycleBinding:
         binding = self._target_e2e_lifecycle_binding
         if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE or binding is None:
@@ -1091,6 +1154,40 @@ def create_graph_readiness_router(handle: GraphRuntimeHandle) -> APIRouter:
                 "Pragma": "no-cache",
                 "X-Content-Type-Options": "nosniff",
             },
+        )
+
+    @router.post(INTAKE_INFRASTRUCTURE_PREPARATION_PATH, response_model=None)
+    async def prepare_intake_infrastructure(request: Request) -> JSONResponse:
+        async for chunk in request.stream():
+            if chunk:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "schema_version": _INTAKE_INFRASTRUCTURE_PREPARATION_SCHEMA,
+                        "status": "UNAVAILABLE",
+                    },
+                    headers={"Cache-Control": "no-store"},
+                )
+        try:
+            await handle.prepare_intake_infrastructure()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "schema_version": _INTAKE_INFRASTRUCTURE_PREPARATION_SCHEMA,
+                    "status": "UNAVAILABLE",
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "schema_version": _INTAKE_INFRASTRUCTURE_PREPARATION_SCHEMA,
+                "status": "READY",
+            },
+            headers={"Cache-Control": "no-store"},
         )
 
     return router

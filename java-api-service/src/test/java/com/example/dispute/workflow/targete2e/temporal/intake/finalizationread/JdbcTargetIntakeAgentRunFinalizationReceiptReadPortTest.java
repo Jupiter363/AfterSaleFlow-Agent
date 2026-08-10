@@ -3,25 +3,46 @@ package com.example.dispute.workflow.targete2e.temporal.intake.finalizationread;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRejectedException;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReceiptReadPort;
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunChildIds;
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunChildState;
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReadRequest;
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReadResult;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
+import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
+import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
+import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcOperations;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.transaction.PlatformTransactionManager;
 
 class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
 
@@ -43,6 +64,14 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
             "fixtures",
             "valid",
             "intake-finalization-receipt-valid.json");
+    private static final Path RESULT_FIXTURE = Path.of(
+            "..",
+            "contracts",
+            "agent-platform",
+            "v1",
+            "fixtures",
+            "valid",
+            "room-graph-result-valid.json");
 
     private static final String TARGET_RECEIPT_HASH = ContractJson.sha256Hex(
             JsonMapper.builder().build().valueToTree(Map.of(
@@ -259,6 +288,262 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
     void rejectsCommittedSuccessorRevisionOverflowWithoutWrapping() throws Exception {
         assertProjectionOverflow(Long.MAX_VALUE, 3);
         assertProjectionOverflow(6, Long.MAX_VALUE);
+    }
+
+    @Test
+    void pendingChildWithDurableFinalizationRejectionResolvesExactTerminalNoCommitAuthority()
+            throws Exception {
+        IntakeWorkflowCommand command = terminalCommand();
+        IntakeAgentRunChildState child = IntakeAgentRunChildState.pending(
+                IntakeAgentRunChildIds.forCommand(command),
+                command.executionContext().targetAgentRun());
+        IntakeAgentRunFinalizationReadRequest request =
+                IntakeAgentRunFinalizationReadRequest.winningAttempt(
+                        IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION,
+                        command,
+                        child);
+        ExecuteAgentRunResult completed = completedAudit(command);
+        JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.TerminalRow exact =
+                terminalRow(command, completed, 0, 0, 0);
+        NamedParameterJdbcOperations jdbc = mock(NamedParameterJdbcOperations.class);
+        when(jdbc.query(anyString(), any(Map.class), any(RowMapper.class)))
+                .thenReturn(List.of());
+        JdbcTargetIntakeAgentRunFinalizationReceiptReadPort port =
+                new JdbcTargetIntakeAgentRunFinalizationReceiptReadPort(
+                        jdbc, mock(PlatformTransactionManager.class), MAPPER);
+
+        IntakeAgentRunFinalizationReadResult resolved =
+                port.terminalNoCommit(request, List.of(exact));
+
+        assertThat(resolved.schemaVersion())
+                .isEqualTo(IntakeAgentRunFinalizationReadResult.SCHEMA_VERSION);
+        assertThat(resolved.resolution())
+                .isEqualTo(IntakeAgentRunFinalizationReadResult.Resolution.TERMINAL_NO_COMMIT);
+        assertThat(resolved.terminalNoCommitEvidence().completedAudit()).isEqualTo(completed);
+        assertThat(resolved.terminalNoCommitEvidence().terminalResult().outcome())
+                .isEqualTo(ExecuteAgentRunResult.Outcome.FAILED);
+        assertThat(resolved.terminalNoCommitEvidence().terminalResult().errorCode())
+                .isEqualTo("INTAKE_RESPONDENT_MATRIX_NOT_READY");
+        assertThatCode(() -> resolved.requireMatches(request)).doesNotThrowAnyException();
+
+        IntakeAgentRunFinalizationReadResult legacyPending =
+                new IntakeAgentRunFinalizationReadResult(
+                        IntakeAgentRunFinalizationReadResult.LEGACY_SCHEMA_VERSION,
+                        IntakeAgentRunFinalizationReadResult.Resolution.PENDING,
+                        null,
+                        null);
+        JsonNode legacyJson = MAPPER.valueToTree(legacyPending);
+        assertThat(legacyJson.has("terminalNoCommitEvidence")).isFalse();
+        assertThat(MAPPER.treeToValue(legacyJson, IntakeAgentRunFinalizationReadResult.class))
+                .isEqualTo(legacyPending);
+
+        assertThatThrownBy(
+                        () -> port.terminalNoCommit(
+                                request, List.of(terminalRow(command, completed, 0, 1, 0))))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .extracting(
+                        failure -> ((TargetE2eFinalizationRejectedException) failure).code())
+                .isEqualTo("TARGET_E2E_FINALIZATION_TERMINAL_AUTHORITY_INVALID");
+        assertThatThrownBy(
+                        () -> port.terminalNoCommit(
+                                request, List.of(terminalRow(command, completed, 1, 0, 0))))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .extracting(
+                        failure -> ((TargetE2eFinalizationRejectedException) failure).code())
+                .isEqualTo("TARGET_E2E_FINALIZATION_TERMINAL_AUTHORITY_INVALID");
+        assertThatThrownBy(
+                        () -> port.terminalNoCommit(
+                                request, List.of(terminalRow(command, completed, 0, 0, 1))))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .extracting(
+                        failure -> ((TargetE2eFinalizationRejectedException) failure).code())
+                .isEqualTo("TARGET_E2E_FINALIZATION_TERMINAL_EVENT_PRESENT");
+    }
+
+    private static IntakeWorkflowCommand terminalCommand() throws Exception {
+        ObjectNode commandJson = commandJson();
+        commandJson.put("command_id", "CMD_FINALIZATION_REJECTED");
+        commandJson.put("logical_run_id", "RUN_FINALIZATION_REJECTED");
+        commandJson.put("attempt_id", "ATTEMPT_FINALIZATION_REJECTED_1");
+        commandJson.put("tenant_surrogate", "tenant-finalization-rejected");
+        commandJson.put("case_id", "CASE_FINALIZATION_REJECTED");
+        commandJson.put("room_type", "INTAKE");
+        commandJson.put("room_epoch", 9);
+        commandJson.put("process_revision", 6);
+        commandJson.put("request_hash", "0".repeat(64));
+        RoomGraphCommand provisional =
+                MAPPER.treeToValue(commandJson, RoomGraphCommand.class);
+        ObjectNode canonicalCommand = MAPPER.valueToTree(provisional);
+        canonicalCommand.remove("request_hash");
+        canonicalCommand.put("request_hash", ContractJson.sha256Hex(canonicalCommand));
+        RoomGraphCommand graph =
+                MAPPER.treeToValue(canonicalCommand, RoomGraphCommand.class);
+        ExecuteAgentRunRequest request = new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                graph.logicalRunId(),
+                1,
+                1,
+                "agent-stream.v2",
+                "6".repeat(64),
+                null,
+                false,
+                0,
+                graph);
+        IntakeTargetAgentRunContext target = new IntakeTargetAgentRunContext(
+                "intake-target-agent-run-context.v1",
+                IntakeTargetAgentRunContext.TARGET_LANE,
+                "p9act.v1." + "1".repeat(32),
+                "2".repeat(64),
+                11,
+                6,
+                6,
+                "case-build-finalization",
+                "control-build-finalization",
+                "agent-build-finalization",
+                "3".repeat(64),
+                "graph-build-finalization",
+                "4".repeat(64),
+                "5".repeat(64),
+                request);
+        IntakeCommandExecutionContext context = new IntakeCommandExecutionContext(
+                "intake-command-execution-context.v2",
+                graph.threadId(),
+                "agent-session-finalization",
+                Instant.parse("2099-01-01T00:00:00Z").toEpochMilli(),
+                new RetryBudget("intake-retry-budget.v1", 1, 1, 0),
+                null,
+                target);
+        return new IntakeWorkflowCommand(
+                "intake-workflow-command.v1",
+                graph.commandId(),
+                graph.tenantSurrogate(),
+                graph.caseId(),
+                graph.roomEpoch(),
+                11,
+                1,
+                IntakeCommandType.INTAKE_MESSAGE,
+                IntakeParty.INITIATOR,
+                "7".repeat(64),
+                "urn:room-message:CMD_FINALIZATION_REJECTED",
+                "9".repeat(64),
+                "intake.operation:" + graph.caseId() + ":" + graph.commandId(),
+                "8".repeat(64),
+                context);
+    }
+
+    private static ExecuteAgentRunResult completedAudit(IntakeWorkflowCommand command)
+            throws Exception {
+        ExecuteAgentRunRequest request = command.executionContext().targetAgentRun().request();
+        JsonNode wrapper = MAPPER.readTree(RESULT_FIXTURE.toFile());
+        RoomGraphResult fixture = MAPPER.treeToValue(
+                wrapper.required("instance"), RoomGraphResult.class);
+        RoomGraphResult graph = new RoomGraphResult(
+                fixture.schemaVersion(),
+                request.command().commandId(),
+                request.logicalRunId(),
+                request.attemptId(),
+                request.command().graphKey(),
+                request.command().graphVersion(),
+                fixture.checkpointId(),
+                fixture.cognitiveRevision(),
+                fixture.status(),
+                fixture.publicEventProposals(),
+                fixture.artifactOperations(),
+                fixture.needsInput(),
+                fixture.needsReview(),
+                fixture.error(),
+                fixture.outputHash(),
+                fixture.usage(),
+                fixture.executionMetadata());
+        return new ExecuteAgentRunResult(
+                ExecuteAgentRunResult.SCHEMA_VERSION,
+                request.agentRunId(),
+                request.logicalRunId(),
+                request.attemptId(),
+                request.attemptNo(),
+                ExecuteAgentRunResult.Outcome.COMPLETED,
+                graph,
+                graph.outputHash(),
+                2,
+                true,
+                null,
+                false,
+                null,
+                Instant.parse("2026-08-10T16:07:06.400Z"));
+    }
+
+    private static JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.TerminalRow terminalRow(
+            IntakeWorkflowCommand command,
+            ExecuteAgentRunResult completed,
+            long completionCount,
+            long receiptCount,
+            long formalEventCount) throws Exception {
+        IntakeCommandExecutionContext context = command.executionContext();
+        IntakeTargetAgentRunContext target = context.targetAgentRun();
+        ExecuteAgentRunRequest request = target.request();
+        ObjectMapper materialMapper =
+                JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.targetMaterialObjectMapper(
+                        MAPPER);
+        String materialJson = ContractJson.canonicalString(materialMapper.valueToTree(context));
+        OffsetDateTime completedAt =
+                OffsetDateTime.ofInstant(completed.completedAt(), ZoneOffset.UTC);
+        return new JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.TerminalRow(
+                request.logicalRunId(),
+                command.tenantSurrogate(),
+                command.caseId(),
+                "agent-stream.v2",
+                "TEMPORAL_ACTIVITY",
+                "INTAKE",
+                command.roomEpoch(),
+                target.expectedProcessRevision(),
+                command.fencingToken(),
+                request.command().requestHash(),
+                request.logicalInputHash(),
+                request.attemptLimit(),
+                "ABORTED",
+                "FINALIZATION_REJECTED",
+                "INTAKE_RESPONDENT_MATRIX_NOT_READY",
+                false,
+                "UNCOMMITTED",
+                request.attemptId(),
+                null,
+                completed.resultHash(),
+                null,
+                null,
+                null,
+                null,
+                completedAt,
+                request.attemptId(),
+                request.attemptNo(),
+                AgentRunAttemptStatus.ABORTED.name(),
+                "TEMPORAL_ACTIVITY",
+                request.command().requestHash(),
+                "agent-run-attempt-lineage.v1",
+                request.command().commandId(),
+                request.command().requestHash(),
+                request.logicalInputHash(),
+                MAPPER.writeValueAsString(request.command()),
+                null,
+                false,
+                0,
+                "FAIL_LOGICAL_RUN",
+                completed.resultHash(),
+                MAPPER.writeValueAsString(completed),
+                "INTAKE_RESPONDENT_MATRIX_NOT_READY",
+                false,
+                true,
+                true,
+                completed.lastSequenceNo() + 1,
+                completedAt,
+                "p9cmd.v1." + "9".repeat(32),
+                target.commandHash(),
+                target.commandEnvelopeHash(),
+                "p9cmd.v1." + "9".repeat(32),
+                materialJson,
+                ContractJson.sha256Hex(materialMapper.valueToTree(context)),
+                completionCount,
+                receiptCount,
+                formalEventCount);
     }
 
     private static ObjectNode commandJson() throws Exception {

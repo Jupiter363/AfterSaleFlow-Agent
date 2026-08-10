@@ -162,7 +162,9 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
   @Override
   public EvidenceRoomSnapshot state() {
     return new EvidenceRoomSnapshot(
-        "evidence-room-snapshot.v1",
+        start != null && start.freezeBound()
+            ? EvidenceRoomSnapshot.FROZEN_SUBMISSION_SCHEMA_VERSION
+            : EvidenceRoomSnapshot.LEGACY_SCHEMA_VERSION,
         start == null ? null : start.tenantSurrogate(),
         start == null ? null : start.caseId(),
         start == null ? null : start.roomId(),
@@ -188,7 +190,9 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
         duplicateSignalCount,
         rejectedSignalCount,
         protocolErrorCode,
-        new ArrayList<>(agentRunReceipts.values()));
+        new ArrayList<>(agentRunReceipts.values()),
+        start == null ? null : start.projectionRef(),
+        start == null ? null : start.projectionSha256());
   }
 
   private void drainHistoryOrderedInbox() {

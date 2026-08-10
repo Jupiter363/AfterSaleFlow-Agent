@@ -625,5 +625,19 @@ class TemporalWorkerRecoveryTest {
             return new RecordCaseCommandRoutedResult(
                     "record-case-command-routed-result.v1", CommandLifecycleOutcome.SHADOW_COMPLETED);
         }
+
+        @Override
+        public CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommitResult
+                convergeTargetIntakeTerminalNoCommit(
+                        CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommit request) {
+            throw new AssertionError("terminal-no-commit convergence is outside this fixture");
+        }
+
+        @Override
+        public CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommitResult
+                resolveTargetIntakeTerminalNoCommit(
+                        CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommit request) {
+            throw new AssertionError("terminal-no-commit recovery is outside this fixture");
+        }
     }
 }

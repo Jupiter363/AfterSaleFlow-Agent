@@ -9,10 +9,16 @@ public record IntakeAgentRunFinalizationReadRequest(
     IntakeWorkflowCommand command,
     IntakeAgentRunChildState childState) {
 
+  public static final String EXACT_SCHEMA_VERSION = "intake-agent-run-finalization-read-request.v1";
+  public static final String WINNING_ATTEMPT_SCHEMA_VERSION =
+      "intake-agent-run-finalization-read-request.v2";
+
   public IntakeAgentRunFinalizationReadRequest {
-    if (!"intake-agent-run-finalization-read-request.v1".equals(schemaVersion)) {
+    if (!EXACT_SCHEMA_VERSION.equals(schemaVersion)
+        && !WINNING_ATTEMPT_SCHEMA_VERSION.equals(schemaVersion)) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-agent-run-finalization-read-request.v1");
+          "schemaVersion must be intake-agent-run-finalization-read-request.v1 or "
+              + "intake-agent-run-finalization-read-request.v2");
     }
     Objects.requireNonNull(mode, "mode must not be null");
     Objects.requireNonNull(command, "command must not be null");
@@ -24,6 +30,22 @@ public record IntakeAgentRunFinalizationReadRequest(
       throw new IllegalArgumentException("receipt lookup requires a target Intake message");
     }
     childState.requireMatches(command, execution.targetAgentRun());
+  }
+
+  public static IntakeAgentRunFinalizationReadRequest exact(
+      Mode mode, IntakeWorkflowCommand command, IntakeAgentRunChildState childState) {
+    return new IntakeAgentRunFinalizationReadRequest(
+        EXACT_SCHEMA_VERSION, mode, command, childState);
+  }
+
+  public static IntakeAgentRunFinalizationReadRequest winningAttempt(
+      Mode mode, IntakeWorkflowCommand command, IntakeAgentRunChildState childState) {
+    return new IntakeAgentRunFinalizationReadRequest(
+        WINNING_ATTEMPT_SCHEMA_VERSION, mode, command, childState);
+  }
+
+  public boolean allowsWinningAttempt() {
+    return WINNING_ATTEMPT_SCHEMA_VERSION.equals(schemaVersion);
   }
 
   public enum Mode {

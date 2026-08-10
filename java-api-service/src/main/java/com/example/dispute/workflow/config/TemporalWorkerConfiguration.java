@@ -16,6 +16,9 @@ import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesI
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeActivitiesV2Adapter;
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
 import com.example.dispute.workflow.activity.domain.ProcessProjectionActivitiesImpl;
+import com.example.dispute.workflow.activity.system.TemporalWorkerProbeActivities.TemporalWorkerDescription;
+import com.example.dispute.workflow.activity.system.IntakeInfrastructurePreparationWorkflowImpl;
+import com.example.dispute.workflow.activity.system.TemporalWorkerProbeWorkflow;
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeWorkflowImpl;
 import com.example.dispute.workflow.application.EvidenceWindowActivitiesAdapter;
 import com.example.dispute.workflow.contract.v1.TemporalTaskQueues;
@@ -27,13 +30,21 @@ import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
 import com.example.dispute.workflow.targete2e.TargetE2eAgentDeploymentBinding;
 import com.example.dispute.workflow.targete2e.temporal.TargetTemporalWorkerRegistration;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.example.dispute.workflow.infrastructure.persistence.authority.bridge.JdbcIntakeChildBridgeReadPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
+import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import javax.sql.DataSource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.beans.factory.ObjectProvider;
@@ -46,6 +57,8 @@ import org.springframework.context.annotation.Lazy;
         name = "app.temporal.worker.enabled",
         havingValue = "true")
 public class TemporalWorkerConfiguration {
+
+    static final Duration STARTUP_PROBE_TIMEOUT = Duration.ofSeconds(30);
 
     @Bean
     IntakeChildBridgeReadPort intakeChildBridgeReadPort(DataSource dataSource) {
@@ -92,7 +105,9 @@ public class TemporalWorkerConfiguration {
                                 ledgerActivities,
                                 projectionActivities,
                                 intakeAuthorityRegistration,
-                                targetRegistration));
+                                targetRegistration),
+                workflowClient,
+                properties);
     }
 
     @Bean(destroyMethod = "shutdown")
@@ -100,6 +115,48 @@ public class TemporalWorkerConfiguration {
     @ConditionalOnProperty(
             name = "app.temporal.worker.role",
             havingValue = "AGENT")
+    WorkerFactory temporalAgentWorkerFactory(
+            WorkflowClient workflowClient,
+            TemporalWorkerProperties properties,
+            TemporalWorkerOptionsFactory optionsFactory,
+            AgentRunV2Properties agentRunV2Properties,
+            GraphCommandClientProperties graphClientProperties,
+            IntakeEpochSelectionProperties intakeEpochSelectionProperties,
+            ObjectProvider<IntakeSyntheticWorkerRegistration> syntheticRegistrationProvider,
+            ObjectProvider<AgentRunLedger> ledgerProvider,
+            ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
+            ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider,
+            ObjectProvider<AgentRunFinalizationFailureRecorder> failureRecorderProvider,
+            ObjectProvider<TargetE2eAgentDeploymentBinding> targetBindingProvider,
+            ObjectProvider<GraphTransportBundle> graphTransportBundleProvider) {
+        requireVersionedAgentWorker(
+                properties, agentRunV2Properties, intakeEpochSelectionProperties);
+        requireTargetAgentDeploymentBinding(
+                properties, graphClientProperties, targetBindingProvider);
+        GraphTransportBundle graphTransportBundle =
+                requireGraphTransportBundle(graphClientProperties, graphTransportBundleProvider);
+        WorkerFactory factory =
+                WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
+        return start(
+                factory,
+                () ->
+                        registerAgentWorker(
+                                factory,
+                                properties,
+                                optionsFactory,
+                                agentRunV2Properties,
+                                intakeEpochSelectionProperties,
+                                syntheticRegistrationProvider,
+                                ledgerProvider,
+                                executionGatewayProvider,
+                                finalizationGatewayProvider,
+                                failureRecorderProvider,
+                                graphTransportBundle),
+                workflowClient,
+                properties,
+                graphPollingBinding(graphClientProperties, graphTransportBundle, factory));
+    }
+
     WorkerFactory temporalAgentWorkerFactory(
             WorkflowClient workflowClient,
             TemporalWorkerProperties properties,
@@ -132,7 +189,10 @@ public class TemporalWorkerConfiguration {
                                 ledgerProvider,
                                 executionGatewayProvider,
                                 finalizationGatewayProvider,
-                                failureRecorderProvider));
+                                failureRecorderProvider,
+                                null),
+                workflowClient,
+                properties);
     }
 
     private static void registerControlWorkers(
@@ -229,7 +289,8 @@ public class TemporalWorkerConfiguration {
             ObjectProvider<AgentRunLedger> ledgerProvider,
             ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
             ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider,
-            ObjectProvider<AgentRunFinalizationFailureRecorder> failureRecorderProvider) {
+            ObjectProvider<AgentRunFinalizationFailureRecorder> failureRecorderProvider,
+            GraphTransportBundle graphTransportBundle) {
         Worker agentExecution =
                 factory.newWorker(
                         AGENT_EXECUTION, optionsFactory.workerOptions(AGENT_EXECUTION));
@@ -251,11 +312,15 @@ public class TemporalWorkerConfiguration {
                             "AgentRunFinalizationFailureRecorder");
             workflowTypes.add(AgentRunWorkflowImpl.class);
             workflowTypes.add(TemporalWorkerProbeWorkflowImpl.class);
+            if (graphTransportBundle != null) {
+                workflowTypes.add(IntakeInfrastructurePreparationWorkflowImpl.class);
+            }
             activityImplementations.add(new ExecuteAgentRunActivityImpl(ledger, executionGateway));
             activityImplementations.add(
                     new FinalizeAgentRunActivityImpl(finalizationGateway, failureRecorder));
             activityImplementations.add(
-                    new TemporalWorkerProbeActivitiesImpl(properties, AGENT_EXECUTION));
+                    new TemporalWorkerProbeActivitiesImpl(
+                            properties, AGENT_EXECUTION, graphTransportBundle));
         }
 
         if (intakeEpochSelectionProperties.shadowSelectionConfigured()) {
@@ -365,6 +430,31 @@ public class TemporalWorkerConfiguration {
                 graphProperties.activationId(), workerProperties.buildId());
     }
 
+    private static GraphTransportBundle requireGraphTransportBundle(
+            GraphCommandClientProperties properties,
+            ObjectProvider<GraphTransportBundle> provider) {
+        if (properties.mode() == GraphCommandClientProperties.Mode.DISABLED) {
+            return null;
+        }
+        GraphTransportBundle bundle = provider.getIfUnique();
+        if (bundle == null) {
+            throw new IllegalStateException(
+                    "Graph-enabled AGENT worker requires exactly one GraphTransportBundle");
+        }
+        return bundle;
+    }
+
+    private static Runnable graphPollingBinding(
+            GraphCommandClientProperties properties,
+            GraphTransportBundle bundle,
+            WorkerFactory factory) {
+        if (properties.mode() == GraphCommandClientProperties.Mode.DISABLED
+                || !"https".equalsIgnoreCase(properties.baseUri().getScheme())) {
+            return () -> {};
+        }
+        return () -> bundle.bindWorkerPolling(factory::suspendPolling, factory::resumePolling);
+    }
+
     private static void requireVersionedControlWorker(TemporalWorkerProperties properties) {
         if (properties.versioningMode() == TemporalWorkerProperties.VersioningMode.NONE) {
             throw new IllegalStateException(
@@ -372,15 +462,102 @@ public class TemporalWorkerConfiguration {
         }
     }
 
-    private static WorkerFactory start(WorkerFactory factory, Runnable registration) {
+    static WorkerFactory start(
+            WorkerFactory factory,
+            Runnable registration,
+            WorkflowClient workflowClient,
+            TemporalWorkerProperties properties) {
+        return start(factory, registration, workflowClient, properties, () -> {});
+    }
+
+    static WorkerFactory start(
+            WorkerFactory factory,
+            Runnable registration,
+            WorkflowClient workflowClient,
+            TemporalWorkerProperties properties,
+            Runnable afterReadiness) {
         try {
             registration.run();
             factory.start();
+            requireStartupProbes(workflowClient, properties);
+            afterReadiness.run();
             return factory;
-        } catch (RuntimeException failure) {
-            factory.shutdownNow();
+        } catch (RuntimeException | Error failure) {
+            try {
+                factory.shutdownNow();
+            } catch (RuntimeException | Error cleanupFailure) {
+                if (cleanupFailure != failure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
             throw failure;
         }
+    }
+
+    static void requireStartupProbes(
+            WorkflowClient workflowClient, TemporalWorkerProperties properties) {
+        List<String> taskQueues = switch (properties.role()) {
+            case CONTROL -> List.of(CASE_CONTROL, ROOM_CONTROL);
+            case AGENT -> List.of(AGENT_EXECUTION);
+            case API -> List.of();
+        };
+        long deadlineNanos = System.nanoTime() + STARTUP_PROBE_TIMEOUT.toNanos();
+        for (String taskQueue : taskQueues) {
+            requireStartupProbe(workflowClient, properties, taskQueue, deadlineNanos);
+        }
+    }
+
+    private static void requireStartupProbe(
+            WorkflowClient workflowClient,
+            TemporalWorkerProperties properties,
+            String taskQueue,
+            long deadlineNanos) {
+        long workflowTimeoutNanos = requireRemainingProbeTime(deadlineNanos);
+        TemporalWorkerProbeWorkflow probe = workflowClient.newWorkflowStub(
+                TemporalWorkerProbeWorkflow.class,
+                WorkflowOptions.newBuilder()
+                        .setWorkflowId(
+                                "temporal-worker-startup-probe:"
+                                        + properties.role().name()
+                                        + ":"
+                                        + taskQueue
+                                        + ":"
+                                        + UUID.randomUUID())
+                        .setTaskQueue(taskQueue)
+                        .setWorkflowExecutionTimeout(Duration.ofNanos(workflowTimeoutNanos))
+                        .setWorkflowIdReusePolicy(
+                                WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
+                        .build());
+        WorkflowClient.start(probe::probe);
+
+        TemporalWorkerDescription actual;
+        try {
+            actual = WorkflowStub.fromTyped(probe)
+                    .getResult(
+                            requireRemainingProbeTime(deadlineNanos),
+                            TimeUnit.NANOSECONDS,
+                            TemporalWorkerDescription.class);
+        } catch (TimeoutException failure) {
+            throw new IllegalStateException("Temporal worker startup probe timed out", failure);
+        }
+        TemporalWorkerDescription expected = new TemporalWorkerDescription(
+                "temporal-worker-description.v1",
+                properties.role().name(),
+                taskQueue,
+                properties.deploymentName(),
+                properties.buildId(),
+                properties.versioningMode().name());
+        if (!expected.equals(actual)) {
+            throw new IllegalStateException("Temporal worker startup probe result mismatch");
+        }
+    }
+
+    private static long requireRemainingProbeTime(long deadlineNanos) {
+        long remainingNanos = deadlineNanos - System.nanoTime();
+        if (remainingNanos <= 0) {
+            throw new IllegalStateException("Temporal worker startup probe timed out");
+        }
+        return remainingNanos;
     }
 
     private static void requireDedicatedLegacyTaskQueue(String legacyTaskQueue) {

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+import app.graph_runtime.checkpoint as checkpoint_module
 from app.contracts.v1.models import ExecutionMetadata, Usage
 from app.graph_runtime.checkpoint import (
     BIND_EXTERNAL_TERMINAL_METADATA_SQL,
@@ -19,12 +23,18 @@ from app.graph_runtime.checkpoint import (
     bind_terminal_result_context,
 )
 from app.graph_runtime.errors import GraphTerminalBindingError
-from app.graph_runtime.ledger import CompletedStartCheckpoint, ResultRecord
+from app.graph_runtime.ledger import (
+    CheckpointRestoreAuthority,
+    CheckpointRestoreKind,
+    CompletedStartCheckpoint,
+    ResultRecord,
+)
 from app.graph_runtime.persistence_models import (
     GraphBindingError,
     GraphFenceContext,
     GraphFenceError,
     GraphGatewayMode,
+    GraphPersistenceConfigurationError,
 )
 from app.graph_runtime.result import CompletedDraft, ResultBindings
 from langgraph.checkpoint.base import CheckpointTuple
@@ -32,6 +42,7 @@ from langgraph.checkpoint.base import CheckpointTuple
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
+STATEMENT_TIMEOUT_MS = 5_000
 
 
 def _fence() -> GraphFenceContext:
@@ -209,15 +220,41 @@ def _terminal_config(
 
 
 class _Cursor:
-    def __init__(self, row: Any = None, rows: list[Any] | None = None) -> None:
+    def __init__(
+        self,
+        row: Any = None,
+        rows: list[Any] | None = None,
+        *,
+        connection: _Connection | None = None,
+    ) -> None:
         self._row = row
         self._rows = rows or []
+        self._connection = connection
+
+    async def __aenter__(self) -> _Cursor:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        return None
 
     async def fetchone(self) -> Any:
         return self._row
 
     async def fetchall(self) -> list[Any]:
         return self._rows
+
+    async def executemany(self, query: str, params: Any) -> None:
+        if self._connection is None:
+            raise AssertionError("batch cursor has no connection")
+        batch = tuple(params)
+        normalized = " ".join(query.split()).lower()
+        if "checkpoint_blobs" in normalized:
+            self._connection.events.append("sql:checkpoint-blob-batch")
+        elif "checkpoint_writes" in normalized:
+            self._connection.events.append("sql:pending-write-batch")
+        else:
+            raise AssertionError(f"unexpected batch SQL: {normalized}")
+        self._connection.executemany_calls.append((query, batch))
 
 
 class _Transaction:
@@ -241,6 +278,10 @@ class _Connection:
         checkpoint_revision: int = 1,
         pending_write_checkpoint_unavailable_attempts: int = 0,
         terminal_metadata_current: bool = True,
+        refresh_current: bool = True,
+        refresh_fencing_token: int = 1,
+        refresh_revision: int = 2,
+        refresh_times_valid: bool = True,
     ) -> None:
         self.events: list[str] = []
         self.executed_queries: list[tuple[str, Any]] = []
@@ -253,14 +294,44 @@ class _Connection:
         )
         self.pending_write_checkpoint_reads = 0
         self.terminal_metadata_current = terminal_metadata_current
+        self.refresh_current = refresh_current
+        self.refresh_fencing_token = refresh_fencing_token
+        self.refresh_revision = refresh_revision
+        self.refresh_times_valid = refresh_times_valid
+        self.executemany_calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.suffix_idle_timeout_params: list[Any] = []
         self.checkpoint_metadata = _metadata(graph_cognitive_revision=checkpoint_revision)
 
     def transaction(self) -> _Transaction:
         return _Transaction(self.events)
 
+    def cursor(self) -> _Cursor:
+        return _Cursor(connection=self)
+
     async def execute(self, query: str, params: Any = None) -> _Cursor:
         self.executed_queries.append((query, params))
         normalized = " ".join(query.split()).lower()
+        if "idle_in_transaction_session_timeout" in normalized:
+            self.suffix_idle_timeout_params.append(params)
+            return _Cursor()
+        if "update agent_graph_lease lease" in normalized:
+            self.events.append("sql:refresh-lease")
+            if not self.refresh_current:
+                return _Cursor(None)
+            renewed_at = datetime.now(timezone.utc)
+            expires_at = (
+                renewed_at + timedelta(seconds=30)
+                if self.refresh_times_valid
+                else renewed_at
+            )
+            return _Cursor(
+                {
+                    "fencing_token": self.refresh_fencing_token,
+                    "lease_revision": self.refresh_revision,
+                    "renewed_at": renewed_at,
+                    "lease_expires_at": expires_at,
+                }
+            )
         if "from agent_graph_lease" in normalized:
             self.events.append("sql:fence")
             return _Cursor({"fencing_token": 1} if self.fence_current else None)
@@ -468,6 +539,7 @@ def _saver(
     return (
         FencedPostgresSaver(
             _Pool(connection),  # type: ignore[arg-type]
+            statement_timeout_ms=STATEMENT_TIMEOUT_MS,
             reader=_Reader(),  # type: ignore[arg-type]
             direct_saver_factory=factory,  # type: ignore[arg-type]
             ledger=ledger,
@@ -533,8 +605,71 @@ class _CompletedStartLedger:
         return self.proof
 
 
+class _RestoreSelectionLedger(_CompletedStartLedger):
+    def __init__(
+        self,
+        *,
+        authority: Any = None,
+        proof: CompletedStartCheckpoint | None = None,
+        failure: Exception | None = None,
+    ) -> None:
+        super().__init__(proof, failure=failure)
+        self.authority = authority
+        self.authority_calls: list[tuple[Any, GraphFenceContext]] = []
+
+    async def load_checkpoint_restore_authority(
+        self,
+        connection: Any,
+        *,
+        fence: GraphFenceContext,
+    ) -> Any:
+        self.authority_calls.append((connection, fence))
+        return self.authority
+
+
+@pytest.mark.parametrize("statement_timeout_ms", (True, 0, -1, 1.5))
+def test_fenced_saver_rejects_invalid_statement_timeout(
+    statement_timeout_ms: Any,
+) -> None:
+    with pytest.raises(
+        GraphPersistenceConfigurationError,
+        match="statement timeout must be a positive integer",
+    ):
+        FencedPostgresSaver(
+            _Pool(_Connection()),  # type: ignore[arg-type]
+            statement_timeout_ms=statement_timeout_ms,
+            reader=_Reader(),  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.asyncio
-async def test_checkpoint_write_locks_fence_and_uses_one_connection() -> None:
+async def test_fenced_saver_uses_actual_statement_timeout_and_rejects_unsafe_reserve() -> None:
+    connection = _Connection()
+    saver = FencedPostgresSaver(
+        _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=6_999,
+        reader=_Reader(),  # type: ignore[arg-type]
+    )
+
+    await saver.avalidate_external_terminal_checkpoint(
+        _config(checkpoint=True),
+        cognitive_revision=1,
+    )
+
+    assert connection.suffix_idle_timeout_params == [("6999ms",)]
+    with pytest.raises(
+        GraphPersistenceConfigurationError,
+        match="transaction completion reserve must remain below the lease horizon",
+    ):
+        FencedPostgresSaver(
+            _Pool(_Connection()),  # type: ignore[arg-type]
+            statement_timeout_ms=7_000,
+            reader=_Reader(),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_write_uses_one_connection_and_fences_after_bulk_write() -> None:
     connection = _Connection()
     saver, direct_savers = _saver(connection)
 
@@ -542,9 +677,10 @@ async def test_checkpoint_write_locks_fence_and_uses_one_connection() -> None:
 
     assert connection.events == [
         "transaction:enter",
-        "sql:fence",
         "saver:put",
+        "sql:fence",
         "sql:bind-command",
+        "sql:refresh-lease",
         "transaction:commit",
     ]
     assert direct_savers[0].connection is connection
@@ -559,6 +695,7 @@ async def test_native_checkpoint_serialization_finishes_before_fenced_transactio
     connection = _Connection()
     saver = FencedPostgresSaver(
         _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
         reader=_Reader(),  # type: ignore[arg-type]
     )
     original_prepare = saver._prepare_checkpoint_write  # noqa: SLF001
@@ -579,22 +716,24 @@ async def test_native_checkpoint_serialization_finishes_before_fenced_transactio
     assert connection.events == [
         "prepare:checkpoint",
         "transaction:enter",
-        "sql:fence",
         "sql:checkpoint-write",
+        "sql:fence",
         "sql:bind-command",
+        "sql:refresh-lease",
         "transaction:commit",
     ]
     assert saved["configurable"][FENCE_CONTEXT_KEY] == _fence()
 
 
 @pytest.mark.asyncio
-async def test_native_terminal_materialization_remains_behind_fence(
+async def test_native_terminal_materialization_and_bulk_precede_final_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection = _Connection(checkpoint_revision=4)
     ledger = _TerminalLedger(connection.events)
     saver = FencedPostgresSaver(
         _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
         reader=_Reader(),  # type: ignore[arg-type]
         ledger=ledger,
     )
@@ -630,13 +769,14 @@ async def test_native_terminal_materialization_remains_behind_fence(
 
     assert connection.events == [
         "transaction:enter",
-        "sql:fence",
         "terminal:materialize",
-        "sql:checkpoint-blob",
+        "sql:checkpoint-blob-batch",
         "sql:checkpoint-write",
+        "sql:fence",
         "sql:bind-command",
         "sql:advance-thread",
         "ledger:store-result",
+        "sql:refresh-lease",
         "transaction:commit",
     ]
 
@@ -648,6 +788,7 @@ async def test_native_pending_write_serialization_finishes_before_fenced_transac
     connection = _Connection()
     saver = FencedPostgresSaver(
         _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
         reader=_Reader(),  # type: ignore[arg-type]
     )
     original_prepare = saver._prepare_pending_writes  # noqa: SLF001
@@ -667,11 +808,383 @@ async def test_native_pending_write_serialization_finishes_before_fenced_transac
     assert connection.events == [
         "prepare:writes",
         "transaction:enter",
-        "sql:fence",
+        "sql:pending-write-batch",
         "sql:checkpoint-metadata",
-        "sql:pending-write",
+        "sql:fence",
+        "sql:refresh-lease",
         "transaction:commit",
     ]
+
+
+@pytest.mark.asyncio
+async def test_prepared_checkpoint_blobs_and_pending_writes_use_one_batch_each() -> None:
+    connection = _Connection()
+    saver = FencedPostgresSaver(
+        _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        reader=_Reader(),  # type: ignore[arg-type]
+    )
+    prepared_checkpoint = SimpleNamespace(
+        blob_parameters=(("blob-1",), ("blob-2",), ("blob-3",)),
+        checkpoint_parameters=("checkpoint",),
+    )
+    prepared_writes = SimpleNamespace(
+        query="insert into checkpoint_writes values (%s)",
+        parameters=(("write-1",), ("write-2",)),
+    )
+
+    await saver._write_prepared_checkpoint(connection, prepared_checkpoint)  # noqa: SLF001
+    await saver._write_prepared_pending_writes(connection, prepared_writes)  # noqa: SLF001
+
+    assert [len(batch) for _, batch in connection.executemany_calls] == [3, 2]
+    assert connection.events == [
+        "sql:checkpoint-blob-batch",
+        "sql:checkpoint-write",
+        "sql:pending-write-batch",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("checkpoint", "pending_writes"))
+async def test_bulk_sql_precedes_final_fence_so_inflight_renewal_is_not_blocked(
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection()
+    saver = FencedPostgresSaver(
+        _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        reader=_Reader(),  # type: ignore[arg-type]
+    )
+    bulk_started = asyncio.Event()
+    release_bulk = asyncio.Event()
+
+    if operation == "checkpoint":
+        original_write = saver._write_prepared_checkpoint  # noqa: SLF001
+
+        async def blocked_checkpoint_write(selected: Any, prepared: Any) -> None:
+            connection.events.append("bulk:blocked")
+            bulk_started.set()
+            await release_bulk.wait()
+            await original_write(selected, prepared)
+            connection.events.append("bulk:finished")
+
+        monkeypatch.setattr(
+            saver,
+            "_write_prepared_checkpoint",
+            blocked_checkpoint_write,
+        )
+        write_task = asyncio.create_task(
+            saver.aput(_config(checkpoint=True), _checkpoint(), {}, {})  # type: ignore[arg-type]
+        )
+        expected = [
+            "transaction:enter",
+            "bulk:blocked",
+            "renew:complete",
+            "sql:checkpoint-write",
+            "bulk:finished",
+            "sql:fence",
+            "sql:bind-command",
+            "sql:refresh-lease",
+            "transaction:commit",
+        ]
+    else:
+        original_write = saver._write_prepared_pending_writes  # noqa: SLF001
+
+        async def blocked_pending_write(selected: Any, prepared: Any) -> None:
+            connection.events.append("bulk:blocked")
+            bulk_started.set()
+            await release_bulk.wait()
+            await original_write(selected, prepared)
+            connection.events.append("bulk:finished")
+
+        monkeypatch.setattr(
+            saver,
+            "_write_prepared_pending_writes",
+            blocked_pending_write,
+        )
+        write_task = asyncio.create_task(
+            saver.aput_writes(
+                _config(checkpoint=True),
+                (("custom-channel", {"value": "pending"}),),
+                "task-bulk-renew",
+            )
+        )
+        expected = [
+            "transaction:enter",
+            "bulk:blocked",
+            "renew:complete",
+            "sql:pending-write-batch",
+            "bulk:finished",
+            "sql:checkpoint-metadata",
+            "sql:fence",
+            "sql:refresh-lease",
+            "transaction:commit",
+        ]
+
+    await asyncio.wait_for(bulk_started.wait(), timeout=0.1)
+    try:
+        assert "sql:fence" not in connection.events
+        connection.events.append("renew:complete")
+    finally:
+        release_bulk.set()
+        await write_task
+
+    assert connection.events == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("checkpoint", "pending_writes"))
+async def test_stale_final_fence_rolls_back_uncommitted_bulk_mutation(
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection()
+    saver = FencedPostgresSaver(
+        _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        reader=_Reader(),  # type: ignore[arg-type]
+    )
+    bulk_started = asyncio.Event()
+    release_bulk = asyncio.Event()
+
+    if operation == "checkpoint":
+        original_write = saver._write_prepared_checkpoint  # noqa: SLF001
+
+        async def blocked_checkpoint_write(selected: Any, prepared: Any) -> None:
+            connection.events.append("bulk:blocked")
+            bulk_started.set()
+            await release_bulk.wait()
+            await original_write(selected, prepared)
+            connection.events.append("bulk:finished")
+
+        monkeypatch.setattr(
+            saver,
+            "_write_prepared_checkpoint",
+            blocked_checkpoint_write,
+        )
+        write_task = asyncio.create_task(
+            saver.aput(_config(checkpoint=True), _checkpoint(), {}, {})  # type: ignore[arg-type]
+        )
+        expected = [
+            "transaction:enter",
+            "bulk:blocked",
+            "sql:checkpoint-write",
+            "bulk:finished",
+            "sql:fence",
+            "transaction:rollback",
+        ]
+    else:
+        original_write = saver._write_prepared_pending_writes  # noqa: SLF001
+
+        async def blocked_pending_write(selected: Any, prepared: Any) -> None:
+            connection.events.append("bulk:blocked")
+            bulk_started.set()
+            await release_bulk.wait()
+            await original_write(selected, prepared)
+            connection.events.append("bulk:finished")
+
+        monkeypatch.setattr(
+            saver,
+            "_write_prepared_pending_writes",
+            blocked_pending_write,
+        )
+        write_task = asyncio.create_task(
+            saver.aput_writes(
+                _config(checkpoint=True),
+                (("custom-channel", {"value": "pending"}),),
+                "task-stale-fence",
+            )
+        )
+        expected = [
+            "transaction:enter",
+            "bulk:blocked",
+            "sql:pending-write-batch",
+            "bulk:finished",
+            "sql:checkpoint-metadata",
+            "sql:fence",
+            "transaction:rollback",
+        ]
+
+    await asyncio.wait_for(bulk_started.wait(), timeout=0.1)
+    connection.fence_current = False
+    release_bulk.set()
+    with pytest.raises(
+        GraphFenceError,
+        match="Graph lease is stale, expired, released, or cancelled",
+    ):
+        await write_task
+
+    assert connection.events == expected
+    assert "sql:bind-command" not in connection.events
+    assert "sql:refresh-lease" not in connection.events
+    assert "transaction:commit" not in connection.events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation",
+    ("checkpoint", "pending_writes", "validate_terminal", "commit_terminal"),
+)
+async def test_every_successful_fenced_transaction_refreshes_exact_lease_last(
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection(checkpoint_revision=(4 if operation == "commit_terminal" else 1))
+    saver, _ = _saver(connection, ledger=_TerminalLedger(connection.events))
+    original_suffix = saver._bounded_fenced_lease_suffix  # noqa: SLF001
+
+    @asynccontextmanager
+    async def observe_suffix(selected_connection: Any) -> AsyncIterator[None]:
+        connection.events.append("suffix:enter")
+        async with original_suffix(selected_connection):
+            yield
+        connection.events.append("suffix:exit")
+
+    monkeypatch.setattr(saver, "_bounded_fenced_lease_suffix", observe_suffix)
+
+    if operation == "checkpoint":
+        await saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
+    elif operation == "pending_writes":
+        await saver.aput_writes(
+            _config(checkpoint=True),
+            [("channel", "value")],
+            "task-refresh",
+        )
+    elif operation == "validate_terminal":
+        await saver.avalidate_external_terminal_checkpoint(
+            _config(checkpoint=True),
+            cognitive_revision=1,
+        )
+    else:
+        await saver.acommit_external_terminal(
+            _config(checkpoint=True),
+            ExternalTerminalCommit(
+                result=_result(checkpoint_id="cp-parent"),
+                cognitive_revision=4,
+            ),
+        )
+
+    assert connection.events.count("suffix:enter") == 1
+    assert connection.events.count("suffix:exit") == 1
+    assert connection.suffix_idle_timeout_params == [("5000ms",)]
+    assert connection.events[-3:] == [
+        "sql:refresh-lease",
+        "suffix:exit",
+        "transaction:commit",
+    ]
+    assert connection.events.index("suffix:enter") < connection.events.index("sql:fence")
+    assert connection.events.index("sql:fence") < connection.events.index(
+        "sql:refresh-lease"
+    )
+    assert connection.events.index("sql:refresh-lease") < connection.events.index(
+        "suffix:exit"
+    )
+    assert connection.events.index("suffix:exit") < connection.events.index(
+        "transaction:commit"
+    )
+    if operation in {"pending_writes", "validate_terminal", "commit_terminal"}:
+        assert connection.events.index("sql:checkpoint-metadata") < connection.events.index(
+            "sql:fence"
+        )
+    refresh_query, refresh_params = next(
+        (query, params)
+        for query, params in reversed(connection.executed_queries)
+        if "update agent_graph_lease lease" in " ".join(query.split()).lower()
+    )
+    assert "cancelled_at is null" in refresh_query
+    assert "released_at is null" in refresh_query
+    assert refresh_params == (
+        _fence().thread_id,
+        _fence().command_id,
+        _fence().owner_id,
+        _fence().fencing_token,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation",
+    ("checkpoint", "pending_writes", "validate_terminal", "commit_terminal"),
+)
+async def test_fenced_suffix_timeout_rolls_back_without_late_mutation(
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        checkpoint_module,
+        "FENCED_LEASE_SUFFIX_BODY_TIMEOUT_SECONDS",
+        0.01,
+    )
+    connection = _Connection(checkpoint_revision=(4 if operation == "commit_terminal" else 1))
+    saver, _ = _saver(connection, ledger=_TerminalLedger(connection.events))
+    lock_cancelled = asyncio.Event()
+
+    async def blocked_lock(_connection: Any, _fence: GraphFenceContext) -> None:
+        connection.events.append("suffix:lock-blocked")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            lock_cancelled.set()
+
+    monkeypatch.setattr(saver, "_lock_fence", blocked_lock)
+
+    with pytest.raises(
+        GraphFenceError,
+        match="transaction suffix exceeded its safety horizon",
+    ):
+        if operation == "checkpoint":
+            await saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
+        elif operation == "pending_writes":
+            await saver.aput_writes(
+                _config(checkpoint=True),
+                [("channel", "value")],
+                "task-timeout",
+            )
+        elif operation == "validate_terminal":
+            await saver.avalidate_external_terminal_checkpoint(
+                _config(checkpoint=True),
+                cognitive_revision=1,
+            )
+        else:
+            await saver.acommit_external_terminal(
+                _config(checkpoint=True),
+                ExternalTerminalCommit(
+                    result=_result(checkpoint_id="cp-parent"),
+                    cognitive_revision=4,
+                ),
+            )
+
+    assert lock_cancelled.is_set()
+    assert connection.suffix_idle_timeout_params == [("5000ms",)]
+    assert connection.events[-1] == "transaction:rollback"
+    assert "sql:refresh-lease" not in connection.events
+    assert "transaction:commit" not in connection.events
+    events_after_rollback = list(connection.events)
+    await asyncio.sleep(0.02)
+    assert connection.events == events_after_rollback
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "connection",
+    (
+        _Connection(refresh_current=False),
+        _Connection(refresh_fencing_token=2),
+        _Connection(refresh_revision=0),
+        _Connection(refresh_times_valid=False),
+    ),
+)
+async def test_locked_lease_refresh_failure_rolls_back_checkpoint_atomically(
+    connection: _Connection,
+) -> None:
+    saver, _ = _saver(connection)
+
+    with pytest.raises(GraphFenceError, match="changed|released|cancelled"):
+        await saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
+
+    assert connection.events[-2:] == ["sql:refresh-lease", "transaction:rollback"]
+    assert "transaction:commit" not in connection.events
 
 
 @pytest.mark.asyncio
@@ -682,6 +1195,7 @@ async def test_same_thread_fenced_transactions_are_serialized_before_pool_acquis
     pool = _Pool(connection)
     saver = FencedPostgresSaver(
         pool,  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
         reader=_Reader(),  # type: ignore[arg-type]
     )
     first_locked = asyncio.Event()
@@ -1012,12 +1526,13 @@ async def test_external_terminal_commit_binds_terminal_metadata_without_rewritin
 
     assert connection.events == [
         "transaction:enter",
-        "sql:fence",
         "sql:checkpoint-metadata",
+        "sql:fence",
         "sql:bind-terminal-metadata",
         "sql:bind-command",
         "sql:advance-thread",
         "ledger:store-result",
+        "sql:refresh-lease",
         "transaction:commit",
     ]
     assert direct_savers == []
@@ -1127,8 +1642,8 @@ async def test_external_terminal_commit_rolls_back_when_metadata_bind_is_not_dur
 
     assert connection.events == [
         "transaction:enter",
-        "sql:fence",
         "sql:checkpoint-metadata",
+        "sql:fence",
         "sql:bind-terminal-metadata",
         "transaction:rollback",
     ]
@@ -1137,7 +1652,7 @@ async def test_external_terminal_commit_rolls_back_when_metadata_bind_is_not_dur
 
 @pytest.mark.asyncio
 async def test_external_terminal_preflight_rejects_stale_fence_before_store_boundary() -> None:
-    connection = _Connection(fence_current=False)
+    connection = _Connection(fence_current=False, checkpoint_revision=4)
     saver, direct_savers = _saver(connection)
 
     with pytest.raises(GraphFenceError, match="stale"):
@@ -1148,6 +1663,7 @@ async def test_external_terminal_preflight_rejects_stale_fence_before_store_boun
     assert direct_savers == []
     assert connection.events == [
         "transaction:enter",
+        "sql:checkpoint-metadata",
         "sql:fence",
         "transaction:rollback",
     ]
@@ -1420,8 +1936,14 @@ async def test_takeover_that_changes_the_fence_rejects_the_late_writer() -> None
             "task-late",
         )
 
-    assert direct_savers == []
-    assert connection.events == ["transaction:enter", "sql:fence", "transaction:rollback"]
+    assert len(direct_savers) == 1
+    assert connection.events == [
+        "transaction:enter",
+        "saver:writes",
+        "sql:checkpoint-metadata",
+        "sql:fence",
+        "transaction:rollback",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1469,9 +1991,10 @@ async def test_pending_writes_validate_the_parent_under_the_same_fence() -> None
 
     assert connection.events == [
         "transaction:enter",
-        "sql:fence",
-        "sql:checkpoint-metadata",
         "saver:writes",
+        "sql:checkpoint-metadata",
+        "sql:fence",
+        "sql:refresh-lease",
         "transaction:commit",
     ]
     assert direct_savers[0].connection is connection
@@ -1494,9 +2017,10 @@ async def test_first_pending_writes_accept_only_the_completed_start_checkpoint()
 
     assert connection.events == [
         "transaction:enter",
-        "sql:fence",
-        "sql:checkpoint-metadata",
         "saver:writes",
+        "sql:checkpoint-metadata",
+        "sql:fence",
+        "sql:refresh-lease",
         "transaction:commit",
     ]
     assert ledger.calls == [
@@ -1591,6 +2115,7 @@ async def test_completed_predecessor_hides_pending_writes_from_other_commands() 
     ledger = _CompletedStartLedger(proof)
     saver = FencedPostgresSaver(
         _Pool(_Connection()),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
         reader=CompletedStartReader(),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
     )
@@ -1623,11 +2148,11 @@ async def test_first_pending_writes_reject_start_checkpoint_without_terminal_pro
 
     assert connection.events == [
         "transaction:enter",
-        "sql:fence",
+        "saver:writes",
         "sql:checkpoint-metadata",
         "transaction:rollback",
     ]
-    assert direct_savers == []
+    assert len(direct_savers) == 1
 
 
 @pytest.mark.asyncio
@@ -1639,9 +2164,10 @@ async def test_pending_writes_allow_langgraph_precheckpoint_ordering() -> None:
 
     assert connection.events == [
         "transaction:enter",
-        "sql:fence",
-        "sql:checkpoint-metadata",
         "saver:writes",
+        "sql:checkpoint-metadata",
+        "sql:fence",
+        "sql:refresh-lease",
         "transaction:commit",
     ]
     assert saver._pool.connection_calls == 1  # noqa: SLF001
@@ -1658,9 +2184,10 @@ async def test_pending_writes_allow_a_checkpoint_that_has_not_been_created_yet()
 
     assert connection.events == [
         "transaction:enter",
-        "sql:fence",
-        "sql:checkpoint-metadata",
         "saver:writes",
+        "sql:checkpoint-metadata",
+        "sql:fence",
+        "sql:refresh-lease",
         "transaction:commit",
     ]
     assert direct_savers[0].connection is connection
@@ -1677,18 +2204,125 @@ async def test_pending_writes_reject_an_existing_checkpoint_from_another_fence()
 
     assert connection.events == [
         "transaction:enter",
-        "sql:fence",
+        "saver:writes",
         "sql:checkpoint-metadata",
         "transaction:rollback",
     ]
-    assert direct_savers == []
+    assert len(direct_savers) == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_read_with_null_current_authority_does_not_consume_thread_latest() -> None:
+    foreign = CheckpointTuple(
+        config={
+            "configurable": {
+                "thread_id": _fence().thread_id,
+                "checkpoint_ns": "hearing",
+                "checkpoint_id": "cp-aborted-predecessor",
+            }
+        },
+        checkpoint={"id": "cp-aborted-predecessor"},  # type: ignore[arg-type]
+        metadata=_metadata(
+            graph_command_id="command-aborted-predecessor",
+            graph_request_hash=SHA_B,
+            graph_fencing_token=2,
+        ),  # type: ignore[arg-type]
+        parent_config=None,
+        pending_writes=None,
+    )
+
+    class ThreadLatestReader(_Reader):
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple:
+            self.calls.append(dict(config.get("configurable") or {}))
+            return foreign
+
+    connection = _Connection()
+    reader = ThreadLatestReader()
+    ledger = _RestoreSelectionLedger()
+    saver = FencedPostgresSaver(
+        _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        reader=reader,  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+    )
+
+    restored = await saver.aget_tuple(_config())
+
+    assert restored is None
+    assert reader.calls == []
+    assert ledger.authority_calls == [(connection, _fence())]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_read_synthesizes_current_committed_pointer_before_reader() -> None:
+    item = CheckpointTuple(
+        config={
+            "configurable": {
+                "thread_id": _fence().thread_id,
+                "checkpoint_ns": "hearing",
+                "checkpoint_id": "cp-current-committed",
+            }
+        },
+        checkpoint={"id": "cp-current-committed"},  # type: ignore[arg-type]
+        metadata=_metadata(),  # type: ignore[arg-type]
+        parent_config=None,
+        pending_writes=None,
+    )
+
+    class ExplicitReader(_Reader):
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple:
+            configurable = dict(config.get("configurable") or {})
+            self.calls.append(configurable)
+            return item
+
+    connection = _Connection()
+    reader = ExplicitReader()
+    ledger = _RestoreSelectionLedger(
+        authority=CheckpointRestoreAuthority(
+            kind=CheckpointRestoreKind.CURRENT_COMMITTED,
+            checkpoint_ns="hearing",
+            checkpoint_id="cp-current-committed",
+        )
+    )
+    saver = FencedPostgresSaver(
+        _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
+        reader=reader,  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+    )
+
+    restored = await saver.aget_tuple(_config())
+
+    assert restored is not None
+    assert restored.checkpoint == {"id": "cp-current-committed"}
+    assert reader.calls == [
+        {
+            "thread_id": _fence().thread_id,
+            "checkpoint_ns": "hearing",
+            "checkpoint_id": "cp-current-committed",
+            FENCE_CONTEXT_KEY: _fence(),
+        }
+    ]
+    assert ledger.authority_calls == [(connection, _fence())]
 
 
 @pytest.mark.asyncio
 async def test_checkpoint_read_rejects_another_graph_binding() -> None:
     item = CheckpointTuple(
-        config={"configurable": {"thread_id": _fence().thread_id}},
-        checkpoint={},  # type: ignore[arg-type]
+        config={
+            "configurable": {
+                "thread_id": _fence().thread_id,
+                "checkpoint_ns": "hearing",
+                "checkpoint_id": "cp-parent",
+            }
+        },
+        checkpoint={"id": "cp-parent"},  # type: ignore[arg-type]
         metadata=_metadata(graph_key="intake_flow"),  # type: ignore[arg-type]
         parent_config=None,
         pending_writes=None,
@@ -1701,11 +2335,12 @@ async def test_checkpoint_read_rejects_another_graph_binding() -> None:
     connection = _Connection()
     saver = FencedPostgresSaver(
         _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
         reader=Reader(),  # type: ignore[arg-type]
     )
 
     with pytest.raises(GraphBindingError, match="graph_key"):
-        await saver.aget_tuple(_config())
+        await saver.aget_tuple(_config(checkpoint=True))
 
 
 @pytest.mark.asyncio
@@ -1732,9 +2367,17 @@ async def test_candidate_read_accepts_exact_completed_start_checkpoint() -> None
 
     connection = _Connection()
     pool = _Pool(connection)
-    ledger = _CompletedStartLedger(proof)
+    ledger = _RestoreSelectionLedger(
+        authority=CheckpointRestoreAuthority(
+            kind=CheckpointRestoreKind.COMPLETED_START,
+            checkpoint_ns=proof.checkpoint_ns,
+            checkpoint_id=proof.checkpoint_id,
+        ),
+        proof=proof,
+    )
     saver = FencedPostgresSaver(
         pool,  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
         reader=CompletedStartReader(),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
     )
@@ -1757,7 +2400,8 @@ async def test_candidate_read_accepts_exact_completed_start_checkpoint() -> None
             proof.command_id,
         )
     ]
-    assert pool.connection_calls == 1
+    assert pool.connection_calls == 2
+    assert ledger.authority_calls == [(connection, fence)]
 
 
 @pytest.mark.asyncio
@@ -1782,11 +2426,17 @@ async def test_candidate_read_rejects_start_checkpoint_without_terminal_proof() 
         async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple:
             return item
 
-    ledger = _CompletedStartLedger(
+    ledger = _RestoreSelectionLedger(
+        authority=CheckpointRestoreAuthority(
+            kind=CheckpointRestoreKind.COMPLETED_START,
+            checkpoint_ns=proof.checkpoint_ns,
+            checkpoint_id=proof.checkpoint_id,
+        ),
         failure=GraphTerminalBindingError("completed start proof is absent")
     )
     saver = FencedPostgresSaver(
         _Pool(_Connection()),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
         reader=CompletedStartReader(),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
     )
@@ -1819,9 +2469,19 @@ async def test_replacement_saver_restores_a_durable_thread_without_process_state
         async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple:
             return item
 
+    connection = _Connection()
+    ledger = _RestoreSelectionLedger(
+        authority=CheckpointRestoreAuthority(
+            kind=CheckpointRestoreKind.CURRENT_COMMITTED,
+            checkpoint_ns="hearing",
+            checkpoint_id="cp-durable",
+        )
+    )
     replacement = FencedPostgresSaver(
-        _Pool(_Connection()),  # type: ignore[arg-type]
+        _Pool(connection),  # type: ignore[arg-type]
+        statement_timeout_ms=STATEMENT_TIMEOUT_MS,
         reader=DurableReader(),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
     )
 
     restored = await replacement.aget_tuple(_config())
@@ -1829,6 +2489,7 @@ async def test_replacement_saver_restores_a_durable_thread_without_process_state
     assert restored is not None
     assert restored.checkpoint == {"id": "cp-durable"}
     assert restored.config["configurable"][FENCE_CONTEXT_KEY] == _fence()
+    assert ledger.authority_calls == [(connection, _fence())]
 
 
 @pytest.mark.asyncio

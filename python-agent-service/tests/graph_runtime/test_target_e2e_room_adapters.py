@@ -97,6 +97,854 @@ def test_review_target_result_projects_the_exchange_persisted_proposal_as_a_patc
     assert "sha256=proposal.payload_hash" in source
 
 
+@pytest.mark.asyncio
+async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_utterance() -> None:
+    import asyncio
+    import json
+    import runpy
+    from copy import deepcopy
+    from dataclasses import replace
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
+    from app.contracts.v1.models import RoomGraphCommand, SnapshotRef
+    from app.graph_runtime.checkpoint import ExternalTerminalCommit
+    from app.graph_runtime.errors import GraphContractError
+    from app.graph_runtime.executor import TargetE2ESpecializedRoomProviderFactory
+    from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
+    from app.graph_runtime.production_bindings import _build_target_e2e_evidence_workflow
+    from app.agents.evidence_clerk.public_reply import (
+        EVIDENCE_CANONICAL_OPENING,
+        EvidencePublicOutputMismatch,
+        guard_evidence_public_reply,
+    )
+    from app.schemas import EvidenceTurnResult
+    from app.security.graph_runtime import GraphSecurityRuntime
+    from app.streaming import current_stream_observer
+    from app.llm import LiteLlmProxyClient
+
+    helper_module = runpy.run_path(
+        str(Path(__file__).parents[1] / "agents" / "test_evidence_clerk_turn.py")
+    )
+    settings = helper_module["_settings"]()
+    shared_client = LiteLlmProxyClient(
+        settings.resolved_llm_base_url,
+        settings.resolved_llm_model,
+        settings.resolved_llm_api_key,
+        settings.llm_timeout_seconds,
+    )
+    production_workflow = _build_target_e2e_evidence_workflow(
+        settings=settings,
+        structured_client=shared_client,
+    )
+    assert callable(getattr(production_workflow, "run", None))
+    assert callable(getattr(production_workflow, "arun", None))
+    request_document = helper_module["_java_evidence_turn_command_payload"]()
+    dossier = request_document["context_envelope"]["intake_dossier_snapshot"]["payload"]
+    dossier.pop("unilateral_case_matrix", None)
+    dossier["case_fact_matrix"] = helper_module["_case_fact_matrix_v2"]()
+
+    safe_prefix = EVIDENCE_CANONICAL_OPENING
+    risky_sentence = "不判断责任但实际由商家承担。"
+    raw_room_utterance = safe_prefix + risky_sentence
+    guarded_room_utterance = guard_evidence_public_reply(raw_room_utterance)
+    burst_sentences = ["我会先核验签收材料与冻结事实矩阵的关联。"] * 80
+    burst_raw_room_utterance = "".join(burst_sentences)
+    burst_guarded_room_utterance = guard_evidence_public_reply(
+        burst_raw_room_utterance
+    )
+    timeline: list[str] = []
+
+    class FakeFormalWorkflow:
+        def __init__(self) -> None:
+            self.calls = []
+            self.provider_calls = 0
+            self.invoke_started = asyncio.Event()
+            self.release_after_bootstrap = asyncio.Event()
+            self.safe_prefix_submitted = asyncio.Event()
+            self.sensitive_prefix_submitted = asyncio.Event()
+            self.release_sensitive_tail = asyncio.Event()
+            self.completed = asyncio.Event()
+
+        def run(self, request):
+            raise AssertionError("formal Target Evidence must not use the sync workflow")
+
+        @staticmethod
+        def result(room_utterance: str) -> EvidenceTurnResult:
+            return EvidenceTurnResult(
+                room_utterance=room_utterance,
+                internal_handoff={
+                    "evidence_change_summary": "已读取本轮真实证据。",
+                    "matrix_change_summary": "未改变冻结事实坐标。",
+                    "remaining_conflicts": [],
+                    "uncovered_fact_ids": [],
+                    "human_review_evidence_ids": [],
+                    "judge_attention_points": [],
+                },
+                confidence=0.8,
+                memory_frame={"guarded": True},
+                canvas_operations=[],
+                referenced_evidence_ids=["EVIDENCE_signature_photo"],
+            )
+
+        @staticmethod
+        def publish_usage(observer) -> None:
+            observer.usage(
+                node_name="evidence_turn",
+                model="formal-evidence-test-model",
+                latency_ms=1,
+                token_usage={"input": 11, "output": 7, "total": 18},
+            )
+
+        async def arun(self, request):
+            self.calls.append(request)
+            self.provider_calls += 1
+            observer = current_stream_observer()
+            assert observer is not None
+            if len(self.calls) > 1:
+                for sentence in burst_sentences:
+                    observer.visible_delta(
+                        "evidence_turn",
+                        "room_utterance",
+                        sentence,
+                    )
+                self.publish_usage(observer)
+                return self.result(burst_guarded_room_utterance)
+
+            self.invoke_started.set()
+            await self.release_after_bootstrap.wait()
+            observer.visible_delta("evidence_turn", "room_utterance", safe_prefix)
+            self.safe_prefix_submitted.set()
+            observer.visible_delta(
+                "evidence_turn",
+                "room_utterance",
+                risky_sentence[:-2],
+            )
+            self.sensitive_prefix_submitted.set()
+            await self.release_sensitive_tail.wait()
+            observer.visible_delta(
+                "evidence_turn",
+                "room_utterance",
+                risky_sentence[-2:],
+            )
+            self.publish_usage(observer)
+            result = self.result(guarded_room_utterance)
+            self.completed.set()
+            return result
+
+    class FencedMemorySaver(InMemorySaver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.commits: list[ExternalTerminalCommit] = []
+
+        async def avalidate_external_terminal_checkpoint(
+            self, config, *, cognitive_revision: int
+        ) -> None:
+            assert cognitive_revision == 1
+
+        async def acommit_external_terminal(self, config, commit):
+            timeline.append("fenced_commit")
+            self.commits.append(commit)
+            return config
+
+    class ObjectStore:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+            self.puts: list[dict[str, object]] = []
+
+        async def load(self, reference: SnapshotRef) -> bytes:
+            assert reference.sha256 == hashlib.sha256(self.payload).hexdigest()
+            assert reference.size_bytes == len(self.payload)
+            return self.payload
+
+        async def put(self, **kwargs):
+            assert hashlib.sha256(kwargs["payload"]).hexdigest() == kwargs["payload_hash"]
+            timeline.append("object_put")
+            self.puts.append(dict(kwargs))
+            return f"urn:target-e2e:proposal:evidence:{kwargs['payload_hash']}"
+
+        async def put_content_addressed(self, **kwargs):
+            raise AssertionError("formal Evidence must use the checkpoint-bound put")
+
+    class RoomExchange:
+        def __init__(self) -> None:
+            self.stores: dict[str, ObjectStore] = {}
+
+        def for_execution(self, execution):
+            return self.stores[execution.admission.command.domain_snapshot_ref.sha256]
+
+    actor_scope = {
+        "actor_id": "USER_local_1",
+        "actor_role": "USER",
+        "audience": "USER",
+        "capabilities": ["EVIDENCE_SUBMIT"],
+    }
+    identity = {
+        "command_id": "evidence-submit:EVIDENCE_BATCH_TEST",
+        "logical_run_id": "target-evidence-run:formal-test",
+        "attempt_id": "target-evidence-run:formal-test:1",
+        "tenant_surrogate": "legacy-default",
+        "case_id": "CASE_evidence_turn_llm",
+        "room_epoch": 0,
+        "fencing_token": 7,
+        "thread_id": "grt.v1.0123456789abcdef0123456789abcdef",
+        "actor_id": "USER_local_1",
+        "actor_role": "USER",
+        "actor_scope_hash": canonical_sha256(actor_scope),
+    }
+    invocation = {
+        "schema_version": "target-e2e-evidence-turn-invocation.v2",
+        "logical_run_id": identity["logical_run_id"],
+        "tenant_surrogate": identity["tenant_surrogate"],
+        "case_id": identity["case_id"],
+        "room_epoch": identity["room_epoch"],
+        "fencing_token": identity["fencing_token"],
+        "thread_id": identity["thread_id"],
+        "actor_id": identity["actor_id"],
+        "actor_role": identity["actor_role"],
+        "actor_scope_hash": identity["actor_scope_hash"],
+        "evidence_turn_request": request_document,
+        "invocation_hash": "0" * 64,
+    }
+    invocation["invocation_hash"] = canonical_sha256_omitting(
+        invocation, "invocation_hash"
+    )
+    invocation_payload = canonicalize(invocation)
+
+    def snapshot_ref(payload: bytes) -> SnapshotRef:
+        digest = hashlib.sha256(payload).hexdigest()
+        return SnapshotRef(
+            artifact_id=f"target-evidence-turn-invocation:{digest[:32]}",
+            schema_version="target-e2e-evidence-turn-invocation.v2",
+            uri=f"urn:target-e2e:object:target-evidence-turn-invocation:{digest[:32]}:{digest}",
+            sha256=digest,
+            size_bytes=len(payload),
+        )
+
+    command = RoomGraphCommand.model_validate_json(
+        json.dumps(
+            {
+                "schema_version": "room-graph-command.v1",
+                "command_id": identity["command_id"],
+                "logical_run_id": identity["logical_run_id"],
+                "attempt_id": identity["attempt_id"],
+                "tenant_surrogate": identity["tenant_surrogate"],
+                "case_id": identity["case_id"],
+                "room_type": "EVIDENCE",
+                "room_epoch": identity["room_epoch"],
+                "graph_key": "all-rooms.target-e2e.v1",
+                "graph_version": "target-e2e-graph.2026-07-27.1",
+                "checkpoint_schema_version": "target-e2e-checkpoint.v1",
+                "thread_id": identity["thread_id"],
+                "actor_scope": actor_scope,
+                "process_revision": 12,
+                "stage_code": "EVIDENCE_SEAL",
+                "stage_sequence": 12,
+                "domain_snapshot_ref": snapshot_ref(invocation_payload).model_dump(
+                    mode="json"
+                ),
+                "event_ref": {
+                    "artifact_id": "evidence-submit-event:COMMAND_TEST",
+                    "schema_version": "target-e2e-case-command-payload.v1",
+                    "uri": "urn:target-e2e:object:evidence-submit-event:COMMAND_TEST:"
+                    + "a" * 64,
+                    "sha256": "a" * 64,
+                    "size_bytes": 128,
+                },
+                "invocation_context": {
+                    "agent_profile_id": "all-rooms-agent.target-e2e.v1",
+                    "prompt_profile_id": "all-rooms-prompt.target-e2e.v1",
+                    "model_profile_id": "target-e2e.formal-evidence",
+                    "output_schema_version": "target-e2e-room-proposal-source.v1",
+                    "policy_version": "target-e2e.proposal-only.v1",
+                    "guardrail_version": "evidence-guardrail.v1",
+                    "tool_capabilities": [],
+                    "envelope_key_id": "JAVA_GRAPH_COMMAND_ES256_TEST",
+                    "envelope_nonce": "NONCE_EVIDENCE_FORMAL_TEST",
+                },
+                "retry_budget": {
+                    "provider_attempts_remaining": 1,
+                    "activity_attempts_remaining": 1,
+                    "repairs_remaining": 0,
+                },
+                "deadline_at": "2026-08-08T00:00:00Z",
+                "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+                "request_hash": "b" * 64,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+    fence = GraphFenceContext(
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        owner_id="OWNER_EVIDENCE_FORMAL_TEST",
+        fencing_token=1,
+        request_hash=command.request_hash,
+        room_epoch=command.room_epoch,
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        activation_id="p9act.v1.0123456789abcdef0123456789abcdef",
+        room_fencing_token=identity["fencing_token"],
+        command_hash=canonical_sha256(command.model_dump(mode="json")),
+        command_envelope_hash="c" * 64,
+        execution_provider="litellm",
+        execution_model="formal-evidence-test-model",
+        environment_id="target-e2e-test",
+        environment_generation=1,
+        tenant_surrogate=command.tenant_surrogate,
+        case_id=command.case_id,
+        room_type="EVIDENCE",
+        binding_hash="d" * 64,
+        code_build_id="target-e2e-test-build",
+    )
+    execution = SimpleNamespace(
+        admission=SimpleNamespace(
+            command=command,
+            binding=SimpleNamespace(room_fencing_token=identity["fencing_token"]),
+        ),
+        fence=fence,
+    )
+    workflow = FakeFormalWorkflow()
+    saver = FencedMemorySaver()
+    store = ObjectStore(invocation_payload)
+    room_exchange = RoomExchange()
+    room_exchange.stores[command.domain_snapshot_ref.sha256] = store
+    provider_factory = TargetE2ESpecializedRoomProviderFactory(
+        security_runtime=object.__new__(GraphSecurityRuntime),
+        room_exchange=room_exchange,
+    ).with_evidence_workflow(workflow)
+    providers = tuple(
+        provider_factory(
+            SimpleNamespace(saver=saver, durable_bulkhead=object())
+        )
+    )
+    evidence_provider = providers[0]
+
+    first_stream = evidence_provider.stream(execution).__aiter__()
+    first = [await anext(first_stream)]
+    timeline.append(f"yield:{first[0].event_type}")
+    first_visible_task = asyncio.create_task(anext(first_stream))
+    await workflow.invoke_started.wait()
+    first_visible = await asyncio.wait_for(first_visible_task, timeout=1.0)
+    first.append(first_visible)
+    timeline.append(f"yield:{first_visible.event_type}")
+    assert first_visible.event_type == "visible_delta"
+    assert first_visible.payload.field == "room_utterance"
+    assert first_visible.payload.delta == EVIDENCE_CANONICAL_OPENING
+    assert not workflow.release_after_bootstrap.is_set()
+    assert not workflow.safe_prefix_submitted.is_set()
+    assert not workflow.completed.is_set()
+    assert store.puts == []
+    assert saver.commits == []
+
+    next_event_task = asyncio.create_task(anext(first_stream))
+    workflow.release_after_bootstrap.set()
+    await workflow.safe_prefix_submitted.wait()
+    await workflow.sensitive_prefix_submitted.wait()
+    await asyncio.sleep(0)
+    assert not next_event_task.done()
+    workflow.release_sensitive_tail.set()
+    next_event = await asyncio.wait_for(next_event_task, timeout=1.0)
+    first.append(next_event)
+    timeline.append(f"yield:{next_event.event_type}")
+    async for event in first_stream:
+        first.append(event)
+        timeline.append(f"yield:{event.event_type}")
+    first_types = [event.event_type for event in first]
+    first_usage_index = first_types.index("usage")
+    assert first_types[0] == "attempt_started"
+    assert first_types[-1] == "final"
+    assert first_types.count("usage") == 1
+    assert all(
+        event_type == "visible_delta"
+        for event_type in first_types[1:first_usage_index]
+    )
+    assert "".join(
+        event.payload.delta or ""
+        for event in first
+        if event.event_type == "visible_delta"
+    ) == guarded_room_utterance
+    assert guarded_room_utterance.count(EVIDENCE_CANONICAL_OPENING) == 1
+    assert risky_sentence not in guarded_room_utterance
+    assert all(
+        event.payload.field == "room_utterance"
+        for event in first
+        if event.event_type == "visible_delta"
+    )
+    assert timeline.index("object_put") < timeline.index("fenced_commit")
+    assert timeline.index("fenced_commit") < timeline.index("yield:final")
+    proposal = json.loads(store.puts[0]["payload"])
+    assert proposal["room_utterance"] == guarded_room_utterance
+    assert proposal["evidence_turn_result"]["room_utterance"] == guarded_room_utterance
+    assert proposal["input_hash"] == command.domain_snapshot_ref.sha256
+    assert proposal["usage"] == {
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "total_tokens": 18,
+    }
+    assert proposal["proposal_hash"] == canonical_sha256_omitting(
+        proposal, "proposal_hash"
+    )
+    governed_agent_context_fields = {
+        "model_profile_id",
+        "output_schema_version",
+        "policy_version",
+        "guardrail_version",
+        "tool_capabilities",
+        "retry_budget",
+        "deadline_at",
+        "traceparent",
+    }
+    assert governed_agent_context_fields.isdisjoint(
+        request_document["agent_context"]
+    )
+    received_agent_context = workflow.calls[0].agent_context
+    assert received_agent_context.model_dump(
+        mode="json",
+        exclude=governed_agent_context_fields,
+    ) == request_document["agent_context"]
+    assert received_agent_context.model_profile_id == (
+        command.invocation_context.model_profile_id
+    )
+    assert received_agent_context.output_schema_version == (
+        command.invocation_context.output_schema_version
+    )
+    assert received_agent_context.policy_version == (
+        command.invocation_context.policy_version
+    )
+    assert received_agent_context.guardrail_version == (
+        command.invocation_context.guardrail_version
+    )
+    assert received_agent_context.tool_capabilities == list(
+        command.invocation_context.tool_capabilities
+    )
+    assert received_agent_context.retry_budget is not None
+    assert received_agent_context.retry_budget.model_dump(mode="json") == (
+        command.retry_budget.model_dump(mode="json")
+    )
+    assert received_agent_context.deadline_at == command.deadline_at
+    assert received_agent_context.traceparent == command.traceparent
+    assert workflow.provider_calls == 1
+    assert workflow.calls[0].context_envelope.visible_evidence[0].evidence_id == (
+        "EVIDENCE_signature_photo"
+    )
+    assert (
+        workflow.calls[0]
+        .context_envelope.intake_dossier_snapshot.payload["case_fact_matrix"]["fact_rows"][0][
+            "fact_id"
+        ]
+        == "FACT_SIGNATURE"
+    )
+
+    conflicting_invocation = deepcopy(invocation)
+    conflicting_invocation["evidence_turn_request"]["agent_context"][
+        "traceparent"
+    ] = "00-fedcba9876543210fedcba9876543210-fedcba9876543210-01"
+    conflicting_invocation["invocation_hash"] = canonical_sha256_omitting(
+        conflicting_invocation,
+        "invocation_hash",
+    )
+    conflicting_payload = canonicalize(conflicting_invocation)
+    conflicting_command = command.model_copy(
+        update={"domain_snapshot_ref": snapshot_ref(conflicting_payload)}
+    )
+    conflicting_fence = replace(
+        fence,
+        command_hash=canonical_sha256(
+            conflicting_command.model_dump(mode="json")
+        ),
+    )
+    conflicting_execution = SimpleNamespace(
+        admission=SimpleNamespace(
+            command=conflicting_command,
+            binding=execution.admission.binding,
+        ),
+        fence=conflicting_fence,
+    )
+    conflicting_store = ObjectStore(conflicting_payload)
+    room_exchange.stores[
+        conflicting_command.domain_snapshot_ref.sha256
+    ] = conflicting_store
+    conflicting_saver = FencedMemorySaver()
+    conflicting_provider = tuple(
+        provider_factory(
+            SimpleNamespace(saver=conflicting_saver, durable_bulkhead=object())
+        )
+    )[0]
+    workflow_calls_before_conflict = len(workflow.calls)
+    provider_calls_before_conflict = workflow.provider_calls
+    conflicting_events = []
+    with pytest.raises(
+        GraphContractError,
+        match="^EVIDENCE_TURN_MODEL_INVOCATION_BINDING_INVALID$",
+    ):
+        async for event in conflicting_provider.stream(conflicting_execution):
+            conflicting_events.append(event)
+    assert [event.event_type for event in conflicting_events] == ["attempt_started"]
+    assert len(workflow.calls) == workflow_calls_before_conflict
+    assert workflow.provider_calls == provider_calls_before_conflict
+    assert conflicting_store.puts == []
+    assert conflicting_saver.commits == []
+
+    replay_stream = evidence_provider.stream(execution).__aiter__()
+    replay = [await anext(replay_stream)]
+    replay_commit_count = len(saver.commits)
+    replay_visible = await anext(replay_stream)
+    assert len(saver.commits) == replay_commit_count + 1
+    replay.append(replay_visible)
+    replay.extend([event async for event in replay_stream])
+    assert [event.event_type for event in replay] == [
+        "attempt_started",
+        "visible_delta",
+        "usage",
+        "final",
+    ]
+    assert sum(event.event_type == "visible_delta" for event in replay) == 1
+    assert sum(event.event_type == "final" for event in replay) == 1
+    assert "".join(
+        event.payload.delta or ""
+        for event in replay
+        if event.event_type == "visible_delta"
+    ) == guarded_room_utterance
+    assert len(workflow.calls) == 1
+    assert governed_agent_context_fields.isdisjoint(
+        request_document["agent_context"]
+    )
+    assert store.puts[0]["payload"] == store.puts[1]["payload"]
+    assert saver.commits[0].result.result_hash == saver.commits[1].result.result_hash
+
+    later_command = command.model_copy(
+        update={
+            "command_id": "evidence-submit:EVIDENCE_BATCH_TEST:retry:2",
+            "attempt_id": "target-evidence-run:formal-test:2",
+            "request_hash": "e" * 64,
+        }
+    )
+    later_fence = replace(
+        fence,
+        command_id=later_command.command_id,
+        request_hash=later_command.request_hash,
+        command_hash=canonical_sha256(later_command.model_dump(mode="json")),
+        command_envelope_hash="f" * 64,
+    )
+    later_execution = SimpleNamespace(
+        admission=SimpleNamespace(
+            command=later_command,
+            binding=execution.admission.binding,
+        ),
+        fence=later_fence,
+    )
+    later_saver = FencedMemorySaver()
+    later_provider = tuple(
+        provider_factory(
+            SimpleNamespace(saver=later_saver, durable_bulkhead=object())
+        )
+    )[0]
+    later = [event async for event in later_provider.stream(later_execution)]
+    later_types = [event.event_type for event in later]
+    later_usage_index = later_types.index("usage")
+    assert later_types[0] == "attempt_started"
+    assert later_types[-1] == "final"
+    assert later_types.count("usage") == 1
+    assert all(
+        event_type == "visible_delta"
+        for event_type in later_types[1:later_usage_index]
+    )
+    assert len(burst_sentences) > 64
+    assert "".join(
+        event.payload.delta or ""
+        for event in later
+        if event.event_type == "visible_delta"
+    ) == burst_guarded_room_utterance
+    assert all(event.attempt_id == later_command.attempt_id for event in later)
+    assert later_command.domain_snapshot_ref == command.domain_snapshot_ref
+    assert len(workflow.calls) == 2
+    later_proposal = json.loads(store.puts[2]["payload"])
+    assert later_proposal["room_utterance"] == burst_guarded_room_utterance
+    assert later_proposal["command_id"] == later_command.command_id
+    assert later_proposal["logical_run_id"] == later_command.logical_run_id
+    assert later_proposal["attempt_id"] == later_command.attempt_id
+    assert store.puts[2]["execution"] is later_execution
+    assert later_saver.commits[0].result.result_hash == later[-1].payload.final_result_hash
+
+    class UnprovenSourceWorkflow:
+        def __init__(self, source_text: str | None, raw_final: str) -> None:
+            self.source_text = source_text
+            self.raw_final = raw_final
+            self.calls = 0
+
+        def run(self, request):
+            raise AssertionError("formal Target Evidence must not use the sync workflow")
+
+        async def arun(self, request):
+            self.calls += 1
+            observer = current_stream_observer()
+            assert observer is not None
+            if self.source_text is not None:
+                observer.visible_delta(
+                    "evidence_turn",
+                    "room_utterance",
+                    self.source_text,
+                )
+            FakeFormalWorkflow.publish_usage(observer)
+            return FakeFormalWorkflow.result(
+                guard_evidence_public_reply(self.raw_final)
+            )
+
+    unproven_cases = (("no-source", None, safe_prefix),)
+    for case_index, (case_name, source_text, raw_final) in enumerate(
+        unproven_cases,
+        start=3,
+    ):
+        failure_command = command.model_copy(
+            update={
+                "command_id": f"evidence-submit:EVIDENCE_BATCH_TEST:{case_name}",
+                "attempt_id": f"target-evidence-run:formal-test:{case_index}",
+                "request_hash": str(case_index) * 64,
+            }
+        )
+        failure_fence = replace(
+            fence,
+            command_id=failure_command.command_id,
+            request_hash=failure_command.request_hash,
+            command_hash=canonical_sha256(
+                failure_command.model_dump(mode="json")
+            ),
+            command_envelope_hash=str(case_index + 3) * 64,
+        )
+        failure_execution = SimpleNamespace(
+            admission=SimpleNamespace(
+                command=failure_command,
+                binding=execution.admission.binding,
+            ),
+            fence=failure_fence,
+        )
+        failure_saver = FencedMemorySaver()
+        failure_workflow = UnprovenSourceWorkflow(source_text, raw_final)
+        failure_provider = tuple(
+            TargetE2ESpecializedRoomProviderFactory(
+                security_runtime=object.__new__(GraphSecurityRuntime),
+                room_exchange=room_exchange,
+            )
+            .with_evidence_workflow(failure_workflow)(
+                SimpleNamespace(saver=failure_saver, durable_bulkhead=object())
+            )
+        )[0]
+        puts_before_failure = len(store.puts)
+        failure_events = []
+        with pytest.raises(EvidencePublicOutputMismatch):
+            async for event in failure_provider.stream(failure_execution):
+                failure_events.append(event)
+
+        assert [event.event_type for event in failure_events] == [
+            "attempt_started",
+            "visible_delta",
+        ]
+        assert failure_events[1].payload.delta == EVIDENCE_CANONICAL_OPENING
+        assert len(store.puts) == puts_before_failure
+        assert failure_saver.commits == []
+        assert failure_workflow.calls == 1
+
+    async def assert_rejected(document, code: str) -> None:
+        payload = canonicalize(document)
+        rejected_command = command.model_copy(
+            update={"domain_snapshot_ref": snapshot_ref(payload)}
+        )
+        rejected_fence = replace(
+            fence,
+            command_hash=canonical_sha256(rejected_command.model_dump(mode="json")),
+        )
+        rejected_execution = SimpleNamespace(
+            admission=SimpleNamespace(
+                command=rejected_command,
+                binding=execution.admission.binding,
+            ),
+            fence=rejected_fence,
+        )
+        room_exchange.stores[rejected_command.domain_snapshot_ref.sha256] = ObjectStore(
+            payload
+        )
+        rejected = []
+        with pytest.raises(GraphContractError, match=code):
+            async for event in evidence_provider.stream(rejected_execution):
+                rejected.append(event)
+        assert [event.event_type for event in rejected] == ["attempt_started"]
+
+    legacy_v1 = deepcopy(invocation)
+    legacy_v1["schema_version"] = "target-e2e-evidence-turn-invocation.v1"
+    legacy_v1["invocation_hash"] = canonical_sha256_omitting(
+        legacy_v1, "invocation_hash"
+    )
+    await assert_rejected(legacy_v1, "EVIDENCE_TURN_INVOCATION_DOCUMENT_INVALID")
+
+    attempt_local = deepcopy(invocation)
+    attempt_local["command_id"] = identity["command_id"]
+    attempt_local["attempt_id"] = identity["attempt_id"]
+    attempt_local["invocation_hash"] = canonical_sha256_omitting(
+        attempt_local, "invocation_hash"
+    )
+    await assert_rejected(
+        attempt_local, "EVIDENCE_TURN_INVOCATION_DOCUMENT_INVALID"
+    )
+
+    tampered = deepcopy(invocation)
+    tampered["actor_id"] = "USER_other"
+    tampered["invocation_hash"] = canonical_sha256_omitting(
+        tampered, "invocation_hash"
+    )
+    await assert_rejected(
+        tampered, "EVIDENCE_TURN_INVOCATION_BINDING_INVALID"
+    )
+
+
+@pytest.mark.asyncio
+async def test_target_evidence_preview_close_cancels_without_terminal_side_effects() -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.agents.evidence_clerk.public_reply import (
+        EVIDENCE_CANONICAL_OPENING,
+        guard_evidence_public_reply,
+    )
+    from app.graph_runtime.evidence_turn_executor import CompiledEvidenceTurnExecutor
+    from app.schemas import EvidenceTurnResult
+    from app.streaming import current_stream_observer
+
+    safe_sentence = EVIDENCE_CANONICAL_OPENING
+    logical_run_id = "target-evidence-run:preview-cancellation"
+
+    class CancellableWorkflow:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.provider_started = asyncio.Event()
+            self.provider_cancelled = asyncio.Event()
+            self.workflow_cancelled = asyncio.Event()
+            self.never_complete = asyncio.Event()
+
+        async def _provider_call(self) -> None:
+            self.provider_started.set()
+            try:
+                await self.never_complete.wait()
+            except asyncio.CancelledError:
+                self.provider_cancelled.set()
+                raise
+
+        async def arun(self, request):
+            self.calls += 1
+            observer = current_stream_observer()
+            assert observer is not None
+            assert observer.finalized_public_output == EVIDENCE_CANONICAL_OPENING
+            observer.visible_delta(
+                "evidence_turn",
+                "room_utterance",
+                safe_sentence,
+            )
+            try:
+                await self._provider_call()
+            except asyncio.CancelledError:
+                self.workflow_cancelled.set()
+                raise
+            raise AssertionError("cancelled Evidence workflow unexpectedly completed")
+
+    class TrackingSaver(InMemorySaver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.terminal_commits = []
+
+        async def acommit_external_terminal(self, config, commit):
+            self.terminal_commits.append(commit)
+            return config
+
+    class TrackingStore:
+        def __init__(self) -> None:
+            self.puts = []
+
+        async def put(self, **kwargs):
+            self.puts.append(dict(kwargs))
+            raise AssertionError("cancelled preview must not persist a proposal")
+
+    workflow = CancellableWorkflow()
+    saver = TrackingSaver()
+    store = TrackingStore()
+    executor = CompiledEvidenceTurnExecutor(saver=saver, workflow=workflow)
+    request = SimpleNamespace(
+        agent_context=SimpleNamespace(
+            agent_invocation_id="AGENT_INVOCATION_PREVIEW_CANCELLATION"
+        )
+    )
+    execution = SimpleNamespace(
+        admission=SimpleNamespace(
+            command=SimpleNamespace(
+                logical_run_id=logical_run_id,
+                attempt_id=logical_run_id + ":1",
+                actor_scope=SimpleNamespace(audience="USER"),
+            )
+        )
+    )
+
+    async def load_invocation(received_execution, received_store):
+        assert received_execution is execution
+        assert received_store is store
+        return ({}, request, "a" * 64)
+
+    def initial_state(received_execution, **kwargs):
+        assert received_execution is execution
+        assert kwargs["request"] is request
+        return {}
+
+    async def run_or_replay(received_execution, initial):
+        assert received_execution is execution
+        assert initial == {}
+        result, usage = await executor._invoke_workflow(
+            request,
+            logical_run_id=logical_run_id,
+        )
+        return (
+            {
+                "evidence_turn_result": EvidenceTurnResult.model_validate(
+                    result
+                ).model_dump(mode="json"),
+                "usage": usage.model_dump(mode="json"),
+                "completed_at": "2099-01-01T00:00:00Z",
+                "cognitive_revision": 1,
+            },
+            {"configurable": {"checkpoint_ns": "", "checkpoint_id": "unused"}},
+        )
+
+    executor._load_invocation = load_invocation
+    executor._initial_state = initial_state
+    executor._run_or_replay = run_or_replay
+
+    stream = executor.stream(execution, store=store).__aiter__()
+    emitted = [await anext(stream), await asyncio.wait_for(anext(stream), timeout=1.0)]
+    assert [event.event_type for event in emitted] == [
+        "attempt_started",
+        "visible_delta",
+    ]
+    assert emitted[1].payload.delta == safe_sentence
+    assert guard_evidence_public_reply(safe_sentence).startswith(safe_sentence)
+    await asyncio.wait_for(workflow.provider_started.wait(), timeout=1.0)
+    assert workflow.calls == 1
+    assert logical_run_id in executor._preview_bridges
+
+    await stream.aclose()
+    await asyncio.wait_for(workflow.provider_cancelled.wait(), timeout=1.0)
+    await asyncio.wait_for(workflow.workflow_cancelled.wait(), timeout=1.0)
+
+    assert store.puts == []
+    assert saver.terminal_commits == []
+    assert executor._preview_bridges == {}
+    assert all(event.event_type not in {"usage", "final"} for event in emitted)
+
+
 def test_target_fixture_transport_emits_a_valid_intake_cognition_draft_without_network() -> None:
     now = datetime.now(timezone.utc)
     transport = TargetE2EDeterministicFixtureTransport(

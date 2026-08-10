@@ -12,6 +12,7 @@ import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -154,6 +155,50 @@ class AgentRunAttemptEntityTest {
         assertThatThrownBy(() -> attempt.advanceRecoveryTerminalErrorSequence(5L))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("exact next public sequence");
+    }
+
+    @Test
+    void failLogicalRunStoresOnlyTheExactNextTerminalResult() {
+        String attemptId = "ATTEMPT_V2_ACTIVITY_TERMINAL";
+        AgentRunAttemptEntity attempt = AgentRunAttemptEntity.start(
+                RUN_ID,
+                AgentRunPersistenceFixtures.allocation(1, attemptId),
+                null,
+                false,
+                0,
+                STARTED_AT);
+        attempt.recordHeartbeat(AgentRunPersistenceFixtures.heartbeat(1, attemptId, 2));
+        ExecuteAgentRunResult source = failureResult(
+                attemptId, 2, AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+        ExecuteAgentRunResult terminal = failureResult(
+                attemptId, 3, AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+
+        attempt.recordFailureResultWithTerminal(
+                AgentRunAttemptStatus.ABORTED,
+                source,
+                terminal,
+                "{\"last_sequence_no\":3}");
+
+        assertThat(attempt.getAttemptStatus()).isEqualTo(AgentRunAttemptStatus.ABORTED);
+        assertThat(attempt.getLastSequenceNo()).isEqualTo(3);
+        assertThat(attempt.getErrorCode()).isEqualTo("GRAPH_GATEWAY_NOT_READY");
+        assertThat(attempt.getErrorRetryable()).isFalse();
+        assertThat(attempt.getTerminationCode()).isEqualTo("FAIL_LOGICAL_RUN");
+        assertThat(attempt.getResultJson()).isEqualTo("{\"last_sequence_no\":3}");
+        attempt.requireDurableFailureResult(terminal);
+        assertThatThrownBy(() -> attempt.recordFailureResultWithTerminal(
+                        AgentRunAttemptStatus.ABORTED,
+                        source,
+                        terminal,
+                        "{\"last_sequence_no\":3}"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("already exists");
+        assertThatThrownBy(() -> attempt.recordFailureResultWithTerminal(
+                        AgentRunAttemptStatus.ABORTED,
+                        source,
+                        failureResult(attemptId, 4, AgentRunRecoveryAction.FAIL_LOGICAL_RUN),
+                        "{\"last_sequence_no\":4}"))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -332,5 +377,26 @@ class AgentRunAttemptEntityTest {
                 source.usage(),
                 source.traceparent(),
                 source.finalizedAt());
+    }
+
+    private static ExecuteAgentRunResult failureResult(
+            String attemptId,
+            long lastSequenceNo,
+            AgentRunRecoveryAction recoveryAction) {
+        return new ExecuteAgentRunResult(
+                ExecuteAgentRunResult.SCHEMA_VERSION,
+                RUN_ID,
+                RUN_ID,
+                attemptId,
+                1,
+                ExecuteAgentRunResult.Outcome.FAILED,
+                null,
+                null,
+                lastSequenceNo,
+                true,
+                "GRAPH_GATEWAY_NOT_READY",
+                false,
+                recoveryAction,
+                COMPLETED_AT);
     }
 }

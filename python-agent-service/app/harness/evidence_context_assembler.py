@@ -6,13 +6,12 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-import hashlib
-import json
 import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.contracts.v1.codec import canonical_sha256_omitting
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.memory import MemeoMemoryAssembler
 from app.schemas import (
@@ -28,6 +27,7 @@ MAX_EVIDENCE_PREVIEW_CHARS = 3_000
 MAX_MODEL_TEXT_CHARS = 20_000
 MAX_CASE_SUMMARY_CHARS = 4_000
 _SAFE_FACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EvidenceTurnWorkingSet(BaseModel):
@@ -162,6 +162,23 @@ class EvidenceContextAssembler:
                 "intake_dossier_provenance": canonical_dossier.get(
                     "intake_dossier_provenance", {}
                 ),
+                "frozen_submission_authority": (
+                    envelope.frozen_submission.authority.model_dump(
+                        mode="json", by_alias=True
+                    )
+                    if envelope.frozen_submission is not None
+                    else None
+                ),
+                "evidence_projection_authority": (
+                    {
+                        "evidence_room_epoch": envelope.frozen_submission.evidence_room_epoch,
+                        "evidence_fencing_token": envelope.frozen_submission.evidence_fencing_token,
+                        "projection_ref": envelope.frozen_submission.projection_ref,
+                        "projection_sha256": envelope.frozen_submission.projection_sha256,
+                    }
+                    if envelope.frozen_submission is not None
+                    else None
+                ),
                 "conversation_scope": actor.conversation_scope,
                 "visibility_policy": "CURRENT_ACTOR_SESSION_ONLY",
                 "output_policy": "EVIDENCE_ONLY_NON_FINAL",
@@ -210,7 +227,15 @@ def _canonical_case_dossier(
 
     snapshot = envelope.case_snapshot
     dossier_snapshot = envelope.intake_dossier_snapshot
-    raw_dossier = dict(dossier_snapshot.payload) if dossier_snapshot is not None else {}
+    frozen_submission = envelope.frozen_submission
+    raw_dossier = (
+        {
+            "schema_version": "intake_frozen_matrix_projection.v1",
+            "case_fact_matrix": copy.deepcopy(frozen_submission.matrix),
+        }
+        if frozen_submission is not None
+        else dict(dossier_snapshot.payload) if dossier_snapshot is not None else {}
+    )
     dossier = _shared_intake_dossier_projection(raw_dossier, envelope=envelope)
     case_story = dossier.get("case_story")
     if isinstance(case_story, dict):
@@ -242,27 +267,43 @@ def _canonical_case_dossier(
     )
     snapshot_view["description_char_count"] = len(snapshot.description)
     dossier["case_snapshot"] = snapshot_view
-    dossier["intake_dossier_provenance"] = {
-        "dossier_id": dossier_snapshot.dossier_id if dossier_snapshot else None,
-        "schema_version": (
-            dossier_snapshot.schema_version if dossier_snapshot else None
-        ),
-        "version": dossier_snapshot.dossier_version if dossier_snapshot else None,
-        "source_turn_no": (
-            dossier_snapshot.source_turn_no if dossier_snapshot else None
-        ),
-        "quality_score": (
-            dossier_snapshot.quality_score if dossier_snapshot else None
-        ),
-        "ready_for_next_step": (
-            dossier_snapshot.ready_for_next_step if dossier_snapshot else False
-        ),
-        "admission_recommendation": (
-            dossier_snapshot.admission_recommendation if dossier_snapshot else None
-        ),
-        "updated_at": dossier_snapshot.updated_at if dossier_snapshot else None,
-        "available": dossier_snapshot is not None,
-    }
+    if frozen_submission is not None:
+        authority = frozen_submission.authority
+        dossier["intake_dossier_provenance"] = {
+            "dossier_id": authority.dossier_id,
+            "schema_version": "intake_frozen_matrix_projection.v1",
+            "version": authority.dossier_version,
+            "source_turn_no": None,
+            "quality_score": None,
+            "ready_for_next_step": None,
+            "admission_recommendation": None,
+            "updated_at": authority.respondent_completed_at,
+            "available": True,
+            "immutable_submit_event_id": authority.submit_event_id,
+            "immutable_authority_hash": authority.authority_hash,
+        }
+    else:
+        dossier["intake_dossier_provenance"] = {
+            "dossier_id": dossier_snapshot.dossier_id if dossier_snapshot else None,
+            "schema_version": (
+                dossier_snapshot.schema_version if dossier_snapshot else None
+            ),
+            "version": dossier_snapshot.dossier_version if dossier_snapshot else None,
+            "source_turn_no": (
+                dossier_snapshot.source_turn_no if dossier_snapshot else None
+            ),
+            "quality_score": (
+                dossier_snapshot.quality_score if dossier_snapshot else None
+            ),
+            "ready_for_next_step": (
+                dossier_snapshot.ready_for_next_step if dossier_snapshot else False
+            ),
+            "admission_recommendation": (
+                dossier_snapshot.admission_recommendation if dossier_snapshot else None
+            ),
+            "updated_at": dossier_snapshot.updated_at if dossier_snapshot else None,
+            "available": dossier_snapshot is not None,
+        }
     return dossier
 
 
@@ -275,10 +316,15 @@ def _shared_intake_dossier_projection(
 
     candidate = dossier.get("case_fact_matrix")
     if isinstance(candidate, dict) and candidate.get("schema_version") == "case_fact_matrix.v2":
-        matrix = _validated_case_fact_matrix(
+        validated_matrix = _validated_case_fact_matrix(
             candidate,
             expected_case_id=envelope.case_snapshot.case_id,
             expected_initiator_role=envelope.case_snapshot.initiator_role,
+        )
+        matrix = (
+            copy.deepcopy(candidate)
+            if envelope.frozen_submission is not None
+            else validated_matrix
         )
         overview = matrix.get("case_overview")
         overview = overview if isinstance(overview, dict) else {}
@@ -328,6 +374,14 @@ def _validated_case_fact_matrix(
     expected_case_id: str | None = None,
     expected_initiator_role: str | None = None,
 ) -> dict[str, Any]:
+    content_hash = value.get("content_hash")
+    if not isinstance(content_hash, str) or not _SHA256_HEX.fullmatch(content_hash):
+        raise ValueError("case_fact_matrix.v2 content hash is invalid")
+    raw_material = copy.deepcopy(value)
+    expected_hash = canonical_sha256_omitting(raw_material, "content_hash")
+    if content_hash != expected_hash:
+        raise ValueError("case_fact_matrix.v2 content hash is invalid")
+
     matrix = CaseFactMatrixV2.model_validate(value)
     if expected_case_id is not None and matrix.case_id != expected_case_id:
         raise ValueError("case_fact_matrix.v2 case_id must match evidence case")
@@ -336,18 +390,6 @@ def _validated_case_fact_matrix(
         and matrix.party_map.initiator_role != expected_initiator_role
     ):
         raise ValueError("case_fact_matrix.v2 party_map must match evidence case")
-    material = matrix.model_dump(mode="json")
-    content_hash = str(material.pop("content_hash"))
-    expected_hash = hashlib.sha256(
-        json.dumps(
-            material,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    if content_hash != expected_hash:
-        raise ValueError("case_fact_matrix.v2 content hash is invalid")
     return matrix.model_dump(mode="json")
 
 
@@ -529,7 +571,11 @@ def _fact_targets(
 def _formal_case_matrix(dossier: dict[str, Any]) -> dict[str, Any]:
     matrix = dossier.get("case_fact_matrix")
     if isinstance(matrix, dict) and matrix.get("schema_version") == "case_fact_matrix.v2":
-        return _validated_case_fact_matrix(matrix)
+        # `_shared_intake_dossier_projection` already verified the exact raw Java
+        # mapping before returning this normalized, process-local projection.
+        # Re-hashing the normalized dump would replace raw authority semantics
+        # with Pydantic serialization semantics and reject valid input.
+        return CaseFactMatrixV2.model_validate(matrix).model_dump(mode="json")
     legacy = dossier.get("unilateral_case_matrix")
     if isinstance(legacy, dict) and legacy.get("schema_version") == "unilateral_case_matrix.v1":
         return legacy

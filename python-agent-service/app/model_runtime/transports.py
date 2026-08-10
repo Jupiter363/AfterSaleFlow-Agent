@@ -17,10 +17,7 @@ from app.llm import (
     StructuredStreamCompleted,
     StructuredStreamDelta,
 )
-from app.streaming import IncrementalVisibleJsonProjector, VisibleFieldSpec
-
-
-_BUFFERED_VALIDATED_STREAM_NODE = "intake_turn_case_detail"
+from app.streaming import VisibleFieldSpec
 
 
 class ModelTransportError(RuntimeError):
@@ -196,12 +193,6 @@ class StructuredClientTransport:
 
     def stream(self, request: ModelTransportRequest) -> Iterator[ModelTransportStreamUpdate]:
         self._validate_request_binding(request)
-        if request.node_name == _BUFFERED_VALIDATED_STREAM_NODE:
-            yield from _buffered_stream_updates(
-                self.generate(request),
-                request.visible_fields,
-            )
-            return
         system_prompt, user_prompt = _prompt_pair(request.messages)
         completed = False
         generation_args = _generation_args(
@@ -252,11 +243,6 @@ class StructuredClientTransport:
         self, request: ModelTransportRequest
     ) -> AsyncIterator[ModelTransportStreamUpdate]:
         self._validate_request_binding(request)
-        if request.node_name == _BUFFERED_VALIDATED_STREAM_NODE:
-            result = await self.agenerate(request)
-            for update in _buffered_stream_updates(result, request.visible_fields):
-                yield update
-            return
         client = _native_async_client(self._client)
         system_prompt, user_prompt = _prompt_pair(request.messages)
         completed = False
@@ -310,16 +296,6 @@ class StructuredClientTransport:
         provider = getattr(self._client, "governed_provider", None)
         if provider != request.governed_request.provider:
             raise ModelTransportError("governed provider conflicts with the transport binding")
-
-
-def _buffered_stream_updates(
-    result: ModelTransportResult,
-    visible_fields: tuple[VisibleFieldSpec, ...],
-) -> Iterator[ModelTransportStreamUpdate]:
-    projector = IncrementalVisibleJsonProjector(visible_fields)
-    for field, delta in projector.feed(result.json_document):
-        yield ModelTransportVisibleDelta(field=field, delta=delta)
-    yield ModelTransportCompleted(result=result)
 
 
 def _native_async_client(client: StructuredLlmClient) -> NativeAsyncStructuredLlmClient:

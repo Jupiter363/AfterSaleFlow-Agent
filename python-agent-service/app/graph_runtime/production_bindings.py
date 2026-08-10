@@ -16,6 +16,10 @@ from app.api.graph_stream_service import (
     ProviderRuntimeBinding,
     ShadowExecutorRegistration,
 )
+from app.agents.evidence_clerk.workflow import (
+    EVIDENCE_TURN_MODEL_NODE_NAME,
+    EvidenceTurnWorkflow,
+)
 from app.config import (
     GraphShadowBindingSettings,
     GraphShadowInputSettings,
@@ -72,6 +76,9 @@ from app.graph_runtime.target_e2e_room_adapters import (
     build_target_e2e_intake_provider,
 )
 from app.graph_runtime.topology import build_shadow_kernel_graph
+from app.harness.evidence_asset_loader import EvidenceAssetLoader
+from app.harness.model_runner import HarnessModelRunner
+from app.harness.prompt_composer import PromptRepository
 from app.security.invocation_envelope import (
     InvocationClaims,
     ReconciliationClaims,
@@ -252,6 +259,7 @@ def build_graph_runtime_bindings(
     structured_client: LiteLlmProxyClient | None = None
     intake_transport: Any = None
     intake_exchange: JavaIntakeExchangeClient | None = None
+    evidence_workflow: EvidenceTurnWorkflow | None = None
     target_uses_default_providers = (
         settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE"
         and target_e2e_provider_factory is None
@@ -271,6 +279,11 @@ def build_graph_runtime_bindings(
             java_api_service_url=settings.java_api_service_url,
             java_service_secret=settings.java_service_secret,
         )
+        if target_uses_default_providers:
+            evidence_workflow = _build_target_e2e_evidence_workflow(
+                settings=settings,
+                structured_client=structured_client,
+            )
 
     async def open_http_resources() -> None:
         if intake_exchange is not None:
@@ -307,6 +320,7 @@ def build_graph_runtime_bindings(
                         if structured_client is not None
                         else None
                     ),
+                    evidence_workflow=evidence_workflow,
                     specialized_provider_factory=target_e2e_specialized_provider_factory,
                 )
             )
@@ -322,6 +336,16 @@ def build_graph_runtime_bindings(
                             else None
                         ),
                         intake_model=(
+                            structured_client.governed_model
+                            if structured_client is not None
+                            else None
+                        ),
+                        evidence_provider=(
+                            structured_client.governed_provider
+                            if structured_client is not None
+                            else None
+                        ),
+                        evidence_model=(
                             structured_client.governed_model
                             if structured_client is not None
                             else None
@@ -360,6 +384,11 @@ def build_graph_runtime_bindings(
             if structured_client is not None or intake_exchange is not None
             else None
         ),
+        intake_infrastructure_preparer=(
+            structured_client.aprepare_intake_infrastructure
+            if target_uses_default_providers and structured_client is not None
+            else None
+        ),
     )
 
 
@@ -370,6 +399,8 @@ def _target_e2e_executor_registration(
     providers: Iterable[TargetE2ERoomProvider],
     intake_provider: str | None = None,
     intake_model: str | None = None,
+    evidence_provider: str | None = None,
+    evidence_model: str | None = None,
 ) -> ShadowExecutorRegistration:
     del kernel
     if (
@@ -384,8 +415,11 @@ def _target_e2e_executor_registration(
     binding = _version_binding(configured)
     if (intake_provider is None) != (intake_model is None):
         raise GraphContractError("target-E2E Intake provider binding is incomplete")
-    room_provider_bindings = (
-        (
+    if (evidence_provider is None) != (evidence_model is None):
+        raise GraphContractError("target-E2E Evidence provider binding is incomplete")
+    room_provider_bindings: list[tuple[str, ProviderRuntimeBinding]] = []
+    if intake_provider is not None and intake_model is not None:
+        room_provider_bindings.append(
             (
                 RoomType.INTAKE.value,
                 ProviderRuntimeBinding(
@@ -394,11 +428,20 @@ def _target_e2e_executor_registration(
                     model=intake_model,
                     allowed_nodes=frozenset({BASELINE_INTAKE_NODE_NAME}),
                 ),
-            ),
+            )
         )
-        if intake_provider is not None and intake_model is not None
-        else ()
-    )
+    if evidence_provider is not None and evidence_model is not None:
+        room_provider_bindings.append(
+            (
+                RoomType.EVIDENCE.value,
+                ProviderRuntimeBinding(
+                    model_profile_id=binding.model_profile_id,
+                    provider=evidence_provider,
+                    model=evidence_model,
+                    allowed_nodes=frozenset({EVIDENCE_TURN_MODEL_NODE_NAME}),
+                ),
+            )
+        )
     return ShadowExecutorRegistration(
         binding=binding,
         executor=TargetE2ECompositeExecutor(providers),
@@ -408,7 +451,7 @@ def _target_e2e_executor_registration(
             model="room-provider-dispatch",
             allowed_nodes=frozenset(room.value for room in TARGET_E2E_ROOM_TYPES),
         ),
-        room_provider_bindings=room_provider_bindings,
+        room_provider_bindings=tuple(room_provider_bindings),
     )
 
 
@@ -419,6 +462,7 @@ def _build_target_e2e_room_providers(
     intake_exchange: Any,
     intake_provider: str | None,
     intake_model: str | None,
+    evidence_workflow: EvidenceTurnWorkflow | None,
     specialized_provider_factory: (
         Callable[[GraphExecutorKernel], Iterable[TargetE2ERoomProvider]] | None
     ),
@@ -432,6 +476,16 @@ def _build_target_e2e_room_providers(
         raise GraphContractError("TARGET_E2E_INTAKE_RUNTIME_DEPENDENCIES_REQUIRED")
     if specialized_provider_factory is None:
         raise GraphContractError("TARGET_E2E_SPECIALIZED_ROOM_RUNTIME_REQUIRED")
+    if not callable(getattr(evidence_workflow, "run", None)):
+        raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
+    bind_evidence_workflow = getattr(
+        specialized_provider_factory,
+        "with_evidence_workflow",
+        None,
+    )
+    if not callable(bind_evidence_workflow):
+        raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_FACTORY_REQUIRED")
+    specialized_provider_factory = bind_evidence_workflow(evidence_workflow)
     specialized = tuple(specialized_provider_factory(kernel))
     if {getattr(provider, "room_type", None) for provider in specialized} != {
         RoomType.EVIDENCE,
@@ -448,6 +502,27 @@ def _build_target_e2e_room_providers(
             exchange=intake_exchange,
         ),
         *specialized,
+    )
+
+
+def _build_target_e2e_evidence_workflow(
+    *,
+    settings: Settings,
+    structured_client: LiteLlmProxyClient,
+) -> EvidenceTurnWorkflow:
+    """Bind the formal Clerk to the lifecycle-owned shared model client."""
+
+    if not isinstance(structured_client, LiteLlmProxyClient):
+        raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_MODEL_REQUIRED")
+    return EvidenceTurnWorkflow(
+        model_runner=HarnessModelRunner(
+            llm=structured_client,
+            prompts=PromptRepository(),
+        ),
+        asset_loader=EvidenceAssetLoader(
+            java_api_service_url=settings.java_api_service_url,
+            java_service_secret=settings.java_service_secret,
+        ),
     )
 
 

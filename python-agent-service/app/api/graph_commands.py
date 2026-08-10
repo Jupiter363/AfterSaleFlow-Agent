@@ -663,11 +663,9 @@ def create_graph_reconciliation_router(
         resolver = dependencies.target_e2e_thread_identity_resolver
         if verifier is None or resolver is None:
             return _error_response(503, "TARGET_E2E_VERIFIER_NOT_CONFIGURED", False)
-        try:
-            if not dependencies.ready():
-                return _error_response(503, "GRAPH_GATEWAY_NOT_READY", True)
-        except Exception:
-            return _error_response(503, "GRAPH_GATEWAY_NOT_READY", True)
+        # This route can only recover the immutable result of an already-admitted command.
+        # Global readiness gates new execution; it must not strand a durable result during a
+        # transient admission outage. Verification and exact durable lookup remain fail closed.
         if not _has_json_utf8_content_type(request):
             return _error_response(415, "GRAPH_CONTENT_TYPE_REJECTED", False)
         if not _has_identity_content_encoding(request):

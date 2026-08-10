@@ -11,11 +11,14 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionOutcome;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionResult;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
 import com.example.dispute.workflow.activity.domain.ProcessProjectionActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.CommandLifecycleOutcome;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommand;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRouted;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult;
@@ -93,6 +96,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       "case-process-future-room-event-retention-v1";
   private static final String ROOM_EPOCH_PROVISION_CHANGE_ID =
       "case-process-room-epoch-provision-v1";
+  private static final String PROVISIONING_SEQUENCE_HIGH_WATER_CHANGE_ID =
+      "case-process-provisioning-sequence-high-water-v1";
   private static final String AUTHORITY_CHECKPOINT_CHANGE_ID =
       "case-process-authority-checkpoint-v1";
   private static final String TYPED_INTAKE_CHILD_CHANGE_ID = "typed-intake-room-child-v1";
@@ -107,6 +112,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       "case-process-target-intake-projection-ready-high-water-v1";
   private static final String TARGET_INTAKE_GLOBAL_PROJECTION_CURSOR_CHANGE_ID =
       "case-process-target-intake-global-projection-cursor-v1";
+  private static final String INTAKE_PROJECTION_RECOVERY_FAILURE =
+      "INTAKE_PROJECTION_COMPLETION_RECOVERY_FAILED";
   private static final String AUTHORITY_CHECKPOINT_MEMO_KEY =
       "case_process_authority_checkpoint_v1";
   private static final String SELECTION_V1 = "room-epoch-selection.v1";
@@ -169,6 +176,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       Workflow.newQueue(INBOX_CAPACITY);
   private final NavigableMap<Long, PendingCommand> orderedCommands = new TreeMap<>();
   private final ArrayDeque<PendingCommand> replayChecks = new ArrayDeque<>();
+  private final ArrayDeque<TargetIntakeCommandTerminalNoCommit> terminalNoCommitInbox =
+      new ArrayDeque<>();
   private final NavigableMap<Long, CaseDomainEventRef> bufferedEvents = new TreeMap<>();
   private final LinkedHashMap<String, ProcessedCommandIdentity> recentCommands =
       new LinkedHashMap<>();
@@ -229,6 +238,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private String protocolErrorCode;
   private RecoveryErrorOrigin protocolErrorOrigin;
   private Promise<Void> runMaxAgeTimer;
+  private CaseProcessIntakeProjectionRecoveryRequest activeIntakeProjectionRecovery;
+  private CaseProcessIntakeProjectionRecoveryRequest completedIntakeProjectionRecoveryRequest;
+  private CaseProcessIntakeProjectionRecoveryResult completedIntakeProjectionRecoveryResult;
 
   private static ActivityOptions intakeChildBridgeActivityOptions() {
     return ActivityOptions.newBuilder()
@@ -298,6 +310,10 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     restoreAuthorityCheckpoint();
     runMaxAgeTimer = Workflow.newTimer(RUN_MAX_AGE);
     while (true) {
+      if (activeIntakeProjectionRecovery != null) {
+        Workflow.await(() -> activeIntakeProjectionRecovery == null);
+        continue;
+      }
       drainCommandInbox();
       drainEventInbox();
       applyManualRecoveryRequest();
@@ -308,6 +324,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       }
 
       if (processReplayCheck()) {
+        continue;
+      }
+      if (processTargetIntakeTerminalNoCommit()) {
         continue;
       }
       if (processNextCommand()) {
@@ -335,6 +354,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void acceptCommand(CaseCommandRef command) {
+    awaitNoActiveIntakeProjectionRecovery();
     validateCommandEnvelope(command);
     validateProvisionedCommand(command);
     CompletablePromise<Void> completion = Workflow.newPromise();
@@ -346,6 +366,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void validateAcceptCommand(CaseCommandRef command) {
+    requireNoActiveIntakeProjectionRecovery();
     validateCommandEnvelope(command);
     validateProvisionedCommand(command);
     if (command.caseCommandSequence() >= nextCommandSequence
@@ -358,6 +379,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public ProvisionRoomEpochReceipt provisionRoomEpoch(ProvisionRoomEpoch request) {
+    awaitNoActiveIntakeProjectionRecovery();
     validateProvisionRequest(request);
     String updateId = currentUpdateId();
     String payloadSha256 = request.payloadSha256();
@@ -374,6 +396,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       return existing.completion().get();
     }
     validateProvisioningOrder(request, updateId, payloadSha256);
+    observeProvisioningSequenceHighWater(request);
     CompletablePromise<ProvisionRoomEpochReceipt> completion = Workflow.newPromise();
     PendingProvisioning pending =
         new PendingProvisioning(updateId, payloadSha256, request, completion);
@@ -385,6 +408,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void validateProvisionRoomEpoch(ProvisionRoomEpoch request) {
+    requireNoActiveIntakeProjectionRecovery();
     validateProvisionRequest(request);
     String updateId = currentUpdateId();
     String payloadSha256 = request.payloadSha256();
@@ -404,7 +428,86 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   }
 
   @Override
+  public CaseProcessIntakeProjectionRecoveryResult recoverIntakeProjectionCompletion(
+      CaseProcessIntakeProjectionRecoveryRequest request) {
+    requireIntakeProjectionRecovery(request, false);
+    if (completedIntakeProjectionRecoveryResult != null) {
+      return completedIntakeProjectionRecoveryResult;
+    }
+    activeIntakeProjectionRecovery = request;
+    try {
+      CompleteConsumedIntakeProjectionResult completed =
+          processProjectionActivities.completeConsumedIntakeProjection(
+              request.projectionCommand());
+      if (!consumedIntakeProjectionResultMatches(request.projectionCommand(), completed)) {
+        throw new IllegalArgumentException(
+            "projection completion result does not match the recovery authority");
+      }
+      requireIntakeProjectionRecovery(request, true);
+      CaseProcessIntakeProjectionRecoveryResult.Disposition disposition =
+          completed.outcome() == CompleteConsumedIntakeProjectionOutcome.APPLIED
+              ? CaseProcessIntakeProjectionRecoveryResult.Disposition.ADOPTED
+              : CaseProcessIntakeProjectionRecoveryResult.Disposition.ALREADY_ADOPTED;
+      CaseProcessIntakeProjectionRecoveryResult recovered =
+          new CaseProcessIntakeProjectionRecoveryResult(
+              CaseProcessIntakeProjectionRecoveryResult.SCHEMA_VERSION,
+              disposition,
+              request,
+              completed);
+      observeTargetIntakeProjectionReadyHighWater(completed);
+      CaseDomainEventRef head = bufferedEvents.get(nextCaseEventSequence);
+      if (!request.event().equals(head)
+          || !bufferedEvents.remove(nextCaseEventSequence, head)) {
+        throw new IllegalStateException("Intake projection recovery event authority changed");
+      }
+      nextCaseEventSequence++;
+      processedEventCount++;
+      eventRecoveryAttempts = 0;
+      eventManualRecoveryRequired = false;
+      if (nextCaseEventSequence > highestObservedEventSequence) {
+        eventRecoveryForced = false;
+      }
+      clearIntakeProjectionRecoveryError();
+      completedIntakeProjectionRecoveryRequest = request;
+      completedIntakeProjectionRecoveryResult = recovered;
+      return recovered;
+    } catch (CanceledFailure failure) {
+      throw failure;
+    } catch (ActivityFailure failure) {
+      rethrowIfCanceled(failure);
+      throw intakeProjectionRecoveryFailure(failure);
+    } catch (RuntimeException failure) {
+      throw intakeProjectionRecoveryFailure(failure);
+    } finally {
+      activeIntakeProjectionRecovery = null;
+    }
+  }
+
+  @Override
+  public void validateRecoverIntakeProjectionCompletion(
+      CaseProcessIntakeProjectionRecoveryRequest request) {
+    requireIntakeProjectionRecovery(request, false);
+  }
+
+  private void observeProvisioningSequenceHighWater(ProvisionRoomEpoch request) {
+    if (Workflow.getVersion(
+            PROVISIONING_SEQUENCE_HIGH_WATER_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+        != 1) {
+      return;
+    }
+    if (request.firstCommandSequence() < nextCommandSequence
+        || request.firstCaseEventSequence() < nextCaseEventSequence) {
+      return;
+    }
+    highestObservedCommandSequence =
+        Math.max(highestObservedCommandSequence, request.lastCommandSequence());
+    highestObservedEventSequence =
+        Math.max(highestObservedEventSequence, request.lastCaseEventSequence());
+  }
+
+  @Override
   public void domainEventCommitted(CaseDomainEventRef event) {
+    awaitNoActiveIntakeProjectionRecovery();
     String validationError = eventValidationError(event);
     if (validationError != null) {
       recordProtocolError(validationError, RecoveryErrorOrigin.DOMAIN_EVENT);
@@ -425,6 +528,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void targetRoomProgressed(TargetRoomProgressReceipt receipt) {
+    awaitNoActiveIntakeProjectionRecovery();
     if (receipt == null
         || activeChildDescriptor == null
         || activeChildDescriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM
@@ -447,7 +551,26 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   }
 
   @Override
+  public void targetIntakeCommandTerminalNoCommit(
+      TargetIntakeCommandTerminalNoCommit authority) {
+    awaitNoActiveIntakeProjectionRecovery();
+    if (authority == null) {
+      recordProtocolError(
+          "TARGET_INTAKE_TERMINAL_NO_COMMIT_INVALID", RecoveryErrorOrigin.COMMAND);
+      return;
+    }
+    if (terminalNoCommitInbox.size() >= INBOX_CAPACITY) {
+      recordProtocolError(
+          "TARGET_INTAKE_TERMINAL_NO_COMMIT_INBOX_FULL", RecoveryErrorOrigin.COMMAND);
+      commandManualRecoveryRequired = true;
+      return;
+    }
+    terminalNoCommitInbox.addLast(authority);
+  }
+
+  @Override
   public void retrySequenceGap() {
+    awaitNoActiveIntakeProjectionRecovery();
     retrySequenceGapRequested = true;
   }
 
@@ -2054,6 +2177,90 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
   }
 
+  private boolean processTargetIntakeTerminalNoCommit() {
+    TargetIntakeCommandTerminalNoCommit authority = terminalNoCommitInbox.peekFirst();
+    if (authority == null || commandManualRecoveryRequired) {
+      return false;
+    }
+    try {
+      requireTargetIntakeTerminalNoCommit(authority);
+      ConvergeTargetIntakeTerminalNoCommitResult result =
+          commandLifecycleActivities.convergeTargetIntakeTerminalNoCommit(
+              new ConvergeTargetIntakeTerminalNoCommit(
+                  "converge-target-intake-terminal-no-commit.v1",
+                  authority,
+                  Workflow.getInfo().getWorkflowId(),
+                  Workflow.getInfo().getFirstExecutionRunId(),
+                  activeChildDescriptor.caseWorkflowBuildId()));
+      if (result == null
+          || !authority.equals(result.authority())
+          || result.processRevision() > observedProcessRevision
+          || result.roomRevision() > activeRoomRevision
+          || result.lastCommandSequence() >= nextCommandSequence
+          || result.lastCaseEventSequence() >= nextCaseEventSequence) {
+        throw new IllegalArgumentException(
+            "terminal-no-commit convergence returned conflicting authority");
+      }
+      terminalNoCommitInbox.removeFirst();
+      return true;
+    } catch (CanceledFailure failure) {
+      throw failure;
+    } catch (ActivityFailure failure) {
+      rethrowIfCanceled(failure);
+      if (!isNonRetryableActivityFailure(failure)) {
+        throw failure;
+      }
+      recordProtocolError(
+          "TARGET_INTAKE_TERMINAL_NO_COMMIT_REJECTED", RecoveryErrorOrigin.COMMAND);
+      commandManualRecoveryRequired = true;
+      return true;
+    } catch (RuntimeException failure) {
+      recordProtocolError(
+          "TARGET_INTAKE_TERMINAL_NO_COMMIT_INVALID", RecoveryErrorOrigin.COMMAND);
+      commandManualRecoveryRequired = true;
+      return true;
+    }
+  }
+
+  private void requireTargetIntakeTerminalNoCommit(
+      TargetIntakeCommandTerminalNoCommit authority) {
+    ActiveChildDescriptor descriptor = activeChildDescriptor;
+    if (tenantSurrogate == null
+        || caseId == null
+        || descriptor == null
+        || descriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM
+        || descriptor.writerMode() != WriterMode.TEMPORAL
+        || activeRoomType != RoomType.INTAKE
+        || descriptor.roomType() != RoomType.INTAKE
+        || !tenantSurrogate.equals(authority.tenantSurrogate())
+        || !caseId.equals(authority.caseId())
+        || authority.roomType() != RoomType.INTAKE
+        || activeRoomEpoch != authority.roomEpoch()
+        || activeFencingToken != authority.fencingToken()
+        || !activeChildWorkflowId.equals(authority.roomWorkflowId())
+        || !activeChildWorkflowRunId.equals(authority.roomWorkflowRunId())
+        || !descriptor.roomWorkflowBuildId().equals(authority.roomWorkflowBuildId())
+        || !descriptor.caseWorkflowBuildId().equals(authority.caseBuildId())
+        || descriptor.currentProcessRevision() == null
+        || descriptor.currentRoomRevision() == null
+        || descriptor.currentProcessRevision() != observedProcessRevision
+        || descriptor.currentRoomRevision() != activeRoomRevision
+        || observedProcessRevision < authority.newProcessRevision()
+        || activeRoomRevision < authority.newRoomRevision()
+        || authority.caseCommandSequence() >= nextCommandSequence
+        || authority.lastCaseEventSequence() >= nextCaseEventSequence) {
+      throw new IllegalArgumentException(
+          "terminal-no-commit authority conflicts with active CaseProcess state");
+    }
+    ProcessedCommandIdentity recent = recentCommands.get(authority.commandId());
+    if (recent != null
+        && (recent.caseCommandSequence() != authority.caseCommandSequence()
+            || !recent.requestHash().equals(authority.commandRequestHash()))) {
+      throw new IllegalArgumentException(
+          "terminal-no-commit authority conflicts with recent command identity");
+    }
+  }
+
   private boolean processNextCommand() {
     if (commandManualRecoveryRequired) {
       return false;
@@ -2359,21 +2566,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       return;
     }
     CompleteConsumedIntakeProjectionCommand command =
-        new CompleteConsumedIntakeProjectionCommand(
-            "complete-consumed-intake-projection.v1",
-            tenantSurrogate,
-            caseId,
-            event.eventId(),
-            event.caseEventSequence(),
-            event.eventType(),
-            Math.max(0, nextCommandSequence - 1),
-            activeRoomEpoch,
-            activeFencingToken,
-            observedProcessRevision,
-            activeRoomRevision,
-            Workflow.getInfo().getWorkflowId(),
-            Workflow.getInfo().getFirstExecutionRunId(),
-            activeChildWorkflowRunId);
+        targetIntakeProjectionCompletionCommand(event);
     CompleteConsumedIntakeProjectionResult completed =
         processProjectionActivities.completeConsumedIntakeProjection(command);
     if (!consumedIntakeProjectionResultMatches(command, completed)) {
@@ -2383,6 +2576,25 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
           null);
     }
     observeTargetIntakeProjectionReadyHighWater(completed);
+  }
+
+  private CompleteConsumedIntakeProjectionCommand targetIntakeProjectionCompletionCommand(
+      CaseDomainEventRef event) {
+    return new CompleteConsumedIntakeProjectionCommand(
+        "complete-consumed-intake-projection.v1",
+        tenantSurrogate,
+        caseId,
+        event.eventId(),
+        event.caseEventSequence(),
+        event.eventType(),
+        Math.max(0, nextCommandSequence - 1),
+        activeRoomEpoch,
+        activeFencingToken,
+        observedProcessRevision,
+        activeRoomRevision,
+        Workflow.getInfo().getWorkflowId(),
+        Workflow.getInfo().getFirstExecutionRunId(),
+        activeChildWorkflowRunId);
   }
 
   private void observeTargetIntakeProjectionReadyHighWater(
@@ -2465,6 +2677,137 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         && command.temporalWorkflowId().equals(result.temporalWorkflowId())
         && command.firstExecutionRunId().equals(result.firstExecutionRunId())
         && command.activeChildRunId().equals(result.activeChildRunId());
+  }
+
+  private void requireIntakeProjectionRecovery(
+      CaseProcessIntakeProjectionRecoveryRequest request, boolean handlerRevalidation) {
+    Objects.requireNonNull(request, "request must not be null");
+    if (completedIntakeProjectionRecoveryRequest != null
+        || completedIntakeProjectionRecoveryResult != null) {
+      if (!request.equals(completedIntakeProjectionRecoveryRequest)
+          || completedIntakeProjectionRecoveryResult == null) {
+        throw new IllegalArgumentException("Intake projection recovery replay conflicts");
+      }
+      return;
+    }
+    if (activeIntakeProjectionRecovery != null
+        && (!handlerRevalidation || !activeIntakeProjectionRecovery.equals(request))) {
+      throw new IllegalStateException("Intake projection recovery is already running");
+    }
+    if (tenantSurrogate == null || caseId == null) {
+      throw new IllegalStateException("Intake projection recovery requires an initialized case");
+    }
+    if (terminalTargetReviewCompleted) {
+      throw new IllegalStateException("Intake projection recovery requires a nonterminal case");
+    }
+    if (targetIntakeProjectionCompletionVersion != 1) {
+      throw new IllegalStateException("Intake projection recovery requires v1 completion authority");
+    }
+    if (!eventManualRecoveryRequired
+        || !"INTAKE_PROCESS_PROJECTION_COMPLETION_FAILED".equals(protocolErrorCode)
+        || protocolErrorOrigin != RecoveryErrorOrigin.DOMAIN_EVENT) {
+      throw new IllegalStateException(
+          "Intake projection recovery requires the exact projection failure state");
+    }
+    if (commandManualRecoveryRequired
+        || provisioningManualRecoveryRequired
+        || retrySequenceGapRequested
+        || provisioningSwitchInProgress
+        || provisioningInboxCount > 0
+        || !pendingProvisioningByUpdateId.isEmpty()
+        || commandInboxCount > 0
+        || !orderedCommands.isEmpty()
+        || !replayChecks.isEmpty()) {
+      throw new IllegalStateException(
+          "Intake projection recovery requires idle command and provisioning authority");
+    }
+    ActiveChildDescriptor descriptor = activeChildDescriptor;
+    if (descriptor == null
+        || descriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM
+        || descriptor.writerMode() != WriterMode.TEMPORAL
+        || descriptor.roomType() != RoomType.INTAKE
+        || descriptor.roomEpoch() != activeRoomEpoch
+        || descriptor.fencingToken() != activeFencingToken
+        || !Objects.equals(descriptor.workflowId(), activeChildWorkflowId)
+        || !Objects.equals(descriptor.startedRunId(), activeChildWorkflowRunId)
+        || !Objects.equals(descriptor.currentProcessRevision(), observedProcessRevision)
+        || !Objects.equals(descriptor.currentRoomRevision(), activeRoomRevision)
+        || activeRoomType != RoomType.INTAKE) {
+      throw new IllegalStateException(
+          "Intake projection recovery active child authority is unavailable");
+    }
+    if (!Workflow.getInfo().getWorkflowId().equals(request.workflowId())
+        || !Workflow.getInfo().getRunId().equals(request.workflowRunId())
+        || !Workflow.getInfo().getFirstExecutionRunId().equals(request.firstExecutionRunId())
+        || !tenantSurrogate.equals(request.tenantSurrogate())
+        || !caseId.equals(request.caseId())
+        || request.roomType() != activeRoomType
+        || request.roomEpoch() != activeRoomEpoch
+        || request.fencingToken() != activeFencingToken
+        || !activeChildWorkflowId.equals(request.activeChildWorkflowId())
+        || !activeChildWorkflowRunId.equals(request.activeChildRunId())
+        || request.expectedProcessRevision() != observedProcessRevision
+        || request.expectedRoomRevision() != activeRoomRevision
+        || request.nextCommandSequence() != nextCommandSequence
+        || request.nextCaseEventSequence() != nextCaseEventSequence
+        || request.processedCommandCount() != processedCommandCount
+        || request.processedEventCount() != processedEventCount) {
+      throw new IllegalArgumentException(
+          "Intake projection recovery request does not match current workflow authority");
+    }
+    CaseDomainEventRef head = bufferedEvents.get(nextCaseEventSequence);
+    if (!request.event().equals(head)
+        || !requiresTargetIntakeProjectionCompletion(
+            targetIntakeProjectionCompletionVersion,
+            descriptor,
+            activeRoomType,
+            activeRoomEpoch,
+            head)) {
+      throw new IllegalArgumentException(
+          "Intake projection recovery does not match the buffered formal event");
+    }
+    CompleteConsumedIntakeProjectionCommand expectedCommand =
+        targetIntakeProjectionCompletionCommand(head);
+    if (!expectedCommand.equals(request.projectionCommand())) {
+      throw new IllegalArgumentException(
+          "Intake projection recovery command does not match current authority");
+    }
+    ProcessedCommandIdentity recent =
+        recentCommands.get(request.recentCommand().commandId());
+    long matchingSequenceCount =
+        recentCommands.values().stream()
+            .filter(
+                identity ->
+                    identity.caseCommandSequence()
+                        == request.recentCommand().caseCommandSequence())
+            .count();
+    if (!request.recentCommand().equals(recent)
+        || request.recentCommand().caseCommandSequence() != nextCommandSequence - 1
+        || matchingSequenceCount != 1) {
+      throw new IllegalArgumentException(
+          "Intake projection recovery recent command authority is unavailable");
+    }
+  }
+
+  private void clearIntakeProjectionRecoveryError() {
+    if (!"INTAKE_PROCESS_PROJECTION_COMPLETION_FAILED".equals(protocolErrorCode)
+        || protocolErrorOrigin != RecoveryErrorOrigin.DOMAIN_EVENT) {
+      throw new IllegalStateException("Intake projection recovery error authority changed");
+    }
+    protocolErrorCode = null;
+    protocolErrorOrigin = null;
+  }
+
+  private void awaitNoActiveIntakeProjectionRecovery() {
+    if (activeIntakeProjectionRecovery != null) {
+      Workflow.await(() -> activeIntakeProjectionRecovery == null);
+    }
+  }
+
+  private void requireNoActiveIntakeProjectionRecovery() {
+    if (activeIntakeProjectionRecovery != null) {
+      throw new IllegalStateException("Intake projection recovery is already running");
+    }
   }
 
   private static boolean isFormalIntakeProjectionEvent(String eventType) {
@@ -3211,10 +3554,14 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   }
 
   private boolean hasWork() {
+    if (activeIntakeProjectionRecovery != null) {
+      return false;
+    }
     return (provisioningInboxCount > 0 && canSwitchRoomEpoch())
         || commandInboxCount > 0
         || eventInboxCount > 0
         || !replayChecks.isEmpty()
+        || (!commandManualRecoveryRequired && !terminalNoCommitInbox.isEmpty())
         || (!commandManualRecoveryRequired && orderedCommands.containsKey(nextCommandSequence))
         || (!eventManualRecoveryRequired && canProcessNextEvent())
         || (!commandManualRecoveryRequired && hasCommandGap())
@@ -3228,6 +3575,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         && eventInboxCount == 0
         && orderedCommands.isEmpty()
         && replayChecks.isEmpty()
+        && terminalNoCommitInbox.isEmpty()
         && bufferedEvents.isEmpty()
         && !hasCommandGap()
         && !hasEventGap();
@@ -3251,12 +3599,14 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   }
 
   private boolean canContinueAsNew() {
-    return provisioningInboxCount == 0
+    return activeIntakeProjectionRecovery == null
+        && provisioningInboxCount == 0
         && pendingProvisioningByUpdateId.isEmpty()
         && commandInboxCount == 0
         && eventInboxCount == 0
         && orderedCommands.isEmpty()
         && replayChecks.isEmpty()
+        && terminalNoCommitInbox.isEmpty()
         && Workflow.isEveryHandlerFinished();
   }
 
@@ -3499,6 +3849,13 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   private static ApplicationFailure protocolFailure(String type, String message) {
     return ApplicationFailure.newNonRetryableFailure(message, type);
+  }
+
+  private static ApplicationFailure intakeProjectionRecoveryFailure(RuntimeException failure) {
+    return ApplicationFailure.newNonRetryableFailureWithCause(
+        "Intake projection completion recovery failed after acceptance",
+        INTAKE_PROJECTION_RECOVERY_FAILURE,
+        failure);
   }
 
   static void rethrowIfCanceled(ActivityFailure failure) {

@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.targete2e.ingress.rooms;
 
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.room.application.EvidenceAgentTurnCommand;
 import com.example.dispute.workflow.application.command.AcceptCaseCommand;
 
 /**
@@ -15,4 +16,23 @@ public interface TargetRoomCommandIngress {
             AcceptCaseCommand command,
             AuthenticatedActor actor,
             String traceId);
+
+    default EvidenceSubmissionRunReceipt materializeEvidenceSubmission(
+            String caseId,
+            String commandId,
+            AcceptCaseCommand command,
+            AuthenticatedActor actor,
+            String traceId,
+            EvidenceAgentTurnCommand evidenceAgentTurnCommand) {
+        throw new IllegalStateException(
+                "target Evidence submission materialization is unavailable");
+    }
+
+    record EvidenceSubmissionRunReceipt(String logicalRunId) {
+        public EvidenceSubmissionRunReceipt {
+            if (logicalRunId == null || logicalRunId.isBlank()) {
+                throw new IllegalArgumentException("logicalRunId must not be blank");
+            }
+        }
+    }
 }

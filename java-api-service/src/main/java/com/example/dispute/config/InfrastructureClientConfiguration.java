@@ -14,9 +14,11 @@ import io.temporal.client.WorkflowClientOptions;
 import io.temporal.common.converter.DataConverter;
 import io.temporal.serviceclient.WorkflowServiceStubs;
 import io.temporal.serviceclient.WorkflowServiceStubsOptions;
+import java.time.Duration;
 import java.util.List;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 
 // 所属模块：【身份鉴权与运行配置 / 核心业务层】类型「InfrastructureClientConfiguration」。
 // 类型职责：在 Spring 启动期装配Infrastructure所需 Bean 和基础设施参数；本类型显式提供 「minioClient」、「workflowServiceStubs」、「workflowClient」。
@@ -25,6 +27,8 @@ import org.springframework.context.annotation.Configuration;
 // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Configuration
 public class InfrastructureClientConfiguration {
+
+    private static final Duration MAXIMUM_TEMPORAL_CONNECT_TIMEOUT = Duration.ofSeconds(30);
 
     // 所属模块：【身份鉴权与运行配置 / 核心业务层】「InfrastructureClientConfiguration.minioClient(AppProperties)」。
     // 具体功能：「InfrastructureClientConfiguration.minioClient(AppProperties)」：构建minio客户端；实际协作者为 「properties.minio」、「minio.endpoint」、「minio.accessKey」、「minio.secretKey」，最终返回「MinioClient」。
@@ -46,12 +50,38 @@ public class InfrastructureClientConfiguration {
     // 下游影响：「InfrastructureClientConfiguration.workflowServiceStubs(AppProperties)」向下依次触达 「WorkflowServiceStubsOptions.newBuilder」、「WorkflowServiceStubs.newServiceStubs」、「properties.temporal」、「WorkflowServiceStubsOptions.newBuilder().setTarget」；计算结果以「WorkflowServiceStubs」交给调用方。
     // 系统意义：「InfrastructureClientConfiguration.workflowServiceStubs(AppProperties)」负责主链路中的“工作流服务Stubs”；调用方身份只能来自可信请求头映射，不能由业务请求体自行声明
     @Bean(destroyMethod = "shutdown")
+    @Lazy(false)
     WorkflowServiceStubs workflowServiceStubs(AppProperties properties) {
         WorkflowServiceStubsOptions options =
                 WorkflowServiceStubsOptions.newBuilder()
                         .setTarget(properties.temporal().address())
+                        .setHealthCheckTimeout(MAXIMUM_TEMPORAL_CONNECT_TIMEOUT)
+                        .setSystemInfoTimeout(MAXIMUM_TEMPORAL_CONNECT_TIMEOUT)
                         .build();
-        return WorkflowServiceStubs.newServiceStubs(options);
+        WorkflowServiceStubs serviceStubs = WorkflowServiceStubs.newServiceStubs(options);
+        try {
+            serviceStubs.connect(temporalConnectTimeout(serviceStubs));
+            return serviceStubs;
+        } catch (RuntimeException | Error failure) {
+            try {
+                serviceStubs.shutdownNow();
+            } catch (RuntimeException | Error cleanupFailure) {
+                if (cleanupFailure != failure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            throw failure;
+        }
+    }
+
+    private static Duration temporalConnectTimeout(WorkflowServiceStubs serviceStubs) {
+        Duration configured = serviceStubs.getOptions().getHealthCheckTimeout();
+        if (configured == null || configured.isZero() || configured.isNegative()) {
+            throw new IllegalStateException("Temporal health-check timeout must be positive");
+        }
+        return configured.compareTo(MAXIMUM_TEMPORAL_CONNECT_TIMEOUT) > 0
+                ? MAXIMUM_TEMPORAL_CONNECT_TIMEOUT
+                : configured;
     }
 
     // 所属模块：【身份鉴权与运行配置 / 核心业务层】「InfrastructureClientConfiguration.workflowClient(WorkflowServiceStubs,AppProperties)」。
