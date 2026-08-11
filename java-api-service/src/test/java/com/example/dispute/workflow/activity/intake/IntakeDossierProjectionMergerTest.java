@@ -1122,6 +1122,63 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void emptySecondPartyOpeningPatchProjectsThePersistedCurrentPartyMirror() {
+        ObjectNode userEntry = partyIntakeEntry(60);
+        ObjectNode merchantEntry = partyIntakeEntry(0);
+        ObjectNode userPatch = partyIntakePatch("USER", userEntry, merchantEntry);
+        MergeResult userTurn = merger.merge(
+                JSON.createObjectNode(),
+                proposal(userPatch, null),
+                matrixAuthority(ActorRole.USER));
+
+        MergeResult merchantOpening = merger.merge(
+                userTurn.dossier(),
+                proposal(JSON.createObjectNode(), null),
+                matrixAuthority(ActorRole.MERCHANT));
+
+        assertThat(merchantOpening.dossier().at("/party_intake_state/USER"))
+                .isEqualTo(userTurn.dossier().at("/party_intake_state/USER"));
+        assertThat(merchantOpening.dossier().at("/intake_quality/score").asInt())
+                .isZero();
+        for (String field :
+                List.of("intake_quality", "missing_information", "handoff_notes", "admission")) {
+            assertThat(merchantOpening.dossier().path(field))
+                    .isEqualTo(merchantOpening.dossier()
+                            .at("/party_intake_state/MERCHANT/" + field));
+        }
+    }
+
+    @Test
+    void partialSecondPartyMirrorFailsClosedEvenWhenInheritedFieldsMatch() {
+        for (ActorRole actor : List.of(ActorRole.USER, ActorRole.MERCHANT)) {
+            ActorRole prior = actor == ActorRole.USER ? ActorRole.MERCHANT : ActorRole.USER;
+            ObjectNode userEntry = partyIntakeEntry(actor == ActorRole.USER ? 0 : 60);
+            ObjectNode merchantEntry = partyIntakeEntry(actor == ActorRole.MERCHANT ? 0 : 60);
+            ObjectNode priorPatch =
+                    partyIntakePatch(prior.name(), userEntry, merchantEntry);
+            ObjectNode current = merger.merge(
+                            JSON.createObjectNode(),
+                            proposal(priorPatch, null),
+                            matrixAuthority(prior))
+                    .dossier();
+
+            JsonNode actorEntry = current.at("/party_intake_state/" + actor.name());
+            ObjectNode partialPatch = JSON.createObjectNode();
+            partialPatch.set(
+                    "intake_quality", actorEntry.path("intake_quality").deepCopy());
+            partialPatch.set(
+                    "handoff_notes", actorEntry.path("handoff_notes").deepCopy());
+
+            assertRejected(
+                    "INTAKE_PARTY_STATE_MIRROR_CONFLICT",
+                    () -> merger.merge(
+                            current,
+                            proposal(partialPatch, null),
+                            matrixAuthority(actor)));
+        }
+    }
+
+    @Test
     void firstPartyProjectionAcceptsTheCanonicalJsonNumberShapeForTheDefaultOtherParty()
             throws Exception {
         ObjectNode patch = partyIntakePatch(

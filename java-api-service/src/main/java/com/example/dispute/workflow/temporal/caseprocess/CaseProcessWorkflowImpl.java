@@ -112,6 +112,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       "case-process-target-intake-projection-ready-high-water-v1";
   private static final String TARGET_INTAKE_GLOBAL_PROJECTION_CURSOR_CHANGE_ID =
       "case-process-target-intake-global-projection-cursor-v1";
+  private static final String TARGET_INTAKE_TERMINAL_EVENT_CATCHUP_CHANGE_ID =
+      "case-process-target-intake-terminal-event-catchup-v1";
   private static final String INTAKE_PROJECTION_RECOVERY_FAILURE =
       "INTAKE_PROJECTION_COMPLETION_RECOVERY_FAILED";
   private static final String AUTHORITY_CHECKPOINT_MEMO_KEY =
@@ -233,6 +235,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private int targetTypedRoomVersion;
   private int childCompensationInvariantVersion;
   private int targetIntakeProjectionCompletionVersion;
+  private int targetIntakeTerminalEventCatchupVersion;
   private boolean provisioningSwitchInProgress;
   private StartedChild uncommittedChild;
   private String protocolErrorCode;
@@ -241,6 +244,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private CaseProcessIntakeProjectionRecoveryRequest activeIntakeProjectionRecovery;
   private CaseProcessIntakeProjectionRecoveryRequest completedIntakeProjectionRecoveryRequest;
   private CaseProcessIntakeProjectionRecoveryResult completedIntakeProjectionRecoveryResult;
+  private ConvergeTargetIntakeTerminalNoCommitResult verifiedTerminalNoCommitConvergence;
 
   private static ActivityOptions intakeChildBridgeActivityOptions() {
     return ActivityOptions.newBuilder()
@@ -305,6 +309,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     targetIntakeProjectionCompletionVersion =
         Workflow.getVersion(
             TARGET_INTAKE_PROJECTION_COMPLETION_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+    targetIntakeTerminalEventCatchupVersion =
+        Workflow.getVersion(
+            TARGET_INTAKE_TERMINAL_EVENT_CATCHUP_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
     validateCarriedTargetHistory();
     restoreActiveChildStub();
     restoreAuthorityCheckpoint();
@@ -2195,25 +2202,22 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       authority = terminalNoCommitInbox.peekFirst();
     }
     try {
+      if (prepareStrictV3TerminalEventCatchup(authority)) {
+        if (processNextEvent() || recoverEventGap()) {
+          return true;
+        }
+        throw new IllegalArgumentException(
+            "strict-v3 terminal event catch-up could not make progress");
+      }
       requireTargetIntakeTerminalNoCommit(authority);
       ConvergeTargetIntakeTerminalNoCommitResult result =
-          commandLifecycleActivities.convergeTargetIntakeTerminalNoCommit(
-              new ConvergeTargetIntakeTerminalNoCommit(
-                  "converge-target-intake-terminal-no-commit.v1",
-                  authority,
-                  Workflow.getInfo().getWorkflowId(),
-                  Workflow.getInfo().getFirstExecutionRunId(),
-                  activeChildDescriptor.caseWorkflowBuildId()));
-      if (result == null
-          || !authority.equals(result.authority())
-          || result.processRevision() > observedProcessRevision
-          || result.roomRevision() > activeRoomRevision
-          || result.lastCommandSequence() >= nextCommandSequence
-          || result.lastCaseEventSequence() >= nextCaseEventSequence) {
-        throw new IllegalArgumentException(
-            "terminal-no-commit convergence returned conflicting authority");
+          verifiedTerminalNoCommitConvergence(authority);
+      if (result == null) {
+        result = convergeTargetIntakeTerminalNoCommit(authority);
       }
+      requireTargetIntakeTerminalNoCommitResult(authority, result, false);
       terminalNoCommitInbox.removeFirst();
+      verifiedTerminalNoCommitConvergence = null;
       return true;
     } catch (CanceledFailure failure) {
       throw failure;
@@ -2268,6 +2272,11 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   private void requireTargetIntakeTerminalNoCommit(
       TargetIntakeCommandTerminalNoCommit authority) {
+    requireTargetIntakeTerminalNoCommit(authority, false);
+  }
+
+  private void requireTargetIntakeTerminalNoCommit(
+      TargetIntakeCommandTerminalNoCommit authority, boolean allowPendingV3EventCatchup) {
     ActiveChildDescriptor descriptor = activeChildDescriptor;
     if (tenantSurrogate == null
         || caseId == null
@@ -2292,7 +2301,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         || observedProcessRevision < authority.newProcessRevision()
         || activeRoomRevision < authority.newRoomRevision()
         || authority.caseCommandSequence() >= nextCommandSequence
-        || authority.lastCaseEventSequence() >= nextCaseEventSequence) {
+        || (!allowPendingV3EventCatchup
+            && authority.lastCaseEventSequence() >= nextCaseEventSequence)) {
       throw new IllegalArgumentException(
           "terminal-no-commit authority conflicts with active CaseProcess state");
     }
@@ -2302,6 +2312,70 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             || !recent.requestHash().equals(authority.commandRequestHash()))) {
       throw new IllegalArgumentException(
           "terminal-no-commit authority conflicts with recent command identity");
+    }
+  }
+
+  private boolean prepareStrictV3TerminalEventCatchup(
+      TargetIntakeCommandTerminalNoCommit authority) {
+    if (targetIntakeTerminalEventCatchupVersion != 1
+        || !TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+            authority.schemaVersion())
+        || authority.lastCaseEventSequence() < nextCaseEventSequence) {
+      return false;
+    }
+    if (eventManualRecoveryRequired) {
+      throw new IllegalArgumentException(
+          "strict-v3 terminal event catch-up is already blocked by event recovery");
+    }
+    requireTargetIntakeTerminalNoCommit(authority, true);
+    ConvergeTargetIntakeTerminalNoCommitResult result =
+        verifiedTerminalNoCommitConvergence(authority);
+    if (result == null) {
+      result = convergeTargetIntakeTerminalNoCommit(authority);
+      requireTargetIntakeTerminalNoCommitResult(authority, result, true);
+      verifiedTerminalNoCommitConvergence = result;
+    }
+    highestObservedEventSequence =
+        Math.max(highestObservedEventSequence, authority.lastCaseEventSequence());
+    return true;
+  }
+
+  private ConvergeTargetIntakeTerminalNoCommitResult convergeTargetIntakeTerminalNoCommit(
+      TargetIntakeCommandTerminalNoCommit authority) {
+    return commandLifecycleActivities.convergeTargetIntakeTerminalNoCommit(
+        new ConvergeTargetIntakeTerminalNoCommit(
+            "converge-target-intake-terminal-no-commit.v1",
+            authority,
+            Workflow.getInfo().getWorkflowId(),
+            Workflow.getInfo().getFirstExecutionRunId(),
+            activeChildDescriptor.caseWorkflowBuildId()));
+  }
+
+  private ConvergeTargetIntakeTerminalNoCommitResult verifiedTerminalNoCommitConvergence(
+      TargetIntakeCommandTerminalNoCommit authority) {
+    if (verifiedTerminalNoCommitConvergence == null) {
+      return null;
+    }
+    if (!authority.equals(verifiedTerminalNoCommitConvergence.authority())) {
+      throw new IllegalArgumentException(
+          "verified terminal-no-commit convergence conflicts with the active authority");
+    }
+    return verifiedTerminalNoCommitConvergence;
+  }
+
+  private void requireTargetIntakeTerminalNoCommitResult(
+      TargetIntakeCommandTerminalNoCommit authority,
+      ConvergeTargetIntakeTerminalNoCommitResult result,
+      boolean allowPendingV3EventCatchup) {
+    if (result == null
+        || !authority.equals(result.authority())
+        || result.processRevision() > observedProcessRevision
+        || result.roomRevision() > activeRoomRevision
+        || result.lastCommandSequence() >= nextCommandSequence
+        || (!allowPendingV3EventCatchup
+            && result.lastCaseEventSequence() >= nextCaseEventSequence)) {
+      throw new IllegalArgumentException(
+          "terminal-no-commit convergence returned conflicting authority");
     }
   }
 

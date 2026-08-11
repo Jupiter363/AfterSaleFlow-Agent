@@ -175,6 +175,7 @@ public final class IntakeDossierProjectionMerger {
                 || current.path("requested_resolution").isObject();
         ObjectNode merged = (ObjectNode) current.deepCopy();
         deepMerge(merged, (ObjectNode) patch);
+        projectOmittedCurrentPartyMirror(merged, (ObjectNode) patch, matrixAuthority);
         if (!hasPersistedClaim) {
             applyClaimAuthority(merged, matrixAuthority);
         }
@@ -538,6 +539,33 @@ public final class IntakeDossierProjectionMerger {
                         "INTAKE_PARTY_STATE_MIRROR_CONFLICT",
                         "legacy Intake branch is not the exact current-actor mirror");
             }
+        }
+    }
+
+    private static void projectOmittedCurrentPartyMirror(
+            ObjectNode dossier, ObjectNode patch, MatrixAuthority authority) {
+        JsonNode state = dossier.get("party_intake_state");
+        if (state == null) {
+            return;
+        }
+        long explicitMirrorFields =
+                PARTY_INTAKE_ENTRY_FIELDS.stream().filter(patch::has).count();
+        if (explicitMirrorFields == PARTY_INTAKE_ENTRY_FIELDS.size()) {
+            return;
+        }
+        if (explicitMirrorFields != 0) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_MIRROR_CONFLICT",
+                    "party Intake patch must omit or provide the complete current-actor mirror");
+        }
+        if (authority == null) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_AUTHORITY_REQUIRED",
+                    "party-scoped Intake projection requires current Java actor authority");
+        }
+        JsonNode actorEntry = state.path(authority.actorRole().name());
+        for (String field : PARTY_INTAKE_ENTRY_FIELDS) {
+            dossier.set(field, actorEntry.path(field).deepCopy());
         }
     }
 

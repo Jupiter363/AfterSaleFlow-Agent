@@ -199,6 +199,163 @@ class CaseProcessWorkflowTest {
   }
 
   @Test
+  void strictV3TerminalNoCommitCatchesUpMissingDurableEventBeforeConvergence() {
+    CaseProcessWorkflow targetWorkflow =
+        client.newWorkflowStub(
+            CaseProcessWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(WORKFLOW_ID)
+                .setTaskQueue(RECOVERY_TASK_QUEUE)
+                .build());
+    WorkflowClient.start(targetWorkflow::run, (CaseProcessCarryState) null);
+    provision(targetWorkflow, projectionRecoveryProvisioning());
+    CaseCommandRef command = projectionRecoveryCommand();
+    ledger.put(command);
+    targetWorkflow.acceptCommand(command);
+    CaseProcessSnapshot before =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 2
+                    && snapshot.nextCaseEventSequence() == 1
+                    && snapshot.observedProcessRevision() == 1
+                    && Long.valueOf(1).equals(snapshot.activeRoomRevision()));
+
+    CaseDomainEventRef missedEvent =
+        event(1, RoomType.INTAKE, before.activeRoomEpoch());
+    ledger.put(missedEvent);
+    TargetIntakeCommandTerminalNoCommit authority =
+        terminalNoCommitAuthority(command, before, 1)
+            .withProjectionLineage(1, 1, List.of());
+
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(authority);
+    awaitTerminalNoCommitConvergences(1);
+    CaseProcessSnapshot converged =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                snapshot.nextCaseEventSequence() == 2
+                    && snapshot.processedEventCount() == 1
+                    && snapshot.protocolErrorCode() == null);
+
+    assertThat(ledger.eventLoads)
+        .singleElement()
+        .satisfies(
+            range -> {
+              assertThat(range.fromSequenceInclusive()).isEqualTo(1);
+              assertThat(range.toSequenceInclusive()).isEqualTo(1);
+            });
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isEqualTo(1);
+    assertThat(ledger.terminalNoCommitOutcomes)
+        .containsExactly(TerminalNoCommitOutcome.TERMINALIZED);
+    assertThat(converged.highestObservedEventSequence()).isEqualTo(1);
+
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(authority);
+    awaitTerminalNoCommitConvergences(2);
+    CaseProcessSnapshot replayed = targetWorkflow.state();
+    assertThat(ledger.terminalNoCommitOutcomes)
+        .containsExactly(
+            TerminalNoCommitOutcome.TERMINALIZED,
+            TerminalNoCommitOutcome.IDEMPOTENT_REPLAY);
+    assertThat(ledger.eventLoads).hasSize(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isEqualTo(1);
+    assertThat(replayed.nextCaseEventSequence()).isEqualTo(2);
+    assertThat(replayed.processedEventCount()).isEqualTo(1);
+    assertThat(replayed.protocolErrorCode()).isNull();
+
+    CaseCommandRef nextCommand =
+        command(2, RoomType.INTAKE, before.activeRoomEpoch());
+    ledger.put(nextCommand);
+    targetWorkflow.acceptCommand(nextCommand);
+    CaseProcessSnapshot resumed =
+        awaitProcess(targetWorkflow, snapshot -> snapshot.nextCommandSequence() == 3);
+    assertThat(resumed.processedCommandCount()).isEqualTo(2);
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(2);
+  }
+
+  @Test
+  void foreignStrictV3TerminalNoCommitCannotRaiseEventHighWaterBeforeDurableValidation() {
+    CaseProcessWorkflow targetWorkflow =
+        client.newWorkflowStub(
+            CaseProcessWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(WORKFLOW_ID)
+                .setTaskQueue(RECOVERY_TASK_QUEUE)
+                .build());
+    WorkflowClient.start(targetWorkflow::run, (CaseProcessCarryState) null);
+    provision(targetWorkflow, projectionRecoveryProvisioning());
+    CaseCommandRef command = projectionRecoveryCommand();
+    ledger.put(command);
+    targetWorkflow.acceptCommand(command);
+    CaseProcessSnapshot before =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 2
+                    && snapshot.nextCaseEventSequence() == 1
+                    && snapshot.highestObservedEventSequence() == 0);
+
+    CaseCommandRef foreignCommand =
+        new CaseCommandRef(
+            command.schemaVersion(),
+            "foreign-" + command.commandId(),
+            command.tenantSurrogate(),
+            command.caseId(),
+            command.caseCommandSequence(),
+            command.commandType(),
+            command.roomType(),
+            command.roomEpoch(),
+            command.actorRef(),
+            command.payloadRef(),
+            command.expectedProcessRevision(),
+            command.occurredAt(),
+            command.deadlineAt(),
+            command.traceparent(),
+            "f".repeat(64));
+    TargetIntakeCommandTerminalNoCommit foreignAuthority =
+        terminalNoCommitAuthority(foreignCommand, before, 1)
+            .withProjectionLineage(1, 1, List.of());
+    ledger.rejectNextTerminalNoCommit = true;
+
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(foreignAuthority);
+    CaseProcessSnapshot rejected =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                "TARGET_INTAKE_TERMINAL_NO_COMMIT_REJECTED".equals(
+                    snapshot.protocolErrorCode()));
+
+    assertThat(ledger.terminalNoCommitConvergences).hasSize(1);
+    assertThat(ledger.terminalNoCommitOutcomes).isEmpty();
+    assertThat(rejected.highestObservedEventSequence()).isZero();
+    assertThat(rejected.nextCaseEventSequence()).isEqualTo(1);
+    assertThat(rejected.processedEventCount()).isZero();
+    assertThat(rejected.blockedReason()).isEqualTo("COMMAND_GAP_MANUAL_RECOVERY");
+    assertThat(ledger.eventLoads).isEmpty();
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isZero();
+
+    CaseCommandRef nextCommand = command(2, RoomType.INTAKE, before.activeRoomEpoch());
+    ledger.put(nextCommand);
+    WorkflowStub.fromTyped(targetWorkflow)
+        .startUpdate(
+            UpdateOptions.newBuilder(Void.class)
+                .setUpdateName(CaseProcessWorkflowProtocol.ACCEPT_COMMAND_UPDATE)
+                .setUpdateId("foreign-terminal-no-commit-next-command")
+                .setWaitForStage(WorkflowUpdateStage.ACCEPTED)
+                .build(),
+            nextCommand);
+    CaseProcessSnapshot stillBlocked =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                snapshot.highestObservedCommandSequence() == 2
+                    && snapshot.nextCommandSequence() == 2);
+    assertThat(stillBlocked.nextCommandSequence()).isEqualTo(2);
+    assertThat(stillBlocked.processedCommandCount()).isEqualTo(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(1);
+  }
+
+  @Test
   void acknowledgedV3SignalRecoversExactRejectedV2WithoutClearingForForeignAuthority() {
     CaseProcessWorkflow targetWorkflow =
         client.newWorkflowStub(
@@ -1148,6 +1305,11 @@ class CaseProcessWorkflowTest {
 
   private static TargetIntakeCommandTerminalNoCommit terminalNoCommitAuthority(
       CaseCommandRef command, CaseProcessSnapshot snapshot) {
+    return terminalNoCommitAuthority(command, snapshot, 0);
+  }
+
+  private static TargetIntakeCommandTerminalNoCommit terminalNoCommitAuthority(
+      CaseCommandRef command, CaseProcessSnapshot snapshot, long lastCaseEventSequence) {
     return new TargetIntakeCommandTerminalNoCommit(
         TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION,
         TENANT,
@@ -1179,8 +1341,8 @@ class CaseProcessWorkflowTest {
         command.expectedProcessRevision() + 1,
         0,
         1,
-        0L,
-        0,
+        lastCaseEventSequence,
+        lastCaseEventSequence,
         "logical-run-terminal-no-commit",
         "attempt-terminal-no-commit-1",
         "attempt-terminal-no-commit-1",
