@@ -64,7 +64,21 @@ _DIRECT_ATTITUDE_CLAUSE_BOUNDARY = re.compile(
     re.IGNORECASE,
 )
 _DIRECT_ATTITUDE_COORDINATION_BOUNDARY = re.compile(r"[；;，,]+")
-_DIRECT_ATTITUDE_AUTHORITATIVE_BOUNDARY = re.compile(r"[。！？!?\r\n]+")
+_DIRECT_ATTITUDE_CONDITIONAL_SCOPE_ZH = re.compile(
+    r"(?:^|\s)(?:如|若|如果|倘若|一旦|只要|只有|经|待)"
+    r"|(?:在|于).{0,32}(?:条件下|情况下|确认后|检测后|完成后)"
+)
+_DIRECT_ATTITUDE_PRECONDITION_REFUSAL_ZH = re.compile(
+    r"未经|尚未|未(?:经|完成|确认|检测)|"
+    r"(?:在|于).{0,32}(?:之前|以前|前)"
+)
+_DIRECT_ATTITUDE_SATISFIED_CONDITION_ZH = re.compile(
+    r"(?:已|已经)(?:确认|检测|完成|符合(?:换货|退款|退货|维修)?条件)"
+    r"|(?:检测|确认).{0,8}(?:已经|已)完成"
+)
+_DIRECT_ATTITUDE_ACTION_ZH = re.compile(
+    r"换货|退款|退货|维修|送检|检测|补偿|赔偿|退还|延长保修|延保|补发|重发"
+)
 _DIRECT_ATTITUDE_SIGNAL_EN = re.compile(
     r"\b(?:partially\s+(?:agree|agreed|accept|accepted)|agree|agreed|agrees|accept|"
     r"accepted|accepts|reject|rejected|rejects|refuse|refused|refuses|disagree|"
@@ -94,6 +108,10 @@ _DIRECT_ATTITUDE_SIGNAL_ZH = re.compile(
 _DIRECT_ATTITUDE_SELF_ZH = re.compile(
     r"^\s*(?:本公司|本人|我方|我们|本方|我司|我)(?P<body>.*)$"
 )
+_DIRECT_ATTITUDE_ROLE_SELF_ZH = {
+    "USER": re.compile(r"^\s*(?:用户|买家|客户|消费者)(?P<body>.*)$"),
+    "MERCHANT": re.compile(r"^\s*(?:商家|卖家|店铺|商户|客服)(?P<body>.*)$"),
+}
 _DIRECT_ATTITUDE_THIRD_PARTY_ZH = (
     r"(?:用户|买家|客户|消费者|对方|商家|卖家|店铺|商户|客服|平台|第三方)"
 )
@@ -101,7 +119,13 @@ _DIRECT_ATTITUDE_ATTRIBUTION_ZH = re.compile(
     rf"(?:的是|由)\s*{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}"
     rf"|(?:据|按|根据)\s*{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}"
     rf"|{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}.{{0,12}}"
-    r"(?:说|表示|回复|回应|答复|声称|称|认为|提出|建议)"
+    r"(?:说|表示|回复|回应|答复|声称|称|认为|提出|建议|"
+    r"部分(?:同意|接受)|同意|接受|拒绝|不同意|不支持|不接受|愿意|"
+    r"要求补充|需要更多信息|未表态|没有表态)"
+)
+_DIRECT_ATTITUDE_THIRD_PARTY_TOPIC_ZH = re.compile(
+    rf"{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}.{{0,16}}"
+    r"(?:处理意见|意见|立场|方案|建议|说法).{0,8}(?:如下|是|为|包括)\s*$"
 )
 _DIRECT_ATTITUDE_THIRD_PARTY_PROPOSAL_OBJECT_ZH = re.compile(
     rf"(?:由\s*)?{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}\s*(?:所\s*)?(?:提出|建议)的"
@@ -2055,6 +2079,7 @@ def _enforce_respondent_attitude_source(
         detection = detect_direct_respondent_attitude(
             current.text,
             source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role=actor_role,
         )
         if detection.state == "UNRESOLVED":
             raise AgentOutputSchemaError(
@@ -2200,11 +2225,91 @@ def _direct_attitude_clauses(text: str) -> list[tuple[str, str | None]]:
     return clauses
 
 
-def _direct_attitude_semantic_clause_zh(clause: str) -> str:
-    return _DIRECT_ATTITUDE_THIRD_PARTY_PROPOSAL_OBJECT_ZH.sub(
+def _direct_attitude_self_subject_zh(
+    clause: str,
+    *,
+    respondent_role: str | None = None,
+) -> tuple[bool, str]:
+    subject = _DIRECT_ATTITUDE_SELF_ZH.match(clause)
+    if subject is None:
+        role_subject = _DIRECT_ATTITUDE_ROLE_SELF_ZH.get(
+            str(respondent_role or "").upper()
+        )
+        subject = role_subject.match(clause) if role_subject is not None else None
+    if subject is None:
+        return False, clause.strip()
+    return True, subject.group("body").strip()
+
+
+def _direct_attitude_semantic_clause_zh(
+    clause: str,
+    *,
+    respondent_role: str | None = None,
+) -> str:
+    semantic_clause = _DIRECT_ATTITUDE_THIRD_PARTY_PROPOSAL_OBJECT_ZH.sub(
         "第三方方案",
         clause,
     )
+    role_subject = _DIRECT_ATTITUDE_ROLE_SELF_ZH.get(
+        str(respondent_role or "").upper()
+    )
+    if role_subject is not None:
+        semantic_clause = role_subject.sub(
+            lambda match: "本方" + match.group("body"),
+            semantic_clause,
+            count=1,
+        )
+    return semantic_clause
+
+
+def _direct_attitude_explicit_third_party_zh(
+    clause: str,
+    *,
+    respondent_role: str | None = None,
+) -> bool:
+    semantic_clause = _direct_attitude_semantic_clause_zh(
+        clause,
+        respondent_role=respondent_role,
+    )
+    return bool(
+        _DIRECT_ATTITUDE_ATTRIBUTION_ZH.search(semantic_clause)
+        or _DIRECT_ATTITUDE_THIRD_PARTY_TOPIC_ZH.search(semantic_clause)
+    )
+
+
+def _direct_attitude_explicit_third_party_topic_zh(
+    clause: str,
+    *,
+    respondent_role: str | None = None,
+) -> bool:
+    return bool(
+        _DIRECT_ATTITUDE_THIRD_PARTY_TOPIC_ZH.search(
+            _direct_attitude_semantic_clause_zh(
+                clause,
+                respondent_role=respondent_role,
+            )
+        )
+    )
+
+
+def _direct_attitude_action_terms_zh(clause: str) -> set[str]:
+    return set(_DIRECT_ATTITUDE_ACTION_ZH.findall(clause))
+
+
+def _direct_attitude_scope_body_zh(
+    clause: str,
+    *,
+    respondent_role: str | None = None,
+) -> str:
+    semantic_clause = _direct_attitude_semantic_clause_zh(
+        clause,
+        respondent_role=respondent_role,
+    )
+    has_subject, body = _direct_attitude_self_subject_zh(
+        semantic_clause,
+        respondent_role=respondent_role,
+    )
+    return body if has_subject else semantic_clause
 
 
 def _direct_attitude_semantic_clause_en(clause: str) -> str:
@@ -2218,6 +2323,7 @@ def detect_direct_respondent_attitude(
     text: str,
     *,
     source_authority: str | None = None,
+    respondent_role: str | None = None,
 ) -> DirectRespondentAttitudeDetection:
     """Classify direct attitude under an explicit current-message authority."""
 
@@ -2235,51 +2341,96 @@ def detect_direct_respondent_attitude(
     resolved: list[str] = []
     unresolved_signal = False
     third_party_signal = False
-    carry_chinese_subject = False
-    for clause, preceding_boundary in _direct_attitude_clauses(normalized):
-        inherited_chinese_subject = (
-            carry_chinese_subject
-            and preceding_boundary is not None
-            and _DIRECT_ATTITUDE_COORDINATION_BOUNDARY.fullmatch(preceding_boundary)
+    conditional_agreement_terms: set[str] = set()
+    precondition_refusal_terms: set[str] = set()
+    authenticated_current_message = (
+        source_authority == RESPONDENT_AUTHORED_CURRENT_MESSAGE
+    )
+    chinese_speaker_context = "SELF" if authenticated_current_message else "UNKNOWN"
+    persistent_third_party_topic = False
+    satisfied_condition_seen = False
+    clauses = _direct_attitude_clauses(normalized)
+    for clause_index, (clause, preceding_boundary) in enumerate(clauses):
+        coordinated_with_previous = (
+            preceding_boundary is not None
+            and _DIRECT_ATTITUDE_COORDINATION_BOUNDARY.fullmatch(
+                preceding_boundary
+            )
             is not None
-            and _DIRECT_ATTITUDE_SIGNAL_ZH.match(clause) is not None
         )
-        authoritative_omitted_chinese_subject = (
-            source_authority == RESPONDENT_AUTHORED_CURRENT_MESSAGE
-            and (
-                preceding_boundary is None
-                or _DIRECT_ATTITUDE_AUTHORITATIVE_BOUNDARY.fullmatch(
-                    preceding_boundary
+        if preceding_boundary is not None and not coordinated_with_previous:
+            if persistent_third_party_topic:
+                chinese_speaker_context = "THIRD_PARTY"
+            else:
+                chinese_speaker_context = (
+                    "SELF" if authenticated_current_message else "UNKNOWN"
                 )
-                is not None
-            )
-            and _DIRECT_ATTITUDE_SIGNAL_ZH.match(clause) is not None
-            and _DIRECT_ATTITUDE_ATTRIBUTION_ZH.search(
-                _direct_attitude_semantic_clause_zh(clause)
-            )
-            is None
+        explicit_self, _ = _direct_attitude_self_subject_zh(
+            clause,
+            respondent_role=respondent_role,
         )
-        carry_chinese_subject = _DIRECT_ATTITUDE_SELF_ZH.match(clause) is not None
-        if _DIRECT_ATTITUDE_SIGNAL_ZH.search(clause):
-            semantic_clause = _direct_attitude_semantic_clause_zh(clause)
-            explicit_third_party = (
-                _DIRECT_ATTITUDE_ATTRIBUTION_ZH.search(semantic_clause) is not None
+        explicit_third_party = _direct_attitude_explicit_third_party_zh(
+            clause,
+            respondent_role=respondent_role,
+        )
+        explicit_third_party_topic = (
+            _direct_attitude_explicit_third_party_topic_zh(
+                clause,
+                respondent_role=respondent_role,
             )
-            if explicit_third_party:
+        )
+        if explicit_self:
+            chinese_speaker_context = "SELF"
+            persistent_third_party_topic = explicit_third_party_topic
+        elif explicit_third_party:
+            chinese_speaker_context = "THIRD_PARTY"
+            persistent_third_party_topic = (
+                persistent_third_party_topic or explicit_third_party_topic
+            )
+        if _DIRECT_ATTITUDE_SATISFIED_CONDITION_ZH.search(clause):
+            satisfied_condition_seen = True
+        if _DIRECT_ATTITUDE_SIGNAL_ZH.search(clause):
+            if explicit_third_party or chinese_speaker_context == "THIRD_PARTY":
                 third_party_signal = True
                 code = "NONE"
             else:
                 code = _direct_respondent_attitude_clause_zh(
                     clause,
-                    inherited_subject=(
-                        inherited_chinese_subject
-                        or authoritative_omitted_chinese_subject
-                    ),
+                    inherited_subject=chinese_speaker_context == "SELF",
+                    respondent_role=respondent_role,
                 )
             if code is None:
                 unresolved_signal = True
             elif code != "NONE":
                 resolved.append(code)
+                scoped_clause = clause
+                if (
+                    clause_index > 0
+                    and coordinated_with_previous
+                ):
+                    scoped_clause = (
+                        clauses[clause_index - 1][0]
+                        + preceding_boundary
+                        + clause
+                    )
+                scoped_body = _direct_attitude_scope_body_zh(
+                    scoped_clause,
+                    respondent_role=respondent_role,
+                )
+                if code == "AGREE" and _DIRECT_ATTITUDE_CONDITIONAL_SCOPE_ZH.search(
+                    scoped_body
+                ):
+                    conditional_agreement_terms.update(
+                        _direct_attitude_action_terms_zh(clause)
+                    )
+                if (
+                    code == "DISAGREE"
+                    and _DIRECT_ATTITUDE_PRECONDITION_REFUSAL_ZH.search(scoped_clause)
+                    and not satisfied_condition_seen
+                ):
+                    precondition_refusal_terms.update(
+                        _direct_attitude_action_terms_zh(clause)
+                    )
             continue
         if _DIRECT_ATTITUDE_SIGNAL_EN.search(clause):
             semantic_clause = _direct_attitude_semantic_clause_en(clause)
@@ -2298,7 +2449,12 @@ def detect_direct_respondent_attitude(
     codes = set(resolved)
     if unresolved_signal or (third_party_signal and resolved):
         return DirectRespondentAttitudeDetection("UNRESOLVED")
-    code = _reduce_direct_respondent_attitude_codes(codes)
+    code = _reduce_direct_respondent_attitude_codes(
+        codes,
+        coherent_conditional_stance=bool(
+            conditional_agreement_terms & precondition_refusal_terms
+        ),
+    )
     if code is not None:
         return DirectRespondentAttitudeDetection(
             "SUBSTANTIVE",
@@ -2315,10 +2471,20 @@ def detect_direct_respondent_attitude(
     return DirectRespondentAttitudeDetection("NONE")
 
 
-def _reduce_direct_respondent_attitude_codes(codes: set[str]) -> str | None:
+def _reduce_direct_respondent_attitude_codes(
+    codes: set[str],
+    *,
+    coherent_conditional_stance: bool = False,
+) -> str | None:
     if len(codes) == 1:
         return next(iter(codes))
     if codes == {"DISAGREE", "ALTERNATIVE_PROPOSED"}:
+        return "ALTERNATIVE_PROPOSED"
+    if coherent_conditional_stance and codes == {
+        "AGREE",
+        "DISAGREE",
+        "ALTERNATIVE_PROPOSED",
+    }:
         return "ALTERNATIVE_PROPOSED"
     return None
 
@@ -2327,17 +2493,24 @@ def _direct_respondent_attitude_clause_zh(
     clause: str,
     *,
     inherited_subject: bool = False,
+    respondent_role: str | None = None,
 ) -> str | None:
-    semantic_clause = _direct_attitude_semantic_clause_zh(clause)
+    semantic_clause = _direct_attitude_semantic_clause_zh(
+        clause,
+        respondent_role=respondent_role,
+    )
     if _DIRECT_ATTITUDE_ATTRIBUTION_ZH.search(semantic_clause) is not None:
         return None
-    subject = _DIRECT_ATTITUDE_SELF_ZH.match(semantic_clause)
-    if subject is None:
+    has_subject, subject_body = _direct_attitude_self_subject_zh(
+        semantic_clause,
+        respondent_role=respondent_role,
+    )
+    if not has_subject:
         if not inherited_subject:
             return None
         body = semantic_clause.strip()
     else:
-        body = subject.group("body").strip()
+        body = subject_body
     if re.fullmatch(r"(?:尚未|未|没有)\s*(?:明确)?表态", body):
         return "NONE"
     if re.search(r"(?:并非|不是|没有|未)\s*(?:不同意|不接受|拒绝|不支持)", body):

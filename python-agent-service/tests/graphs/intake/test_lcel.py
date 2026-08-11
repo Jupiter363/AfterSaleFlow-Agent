@@ -5522,6 +5522,94 @@ def test_lcel_direct_respondent_adversarial_substantive_signal_pins_current_sour
     assert materialized["respondent_attitude"] == expected_attitude
 
 
+def test_lcel_authenticated_merchant_conditional_alternative_pins_current_source(
+    bindings,
+    version_pins,
+) -> None:
+    text = (
+        "商家目前没有形成硬件故障的最终定性，远程排障记录只能证明恢复出厂设置后问题仍出现，"
+        "建议设备送检。处理意见是免费收机检测，并在收机后7个工作日内完成维修；"
+        "如检测确认属于出厂质量问题且符合换货条件，同意换货并延长保修。"
+        "现阶段不同意在未经检测时直接无条件换货。"
+    )
+    for authority in (None, "UNVERIFIED_RESPONDENT_MESSAGE"):
+        assert (
+            detect_direct_respondent_attitude(
+                text,
+                source_authority=authority,
+                respondent_role="MERCHANT",
+            ).state
+            == "UNRESOLVED"
+        )
+
+    detection = detect_direct_respondent_attitude(
+        text,
+        source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        respondent_role="MERCHANT",
+    )
+    assert detection.state == "SUBSTANTIVE"
+    assert detection.candidate == {
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position": text,
+        "confidence": 0.65,
+    }
+    actor_subject_text = (
+        "商家如检测确认属于出厂质量问题，同意换货。提出维修替代方案。"
+        "现阶段不同意在未经检测时直接无条件换货。"
+    )
+    actor_subject_detection = detect_direct_respondent_attitude(
+        actor_subject_text,
+        source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        respondent_role="MERCHANT",
+    )
+    assert actor_subject_detection.state == "SUBSTANTIVE"
+    assert actor_subject_detection.candidate == {
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position": actor_subject_text,
+        "confidence": 0.65,
+    }
+
+    state, _ = _direct_respondent_adversarial_state(
+        bindings,
+        version_pins,
+        text=text,
+        prior_attitude="AGREE",
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "ALTERNATIVE_PROPOSED",
+                    "position": "Model wording must not replace the current message.",
+                    "confidence": 0.99,
+                }
+            }
+        )
+    )
+
+    _, _, normalized = _generation_parts(
+        {
+            "state": state,
+            "generation": {
+                "message": AIMessage(content="{}"),
+                "draft": draft,
+            },
+        }
+    )
+
+    assert normalized.dossier_patch.respondent_attitude == {
+        "respondent_role": "MERCHANT",
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position": text,
+        "source": "被发起方接待室直接陈述",
+        "confidence": 0.65,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_MERCHANT_ADVERSARIAL_CURRENT",
+        },
+    }
+
+
 def test_direct_respondent_detector_confidence_survives_merge_and_next_turn(
     bindings,
     version_pins,
@@ -5658,6 +5746,21 @@ def test_direct_respondent_detector_confidence_survives_merge_and_next_turn(
             id="zh-true-mixed-codes",
         ),
         pytest.param(
+            "如果已经确认符合换货条件，同意换货。"
+            "当前已确认符合换货条件但不同意换货。提出维修替代方案。",
+            id="zh-satisfied-same-condition-contradiction-with-alternative",
+        ),
+        pytest.param(
+            "如检测确认属于出厂质量问题，同意换货。检测已经完成。"
+            "现阶段不同意在未经检测时直接无条件换货。提出维修替代方案。",
+            id="zh-satisfied-condition-in-prior-sentence-with-alternative",
+        ),
+        pytest.param(
+            "如检测确认属于出厂质量问题，同意换货。提出维修替代方案。"
+            "现阶段无条件不同意换货。",
+            id="zh-unconditional-refusal-is-not-precondition-refusal",
+        ),
+        pytest.param(
             "本方同意方案A。对方表示不同意方案B。",
             id="zh-resolved-plus-third-party-attribution",
         ),
@@ -5712,6 +5815,10 @@ def test_lcel_direct_respondent_adversarial_unresolved_signal_fails_closed(
     [
         "建议Y的是对方，不是我方。",
         "同意Y的是对方，我方未表态。",
+        "客户的处理意见如下，建议退款。",
+        "客户的处理意见如下。建议退款。",
+        "本方转述客户的处理意见如下。建议退款。",
+        "本方表示用户同意退款。",
         "本方仅记录对方表示同意方案A。",
         "The buyer accepted Y; our company only recorded it.",
         "The customer proposed a refund.",
@@ -5755,11 +5862,49 @@ def test_lcel_pure_third_party_attribution_reaches_a_valid_qa_proposal(
         exclude_unset=True,
     )
 
-    assert detect_direct_respondent_attitude(text).state == "NONE"
+    assert (
+        detect_direct_respondent_attitude(
+            text,
+            respondent_role="MERCHANT",
+        ).state
+        == "NONE"
+    )
+    assert (
+        detect_direct_respondent_attitude(
+            text,
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role="MERCHANT",
+        ).state
+        == "NONE"
+    )
     assert "respondent_attitude" not in normalized_patch
     assert normalized.room_utterance.endswith("？")
     assert normalized.readiness == "INCOMPLETE"
     assert normalized.recommendation == "NEED_MORE_INFO"
+
+
+def test_direct_respondent_role_label_is_actor_relative() -> None:
+    text = "商家建议设备送检。"
+
+    merchant = detect_direct_respondent_attitude(
+        text,
+        source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        respondent_role="MERCHANT",
+    )
+    assert merchant.state == "SUBSTANTIVE"
+    assert merchant.candidate == {
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position": text,
+        "confidence": 0.65,
+    }
+    assert (
+        detect_direct_respondent_attitude(
+            text,
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role="USER",
+        ).state
+        == "NONE"
+    )
 
 
 def test_negated_english_direct_response_does_not_ground_agreement(

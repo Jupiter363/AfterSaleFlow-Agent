@@ -1903,6 +1903,7 @@ def _grounded_respondent_attitude(
         detection = detect_direct_respondent_attitude(
             source.text,
             source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role=actor_role,
         )
         if detection.state == "UNRESOLVED":
             raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
