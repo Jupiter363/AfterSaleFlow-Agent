@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol, cast
 from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableConfig
 
+from app.agents.dispute_intake_officer.room_utterance import phase_safe_room_utterance
 from app.contracts.v1.models import (
     AgentStreamEvent,
     AgentStreamPayload,
@@ -172,6 +173,7 @@ class CompiledIntakeGraphShadowExecutor:
         emitted_usage: list[Usage] = []
         pending_usage_update: GraphPublicUpdate | None = None
         streamed_room_utterance_parts: list[str] = []
+        target_visible_updates: list[GraphPublicUpdate] = []
         room_utterance_received = False
         room_utterance_completed = False
         case_detail_seen_before_room_utterance = False
@@ -243,13 +245,16 @@ class CompiledIntakeGraphShadowExecutor:
                                 delta=projected_room_utterance,
                             ):
                                 self._validate_public_update(room_update)
-                                yield self._event(
-                                    execution,
-                                    sequence,
-                                    room_update.event_type,
-                                    room_update.payload,
-                                )
-                                sequence += 1
+                                if target_reply_then_board:
+                                    target_visible_updates.append(room_update)
+                                else:
+                                    yield self._event(
+                                        execution,
+                                        sequence,
+                                        room_update.event_type,
+                                        room_update.payload,
+                                    )
+                                    sequence += 1
                             streamed_room_utterance_parts.append(projected_room_utterance)
                         room_utterance_received = True
                         continue
@@ -287,13 +292,16 @@ class CompiledIntakeGraphShadowExecutor:
                     # prefixes; structured sections arrive once their JSON value closes.
                     # The durable proposal and formal dossier remain authoritative only
                     # after the fenced terminal commit below succeeds.
-                    yield self._event(
-                        execution,
-                        sequence,
-                        update.event_type,
-                        update.payload,
-                    )
-                    sequence += 1
+                    if target_reply_then_board:
+                        target_visible_updates.append(update)
+                    else:
+                        yield self._event(
+                            execution,
+                            sequence,
+                            update.event_type,
+                            update.payload,
+                        )
+                        sequence += 1
         finally:
             await cast(Callable[[], Awaitable[None]], close)()
 
@@ -324,10 +332,34 @@ class CompiledIntakeGraphShadowExecutor:
                 proposal.room_utterance
             )
         if target_reply_then_board and room_utterance_received:
-            self._require_streamed_room_utterance_matches_terminal(
-                streamed="".join(streamed_room_utterance_parts),
+            streamed_room_utterance = "".join(streamed_room_utterance_parts)
+            if streamed_room_utterance == terminal_room_utterance:
+                governed_target_updates = tuple(target_visible_updates)
+            elif self._is_authorized_phase_safe_room_utterance_rewrite(
+                streamed=streamed_room_utterance,
                 terminal=terminal_room_utterance,
-            )
+                proposal=proposal,
+            ):
+                governed_target_updates = self._target_canonical_replay_updates(proposal)
+            else:
+                self._require_streamed_room_utterance_matches_terminal(
+                    streamed=streamed_room_utterance,
+                    terminal=terminal_room_utterance,
+                )
+                raise AssertionError("unreachable")
+            # Target model deltas remain private until the completed baseline
+            # proposal proves which room utterance is authoritative.  This keeps
+            # the existing reply-before-board stream shape while preventing a
+            # phase-safe rewrite from replacing text that was already public.
+            for update in governed_target_updates:
+                self._validate_public_update(update)
+                yield self._event(
+                    execution,
+                    sequence,
+                    update.event_type,
+                    update.payload,
+                )
+                sequence += 1
         elif room_utterance_received:
             self._require_streamed_room_utterance_matches_terminal(
                 streamed="".join(streamed_room_utterance_parts),
@@ -645,6 +677,29 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "Intake streamed room utterance differs from normalized terminal proposal"
             )
+
+    @staticmethod
+    def _is_authorized_phase_safe_room_utterance_rewrite(
+        *,
+        streamed: str,
+        terminal: str,
+        proposal: IntakeTurnProposal,
+    ) -> bool:
+        """Accept only the baseline's exact first-readiness governance transform."""
+
+        if not streamed or streamed == terminal:
+            return False
+        try:
+            snapshot = proposal.dossier_patch.model_dump(
+                mode="python",
+                exclude_none=True,
+                exclude_unset=True,
+            )
+        except (AttributeError, TypeError, ValueError):
+            return False
+        if not isinstance(snapshot, dict):
+            return False
+        return phase_safe_room_utterance(streamed, snapshot) == terminal
 
     @staticmethod
     def _room_utterance_updates(room_utterance: str) -> tuple[GraphPublicUpdate, ...]:

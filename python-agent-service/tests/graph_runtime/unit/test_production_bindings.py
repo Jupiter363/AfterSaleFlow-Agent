@@ -3401,20 +3401,21 @@ async def test_target_intake_preview_does_not_turn_graph_failure_into_formal_res
 
 
 @pytest.mark.asyncio
-async def test_target_intake_executor_streams_governed_ready_handoff_equal_to_terminal(
+async def test_target_intake_executor_replays_only_phase_safe_terminal_when_raw_reply_is_rewritten(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command, _, _ = _intake_command()
     execution = _target_candidate_intake_execution(command)
-    baseline_ready_handoff = (
-        "已记录本轮补充，当前信息已经可以提交。"
-        "请问还有没有需要备注给证据书记官或后续审理环节的案情内容？"
+    canonical_question = "商家当时对退款诉求给出的具体答复是什么？"
+    raw_room_utterance = (
+        f"{canonical_question}当前信息已经完整，可以提交。"
+        "请问还有备注需要交接吗？另外，平台还应核实什么【RAW_PRIVATE】？"
     )
     assert (
-        intake_executor._normalized_intake_room_utterance(baseline_ready_handoff)
-        == baseline_ready_handoff
+        intake_executor._normalized_intake_room_utterance(raw_room_utterance)
+        == raw_room_utterance
     )
-    governed_room_utterance = baseline_ready_handoff
+    governed_room_utterance = canonical_question
     raw_dossier_delta = '{"order_reference":"RAW-UNCOMMITTED"}'
     state = {
         "terminal_draft": {"same": True},
@@ -3434,7 +3435,13 @@ async def test_target_intake_executor_streams_governed_ready_handoff_equal_to_te
 
     class DossierPatch:
         def model_dump(self, **_: Any) -> dict[str, Any]:
-            return {"references": {"order_reference": "ORDER-READY-HANDOFF"}}
+            return {
+                "references": {"order_reference": "ORDER-READY-HANDOFF"},
+                "missing_information": {"next_questions": [canonical_question]},
+                "handoff_notes": {
+                    "remark_status": "READY_PENDING_REMARK_INVITE",
+                },
+            }
 
     proposal = SimpleNamespace(
         room_utterance=governed_room_utterance,
@@ -3490,7 +3497,7 @@ async def test_target_intake_executor_streams_governed_ready_handoff_equal_to_te
         async def astream(self, input: Any, config: Any, **kwargs: Any):
             assert kwargs["stream_mode"] == ["messages", "custom"]
             for field, delta in (
-                ("room_utterance", governed_room_utterance),
+                ("room_utterance", raw_room_utterance),
                 ("case_detail.references", raw_dossier_delta),
             ):
                 yield (
@@ -3634,17 +3641,22 @@ async def test_target_intake_executor_streams_governed_ready_handoff_equal_to_te
     assert "".join(
         event.payload.delta or "" for event in room_events
     ) == governed_room_utterance
-    assert visible_commit_states == [False, False]
+    assert visible_commit_states and not any(visible_commit_states)
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
     all_visible_text = "".join(event.payload.delta or "" for event in visible)
     assert governed_room_utterance in all_visible_text
-    assert raw_dossier_delta in all_visible_text
-    assert baseline_ready_handoff in all_visible_text
-    assert [(event.payload.field, event.payload.delta) for event in board_events] == [
-        ("case_detail.references", raw_dossier_delta)
-    ]
+    assert raw_room_utterance not in all_visible_text
+    assert "【RAW_PRIVATE】" not in all_visible_text
+    assert raw_dossier_delta not in all_visible_text
+    board_by_field = {event.payload.field: event.payload.delta for event in board_events}
+    assert json.loads(board_by_field["case_detail.references"]) == {
+        "order_reference": "ORDER-READY-HANDOFF"
+    }
+    assert json.loads(board_by_field["case_detail.missing_information"]) == {
+        "next_questions": [canonical_question]
+    }
     assert events[-1].event_type == "final"
     assert saver.preflights == 1
     assert store.calls == 1
@@ -3653,7 +3665,7 @@ async def test_target_intake_executor_streams_governed_ready_handoff_equal_to_te
 
 
 @pytest.mark.asyncio
-async def test_target_intake_executor_streams_three_full_width_questions_before_streaming_board(
+async def test_target_intake_executor_buffers_then_streams_exact_terminal_questions_before_board(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command, _, _ = _intake_command()
@@ -3666,8 +3678,7 @@ async def test_target_intake_executor_streams_three_full_width_questions_before_
     )
     raw_room_utterance = "".join(raw_room_deltas)
     expected_live_room_after_each_delta = tuple(
-        "".join(raw_room_deltas[: index + 1])
-        for index in range(len(raw_room_deltas))
+        "" for _ in raw_room_deltas
     )
     terminal_room_utterance = raw_room_utterance
     assert raw_room_utterance.count("？") == 3
@@ -3919,13 +3930,13 @@ async def test_target_intake_executor_streams_three_full_width_questions_before_
     visible_text = "".join(event.payload.delta or "" for event in visible)
 
     assert graph.room_after_each_delta == list(expected_live_room_after_each_delta)
-    assert graph.room_before_board == expected_live_room_after_each_delta[-1]
+    assert graph.room_before_board == ""
     assert events[1].payload.field == "room_utterance"
     assert events[1].payload.delta == raw_room_deltas[0]
     assert [event.payload.delta for event in room_events] == list(raw_room_deltas)
     streamed_room_utterance = "".join(event.payload.delta or "" for event in room_events)
     assert streamed_room_utterance == terminal_room_utterance == raw_room_utterance
-    assert "【RAW_THIRD_QUESTION】" in graph.room_before_board
+    assert "【RAW_THIRD_QUESTION】" not in graph.room_before_board
     assert "【RAW_THIRD_QUESTION】" in visible_text
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
@@ -3934,7 +3945,7 @@ async def test_target_intake_executor_streams_three_full_width_questions_before_
         ("case_detail.references", raw_board_delta)
     ]
     assert visible_commit_states == [False] * len(visible)
-    assert visible_source_completion_states[-1] == ("case_detail.references", False)
+    assert visible_source_completion_states[-1] == ("case_detail.references", True)
     assert events[-2].event_type == "usage"
     assert events[-1].event_type == "final"
     assert saver.preflights == 1
@@ -4029,18 +4040,9 @@ async def test_target_intake_executor_rejects_room_append_after_root_close(
         async for event in executor.stream(execution):
             events.append(event)
 
-    # The provisional board was already visible when the later room-order breach
-    # failed the stream.  The caller must emit its normal ERROR/reset path rather
-    # than treating that provisional board as a terminal result.
-    assert [event.event_type for event in events] == [
-        "attempt_started",
-        "visible_delta",
-        "visible_delta",
-    ]
-    assert [(event.payload.field, event.payload.delta) for event in events[1:]] == [
-        ("room_utterance", "Please confirm the order number?"),
-        ("case_detail.references", '{"order_reference":"RAW-AFTER-ROOM"}'),
-    ]
+    # Target visible content remains private until terminal governance.  A source
+    # order breach therefore cannot leak either its room prefix or provisional board.
+    assert [event.event_type for event in events] == ["attempt_started"]
 
 
 @pytest.mark.asyncio
@@ -4078,7 +4080,22 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
         },
         execution.fence,
     )
-    proposal = SimpleNamespace(room_utterance=terminal_room_utterance)
+
+    class DossierPatch:
+        def model_dump(self, **_: Any) -> dict[str, Any]:
+            return {
+                "missing_information": {
+                    "next_questions": ["Which exact order record should be checked?"],
+                },
+                "handoff_notes": {
+                    "remark_status": "READY_PENDING_REMARK_INVITE",
+                },
+            }
+
+    proposal = SimpleNamespace(
+        room_utterance=terminal_room_utterance,
+        dossier_patch=DossierPatch(),
+    )
 
     class Saver:
         def __init__(self) -> None:
@@ -4202,15 +4219,18 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
         async for event in executor.stream(execution):
             events.append(event)
 
-    assert [event.event_type for event in events] == [
-        "attempt_started",
-        "visible_delta",
-        "visible_delta",
-    ]
-    assert [(event.payload.field, event.payload.delta) for event in events[1:]] == [
-        ("room_utterance", streamed_room_utterance),
-        ("case_detail.references", provisional_board_delta),
-    ]
+    if target_candidate:
+        assert [event.event_type for event in events] == ["attempt_started"]
+    else:
+        assert [event.event_type for event in events] == [
+            "attempt_started",
+            "visible_delta",
+            "visible_delta",
+        ]
+        assert [(event.payload.field, event.payload.delta) for event in events[1:]] == [
+            ("room_utterance", streamed_room_utterance),
+            ("case_detail.references", provisional_board_delta),
+        ]
     assert saver.preflights == 0
     assert saver.commits == 0
     assert store.calls == 0
