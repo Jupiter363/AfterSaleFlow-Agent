@@ -493,6 +493,110 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void exactHandoffPartitionCarryKeepsPriorSourceWhileChangedPartitionRequiresCurrentMessage()
+            throws Exception {
+        String priorMessageId = "MESSAGE_HANDOFF_THRESHOLD_MERCHANT";
+        String currentMessageId = "MESSAGE_HANDOFF_CURRENT_MERCHANT";
+        ObjectNode current = dossierWithInitiatorMatrix();
+        ObjectNode merchant = readyPartyIntakeEntry("NO_EXTRA_REMARKS", priorMessageId);
+        merchant.withObject("handoff_notes").put("latest_remark", "无额外备注。");
+        ObjectNode state = JSON.createObjectNode();
+        state.put("schema_version", "party-intake-state.v1");
+        state.set("USER", partyIntakeEntry(0));
+        state.set("MERCHANT", merchant.deepCopy());
+        current.set("party_intake_state", state);
+        copyPartyMirror(current, merchant);
+        ObjectNode partition = handoffRemarkPartition(
+                current, "MERCHANT", "NO_EXTRA_REMARKS", null);
+        current.set("handoff_remark_partition", partition);
+
+        MatrixAuthority currentMessageAuthority = matrixAuthority(
+                ActorRole.MERCHANT, currentMessageId, SourceType.ROOM_MESSAGE);
+        ObjectNode carryPatch = JSON.createObjectNode();
+        carryPatch.set("handoff_remark_partition", partition.deepCopy());
+        IntakeTurnProposal carryProposal = proposal(
+                carryPatch,
+                null,
+                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                List.of());
+        ObjectNode currentBefore = current.deepCopy();
+        ObjectNode carryPatchBefore = carryPatch.deepCopy();
+
+        MergeResult carried = merger.merge(current, carryProposal, currentMessageAuthority);
+        MergeResult replay = merger.merge(current, carryProposal, currentMessageAuthority);
+
+        assertThat(carried.dossier()).isEqualTo(currentBefore);
+        assertThat(replay.dossier()).isEqualTo(carried.dossier());
+        assertThat(carried.dossier()
+                        .at("/handoff_remark_partition/parties/MERCHANT/source/message_id")
+                        .asText())
+                .isEqualTo(priorMessageId);
+        assertThat(current).isEqualTo(currentBefore);
+        assertThat(carryPatch).isEqualTo(carryPatchBefore);
+
+        String remark = "请继续核对既有售后记录。";
+        ObjectNode changedPartition = partition.deepCopy();
+        ObjectNode changedMerchant = changedPartition
+                .withObject("parties")
+                .withObject("MERCHANT");
+        changedMerchant.put("remark_status", "HAS_REMARKS");
+        changedMerchant.put("latest_remark", remark);
+        changedMerchant
+                .withObject("source")
+                .put("message_id", priorMessageId)
+                .put(
+                        "message_hash",
+                        handoffRemarkSourceHash(priorMessageId, "MERCHANT", remark));
+        changedMerchant
+                .withArray("remarks")
+                .addObject()
+                .put("party_role", "MERCHANT")
+                .put("text", remark)
+                .put("source_message_id", priorMessageId)
+                .put(
+                        "source_message_hash",
+                        handoffRemarkSourceHash(priorMessageId, "MERCHANT", remark))
+                .put("turn_source", "ROOM_MESSAGE");
+        ObjectNode changedPatch = JSON.createObjectNode();
+        changedPatch.set("handoff_remark_partition", changedPartition);
+        assertRejected(
+                "INTAKE_HANDOFF_REMARK_PARTITION_SOURCE_MISMATCH",
+                () -> merger.merge(
+                        current,
+                        proposal(
+                                changedPatch,
+                                null,
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of()),
+                        currentMessageAuthority));
+
+        ObjectNode foreignPartition = partition.deepCopy();
+        foreignPartition
+                .withObject("parties")
+                .withObject("USER")
+                .put("remark_status", "NO_EXTRA_REMARKS")
+                .putObject("source")
+                .put("source_kind", "ROOM_MESSAGE")
+                .put("message_id", "MESSAGE_FOREIGN_USER")
+                .put(
+                        "message_hash",
+                        handoffRemarkSourceHash(
+                                "MESSAGE_FOREIGN_USER", "USER", "threshold"));
+        ObjectNode foreignPatch = JSON.createObjectNode();
+        foreignPatch.set("handoff_remark_partition", foreignPartition);
+        assertRejected(
+                "INTAKE_HANDOFF_REMARK_PARTITION_FOREIGN_DRIFT",
+                () -> merger.merge(
+                        current,
+                        proposal(
+                                foreignPatch,
+                                null,
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of()),
+                        currentMessageAuthority));
+    }
+
+    @Test
     void buildsTheUnifiedMatrixFromTrustedClaimFactsWhenTheModelOmitsTheClaimBranch()
             throws Exception {
         JsonNode modelPatch = JSON.readTree(

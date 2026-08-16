@@ -753,9 +753,6 @@ public final class IntakeDossierProjectionMerger {
         }
         JsonNode previousActor = previous.at("/parties/" + actorRole);
         if (previousActor.equals(proposedActor)) {
-            if (proposedActor.has("source")) {
-                requireCurrentHandoffRemarkSource(proposedActor, authority);
-            }
             return;
         }
         requireCurrentHandoffRemarkSource(proposedActor, authority);
