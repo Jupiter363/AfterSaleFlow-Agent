@@ -73,6 +73,58 @@ public interface CaseProcessProjectionRepository
     @Query(
             value =
                     """
+                    update case_process_projection projection
+                       set last_command_sequence = :newLastCommandSequence,
+                           updated_at = :updatedAt,
+                           version = version + 1
+                     where projection.case_id = :caseId
+                       and projection.tenant_surrogate = :tenantSurrogate
+                       and projection.writer_mode = 'TEMPORAL'
+                       and projection.current_room = 'EVIDENCE'
+                       and projection.room_epoch = :roomEpoch
+                       and projection.fencing_token = :fencingToken
+                       and projection.process_revision = :processRevision
+                       and :newLastCommandSequence = :expectedLastCommandSequence + 1
+                       and projection.last_command_sequence = :expectedLastCommandSequence
+                       and projection.last_case_event_sequence = :lastCaseEventSequence
+                       and projection.temporal_workflow_id = :temporalWorkflowId
+                       and projection.temporal_run_id = :temporalRunId
+                       and projection.temporal_build_id = :temporalBuildId
+                       and exists (
+                           select 1
+                             from case_room_epoch epoch
+                            where epoch.case_id = :caseId
+                              and epoch.tenant_surrogate = :tenantSurrogate
+                              and epoch.room_type = 'EVIDENCE'
+                              and epoch.room_epoch = :roomEpoch
+                              and epoch.writer_mode = 'TEMPORAL'
+                              and epoch.lifecycle_status = 'ACTIVE'
+                              and epoch.provisioning_status = 'READY'
+                               and epoch.fencing_token = :fencingToken
+                               and epoch.process_revision = :processRevision
+                               and epoch.room_revision = :roomRevision
+                        )
+                    """,
+            nativeQuery = true)
+    int advanceTerminalNoCommitCommandCursor(
+            @Param("tenantSurrogate") String tenantSurrogate,
+            @Param("caseId") String caseId,
+            @Param("roomEpoch") long roomEpoch,
+            @Param("fencingToken") long fencingToken,
+            @Param("processRevision") long processRevision,
+            @Param("roomRevision") long roomRevision,
+            @Param("expectedLastCommandSequence") long expectedLastCommandSequence,
+            @Param("newLastCommandSequence") long newLastCommandSequence,
+            @Param("lastCaseEventSequence") long lastCaseEventSequence,
+            @Param("temporalWorkflowId") String temporalWorkflowId,
+            @Param("temporalRunId") String temporalRunId,
+            @Param("temporalBuildId") String temporalBuildId,
+            @Param("updatedAt") java.time.OffsetDateTime updatedAt);
+
+    @Modifying(flushAutomatically = true)
+    @Query(
+            value =
+                    """
                     insert into case_process_projection (
                         case_id, tenant_surrogate, macro_phase, current_room, room_phase,
                         writer_mode, process_revision, room_epoch, fencing_token,

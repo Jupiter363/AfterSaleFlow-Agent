@@ -2,7 +2,7 @@ package com.example.dispute.workflow.infrastructure.bootstrap;
 
 import static io.temporal.api.enums.v1.WorkflowIdConflictPolicy.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING;
 import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
-import static io.temporal.client.WorkflowUpdateStage.COMPLETED;
+import static io.temporal.client.WorkflowUpdateStage.ACCEPTED;
 
 import com.example.dispute.workflow.config.RoomEpochBootstrapProperties;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
@@ -90,7 +90,7 @@ public final class SdkRoomEpochProvisioningGateway
                 UpdateOptions.newBuilder(ProvisionRoomEpochReceipt.class)
                         .setUpdateName(RoomEpochProvisioningProtocol.PROVISION_ROOM_EPOCH_UPDATE)
                         .setUpdateId(request.updateId())
-                        .setWaitForStage(COMPLETED)
+                        .setWaitForStage(ACCEPTED)
                         .build();
         WorkflowUpdateHandle<ProvisionRoomEpochReceipt> handle =
                 workflow.startUpdateWithStart(

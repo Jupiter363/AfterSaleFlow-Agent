@@ -10,6 +10,8 @@ import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.RoomEpochAllocation;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
 import com.example.dispute.workflow.temporal.caseprocess.TargetRoomProgressReceipt;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.ActivationIdentity;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.temporal.activity.Activity;
@@ -22,6 +24,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +44,7 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
 
   private final DataSource dataSource;
   private final TransactionTemplate transaction;
+  private final TargetE2eActivationLifecycleStore activationLifecycleStore;
   private final EvidenceDossierFreezer dossierFreezer;
   private final RoomEpochAllocator roomEpochAllocator;
   private final ObjectMapper mapper;
@@ -49,12 +53,15 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
   public JdbcTargetEvidenceTerminalActivities(
       DataSource dataSource,
       TransactionTemplate transaction,
+      TargetE2eActivationLifecycleStore activationLifecycleStore,
       EvidenceDossierFreezer dossierFreezer,
       RoomEpochAllocator roomEpochAllocator,
       ObjectMapper mapper,
       Clock clock) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     this.transaction = Objects.requireNonNull(transaction, "transaction");
+    this.activationLifecycleStore =
+        Objects.requireNonNull(activationLifecycleStore, "activationLifecycleStore");
     this.dossierFreezer = Objects.requireNonNull(dossierFreezer, "dossierFreezer");
     this.roomEpochAllocator = Objects.requireNonNull(roomEpochAllocator, "roomEpochAllocator");
     this.mapper = Objects.requireNonNull(mapper, "mapper").copy();
@@ -63,6 +70,20 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
 
   @Override
   public TerminalResult finalizeTerminal(TerminalRequest request) {
+    var activityInfo = Activity.getExecutionContext().getInfo();
+    return finalizeTerminal(request, activityInfo.getWorkflowId(), activityInfo.getRunId());
+  }
+
+  TerminalResult finalizeTerminal(
+      TerminalRequest request, String actualWorkflowId, String actualWorkflowRunId) {
+    WorkflowIdentity workflowIdentity =
+        requireWorkflowIdentity(request, actualWorkflowId, actualWorkflowRunId);
+    BoundActivation boundActivation =
+        loadBoundActivationAuthority(request, workflowIdentity);
+    Objects.requireNonNull(
+        activationLifecycleStore.refresh(
+            boundActivation.identity(), boundActivation.expiresAt(), clock.instant()),
+        "target Evidence bound activation refresh result");
     return transaction.execute(status -> finalizeInTransaction(request));
   }
 
@@ -75,7 +96,7 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
           requireWorkflowIdentity(
               request, activityInfo.getWorkflowId(), activityInfo.getRunId());
       // Match the party-completion transaction's command -> participant -> epoch lock order.
-      requirePersistedCompletionFacts(connection, request);
+      long terminalCommandSequence = requirePersistedCompletionFacts(connection, request);
       Authority authority = lockAuthority(connection, request, workflowIdentity);
       Stored stored = readStored(connection, request, true);
       requireAuthorityCoordinates(authority, request, stored != null);
@@ -92,24 +113,34 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
         throw new IllegalStateException("target Evidence terminal froze an unexpected dossier version");
       }
 
-      Instant committedAt = clock.instant();
+      Instant committedAt = canonicalTerminalInstant(clock);
       String requestHash = hash(request);
       String receiptId = "EVDTERM_" + ContractJson.sha256Hex(mapper.valueToTree(
           List.of(request.start().caseId(), request.start().roomEpoch(), requestHash))).substring(0, 32);
       String hearingRoomId = "ROOM_HEARING_" + ContractJson.sha256Hex(mapper.valueToTree(
           List.of(request.start().caseId(), request.start().roomEpoch(), requestHash))).substring(0, 28);
       Instant hearingDeadline = committedAt.plus(HEARING_WINDOW);
-      sealEvidenceAndOpenHearing(connection, request, hearingRoomId, hearingDeadline);
-      RoomEpochAllocation hearingEpoch = roomEpochAllocator.transition(new TransitionRoomEpoch(
-          request.start().caseId(), RoomType.EVIDENCE, hearingRoomId, RoomType.HEARING,
-          "HEARING_OPEN", "PROVISIONING", OffsetDateTime.ofInstant(hearingDeadline, ZoneOffset.UTC),
-          OffsetDateTime.ofInstant(committedAt, ZoneOffset.UTC)));
-      validateHearingAllocation(connection, request, hearingRoomId, hearingDeadline, hearingEpoch);
-      long terminalProcessRevision = hearingEpoch.processRevision();
+      long terminalProcessRevision = Math.incrementExact(request.expectedProcessRevision());
       long terminalRoomRevision = Math.incrementExact(request.expectedRoomRevision());
       String receiptHash = receiptHash(request, frozen, hearingRoomId, hearingDeadline,
           terminalProcessRevision, terminalRoomRevision);
+      sealEvidenceAndOpenHearing(connection, request, hearingRoomId, hearingDeadline);
       appendEventAndOutbox(connection, request, frozen, hearingRoomId, hearingDeadline, receiptHash);
+      long terminalEventSequence =
+          lockTerminalEventSequence(connection, request, frozen, receiptHash);
+      RoomEpochAllocation hearingEpoch = roomEpochAllocator.transition(new TransitionRoomEpoch(
+          request.start().caseId(), RoomType.EVIDENCE, hearingRoomId, RoomType.HEARING,
+          "HEARING_OPEN", "PROVISIONING", OffsetDateTime.ofInstant(hearingDeadline, ZoneOffset.UTC),
+          OffsetDateTime.ofInstant(committedAt, ZoneOffset.UTC), null, null,
+          terminalCommandSequence, terminalEventSequence));
+      validateHearingAllocation(
+          connection,
+          request,
+          hearingRoomId,
+          hearingDeadline,
+          hearingEpoch,
+          terminalCommandSequence,
+          terminalEventSequence);
       insertReceipt(connection, receiptId, receiptHash, requestHash, request, frozen, hearingRoomId,
           hearingDeadline, terminalProcessRevision, terminalRoomRevision, committedAt);
       return result(request, receiptId, receiptHash);
@@ -124,6 +155,10 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
     return new TerminalResult(new TargetRoomProgressReceipt(RoomType.EVIDENCE, request.start().roomEpoch(),
         request.start().fencingToken(), Math.incrementExact(request.expectedProcessRevision()),
         Math.incrementExact(request.expectedRoomRevision()), receiptId, receiptHash));
+  }
+
+  static Instant canonicalTerminalInstant(Clock clock) {
+    return Objects.requireNonNull(clock, "clock").instant().truncatedTo(ChronoUnit.MICROS);
   }
 
   static WorkflowIdentity requireWorkflowIdentity(
@@ -150,7 +185,85 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
       throw new IllegalStateException(
           "legacy target Evidence terminal request has no target build marker");
     }
-    return new WorkflowIdentity(actualWorkflowId, actualWorkflowRunId);
+    String roomAuthorityRunId =
+        request.carriesDurableWorkflowAuthority()
+            ? request.durableWorkflowRunId()
+            : actualWorkflowRunId;
+    return new WorkflowIdentity(
+        actualWorkflowId, actualWorkflowRunId, roomAuthorityRunId);
+  }
+
+  BoundActivation loadBoundActivationAuthority(
+      TerminalRequest request, WorkflowIdentity workflowIdentity) {
+    try (Connection connection = dataSource.getConnection();
+        PreparedStatement statement =
+            connection.prepareStatement(
+                """
+                select activation.environment_id,
+                       activation.environment_generation,
+                       binding.activation_id,
+                       binding.activation_manifest_hash,
+                       activation.expires_at
+                  from case_room_epoch epoch
+                  join target_e2e_room_epoch_binding binding
+                    on binding.epoch_id = epoch.id
+                   and binding.tenant_surrogate = epoch.tenant_surrogate
+                   and binding.case_id = epoch.case_id
+                   and binding.room_type = epoch.room_type
+                   and binding.room_epoch = epoch.room_epoch
+                   and binding.room_fencing_token = epoch.fencing_token
+                  join target_e2e_activation activation
+                    on activation.activation_id = binding.activation_id
+                   and activation.manifest_hash = binding.activation_manifest_hash
+                   and activation.execution_lane = binding.execution_lane
+                   and activation.isolated_domain_db_binding_hash =
+                       binding.isolated_domain_db_binding_hash
+                   and activation.tenant_surrogate = epoch.tenant_surrogate
+                   and activation.control_build_id = epoch.room_workflow_build_id
+                 where epoch.tenant_surrogate = ?
+                   and epoch.case_id = ?
+                   and epoch.room_id = ?
+                   and epoch.room_type = 'EVIDENCE'
+                   and epoch.room_epoch = ?
+                   and epoch.fencing_token = ?
+                   and epoch.writer_mode = 'TEMPORAL'
+                   and epoch.provisioning_status = 'READY'
+                   and epoch.lifecycle_status in ('ACTIVE', 'TERMINAL')
+                   and epoch.room_temporal_workflow_id = ?
+                   and epoch.room_temporal_run_id = ?
+                   and epoch.room_workflow_build_id = ?
+                   and binding.execution_lane = 'TARGET_E2E_CANDIDATE'
+                """)) {
+      int index = 1;
+      statement.setString(index++, request.start().tenantSurrogate());
+      statement.setString(index++, request.start().caseId());
+      statement.setString(index++, request.start().roomId());
+      statement.setLong(index++, request.start().roomEpoch());
+      statement.setLong(index++, request.start().fencingToken());
+      statement.setString(index++, workflowIdentity.workflowId());
+      statement.setString(index++, workflowIdentity.roomAuthorityRunId());
+      statement.setString(index, request.start().workflowBuildId());
+      try (ResultSet row = statement.executeQuery()) {
+        if (!row.next()) {
+          throw new IllegalStateException(
+              "target Evidence terminal has no exact bound activation authority");
+        }
+        OffsetDateTime expiresAt = row.getObject(5, OffsetDateTime.class);
+        BoundActivation authority =
+            new BoundActivation(
+                new ActivationIdentity(
+                    row.getString(1), row.getLong(2), row.getString(3), row.getString(4)),
+                expiresAt == null ? null : expiresAt.toInstant());
+        if (row.next()) {
+          throw new IllegalStateException(
+              "target Evidence terminal bound activation authority is ambiguous");
+        }
+        return authority;
+      }
+    } catch (SQLException failure) {
+      throw new IllegalStateException(
+          "target Evidence terminal activation authority lookup failed", failure);
+    }
   }
 
   static Authority lockAuthority(
@@ -202,7 +315,7 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
       statement.setLong(index++, request.start().roomEpoch());
       statement.setLong(index++, request.start().fencingToken());
       statement.setString(index++, workflowIdentity.workflowId());
-      statement.setString(index++, workflowIdentity.workflowRunId());
+      statement.setString(index++, workflowIdentity.roomAuthorityRunId());
       statement.setString(index, request.start().workflowBuildId());
       try (ResultSet row = statement.executeQuery()) {
         if (!row.next()) {
@@ -260,16 +373,17 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
         && ("DRAINED".equals(lifecycle) || "REVOKED_TERMINAL".equals(lifecycle));
   }
 
-  void requirePersistedCompletionFacts(Connection connection, TerminalRequest request)
+  long requirePersistedCompletionFacts(Connection connection, TerminalRequest request)
       throws SQLException {
-    lockCompletionCommands(connection, request);
+    long terminalCommandSequence = lockCompletionCommands(connection, request);
     requirePersistedCompletionFactsAfterCommandLock(connection, request);
+    return terminalCommandSequence;
   }
 
-  static void lockCompletionCommands(Connection connection, TerminalRequest request)
+  static long lockCompletionCommands(Connection connection, TerminalRequest request)
       throws SQLException {
     try (PreparedStatement statement = connection.prepareStatement("""
-        select command_id
+        select command_id, case_command_sequence
           from case_command
          where tenant_surrogate = ?
            and case_id = ?
@@ -287,9 +401,11 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
       statement.setString(4, request.initiatorCompletionId());
       statement.setString(5, request.respondentCompletionId());
       java.util.Set<String> locked = new java.util.HashSet<>(2);
+      long terminalCommandSequence = 0;
       try (ResultSet row = statement.executeQuery()) {
         while (row.next()) {
           locked.add(row.getString(1));
+          terminalCommandSequence = Math.max(terminalCommandSequence, row.getLong(2));
         }
       }
       if (!locked.equals(
@@ -298,6 +414,7 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
         throw new IllegalStateException(
             "target Evidence terminal completion commands are absent or ambiguous");
       }
+      return terminalCommandSequence;
     }
   }
 
@@ -431,41 +548,187 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
 
   void requireAgentRunReceipts(Connection connection, TerminalRequest request) throws SQLException {
     try (PreparedStatement statement = connection.prepareStatement("""
-        select count(*)
-          from target_e2e_evidence_command_material material
-         where material.tenant_surrogate = ? and material.case_id = ? and material.room_epoch = ?
-           and not exists (
-             select 1 from target_e2e_finalization_receipt receipt
-              where receipt.execution_lane = 'TARGET_E2E_CANDIDATE'
-                and receipt.activation_id = material.activation_id
-                and receipt.tenant_surrogate = material.tenant_surrogate
-                and receipt.case_id = material.case_id
-                and receipt.room_type = 'EVIDENCE'
-                and receipt.room_epoch = material.room_epoch
-                and receipt.room_fencing_token = material.room_fencing_token
-                and receipt.logical_run_id = material.material_canonical_json::jsonb #>> '{request,agent_run_id}'
-                and receipt.attempt_id = material.material_canonical_json::jsonb #>> '{request,command,attempt_id}'
-                and receipt.command_hash = material.command_hash
-                and receipt.command_envelope_hash = material.command_envelope_hash
-                and receipt.process_revision::text = material.material_canonical_json::jsonb #>> '{request,command,process_revision}'
-                and receipt.stage_sequence::text = material.material_canonical_json::jsonb #>> '{request,command,stage_sequence}'
-                and receipt.graph_key = material.material_canonical_json::jsonb #>> '{request,command,graph_key}'
-                and receipt.graph_version = material.material_canonical_json::jsonb #>> '{request,command,graph_version}'
-                and receipt.checkpoint_schema_version = material.material_canonical_json::jsonb #>> '{request,command,checkpoint_schema_version}'
-                and receipt.formal_writer = 'JAVA_FINALIZER_ONLY'
-                and receipt.domain_commit_status = 'COMMITTED'
-           )
+        with scoped_material as (
+          select material.*,
+                 material.material_canonical_json::jsonb #>> '{request,agent_run_id}' as logical_run_id,
+                 material.material_canonical_json::jsonb #>> '{request,command,attempt_id}' as attempt_id,
+                 material.material_canonical_json::jsonb #>> '{request,command,request_hash}' as request_hash,
+                 material.material_canonical_json::jsonb #>> '{request,command,process_revision}' as process_revision,
+                 material.material_canonical_json::jsonb #>> '{request,command,stage_sequence}' as stage_sequence,
+                 material.material_canonical_json::jsonb #>> '{request,command,graph_key}' as graph_key,
+                 material.material_canonical_json::jsonb #>> '{request,command,graph_version}' as graph_version,
+                 material.material_canonical_json::jsonb #>> '{request,command,checkpoint_schema_version}' as checkpoint_schema_version
+            from target_e2e_evidence_command_material material
+           where material.tenant_surrogate = ? and material.case_id = ? and material.room_epoch = ?
+        ), logical_run_scope as (
+          select logical_run_id, count(*) as material_count
+            from scoped_material
+           group by logical_run_id
+        )
+        select scope.logical_run_id,
+               run.committed_attempt_id,
+               case when run.id is not null
+                          and run.protocol = 'agent-stream.v2'
+                          and run.executor_kind = 'TEMPORAL_ACTIVITY'
+                          and run.run_status = 'COMPLETED'
+                          and run.finalization_status = 'COMMITTED'
+                          and run.result_ready_attempt_id = run.committed_attempt_id
+                          and run.final_result_hash is not null
+                          and run.finalized_at is not null
+                          and run.tenant_surrogate = ? and run.case_id = ?
+                          and run.room_type = 'EVIDENCE' and run.room_epoch = ?
+                          and not exists (
+                            select 1 from scoped_material binding
+                             where binding.logical_run_id is not distinct from scope.logical_run_id
+                               and (binding.execution_lane <> 'TARGET_E2E_CANDIDATE'
+                                    or binding.tenant_surrogate <> run.tenant_surrogate
+                                    or binding.case_id <> run.case_id
+                                    or binding.room_type <> run.room_type
+                                    or binding.room_epoch <> run.room_epoch
+                                    or binding.room_fencing_token <> run.fencing_token)
+                          )
+                    then true else false end as run_binding_exact,
+               scope.material_count,
+               (select count(*) from agent_run_attempt winner
+                 where winner.agent_run_id = run.id
+                   and winner.id = run.committed_attempt_id
+                   and winner.attempt_status = 'COMPLETED'
+                   and winner.executor_kind = 'TEMPORAL_ACTIVITY'
+                   and winner.completed_at is not null
+                   and winner.final_frame_observed
+                   and winner.result_hash = run.final_result_hash) as winner_attempt_count,
+               (select count(*) from agent_run_attempt candidate
+                 where candidate.agent_run_id = run.id
+                   and candidate.attempt_status in ('RESULT_READY', 'COMPLETED')) as winner_candidate_count,
+               (select count(*) from scoped_material winner_material
+                 where winner_material.logical_run_id is not distinct from scope.logical_run_id
+                   and winner_material.attempt_id = run.committed_attempt_id) as winner_material_count,
+               (select count(*) from target_e2e_finalization_receipt receipt
+                 where receipt.logical_run_id is not distinct from scope.logical_run_id) as receipt_count,
+               (select count(*)
+                  from scoped_material material
+                  join agent_run_attempt winner
+                    on winner.agent_run_id = run.id and winner.id = run.committed_attempt_id
+                  join target_e2e_finalization_receipt receipt
+                    on receipt.logical_run_id = scope.logical_run_id
+                   and receipt.attempt_id = run.committed_attempt_id
+                   and receipt.execution_lane = material.execution_lane
+                   and receipt.activation_id = material.activation_id
+                   and receipt.activation_manifest_hash = material.activation_manifest_hash
+                   and receipt.isolated_domain_db_binding_hash = material.isolated_domain_db_binding_hash
+                   and receipt.tenant_surrogate = material.tenant_surrogate
+                   and receipt.case_id = material.case_id
+                   and receipt.room_type = material.room_type
+                   and receipt.room_epoch = material.room_epoch
+                   and receipt.room_fencing_token = material.room_fencing_token
+                   and receipt.command_hash = material.command_hash
+                   and receipt.command_envelope_hash = material.command_envelope_hash
+                   and receipt.process_revision::text = material.process_revision
+                   and receipt.stage_sequence::text = material.stage_sequence
+                   and receipt.graph_key = material.graph_key
+                   and receipt.graph_version = material.graph_version
+                   and receipt.checkpoint_schema_version = material.checkpoint_schema_version
+                   and receipt.result_hash = winner.result_hash
+                   and receipt.formal_writer = 'JAVA_FINALIZER_ONLY'
+                   and receipt.domain_commit_status = 'COMMITTED'
+                 where material.logical_run_id is not distinct from scope.logical_run_id
+                   and material.attempt_id = run.committed_attempt_id
+                   and winner.request_hash = material.request_hash
+                   and winner.graph_key = material.graph_key
+                   and winner.graph_version = material.graph_version
+                   and winner.checkpoint_schema_version = material.checkpoint_schema_version) as exact_receipt_count,
+               (select count(*) from scoped_material candidate_material
+                 where candidate_material.logical_run_id is not distinct from scope.logical_run_id
+                   and not exists (
+                     select 1
+                       from agent_run_attempt attempt
+                       join agent_run_attempt winner
+                         on winner.agent_run_id = run.id and winner.id = run.committed_attempt_id
+                      where attempt.agent_run_id = run.id
+                        and attempt.id = candidate_material.attempt_id
+                        and (
+                          (attempt.id = winner.id
+                           and attempt.attempt_status = 'COMPLETED'
+                           and attempt.completed_at is not null)
+                          or
+                          (attempt.id <> winner.id
+                           and attempt.attempt_no < winner.attempt_no
+                           and attempt.attempt_status in ('ABORTED', 'FAILED', 'CANCELLED')
+                           and attempt.executor_kind = 'TEMPORAL_ACTIVITY'
+                           and attempt.termination_code = 'CREATE_NEXT_ATTEMPT'
+                           and attempt.completed_at is not null
+                           and nullif(trim(attempt.error_code), '') is not null
+                           and attempt.error_retryable
+                           and attempt.result_hash is null
+                           and not attempt.final_frame_observed)
+                        )
+                   )) as invalid_lineage_count
+          from logical_run_scope scope
+          left join agent_run run on run.id = scope.logical_run_id
+         order by scope.logical_run_id nulls first
         """)) {
       statement.setString(1, request.start().tenantSurrogate());
       statement.setString(2, request.start().caseId());
       statement.setLong(3, request.start().roomEpoch());
+      statement.setString(4, request.start().tenantSurrogate());
+      statement.setString(5, request.start().caseId());
+      statement.setLong(6, request.start().roomEpoch());
       try (ResultSet row = statement.executeQuery()) {
-        if (!row.next() || row.getLong(1) != 0) {
-          throw new IllegalStateException("all EVIDENCE_SUBMIT AgentRun formal receipts are required");
+        boolean found = false;
+        while (row.next()) {
+          found = true;
+          requireAgentRunReceiptAuthority(
+              new AgentRunReceiptAuthority(
+                  row.getString(1),
+                  row.getString(2),
+                  row.getBoolean(3),
+                  row.getLong(4),
+                  row.getLong(5),
+                  row.getLong(6),
+                  row.getLong(7),
+                  row.getLong(8),
+                  row.getLong(9),
+                  row.getLong(10)));
         }
+        if (!found) rejectAgentRunReceiptAuthority();
       }
     }
   }
+
+  static void requireAgentRunReceiptAuthority(AgentRunReceiptAuthority authority) {
+    if (authority == null
+        || authority.logicalRunId() == null
+        || authority.logicalRunId().isBlank()
+        || authority.committedAttemptId() == null
+        || authority.committedAttemptId().isBlank()
+        || !authority.runBindingExact()
+        || authority.materialCount() < 1
+        || authority.winnerAttemptCount() != 1
+        || authority.winnerCandidateCount() != 1
+        || authority.winnerMaterialCount() != 1
+        || authority.receiptCount() != 1
+        || authority.exactReceiptCount() != 1
+        || authority.invalidLineageCount() != 0) {
+      rejectAgentRunReceiptAuthority();
+    }
+  }
+
+  private static void rejectAgentRunReceiptAuthority() {
+    throw new IllegalStateException(
+        "all EVIDENCE_SUBMIT AgentRun formal receipts are required");
+  }
+
+  record AgentRunReceiptAuthority(
+      String logicalRunId,
+      String committedAttemptId,
+      boolean runBindingExact,
+      long materialCount,
+      long winnerAttemptCount,
+      long winnerCandidateCount,
+      long winnerMaterialCount,
+      long receiptCount,
+      long exactReceiptCount,
+      long invalidLineageCount) {}
 
   private void sealEvidenceAndOpenHearing(Connection connection, TerminalRequest request,
       String hearingRoomId, Instant hearingDeadline) throws SQLException {
@@ -478,7 +741,8 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
   }
 
   private void validateHearingAllocation(Connection connection, TerminalRequest request, String hearingRoomId,
-      Instant hearingDeadline, RoomEpochAllocation allocation) throws SQLException {
+      Instant hearingDeadline, RoomEpochAllocation allocation, long terminalCommandSequence,
+      long terminalEventSequence) throws SQLException {
     if (allocation == null || !request.start().tenantSurrogate().equals(allocation.tenantSurrogate())
         || !request.start().caseId().equals(allocation.caseId()) || !hearingRoomId.equals(allocation.roomId())
         || allocation.roomType() != RoomType.HEARING || allocation.writerMode() != WriterMode.TEMPORAL
@@ -505,7 +769,7 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
     }
     try (PreparedStatement statement = connection.prepareStatement("""
         select macro_phase, current_room, room_phase, writer_mode, process_revision, room_epoch,
-               fencing_token, projected_deadline_at
+               fencing_token, last_command_sequence, last_case_event_sequence, projected_deadline_at
           from case_process_projection where case_id = ?
         """)) {
       statement.setString(1, request.start().caseId());
@@ -520,11 +784,15 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
         long processRevision = row.getLong(5);
         long roomEpoch = row.getLong(6);
         long fencingToken = row.getLong(7);
-        java.sql.Timestamp deadline = row.getTimestamp(8);
+        long lastCommandSequence = row.getLong(8);
+        long lastCaseEventSequence = row.getLong(9);
+        java.sql.Timestamp deadline = row.getTimestamp(10);
         if (row.next() || !"HEARING_OPEN".equals(macroPhase)
             || !"HEARING".equals(currentRoom) || !"PROVISIONING".equals(roomPhase)
             || !"TEMPORAL".equals(writerMode) || processRevision != allocation.processRevision()
             || roomEpoch != allocation.roomEpoch() || fencingToken != allocation.fencingToken()
+            || lastCommandSequence != terminalCommandSequence
+            || lastCaseEventSequence != terminalEventSequence
             || deadline == null || !hearingDeadline.equals(deadline.toInstant())) {
           throw new IllegalStateException("target Hearing projection allocation drifted");
         }
@@ -609,7 +877,43 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
     String payload = ContractJson.canonicalString(mapper.valueToTree(Map.of("schema_version", "target-e2e-evidence-terminal.v1",
         "receipt_hash", receiptHash, "dossier_id", frozen.getId(), "dossier_version", frozen.getDossierVersion(),
         "hearing_room_id", hearingRoomId, "deadline_at", deadline.toString(), "provisioning", "REQUIRED")));
-    execute(connection, "insert into case_timeline_event (id, case_id, dossier_id, event_type, event_time, source_refs_json, event_json, sequence_no, room_id, audience_json, event_key, created_by) values (?, ?, ?, 'HEARING_OPENED', now(), '[]'::jsonb, ?::jsonb, (select coalesce(max(sequence_no), 0) + 1 from case_timeline_event where case_id = ?), ?, '[]'::jsonb, ?, ?) on conflict (case_id, event_key) do nothing", eventId, request.start().caseId(), frozen.getId(), payload, request.start().caseId(), hearingRoomId, key, WRITER);
+    execute(connection, "insert into case_timeline_event (id, case_id, dossier_id, event_type, event_time, source_refs_json, event_json, sequence_no, room_id, audience_json, event_key, created_by) values (?, ?, ?, 'HEARING_OPENED', now(), '[]'::jsonb, ?::jsonb, (select coalesce(max(sequence_no), 0) + 1 from case_timeline_event where case_id = ?), ?, '[]'::jsonb, ?, ?) on conflict (case_id, event_key) where event_key is not null do nothing", eventId, request.start().caseId(), frozen.getId(), payload, request.start().caseId(), hearingRoomId, key, WRITER);
+  }
+
+  static long lockTerminalEventSequence(Connection connection, TerminalRequest request,
+      EvidenceDossierEntity frozen, String receiptHash) throws SQLException {
+    String key =
+        "target-e2e-hearing-open:"
+            + request.start().caseId()
+            + ":"
+            + request.start().roomEpoch();
+    String eventId = "EVT_HEARING_" + receiptHash.substring(0, 32);
+    try (PreparedStatement statement = connection.prepareStatement("""
+        select sequence_no
+          from case_timeline_event
+         where id = ? and case_id = ? and dossier_id = ?
+           and event_type = 'HEARING_OPENED' and event_key = ?
+           and event_json #>> '{receipt_hash}' = ?
+         for update
+        """)) {
+      statement.setString(1, eventId);
+      statement.setString(2, request.start().caseId());
+      statement.setString(3, frozen.getId());
+      statement.setString(4, key);
+      statement.setString(5, receiptHash);
+      try (ResultSet row = statement.executeQuery()) {
+        if (!row.next()) {
+          throw new IllegalStateException(
+              "target Evidence terminal timeline authority is missing");
+        }
+        long sequence = row.getLong(1);
+        if (sequence < 1 || row.next()) {
+          throw new IllegalStateException(
+              "target Evidence terminal timeline authority is ambiguous");
+        }
+        return sequence;
+      }
+    }
   }
 
   private void insertReceipt(Connection connection, String receiptId, String receiptHash, String requestHash,
@@ -733,7 +1037,17 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
 
   String hash(TerminalRequest request) {
     List<?> material =
-        request.carriesWorkflowIdentity()
+        request.carriesDurableWorkflowAuthority()
+            ? List.of(
+                request.start(),
+                request.expectedProcessRevision(),
+                request.expectedRoomRevision(),
+                request.initiatorCompletionId(),
+                request.respondentCompletionId(),
+                request.workflowId(),
+                request.workflowRunId(),
+                request.durableWorkflowRunId())
+            : request.carriesWorkflowIdentity()
             ? List.of(
                 request.start(),
                 request.expectedProcessRevision(),
@@ -755,7 +1069,14 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
   private static boolean isSha256(String value) { return value != null && value.matches("[0-9a-f]{64}"); }
   private static void requireTransaction(Connection connection) throws SQLException { if (connection.getAutoCommit()) throw new IllegalStateException("target Evidence terminal requires a transaction"); }
   private static void execute(Connection connection, String sql, Object... values) throws SQLException { try (PreparedStatement s = connection.prepareStatement(sql)) { for (int i = 0; i < values.length; i++) s.setObject(i + 1, values[i]); s.executeUpdate(); } }
-  record WorkflowIdentity(String workflowId, String workflowRunId) {}
+  record WorkflowIdentity(
+      String workflowId, String workflowRunId, String roomAuthorityRunId) {}
+  record BoundActivation(ActivationIdentity identity, Instant expiresAt) {
+    BoundActivation {
+      Objects.requireNonNull(identity, "identity");
+      Objects.requireNonNull(expiresAt, "expiresAt");
+    }
+  }
   record Authority(
       String epochId,
       String lifecycleStatus,

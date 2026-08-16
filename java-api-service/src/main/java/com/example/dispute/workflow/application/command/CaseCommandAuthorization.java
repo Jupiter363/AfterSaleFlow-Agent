@@ -15,6 +15,7 @@ final class CaseCommandAuthorization {
                     CommandType.INTAKE_MESSAGE,
                     CommandType.INTAKE_CONFIRM,
                     CommandType.INTAKE_CANCEL,
+                    CommandType.EVIDENCE_OPENING,
                     CommandType.EVIDENCE_SUBMIT,
                     CommandType.PARTY_EVIDENCE_COMPLETE,
                     CommandType.HEARING_STATEMENT,
@@ -51,12 +52,21 @@ final class CaseCommandAuthorization {
         var contractRole =
                 com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole.valueOf(
                         actor.role().name());
-        String scope =
-                "case:"
-                        + disputeCase.getId()
-                        + ":command:"
-                        + command.commandType().name();
-        return new ActorRef(actor.actorId(), contractRole, List.of(scope));
+        return new ActorRef(
+                actor.actorId(),
+                contractRole,
+                actorScopes(disputeCase.getId(), command.commandType()));
+    }
+
+    private static List<String> actorScopes(String caseId, CommandType commandType) {
+        String prefix = "case:" + caseId + ":command:";
+        if (commandType == CommandType.EVIDENCE_OPENING
+                || commandType == CommandType.EVIDENCE_SUBMIT) {
+            return List.of(
+                    prefix + CommandType.EVIDENCE_OPENING.name(),
+                    prefix + CommandType.EVIDENCE_SUBMIT.name());
+        }
+        return List.of(prefix + commandType.name());
     }
 
     private static void assertParty(

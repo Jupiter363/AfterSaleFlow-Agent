@@ -21,7 +21,8 @@ public interface TargetEvidenceTerminalActivities {
       String initiatorCompletionId,
       String respondentCompletionId,
       String workflowId,
-      String workflowRunId) {
+      String workflowRunId,
+      String durableWorkflowRunId) {
 
     /** Keeps the exact v1 Activity payload shape used by histories recorded before P0 authority. */
     public TerminalRequest(
@@ -37,6 +38,27 @@ public interface TargetEvidenceTerminalActivities {
           initiatorCompletionId,
           respondentCompletionId,
           null,
+          null,
+          null);
+    }
+
+    /** Keeps the exact single-run identity shape recorded before reset-aware authority. */
+    public TerminalRequest(
+        EvidenceRoomStart start,
+        long expectedProcessRevision,
+        long expectedRoomRevision,
+        String initiatorCompletionId,
+        String respondentCompletionId,
+        String workflowId,
+        String workflowRunId) {
+      this(
+          start,
+          expectedProcessRevision,
+          expectedRoomRevision,
+          initiatorCompletionId,
+          respondentCompletionId,
+          workflowId,
+          workflowRunId,
           null);
     }
 
@@ -55,10 +77,19 @@ public interface TargetEvidenceTerminalActivities {
       if (workflowId != null && (workflowId.isBlank() || workflowRunId.isBlank())) {
         throw new IllegalArgumentException("target Evidence workflow identity is invalid");
       }
+      if (durableWorkflowRunId != null
+          && (workflowId == null || durableWorkflowRunId.isBlank())) {
+        throw new IllegalArgumentException(
+            "target Evidence durable workflow authority is invalid");
+      }
     }
 
     public boolean carriesWorkflowIdentity() {
       return workflowId != null;
+    }
+
+    public boolean carriesDurableWorkflowAuthority() {
+      return durableWorkflowRunId != null;
     }
   }
 

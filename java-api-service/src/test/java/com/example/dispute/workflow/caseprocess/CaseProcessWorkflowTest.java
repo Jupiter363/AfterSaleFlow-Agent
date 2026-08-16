@@ -1,6 +1,8 @@
 package com.example.dispute.workflow.caseprocess;
 
 import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW;
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_MARKER_RECORDED;
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED;
 import static io.temporal.api.enums.v1.WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_COMPLETED;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -11,6 +13,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
@@ -32,6 +35,9 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleAct
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommand;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommandResult;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpiredTargetEvidenceTerminalRecoveryOutcome;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecoverExpiredTargetEvidenceTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecoverExpiredTargetEvidenceTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRouted;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommit;
@@ -42,6 +48,8 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessExpiredTargetEvidenceTerminalRecoveryResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessIntakeProjectionRecoveryRequest;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessIntakeProjectionRecoveryResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities;
@@ -55,20 +63,32 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl;
 import com.example.dispute.workflow.temporal.caseprocess.ProcessedCommandIdentity;
 import com.example.dispute.workflow.temporal.caseprocess.TargetIntakeCommandTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.TargetRoomProgressReceipt;
 import com.example.dispute.workflow.temporal.room.common.RoomControlSnapshot;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflow;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomCaseProcessWorkflow;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetEvidenceTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetEvidenceTerminalNoCommitResult;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetEvidenceTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetEvidenceTerminalNoCommitResult;
+import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.api.history.v1.HistoryEvent;
 import io.temporal.client.UpdateOptions;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateException;
+import io.temporal.client.WorkflowUpdateHandle;
 import io.temporal.client.WorkflowUpdateStage;
 import io.temporal.common.WorkflowExecutionHistory;
+import io.temporal.common.converter.DefaultDataConverter;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
@@ -79,8 +99,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
@@ -95,6 +117,12 @@ class CaseProcessWorkflowTest {
       CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID);
   private static final String RECOVERY_TASK_QUEUE = "case-process-projection-recovery-test";
   private static final Instant OCCURRED_AT = Instant.parse("2026-07-17T08:00:00Z");
+  private static final String EXPIRED_EVIDENCE_RECOVERY_CHANGE_ID =
+      "case-process-expired-target-evidence-terminal-recovery-v1";
+  private static final String SUCCESSOR_PROVISIONING_EVENT_BOUNDARY_CHANGE_ID =
+      "case-process-successor-provisioning-event-boundary-v1";
+  private static final String TARGET_ROOM_PROGRESS_HANDLE_REBIND_CHANGE_ID =
+      "case-process-target-room-progress-handle-rebind-v1";
 
   private TestWorkflowEnvironment environment;
   private WorkflowClient client;
@@ -107,7 +135,7 @@ class CaseProcessWorkflowTest {
         TestWorkflowEnvironment.newInstance(
             TestEnvironmentOptions.newBuilder().setInitialTime(OCCURRED_AT).build());
     Worker caseWorker = environment.newWorker(CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE);
-    caseWorker.registerWorkflowImplementationTypes(CaseProcessWorkflowImpl.class);
+    caseWorker.registerWorkflowImplementationTypes(RecoveryTargetCaseProcessWorkflow.class);
     ledger = new RecordingLedgerActivities();
     recoveryProjection = new RecoveryProjectionActivities();
     caseWorker.registerActivitiesImplementations(ledger, recoveryProjection);
@@ -196,6 +224,263 @@ class CaseProcessWorkflowTest {
     assertTerminalNoCommitAccountingUnchanged(before, targetWorkflow.state());
     assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(1);
     assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isZero();
+  }
+
+  @Test
+  void terminalEvidenceAgentRunFailsAndConsumesParentOnceBeforeFreshOpeningResumes() {
+    CaseProcessWorkflow targetWorkflow =
+        client.newWorkflowStub(
+            CaseProcessWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(WORKFLOW_ID)
+                .setTaskQueue(RECOVERY_TASK_QUEUE)
+                .build());
+    WorkflowClient.start(targetWorkflow::run, (CaseProcessCarryState) null);
+    provision(targetWorkflow, evidenceTerminalProvisioning());
+
+    CaseCommandRef failedOpening = evidenceOpeningCommand(1, 0);
+    RecoveryTargetCaseProcessWorkflow.terminalEvidenceCommandIds.put(
+        failedOpening.commandId(), true);
+    ledger.put(failedOpening);
+    assertThatThrownBy(() -> targetWorkflow.acceptCommand(failedOpening))
+        .isInstanceOf(WorkflowUpdateException.class)
+        .hasMessageContaining(WORKFLOW_ID);
+    CaseProcessSnapshot terminal =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 2
+                    && snapshot.processedCommandCount() == 1
+                    && snapshot.pendingCommandCount() == 0);
+
+    assertThat(ledger.evidenceTerminalNoCommitConvergences).hasSize(1);
+    TargetRoomAgentRunTerminalNoCommit authority =
+        ledger.evidenceTerminalNoCommitConvergences.getFirst().authority();
+    assertThat(authority.command()).isEqualTo(failedOpening);
+    assertThat(authority.terminalResult().outcome())
+        .isEqualTo(ExecuteAgentRunResult.Outcome.FAILED);
+    assertThat(authority.terminalResult().recoveryAction())
+        .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+    assertThat(terminal.observedProcessRevision()).isZero();
+    assertThat(terminal.activeRoomRevision()).isZero();
+    assertThat(terminal.nextCaseEventSequence()).isEqualTo(1);
+    assertThat(terminal.processedEventCount()).isZero();
+    assertThat(terminal.bufferedEventCount()).isZero();
+    assertThat(terminal.blockedReason()).isEqualTo("NONE");
+    assertThat(terminal.protocolErrorCode()).isNull();
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isZero();
+
+    ConvergeTargetEvidenceTerminalNoCommit convergence =
+        ledger.evidenceTerminalNoCommitConvergences.getFirst();
+    assertThat(ledger.convergeTargetEvidenceTerminalNoCommit(convergence).outcome())
+        .isEqualTo(TerminalNoCommitOutcome.IDEMPOTENT_REPLAY);
+    assertThat(ledger.evidenceTerminalNoCommitConvergences).hasSize(2);
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(1);
+
+    CaseCommandRef freshOpening = evidenceOpeningCommand(2, 0);
+    ledger.put(freshOpening);
+    targetWorkflow.acceptCommand(freshOpening);
+    CaseProcessSnapshot resumed =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 3
+                    && snapshot.processedCommandCount() == 2);
+
+    assertThat(resumed.observedProcessRevision()).isEqualTo(1);
+    assertThat(resumed.activeRoomRevision()).isEqualTo(1);
+    assertThat(resumed.blockedReason()).isEqualTo("NONE");
+    assertThat(resumed.protocolErrorCode()).isNull();
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(2);
+    assertThat(RecoveryTargetCaseProcessWorkflow.evidenceLogicalRunIds)
+        .containsExactly(
+            "target-evidence-run:" + failedOpening.commandId(),
+            "target-evidence-run:" + freshOpening.commandId());
+    assertThat(RecoveryTargetCaseProcessWorkflow.evidenceRootAttemptIds)
+        .containsExactly(
+            "target-evidence-run:" + failedOpening.commandId() + ":1",
+            "target-evidence-run:" + freshOpening.commandId() + ":1");
+  }
+
+  @Test
+  void expiredEvidenceTerminalRecoversConsumedSequenceNineOnceAndSurvivesContinueAsNew() {
+    PreparedExpiredEvidenceRecovery prepared = prepareExpiredEvidenceRecovery();
+    CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request = prepared.request();
+
+    assertThat(client.fetchHistory(WORKFLOW_ID, prepared.firstExecutionRunId()).getEvents())
+        .noneMatch(
+            event -> isVersionMarker(event, EXPIRED_EVIDENCE_RECOVERY_CHANGE_ID));
+
+    assertExpiredEvidenceRecoveryRejected(
+        prepared.workflow(), request, request.recoveryId() + "-wrong-update-id");
+    ProcessedCommandIdentity foreignIdentity =
+        new ProcessedCommandIdentity(
+            request.previousCommand().commandId() + "-foreign",
+            request.previousCommand().caseCommandSequence(),
+            request.previousCommand().requestHash());
+    assertExpiredEvidenceRecoveryRejected(
+        prepared.workflow(),
+        expiredEvidenceRecoveryRequest(
+            prepared.expired(),
+            prepared.firstExecutionRunId(),
+            request.actualExpiredAt(),
+            foreignIdentity,
+            request.expectedNextCaseEventSequence(),
+            request.expectedProcessedEventCount(),
+            request.expectedRoomRevision(),
+            request.expectedProtocolErrorCode()),
+        CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest.recoveryId(
+            WORKFLOW_ID,
+            prepared.firstExecutionRunId(),
+            foreignIdentity,
+            request.actualExpiredAt()));
+    assertExpiredEvidenceRecoveryRejected(
+        prepared.workflow(),
+        expiredEvidenceRecoveryRequest(
+            prepared.expired(),
+            prepared.firstExecutionRunId(),
+            request.actualExpiredAt(),
+            request.previousCommand(),
+            request.expectedNextCaseEventSequence() + 1,
+            request.expectedProcessedEventCount() + 1,
+            request.expectedRoomRevision(),
+            request.expectedProtocolErrorCode()),
+        request.recoveryId());
+    assertExpiredEvidenceRecoveryRejected(
+        prepared.workflow(),
+        expiredEvidenceRecoveryRequest(
+            prepared.expired(),
+            prepared.firstExecutionRunId(),
+            request.actualExpiredAt(),
+            request.previousCommand(),
+            request.expectedNextCaseEventSequence(),
+            request.expectedProcessedEventCount(),
+            request.expectedRoomRevision() + 1,
+            request.expectedProtocolErrorCode()),
+        request.recoveryId());
+    CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest errorDrift =
+        expiredEvidenceRecoveryRequest(
+            prepared.expired(),
+            prepared.firstExecutionRunId(),
+            request.actualExpiredAt(),
+            request.previousCommand(),
+            request.expectedNextCaseEventSequence(),
+            request.expectedProcessedEventCount(),
+            request.expectedRoomRevision(),
+            "FOREIGN_COMMAND_PROTOCOL_ERROR");
+    assertExpiredEvidenceRecoveryRejected(
+        prepared.workflow(), errorDrift, request.recoveryId());
+    assertThat(ledger.expiredEvidenceRecoveries).isEmpty();
+
+    CaseProcessExpiredTargetEvidenceTerminalRecoveryResult recovered =
+        recoverExpiredEvidence(prepared.workflow(), request, request.recoveryId());
+    CaseProcessSnapshot afterRecovery = prepared.workflow().state();
+
+    assertThat(recovered.disposition())
+        .isEqualTo(
+            CaseProcessExpiredTargetEvidenceTerminalRecoveryResult.Disposition.RECOVERED);
+    assertThat(recovered.request()).isEqualTo(request);
+    assertThat(recovered.commandStatus()).isEqualTo(CaseCommandLedgerState.FAILED);
+    assertThat(recovered.lastCommandSequence()).isEqualTo(9);
+    assertThat(recovered.nextCommandSequence()).isEqualTo(10);
+    assertThat(recovered.processedCommandCount()).isEqualTo(9);
+    assertThat(recovered.nextCaseEventSequence()).isEqualTo(1);
+    assertThat(recovered.processedEventCount()).isZero();
+    assertThat(recovered.clearedProtocolErrorCode())
+        .isEqualTo(request.expectedProtocolErrorCode());
+    assertThat(recovered.clearedProtocolErrorOrigin()).isEqualTo(RecoveryErrorOrigin.COMMAND);
+    assertExpiredEvidenceRecoveryAccountingUnchanged(prepared.expired(), afterRecovery);
+    assertThat(afterRecovery.protocolErrorCode()).isNull();
+    assertThat(afterRecovery.protocolErrorOrigin()).isNull();
+    assertThat(ledger.expiredEvidenceRecoveries).hasSize(1);
+    assertThat(ledger.commandStates.get(9L)).isEqualTo(CaseCommandLedgerState.FAILED);
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get())
+        .isEqualTo(prepared.commandDispatchesBeforeRecovery());
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isZero();
+    assertThat(client.fetchHistory(WORKFLOW_ID, prepared.firstExecutionRunId()).getEvents())
+        .anyMatch(
+            event -> isVersionMarker(event, EXPIRED_EVIDENCE_RECOVERY_CHANGE_ID));
+
+    CaseProcessExpiredTargetEvidenceTerminalRecoveryResult sameRunReplay =
+        recoverExpiredEvidence(prepared.workflow(), request, request.recoveryId());
+    assertThat(sameRunReplay).isEqualTo(recovered);
+    assertThat(ledger.expiredEvidenceRecoveries).hasSize(1);
+
+    int generationBeforeContinue = afterRecovery.runGeneration();
+    prepared.workflow().requestContinueAsNew();
+    CaseProcessSnapshot continued =
+        awaitProcess(
+            prepared.workflow(),
+            snapshot -> snapshot.runGeneration() == generationBeforeContinue + 1);
+    assertExpiredEvidenceRecoveryAccountingUnchanged(prepared.expired(), continued);
+    assertThat(continued.protocolErrorCode()).isNull();
+
+    assertExpiredEvidenceRecoveryRejected(
+        prepared.workflow(), errorDrift, request.recoveryId());
+    CaseProcessExpiredTargetEvidenceTerminalRecoveryResult carriedReplay =
+        recoverExpiredEvidence(prepared.workflow(), request, request.recoveryId());
+    assertThat(carriedReplay).isEqualTo(recovered);
+    assertThat(ledger.expiredEvidenceRecoveries).hasSize(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get())
+        .isEqualTo(prepared.commandDispatchesBeforeRecovery());
+  }
+
+  @Test
+  void expiredEvidenceRecoveryRejectsPendingNextCommandBeforeActivity() {
+    PreparedExpiredEvidenceRecovery prepared = prepareExpiredEvidenceRecovery();
+    CaseCommandRef next = evidenceOpeningCommand(10, prepared.expired().observedProcessRevision());
+    RecoveryTargetCaseProcessWorkflow.failedEvidenceCommandIds.put(next.commandId(), true);
+    ledger.put(next);
+
+    assertThatThrownBy(() -> prepared.workflow().acceptCommand(next))
+        .isInstanceOf(WorkflowUpdateException.class);
+    CaseProcessSnapshot pending =
+        awaitProcess(
+            prepared.workflow(),
+            snapshot ->
+                snapshot.nextCommandSequence() == 10
+                    && snapshot.highestObservedCommandSequence() == 10
+                    && snapshot.protocolErrorOrigin() == RecoveryErrorOrigin.COMMAND);
+    assertThat(pending.processedCommandCount()).isEqualTo(9);
+
+    assertExpiredEvidenceRecoveryRejected(
+        prepared.workflow(), prepared.request(), prepared.request().recoveryId());
+    assertThat(ledger.expiredEvidenceRecoveries).isEmpty();
+    assertThat(ledger.commandStates.get(9L)).isEqualTo(CaseCommandLedgerState.EXPIRED);
+  }
+
+  @Test
+  void continueAsNewWaitsForActiveExpiredEvidenceRecovery() throws Exception {
+    PreparedExpiredEvidenceRecovery prepared = prepareExpiredEvidenceRecovery();
+    ledger.blockExpiredEvidenceRecovery = true;
+    CompletableFuture<CaseProcessExpiredTargetEvidenceTerminalRecoveryResult> recovery =
+        CompletableFuture.supplyAsync(
+            () ->
+                recoverExpiredEvidence(
+                    prepared.workflow(),
+                    prepared.request(),
+                    prepared.request().recoveryId()));
+    assertThat(ledger.expiredEvidenceRecoveryEntered.await(10, TimeUnit.SECONDS)).isTrue();
+
+    prepared.workflow().requestContinueAsNew();
+    sleepBriefly();
+    CaseProcessSnapshot whileActive = prepared.workflow().state();
+    assertThat(whileActive.workflowRunId()).isEqualTo(prepared.firstExecutionRunId());
+    assertThat(whileActive.runGeneration()).isEqualTo(prepared.expired().runGeneration());
+
+    ledger.expiredEvidenceRecoveryRelease.countDown();
+    CaseProcessExpiredTargetEvidenceTerminalRecoveryResult recovered = recovery.join();
+    CaseProcessSnapshot continued =
+        awaitProcess(
+            prepared.workflow(),
+            snapshot -> snapshot.runGeneration() == prepared.expired().runGeneration() + 1);
+    assertThat(recovered.disposition())
+        .isEqualTo(
+            CaseProcessExpiredTargetEvidenceTerminalRecoveryResult.Disposition.RECOVERED);
+    assertExpiredEvidenceRecoveryAccountingUnchanged(prepared.expired(), continued);
+    assertThat(continued.protocolErrorCode()).isNull();
+    assertThat(ledger.expiredEvidenceRecoveries).hasSize(1);
   }
 
   @Test
@@ -715,6 +1000,180 @@ class CaseProcessWorkflowTest {
   }
 
   @Test
+  void successorOpeningEventRecoveredAtProvisioningBoundaryCompletesAcceptedUpdateExactlyOnce()
+      throws Exception {
+    startWorkflow();
+    provision(provisioning(RoomType.EVIDENCE, 0, 1, 0, 0, 0));
+    CaseDomainEventRef hearingOpened = event(1, RoomType.HEARING, 0);
+    ledger.put(hearingOpened);
+    ProvisionRoomEpoch hearing = provisioning(RoomType.HEARING, 0, 2, 0, 0, 1);
+
+    CompletableFuture<ProvisionRoomEpochReceipt> accepted =
+        CompletableFuture.supplyAsync(() -> provision(hearing));
+
+    ProvisionRoomEpochReceipt receipt = accepted.get(5, TimeUnit.SECONDS);
+    CaseProcessSnapshot switched =
+        awaitProcess(
+            snapshot ->
+                snapshot.activeRoomType() == RoomType.HEARING
+                    && snapshot.nextCaseEventSequence() == 2);
+    assertThat(receipt.roomWorkflowId()).isEqualTo(hearing.roomWorkflowId());
+    assertThat(switched.processedEventCount()).isEqualTo(1);
+    assertThat(switched.bufferedEventCount()).isZero();
+    RoomControlSnapshot hearingRoom = awaitRoom(receipt.roomWorkflowId(), snapshot -> true);
+    assertThat(hearingRoom.roomType()).isEqualTo(RoomType.HEARING);
+    assertThat(hearingRoom.processedEventCount()).isZero();
+
+    ProvisionRoomEpochReceipt replayed = provision(hearing);
+    assertThat(replayed).isEqualTo(receipt);
+    assertThat(DefaultDataConverter.STANDARD_INSTANCE.toPayload(replayed).orElseThrow())
+        .isEqualTo(
+            DefaultDataConverter.STANDARD_INSTANCE.toPayload(receipt).orElseThrow());
+
+    WorkflowExecutionHistory committedHistory =
+        client.fetchHistory(WORKFLOW_ID, receipt.caseWorkflowRunId());
+    assertThat(committedHistory.getEvents())
+        .filteredOn(
+            historyEvent ->
+                historyEvent.getEventType()
+                        == EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED
+                    && historyEvent
+                        .getStartChildWorkflowExecutionInitiatedEventAttributes()
+                        .getWorkflowId()
+                        .equals(hearing.roomWorkflowId()))
+        .hasSize(1);
+    assertThat(committedHistory.getEvents())
+        .filteredOn(
+            historyEvent ->
+                isVersionMarker(
+                    historyEvent, SUCCESSOR_PROVISIONING_EVENT_BOUNDARY_CHANGE_ID))
+        .hasSize(1);
+
+    ProvisionRoomEpoch staleFence = provisioning(RoomType.REVIEW, 0, 2, 0, 0, 1);
+    assertThatThrownBy(() -> provision(staleFence)).isInstanceOf(WorkflowUpdateException.class);
+
+    CaseDomainEventRef unrelatedUnordered = event(3, RoomType.EVIDENCE, 7);
+    ledger.put(unrelatedUnordered);
+    workflow().domainEventCommitted(unrelatedUnordered);
+    ProvisionRoomEpoch unrelatedBoundary = provisioning(RoomType.REVIEW, 0, 3, 0, 0, 1);
+    WorkflowUpdateHandle<ProvisionRoomEpochReceipt> blocked =
+        WorkflowStub.fromTyped(workflow())
+            .startUpdate(
+                UpdateOptions.newBuilder(ProvisionRoomEpochReceipt.class)
+                    .setUpdateName(CaseProcessWorkflowProtocol.PROVISION_ROOM_EPOCH_UPDATE)
+                    .setUpdateId(unrelatedBoundary.updateId())
+                    .setWaitForStage(WorkflowUpdateStage.ACCEPTED)
+                    .build(),
+                unrelatedBoundary);
+    CaseProcessSnapshot rejected =
+        awaitProcess(
+            snapshot ->
+                snapshot.activeRoomType() == RoomType.HEARING
+                    && snapshot.nextCaseEventSequence() == 2
+                    && snapshot.bufferedEventCount() == 1);
+    assertThat(blocked.getResultAsync()).isNotDone();
+    assertThat(rejected.activeFencingToken()).isEqualTo(2);
+    assertThat(rejected.provisioningCommitmentCount()).isEqualTo(2);
+  }
+
+  @Test
+  void evidenceTerminalProgressRebindsHandleBeforeRecoveredSuccessorBoundaryEvents()
+      throws Exception {
+    startWorkflow();
+    ProvisionRoomEpoch evidence = evidenceTerminalProvisioning();
+    provision(evidence);
+    for (int sequence = 1; sequence <= 24; sequence++) {
+      ledger.put(event(sequence, RoomType.EVIDENCE, 0));
+    }
+    workflow().domainEventCommitted(event(24, RoomType.EVIDENCE, 0));
+    awaitProcess(snapshot -> snapshot.nextCaseEventSequence() == 25);
+
+    TargetRoomProgressReceipt terminalProgress =
+        new TargetRoomProgressReceipt(
+            RoomType.EVIDENCE, 0, 17, 14, 6, "evidence-terminal-progress", "e".repeat(64));
+    workflow().targetRoomProgressed(terminalProgress);
+    CaseProcessSnapshot progressed =
+        awaitProcess(
+            snapshot ->
+                snapshot.observedProcessRevision() == 14
+                    && Long.valueOf(6).equals(snapshot.activeRoomRevision()));
+    workflow().targetRoomProgressed(terminalProgress);
+    assertThat(awaitProcess(snapshot -> snapshot.nextCaseEventSequence() == 25))
+        .isEqualTo(progressed);
+
+    workflow()
+        .targetRoomProgressed(
+            new TargetRoomProgressReceipt(
+                RoomType.EVIDENCE, 0, 17, 13, 5, "stale-progress", "a".repeat(64)));
+    assertThat(
+            awaitProcess(
+                snapshot ->
+                    "TARGET_ROOM_PROGRESS_REVISION_INVALID".equals(
+                        snapshot.protocolErrorCode())))
+        .satisfies(
+            snapshot -> {
+              assertThat(snapshot.observedProcessRevision()).isEqualTo(14);
+              assertThat(snapshot.activeRoomRevision()).isEqualTo(6);
+            });
+    workflow()
+        .targetRoomProgressed(
+            new TargetRoomProgressReceipt(
+                RoomType.HEARING, 0, 17, 15, 7, "foreign-room-progress", "b".repeat(64)));
+    workflow()
+        .targetRoomProgressed(
+            new TargetRoomProgressReceipt(
+                RoomType.EVIDENCE, 1, 17, 15, 7, "foreign-epoch-progress", "c".repeat(64)));
+    workflow()
+        .targetRoomProgressed(
+            new TargetRoomProgressReceipt(
+                RoomType.EVIDENCE, 0, 18, 15, 7, "foreign-fence-progress", "d".repeat(64)));
+    assertThat(
+            awaitProcess(
+                snapshot ->
+                    "TARGET_ROOM_PROGRESS_AUTHORITY_INVALID".equals(
+                        snapshot.protocolErrorCode())))
+        .satisfies(
+            snapshot -> {
+              assertThat(snapshot.observedProcessRevision()).isEqualTo(14);
+              assertThat(snapshot.activeRoomRevision()).isEqualTo(6);
+            });
+
+    CaseDomainEventRef terminalEvidenceEvent = event(25, RoomType.EVIDENCE, 0);
+    CaseDomainEventRef hearingOpened = event(26, RoomType.HEARING, 0);
+    ledger.put(terminalEvidenceEvent);
+    ledger.put(hearingOpened);
+    ProvisionRoomEpoch hearing = targetHearingAfterEvidenceProgressProvisioning();
+
+    CompletableFuture<ProvisionRoomEpochReceipt> accepted =
+        CompletableFuture.supplyAsync(() -> provision(hearing));
+
+    ProvisionRoomEpochReceipt receipt = accepted.get(5, TimeUnit.SECONDS);
+    CaseProcessSnapshot switched =
+        awaitProcess(
+            snapshot ->
+                snapshot.activeRoomType() == RoomType.HEARING
+                    && snapshot.nextCaseEventSequence() == 27);
+    assertThat(switched.processedEventCount()).isEqualTo(26);
+    assertThat(switched.bufferedEventCount()).isZero();
+    assertThat(switched.protocolErrorCode()).isEqualTo("TARGET_ROOM_PROGRESS_AUTHORITY_INVALID");
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isEqualTo(25);
+    assertThat(RecoveryTargetCaseProcessWorkflow.startedRoomTypes)
+        .containsExactly(RoomType.EVIDENCE, RoomType.HEARING);
+
+    ProvisionRoomEpochReceipt replayed = provision(hearing);
+    assertThat(replayed).isEqualTo(receipt);
+    assertThat(DefaultDataConverter.STANDARD_INSTANCE.toPayload(replayed).orElseThrow())
+        .isEqualTo(DefaultDataConverter.STANDARD_INSTANCE.toPayload(receipt).orElseThrow());
+    assertThat(RecoveryTargetCaseProcessWorkflow.startedRoomTypes)
+        .containsExactly(RoomType.EVIDENCE, RoomType.HEARING);
+    assertThat(client.fetchHistory(WORKFLOW_ID, receipt.caseWorkflowRunId()).getEvents())
+        .filteredOn(
+            historyEvent ->
+                isVersionMarker(historyEvent, TARGET_ROOM_PROGRESS_HANDLE_REBIND_CHANGE_ID))
+        .hasSize(1);
+  }
+
+  @Test
   void aClosedRoomTupleSurvivesContinueAsNewAndClassifiesItsLateEventAsStale() {
     CaseCommandRef first = command(1, RoomType.EVIDENCE, 0);
     CaseCommandRef second = command(2, RoomType.HEARING, 0);
@@ -1195,6 +1654,73 @@ class CaseProcessWorkflowTest {
     assertThat(oldRoom.recentCommandIds()).containsExactly(oldCommand.commandId());
   }
 
+  @Test
+  void hearingHandleConsumesChildProgressBeforeSecondPartyAndNextStageCommands() {
+    startWorkflow();
+    ProvisionRoomEpoch hearing = targetHearingProvisioning();
+    provision(hearing);
+
+    CaseCommandRef firstParty =
+        hearingCommand(1, CommandType.HEARING_STATEMENT, ActorRole.USER, 0);
+    ledger.put(firstParty);
+    workflow().acceptCommand(firstParty);
+    awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2);
+
+    TargetRoomProgressReceipt firstProgress = hearingProgress(2, 1);
+    workflow().targetRoomProgressed(firstProgress);
+    CaseProcessSnapshot afterFirst =
+        awaitProcess(
+            snapshot ->
+                snapshot.observedProcessRevision() == 2
+                    && Long.valueOf(1).equals(snapshot.activeRoomRevision()));
+    workflow().targetRoomProgressed(firstProgress);
+    assertThat(awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2))
+        .isEqualTo(afterFirst);
+
+    CaseCommandRef secondParty =
+        hearingCommand(2, CommandType.HEARING_STATEMENT, ActorRole.MERCHANT, 2);
+    ledger.put(secondParty);
+    workflow().acceptCommand(secondParty);
+    awaitProcess(snapshot -> snapshot.nextCommandSequence() == 3);
+
+    TargetRoomProgressReceipt secondProgress = hearingProgress(4, 2);
+    workflow().targetRoomProgressed(secondProgress);
+    awaitProcess(
+        snapshot ->
+            snapshot.observedProcessRevision() == 4
+                && Long.valueOf(2).equals(snapshot.activeRoomRevision()));
+
+    CaseCommandRef nextStage =
+        hearingCommand(3, CommandType.HEARING_EVIDENCE_BATCH, ActorRole.USER, 4);
+    ledger.put(nextStage);
+    workflow().acceptCommand(nextStage);
+    CaseProcessSnapshot completed =
+        awaitProcess(snapshot -> snapshot.nextCommandSequence() == 4);
+
+    assertThat(RecoveryTargetCaseProcessWorkflow.hearingCommandCoordinates)
+        .containsExactly("0/0", "2/1", "4/2");
+    assertThat(completed.protocolErrorCode()).isNull();
+    assertThat(completed.observedProcessRevision()).isEqualTo(5);
+    assertThat(completed.activeRoomRevision()).isEqualTo(2);
+
+    workflow().targetRoomProgressed(hearingProgress(6, 3));
+    awaitProcess(
+        snapshot ->
+            snapshot.observedProcessRevision() == 6
+                && Long.valueOf(3).equals(snapshot.activeRoomRevision()));
+    provision(targetEvidenceAfterHearingProvisioning());
+    CaseCommandRef adjacentEvidence = adjacentEvidenceCommand();
+    ledger.put(adjacentEvidence);
+    workflow().acceptCommand(adjacentEvidence);
+    CaseProcessSnapshot adjacent =
+        awaitProcess(snapshot -> snapshot.nextCommandSequence() == 5);
+
+    assertThat(RecoveryTargetCaseProcessWorkflow.nonHearingCommandCoordinates)
+        .containsExactly("6/0->7/1");
+    assertThat(adjacent.activeRoomType()).isEqualTo(RoomType.EVIDENCE);
+    assertThat(adjacent.protocolErrorCode()).isNull();
+  }
+
   private PreparedProjectionRecovery prepareProjectionRecovery() {
     CaseProcessWorkflow recoveryWorkflow =
         client.newWorkflowStub(
@@ -1276,6 +1802,166 @@ class CaseProcessWorkflowTest {
             event,
             projectionCommand);
     return new PreparedProjectionRecovery(recoveryWorkflow, request, failed);
+  }
+
+  private PreparedExpiredEvidenceRecovery prepareExpiredEvidenceRecovery() {
+    CaseProcessWorkflow recoveryWorkflow =
+        client.newWorkflowStub(
+            CaseProcessWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(WORKFLOW_ID)
+                .setTaskQueue(RECOVERY_TASK_QUEUE)
+                .build());
+    WorkflowClient.start(recoveryWorkflow::run, (CaseProcessCarryState) null);
+    ProvisionRoomEpochReceipt provisioned =
+        provision(recoveryWorkflow, evidenceTerminalProvisioning());
+    for (int sequence = 1; sequence < 9; sequence++) {
+      CaseCommandRef accepted = command(sequence, RoomType.EVIDENCE, 0);
+      ledger.put(accepted);
+      recoveryWorkflow.acceptCommand(accepted);
+    }
+    CaseProcessSnapshot beforeFailure =
+        awaitProcess(
+            recoveryWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 9
+                    && snapshot.processedCommandCount() == 8
+                    && snapshot.observedProcessRevision() == 8
+                    && Long.valueOf(8).equals(snapshot.activeRoomRevision()));
+
+    CaseCommandRef expired =
+        expiringEvidenceOpeningCommand(
+            9, beforeFailure.observedProcessRevision(), OCCURRED_AT.plusSeconds(30));
+    RecoveryTargetCaseProcessWorkflow.failedEvidenceCommandIds.put(expired.commandId(), true);
+    ledger.put(expired);
+    assertThatThrownBy(() -> recoveryWorkflow.acceptCommand(expired))
+        .isInstanceOf(WorkflowUpdateException.class);
+    CaseProcessSnapshot rejected =
+        awaitProcess(
+            recoveryWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 9
+                    && snapshot.processedCommandCount() == 8
+                    && "TARGET_TYPED_ROOM_COMMAND_DISPATCH_FAILED"
+                        .equals(snapshot.protocolErrorCode())
+                    && snapshot.protocolErrorOrigin() == RecoveryErrorOrigin.COMMAND);
+    assertThat(rejected.blockedReason()).isEqualTo("COMMAND_GAP_MANUAL_RECOVERY");
+
+    environment.sleep(Duration.ofSeconds(31));
+    recoveryWorkflow.retrySequenceGap();
+    CaseProcessSnapshot consumedExpired =
+        awaitProcess(
+            recoveryWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 10
+                    && snapshot.processedCommandCount() == 9
+                    && "TARGET_TYPED_ROOM_COMMAND_DISPATCH_FAILED"
+                        .equals(snapshot.protocolErrorCode())
+                    && snapshot.protocolErrorOrigin() == RecoveryErrorOrigin.COMMAND);
+    assertThat(consumedExpired.recentCommandIds()).endsWith(expired.commandId());
+    assertThat(consumedExpired.observedProcessRevision()).isEqualTo(8);
+    assertThat(consumedExpired.activeRoomRevision()).isEqualTo(8);
+    assertThat(consumedExpired.nextCaseEventSequence()).isEqualTo(1);
+    assertThat(consumedExpired.processedEventCount()).isZero();
+    assertThat(ledger.commandStates.get(9L)).isEqualTo(CaseCommandLedgerState.EXPIRED);
+    ExpireCaseCommand expiration =
+        ledger.expirations.stream()
+            .filter(candidate -> candidate.caseCommandSequence() == 9)
+            .findFirst()
+            .orElseThrow();
+    ProcessedCommandIdentity previous =
+        new ProcessedCommandIdentity(
+            expired.commandId(), expired.caseCommandSequence(), expired.requestHash());
+    CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request =
+        expiredEvidenceRecoveryRequest(
+            consumedExpired,
+            provisioned.caseWorkflowRunId(),
+            expiration.expiredAt(),
+            previous,
+            consumedExpired.nextCaseEventSequence(),
+            consumedExpired.processedEventCount(),
+            consumedExpired.activeRoomRevision(),
+            consumedExpired.protocolErrorCode());
+    return new PreparedExpiredEvidenceRecovery(
+        recoveryWorkflow,
+        request,
+        consumedExpired,
+        provisioned.caseWorkflowRunId(),
+        RecoveryTargetCaseProcessWorkflow.commandDispatches.get());
+  }
+
+  private static CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest
+      expiredEvidenceRecoveryRequest(
+          CaseProcessSnapshot snapshot,
+          String firstExecutionRunId,
+          Instant actualExpiredAt,
+          ProcessedCommandIdentity previous,
+          long nextCaseEventSequence,
+          long processedEventCount,
+          long roomRevision,
+          String protocolErrorCode) {
+    String recoveryId =
+        CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest.recoveryId(
+            snapshot.workflowId(), firstExecutionRunId, previous, actualExpiredAt);
+    return new CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest(
+        CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest.SCHEMA_VERSION,
+        recoveryId,
+        snapshot.workflowId(),
+        firstExecutionRunId,
+        TENANT,
+        CASE_ID,
+        snapshot.nextCommandSequence(),
+        snapshot.processedCommandCount(),
+        nextCaseEventSequence,
+        processedEventCount,
+        snapshot.observedProcessRevision(),
+        roomRevision,
+        protocolErrorCode,
+        RecoveryErrorOrigin.COMMAND,
+        actualExpiredAt,
+        previous);
+  }
+
+  private static CaseProcessExpiredTargetEvidenceTerminalRecoveryResult recoverExpiredEvidence(
+      CaseProcessWorkflow targetWorkflow,
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request,
+      String updateId) {
+    return WorkflowStub.fromTyped(targetWorkflow)
+        .startUpdate(
+            UpdateOptions.newBuilder(
+                    CaseProcessExpiredTargetEvidenceTerminalRecoveryResult.class)
+                .setUpdateName(
+                    CaseProcessWorkflowProtocol
+                        .RECOVER_EXPIRED_TARGET_EVIDENCE_TERMINAL_NO_COMMIT_UPDATE)
+                .setUpdateId(updateId)
+                .setWaitForStage(WorkflowUpdateStage.COMPLETED)
+                .build(),
+            request)
+        .getResult();
+  }
+
+  private static void assertExpiredEvidenceRecoveryRejected(
+      CaseProcessWorkflow targetWorkflow,
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request,
+      String updateId) {
+    assertThatThrownBy(() -> recoverExpiredEvidence(targetWorkflow, request, updateId))
+        .isInstanceOf(WorkflowUpdateException.class);
+  }
+
+  private static void assertExpiredEvidenceRecoveryAccountingUnchanged(
+      CaseProcessSnapshot expected, CaseProcessSnapshot actual) {
+    assertThat(actual.observedProcessRevision()).isEqualTo(expected.observedProcessRevision());
+    assertThat(actual.activeRoomRevision()).isEqualTo(expected.activeRoomRevision());
+    assertThat(actual.nextCommandSequence()).isEqualTo(expected.nextCommandSequence());
+    assertThat(actual.nextCaseEventSequence()).isEqualTo(expected.nextCaseEventSequence());
+    assertThat(actual.processedCommandCount()).isEqualTo(expected.processedCommandCount());
+    assertThat(actual.processedEventCount()).isEqualTo(expected.processedEventCount());
+    assertThat(actual.recentCommandIds()).isEqualTo(expected.recentCommandIds());
+    assertThat(actual.activeChildWorkflowId()).isEqualTo(expected.activeChildWorkflowId());
+    assertThat(actual.activeChildWorkflowRunId()).isEqualTo(expected.activeChildWorkflowRunId());
+    assertThat(actual.activeFencingToken()).isEqualTo(expected.activeFencingToken());
+    assertThat(actual.pendingCommandCount()).isZero();
+    assertThat(actual.bufferedEventCount()).isZero();
   }
 
   private void awaitTerminalNoCommitConvergences(int expectedCount) {
@@ -1393,6 +2079,159 @@ class CaseProcessWorkflowTest {
         null,
         null,
         OCCURRED_AT);
+  }
+
+  private static ProvisionRoomEpoch evidenceTerminalProvisioning() {
+    return new ProvisionRoomEpoch(
+        ProvisionRoomEpoch.SCHEMA_VERSION,
+        "epoch-evidence-terminal-no-commit",
+        TENANT,
+        CASE_ID,
+        "room-evidence-terminal-no-commit",
+        RoomType.EVIDENCE,
+        0,
+        0,
+        0,
+        17,
+        "ACTIVE",
+        "EVIDENCE",
+        "WAITING_PARTIES",
+        WriterMode.TEMPORAL,
+        WORKFLOW_ID,
+        CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.EVIDENCE, 0),
+        TargetTypedRoomProtocol.SELECTION_SCHEMA_VERSION,
+        TargetTypedRoomProtocol.PROCESS_CONTRACT_VERSION,
+        TargetTypedRoomProtocol.CASE_WORKFLOW_TYPE,
+        "case-process-recovery-test.v1",
+        TargetTypedRoomProtocol.workflowType(RoomType.EVIDENCE),
+        "evidence-room-terminal-test.v1",
+        TargetTypedRoomProtocol.GRAPH_KEY,
+        TargetTypedRoomProtocol.GRAPH_VERSION,
+        TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
+        TargetTypedRoomProtocol.STREAM_PROTOCOL,
+        0,
+        0,
+        1,
+        1,
+        OCCURRED_AT.plusSeconds(3_600),
+        "urn:test:frozen-evidence-pair",
+        "f".repeat(64),
+        OCCURRED_AT);
+  }
+
+  private static ProvisionRoomEpoch targetHearingProvisioning() {
+    return new ProvisionRoomEpoch(
+        ProvisionRoomEpoch.SCHEMA_VERSION,
+        "epoch-hearing-coordinate-test",
+        TENANT,
+        CASE_ID,
+        "room-hearing-coordinate-test",
+        RoomType.HEARING,
+        0,
+        0,
+        0,
+        23,
+        "ACTIVE",
+        "HEARING",
+        "COURT_PREPARING",
+        WriterMode.TEMPORAL,
+        WORKFLOW_ID,
+        CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.HEARING, 0),
+        TargetTypedRoomProtocol.SELECTION_SCHEMA_VERSION,
+        TargetTypedRoomProtocol.PROCESS_CONTRACT_VERSION,
+        TargetTypedRoomProtocol.CASE_WORKFLOW_TYPE,
+        "case-process-recovery-test.v1",
+        TargetTypedRoomProtocol.workflowType(RoomType.HEARING),
+        "hearing-room-coordinate-test.v1",
+        TargetTypedRoomProtocol.GRAPH_KEY,
+        TargetTypedRoomProtocol.GRAPH_VERSION,
+        TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
+        TargetTypedRoomProtocol.STREAM_PROTOCOL,
+        0,
+        0,
+        1,
+        1,
+        OCCURRED_AT.plusSeconds(3_600),
+        null,
+        null,
+        OCCURRED_AT);
+  }
+
+  private static ProvisionRoomEpoch targetEvidenceAfterHearingProvisioning() {
+    ProvisionRoomEpoch base = evidenceTerminalProvisioning();
+    return new ProvisionRoomEpoch(
+        base.schemaVersion(),
+        "epoch-evidence-after-hearing",
+        base.tenantSurrogate(),
+        base.caseId(),
+        "room-evidence-after-hearing",
+        base.roomType(),
+        base.roomEpoch(),
+        6,
+        base.initialRoomRevision(),
+        24,
+        base.macroPhase(),
+        base.currentRoom(),
+        base.roomPhase(),
+        base.writerMode(),
+        base.caseWorkflowId(),
+        base.roomWorkflowId(),
+        base.selectionSchemaVersion(),
+        base.processContractVersion(),
+        base.workflowType(),
+        base.temporalBuildId(),
+        base.roomWorkflowType(),
+        base.roomWorkflowBuildId(),
+        base.graphKey(),
+        base.graphVersion(),
+        base.checkpointSchemaVersion(),
+        base.streamProtocol(),
+        3,
+        0,
+        4,
+        1,
+        base.projectedDeadlineAt(),
+        base.projectionRef(),
+        base.projectionSha256(),
+        OCCURRED_AT.plusSeconds(10));
+  }
+
+  private static ProvisionRoomEpoch targetHearingAfterEvidenceProgressProvisioning() {
+    return new ProvisionRoomEpoch(
+        ProvisionRoomEpoch.SCHEMA_VERSION,
+        "epoch-hearing-after-evidence-progress",
+        TENANT,
+        CASE_ID,
+        "room-hearing-after-evidence-progress",
+        RoomType.HEARING,
+        0,
+        14,
+        0,
+        18,
+        "ACTIVE",
+        "HEARING",
+        "COURT_PREPARING",
+        WriterMode.TEMPORAL,
+        WORKFLOW_ID,
+        CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.HEARING, 0),
+        TargetTypedRoomProtocol.SELECTION_SCHEMA_VERSION,
+        TargetTypedRoomProtocol.PROCESS_CONTRACT_VERSION,
+        TargetTypedRoomProtocol.CASE_WORKFLOW_TYPE,
+        "case-process-recovery-test.v1",
+        TargetTypedRoomProtocol.workflowType(RoomType.HEARING),
+        "hearing-room-after-evidence-progress.v1",
+        TargetTypedRoomProtocol.GRAPH_KEY,
+        TargetTypedRoomProtocol.GRAPH_VERSION,
+        TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
+        TargetTypedRoomProtocol.STREAM_PROTOCOL,
+        0,
+        26,
+        1,
+        27,
+        OCCURRED_AT.plusSeconds(3_600),
+        null,
+        null,
+        OCCURRED_AT.plusSeconds(20));
   }
 
   private static CaseCommandRef projectionRecoveryCommand() {
@@ -1665,6 +2504,18 @@ class CaseProcessWorkflowTest {
     throw new AssertionError("room control state did not converge", lastFailure);
   }
 
+  private static boolean isVersionMarker(HistoryEvent event, String changeId) {
+    if (event.getEventType() != EVENT_TYPE_MARKER_RECORDED) {
+      return false;
+    }
+    var marker = event.getMarkerRecordedEventAttributes();
+    var details = marker.getDetailsMap().get("changeId");
+    return marker.getMarkerName().equals("Version")
+        && details != null
+        && details.getPayloadsCount() == 1
+        && details.getPayloads(0).getData().toStringUtf8().equals("\"" + changeId + "\"");
+  }
+
   private static void sleepBriefly() {
     try {
       Thread.sleep(20);
@@ -1701,6 +2552,223 @@ class CaseProcessWorkflowTest {
         OCCURRED_AT.plusSeconds(3600 + sequence),
         "00-11111111111111111111111111111111-2222222222222222-01",
         String.valueOf(hashCharacter).repeat(64));
+  }
+
+  private static CaseCommandRef hearingCommand(
+      int sequence, CommandType commandType, ActorRole actorRole, long expectedRevision) {
+    char hashCharacter = Character.forDigit(sequence % 16, 16);
+    String hash = String.valueOf(hashCharacter).repeat(64);
+    return new CaseCommandRef(
+        "case-command-ref.v1",
+        "hearing-command-" + sequence,
+        TENANT,
+        CASE_ID,
+        sequence,
+        commandType,
+        RoomType.HEARING,
+        0,
+        new ActorRef(
+            actorRole == ActorRole.USER ? "user-case-process" : "merchant-case-process",
+            actorRole,
+            List.of("case:hearing")),
+        new PayloadRef(
+            "hearing-party-command.v1",
+            "urn:test:hearing-command:" + sequence,
+            hash,
+            32),
+        expectedRevision,
+        OCCURRED_AT.plusSeconds(sequence),
+        OCCURRED_AT.plusSeconds(3_600 + sequence),
+        "00-11111111111111111111111111111111-2222222222222222-01",
+        hash);
+  }
+
+  private static TargetRoomProgressReceipt hearingProgress(
+      long processRevision, long roomRevision) {
+    return new TargetRoomProgressReceipt(
+        RoomType.HEARING,
+        0,
+        23,
+        processRevision,
+        roomRevision,
+        "hearing-receipt-" + roomRevision,
+        Long.toHexString(roomRevision).repeat(64));
+  }
+
+  private static CaseCommandRef adjacentEvidenceCommand() {
+    String hash = "4".repeat(64);
+    return new CaseCommandRef(
+        "case-command-ref.v1",
+        "evidence-command-after-hearing",
+        TENANT,
+        CASE_ID,
+        4,
+        CommandType.EVIDENCE_SUBMIT,
+        RoomType.EVIDENCE,
+        0,
+        new ActorRef("user-case-process", ActorRole.USER, List.of("case:evidence")),
+        new PayloadRef(
+            "case-process-command.v1",
+            "urn:test:evidence-command-after-hearing",
+            hash,
+            32),
+        6,
+        OCCURRED_AT.plusSeconds(20),
+        OCCURRED_AT.plusSeconds(3_620),
+        "00-11111111111111111111111111111111-2222222222222222-01",
+        hash);
+  }
+
+  private static CaseCommandRef evidenceOpeningCommand(int sequence, long expectedRevision) {
+    char hashCharacter = Character.forDigit(sequence % 16, 16);
+    String hash = String.valueOf(hashCharacter).repeat(64);
+    return new CaseCommandRef(
+        "case-command-ref.v1",
+        "evidence-opening-" + sequence,
+        TENANT,
+        CASE_ID,
+        sequence,
+        CommandType.EVIDENCE_OPENING,
+        RoomType.EVIDENCE,
+        0,
+        new ActorRef("user-case-process", ActorRole.USER, List.of("evidence:opening")),
+        new PayloadRef(
+            "target-e2e-evidence-opening.v1",
+            "urn:test:evidence-opening:" + sequence,
+            hash,
+            32),
+        expectedRevision,
+        OCCURRED_AT.plusSeconds(sequence),
+        OCCURRED_AT.plusSeconds(3600 + sequence),
+        "00-11111111111111111111111111111111-2222222222222222-01",
+        hash);
+  }
+
+  private static CaseCommandRef expiringEvidenceOpeningCommand(
+      int sequence, long expectedRevision, Instant deadlineAt) {
+    CaseCommandRef command = evidenceOpeningCommand(sequence, expectedRevision);
+    return new CaseCommandRef(
+        command.schemaVersion(),
+        command.commandId(),
+        command.tenantSurrogate(),
+        command.caseId(),
+        command.caseCommandSequence(),
+        command.commandType(),
+        command.roomType(),
+        command.roomEpoch(),
+        command.actorRef(),
+        command.payloadRef(),
+        command.expectedProcessRevision(),
+        command.occurredAt(),
+        deadlineAt,
+        command.traceparent(),
+        command.requestHash());
+  }
+
+  private static ExecuteAgentRunRequest evidenceAgentRunRequest(CaseCommandRef command) {
+    String logicalRunId = "target-evidence-run:" + command.commandId();
+    RoomGraphCommand graph =
+        new RoomGraphCommand(
+            "room-graph-command.v1",
+            command.commandId(),
+            logicalRunId,
+            logicalRunId + ":1",
+            command.tenantSurrogate(),
+            command.caseId(),
+            RoomType.EVIDENCE,
+            command.roomEpoch(),
+            TargetTypedRoomProtocol.GRAPH_KEY,
+            TargetTypedRoomProtocol.GRAPH_VERSION,
+            TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
+            "grt.v1.case-process-test",
+            new RoomGraphCommand.ActorScope(
+                command.actorRef().actorId(),
+                command.actorRef().actorRole(),
+                Audience.USER,
+                command.actorRef().actorScopes()),
+            command.expectedProcessRevision(),
+            "EVIDENCE_SEAL",
+            command.expectedProcessRevision(),
+            new RoomGraphCommand.SnapshotRef(
+                "evidence-invocation:" + command.caseCommandSequence(),
+                command.payloadRef().schemaVersion(),
+                command.payloadRef().uri(),
+                command.payloadRef().sha256(),
+                command.payloadRef().sizeBytes()),
+            new RoomGraphCommand.SnapshotRef(
+                "case-command:" + command.commandId(),
+                command.payloadRef().schemaVersion(),
+                command.payloadRef().uri(),
+                command.payloadRef().sha256(),
+                command.payloadRef().sizeBytes()),
+            new RoomGraphCommand.InvocationContext(
+                "evidence-clerk",
+                "prompt-v1",
+                "model-v1",
+                "output-v1",
+                "policy-v1",
+                "guardrail-v1",
+                List.of(),
+                "key-v1",
+                "nonce-v1"),
+            new RoomGraphCommand.RetryBudget(1, 1, 0),
+            command.deadlineAt(),
+            command.traceparent(),
+            command.requestHash());
+    return new ExecuteAgentRunRequest(
+        ExecuteAgentRunRequest.SCHEMA_VERSION,
+        logicalRunId,
+        1,
+        "agent-stream.v2",
+        "e".repeat(64),
+        null,
+        false,
+        0,
+        graph);
+  }
+
+  private static TargetRoomAgentRunTerminalNoCommit evidenceTerminalAuthority(
+      CaseCommandRef command,
+      WorkflowExecution roomExecution,
+      long roomFencingToken,
+      long expectedRoomRevision) {
+    ExecuteAgentRunRequest root = evidenceAgentRunRequest(command);
+    ExecuteAgentRunResult terminal =
+        new ExecuteAgentRunResult(
+            ExecuteAgentRunResult.SCHEMA_VERSION,
+            root.agentRunId(),
+            root.logicalRunId(),
+            root.attemptId(),
+            root.attemptNo(),
+            ExecuteAgentRunResult.Outcome.FAILED,
+            null,
+            null,
+            0,
+            false,
+            "EVIDENCE_AGENT_RUN_FAILED",
+            false,
+            AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
+            command.occurredAt().plusSeconds(1));
+    return new TargetRoomAgentRunTerminalNoCommit(
+        TargetRoomAgentRunTerminalNoCommit.SCHEMA_VERSION,
+        command,
+        roomFencingToken,
+        expectedRoomRevision,
+        0,
+        roomExecution.getWorkflowId(),
+        roomExecution.getRunId(),
+        "evidence-room-terminal-test.v1",
+        "a".repeat(64),
+        "b".repeat(64),
+        root,
+        terminal,
+        AgentRunAttemptStatus.FAILED,
+        terminal.errorCode(),
+        terminal.retryable(),
+        terminal.recoveryAction(),
+        terminal.lastSequenceNo(),
+        terminal.completedAt(),
+        false);
   }
 
   private static CaseCommandRef expiredCommand(int sequence) {
@@ -1768,6 +2836,13 @@ class CaseProcessWorkflowTest {
       CaseProcessIntakeProjectionRecoveryRequest request,
       CaseProcessSnapshot failed) {}
 
+  private record PreparedExpiredEvidenceRecovery(
+      CaseProcessWorkflow workflow,
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request,
+      CaseProcessSnapshot expired,
+      String firstExecutionRunId,
+      int commandDispatchesBeforeRecovery) {}
+
   public static final class RecoveryTargetCaseProcessWorkflow
       extends TargetTypedRoomCaseProcessWorkflow {
 
@@ -1775,18 +2850,42 @@ class CaseProcessWorkflowTest {
     private static final AtomicInteger commandDispatches = new AtomicInteger();
     private static final AtomicInteger eventDispatches = new AtomicInteger();
     private static final AtomicInteger closeCalls = new AtomicInteger();
+    private static final ConcurrentSkipListMap<String, Boolean> observedCommandDispatches =
+        new ConcurrentSkipListMap<>();
+    private static final ConcurrentSkipListMap<String, Boolean> observedEventDispatches =
+        new ConcurrentSkipListMap<>();
+    private static final ConcurrentSkipListMap<String, Boolean> terminalEvidenceCommandIds =
+        new ConcurrentSkipListMap<>();
+    private static final ConcurrentSkipListMap<String, Boolean> failedEvidenceCommandIds =
+        new ConcurrentSkipListMap<>();
+    private static final List<String> evidenceLogicalRunIds = new CopyOnWriteArrayList<>();
+    private static final List<String> evidenceRootAttemptIds = new CopyOnWriteArrayList<>();
+    private static final List<String> hearingCommandCoordinates = new CopyOnWriteArrayList<>();
+    private static final List<String> nonHearingCommandCoordinates =
+        new CopyOnWriteArrayList<>();
+    private static final List<RoomType> startedRoomTypes = new CopyOnWriteArrayList<>();
 
     private static void reset() {
       startCalls.set(0);
       commandDispatches.set(0);
       eventDispatches.set(0);
       closeCalls.set(0);
+      observedCommandDispatches.clear();
+      observedEventDispatches.clear();
+      terminalEvidenceCommandIds.clear();
+      failedEvidenceCommandIds.clear();
+      evidenceLogicalRunIds.clear();
+      evidenceRootAttemptIds.clear();
+      hearingCommandCoordinates.clear();
+      nonHearingCommandCoordinates.clear();
+      startedRoomTypes.clear();
     }
 
     @Override
     protected TargetTypedRoomChildHandle startTargetTypedRoomChild(
         ProvisionRoomEpoch request, String provisioningHash) {
       startCalls.incrementAndGet();
+      startedRoomTypes.add(request.roomType());
       return new RecordingTargetHandle(
           WorkflowExecution.newBuilder()
               .setWorkflowId(request.roomWorkflowId())
@@ -1814,7 +2913,7 @@ class CaseProcessWorkflowTest {
           descriptor.currentRoomRevision());
     }
 
-    private static final class RecordingTargetHandle implements TargetTypedRoomChildHandle {
+    private final class RecordingTargetHandle implements TargetTypedRoomChildHandle {
       private final WorkflowExecution execution;
       private final RoomType roomType;
       private final long roomEpoch;
@@ -1844,26 +2943,89 @@ class CaseProcessWorkflowTest {
 
       @Override
       public TargetTypedRoomDispatchReceipt commandAccepted(CaseCommandRef command) {
-        commandDispatches.incrementAndGet();
+        boolean firstObservedDispatch =
+            observedCommandDispatches.putIfAbsent(command.commandId(), true) == null;
+        if (firstObservedDispatch) {
+          commandDispatches.incrementAndGet();
+        }
+        if (command.roomType() == RoomType.EVIDENCE
+            && (command.commandType() == CommandType.EVIDENCE_OPENING
+                || command.commandType() == CommandType.EVIDENCE_SUBMIT)) {
+          ExecuteAgentRunRequest request = evidenceAgentRunRequest(command);
+          if (firstObservedDispatch) {
+            evidenceLogicalRunIds.add(request.logicalRunId());
+            evidenceRootAttemptIds.add(request.attemptId());
+          }
+          if (failedEvidenceCommandIds.containsKey(command.commandId())) {
+            throw ApplicationFailure.newNonRetryableFailure(
+                "fixture leaves the durable Evidence terminal before parent convergence",
+                "TEST_EVIDENCE_CHILD_TERMINAL_BEFORE_PARENT");
+          }
+          if (terminalEvidenceCommandIds.containsKey(command.commandId())) {
+            convergeTargetEvidenceTerminalNoCommit(
+                evidenceTerminalAuthority(
+                    command, execution, fencingToken, roomRevision));
+            throw new AssertionError("terminal Evidence convergence must consume the command");
+          }
+        }
+        if (roomType == RoomType.HEARING) {
+          if (command.roomType() != RoomType.HEARING
+              || command.roomEpoch() != roomEpoch
+              || command.expectedProcessRevision() != processRevision
+              || (command.commandType() != CommandType.HEARING_STATEMENT
+                  && command.commandType() != CommandType.HEARING_EVIDENCE_BATCH)) {
+            throw new IllegalStateException(
+                "HEARING_PARTY_COMMAND_STAGE_OR_COORDINATE_MISMATCH");
+          }
+          hearingCommandCoordinates.add(processRevision + "/" + roomRevision);
+          return receipt();
+        }
+        long sourceProcessRevision = processRevision;
+        long sourceRoomRevision = roomRevision;
         processRevision = Math.max(processRevision, command.expectedProcessRevision() + 1);
         roomRevision++;
+        nonHearingCommandCoordinates.add(
+            sourceProcessRevision
+                + "/"
+                + sourceRoomRevision
+                + "->"
+                + processRevision
+                + "/"
+                + roomRevision);
         return receipt();
       }
 
       @Override
       public TargetTypedRoomDispatchReceipt domainEventCommitted(CaseDomainEventRef event) {
-        eventDispatches.incrementAndGet();
+        if (observedEventDispatches.putIfAbsent(event.eventId(), true) == null) {
+          eventDispatches.incrementAndGet();
+        }
         return receipt();
       }
 
       @Override
       public String initiatorActorScopeHash() {
-        return "a".repeat(64);
+        return roomType == RoomType.INTAKE ? "a".repeat(64) : null;
       }
 
       @Override
       public String respondentActorScopeHash() {
-        return "b".repeat(64);
+        return roomType == RoomType.INTAKE ? "b".repeat(64) : null;
+      }
+
+      @Override
+      public TargetEvidenceParticipantBindingActivities.Binding evidenceParticipantBinding() {
+        if (roomType != RoomType.EVIDENCE) {
+          return null;
+        }
+        return new TargetEvidenceParticipantBindingActivities.Binding(
+            TENANT,
+            CASE_ID,
+            roomEpoch,
+            fencingToken,
+            "user-case-process",
+            "merchant-case-process",
+            "c".repeat(64));
       }
 
       @Override
@@ -1936,9 +3098,16 @@ class CaseProcessWorkflowTest {
         new CopyOnWriteArrayList<>();
     private final List<TerminalNoCommitOutcome> terminalNoCommitOutcomes =
         new CopyOnWriteArrayList<>();
+    private final List<ConvergeTargetEvidenceTerminalNoCommit>
+        evidenceTerminalNoCommitConvergences = new CopyOnWriteArrayList<>();
+    private final List<RecoverExpiredTargetEvidenceTerminalNoCommit>
+        expiredEvidenceRecoveries = new CopyOnWriteArrayList<>();
+    private final CountDownLatch expiredEvidenceRecoveryEntered = new CountDownLatch(1);
+    private final CountDownLatch expiredEvidenceRecoveryRelease = new CountDownLatch(1);
     private volatile boolean invalidCommandResponse;
     private volatile boolean invalidEventResponse;
     private volatile boolean rejectNextTerminalNoCommit;
+    private volatile boolean blockExpiredEvidenceRecovery;
 
     void put(CaseCommandRef command) {
       commands.put(command.caseCommandSequence(), command);
@@ -2077,6 +3246,90 @@ class CaseProcessWorkflowTest {
           authority.newRoomRevision(),
           authority.caseCommandSequence(),
           authority.lastCaseEventSequence());
+    }
+
+    @Override
+    public ConvergeTargetEvidenceTerminalNoCommitResult convergeTargetEvidenceTerminalNoCommit(
+        ConvergeTargetEvidenceTerminalNoCommit request) {
+      TargetRoomAgentRunTerminalNoCommit authority = request.authority();
+      TargetRoomAgentRunTerminalNoCommit firstAuthority =
+          evidenceTerminalNoCommitConvergences.isEmpty()
+              ? null
+              : evidenceTerminalNoCommitConvergences.getFirst().authority();
+      if (firstAuthority != null && !firstAuthority.equals(authority)) {
+        throw ApplicationFailure.newNonRetryableFailure(
+            "Evidence terminal-no-commit authority changed",
+            "TargetEvidenceTerminalNoCommitAuthorityConflict");
+      }
+      TerminalNoCommitOutcome outcome =
+          firstAuthority == null
+              ? TerminalNoCommitOutcome.TERMINALIZED
+              : TerminalNoCommitOutcome.IDEMPOTENT_REPLAY;
+      evidenceTerminalNoCommitConvergences.add(request);
+      commandStates.put(authority.command().caseCommandSequence(), CaseCommandLedgerState.FAILED);
+      return new ConvergeTargetEvidenceTerminalNoCommitResult(
+          "converge-target-evidence-terminal-no-commit-result.v1",
+          outcome,
+          authority,
+          authority.receiptUri(),
+          authority.receiptSha256(),
+          authority.command().expectedProcessRevision(),
+          authority.expectedRoomRevision(),
+          authority.command().caseCommandSequence(),
+          authority.expectedLastCaseEventSequence());
+    }
+
+    @Override
+    public ResolveTargetEvidenceTerminalNoCommitResult resolveTargetEvidenceTerminalNoCommit(
+        ResolveTargetEvidenceTerminalNoCommit request) {
+      throw new AssertionError("returned FAILED fixture must not invoke durable result recovery");
+    }
+
+    @Override
+    public RecoverExpiredTargetEvidenceTerminalNoCommitResult
+        recoverExpiredTargetEvidenceTerminalNoCommit(
+            RecoverExpiredTargetEvidenceTerminalNoCommit request) {
+      expiredEvidenceRecoveries.add(request);
+      expiredEvidenceRecoveryEntered.countDown();
+      if (blockExpiredEvidenceRecovery) {
+        try {
+          if (!expiredEvidenceRecoveryRelease.await(10, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("expired Evidence recovery fixture was not released");
+          }
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          throw new IllegalStateException("expired Evidence recovery fixture was interrupted", interrupted);
+        }
+      }
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest recovery = request.recovery();
+      CaseCommandRef command =
+          commands.get(recovery.previousCommand().caseCommandSequence());
+      if (command == null) {
+        throw new IllegalStateException("expired Evidence recovery command is missing");
+      }
+      TargetRoomAgentRunTerminalNoCommit authority =
+          evidenceTerminalAuthority(
+              command,
+              WorkflowExecution.newBuilder()
+                  .setWorkflowId(request.roomWorkflowId())
+                  .setRunId(request.roomWorkflowRunId())
+                  .build(),
+              request.roomFencingToken(),
+              recovery.expectedRoomRevision());
+      commandStates.put(command.caseCommandSequence(), CaseCommandLedgerState.FAILED);
+      return new RecoverExpiredTargetEvidenceTerminalNoCommitResult(
+          RecoverExpiredTargetEvidenceTerminalNoCommitResult.SCHEMA_VERSION,
+          ExpiredTargetEvidenceTerminalRecoveryOutcome.RECOVERED,
+          recovery.recoveryId(),
+          recovery.requestSha256(),
+          authority,
+          authority.receiptUri(),
+          authority.receiptSha256(),
+          recovery.actualExpiredAt(),
+          recovery.expectedProcessRevision(),
+          recovery.expectedRoomRevision(),
+          recovery.previousCommand().caseCommandSequence(),
+          Math.decrementExact(recovery.expectedNextCaseEventSequence()));
     }
 
     @Override

@@ -37,12 +37,24 @@ public class EvidenceProcessProjectionAdapter {
             select projection.tenant_surrogate,
                    projection.case_id,
                    projection.writer_mode,
-                   projection.writer_activation_status,
-                   projection.room_epoch as projection_room_epoch,
-                   projection.process_revision as projection_process_revision,
-                   projection.fencing_token as projection_fencing_token,
-                   projection.room_phase,
-                   projection.projected_at,
+                   case
+                       when epoch.lifecycle_status = 'TERMINAL' then 'TERMINAL'
+                       else projection.writer_activation_status
+                   end as writer_activation_status,
+                   coalesce(epoch.room_epoch, projection.room_epoch)
+                       as projection_room_epoch,
+                   coalesce(epoch.process_revision, projection.process_revision)
+                       as projection_process_revision,
+                   coalesce(epoch.fencing_token, projection.fencing_token)
+                       as projection_fencing_token,
+                   case
+                       when epoch.lifecycle_status = 'TERMINAL' then 'COMPLETED'
+                       else projection.room_phase
+                   end as room_phase,
+                   case
+                       when epoch.lifecycle_status = 'TERMINAL' then epoch.terminal_at
+                       else projection.projected_at
+                   end as projected_at,
                    epoch.room_id,
                    epoch.writer_mode as epoch_writer_mode,
                    epoch.lifecycle_status as epoch_lifecycle_status,
@@ -107,12 +119,38 @@ public class EvidenceProcessProjectionAdapter {
                     else '__DENY__'
                 end
                 and viewer.permission_scopes_json @> cast(:requiredViewerScopes as jsonb)
-               left join case_room_epoch epoch
-                on epoch.case_id = projection.case_id
-               and epoch.room_type = 'EVIDENCE'
-               and epoch.room_epoch = projection.room_epoch
-               and epoch.fencing_token = projection.fencing_token
-               and epoch.lifecycle_status in ('ACTIVE', 'TERMINAL')
+               left join lateral (
+                    with evidence_candidates as (
+                        select candidate.*
+                          from case_room_epoch candidate
+                         where candidate.case_id = projection.case_id
+                           and candidate.room_type = 'EVIDENCE'
+                           and candidate.lifecycle_status in ('ACTIVE', 'TERMINAL')
+                    ),
+                    authoritative_candidates as (
+                        select candidate.*
+                          from evidence_candidates candidate
+                         where (
+                             projection.current_room = 'EVIDENCE'
+                             and candidate.room_epoch = projection.room_epoch
+                             and candidate.fencing_token = projection.fencing_token
+                         )
+                         or (
+                             coalesce(projection.current_room, '') <> 'EVIDENCE'
+                             and candidate.lifecycle_status = 'TERMINAL'
+                             and not exists (
+                                 select 1
+                                   from evidence_candidates later
+                                  where later.lifecycle_status = 'TERMINAL'
+                                    and (later.room_epoch, later.fencing_token) >
+                                        (candidate.room_epoch, candidate.fencing_token)
+                             )
+                         )
+                    )
+                    select candidate.*
+                      from authoritative_candidates candidate
+                     where (select count(*) from authoritative_candidates) = 1
+              ) epoch on true
                left join target_e2e_room_epoch_binding target_binding
                  on target_binding.epoch_id = epoch.id
                 and target_binding.tenant_surrogate = projection.tenant_surrogate
@@ -264,13 +302,15 @@ public class EvidenceProcessProjectionAdapter {
                         .addValue("requiredViewerScopes", "[\"CASE_READ\",\"EVIDENCE_READ\"]")
                         .addValue("historyMode", historyMode),
                 EvidenceProcessProjectionAdapter::row);
-        if (rows.size() > 1) {
-            return Optional.of(processing(rows.getFirst(), requireViewerBinding(rows.getFirst(), actor)));
+        List<ProjectionRow> uniqueRows = rows.stream().distinct().toList();
+        if (uniqueRows.size() > 1) {
+            return Optional.of(processing(
+                    uniqueRows.getFirst(), requireViewerBinding(uniqueRows.getFirst(), actor)));
         }
-        if (rows.isEmpty()) {
+        if (uniqueRows.isEmpty()) {
             return Optional.empty();
         }
-        ProjectionRow row = rows.getFirst();
+        ProjectionRow row = uniqueRows.getFirst();
         StateResolution resolution = Objects.requireNonNull(
                 stateResolver.resolve(row), "resolved Evidence projection state");
         return Optional.of(adapt(

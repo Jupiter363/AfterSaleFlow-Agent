@@ -120,6 +120,22 @@ public interface CaseRoomEpochRepository extends JpaRepository<CaseRoomEpochEnti
             @Param("occurredAt") OffsetDateTime occurredAt,
             Pageable pageable);
 
+    @Query(
+            """
+            select epoch
+              from CaseRoomEpochEntity epoch
+             where epoch.tenantSurrogate = :tenantSurrogate
+               and epoch.caseId = :caseId
+               and epoch.roomId = :roomId
+               and epoch.roomType = :roomType
+            """)
+    List<CaseRoomEpochEntity> findByRoomAuthority(
+            @Param("tenantSurrogate") String tenantSurrogate,
+            @Param("caseId") String caseId,
+            @Param("roomId") String roomId,
+            @Param("roomType") RoomType roomType,
+            Pageable pageable);
+
     List<CaseRoomEpochEntity>
             findByLifecycleStatusAndWriterModeInAndTemporalWorkflowIdIsNotNullOrderByUpdatedAtAsc(
                     EpochLifecycleStatus lifecycleStatus,

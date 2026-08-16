@@ -12,6 +12,8 @@ import com.example.dispute.workflow.contract.outcome.v1.OutcomeWorkflowStart;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.AgentRunWorkflowIds;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -54,9 +56,11 @@ import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyS
 import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyScopeSource.Request;
 import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyScopeSource.ResolvedPartyScopes;
 import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
+import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.failure.ChildWorkflowFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.ExternalWorkflowStub;
@@ -95,6 +99,10 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       "target-review-non-execution-v1";
   public static final String TARGET_EVIDENCE_FROZEN_SUBMISSION_START_CHANGE_ID =
       "target-evidence-frozen-submission-start-v1";
+  public static final String TARGET_EVIDENCE_AGENT_RUN_TERMINAL_NO_COMMIT_CHANGE_ID =
+      "target-evidence-agent-run-terminal-no-commit-v1";
+  public static final String TARGET_EVIDENCE_RETURNED_AGENT_RUN_TERMINAL_NO_COMMIT_CHANGE_ID =
+      "target-evidence-returned-agent-run-terminal-no-commit-v1";
   private static final int FROZEN_EVIDENCE_START = 1;
 
   private final TargetIntakeCommandBridgeActivities targetIntakeCommandBridge =
@@ -223,19 +231,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
               descriptor.currentRoomRevision(),
               descriptor.initiatorActorScopeHash(),
               descriptor.respondentActorScopeHash());
-      case EVIDENCE ->
-          new EvidenceHandle(
-              Workflow.newExternalWorkflowStub(EvidenceRoomWorkflow.class, execution),
-              execution,
-              descriptor.roomEpoch(),
-              descriptor.fencingToken(),
-              descriptor.currentProcessRevision(),
-              descriptor.currentRoomRevision(),
-              Objects.requireNonNull(
-                  descriptor.evidenceParticipantBinding(),
-                  "restored target Evidence participant binding"),
-              descriptor.roomWorkflowBuildId(),
-              ExecutionLane.TARGET_E2E_CANDIDATE);
+      case EVIDENCE -> restoreEvidenceHandle(descriptor, execution);
       case HEARING ->
           new HearingHandle(
               Workflow.newExternalWorkflowStub(HearingRoomWorkflow.class, execution),
@@ -256,6 +252,29 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
                   descriptor.reviewOutcomeStartBinding(),
                   "restored target Review Outcome binding"));
     };
+  }
+
+  private EvidenceHandle restoreEvidenceHandle(
+      ActiveChildDescriptor descriptor, WorkflowExecution execution) {
+    TargetEvidenceParticipantBindingActivities.Binding participants =
+        Objects.requireNonNull(
+            descriptor.evidenceParticipantBinding(),
+            "restored target Evidence participant binding");
+    var commitment =
+        Objects.requireNonNull(
+            provisioningCommitment(), "restored target Evidence provisioning commitment");
+    EvidenceRoomStart start = targetEvidenceStart(commitment.request(), participants);
+    return new EvidenceHandle(
+        Workflow.newExternalWorkflowStub(EvidenceRoomWorkflow.class, execution),
+        execution,
+        descriptor.roomEpoch(),
+        descriptor.fencingToken(),
+        descriptor.currentProcessRevision(),
+        descriptor.currentRoomRevision(),
+        participants,
+        start.workflowBuildId(),
+        start.executionLane(),
+        start);
   }
 
   private TargetTypedRoomChildHandle startIntake(
@@ -385,7 +404,8 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         request.initialRoomRevision(),
         participants,
         start.workflowBuildId(),
-        start.executionLane());
+        start.executionLane(),
+        start);
   }
 
   static EvidenceRoomStart targetEvidenceStart(
@@ -1020,6 +1040,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     private final TargetEvidenceParticipantBindingActivities.Binding participants;
     private final String workflowBuildId;
     private final ExecutionLane executionLane;
+    private final EvidenceRoomStart start;
 
     private EvidenceHandle(
         EvidenceRoomWorkflow child,
@@ -1030,7 +1051,8 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         long roomRevision,
         TargetEvidenceParticipantBindingActivities.Binding participants,
         String workflowBuildId,
-        ExecutionLane executionLane) {
+        ExecutionLane executionLane,
+        EvidenceRoomStart start) {
       super(RoomType.EVIDENCE, execution, roomEpoch, fencingToken, processRevision, roomRevision);
       this.child = Objects.requireNonNull(child, "child");
       this.roomEpoch = roomEpoch;
@@ -1040,17 +1062,80 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         throw new IllegalArgumentException("target Evidence handle requires the target execution lane");
       }
       this.executionLane = executionLane;
+      this.start = Objects.requireNonNull(start, "start");
     }
 
     @Override
     protected boolean onCommand(CaseCommandRef command) {
       if (command.commandType()
-          == com.example.dispute.workflow.contract.v1.ContractTypes.CommandType.EVIDENCE_SUBMIT) {
+              == com.example.dispute.workflow.contract.v1.ContractTypes.CommandType.EVIDENCE_SUBMIT
+          || command.commandType()
+              == com.example.dispute.workflow.contract.v1.ContractTypes.CommandType.EVIDENCE_OPENING) {
         TargetEvidenceAgentRunTrigger trigger =
             targetEvidenceCommandBridge.bindEvidenceAgentRun(
                 new TargetEvidenceCommandBridgeActivities.BindRequest(
                     command, fencingToken(), roomRevision()));
-        ExecuteAgentRunResult result = launchTargetAgentRunChild(trigger.request());
+        int terminalNoCommitVersion =
+            Workflow.getVersion(
+                TARGET_EVIDENCE_AGENT_RUN_TERMINAL_NO_COMMIT_CHANGE_ID,
+                Workflow.DEFAULT_VERSION,
+                1);
+        ExecuteAgentRunResult result;
+        try {
+          result = launchTargetAgentRunChild(trigger.request());
+        } catch (ChildWorkflowFailure failure) {
+          if (terminalNoCommitVersion == Workflow.DEFAULT_VERSION) {
+            throw failure;
+          }
+          TargetRoomAgentRunTerminalNoCommit authority =
+              resolveTargetEvidenceTerminalNoCommit(
+                  command,
+                  fencingToken(),
+                  trigger.expectedRoomRevision(),
+                  targetEvidenceExpectedLastCaseEventSequence(),
+                  execution().getWorkflowId(),
+                  execution().getRunId(),
+                  workflowBuildId,
+                  trigger.commandHash(),
+                  trigger.commandEnvelopeHash(),
+                  trigger.request());
+          convergeTargetEvidenceTerminalNoCommit(authority);
+          throw failure;
+        }
+        if (terminalNoCommitVersion == 1 && isTerminalNoCommit(result)) {
+          int returnedTerminalNoCommitVersion =
+              Workflow.getVersion(
+                  TARGET_EVIDENCE_RETURNED_AGENT_RUN_TERMINAL_NO_COMMIT_CHANGE_ID,
+                  Workflow.DEFAULT_VERSION,
+                  1);
+          if (returnedTerminalNoCommitVersion == 1) {
+            AgentRunAttemptStatus attemptStatus =
+                result.publicOutputEmitted()
+                    ? AgentRunAttemptStatus.ABORTED
+                    : AgentRunAttemptStatus.FAILED;
+            convergeTargetEvidenceTerminalNoCommit(
+                new TargetRoomAgentRunTerminalNoCommit(
+                    TargetRoomAgentRunTerminalNoCommit.SCHEMA_VERSION,
+                    command,
+                    fencingToken(),
+                    trigger.expectedRoomRevision(),
+                    targetEvidenceExpectedLastCaseEventSequence(),
+                    execution().getWorkflowId(),
+                    execution().getRunId(),
+                    workflowBuildId,
+                    trigger.commandHash(),
+                    trigger.commandEnvelopeHash(),
+                    trigger.request(),
+                    result,
+                    attemptStatus,
+                    result.errorCode(),
+                    result.retryable(),
+                    result.recoveryAction(),
+                    result.lastSequenceNo(),
+                    result.completedAt(),
+                    false));
+          }
+        }
         child.agentRunFinalized(
             TargetRoomAgentRunFinalizationReceipt.completed(
                 trigger.request(), result, fencingToken(), trigger.expectedRoomRevision()));
@@ -1064,7 +1149,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         TargetEvidencePartyCompletionActivities.Result finalized =
             targetEvidencePartyCompletion.finalizeCompletion(
                 new TargetEvidencePartyCompletionActivities.Request(
-                    evidenceStart(), participants, command, processRevision(), roomRevision()));
+                    start, participants, command, processRevision(), roomRevision()));
         advanceTo(finalized.progressReceipt());
         child.partyCompleted(
             new EvidenceRoomSignal(
@@ -1095,24 +1180,12 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       throw new IllegalArgumentException("target Evidence completion actor is not a bound participant");
     }
 
-    private EvidenceRoomStart evidenceStart() {
-      return new EvidenceRoomStart(
-          "evidence-room-start.v1",
-          participants.tenantSurrogate(),
-          participants.caseId(),
-          "ROOM_EVIDENCE_" + participants.caseId(),
-          roomEpoch,
-          fencingToken(),
-          participants.initiatorParticipantId(),
-          participants.respondentParticipantId(),
-          Instant.EPOCH,
-          Instant.EPOCH.plus(Duration.ofHours(24)),
-          1,
-          processRevision(),
-          roomRevision(),
-          workflowBuildId,
-          executionLane);
-    }
+  }
+
+  private static boolean isTerminalNoCommit(ExecuteAgentRunResult result) {
+    return result.outcome() == ExecuteAgentRunResult.Outcome.FAILED
+        && !result.retryable()
+        && result.recoveryAction() == AgentRunRecoveryAction.FAIL_LOGICAL_RUN;
   }
 
   /** Runs the immutable child through formal finalization before returning its completed result. */

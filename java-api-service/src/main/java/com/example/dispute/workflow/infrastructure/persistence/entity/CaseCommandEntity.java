@@ -258,6 +258,10 @@ public class CaseCommandEntity extends AbstractEntity {
         return appliedAt;
     }
 
+    public OffsetDateTime getUpdatedAt() {
+        return updatedAt;
+    }
+
     public void markOrchestrationAccepted(OffsetDateTime acceptedByOrchestratorAt) {
         Objects.requireNonNull(
                 acceptedByOrchestratorAt, "acceptedByOrchestratorAt must not be null");
@@ -345,6 +349,69 @@ public class CaseCommandEntity extends AbstractEntity {
         commandStatus = CommandStatus.EXPIRED;
         statusReasonCode = reasonCode;
         updatedAt = expiredAt;
+    }
+
+    /**
+     * Converts one exact expired orchestration to a terminal-no-commit failure while retaining the
+     * persisted expiration instant as immutable replay authority.
+     */
+    public void markExpiredOrchestrationTerminalNoCommit(
+            String expectedExpirationReasonCode,
+            OffsetDateTime actualExpiredAt,
+            String terminalReasonCode,
+            String terminalReceiptUri,
+            String terminalReceiptSha256,
+            OffsetDateTime terminalAt) {
+        Objects.requireNonNull(
+                expectedExpirationReasonCode, "expectedExpirationReasonCode must not be null");
+        Objects.requireNonNull(actualExpiredAt, "actualExpiredAt must not be null");
+        Objects.requireNonNull(terminalReasonCode, "terminalReasonCode must not be null");
+        Objects.requireNonNull(terminalReceiptUri, "terminalReceiptUri must not be null");
+        Objects.requireNonNull(terminalReceiptSha256, "terminalReceiptSha256 must not be null");
+        Objects.requireNonNull(terminalAt, "terminalAt must not be null");
+        if (expectedExpirationReasonCode.isBlank()
+                || expectedExpirationReasonCode.length() > 64
+                || terminalReasonCode.isBlank()
+                || terminalReasonCode.length() > 64) {
+            throw new IllegalArgumentException("terminal reason authority is invalid");
+        }
+        if (terminalReceiptUri.isBlank()
+                || terminalReceiptUri.length() > 1024
+                || !terminalReceiptSha256.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("terminal receipt identity is invalid");
+        }
+        if (orchestratedAt == null
+                || updatedAt == null
+                || !updatedAt.toInstant().equals(actualExpiredAt.toInstant())
+                || orchestratedAt.toInstant().isAfter(terminalAt.toInstant())
+                || !terminalAt.toInstant().isBefore(deadlineAt.toInstant())
+                || deadlineAt.toInstant().isAfter(actualExpiredAt.toInstant())) {
+            throw new IllegalStateException(
+                    "expired orchestration chronology conflicts with terminal authority");
+        }
+        if (commandStatus == CommandStatus.FAILED) {
+            if (!terminalReasonCode.equals(statusReasonCode)
+                    || !terminalReceiptUri.equals(resultUri)
+                    || !terminalReceiptSha256.equals(resultSha256)
+                    || appliedAt != null) {
+                throw new IllegalStateException(
+                        "failed expired command is bound to another terminal authority");
+            }
+            return;
+        }
+        if (commandStatus != CommandStatus.EXPIRED
+                || !expectedExpirationReasonCode.equals(statusReasonCode)
+                || resultUri != null
+                || resultSha256 != null
+                || appliedAt != null) {
+            throw new IllegalStateException(
+                    "only the exact expired orchestration can converge without a commit");
+        }
+        commandStatus = CommandStatus.FAILED;
+        statusReasonCode = terminalReasonCode;
+        resultUri = terminalReceiptUri;
+        resultSha256 = terminalReceiptSha256;
+        // Deliberately preserve updatedAt == actualExpiredAt as the historic expiration authority.
     }
 
     public void markShadowCompleted(OffsetDateTime completedAt) {

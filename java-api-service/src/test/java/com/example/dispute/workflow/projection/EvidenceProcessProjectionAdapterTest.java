@@ -16,6 +16,7 @@ import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter.ProjectionEvidenceState;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter.ProjectionRow;
+import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter.StateResolution;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter.TargetActivationAuthority;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionQuery;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView;
@@ -188,6 +189,265 @@ class EvidenceProcessProjectionAdapterTest {
         assertThat(view.dossierVersion()).isNull();
         assertThat(view.terminalProposal()).isNull();
         assertThat(view.recovery()).isEqualTo(Recovery.none());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void identicalTargetRowsDeduplicateBeforeAuthoritativeAvailabilityResolution() {
+        NamedParameterJdbcOperations jdbc = mock(NamedParameterJdbcOperations.class);
+        AuthenticatedActor actor = actor(ActorRole.MERCHANT);
+        ProjectionRow target = row(
+                actor,
+                "TEMPORAL",
+                "tenant-run001",
+                "QA_TARGET_0042",
+                "ROOM_P9_EVIDENCE_42",
+                false,
+                false,
+                "OPEN",
+                "ACTIVE",
+                pendingState(),
+                PROJECTED_AT);
+        ProjectionRow materiallyDifferent = row(
+                actor,
+                "TEMPORAL",
+                "tenant-run001",
+                "QA_TARGET_0042",
+                "ROOM_P9_EVIDENCE_42",
+                false,
+                false,
+                "OPEN",
+                "ACTIVE",
+                pendingState(),
+                PROJECTED_AT.plusSeconds(1));
+        when(jdbc.query(anyString(), any(SqlParameterSource.class), any(RowMapper.class)))
+                .thenReturn(List.of(target, target), List.of(target, materiallyDifferent));
+        EvidenceProcessProjectionQuery query = new EvidenceProcessProjectionQuery(
+                new EvidenceProcessProjectionAdapter(jdbc, TARGET_RUNTIME_PINS), List.of());
+
+        EvidenceProcessProjectionView view =
+                query.read(target.caseId(), actor, false).orElseThrow();
+
+        assertThat(view.projectionState()).isEqualTo("AVAILABLE");
+        assertThat(view.writerMode()).isEqualTo("TEMPORAL");
+        assertThat(view.graphRuntimeMode()).isEqualTo("TARGET_E2E_CANDIDATE");
+        assertThat(view.roomPhase()).isEqualTo("OPEN");
+        assertThat(view.pendingState()).isEqualTo("NONE");
+        assertThat(view.activeGraphRun()).isNull();
+        assertThat(view.recovery()).isEqualTo(Recovery.none());
+
+        EvidenceProcessProjectionView ambiguous =
+                query.read(target.caseId(), actor, false).orElseThrow();
+
+        assertThat(ambiguous.projectionState()).isEqualTo("PROCESSING");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void advancedHearingProjectionReadsExactTerminalEvidenceEpochAuthority() {
+        AuthenticatedActor actor = actor(ActorRole.MERCHANT);
+        ProjectionEvidenceState closedState = new ProjectionEvidenceState(
+                PROJECTED_AT.plusDays(1),
+                false,
+                null,
+                new PartyCompletion(
+                        true,
+                        true,
+                        "RECEIPT_EVIDENCE_USER",
+                        "a".repeat(64),
+                        "RECEIPT_EVIDENCE_MERCHANT",
+                        "b".repeat(64)),
+                new AssessmentCounts(1, 1, 0, 0, 0),
+                1L,
+                6,
+                "BOTH_PARTIES_COMPLETED",
+                new TerminalProposal("PROPOSAL_EVIDENCE_TERMINAL", "c".repeat(64)),
+                Recovery.none());
+        ProjectionRow terminal = targetEvidenceRow(
+                actor,
+                false,
+                "ROOM_EVIDENCE_TERMINAL",
+                "TERMINAL",
+                0,
+                14,
+                2,
+                6,
+                closedState,
+                targetAuthority(
+                        "tenant-run001",
+                        "QA_TARGET_0097",
+                        "ISOLATED_SYNTHETIC_NEW_CASES",
+                        TARGET_SYNTHETIC_PREFIX,
+                        "ISOLATED_SYNTHETIC_NEW_CASE",
+                        "EVIDENCE",
+                        0,
+                        2));
+        ProjectionRow terminalHistory = targetEvidenceRow(
+                actor,
+                true,
+                "ROOM_EVIDENCE_TERMINAL",
+                "TERMINAL",
+                0,
+                14,
+                2,
+                6,
+                closedState,
+                terminal.targetAuthority());
+        NamedParameterJdbcOperations jdbc = mock(NamedParameterJdbcOperations.class);
+        when(jdbc.query(anyString(), any(SqlParameterSource.class), any(RowMapper.class)))
+                .thenReturn(List.of(terminal), List.of(terminalHistory), List.of(terminal));
+        EvidenceProcessProjectionAdapter scoped =
+                new EvidenceProcessProjectionAdapter(jdbc, TARGET_RUNTIME_PINS);
+
+        EvidenceProcessProjectionView activeRead = scoped.read(
+                        terminal.caseId(),
+                        actor,
+                        false,
+                        ignored -> new StateResolution(closedState, true))
+                .orElseThrow();
+        EvidenceProcessProjectionView historyRead = scoped.read(
+                        terminal.caseId(),
+                        actor,
+                        true,
+                        ignored -> new StateResolution(closedState, true))
+                .orElseThrow();
+        EvidenceProcessProjectionView replay = scoped.read(
+                        terminal.caseId(),
+                        actor,
+                        false,
+                        ignored -> new StateResolution(closedState, true))
+                .orElseThrow();
+
+        assertThat(activeRead).isEqualTo(replay);
+        assertThat(activeRead.roomId()).isEqualTo("ROOM_EVIDENCE_TERMINAL");
+        assertThat(activeRead.roomEpoch()).isZero();
+        assertThat(activeRead.fencingToken()).isEqualTo(2);
+        assertThat(activeRead.processRevision()).isEqualTo(14);
+        assertThat(activeRead.roomRevision()).isEqualTo(6);
+        assertThat(activeRead.roomPhase()).isEqualTo("COMPLETED");
+        assertThat(activeRead.pendingState()).isEqualTo("NONE");
+        assertThat(activeRead.activeGraphRun()).isNull();
+        assertThat(historyRead.historyMode()).isTrue();
+        assertThat(historyRead.roomId()).isEqualTo(activeRead.roomId());
+        assertThat(historyRead.roomEpoch()).isEqualTo(activeRead.roomEpoch());
+        assertThat(historyRead.fencingToken()).isEqualTo(activeRead.fencingToken());
+        assertThat(historyRead.roomPhase()).isEqualTo("COMPLETED");
+        assertThat(historyRead.pendingState()).isEqualTo("NONE");
+        assertThat(historyRead.activeGraphRun()).isNull();
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc, org.mockito.Mockito.times(3))
+                .query(sql.capture(), any(SqlParameterSource.class), any(RowMapper.class));
+        assertThat(sql.getValue())
+                .contains(
+                        "with evidence_candidates as",
+                        "projection.current_room = 'EVIDENCE'",
+                        "coalesce(projection.current_room, '') <> 'EVIDENCE'",
+                        "candidate.lifecycle_status = 'TERMINAL'",
+                        "(later.room_epoch, later.fencing_token) >",
+                        "(select count(*) from authoritative_candidates) = 1",
+                        "coalesce(epoch.room_epoch, projection.room_epoch)",
+                        "as projection_room_epoch",
+                        "coalesce(epoch.fencing_token, projection.fencing_token)",
+                        "as projection_fencing_token",
+                        "then 'COMPLETED'",
+                        "then epoch.terminal_at");
+
+        ProjectionRow currentActive = row(
+                actor,
+                "TEMPORAL",
+                "tenant-run001",
+                "QA_TARGET_0097",
+                "ROOM_EVIDENCE_ACTIVE",
+                false,
+                false,
+                "OPEN",
+                "ACTIVE",
+                pendingState(),
+                PROJECTED_AT);
+        assertThat(targetAdapter.adapt(currentActive, actor).projectionState())
+                .isEqualTo("AVAILABLE");
+
+        ProjectionRow missingTerminal = targetEvidenceRow(
+                actor, false, null, "TERMINAL", 0, 14, 2, 6, closedState, null);
+        assertThatThrownBy(() -> targetAdapter.adapt(missingTerminal, actor))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("lacks its activation ledger binding");
+
+        TargetActivationAuthority drifted = targetAuthority(
+                "tenant-run001",
+                "QA_TARGET_0097",
+                "ISOLATED_SYNTHETIC_NEW_CASES",
+                TARGET_SYNTHETIC_PREFIX,
+                "ISOLATED_SYNTHETIC_NEW_CASE",
+                "EVIDENCE",
+                0,
+                3);
+        assertThatThrownBy(() -> targetAdapter.adapt(
+                        targetEvidenceRow(
+                                actor,
+                                false,
+                                "ROOM_EVIDENCE_TERMINAL",
+                                "TERMINAL",
+                                0,
+                                14,
+                                2,
+                                6,
+                                closedState,
+                                drifted),
+                        actor))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("lacks its activation ledger binding");
+
+        TargetActivationAuthority hearing = targetAuthority(
+                "tenant-run001",
+                "QA_TARGET_0097",
+                "ISOLATED_SYNTHETIC_NEW_CASES",
+                TARGET_SYNTHETIC_PREFIX,
+                "ISOLATED_SYNTHETIC_NEW_CASE",
+                "HEARING",
+                0,
+                2);
+        assertThatThrownBy(() -> targetAdapter.adapt(
+                        targetEvidenceRow(
+                                actor,
+                                false,
+                                "ROOM_EVIDENCE_TERMINAL",
+                                "TERMINAL",
+                                0,
+                                14,
+                                2,
+                                6,
+                                closedState,
+                                hearing),
+                        actor))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("lacks its activation ledger binding");
+
+        NamedParameterJdbcOperations ambiguousJdbc = mock(NamedParameterJdbcOperations.class);
+        ProjectionRow conflicting = targetEvidenceRow(
+                actor,
+                false,
+                "ROOM_EVIDENCE_CONFLICT",
+                "TERMINAL",
+                0,
+                14,
+                2,
+                7,
+                closedState,
+                terminal.targetAuthority());
+        when(ambiguousJdbc.query(
+                        anyString(), any(SqlParameterSource.class), any(RowMapper.class)))
+                .thenReturn(List.of(terminal, conflicting));
+        EvidenceProcessProjectionView ambiguous = new EvidenceProcessProjectionAdapter(
+                        ambiguousJdbc, TARGET_RUNTIME_PINS)
+                .read(
+                        terminal.caseId(),
+                        actor,
+                        false,
+                        ignored -> new StateResolution(closedState, true))
+                .orElseThrow();
+        assertThat(ambiguous.projectionState()).isEqualTo("PROCESSING");
     }
 
     @Test
@@ -787,6 +1047,26 @@ class EvidenceProcessProjectionAdapterTest {
             String caseScopeMode,
             String caseIdPrefix,
             String reservationKind) {
+        return targetAuthority(
+                tenantSurrogate,
+                caseId,
+                caseScopeMode,
+                caseIdPrefix,
+                reservationKind,
+                "EVIDENCE",
+                4,
+                9);
+    }
+
+    private static TargetActivationAuthority targetAuthority(
+            String tenantSurrogate,
+            String caseId,
+            String caseScopeMode,
+            String caseIdPrefix,
+            String reservationKind,
+            String roomType,
+            long roomEpoch,
+            long roomFencingToken) {
         return new TargetActivationAuthority(
                 "p9act.v1." + "a".repeat(32),
                 "c".repeat(64),
@@ -794,9 +1074,9 @@ class EvidenceProcessProjectionAdapterTest {
                 tenantSurrogate,
                 tenantSurrogate,
                 caseId,
-                "EVIDENCE",
-                4,
-                9,
+                roomType,
+                roomEpoch,
+                roomFencingToken,
                 "p9case.v1." + "f".repeat(32),
                 reservationKind,
                 "e".repeat(64),
@@ -813,6 +1093,47 @@ class EvidenceProcessProjectionAdapterTest {
                 "graph-code-p9",
                 "d".repeat(64),
                 "ACTIVE");
+    }
+
+    private static ProjectionRow targetEvidenceRow(
+            AuthenticatedActor actor,
+            boolean historyMode,
+            String roomId,
+            String lifecycle,
+            long roomEpoch,
+            long processRevision,
+            long fencingToken,
+            long roomRevision,
+            ProjectionEvidenceState state,
+            TargetActivationAuthority authority) {
+        return new ProjectionRow(
+                "tenant-run001",
+                "QA_TARGET_0097",
+                roomId,
+                "TEMPORAL",
+                "TERMINAL".equals(lifecycle) ? "TERMINAL" : "READY",
+                roomEpoch,
+                processRevision,
+                fencingToken,
+                "TERMINAL".equals(lifecycle) ? "COMPLETED" : "OPEN",
+                PROJECTED_AT,
+                "TEMPORAL",
+                lifecycle,
+                "READY",
+                roomId == null ? null : roomEpoch,
+                roomId == null ? null : processRevision,
+                roomId == null ? null : roomRevision,
+                roomId == null ? null : fencingToken,
+                roomId == null ? null : "control-build-p9",
+                roomId == null ? null : "target-e2e-graph.2026-07-27.1",
+                roomId == null ? null : "target-e2e-checkpoint.v1",
+                authority,
+                false,
+                null,
+                state,
+                historyMode,
+                actor.actorId(),
+                actor.role().name());
     }
 
     private static ProjectionEvidenceState pendingState() {

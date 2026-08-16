@@ -4,6 +4,7 @@ import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_TIMER_FIRED;
 import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_TIMER_STARTED;
 import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceOperationKeys;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomSignal;
@@ -54,10 +55,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class EvidenceRoomWorkflowReplayTest {
 
+  private static final String FIRST_EXECUTION_RUN_TERMINAL_AUTHORITY_CHANGE_ID =
+      "evidence-first-execution-run-terminal-authority";
+  private static final String DUAL_RUN_TERMINAL_AUTHORITY_CHANGE_ID =
+      "evidence-dual-run-terminal-authority";
   private static final String CASE_ID = "CASE_P5_SYNTHETIC_REPLAY";
   private static final long EPOCH = 8;
   private static final String INITIATOR = "PARTICIPANT_P5_REPLAY_INITIATOR";
@@ -194,8 +200,33 @@ class EvidenceRoomWorkflowReplayTest {
   @Test
   void explicitTargetLaneWithLocalBuildFinalizesSignalsParentAndReplaysExactlyOnce()
       throws Exception {
+    assertThat(
+            resolveTerminalWorkflowRunId(
+                1, "reset-current-run", "durable-first-execution-run"))
+        .isEqualTo("durable-first-execution-run");
+    assertThat(
+            resolveTerminalWorkflowRunId(
+                Workflow.DEFAULT_VERSION,
+                "recorded-current-run",
+                "durable-first-execution-run"))
+        .isEqualTo("recorded-current-run");
+    assertThat(
+            resolveTerminalWorkflowRunId(
+                1, "reset-current-run", "durable-first-execution-run"))
+        .isEqualTo(
+            resolveTerminalWorkflowRunId(
+                1, "reset-current-run", "durable-first-execution-run"));
+    assertThatThrownBy(() -> resolveTerminalWorkflowRunId(1, "reset-current-run", " "))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () ->
+                resolveTerminalWorkflowRunId(
+                    Workflow.DEFAULT_VERSION, null, "durable-first-execution-run"))
+        .isInstanceOf(IllegalArgumentException.class);
     WorkflowExecutionHistory history;
     AtomicInteger terminalCalls = new AtomicInteger();
+    AtomicReference<TargetEvidenceTerminalActivities.TerminalRequest> terminalRequest =
+        new AtomicReference<>();
     try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
       WorkerFactory targetWorkerFactory = null;
       try {
@@ -220,6 +251,9 @@ class EvidenceRoomWorkflowReplayTest {
                       || request.workflowRunId().isBlank()) {
                     throw new IllegalStateException(
                         "terminal Activity did not freeze the exact room Workflow execution");
+                  }
+                  if (!terminalRequest.compareAndSet(null, request)) {
+                    throw new IllegalStateException("terminal Activity was invoked more than once");
                   }
                   terminalCalls.incrementAndGet();
                   return new TargetEvidenceTerminalActivities.TerminalResult(
@@ -263,7 +297,7 @@ class EvidenceRoomWorkflowReplayTest {
                         .build());
         Instant openedAt = Instant.ofEpochMilli(environment.currentTimeMillis());
         EvidenceRoomStart targetStart = targetStart(openedAt, Duration.ofHours(2));
-        WorkflowClient.start(workflow::run, targetStart);
+        var execution = WorkflowClient.start(workflow::run, targetStart);
         workflow.partyCompleted(signal(INITIATOR, "TARGET_TERMINAL_I", 6));
         workflow.partyCompleted(signal(RESPONDENT, "TARGET_TERMINAL_R", 7));
 
@@ -274,7 +308,22 @@ class EvidenceRoomWorkflowReplayTest {
         assertThat(result.processRevision()).isEqualTo(5);
         assertThat(result.roomRevision()).isEqualTo(6);
         assertThat(terminalCalls).hasValue(1);
+        assertThat(terminalRequest.get().workflowId()).isEqualTo(workflowId);
+        assertThat(terminalRequest.get().workflowRunId()).isEqualTo(execution.getRunId());
+        assertThat(terminalRequest.get().durableWorkflowRunId())
+            .isEqualTo(execution.getRunId());
         history = environment.getWorkflowClient().fetchHistory(workflowId);
+        assertThat(history.getEvents().stream()
+                .filter(
+                    event ->
+                        isVersionMarker(
+                            event, FIRST_EXECUTION_RUN_TERMINAL_AUTHORITY_CHANGE_ID)))
+            .hasSize(1);
+        assertThat(history.getEvents().stream()
+                .filter(
+                    event ->
+                        isVersionMarker(event, DUAL_RUN_TERMINAL_AUTHORITY_CHANGE_ID)))
+            .hasSize(1);
       } finally {
         if (targetWorkerFactory != null) {
           shutdownAndAwait(targetWorkerFactory);
@@ -284,6 +333,129 @@ class EvidenceRoomWorkflowReplayTest {
 
     WorkflowReplayer.replayWorkflowExecution(history, EvidenceRoomWorkflowImpl.class);
     assertThat(terminalCalls).hasValue(1);
+
+    WorkflowExecutionHistory preDualRunAuthorityHistory;
+    AtomicInteger preDualRunAuthorityTerminalCalls = new AtomicInteger();
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      WorkerFactory targetWorkerFactory = null;
+      try {
+        String taskQueue = "phase5-evidence-replay-pre-run-authority";
+        String workflowId =
+            CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, RoomType.EVIDENCE, EPOCH);
+        Worker controlWorker =
+            environment.newWorker(CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE);
+        controlWorker.registerActivitiesImplementations(
+            (TargetEvidenceTerminalActivities)
+                request -> {
+                  assertThat(request.start().targetE2eCandidate()).isTrue();
+                  assertThat(request.workflowId()).isEqualTo(workflowId);
+                  assertThat(request.workflowRunId()).isNotBlank();
+                  assertThat(request.durableWorkflowRunId()).isNull();
+                  preDualRunAuthorityTerminalCalls.incrementAndGet();
+                  return new TargetEvidenceTerminalActivities.TerminalResult(
+                      new TargetRoomProgressReceipt(
+                          RoomType.EVIDENCE,
+                          request.start().roomEpoch(),
+                          request.start().fencingToken(),
+                          Math.incrementExact(request.expectedProcessRevision()),
+                          Math.incrementExact(request.expectedRoomRevision()),
+                          "pre-authority-version-terminal-receipt",
+                          "f".repeat(64)));
+                });
+        environment.start();
+        targetWorkerFactory =
+            startWorkerFactory(
+                environment.getWorkflowClient(),
+                taskQueue,
+                LegacyTargetPrefixEvidenceWorkflow.class,
+                RecordingCaseProcessWorkflow.class);
+
+        CaseProcessWorkflow parent =
+            environment
+                .getWorkflowClient()
+                .newWorkflowStub(
+                    CaseProcessWorkflow.class,
+                    WorkflowOptions.newBuilder()
+                        .setWorkflowId(
+                            CaseProcessWorkflowProtocol.caseWorkflowId(
+                                "TENANT_P5_SYNTHETIC_REPLAY", CASE_ID))
+                        .setTaskQueue(taskQueue)
+                        .build());
+        WorkflowStub.fromTyped(parent).start((Object) null);
+        EvidenceRoomWorkflow workflow =
+            environment
+                .getWorkflowClient()
+                .newWorkflowStub(
+                    EvidenceRoomWorkflow.class,
+                    WorkflowOptions.newBuilder()
+                        .setWorkflowId(workflowId)
+                        .setTaskQueue(taskQueue)
+                        .build());
+        var execution =
+            WorkflowClient.start(
+                workflow::run,
+                targetStart(
+                    Instant.ofEpochMilli(environment.currentTimeMillis()), Duration.ofHours(2)));
+        workflow.partyCompleted(signal(INITIATOR, "PRE_AUTHORITY_VERSION_I", 6));
+        workflow.partyCompleted(signal(RESPONDENT, "PRE_AUTHORITY_VERSION_R", 7));
+
+        WorkflowStub.fromTyped(workflow).getResult(EvidenceRoomSnapshot.class);
+        WorkflowStub.fromTyped(parent).getResult(Void.class);
+        assertThat(preDualRunAuthorityTerminalCalls).hasValue(1);
+        assertThat(execution.getRunId()).isNotBlank();
+        preDualRunAuthorityHistory = environment.getWorkflowClient().fetchHistory(workflowId);
+        assertThat(preDualRunAuthorityHistory.getEvents())
+            .anyMatch(
+                event ->
+                    isVersionMarker(
+                        event, FIRST_EXECUTION_RUN_TERMINAL_AUTHORITY_CHANGE_ID));
+        assertThat(preDualRunAuthorityHistory.getEvents())
+            .noneMatch(
+                event ->
+                    isVersionMarker(event, DUAL_RUN_TERMINAL_AUTHORITY_CHANGE_ID));
+      } finally {
+        if (targetWorkerFactory != null) {
+          shutdownAndAwait(targetWorkerFactory);
+        }
+      }
+    }
+
+    WorkflowReplayer.replayWorkflowExecution(
+        preDualRunAuthorityHistory, EvidenceRoomWorkflowImpl.class);
+    assertThat(preDualRunAuthorityTerminalCalls).hasValue(1);
+  }
+
+  private static String resolveTerminalWorkflowRunId(
+      int version, String currentRunId, String firstExecutionRunId) {
+    try {
+      var resolver =
+          EvidenceRoomWorkflowImpl.class.getDeclaredMethod(
+              "terminalWorkflowRunId", int.class, String.class, String.class);
+      resolver.setAccessible(true);
+      return (String) resolver.invoke(null, version, currentRunId, firstExecutionRunId);
+    } catch (NoSuchMethodException ignored) {
+      return currentRunId;
+    } catch (java.lang.reflect.InvocationTargetException failure) {
+      if (failure.getCause() instanceof RuntimeException runtimeFailure) {
+        throw runtimeFailure;
+      }
+      throw new AssertionError("terminal workflow run authority resolver failed", failure);
+    } catch (ReflectiveOperationException failure) {
+      throw new AssertionError("terminal workflow run authority resolver failed", failure);
+    }
+  }
+
+  private static boolean isVersionMarker(
+      io.temporal.api.history.v1.HistoryEvent event, String changeId) {
+    if (!event.hasMarkerRecordedEventAttributes()) {
+      return false;
+    }
+    var marker = event.getMarkerRecordedEventAttributes();
+    var details = marker.getDetailsMap().get("changeId");
+    return marker.getMarkerName().equals("Version")
+        && details != null
+        && details.getPayloadsCount() == 1
+        && details.getPayloads(0).getData().toStringUtf8().equals("\"" + changeId + "\"");
   }
 
   @Test
@@ -608,7 +780,7 @@ class EvidenceRoomWorkflowReplayTest {
   private record RegisteredWorkflow(
       EvidenceRoomWorkflow workflow, WorkerFactory targetWorkerFactory) {}
 
-  /** Exact old target-prefix terminal path, intentionally without the new lane Version marker. */
+  /** Exact pre-run-authority terminal paths, intentionally without the new authority marker. */
   public static final class LegacyTargetPrefixEvidenceWorkflow
       implements EvidenceRoomWorkflow {
 
@@ -648,16 +820,35 @@ class EvidenceRoomWorkflowReplayTest {
         }
       }
 
+      TargetEvidenceTerminalActivities.TerminalRequest terminalRequest;
+      if (start.targetE2eCandidate()) {
+        Workflow.getVersion(
+            "evidence-explicit-target-terminal-lane", Workflow.DEFAULT_VERSION, 1);
+        Workflow.getVersion(
+            FIRST_EXECUTION_RUN_TERMINAL_AUTHORITY_CHANGE_ID,
+            Workflow.DEFAULT_VERSION,
+            1);
+        var workflowInfo = Workflow.getInfo();
+        terminalRequest =
+            new TargetEvidenceTerminalActivities.TerminalRequest(
+                start,
+                processRevision,
+                roomRevision,
+                initiator.completionRequestId(),
+                respondent.completionRequestId(),
+                workflowInfo.getWorkflowId(),
+                workflowInfo.getFirstExecutionRunId());
+      } else {
+        terminalRequest =
+            new TargetEvidenceTerminalActivities.TerminalRequest(
+                start,
+                processRevision,
+                roomRevision,
+                initiator.completionRequestId(),
+                respondent.completionRequestId());
+      }
       TargetRoomProgressReceipt progress =
-          terminalActivities
-              .finalizeTerminal(
-                  new TargetEvidenceTerminalActivities.TerminalRequest(
-                      start,
-                      processRevision,
-                      roomRevision,
-                      initiator.completionRequestId(),
-                      respondent.completionRequestId()))
-              .progressReceipt();
+          terminalActivities.finalizeTerminal(terminalRequest).progressReceipt();
       processRevision = progress.processRevision();
       roomRevision = progress.roomRevision();
       CaseProcessWorkflow parent =

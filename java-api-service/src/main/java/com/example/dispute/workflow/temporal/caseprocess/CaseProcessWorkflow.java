@@ -45,6 +45,27 @@ public interface CaseProcessWorkflow {
         "Intake projection completion recovery is not supported by this CaseProcess workflow");
   }
 
+  @UpdateMethod(
+      name =
+          CaseProcessWorkflowProtocol
+              .RECOVER_EXPIRED_TARGET_EVIDENCE_TERMINAL_NO_COMMIT_UPDATE)
+  default CaseProcessExpiredTargetEvidenceTerminalRecoveryResult
+      recoverExpiredTargetEvidenceTerminalNoCommit(
+          CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request) {
+    throw new UnsupportedOperationException(
+        "expired target Evidence terminal recovery is not supported by this CaseProcess workflow");
+  }
+
+  @UpdateValidatorMethod(
+      updateName =
+          CaseProcessWorkflowProtocol
+              .RECOVER_EXPIRED_TARGET_EVIDENCE_TERMINAL_NO_COMMIT_UPDATE)
+  default void validateRecoverExpiredTargetEvidenceTerminalNoCommit(
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request) {
+    throw new UnsupportedOperationException(
+        "expired target Evidence terminal recovery is not supported by this CaseProcess workflow");
+  }
+
   @SignalMethod(name = CaseProcessWorkflowProtocol.DOMAIN_EVENT_SIGNAL)
   void domainEventCommitted(CaseDomainEventRef event);
 

@@ -41,13 +41,16 @@ public record CaseProcessCarryState(
     RecoveryErrorOrigin protocolErrorOrigin,
     boolean provisioningManualRecoveryRequired,
     List<UnreconciledChildExecution> unreconciledChildren,
-    TargetRoomProgressReceipt lastTargetRoomProgress) {
+    TargetRoomProgressReceipt lastTargetRoomProgress,
+    List<ExpiredTargetEvidenceTerminalRecoveryCommitment>
+        expiredTargetEvidenceTerminalRecoveryCommitments) {
 
   public static final int MAX_RECENT_COMMANDS = 256;
   public static final int MAX_BUFFERED_EVENTS = 128;
   public static final int MAX_CLOSED_ROOMS = 256;
   public static final int MAX_PROVISIONING_COMMITMENTS = 64;
   public static final int MAX_UNRECONCILED_CHILDREN = 2;
+  public static final int MAX_EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_COMMITMENTS = 16;
 
   public CaseProcessCarryState(
       String schemaVersion,
@@ -353,6 +356,74 @@ public record CaseProcessCarryState(
         null);
   }
 
+  /** Source-compatible constructor for carry values written before expired Evidence recovery. */
+  public CaseProcessCarryState(
+      String schemaVersion,
+      String tenantSurrogate,
+      String caseId,
+      RoomType activeRoomType,
+      long activeRoomEpoch,
+      String activeChildWorkflowId,
+      long observedProcessRevision,
+      long nextCommandSequence,
+      long nextCaseEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      List<ProcessedCommandIdentity> recentCommands,
+      List<CaseDomainEventRef> bufferedEvents,
+      long highestObservedEventSequence,
+      int runGeneration,
+      int commandRecoveryAttempts,
+      int eventRecoveryAttempts,
+      boolean commandManualRecoveryRequired,
+      boolean eventManualRecoveryRequired,
+      String protocolErrorCode,
+      List<ClosedRoomTuple> closedRooms,
+      long activeFencingToken,
+      String activeChildWorkflowRunId,
+      List<ProvisioningCommitment> provisioningCommitments,
+      List<ProvisionedRoomEpochHighWater> highestProvisionedEpochs,
+      ActiveChildDescriptor activeChildDescriptor,
+      Long activeRoomRevision,
+      RecoveryErrorOrigin protocolErrorOrigin,
+      boolean provisioningManualRecoveryRequired,
+      List<UnreconciledChildExecution> unreconciledChildren,
+      TargetRoomProgressReceipt lastTargetRoomProgress) {
+    this(
+        schemaVersion,
+        tenantSurrogate,
+        caseId,
+        activeRoomType,
+        activeRoomEpoch,
+        activeChildWorkflowId,
+        observedProcessRevision,
+        nextCommandSequence,
+        nextCaseEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        recentCommands,
+        bufferedEvents,
+        highestObservedEventSequence,
+        runGeneration,
+        commandRecoveryAttempts,
+        eventRecoveryAttempts,
+        commandManualRecoveryRequired,
+        eventManualRecoveryRequired,
+        protocolErrorCode,
+        closedRooms,
+        activeFencingToken,
+        activeChildWorkflowRunId,
+        provisioningCommitments,
+        highestProvisionedEpochs,
+        activeChildDescriptor,
+        activeRoomRevision,
+        protocolErrorOrigin,
+        provisioningManualRecoveryRequired,
+        unreconciledChildren,
+        lastTargetRoomProgress,
+        List.of());
+  }
+
   public CaseProcessCarryState {
     if (!"case-process-carry-state.v1".equals(schemaVersion)) {
       throw new IllegalArgumentException("schemaVersion must be case-process-carry-state.v1");
@@ -405,6 +476,10 @@ public record CaseProcessCarryState(
         highestProvisionedEpochs == null ? List.of() : List.copyOf(highestProvisionedEpochs);
     unreconciledChildren =
         unreconciledChildren == null ? List.of() : List.copyOf(unreconciledChildren);
+    expiredTargetEvidenceTerminalRecoveryCommitments =
+        expiredTargetEvidenceTerminalRecoveryCommitments == null
+            ? List.of()
+            : List.copyOf(expiredTargetEvidenceTerminalRecoveryCommitments);
     if (activeRoomRevision != null
         && (activeRoomRevision < 0 || activeRoomType == null)) {
       throw new IllegalArgumentException("active room revision is invalid");
@@ -425,6 +500,25 @@ public record CaseProcessCarryState(
     }
     if (provisioningCommitments.size() > MAX_PROVISIONING_COMMITMENTS) {
       throw new IllegalArgumentException("provisioning commitment cache is too large");
+    }
+    if (expiredTargetEvidenceTerminalRecoveryCommitments.size()
+            > MAX_EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_COMMITMENTS
+        || expiredTargetEvidenceTerminalRecoveryCommitments.stream()
+                .map(ExpiredTargetEvidenceTerminalRecoveryCommitment::recoveryId)
+                .distinct()
+                .count()
+            != expiredTargetEvidenceTerminalRecoveryCommitments.size()) {
+      throw new IllegalArgumentException(
+          "expired target Evidence recovery commitments are invalid");
+    }
+    for (ExpiredTargetEvidenceTerminalRecoveryCommitment commitment :
+        expiredTargetEvidenceTerminalRecoveryCommitments) {
+      if (commitment == null
+          || recentCommands.stream()
+              .noneMatch(commitment.result().commandIdentity()::equals)) {
+        throw new IllegalArgumentException(
+            "expired target Evidence recovery commitment lost its recent command authority");
+      }
     }
     int previousRoomTypeOrdinal = -1;
     for (ProvisionedRoomEpochHighWater highWater : highestProvisionedEpochs) {
@@ -492,6 +586,31 @@ public record CaseProcessCarryState(
         false,
         null,
         List.of());
+  }
+
+  public record ExpiredTargetEvidenceTerminalRecoveryCommitment(
+      String schemaVersion,
+      String recoveryId,
+      String requestSha256,
+      String resultSha256,
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryResult result) {
+
+    public static final String SCHEMA_VERSION =
+        "case-process-expired-target-evidence-terminal-recovery-commitment.v1";
+
+    public ExpiredTargetEvidenceTerminalRecoveryCommitment {
+      if (!SCHEMA_VERSION.equals(schemaVersion)) {
+        throw new IllegalArgumentException(
+            "schemaVersion must be case-process-expired-target-evidence-terminal-recovery-commitment.v1");
+      }
+      result = Objects.requireNonNull(result, "result must not be null");
+      if (!result.recoveryId().equals(recoveryId)
+          || !result.requestSha256().equals(requestSha256)
+          || !result.resultSha256().equals(resultSha256)) {
+        throw new IllegalArgumentException(
+            "expired target Evidence recovery commitment hashes do not match its result");
+      }
+    }
   }
 
   public record ClosedRoomTuple(RoomType roomType, long roomEpoch) {

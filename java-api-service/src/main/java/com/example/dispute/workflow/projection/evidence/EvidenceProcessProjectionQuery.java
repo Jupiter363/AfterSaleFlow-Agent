@@ -31,7 +31,7 @@ public class EvidenceProcessProjectionQuery {
     private StateResolution enrich(
             EvidenceProcessProjectionAdapter.ProjectionRow row, AuthenticatedActor actor) {
         EvidenceProcessProjectionAdapter.ProjectionEvidenceState state = row.evidenceState();
-        boolean authoritativelyComplete = false;
+        boolean authoritativelyComplete = targetBaseSnapshotIsAuthoritative(row);
         for (StateEnricher enricher : stateEnrichers) {
             state = Objects.requireNonNull(
                     enricher.enrich(row, actor, state),
@@ -42,6 +42,15 @@ public class EvidenceProcessProjectionQuery {
             }
         }
         return new StateResolution(state, authoritativelyComplete);
+    }
+
+    private static boolean targetBaseSnapshotIsAuthoritative(
+            EvidenceProcessProjectionAdapter.ProjectionRow row) {
+        EvidenceProcessProjectionAdapter.TargetActivationAuthority authority =
+                row.targetAuthority();
+        return "TEMPORAL".equals(row.writerMode())
+                && authority != null
+                && "TARGET_E2E_CANDIDATE".equals(authority.executionLane());
     }
 
     /**

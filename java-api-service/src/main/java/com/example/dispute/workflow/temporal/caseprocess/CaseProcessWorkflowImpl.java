@@ -10,6 +10,7 @@ import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionOutcome;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionResult;
@@ -17,15 +18,23 @@ import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
 import com.example.dispute.workflow.activity.domain.ProcessProjectionActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.CommandLifecycleOutcome;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetEvidenceTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetEvidenceTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommit;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommand;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpiredTargetEvidenceTerminalRecoveryOutcome;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecoverExpiredTargetEvidenceTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecoverExpiredTargetEvidenceTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRouted;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetEvidenceTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetEvidenceTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ClosedRoomTuple;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ExpiredTargetEvidenceTerminalRecoveryCommitment;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ProvisionedRoomEpochHighWater;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.UnreconciledChildExecution;
@@ -50,6 +59,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.activity.ActivityCancellationType;
 import io.temporal.api.common.v1.WorkflowExecution;
@@ -98,12 +108,16 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       "case-process-room-epoch-provision-v1";
   private static final String PROVISIONING_SEQUENCE_HIGH_WATER_CHANGE_ID =
       "case-process-provisioning-sequence-high-water-v1";
+  private static final String SUCCESSOR_PROVISIONING_EVENT_BOUNDARY_CHANGE_ID =
+      "case-process-successor-provisioning-event-boundary-v1";
   private static final String AUTHORITY_CHECKPOINT_CHANGE_ID =
       "case-process-authority-checkpoint-v1";
   private static final String TYPED_INTAKE_CHILD_CHANGE_ID = "typed-intake-room-child-v1";
   private static final String AUTHORITY_BRIDGE_CHANGE_ID = "typed-intake-bridge-authority-v1";
   private static final String TARGET_TYPED_ROOM_CHANGE_ID =
       "target-e2e-typed-room-child-v1";
+  private static final String TARGET_ROOM_PROGRESS_HANDLE_REBIND_CHANGE_ID =
+      "case-process-target-room-progress-handle-rebind-v1";
   private static final String CHILD_COMPENSATION_INVARIANT_CHANGE_ID =
       "case-process-child-compensation-invariant-v1";
   private static final String TARGET_INTAKE_PROJECTION_COMPLETION_CHANGE_ID =
@@ -114,8 +128,12 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       "case-process-target-intake-global-projection-cursor-v1";
   private static final String TARGET_INTAKE_TERMINAL_EVENT_CATCHUP_CHANGE_ID =
       "case-process-target-intake-terminal-event-catchup-v1";
+  private static final String EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_CHANGE_ID =
+      "case-process-expired-target-evidence-terminal-recovery-v1";
   private static final String INTAKE_PROJECTION_RECOVERY_FAILURE =
       "INTAKE_PROJECTION_COMPLETION_RECOVERY_FAILED";
+  private static final String EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_FAILURE =
+      "EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_FAILED";
   private static final String AUTHORITY_CHECKPOINT_MEMO_KEY =
       "case_process_authority_checkpoint_v1";
   private static final String SELECTION_V1 = "room-epoch-selection.v1";
@@ -186,6 +204,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private final LinkedHashSet<ClosedRoomTuple> closedRooms = new LinkedHashSet<>();
   private final LinkedHashMap<String, ProvisioningCommitment> provisioningCommitments =
       new LinkedHashMap<>();
+  private final LinkedHashMap<String, ExpiredTargetEvidenceTerminalRecoveryCommitment>
+      expiredTargetEvidenceTerminalRecoveryCommitments = new LinkedHashMap<>();
   private final EnumMap<com.example.dispute.workflow.contract.v1.ContractTypes.RoomType, Long>
       highestProvisionedEpochs =
           new EnumMap<>(com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.class);
@@ -229,6 +249,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private boolean terminalTargetReviewCompleted;
   private Boolean futureRoomEventRetentionEnabled;
   private Boolean provisioningEnabled;
+  private boolean successorProvisioningEventBoundaryEnabled;
   private boolean authorityCheckpointEnabled;
   private int typedIntakeChildVersion;
   private int authorityBridgeVersion;
@@ -242,6 +263,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private RecoveryErrorOrigin protocolErrorOrigin;
   private Promise<Void> runMaxAgeTimer;
   private CaseProcessIntakeProjectionRecoveryRequest activeIntakeProjectionRecovery;
+  private CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest
+      activeExpiredTargetEvidenceTerminalRecovery;
   private CaseProcessIntakeProjectionRecoveryRequest completedIntakeProjectionRecoveryRequest;
   private CaseProcessIntakeProjectionRecoveryResult completedIntakeProjectionRecoveryResult;
   private ConvergeTargetIntakeTerminalNoCommitResult verifiedTerminalNoCommitConvergence;
@@ -295,6 +318,10 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     restoreCarryState(carryState);
     provisioningEnabled =
         Workflow.getVersion(ROOM_EPOCH_PROVISION_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
+    successorProvisioningEventBoundaryEnabled =
+        Workflow.getVersion(
+                SUCCESSOR_PROVISIONING_EVENT_BOUNDARY_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+            == 1;
     authorityCheckpointEnabled =
         Workflow.getVersion(AUTHORITY_CHECKPOINT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
     typedIntakeChildVersion =
@@ -317,8 +344,12 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     restoreAuthorityCheckpoint();
     runMaxAgeTimer = Workflow.newTimer(RUN_MAX_AGE);
     while (true) {
-      if (activeIntakeProjectionRecovery != null) {
-        Workflow.await(() -> activeIntakeProjectionRecovery == null);
+      if (activeIntakeProjectionRecovery != null
+          || activeExpiredTargetEvidenceTerminalRecovery != null) {
+        Workflow.await(
+            () ->
+                activeIntakeProjectionRecovery == null
+                    && activeExpiredTargetEvidenceTerminalRecovery == null);
         continue;
       }
       drainCommandInbox();
@@ -361,7 +392,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void acceptCommand(CaseCommandRef command) {
-    awaitNoActiveIntakeProjectionRecovery();
+    awaitNoActiveRecovery();
     validateCommandEnvelope(command);
     validateProvisionedCommand(command);
     CompletablePromise<Void> completion = Workflow.newPromise();
@@ -373,7 +404,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void validateAcceptCommand(CaseCommandRef command) {
-    requireNoActiveIntakeProjectionRecovery();
+    requireNoActiveRecovery();
     validateCommandEnvelope(command);
     validateProvisionedCommand(command);
     if (command.caseCommandSequence() >= nextCommandSequence
@@ -386,7 +417,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public ProvisionRoomEpochReceipt provisionRoomEpoch(ProvisionRoomEpoch request) {
-    awaitNoActiveIntakeProjectionRecovery();
+    awaitNoActiveRecovery();
     validateProvisionRequest(request);
     String updateId = currentUpdateId();
     String payloadSha256 = request.payloadSha256();
@@ -415,7 +446,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void validateProvisionRoomEpoch(ProvisionRoomEpoch request) {
-    requireNoActiveIntakeProjectionRecovery();
+    requireNoActiveRecovery();
     validateProvisionRequest(request);
     String updateId = currentUpdateId();
     String payloadSha256 = request.payloadSha256();
@@ -496,6 +527,93 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     requireIntakeProjectionRecovery(request, false);
   }
 
+  @Override
+  public CaseProcessExpiredTargetEvidenceTerminalRecoveryResult
+      recoverExpiredTargetEvidenceTerminalNoCommit(
+          CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request) {
+    requireExpiredTargetEvidenceTerminalRecovery(request, false);
+    int recoveryVersion =
+        Workflow.getVersion(
+            EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_CHANGE_ID,
+            Workflow.DEFAULT_VERSION,
+            1);
+    if (recoveryVersion != 1) {
+      throw protocolFailure(
+          "EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_UNSUPPORTED",
+          "expired target Evidence terminal recovery requires v1 history authority");
+    }
+    ExpiredTargetEvidenceTerminalRecoveryCommitment completed =
+        expiredTargetEvidenceTerminalRecoveryCommitments.get(request.recoveryId());
+    if (completed != null) {
+      return completed.result();
+    }
+
+    ActiveChildDescriptor descriptor = activeChildDescriptor;
+    activeExpiredTargetEvidenceTerminalRecovery = request;
+    try {
+      RecoverExpiredTargetEvidenceTerminalNoCommitResult persisted =
+          commandLifecycleActivities.recoverExpiredTargetEvidenceTerminalNoCommit(
+              new RecoverExpiredTargetEvidenceTerminalNoCommit(
+                  RecoverExpiredTargetEvidenceTerminalNoCommit.SCHEMA_VERSION,
+                  request,
+                  activeRoomEpoch,
+                  activeFencingToken,
+                  activeChildWorkflowId,
+                  activeChildWorkflowRunId,
+                  descriptor.roomWorkflowBuildId(),
+                  descriptor.caseWorkflowBuildId()));
+      requireExpiredTargetEvidenceTerminalRecoveryResult(request, persisted);
+      requireExpiredTargetEvidenceTerminalRecovery(request, true);
+
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryResult recovered =
+          new CaseProcessExpiredTargetEvidenceTerminalRecoveryResult(
+              CaseProcessExpiredTargetEvidenceTerminalRecoveryResult.SCHEMA_VERSION,
+              persisted.outcome() == ExpiredTargetEvidenceTerminalRecoveryOutcome.RECOVERED
+                  ? CaseProcessExpiredTargetEvidenceTerminalRecoveryResult.Disposition.RECOVERED
+                  : CaseProcessExpiredTargetEvidenceTerminalRecoveryResult.Disposition
+                      .IDEMPOTENT_REPLAY,
+              request,
+              request.requestSha256(),
+              persisted.authority(),
+              CaseCommandLedgerState.FAILED,
+              persisted.receiptUri(),
+              persisted.receiptSha256(),
+              persisted.processRevision(),
+              persisted.roomRevision(),
+              persisted.lastCommandSequence(),
+              persisted.lastCaseEventSequence(),
+              nextCommandSequence,
+              processedCommandCount,
+              nextCaseEventSequence,
+              processedEventCount,
+              request.expectedProtocolErrorCode(),
+              RecoveryErrorOrigin.COMMAND);
+      ExpiredTargetEvidenceTerminalRecoveryCommitment commitment =
+          new ExpiredTargetEvidenceTerminalRecoveryCommitment(
+              ExpiredTargetEvidenceTerminalRecoveryCommitment.SCHEMA_VERSION,
+              request.recoveryId(),
+              request.requestSha256(),
+              recovered.resultSha256(),
+              recovered);
+      clearExpiredTargetEvidenceTerminalRecoveryError(request);
+      rememberExpiredTargetEvidenceTerminalRecovery(commitment);
+      return recovered;
+    } catch (CanceledFailure failure) {
+      throw failure;
+    } catch (ActivityFailure failure) {
+      rethrowIfCanceled(failure);
+      throw expiredTargetEvidenceTerminalRecoveryFailure(failure);
+    } finally {
+      activeExpiredTargetEvidenceTerminalRecovery = null;
+    }
+  }
+
+  @Override
+  public void validateRecoverExpiredTargetEvidenceTerminalNoCommit(
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request) {
+    requireExpiredTargetEvidenceTerminalRecovery(request, false);
+  }
+
   private void observeProvisioningSequenceHighWater(ProvisionRoomEpoch request) {
     if (Workflow.getVersion(
             PROVISIONING_SEQUENCE_HIGH_WATER_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
@@ -514,7 +632,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void domainEventCommitted(CaseDomainEventRef event) {
-    awaitNoActiveIntakeProjectionRecovery();
+    awaitNoActiveRecovery();
     String validationError = eventValidationError(event);
     if (validationError != null) {
       recordProtocolError(validationError, RecoveryErrorOrigin.DOMAIN_EVENT);
@@ -535,7 +653,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void targetRoomProgressed(TargetRoomProgressReceipt receipt) {
-    awaitNoActiveIntakeProjectionRecovery();
+    awaitNoActiveRecovery();
     if (receipt == null
         || activeChildDescriptor == null
         || activeChildDescriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM
@@ -551,16 +669,48 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       recordProtocolError("TARGET_ROOM_PROGRESS_REVISION_INVALID", RecoveryErrorOrigin.DOMAIN_EVENT);
       return;
     }
+    ActiveChildDescriptor progressedDescriptor =
+        activeChildDescriptor.withCurrentRevisions(
+            receipt.processRevision(), receipt.roomRevision());
+    TargetTypedRoomChildHandle progressedHandle = activeTargetTypedChild;
+    boolean rebindProgressedHandle =
+        receipt.roomType() == RoomType.HEARING
+            || Workflow.getVersion(
+                    TARGET_ROOM_PROGRESS_HANDLE_REBIND_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+                == 1;
+    if (rebindProgressedHandle) {
+      if (activeTargetTypedChild == null
+          || !matchesExecution(activeTargetTypedChild.execution(), activeChildDescriptor)) {
+        recordProtocolError(
+            "TARGET_ROOM_PROGRESS_AUTHORITY_INVALID", RecoveryErrorOrigin.DOMAIN_EVENT);
+        return;
+      }
+      try {
+        validateTargetTypedDescriptor(progressedDescriptor);
+        progressedHandle = restoreTargetTypedRoomChild(progressedDescriptor);
+      } catch (RuntimeException failure) {
+        recordProtocolError(
+            "TARGET_ROOM_PROGRESS_AUTHORITY_INVALID", RecoveryErrorOrigin.DOMAIN_EVENT);
+        return;
+      }
+      if (progressedHandle == null
+          || !matchesExecution(progressedHandle.execution(), progressedDescriptor)) {
+        recordProtocolError(
+            "TARGET_ROOM_PROGRESS_AUTHORITY_INVALID", RecoveryErrorOrigin.DOMAIN_EVENT);
+        return;
+      }
+    }
     observedProcessRevision = receipt.processRevision();
     activeRoomRevision = receipt.roomRevision();
-    activeChildDescriptor = activeChildDescriptor.withCurrentRevisions(observedProcessRevision, activeRoomRevision);
+    activeChildDescriptor = progressedDescriptor;
+    activeTargetTypedChild = progressedHandle;
     lastTargetRoomProgress = receipt;
   }
 
   @Override
   public void targetIntakeCommandTerminalNoCommit(
       TargetIntakeCommandTerminalNoCommit authority) {
-    awaitNoActiveIntakeProjectionRecovery();
+    awaitNoActiveRecovery();
     if (authority == null) {
       recordProtocolError(
           "TARGET_INTAKE_TERMINAL_NO_COMMIT_INVALID", RecoveryErrorOrigin.COMMAND);
@@ -583,12 +733,13 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void retrySequenceGap() {
-    awaitNoActiveIntakeProjectionRecovery();
+    awaitNoActiveRecovery();
     retrySequenceGapRequested = true;
   }
 
   @Override
   public void requestContinueAsNew() {
+    awaitNoActiveRecovery();
     continueAsNewRequested = true;
   }
 
@@ -689,6 +840,12 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             ? inferLegacyErrorOrigin(carry.protocolErrorCode())
             : carry.protocolErrorOrigin();
     carry.recentCommands().forEach(identity -> recentCommands.put(identity.commandId(), identity));
+    carry
+        .expiredTargetEvidenceTerminalRecoveryCommitments()
+        .forEach(
+            commitment ->
+                expiredTargetEvidenceTerminalRecoveryCommitments.put(
+                    commitment.recoveryId(), commitment));
     carry.bufferedEvents().forEach(event -> bufferedEvents.put(event.caseEventSequence(), event));
     closedRooms.addAll(carry.closedRooms());
     carry
@@ -1168,6 +1325,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       }
       try {
         applyTargetTypedRoomReceipt(activeTargetTypedChild.commandAccepted(command));
+      } catch (TargetEvidenceTerminalNoCommitConverged convergence) {
+        throw convergence;
       } catch (TypedChildOperationFailure failure) {
         throw failure;
       } catch (CanceledFailure failure) {
@@ -1210,6 +1369,140 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
           "typed Intake child could not accept the command",
           failure);
     }
+  }
+
+  /** Atomically terminalizes one failed target Evidence command without advancing room state. */
+  protected final void convergeTargetEvidenceTerminalNoCommit(
+      TargetRoomAgentRunTerminalNoCommit authority) {
+    Objects.requireNonNull(authority, "authority");
+    CaseCommandRef command = authority.command();
+    ActiveChildDescriptor descriptor = activeChildDescriptor;
+    if (tenantSurrogate == null
+        || caseId == null
+        || descriptor == null
+        || descriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM
+        || descriptor.writerMode() != WriterMode.TEMPORAL
+        || activeRoomType != RoomType.EVIDENCE
+        || descriptor.roomType() != RoomType.EVIDENCE
+        || !tenantSurrogate.equals(command.tenantSurrogate())
+        || !caseId.equals(command.caseId())
+        || command.roomType() != RoomType.EVIDENCE
+        || activeRoomEpoch != command.roomEpoch()
+        || activeFencingToken != authority.roomFencingToken()
+        || !activeChildWorkflowId.equals(authority.roomWorkflowId())
+        || !activeChildWorkflowRunId.equals(authority.roomWorkflowRunId())
+        || !descriptor.roomWorkflowBuildId().equals(authority.roomWorkflowBuildId())
+        || descriptor.currentProcessRevision() == null
+        || descriptor.currentRoomRevision() == null
+        || descriptor.currentProcessRevision() != observedProcessRevision
+        || descriptor.currentRoomRevision() != activeRoomRevision
+        || command.expectedProcessRevision() != observedProcessRevision
+        || authority.expectedRoomRevision() != activeRoomRevision
+        || authority.expectedLastCaseEventSequence()
+            != targetEvidenceExpectedLastCaseEventSequence()
+        || command.caseCommandSequence() != nextCommandSequence) {
+      throw new IllegalArgumentException(
+          "target Evidence terminal-no-commit authority conflicts with active CaseProcess state");
+    }
+    ConvergeTargetEvidenceTerminalNoCommitResult result =
+        commandLifecycleActivities.convergeTargetEvidenceTerminalNoCommit(
+            new ConvergeTargetEvidenceTerminalNoCommit(
+                "converge-target-evidence-terminal-no-commit.v1",
+                authority,
+                Workflow.getInfo().getWorkflowId(),
+                Workflow.getInfo().getFirstExecutionRunId(),
+                descriptor.caseWorkflowBuildId()));
+    long expectedLastEventSequence = Math.decrementExact(nextCaseEventSequence);
+    if (result == null
+        || !authority.equals(result.authority())
+        || result.processRevision() != observedProcessRevision
+        || result.roomRevision() != activeRoomRevision
+        || result.lastCommandSequence() != command.caseCommandSequence()
+        || result.lastCaseEventSequence() != expectedLastEventSequence) {
+      throw new IllegalArgumentException(
+          "target Evidence terminal-no-commit convergence returned conflicting authority");
+    }
+    throw new TargetEvidenceTerminalNoCommitConverged(result);
+  }
+
+  protected final long targetEvidenceExpectedLastCaseEventSequence() {
+    return Math.decrementExact(nextCaseEventSequence);
+  }
+
+  /** Resolves the exact durable terminal after an AgentRun child throws instead of returning it. */
+  protected final TargetRoomAgentRunTerminalNoCommit resolveTargetEvidenceTerminalNoCommit(
+      CaseCommandRef command,
+      long roomFencingToken,
+      long expectedRoomRevision,
+      long expectedLastCaseEventSequence,
+      String roomWorkflowId,
+      String roomWorkflowRunId,
+      String roomWorkflowBuildId,
+      String commandHash,
+      String commandEnvelopeHash,
+      ExecuteAgentRunRequest rootRequest) {
+    ActiveChildDescriptor descriptor = activeChildDescriptor;
+    if (tenantSurrogate == null
+        || caseId == null
+        || descriptor == null
+        || descriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM
+        || descriptor.writerMode() != WriterMode.TEMPORAL
+        || activeRoomType != RoomType.EVIDENCE
+        || descriptor.roomType() != RoomType.EVIDENCE
+        || command == null
+        || !tenantSurrogate.equals(command.tenantSurrogate())
+        || !caseId.equals(command.caseId())
+        || command.roomType() != RoomType.EVIDENCE
+        || activeRoomEpoch != command.roomEpoch()
+        || activeFencingToken != roomFencingToken
+        || !activeChildWorkflowId.equals(roomWorkflowId)
+        || !activeChildWorkflowRunId.equals(roomWorkflowRunId)
+        || !descriptor.roomWorkflowBuildId().equals(roomWorkflowBuildId)
+        || descriptor.currentProcessRevision() == null
+        || descriptor.currentRoomRevision() == null
+        || descriptor.currentProcessRevision() != observedProcessRevision
+        || descriptor.currentRoomRevision() != activeRoomRevision
+        || command.expectedProcessRevision() != observedProcessRevision
+        || expectedRoomRevision != activeRoomRevision
+        || expectedLastCaseEventSequence != targetEvidenceExpectedLastCaseEventSequence()
+        || command.caseCommandSequence() != nextCommandSequence) {
+      throw new IllegalArgumentException(
+          "target Evidence terminal source conflicts with active CaseProcess state");
+    }
+    ResolveTargetEvidenceTerminalNoCommit request =
+        new ResolveTargetEvidenceTerminalNoCommit(
+            "resolve-target-evidence-terminal-no-commit.v1",
+            command,
+            roomFencingToken,
+            expectedRoomRevision,
+            expectedLastCaseEventSequence,
+            roomWorkflowId,
+            roomWorkflowRunId,
+            roomWorkflowBuildId,
+            commandHash,
+            commandEnvelopeHash,
+            rootRequest,
+            Workflow.getInfo().getWorkflowId(),
+            Workflow.getInfo().getFirstExecutionRunId(),
+            descriptor.caseWorkflowBuildId());
+    ResolveTargetEvidenceTerminalNoCommitResult result =
+        commandLifecycleActivities.resolveTargetEvidenceTerminalNoCommit(request);
+    TargetRoomAgentRunTerminalNoCommit authority = result == null ? null : result.authority();
+    if (authority == null
+        || !command.equals(authority.command())
+        || roomFencingToken != authority.roomFencingToken()
+        || expectedRoomRevision != authority.expectedRoomRevision()
+        || expectedLastCaseEventSequence != authority.expectedLastCaseEventSequence()
+        || !roomWorkflowId.equals(authority.roomWorkflowId())
+        || !roomWorkflowRunId.equals(authority.roomWorkflowRunId())
+        || !roomWorkflowBuildId.equals(authority.roomWorkflowBuildId())
+        || !commandHash.equals(authority.commandHash())
+        || !commandEnvelopeHash.equals(authority.commandEnvelopeHash())
+        || !rootRequest.equals(authority.rootRequest())) {
+      throw new IllegalArgumentException(
+          "resolved target Evidence terminal authority conflicts with its source");
+    }
+    return authority;
   }
 
   /**
@@ -2067,6 +2360,16 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                     "provisioning must execute as a Temporal Update"));
   }
 
+  private static String currentExpiredTargetEvidenceTerminalRecoveryUpdateId() {
+    return Workflow.getCurrentUpdateInfo()
+        .map(info -> info.getUpdateId())
+        .orElseThrow(
+            () ->
+                protocolFailure(
+                    "EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_UPDATE_CONTEXT_MISSING",
+                    "expired target Evidence recovery must execute as a Temporal Update"));
+  }
+
   private ProvisioningCommitment currentProvisioningCommitment() {
     ProvisioningCommitment current = null;
     for (ProvisioningCommitment commitment : provisioningCommitments.values()) {
@@ -2441,6 +2744,14 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       commandManualRecoveryRequired = false;
       clearRecoveryError(SequenceStream.COMMAND);
       pending.complete();
+    } catch (TargetEvidenceTerminalNoCommitConverged convergence) {
+      TargetRoomAgentRunTerminalNoCommit authority = convergence.result().authority();
+      if (!pending.command().equals(authority.command())
+          || authority.command().caseCommandSequence() != nextCommandSequence) {
+        throw new IllegalArgumentException(
+            "target Evidence terminal-no-commit consumed another pending command");
+      }
+      consumeTerminalCommand(pending, CaseCommandLedgerState.FAILED);
     } catch (TypedChildOperationFailure failure) {
       orderedCommands.put(nextCommandSequence, pending);
       recordProtocolError(
@@ -2800,6 +3111,10 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private void requireIntakeProjectionRecovery(
       CaseProcessIntakeProjectionRecoveryRequest request, boolean handlerRevalidation) {
     Objects.requireNonNull(request, "request must not be null");
+    if (activeExpiredTargetEvidenceTerminalRecovery != null) {
+      throw new IllegalStateException(
+          "Intake projection recovery conflicts with expired Evidence recovery");
+    }
     if (completedIntakeProjectionRecoveryRequest != null
         || completedIntakeProjectionRecoveryResult != null) {
       if (!request.equals(completedIntakeProjectionRecoveryRequest)
@@ -2907,6 +3222,178 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
   }
 
+  private void requireExpiredTargetEvidenceTerminalRecovery(
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request,
+      boolean handlerRevalidation) {
+    Objects.requireNonNull(request, "request must not be null");
+    String updateId = currentExpiredTargetEvidenceTerminalRecoveryUpdateId();
+    if (!request.recoveryId().equals(updateId)) {
+      throw protocolFailure(
+          "EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_UPDATE_ID_MISMATCH",
+          "Temporal Update id does not match expired Evidence recovery authority");
+    }
+    if (!Workflow.getInfo().getWorkflowId().equals(request.workflowId())
+        || !Workflow.getInfo().getFirstExecutionRunId().equals(request.firstExecutionRunId())) {
+      throw new IllegalArgumentException(
+          "expired Evidence recovery workflow execution authority conflicts");
+    }
+
+    ExpiredTargetEvidenceTerminalRecoveryCommitment completed =
+        expiredTargetEvidenceTerminalRecoveryCommitments.get(request.recoveryId());
+    if (completed != null) {
+      if (!request.equals(completed.result().request())
+          || !request.requestSha256().equals(completed.requestSha256())
+          || !completed.result().resultSha256().equals(completed.resultSha256())) {
+        throw new IllegalArgumentException("expired Evidence recovery replay conflicts");
+      }
+      return;
+    }
+    boolean anotherCommitmentForCommand =
+        expiredTargetEvidenceTerminalRecoveryCommitments.values().stream()
+            .map(ExpiredTargetEvidenceTerminalRecoveryCommitment::result)
+            .anyMatch(result -> result.commandIdentity().equals(request.previousCommand()));
+    if (anotherCommitmentForCommand) {
+      throw new IllegalArgumentException(
+          "expired Evidence command already has another recovery commitment");
+    }
+    if (activeIntakeProjectionRecovery != null) {
+      throw new IllegalStateException(
+          "expired Evidence recovery conflicts with Intake projection recovery");
+    }
+    if (activeExpiredTargetEvidenceTerminalRecovery != null
+        && (!handlerRevalidation
+            || !activeExpiredTargetEvidenceTerminalRecovery.equals(request))) {
+      throw new IllegalStateException("expired Evidence terminal recovery is already running");
+    }
+    if (tenantSurrogate == null
+        || caseId == null
+        || !tenantSurrogate.equals(request.tenantSurrogate())
+        || !caseId.equals(request.caseId())
+        || terminalTargetReviewCompleted) {
+      throw new IllegalStateException(
+          "expired Evidence recovery requires the exact active nonterminal case");
+    }
+
+    ActiveChildDescriptor descriptor = activeChildDescriptor;
+    if (descriptor == null
+        || descriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM
+        || descriptor.writerMode() != WriterMode.TEMPORAL
+        || descriptor.roomType() != RoomType.EVIDENCE
+        || activeRoomType != RoomType.EVIDENCE
+        || descriptor.roomEpoch() != activeRoomEpoch
+        || descriptor.fencingToken() != activeFencingToken
+        || !Objects.equals(descriptor.workflowId(), activeChildWorkflowId)
+        || !Objects.equals(descriptor.startedRunId(), activeChildWorkflowRunId)
+        || descriptor.roomWorkflowBuildId() == null
+        || descriptor.roomWorkflowBuildId().isBlank()
+        || descriptor.caseWorkflowBuildId() == null
+        || descriptor.caseWorkflowBuildId().isBlank()
+        || !Objects.equals(descriptor.currentProcessRevision(), observedProcessRevision)
+        || !Objects.equals(descriptor.currentRoomRevision(), activeRoomRevision)
+        || request.expectedProcessRevision() != observedProcessRevision
+        || request.expectedRoomRevision() != activeRoomRevision) {
+      throw new IllegalStateException(
+          "expired Evidence recovery active child authority is unavailable");
+    }
+
+    ProcessedCommandIdentity previous = request.previousCommand();
+    ProcessedCommandIdentity recent = recentCommands.get(previous.commandId());
+    long matchingSequenceCount =
+        recentCommands.values().stream()
+            .filter(identity -> identity.caseCommandSequence() == previous.caseCommandSequence())
+            .count();
+    if (!previous.equals(recent)
+        || previous.caseCommandSequence() != nextCommandSequence - 1
+        || matchingSequenceCount != 1
+        || request.expectedNextCommandSequence() != nextCommandSequence
+        || request.expectedProcessedCommandCount() != processedCommandCount
+        || request.expectedNextCaseEventSequence() != nextCaseEventSequence
+        || request.expectedProcessedEventCount() != processedEventCount) {
+      throw new IllegalArgumentException(
+          "expired Evidence recovery does not match consumed workflow authority");
+    }
+    if (!request.expectedProtocolErrorCode().equals(protocolErrorCode)
+        || request.expectedProtocolErrorOrigin() != RecoveryErrorOrigin.COMMAND
+        || protocolErrorOrigin != RecoveryErrorOrigin.COMMAND) {
+      throw new IllegalStateException(
+          "expired Evidence recovery requires the exact COMMAND protocol error");
+    }
+    long expectedLastEventSequence = Math.decrementExact(nextCaseEventSequence);
+    if (commandInboxCount != 0
+        || !orderedCommands.isEmpty()
+        || !replayChecks.isEmpty()
+        || !terminalNoCommitInbox.isEmpty()
+        || highestObservedCommandSequence != previous.caseCommandSequence()
+        || eventInboxCount != 0
+        || !bufferedEvents.isEmpty()
+        || highestObservedEventSequence != expectedLastEventSequence
+        || provisioningInboxCount != 0
+        || !pendingProvisioningByUpdateId.isEmpty()
+        || provisioningSwitchInProgress
+        || uncommittedChild != null
+        || retrySequenceGapRequested
+        || commandManualRecoveryRequired
+        || eventManualRecoveryRequired
+        || provisioningManualRecoveryRequired) {
+      throw new IllegalStateException(
+          "expired Evidence recovery requires idle immediate-previous authority");
+    }
+  }
+
+  private void requireExpiredTargetEvidenceTerminalRecoveryResult(
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request,
+      RecoverExpiredTargetEvidenceTerminalNoCommitResult result) {
+    if (result == null
+        || !request.recoveryId().equals(result.recoveryId())
+        || !request.requestSha256().equals(result.requestSha256())
+        || !request.actualExpiredAt().equals(result.actualExpiredAt())
+        || result.processRevision() != request.expectedProcessRevision()
+        || result.roomRevision() != request.expectedRoomRevision()
+        || result.lastCommandSequence() != request.previousCommand().caseCommandSequence()
+        || result.lastCaseEventSequence()
+            != Math.decrementExact(request.expectedNextCaseEventSequence())) {
+      throw new IllegalArgumentException(
+          "expired Evidence recovery Activity returned conflicting coordinates");
+    }
+    TargetRoomAgentRunTerminalNoCommit authority = result.authority();
+    ProcessedCommandIdentity previous = request.previousCommand();
+    ActiveChildDescriptor descriptor = activeChildDescriptor;
+    if (authority == null
+        || descriptor == null
+        || !previous.commandId().equals(authority.command().commandId())
+        || previous.caseCommandSequence() != authority.command().caseCommandSequence()
+        || !previous.requestHash().equals(authority.command().requestHash())
+        || !request.tenantSurrogate().equals(authority.command().tenantSurrogate())
+        || !request.caseId().equals(authority.command().caseId())
+        || authority.command().roomType() != RoomType.EVIDENCE
+        || (authority.command().commandType() != CommandType.EVIDENCE_OPENING
+            && authority.command().commandType() != CommandType.EVIDENCE_SUBMIT)
+        || authority.command().roomEpoch() != activeRoomEpoch
+        || authority.roomFencingToken() != activeFencingToken
+        || !activeChildWorkflowId.equals(authority.roomWorkflowId())
+        || !activeChildWorkflowRunId.equals(authority.roomWorkflowRunId())
+        || !descriptor.roomWorkflowBuildId().equals(authority.roomWorkflowBuildId())
+        || !authority.receiptUri().equals(result.receiptUri())
+        || !authority.receiptSha256().equals(result.receiptSha256())
+        || !authority.terminalAt().isBefore(authority.command().deadlineAt())
+        || authority.command().deadlineAt().isAfter(request.actualExpiredAt())) {
+      throw new IllegalArgumentException(
+          "expired Evidence recovery Activity returned conflicting terminal authority");
+    }
+  }
+
+  private void clearExpiredTargetEvidenceTerminalRecoveryError(
+      CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request) {
+    if (!request.expectedProtocolErrorCode().equals(protocolErrorCode)
+        || request.expectedProtocolErrorOrigin() != RecoveryErrorOrigin.COMMAND
+        || protocolErrorOrigin != RecoveryErrorOrigin.COMMAND) {
+      throw new IllegalStateException(
+          "expired Evidence recovery protocol error authority changed");
+    }
+    protocolErrorCode = null;
+    protocolErrorOrigin = null;
+  }
+
   private void clearIntakeProjectionRecoveryError() {
     if (!"INTAKE_PROCESS_PROJECTION_COMPLETION_FAILED".equals(protocolErrorCode)
         || protocolErrorOrigin != RecoveryErrorOrigin.DOMAIN_EVENT) {
@@ -2916,15 +3403,20 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     protocolErrorOrigin = null;
   }
 
-  private void awaitNoActiveIntakeProjectionRecovery() {
-    if (activeIntakeProjectionRecovery != null) {
-      Workflow.await(() -> activeIntakeProjectionRecovery == null);
+  private void awaitNoActiveRecovery() {
+    if (activeIntakeProjectionRecovery != null
+        || activeExpiredTargetEvidenceTerminalRecovery != null) {
+      Workflow.await(
+          () ->
+              activeIntakeProjectionRecovery == null
+                  && activeExpiredTargetEvidenceTerminalRecovery == null);
     }
   }
 
-  private void requireNoActiveIntakeProjectionRecovery() {
-    if (activeIntakeProjectionRecovery != null) {
-      throw new IllegalStateException("Intake projection recovery is already running");
+  private void requireNoActiveRecovery() {
+    if (activeIntakeProjectionRecovery != null
+        || activeExpiredTargetEvidenceTerminalRecovery != null) {
+      throw new IllegalStateException("a CaseProcess recovery Update is already running");
     }
   }
 
@@ -3031,6 +3523,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     if (!isRoomMismatch(event) || !futureRoomEventRetentionEnabled()) {
       return false;
     }
+    if (matchesHeadSuccessorProvisioningBoundary(event)) {
+      return false;
+    }
     ClosedRoomTuple eventRoom = new ClosedRoomTuple(event.roomType(), event.roomEpoch());
     return !closedRooms.contains(eventRoom);
   }
@@ -3044,7 +3539,24 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       return true;
     }
     return !futureRoomEventRetentionEnabled
+        || matchesHeadSuccessorProvisioningBoundary(event)
         || closedRooms.contains(new ClosedRoomTuple(event.roomType(), event.roomEpoch()));
+  }
+
+  private boolean matchesHeadSuccessorProvisioningBoundary(CaseDomainEventRef event) {
+    if (!successorProvisioningEventBoundaryEnabled
+        || event == null
+        || pendingProvisioningByUpdateId.isEmpty()) {
+      return false;
+    }
+    PendingProvisioning head = pendingProvisioningByUpdateId.values().iterator().next();
+    ProvisionRoomEpoch request = head.request();
+    return request.fencingToken() > activeFencingToken
+        && request.firstCaseEventSequence() == request.lastCaseEventSequence() + 1
+        && event.caseEventSequence() == nextCaseEventSequence
+        && event.caseEventSequence() <= request.lastCaseEventSequence()
+        && event.roomType() == request.roomType()
+        && event.roomEpoch() == request.roomEpoch();
   }
 
   private boolean isRoomMismatch(CaseDomainEventRef event) {
@@ -3672,7 +4184,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   }
 
   private boolean hasWork() {
-    if (activeIntakeProjectionRecovery != null) {
+    if (activeIntakeProjectionRecovery != null
+        || activeExpiredTargetEvidenceTerminalRecovery != null) {
       return false;
     }
     return (provisioningInboxCount > 0 && canSwitchRoomEpoch())
@@ -3718,6 +4231,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   private boolean canContinueAsNew() {
     return activeIntakeProjectionRecovery == null
+        && activeExpiredTargetEvidenceTerminalRecovery == null
         && provisioningInboxCount == 0
         && pendingProvisioningByUpdateId.isEmpty()
         && commandInboxCount == 0
@@ -3764,7 +4278,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             protocolErrorOrigin,
             provisioningManualRecoveryRequired,
             new ArrayList<>(unreconciledChildren),
-            lastTargetRoomProgress);
+            lastTargetRoomProgress,
+            new ArrayList<>(expiredTargetEvidenceTerminalRecoveryCommitments.values()));
     ContinueAsNewOptions options =
         ContinueAsNewOptions.newBuilder()
             .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
@@ -3950,6 +4465,26 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     while (recentCommands.size() > CaseProcessCarryState.MAX_RECENT_COMMANDS) {
       String first = recentCommands.keySet().iterator().next();
       recentCommands.remove(first);
+      expiredTargetEvidenceTerminalRecoveryCommitments
+          .entrySet()
+          .removeIf(entry -> entry.getValue().result().commandIdentity().commandId().equals(first));
+    }
+  }
+
+  private void rememberExpiredTargetEvidenceTerminalRecovery(
+      ExpiredTargetEvidenceTerminalRecoveryCommitment commitment) {
+    ExpiredTargetEvidenceTerminalRecoveryCommitment existing =
+        expiredTargetEvidenceTerminalRecoveryCommitments.putIfAbsent(
+            commitment.recoveryId(), commitment);
+    if (existing != null && !existing.equals(commitment)) {
+      throw new IllegalStateException(
+          "expired target Evidence terminal recovery commitment conflicts");
+    }
+    while (expiredTargetEvidenceTerminalRecoveryCommitments.size()
+        > CaseProcessCarryState.MAX_EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_COMMITMENTS) {
+      String first =
+          expiredTargetEvidenceTerminalRecoveryCommitments.keySet().iterator().next();
+      expiredTargetEvidenceTerminalRecoveryCommitments.remove(first);
     }
   }
 
@@ -3973,6 +4508,14 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     return ApplicationFailure.newNonRetryableFailureWithCause(
         "Intake projection completion recovery failed after acceptance",
         INTAKE_PROJECTION_RECOVERY_FAILURE,
+        failure);
+  }
+
+  private static ApplicationFailure expiredTargetEvidenceTerminalRecoveryFailure(
+      RuntimeException failure) {
+    return ApplicationFailure.newNonRetryableFailureWithCause(
+        "expired target Evidence terminal recovery failed after acceptance",
+        EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_FAILURE,
         failure);
   }
 
@@ -4112,6 +4655,20 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
     String errorCode() {
       return errorCode;
+    }
+  }
+
+  private static final class TargetEvidenceTerminalNoCommitConverged extends RuntimeException {
+    private final ConvergeTargetEvidenceTerminalNoCommitResult result;
+
+    private TargetEvidenceTerminalNoCommitConverged(
+        ConvergeTargetEvidenceTerminalNoCommitResult result) {
+      super("target Evidence terminal-no-commit convergence completed");
+      this.result = Objects.requireNonNull(result, "result");
+    }
+
+    private ConvergeTargetEvidenceTerminalNoCommitResult result() {
+      return result;
     }
   }
 

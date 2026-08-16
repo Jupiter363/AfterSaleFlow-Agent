@@ -164,6 +164,21 @@ public class CaseProcessProjectionEntity {
                 null);
     }
 
+    public void advanceSequenceHighWater(
+            long expectedRoomEpoch,
+            long expectedFencingToken,
+            long newLastCommandSequence,
+            long newLastCaseEventSequence) {
+        requireExpectedTuple(expectedRoomEpoch, expectedFencingToken);
+        if (newLastCommandSequence < lastCommandSequence
+                || newLastCaseEventSequence < lastCaseEventSequence) {
+            throw new IllegalArgumentException(
+                    "process projection sequence high-water marks cannot move backward");
+        }
+        lastCommandSequence = newLastCommandSequence;
+        lastCaseEventSequence = newLastCaseEventSequence;
+    }
+
     public void switchTo(
             long expectedRoomEpoch,
             long expectedFencingToken,

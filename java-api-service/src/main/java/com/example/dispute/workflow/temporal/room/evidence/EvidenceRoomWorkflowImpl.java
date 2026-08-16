@@ -31,6 +31,12 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
   private static final String EXPLICIT_TARGET_LANE_CHANGE_ID =
       "evidence-explicit-target-terminal-lane";
   private static final int EXPLICIT_TARGET_LANE = 1;
+  private static final String FIRST_EXECUTION_RUN_TERMINAL_AUTHORITY_CHANGE_ID =
+      "evidence-first-execution-run-terminal-authority";
+  private static final int FIRST_EXECUTION_RUN_TERMINAL_AUTHORITY = 1;
+  private static final String DUAL_RUN_TERMINAL_AUTHORITY_CHANGE_ID =
+      "evidence-dual-run-terminal-authority";
+  private static final int DUAL_RUN_TERMINAL_AUTHORITY = 1;
   private static final int MAX_AGENT_RUN_FINALIZATION_RECEIPTS = 64;
   private final TargetEvidenceTerminalActivities terminalActivities =
       Workflow.newActivityStub(
@@ -411,15 +417,47 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
               respondentCompletion.completionRequestId());
     } else {
       var workflowInfo = Workflow.getInfo();
-      terminalRequest =
-          new TargetEvidenceTerminalActivities.TerminalRequest(
-              start,
-              processRevision,
-              roomRevision,
-              initiatorCompletion.completionRequestId(),
-              respondentCompletion.completionRequestId(),
-              workflowInfo.getWorkflowId(),
-              workflowInfo.getRunId());
+      int terminalAuthorityVersion =
+          Workflow.getVersion(
+              FIRST_EXECUTION_RUN_TERMINAL_AUTHORITY_CHANGE_ID,
+              Workflow.DEFAULT_VERSION,
+              FIRST_EXECUTION_RUN_TERMINAL_AUTHORITY);
+      String durableWorkflowRunId =
+          terminalWorkflowRunId(
+              terminalAuthorityVersion,
+              workflowInfo.getRunId(),
+              workflowInfo.getFirstExecutionRunId());
+      int dualRunAuthorityVersion =
+          Workflow.getVersion(
+              DUAL_RUN_TERMINAL_AUTHORITY_CHANGE_ID,
+              Workflow.DEFAULT_VERSION,
+              DUAL_RUN_TERMINAL_AUTHORITY);
+      if (dualRunAuthorityVersion == Workflow.DEFAULT_VERSION) {
+        terminalRequest =
+            new TargetEvidenceTerminalActivities.TerminalRequest(
+                start,
+                processRevision,
+                roomRevision,
+                initiatorCompletion.completionRequestId(),
+                respondentCompletion.completionRequestId(),
+                workflowInfo.getWorkflowId(),
+                durableWorkflowRunId);
+      } else if (dualRunAuthorityVersion == DUAL_RUN_TERMINAL_AUTHORITY) {
+        terminalRequest =
+            new TargetEvidenceTerminalActivities.TerminalRequest(
+                start,
+                processRevision,
+                roomRevision,
+                initiatorCompletion.completionRequestId(),
+                respondentCompletion.completionRequestId(),
+                workflowInfo.getWorkflowId(),
+                workflowInfo.getRunId(),
+                durableWorkflowRunId);
+      } else {
+        throw new IllegalStateException(
+            "unsupported Evidence dual-run terminal authority version: "
+                + dualRunAuthorityVersion);
+      }
     }
     TargetRoomProgressReceipt receipt = terminalActivities.finalizeTerminal(
         terminalRequest).progressReceipt();
@@ -436,6 +474,23 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
         CaseProcessWorkflow.class,
         CaseProcessWorkflowProtocol.caseWorkflowId(start.tenantSurrogate(), start.caseId()));
     parent.targetRoomProgressed(receipt);
+  }
+
+  static String terminalWorkflowRunId(
+      int version, String currentRunId, String firstExecutionRunId) {
+    String selectedRunId;
+    if (version == Workflow.DEFAULT_VERSION) {
+      selectedRunId = currentRunId;
+    } else if (version == FIRST_EXECUTION_RUN_TERMINAL_AUTHORITY) {
+      selectedRunId = firstExecutionRunId;
+    } else {
+      throw new IllegalArgumentException(
+          "unsupported Evidence terminal workflow authority version: " + version);
+    }
+    if (selectedRunId == null || selectedRunId.isBlank()) {
+      throw new IllegalArgumentException("Evidence terminal workflow run authority is required");
+    }
+    return selectedRunId;
   }
 
   private boolean awaitLegacyInputBefore(Instant boundary) {

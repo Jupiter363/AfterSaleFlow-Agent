@@ -70,6 +70,7 @@ import com.example.dispute.workflow.targete2e.ingress.rooms.MinioTargetE2eRoomCo
 import com.example.dispute.workflow.targete2e.ingress.rooms.TargetE2eHearingInvocationPublisher;
 import com.example.dispute.workflow.targete2e.exchange.rooms.JdbcTargetE2eRoomObjectIndex;
 import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eActivationStores;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore;
 import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eApiAuthority;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewCommandMaterialStore;
@@ -123,12 +124,19 @@ public class TargetE2eControlConfiguration {
   }
 
   @Bean
+  JdbcTargetE2eActivationStores targetE2eControlActivationStores(
+      DataSource dataSource) {
+    return new JdbcTargetE2eActivationStores(dataSource, Clock.systemUTC());
+  }
+
+  @Bean
   JdbcTargetE2eApiAuthority targetRoomEpochSelectionAuthority(
-      DataSource dataSource, Environment environment) {
+      DataSource dataSource, Environment environment,
+      JdbcTargetE2eActivationStores targetE2eControlActivationStores) {
     Clock clock = Clock.systemUTC();
     return new JdbcTargetE2eApiAuthority(
         dataSource,
-        new JdbcTargetE2eActivationStores(dataSource, clock),
+        targetE2eControlActivationStores,
         required(environment, "target.e2e.activation.id"),
         clock);
   }
@@ -326,11 +334,13 @@ public class TargetE2eControlConfiguration {
   TargetEvidenceTerminalActivities targetEvidenceTerminalActivities(
       DataSource dataSource,
       PlatformTransactionManager transactionManager,
+      TargetE2eActivationLifecycleStore targetE2eControlActivationStores,
       EvidenceDossierFreezer evidenceDossierFreezer,
       RoomEpochAllocator roomEpochAllocator,
       ObjectMapper objectMapper) {
     return new JdbcTargetEvidenceTerminalActivities(
-        dataSource, new TransactionTemplate(transactionManager), evidenceDossierFreezer,
+        dataSource, new TransactionTemplate(transactionManager),
+        targetE2eControlActivationStores, evidenceDossierFreezer,
         roomEpochAllocator, objectMapper, Clock.systemUTC());
   }
 

@@ -38,6 +38,10 @@ import org.hibernate.type.SqlTypes;
 @Table(name = "agent_run")
 public class AgentRunEntity extends AbstractEntity {
 
+    public static final String V2_LOGICAL_FAILURE_MESSAGE =
+            "AgentRun V2 logical execution cannot continue";
+    public static final String V2_LOGICAL_FAILURE_STOP_REASON = "STREAM_FAILED";
+
     @Column(name = "case_id", length = 64)
     private String caseId;
 
@@ -552,6 +556,62 @@ public class AgentRunEntity extends AbstractEntity {
         }
     }
 
+    /**
+     * Repairs the one historical V2 terminal shape whose immutable terminal coordinates were
+     * persisted before its public parent failure projection. Exact replay is a no-op; partial or
+     * conflicting projections fail closed.
+     */
+    public boolean repairLegacyV2TerminalFailureScalars(
+            AgentRunAttemptStatus terminalStatus,
+            String terminalErrorCode,
+            Instant terminalAt) {
+        if (!AgentRunProtocol.V2.wireValue().equals(protocol)
+                || executorKind != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
+            throw new IllegalStateException(
+                    "legacy terminal scalar repair requires a Temporal AgentRun V2");
+        }
+        if (terminalStatus != AgentRunAttemptStatus.FAILED
+                && terminalStatus != AgentRunAttemptStatus.ABORTED) {
+            throw new IllegalArgumentException(
+                    "legacy terminal scalar repair requires FAILED or ABORTED");
+        }
+        String canonicalErrorCode = required(terminalErrorCode, "terminalErrorCode");
+        OffsetDateTime canonicalTerminalAt = at(terminalAt, "terminalAt");
+        requireEqual(runStatus, terminalStatus.name(), "runStatus");
+        requireEqual(completedAt, canonicalTerminalAt, "completedAt");
+        requireEqual(finalizationStatus, "UNCOMMITTED", "finalizationStatus");
+        if (resultReadyAttemptId != null
+                || committedAttemptId != null
+                || finalResultHash != null
+                || committedManifestId != null
+                || committedManifestHash != null
+                || finalStreamSequenceNo != null
+                || finalizedAt != null) {
+            throw new IllegalStateException(
+                    "legacy terminal scalar repair conflicts with result or commit authority");
+        }
+
+        boolean exactProjection = canonicalErrorCode.equals(errorCode)
+                && Boolean.FALSE.equals(errorRetryable)
+                && V2_LOGICAL_FAILURE_MESSAGE.equals(errorMessage)
+                && V2_LOGICAL_FAILURE_STOP_REASON.equals(stopReason);
+        if (exactProjection) {
+            return false;
+        }
+        if (errorCode != null
+                || errorRetryable != null
+                || errorMessage != null
+                || stopReason != null) {
+            throw new IllegalStateException(
+                    "legacy terminal scalar repair requires an all-null historical projection");
+        }
+        errorCode = canonicalErrorCode;
+        errorRetryable = false;
+        errorMessage = V2_LOGICAL_FAILURE_MESSAGE;
+        stopReason = V2_LOGICAL_FAILURE_STOP_REASON;
+        return true;
+    }
+
     /** Records a fixed, nonretryable formal-finalization rejection without committing the FINAL. */
     public boolean recordV2FinalizationFailure(
             String attemptId,
@@ -904,6 +964,10 @@ public class AgentRunEntity extends AbstractEntity {
     // 系统意义：「AgentRunEntity.getErrorCode()」直接影响 PostgreSQL 事实投影；实体记录是 API 查询投影和审计依据，写入必须服从上层事务与状态机
     public String getErrorCode() {
         return errorCode;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
     }
 
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「AgentRunEntity.getErrorRetryable()」。

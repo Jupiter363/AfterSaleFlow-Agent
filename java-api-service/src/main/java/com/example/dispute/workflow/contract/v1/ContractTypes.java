@@ -56,6 +56,7 @@ public final class ContractTypes {
         INTAKE_MESSAGE,
         INTAKE_CONFIRM,
         INTAKE_CANCEL,
+        EVIDENCE_OPENING,
         EVIDENCE_SUBMIT,
         PARTY_EVIDENCE_COMPLETE,
         HEARING_STATEMENT,

@@ -20,6 +20,7 @@ import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRo
 import com.example.dispute.workflow.infrastructure.bootstrap.RoomEpochBootstrapEnqueuer;
 import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter;
 import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter.BindingContext;
+import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter.SuccessorContext;
 import java.time.OffsetDateTime;
 import java.util.Objects;
 import java.util.UUID;
@@ -153,6 +154,9 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
             if (command.hasProjectionAuthority()) {
                 requireProjectionAuthority(projection, command);
             }
+            if (command.hasSequenceAuthority()) {
+                requireSequenceAuthority(projection, command);
+            }
             return allocation(active);
         }
         if (active.getRoomType() != command.expectedRoomType()) {
@@ -165,9 +169,12 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
         long nextFencingToken = nextFencingToken(command.caseId());
         long nextProcessRevision = Math.addExact(active.getProcessRevision(), 1);
         long closedRoomRevision = Math.addExact(active.getRoomRevision(), 1);
-        RoomEpochSelection selection = selector.selectForNewEpoch(
-                command.nextRoomType(),
-                RoomEpochSelectionContext.realCase(tenant, command.caseId()));
+        RoomEpochSelection selection =
+                active.getWriterMode() == WriterMode.TEMPORAL
+                        ? selectTargetSuccessor(active, command.nextRoomType())
+                        : selector.selectForNewEpoch(
+                                command.nextRoomType(),
+                                RoomEpochSelectionContext.realCase(tenant, command.caseId()));
         requireProvisionable(selection);
 
         active.terminalize(
@@ -190,6 +197,13 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                         command.occurredAt());
         epochRepository.saveAndFlush(next);
         persistTargetBinding(next, selection);
+        if (command.hasSequenceAuthority()) {
+            projection.advanceSequenceHighWater(
+                    active.getRoomEpoch(),
+                    active.getFencingToken(),
+                    command.lastCommandSequence(),
+                    command.lastCaseEventSequence());
+        }
         if (command.hasProjectionAuthority()) {
             projection.switchTo(
                     active.getRoomEpoch(),
@@ -501,6 +515,16 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
         }
     }
 
+    private static void requireSequenceAuthority(
+            CaseProcessProjectionEntity projection, TransitionRoomEpoch command) {
+        if (projection.getLastCommandSequence() != command.lastCommandSequence()
+                || projection.getLastCaseEventSequence() != command.lastCaseEventSequence()) {
+            throw failure(
+                    "ROOM_EPOCH_SEQUENCE_AUTHORITY_CONFLICT",
+                    "the active room epoch is bound to different sequence authority");
+        }
+    }
+
     private static void requireTenant(CaseRoomEpochEntity epoch, String tenant) {
         if (!tenant.equals(epoch.getTenantSurrogate())) {
             throw failure(
@@ -535,6 +559,36 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                     "TARGET_E2E_ACTIVATION_BINDING_INVALID",
                     "only a TEMPORAL room epoch can persist a target activation binding");
         }
+        targetBindingAuthority()
+                .persist(
+                        new BindingContext(
+                                epoch.getId(),
+                                epoch.getTenantSurrogate(),
+                                epoch.getCaseId(),
+                                epoch.getRoomType(),
+                                epoch.getRoomEpoch(),
+                                epoch.getFencingToken(),
+                                selection));
+    }
+
+    private RoomEpochSelection selectTargetSuccessor(
+            CaseRoomEpochEntity source, RoomType nextRoomType) {
+        return targetBindingAuthority()
+                .selectSuccessor(
+                        new SuccessorContext(
+                                source.getId(),
+                                source.getTenantSurrogate(),
+                                source.getCaseId(),
+                                source.getRoomType(),
+                                source.getRoomEpoch(),
+                                source.getFencingToken(),
+                                source.getProcessRevision(),
+                                source.getTemporalWorkflowId(),
+                                nextRoomType,
+                                persistedSelection(source)));
+    }
+
+    private TargetRoomEpochBindingWriter targetBindingAuthority() {
         if (targetBindingWriter == null) {
             throw failure(
                     "TARGET_E2E_ACTIVATION_BINDING_UNAVAILABLE",
@@ -546,16 +600,7 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                     "TARGET_E2E_ACTIVATION_BINDING_UNAVAILABLE",
                     "target room epoch binding requires exactly one writer");
         }
-        writers.getFirst()
-                .persist(
-                        new BindingContext(
-                                epoch.getId(),
-                                epoch.getTenantSurrogate(),
-                                epoch.getCaseId(),
-                                epoch.getRoomType(),
-                                epoch.getRoomEpoch(),
-                                epoch.getFencingToken(),
-                                selection));
+        return writers.getFirst();
     }
 
     private void enqueueProvisioning(
@@ -626,19 +671,7 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
     }
 
     private static RoomEpochAllocation allocation(CaseRoomEpochEntity epoch) {
-        RoomEpochSelection selection =
-                new RoomEpochSelection(
-                        epoch.getWriterMode(),
-                        epoch.getSelectionSchemaVersion(),
-                        epoch.getProcessContractVersion(),
-                        epoch.getWorkflowType(),
-                        epoch.getTemporalBuildId(),
-                        epoch.getRoomWorkflowType(),
-                        epoch.getRoomWorkflowBuildId(),
-                        epoch.getGraphKey(),
-                        epoch.getGraphVersion(),
-                        epoch.getCheckpointSchemaVersion(),
-                        epoch.getStreamProtocol());
+        RoomEpochSelection selection = persistedSelection(epoch);
         return new RoomEpochAllocation(
                 epoch.getId(),
                 epoch.getTenantSurrogate(),
@@ -654,6 +687,21 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                 epoch.getTemporalWorkflowId(),
                 epoch.getTemporalRunId(),
                 selection);
+    }
+
+    private static RoomEpochSelection persistedSelection(CaseRoomEpochEntity epoch) {
+        return new RoomEpochSelection(
+                        epoch.getWriterMode(),
+                        epoch.getSelectionSchemaVersion(),
+                        epoch.getProcessContractVersion(),
+                        epoch.getWorkflowType(),
+                        epoch.getTemporalBuildId(),
+                        epoch.getRoomWorkflowType(),
+                        epoch.getRoomWorkflowBuildId(),
+                        epoch.getGraphKey(),
+                        epoch.getGraphVersion(),
+                        epoch.getCheckpointSchemaVersion(),
+                        epoch.getStreamProtocol());
     }
 
     private static String epochId() {

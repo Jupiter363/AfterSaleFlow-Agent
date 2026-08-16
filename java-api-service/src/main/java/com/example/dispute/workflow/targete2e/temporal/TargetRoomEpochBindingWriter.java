@@ -7,7 +7,45 @@ import java.util.Objects;
 /** Target-only transaction participant that persists the activation-bound epoch selection. */
 public interface TargetRoomEpochBindingWriter {
 
+    default RoomEpochSelection selectSuccessor(SuccessorContext context) {
+        throw new IllegalStateException(
+                "TEMPORAL room epoch selection requires exact target activation authority");
+    }
+
     void persist(BindingContext context);
+
+    record SuccessorContext(
+            String sourceEpochId,
+            String tenantSurrogate,
+            String caseId,
+            RoomType sourceRoomType,
+            long sourceRoomEpoch,
+            long sourceFencingToken,
+            long sourceProcessRevision,
+            String sourceTemporalWorkflowId,
+            RoomType nextRoomType,
+            RoomEpochSelection sourceSelection) {
+
+        public SuccessorContext {
+            requireText(sourceEpochId, "sourceEpochId");
+            requireText(tenantSurrogate, "tenantSurrogate");
+            requireText(caseId, "caseId");
+            Objects.requireNonNull(sourceRoomType, "sourceRoomType must not be null");
+            if (sourceRoomEpoch < 0 || sourceFencingToken < 1 || sourceProcessRevision < 0) {
+                throw new IllegalArgumentException("source epoch coordinates are invalid");
+            }
+            requireText(sourceTemporalWorkflowId, "sourceTemporalWorkflowId");
+            Objects.requireNonNull(nextRoomType, "nextRoomType must not be null");
+            if (sourceRoomType == nextRoomType) {
+                throw new IllegalArgumentException("successor room type must advance");
+            }
+            Objects.requireNonNull(sourceSelection, "sourceSelection must not be null");
+            if (sourceSelection.writerMode()
+                    != com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode.TEMPORAL) {
+                throw new IllegalArgumentException("source selection must be TEMPORAL");
+            }
+        }
+    }
 
     record BindingContext(
             String epochId,

@@ -82,11 +82,17 @@ class AgentRunV2RecoveryTerminalEventTest {
 
         ExecuteAgentRunResult first = harness.ledger().recordAttemptFailureResult(
                 AgentRunAttemptStatus.ABORTED, source);
+        long durableAttemptVersion = harness.attempt().getAttemptVersion();
         ExecuteAgentRunResult replayed = harness.ledger().recordAttemptFailureResult(
-                AgentRunAttemptStatus.ABORTED, source);
+                AgentRunAttemptStatus.ABORTED, first);
+        assertThatThrownBy(() -> harness.ledger().recordAttemptFailureResult(
+                        AgentRunAttemptStatus.ABORTED, source))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("durableFailureResultSequence");
 
         assertThat(first.lastSequenceNo()).isEqualTo(108);
         assertThat(replayed).isEqualTo(first);
+        assertThat(harness.attempt().getAttemptVersion()).isEqualTo(durableAttemptVersion);
         assertThat(harness.attempt().getLastSequenceNo()).isEqualTo(108);
         assertThat(harness.attempt().getAttemptStatus())
                 .isEqualTo(AgentRunAttemptStatus.ABORTED);
@@ -132,11 +138,22 @@ class AgentRunV2RecoveryTerminalEventTest {
 
         ExecuteAgentRunResult first = harness.ledger().recordAttemptFailureResult(
                 AgentRunAttemptStatus.ABORTED, source);
+        long durableAttemptVersion = harness.attempt().getAttemptVersion();
         ExecuteAgentRunResult replayed = harness.ledger().recordAttemptFailureResult(
                 AgentRunAttemptStatus.ABORTED, source);
+        ExecuteAgentRunResult storedMinusOne = activityFailureResult(
+                harness.attempt().getId(),
+                89,
+                true,
+                AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+        assertThatThrownBy(() -> harness.ledger().recordAttemptFailureResult(
+                        AgentRunAttemptStatus.ABORTED, storedMinusOne))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("durableFailureResultSequence");
 
         assertThat(first).isEqualTo(source);
         assertThat(replayed).isEqualTo(first);
+        assertThat(harness.attempt().getAttemptVersion()).isEqualTo(durableAttemptVersion);
         assertThat(harness.attempt().getLastSequenceNo()).isEqualTo(90);
         assertThat(harness.attempt().getAttemptStatus())
                 .isEqualTo(AgentRunAttemptStatus.ABORTED);
@@ -146,6 +163,125 @@ class AgentRunV2RecoveryTerminalEventTest {
         verify(harness.recoveryEventStore(), never())
                 .appendRecoveryErrorInCurrentTransaction(any());
         verify(harness.entityManager(), never()).flush();
+    }
+
+    @Test
+    void failureResultProjectsExactParentTerminalAuthorityAndKeepsRetryableRunOpen() {
+        ActivityFailureHarness terminal = activityFailureHarness(
+                false,
+                1,
+                Audience.USER,
+                StreamEventType.ERROR,
+                "GRAPH_GATEWAY_NOT_READY",
+                false);
+        ExecuteAgentRunResult terminalSource = activityFailureResult(
+                terminal.attempt().getId(),
+                1,
+                false,
+                AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+
+        ExecuteAgentRunResult terminalFirst = terminal.ledger().recordAttemptFailureResult(
+                AgentRunAttemptStatus.FAILED, terminalSource);
+        String terminalResultJson = terminal.attempt().getResultJson();
+        long terminalAttemptVersion = terminal.attempt().getAttemptVersion();
+        ExecuteAgentRunResult terminalReplay = terminal.ledger().recordAttemptFailureResult(
+                AgentRunAttemptStatus.FAILED, terminalSource);
+
+        assertThat(terminalFirst).isEqualTo(terminalSource);
+        assertThat(terminalReplay).isEqualTo(terminalFirst);
+        assertThat(terminal.run().getRunStatus()).isEqualTo("FAILED");
+        assertThat(terminal.run().getErrorCode()).isEqualTo(terminalFirst.errorCode());
+        assertThat(terminal.run().getErrorRetryable()).isFalse();
+        assertThat(terminal.run().getStopReason()).isEqualTo("STREAM_FAILED");
+        assertThat(terminal.run().getCompletedAt().toInstant())
+                .isEqualTo(terminalFirst.completedAt());
+        assertThat(terminal.run().getFinalizationStatus()).isEqualTo("UNCOMMITTED");
+        assertThat(terminal.run().getResultReadyAttemptId()).isNull();
+        assertThat(terminal.run().getCommittedAttemptId()).isNull();
+        assertThat(terminal.run().getFinalResultHash()).isNull();
+        assertThat(terminal.attempt().getAttemptStatus())
+                .isEqualTo(AgentRunAttemptStatus.FAILED);
+        assertThat(terminal.attempt().getErrorCode()).isEqualTo(terminalFirst.errorCode());
+        assertThat(terminal.attempt().getErrorRetryable()).isFalse();
+        assertThat(terminal.attempt().getTerminationCode())
+                .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN.name());
+        assertThat(terminal.attempt().getCompletedAt().toInstant())
+                .isEqualTo(terminalFirst.completedAt());
+        assertThat(terminal.attempt().getResultJson()).isEqualTo(terminalResultJson);
+        assertThat(terminal.attempt().getAttemptVersion()).isEqualTo(terminalAttemptVersion);
+
+        assertParentFailureReplayDriftRejected(
+                terminal,
+                terminalSource,
+                "errorCode",
+                "FOREIGN_TERMINAL_ERROR",
+                terminalFirst.errorCode(),
+                terminalResultJson,
+                terminalAttemptVersion);
+        assertParentFailureReplayDriftRejected(
+                terminal,
+                terminalSource,
+                "errorRetryable",
+                true,
+                false,
+                terminalResultJson,
+                terminalAttemptVersion);
+        assertParentFailureReplayDriftRejected(
+                terminal,
+                terminalSource,
+                "stopReason",
+                "FOREIGN_TERMINAL_STOP",
+                "STREAM_FAILED",
+                terminalResultJson,
+                terminalAttemptVersion);
+        assertParentFailureReplayDriftRejected(
+                terminal,
+                terminalSource,
+                "completedAt",
+                terminal.run().getCompletedAt().plusSeconds(1),
+                terminal.run().getCompletedAt(),
+                terminalResultJson,
+                terminalAttemptVersion);
+        verify(terminal.recoveryEventStore(), never())
+                .appendRecoveryErrorInCurrentTransaction(any());
+
+        ActivityFailureHarness retryable = activityFailureHarness(false);
+        ExecuteAgentRunResult retryableSource = activityFailureResult(
+                retryable.attempt().getId(),
+                0,
+                false,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT);
+
+        ExecuteAgentRunResult retryableFirst = retryable.ledger().recordAttemptFailureResult(
+                AgentRunAttemptStatus.FAILED, retryableSource);
+        String retryableResultJson = retryable.attempt().getResultJson();
+        long retryableAttemptVersion = retryable.attempt().getAttemptVersion();
+        ExecuteAgentRunResult retryableReplay = retryable.ledger().recordAttemptFailureResult(
+                AgentRunAttemptStatus.FAILED, retryableSource);
+
+        assertThat(retryableFirst).isEqualTo(retryableSource);
+        assertThat(retryableReplay).isEqualTo(retryableFirst);
+        assertThat(retryable.run().getRunStatus()).isEqualTo("PENDING");
+        assertThat(retryable.run().getErrorCode()).isNull();
+        assertThat(retryable.run().getErrorRetryable()).isNull();
+        assertThat(retryable.run().getStopReason()).isNull();
+        assertThat(retryable.run().getCompletedAt()).isNull();
+        assertThat(retryable.run().getFinalizationStatus()).isEqualTo("UNCOMMITTED");
+        assertThat(retryable.attempt().getAttemptStatus())
+                .isEqualTo(AgentRunAttemptStatus.FAILED);
+        assertThat(retryable.attempt().getErrorCode()).isEqualTo(retryableFirst.errorCode());
+        assertThat(retryable.attempt().getErrorRetryable()).isTrue();
+        assertThat(retryable.attempt().getTerminationCode())
+                .isEqualTo(AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT.name());
+        assertThat(retryable.attempt().getResultJson()).isEqualTo(retryableResultJson);
+        assertThat(retryable.attempt().getAttemptVersion()).isEqualTo(retryableAttemptVersion);
+        assertThatThrownBy(() -> retryable.ledger().recordAttemptFailureResult(
+                        AgentRunAttemptStatus.ABORTED, retryableSource))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(retryable.attempt().getResultJson()).isEqualTo(retryableResultJson);
+        assertThat(retryable.attempt().getAttemptVersion()).isEqualTo(retryableAttemptVersion);
+        verify(retryable.recoveryEventStore(), never())
+                .appendRecoveryErrorInCurrentTransaction(any());
     }
 
     @Test
@@ -171,7 +307,7 @@ class AgentRunV2RecoveryTerminalEventTest {
 
         ExecuteAgentRunResult arbitrarySequence = activityFailureResult(
                 harness.attempt().getId(),
-                88,
+                89,
                 true,
                 AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
         assertThatThrownBy(() -> harness.ledger().recordAttemptFailureResult(
@@ -191,7 +327,7 @@ class AgentRunV2RecoveryTerminalEventTest {
         assertThatThrownBy(() -> harness.ledger().recordAttemptFailureResult(
                         AgentRunAttemptStatus.ABORTED, source))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("durableFailureRunStatus");
+                .hasMessageContaining("v2FailureRunStatus");
         assertThat(harness.run().getRunStatus()).isEqualTo("RUNNING");
         ReflectionTestUtils.setField(harness.run(), "runStatus", "ABORTED");
 
@@ -503,13 +639,23 @@ class AgentRunV2RecoveryTerminalEventTest {
         when(attemptRepository.findByAgentRunIdAndAttemptNoForUpdate(run.getId(), 1L))
                 .thenReturn(Optional.of(attempt));
         when(eventRepository.findMaxV2Sequence(run.getId(), attempt.getId()))
-                .thenReturn(2L);
+                .thenReturn(2L, 3L);
         when(eventRepository.findV2Event(run.getId(), attempt.getId(), 2L))
                 .thenReturn(Optional.of(event(
                         run.getId(),
                         attempt.getId(),
                         2L,
                         StreamEventType.ATTEMPT_ABORTED)));
+        AgentRunStreamEventEntity persistedTerminal = event(
+                run.getId(),
+                attempt.getId(),
+                3L,
+                StreamEventType.ERROR,
+                Audience.USER,
+                ERROR_CODE,
+                false);
+        when(eventRepository.findV2Event(run.getId(), attempt.getId(), 3L))
+                .thenReturn(Optional.of(persistedTerminal));
         when(recoveryEventStore.appendRecoveryErrorInCurrentTransaction(any()))
                 .thenReturn(new AppendReceipt(true, 3));
 
@@ -519,12 +665,223 @@ class AgentRunV2RecoveryTerminalEventTest {
                 1,
                 ERROR_CODE,
                 AgentRunPersistenceFixtures.COMPLETED_AT);
+
+        assertThatThrownBy(() -> ledger.terminalizeV2RecoveryCandidate(
+                        run.getId(),
+                        "ATTEMPT_V2_FOREIGN",
+                        1,
+                        ERROR_CODE,
+                        AgentRunPersistenceFixtures.COMPLETED_AT))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> ledger.terminalizeV2RecoveryCandidate(
+                        run.getId(),
+                        attempt.getId(),
+                        2,
+                        ERROR_CODE,
+                        AgentRunPersistenceFixtures.COMPLETED_AT))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> ledger.terminalizeV2RecoveryCandidate(
+                        run.getId(),
+                        attempt.getId(),
+                        1,
+                        "FOREIGN_TERMINAL_ERROR",
+                        AgentRunPersistenceFixtures.COMPLETED_AT))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> ledger.terminalizeV2RecoveryCandidate(
+                        run.getId(),
+                        attempt.getId(),
+                        1,
+                        ERROR_CODE,
+                        AgentRunPersistenceFixtures.COMPLETED_AT.plusSeconds(1)))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "runStatus",
+                AgentRunAttemptStatus.ABORTED.name(),
+                AgentRunAttemptStatus.FAILED.name());
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "errorCode",
+                "FOREIGN_TERMINAL_ERROR",
+                ERROR_CODE);
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "errorRetryable",
+                true,
+                false);
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "errorMessage",
+                "FOREIGN_TERMINAL_MESSAGE",
+                AgentRunEntity.V2_LOGICAL_FAILURE_MESSAGE);
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "stopReason",
+                "FOREIGN_TERMINAL_STOP",
+                AgentRunEntity.V2_LOGICAL_FAILURE_STOP_REASON);
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "completedAt",
+                run.getCompletedAt().plusSeconds(1),
+                run.getCompletedAt());
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "finalizationStatus",
+                "COMMITTED",
+                "UNCOMMITTED");
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "resultReadyAttemptId",
+                attempt.getId(),
+                null);
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "committedAttemptId",
+                attempt.getId(),
+                null);
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "finalResultHash",
+                "a".repeat(64),
+                null);
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "committedManifestId",
+                "MANIFEST_FOREIGN",
+                null);
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "committedManifestHash",
+                "b".repeat(64),
+                null);
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "finalStreamSequenceNo",
+                3L,
+                null);
+        assertRecoveryReplayRunDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "finalizedAt",
+                run.getCompletedAt(),
+                null);
+        assertRecoveryReplayAttemptDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "attemptStatus",
+                AgentRunAttemptStatus.RESULT_READY,
+                AgentRunAttemptStatus.ABORTED);
+        assertRecoveryReplayAttemptDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "finalFrameObserved",
+                true,
+                false);
+        assertRecoveryReplayAttemptDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "lastSequenceNo",
+                4L,
+                3L);
+        assertRecoveryReplayAttemptDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "errorRetryable",
+                false,
+                true);
+        assertRecoveryReplayAttemptDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "terminationCode",
+                AgentRunRecoveryAction.FAIL_LOGICAL_RUN.name(),
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT.name());
+        assertRecoveryReplayAttemptDriftRejected(
+                ledger,
+                run,
+                attempt,
+                "completedAt",
+                attempt.getCompletedAt().plusSeconds(1),
+                attempt.getCompletedAt());
+
+        String terminalPayloadHash = persistedTerminal.getPayloadHash();
+        ReflectionTestUtils.setField(persistedTerminal, "payloadHash", "f".repeat(64));
+        assertThatThrownBy(() -> ledger.terminalizeV2RecoveryCandidate(
+                        run.getId(),
+                        attempt.getId(),
+                        1,
+                        ERROR_CODE,
+                        AgentRunPersistenceFixtures.COMPLETED_AT))
+                .isInstanceOf(IllegalStateException.class);
+        ReflectionTestUtils.setField(persistedTerminal, "payloadHash", terminalPayloadHash);
+        ReflectionTestUtils.setField(
+                persistedTerminal, "eventType", StreamEventType.VISIBLE_DELTA.wireValue());
+        assertThatThrownBy(() -> ledger.terminalizeV2RecoveryCandidate(
+                        run.getId(),
+                        attempt.getId(),
+                        1,
+                        ERROR_CODE,
+                        AgentRunPersistenceFixtures.COMPLETED_AT))
+                .isInstanceOf(IllegalStateException.class);
+        ReflectionTestUtils.setField(
+                persistedTerminal, "eventType", StreamEventType.ERROR.wireValue());
+        ReflectionTestUtils.setField(
+                persistedTerminal,
+                "createdAt",
+                persistedTerminal.getCreatedAt().plusSeconds(1));
+        assertThatThrownBy(() -> ledger.terminalizeV2RecoveryCandidate(
+                        run.getId(),
+                        attempt.getId(),
+                        1,
+                        ERROR_CODE,
+                        AgentRunPersistenceFixtures.COMPLETED_AT))
+                .isInstanceOf(IllegalStateException.class);
+        ReflectionTestUtils.setField(
+                persistedTerminal,
+                "createdAt",
+                AgentRunPersistenceFixtures.COMPLETED_AT.atOffset(java.time.ZoneOffset.UTC));
+        var durableRunUpdatedAt = run.getUpdatedAt();
+        long durableAttemptVersion = attempt.getAttemptVersion();
         ledger.terminalizeV2RecoveryCandidate(
                 run.getId(),
                 attempt.getId(),
                 1,
                 ERROR_CODE,
                 AgentRunPersistenceFixtures.COMPLETED_AT);
+        assertThat(run.getUpdatedAt()).isEqualTo(durableRunUpdatedAt);
+        assertThat(attempt.getAttemptVersion()).isEqualTo(durableAttemptVersion);
 
         assertThat(run.getRunStatus()).isEqualTo("FAILED");
         assertThat(run.getErrorCode()).isEqualTo(ERROR_CODE);
@@ -561,8 +918,6 @@ class AgentRunV2RecoveryTerminalEventTest {
         InOrder recoveryOrder = inOrder(entityManager, recoveryEventStore);
         recoveryOrder.verify(entityManager).flush();
         recoveryOrder.verify(recoveryEventStore).appendRecoveryErrorInCurrentTransaction(event);
-        verify(eventRepository, times(1))
-                .findMaxV2Sequence(run.getId(), attempt.getId());
     }
 
     @Test
@@ -786,6 +1141,44 @@ class AgentRunV2RecoveryTerminalEventTest {
                 harness, source, durable, harness.attempt().getResultJson());
     }
 
+    private static void assertRecoveryReplayRunDriftRejected(
+            JpaAgentRunLedger ledger,
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            String field,
+            Object driftedValue,
+            Object durableValue) {
+        ReflectionTestUtils.setField(run, field, driftedValue);
+        assertThatThrownBy(() -> ledger.terminalizeV2RecoveryCandidate(
+                        run.getId(),
+                        attempt.getId(),
+                        attempt.getAttemptNo(),
+                        ERROR_CODE,
+                        AgentRunPersistenceFixtures.COMPLETED_AT))
+                .as(field)
+                .isInstanceOf(IllegalStateException.class);
+        ReflectionTestUtils.setField(run, field, durableValue);
+    }
+
+    private static void assertRecoveryReplayAttemptDriftRejected(
+            JpaAgentRunLedger ledger,
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            String field,
+            Object driftedValue,
+            Object durableValue) {
+        ReflectionTestUtils.setField(attempt, field, driftedValue);
+        assertThatThrownBy(() -> ledger.terminalizeV2RecoveryCandidate(
+                        run.getId(),
+                        attempt.getId(),
+                        attempt.getAttemptNo(),
+                        ERROR_CODE,
+                        AgentRunPersistenceFixtures.COMPLETED_AT))
+                .as(field)
+                .isInstanceOf(IllegalStateException.class);
+        ReflectionTestUtils.setField(attempt, field, durableValue);
+    }
+
     private static AgentRunStreamEventEntity matchingFailureError(
             ActivityFailureHarness harness) {
         return event(
@@ -825,6 +1218,25 @@ class AgentRunV2RecoveryTerminalEventTest {
         verify(harness.recoveryEventStore(), never())
                 .appendRecoveryErrorInCurrentTransaction(any());
         verify(harness.entityManager(), never()).flush();
+    }
+
+    private static void assertParentFailureReplayDriftRejected(
+            ActivityFailureHarness harness,
+            ExecuteAgentRunResult source,
+            String field,
+            Object driftedValue,
+            Object durableValue,
+            String durableResultJson,
+            long durableAttemptVersion) {
+        ReflectionTestUtils.setField(harness.run(), field, driftedValue);
+        assertThatThrownBy(() -> harness.ledger().recordAttemptFailureResult(
+                        AgentRunAttemptStatus.FAILED, source))
+                .as(field)
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(harness.attempt().getResultJson()).as(field).isEqualTo(durableResultJson);
+        assertThat(harness.attempt().getAttemptVersion()).as(field)
+                .isEqualTo(durableAttemptVersion);
+        ReflectionTestUtils.setField(harness.run(), field, durableValue);
     }
 
     private static ActivityFailureHarness activityFailureHarness(boolean publicOutput) {

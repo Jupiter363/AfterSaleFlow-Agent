@@ -11,6 +11,7 @@ import java.security.KeyPairGenerator;
 import java.security.spec.ECGenParameterSpec;
 import java.util.Base64;
 import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eApiAuthority;
+import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eActivationStores;
 import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochSelectionAuthority;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -152,35 +153,55 @@ class TargetE2eActivationRuntimeConfigurationTest {
   }
 
   @Test
-  void targetControlPublishesSingleRoomEpochSelectionAuthorityAndReusesItForHearingMaterializer()
+  void targetControlPublishesSingleSharedActivationStoreAndReusesItForAllAuthorities()
       throws Exception {
     String configuration =
         Files.readString(TARGET_CONTROL_CONFIGURATION).replace("\r\n", "\n");
 
     assertThat(TargetRoomEpochSelectionAuthority.class)
         .isAssignableFrom(JdbcTargetE2eApiAuthority.class);
+    assertThat(TargetE2eActivationLifecycleStore.class)
+        .isAssignableFrom(JdbcTargetE2eActivationStores.class);
     assertThat(configuration)
         .contains(
             "@Bean\n"
+                + "  JdbcTargetE2eActivationStores targetE2eControlActivationStores(\n"
+                + "      DataSource dataSource) {\n"
+                + "    return new JdbcTargetE2eActivationStores(dataSource, Clock.systemUTC());\n"
+                + "  }")
+        .contains(
+            "@Bean\n"
                 + "  JdbcTargetE2eApiAuthority targetRoomEpochSelectionAuthority(\n"
-                + "      DataSource dataSource, Environment environment) {\n"
+                + "      DataSource dataSource, Environment environment,\n"
+                + "      JdbcTargetE2eActivationStores targetE2eControlActivationStores) {\n"
                 + "    Clock clock = Clock.systemUTC();\n"
                 + "    return new JdbcTargetE2eApiAuthority(\n"
                 + "        dataSource,\n"
-                + "        new JdbcTargetE2eActivationStores(dataSource, clock),\n"
+                + "        targetE2eControlActivationStores,\n"
                 + "        required(environment, \"target.e2e.activation.id\"),\n"
                 + "        clock);\n"
                 + "  }")
+        .contains(
+            "TargetE2eActivationLifecycleStore targetE2eControlActivationStores,")
+        .contains(
+            "targetE2eControlActivationStores, evidenceDossierFreezer,")
         .contains("JdbcTargetE2eApiAuthority targetRoomEpochSelectionAuthority,")
         .contains(
             "new TargetHearingInternalStageMaterializer(\n"
                 + "        targetRoomEpochSelectionAuthority,")
-        .doesNotContain("var apiAuthority");
+        .doesNotContain("var apiAuthority")
+        .doesNotContain("ObjectProvider<TargetE2eActivationLifecycleStore>")
+        .doesNotContain("new JdbcTargetE2eActivationStores(dataSource, clock)");
     assertThat(
             configuration.split(
                 "JdbcTargetE2eApiAuthority targetRoomEpochSelectionAuthority\\(", -1))
         .hasSize(2);
     assertThat(configuration.split("new JdbcTargetE2eApiAuthority\\(", -1)).hasSize(2);
+    assertThat(
+            configuration.split(
+                "JdbcTargetE2eActivationStores targetE2eControlActivationStores\\(", -1))
+        .hasSize(2);
+    assertThat(configuration.split("new JdbcTargetE2eActivationStores\\(", -1)).hasSize(2);
   }
 
   private KeyPair p256() throws Exception {

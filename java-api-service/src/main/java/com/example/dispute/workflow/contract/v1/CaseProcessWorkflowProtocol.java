@@ -17,6 +17,8 @@ public final class CaseProcessWorkflowProtocol {
   public static final String PROVISION_ROOM_EPOCH_UPDATE = "provisionRoomEpoch";
   public static final String RECOVER_INTAKE_PROJECTION_COMPLETION_UPDATE =
       "recoverIntakeProjectionCompletion";
+  public static final String RECOVER_EXPIRED_TARGET_EVIDENCE_TERMINAL_NO_COMMIT_UPDATE =
+      "recoverExpiredTargetEvidenceTerminalNoCommit";
   public static final String DOMAIN_EVENT_SIGNAL = "domainEventCommitted";
   public static final String TARGET_ROOM_PROGRESS_SIGNAL = "targetRoomProgressed";
   public static final String TARGET_INTAKE_TERMINAL_NO_COMMIT_SIGNAL =

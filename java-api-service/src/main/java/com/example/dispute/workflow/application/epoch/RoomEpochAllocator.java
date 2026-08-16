@@ -45,7 +45,9 @@ public interface RoomEpochAllocator {
             OffsetDateTime projectedDeadlineAt,
             OffsetDateTime occurredAt,
             String projectionRef,
-            String projectionSha256) {
+            String projectionSha256,
+            Long lastCommandSequence,
+            Long lastCaseEventSequence) {
 
         public TransitionRoomEpoch(
                 String caseId,
@@ -66,6 +68,34 @@ public interface RoomEpochAllocator {
                     projectedDeadlineAt,
                     occurredAt,
                     null,
+                    null,
+                    null,
+                    null);
+        }
+
+        public TransitionRoomEpoch(
+                String caseId,
+                RoomType expectedRoomType,
+                String nextRoomId,
+                RoomType nextRoomType,
+                String macroPhase,
+                String roomPhase,
+                OffsetDateTime projectedDeadlineAt,
+                OffsetDateTime occurredAt,
+                String projectionRef,
+                String projectionSha256) {
+            this(
+                    caseId,
+                    expectedRoomType,
+                    nextRoomId,
+                    nextRoomType,
+                    macroPhase,
+                    roomPhase,
+                    projectedDeadlineAt,
+                    occurredAt,
+                    projectionRef,
+                    projectionSha256,
+                    null,
                     null);
         }
 
@@ -81,10 +111,15 @@ public interface RoomEpochAllocator {
             requireText(roomPhase, "roomPhase");
             Objects.requireNonNull(occurredAt, "occurredAt must not be null");
             requireProjectionPair(projectionRef, projectionSha256);
+            requireSequencePair(lastCommandSequence, lastCaseEventSequence);
         }
 
         public boolean hasProjectionAuthority() {
             return projectionRef != null;
+        }
+
+        public boolean hasSequenceAuthority() {
+            return lastCommandSequence != null;
         }
     }
 
@@ -157,6 +192,19 @@ public interface RoomEpochAllocator {
         }
         if (!projectionSha256.matches("[0-9a-f]{64}")) {
             throw new IllegalArgumentException("projectionSha256 must be lowercase SHA-256");
+        }
+    }
+
+    private static void requireSequencePair(
+            Long lastCommandSequence, Long lastCaseEventSequence) {
+        if ((lastCommandSequence == null) != (lastCaseEventSequence == null)) {
+            throw new IllegalArgumentException(
+                    "lastCommandSequence and lastCaseEventSequence must both be absent or present");
+        }
+        if (lastCommandSequence != null
+                && (lastCommandSequence < 1 || lastCaseEventSequence < 1)) {
+            throw new IllegalArgumentException(
+                    "transition sequence authority must contain positive high-water marks");
         }
     }
 }

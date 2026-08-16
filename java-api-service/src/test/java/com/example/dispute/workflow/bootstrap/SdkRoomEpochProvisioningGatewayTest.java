@@ -2,15 +2,19 @@ package com.example.dispute.workflow.bootstrap;
 
 import static io.temporal.api.enums.v1.WorkflowIdConflictPolicy.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING;
 import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
-import static io.temporal.client.WorkflowUpdateStage.COMPLETED;
+import static io.temporal.client.WorkflowUpdateStage.ACCEPTED;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.workflow.config.RoomEpochBootstrapProperties;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
 import com.example.dispute.workflow.infrastructure.bootstrap.RoomEpochProvisioningException;
 import com.example.dispute.workflow.infrastructure.bootstrap.RoomEpochProvisioningGateway;
 import com.example.dispute.workflow.infrastructure.bootstrap.SdkRoomEpochProvisioningGateway;
@@ -53,47 +57,130 @@ class SdkRoomEpochProvisioningGatewayTest {
     }
 
     @Test
-    void waitsForCompletedAndAcceptsStableReceiptFromAnEarlierChainRun() {
-        var command = RoomEpochProvisioningFixtures.command("EPOCH_1", "CASE_1");
-        var receipt = RoomEpochProvisioningFixtures.receipt(command);
+    void hearingProvisioningAcknowledgesDurableStartBeforeAwaitingStableCompletion()
+            throws Exception {
+        var hearingCommand =
+                RoomEpochProvisioningFixtures.targetV2Command(
+                        "EPOCH_HEARING",
+                        "CASE_HEARING",
+                        RoomType.HEARING,
+                        "HearingRoomWorkflow");
+        var hearingReceipt = RoomEpochProvisioningFixtures.receipt(hearingCommand);
+        var pendingEvidenceCommand = RoomEpochProvisioningFixtures.command("EPOCH_2", "CASE_2");
+        @SuppressWarnings("unchecked")
+        WorkflowUpdateHandle<ProvisionRoomEpochReceipt> pendingHandle =
+                (WorkflowUpdateHandle<ProvisionRoomEpochReceipt>)
+                        mock(WorkflowUpdateHandle.class);
+        var pendingResultStarted = new CountDownLatch(1);
+
         when(workflowClient.newUntypedWorkflowStub(eq("CaseProcessWorkflow"), any()))
                 .thenReturn(workflowStub);
         when(workflowStub
-                        .<com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt>
+                        .<ProvisionRoomEpochReceipt>
                                 startUpdateWithStart(any(), any(), any()))
-                .thenReturn(handle);
+                .thenAnswer(
+                        invocation -> {
+                            UpdateOptions<?> options = invocation.getArgument(0);
+                            return hearingCommand.updateId().equals(options.getUpdateId())
+                                    ? handle
+                                    : pendingHandle;
+                        });
         when(handle.getExecution())
                 .thenReturn(
                         WorkflowExecution.newBuilder()
-                                .setWorkflowId(command.caseWorkflowId())
+                                .setWorkflowId(hearingCommand.caseWorkflowId())
                                 .setRunId("current-continue-as-new-run")
                                 .build());
-        when(handle.getResult()).thenReturn(receipt);
+        when(handle.getResult()).thenReturn(hearingReceipt);
+        when(pendingHandle.getExecution())
+                .thenReturn(
+                        WorkflowExecution.newBuilder()
+                                .setWorkflowId(pendingEvidenceCommand.caseWorkflowId())
+                                .setRunId("pending-case-run")
+                                .build());
+        when(pendingHandle.getResult())
+                .thenAnswer(
+                        invocation -> {
+                            pendingResultStarted.countDown();
+                            try {
+                                new CountDownLatch(1).await();
+                                return null;
+                            } catch (InterruptedException exception) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(exception);
+                            }
+                        });
 
-        var actual = gateway.provision(request(command));
+        var actual = gateway.provision(request(hearingCommand));
+        var replay = gateway.provision(request(hearingCommand));
 
+        assertThat(actual).isEqualTo(hearingReceipt).isEqualTo(replay);
+        assertThat(actual.roomType()).isEqualTo(RoomType.HEARING);
+        assertThat(actual.roomWorkflowId()).isEqualTo(hearingCommand.roomWorkflowId());
+        assertThat(actual.roomWorkflowRunId()).isEqualTo("room-first-run");
         assertThat(actual.caseWorkflowRunId()).isEqualTo("case-first-run");
+
+        gateway.closeExecutor();
+        gateway =
+                new SdkRoomEpochProvisioningGateway(
+                        workflowClient,
+                        Duration.ofMillis(50),
+                        Executors.newSingleThreadExecutor());
+        assertThatThrownBy(() -> gateway.provision(request(pendingEvidenceCommand)))
+                .isInstanceOfSatisfying(
+                        RoomEpochProvisioningException.class,
+                        failure -> {
+                            assertThat(failure.retryable()).isTrue();
+                            assertThat(failure.errorCode())
+                                    .isEqualTo("TEMPORAL_COMPLETION_TIMEOUT");
+                        });
+        assertThat(pendingResultStarted.await(1, TimeUnit.SECONDS)).isTrue();
+
         @SuppressWarnings("rawtypes")
         ArgumentCaptor<UpdateOptions> update = ArgumentCaptor.forClass(UpdateOptions.class);
         ArgumentCaptor<Object[]> updateArguments = ArgumentCaptor.forClass(Object[].class);
         ArgumentCaptor<Object[]> startArguments = ArgumentCaptor.forClass(Object[].class);
-        verify(workflowStub)
+        verify(workflowStub, times(3))
                 .startUpdateWithStart(
                         update.capture(), updateArguments.capture(), startArguments.capture());
-        assertThat(update.getValue().getUpdateName()).isEqualTo("provisionRoomEpoch");
-        assertThat(update.getValue().getUpdateId()).isEqualTo(command.updateId());
-        assertThat(update.getValue().getWaitForStage()).isEqualTo(COMPLETED);
-        assertThat(updateArguments.getValue()).containsExactly(command);
-        assertThat(startArguments.getValue()).hasSize(1);
+        assertThat(update.getAllValues())
+                .allSatisfy(
+                        options -> {
+                            assertThat(options.getUpdateName()).isEqualTo("provisionRoomEpoch");
+                            assertThat(options.getWaitForStage()).isEqualTo(ACCEPTED);
+                        });
+        assertThat(update.getAllValues())
+                .extracting(UpdateOptions::getUpdateId)
+                .containsExactly(
+                        hearingCommand.updateId(),
+                        hearingCommand.updateId(),
+                        pendingEvidenceCommand.updateId());
+        assertThat(updateArguments.getAllValues())
+                .containsExactly(
+                        new Object[] {hearingCommand},
+                        new Object[] {hearingCommand},
+                        new Object[] {pendingEvidenceCommand});
+        assertThat(startArguments.getAllValues()).allSatisfy(arguments -> assertThat(arguments).hasSize(1));
 
         ArgumentCaptor<WorkflowOptions> options = ArgumentCaptor.forClass(WorkflowOptions.class);
-        verify(workflowClient)
+        verify(workflowClient, times(3))
                 .newUntypedWorkflowStub(eq("CaseProcessWorkflow"), options.capture());
-        assertThat(options.getValue().getWorkflowId()).isEqualTo(command.caseWorkflowId());
-        assertThat(options.getValue().getWorkflowIdConflictPolicy())
-                .isEqualTo(WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING);
-        assertThat(options.getValue().getWorkflowIdReusePolicy())
-                .isEqualTo(WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE);
+        assertThat(options.getAllValues())
+                .allSatisfy(
+                        value -> {
+                            assertThat(value.getWorkflowIdConflictPolicy())
+                                    .isEqualTo(WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING);
+                            assertThat(value.getWorkflowIdReusePolicy())
+                                    .isEqualTo(WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE);
+                        });
+        assertThat(options.getAllValues())
+                .extracting(WorkflowOptions::getWorkflowId)
+                .containsExactly(
+                        hearingCommand.caseWorkflowId(),
+                        hearingCommand.caseWorkflowId(),
+                        pendingEvidenceCommand.caseWorkflowId());
+        verify(handle, times(2)).getResult();
+        verify(pendingHandle).getResult();
     }
 
     @Test

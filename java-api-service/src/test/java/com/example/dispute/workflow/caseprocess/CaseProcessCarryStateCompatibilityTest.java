@@ -3,25 +3,46 @@ package com.example.dispute.workflow.caseprocess;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ExpiredTargetEvidenceTerminalRecoveryCommitment;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.UnreconciledChildExecution;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessExpiredTargetEvidenceTerminalRecoveryResult;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessExpiredTargetEvidenceTerminalRecoveryResult.Disposition;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerState;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessSnapshot;
+import com.example.dispute.workflow.temporal.caseprocess.ProcessedCommandIdentity;
 import com.example.dispute.workflow.temporal.caseprocess.ProvisioningCommitment;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class CaseProcessCarryStateCompatibilityTest {
 
-  private final JsonMapper mapper = JsonMapper.builder().build();
+  private final JsonMapper mapper = JsonMapper.builder().findAndAddModules().build();
 
   @Test
   void readsLegacyCarryWithoutDescriptorAndNeverInfersTypedKind() throws Exception {
@@ -64,6 +85,7 @@ class CaseProcessCarryStateCompatibilityTest {
     assertThat(carry.protocolErrorOrigin()).isNull();
     assertThat(carry.provisioningManualRecoveryRequired()).isFalse();
     assertThat(carry.unreconciledChildren()).isEmpty();
+    assertThat(carry.expiredTargetEvidenceTerminalRecoveryCommitments()).isEmpty();
   }
 
   @Test
@@ -104,6 +126,7 @@ class CaseProcessCarryStateCompatibilityTest {
     assertThat(carry.protocolErrorCode()).isEqualTo("INTAKE_CHILD_ACTIVE_BINDING_INVALID");
     assertThat(carry.protocolErrorOrigin()).isNull();
     assertThat(carry.provisioningManualRecoveryRequired()).isFalse();
+    assertThat(carry.expiredTargetEvidenceTerminalRecoveryCommitments()).isEmpty();
   }
 
   @Test
@@ -194,6 +217,67 @@ class CaseProcessCarryStateCompatibilityTest {
     assertThat(restored.activeChildDescriptor()).isEqualTo(descriptor);
     assertThat(restored.activeChildDescriptor().kind())
         .isEqualTo(ActiveChildKind.GENERIC_ROOM_CONTROL);
+    assertThat(restored.expiredTargetEvidenceTerminalRecoveryCommitments()).isEmpty();
+  }
+
+  @Test
+  void expiredEvidenceRecoveryCommitmentRoundTripsAndMalformedCarryFailsClosed()
+      throws Exception {
+    ExpiredTargetEvidenceTerminalRecoveryCommitment commitment = recoveryCommitment(1);
+    ProcessedCommandIdentity identity = commitment.result().commandIdentity();
+    CaseProcessCarryState carry = recoveryCarry(List.of(identity), List.of(commitment));
+
+    CaseProcessCarryState restored =
+        mapper.readValue(mapper.writeValueAsBytes(carry), CaseProcessCarryState.class);
+
+    assertThat(restored.expiredTargetEvidenceTerminalRecoveryCommitments())
+        .containsExactly(commitment);
+    assertThat(restored.expiredTargetEvidenceTerminalRecoveryCommitments().getFirst().result())
+        .isEqualTo(commitment.result());
+
+    assertThatThrownBy(
+            () ->
+                new ExpiredTargetEvidenceTerminalRecoveryCommitment(
+                    ExpiredTargetEvidenceTerminalRecoveryCommitment.SCHEMA_VERSION,
+                    commitment.recoveryId(),
+                    commitment.requestSha256(),
+                    commitment.resultSha256(),
+                    null))
+        .isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(
+            () ->
+                new ExpiredTargetEvidenceTerminalRecoveryCommitment(
+                    ExpiredTargetEvidenceTerminalRecoveryCommitment.SCHEMA_VERSION,
+                    commitment.recoveryId(),
+                    "9".repeat(64),
+                    commitment.resultSha256(),
+                    commitment.result()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("hashes");
+    assertThatThrownBy(
+            () ->
+                recoveryCarry(
+                    List.of(identity),
+                    List.of(commitment, commitment)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("commitments");
+    assertThatThrownBy(() -> recoveryCarry(List.of(), List.of(commitment)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("recent command authority");
+
+    List<ExpiredTargetEvidenceTerminalRecoveryCommitment> oversized = new ArrayList<>();
+    List<ProcessedCommandIdentity> recent = new ArrayList<>();
+    for (int sequence = 1;
+        sequence <=
+            CaseProcessCarryState.MAX_EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_COMMITMENTS + 1;
+        sequence++) {
+      ExpiredTargetEvidenceTerminalRecoveryCommitment candidate = recoveryCommitment(sequence);
+      oversized.add(candidate);
+      recent.add(candidate.result().commandIdentity());
+    }
+    assertThatThrownBy(() -> recoveryCarry(recent, oversized))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("commitments");
   }
 
   @Test
@@ -300,6 +384,232 @@ class CaseProcessCarryStateCompatibilityTest {
         descriptor,
         roomRevision,
         null);
+  }
+
+  private static CaseProcessCarryState recoveryCarry(
+      List<ProcessedCommandIdentity> recentCommands,
+      List<ExpiredTargetEvidenceTerminalRecoveryCommitment> commitments) {
+    long nextCommandSequence =
+        commitments.stream()
+            .map(ExpiredTargetEvidenceTerminalRecoveryCommitment::result)
+            .mapToLong(CaseProcessExpiredTargetEvidenceTerminalRecoveryResult::nextCommandSequence)
+            .max()
+            .orElse(1L);
+    return new CaseProcessCarryState(
+        "case-process-carry-state.v1",
+        "tenant-recovery",
+        "CASE_Recovery",
+        null,
+        -1,
+        null,
+        0,
+        nextCommandSequence,
+        1,
+        Math.max(0, nextCommandSequence - 1),
+        0,
+        recentCommands,
+        List.of(),
+        0,
+        1,
+        0,
+        0,
+        false,
+        false,
+        null,
+        List.of(),
+        0,
+        null,
+        List.of(),
+        List.of(),
+        null,
+        null,
+        null,
+        false,
+        List.of(),
+        null,
+        commitments);
+  }
+
+  private static ExpiredTargetEvidenceTerminalRecoveryCommitment recoveryCommitment(
+      int sequence) {
+    Instant occurredAt = Instant.parse("2026-08-11T16:00:00Z").plusSeconds(sequence);
+    String hashCharacter = Integer.toHexString(sequence % 16);
+    String requestHash = hashCharacter.repeat(64);
+    CaseCommandRef command =
+        new CaseCommandRef(
+            "case-command-ref.v1",
+            "expired-evidence-command-" + sequence,
+            "tenant-recovery",
+            "CASE_Recovery",
+            sequence,
+            CommandType.EVIDENCE_OPENING,
+            RoomType.EVIDENCE,
+            0,
+            new ActorRef("user-recovery", ActorRole.USER, List.of("evidence:opening")),
+            new PayloadRef(
+                "target-e2e-evidence-opening.v1",
+                "urn:test:expired-evidence:" + sequence,
+                requestHash,
+                32),
+            0,
+            occurredAt,
+            occurredAt.plusSeconds(60),
+            "00-11111111111111111111111111111111-2222222222222222-01",
+            requestHash);
+    ProcessedCommandIdentity identity =
+        new ProcessedCommandIdentity(
+            command.commandId(), command.caseCommandSequence(), command.requestHash());
+    Instant actualExpiredAt = command.deadlineAt().plusSeconds(1);
+    String workflowId =
+        CaseProcessWorkflowProtocol.caseWorkflowId(
+            command.tenantSurrogate(), command.caseId());
+    String firstExecutionRunId = "case-run-recovery";
+    CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest request =
+        new CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest(
+            CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest.SCHEMA_VERSION,
+            CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest.recoveryId(
+                workflowId, firstExecutionRunId, identity, actualExpiredAt),
+            workflowId,
+            firstExecutionRunId,
+            command.tenantSurrogate(),
+            command.caseId(),
+            sequence + 1L,
+            sequence,
+            1,
+            0,
+            0,
+            0,
+            "TARGET_TYPED_ROOM_COMMAND_DISPATCH_FAILED",
+            RecoveryErrorOrigin.COMMAND,
+            actualExpiredAt,
+            identity);
+    TargetRoomAgentRunTerminalNoCommit authority = terminalAuthority(command);
+    CaseProcessExpiredTargetEvidenceTerminalRecoveryResult result =
+        new CaseProcessExpiredTargetEvidenceTerminalRecoveryResult(
+            CaseProcessExpiredTargetEvidenceTerminalRecoveryResult.SCHEMA_VERSION,
+            Disposition.RECOVERED,
+            request,
+            request.requestSha256(),
+            authority,
+            CaseCommandLedgerState.FAILED,
+            authority.receiptUri(),
+            authority.receiptSha256(),
+            0,
+            0,
+            sequence,
+            0,
+            sequence + 1L,
+            sequence,
+            1,
+            0,
+            request.expectedProtocolErrorCode(),
+            RecoveryErrorOrigin.COMMAND);
+    return new ExpiredTargetEvidenceTerminalRecoveryCommitment(
+        ExpiredTargetEvidenceTerminalRecoveryCommitment.SCHEMA_VERSION,
+        request.recoveryId(),
+        request.requestSha256(),
+        result.resultSha256(),
+        result);
+  }
+
+  private static TargetRoomAgentRunTerminalNoCommit terminalAuthority(CaseCommandRef command) {
+    String logicalRunId = "target-evidence-run:" + command.commandId();
+    RoomGraphCommand graph =
+        new RoomGraphCommand(
+            "room-graph-command.v1",
+            command.commandId(),
+            logicalRunId,
+            logicalRunId + ":1",
+            command.tenantSurrogate(),
+            command.caseId(),
+            RoomType.EVIDENCE,
+            command.roomEpoch(),
+            TargetTypedRoomProtocol.GRAPH_KEY,
+            TargetTypedRoomProtocol.GRAPH_VERSION,
+            TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
+            "grt.v1.carry-compatibility-test",
+            new RoomGraphCommand.ActorScope(
+                command.actorRef().actorId(),
+                command.actorRef().actorRole(),
+                Audience.USER,
+                command.actorRef().actorScopes()),
+            command.expectedProcessRevision(),
+            "EVIDENCE_SEAL",
+            command.expectedProcessRevision(),
+            new RoomGraphCommand.SnapshotRef(
+                "evidence-invocation:" + command.caseCommandSequence(),
+                command.payloadRef().schemaVersion(),
+                command.payloadRef().uri(),
+                command.payloadRef().sha256(),
+                command.payloadRef().sizeBytes()),
+            new RoomGraphCommand.SnapshotRef(
+                "case-command:" + command.commandId(),
+                command.payloadRef().schemaVersion(),
+                command.payloadRef().uri(),
+                command.payloadRef().sha256(),
+                command.payloadRef().sizeBytes()),
+            new RoomGraphCommand.InvocationContext(
+                "evidence-clerk",
+                "prompt-v1",
+                "model-v1",
+                "output-v1",
+                "policy-v1",
+                "guardrail-v1",
+                List.of(),
+                "key-v1",
+                "nonce-v1"),
+            new RoomGraphCommand.RetryBudget(1, 1, 0),
+            command.deadlineAt(),
+            command.traceparent(),
+            command.requestHash());
+    ExecuteAgentRunRequest root =
+        new ExecuteAgentRunRequest(
+            ExecuteAgentRunRequest.SCHEMA_VERSION,
+            logicalRunId,
+            1,
+            "agent-stream.v2",
+            "e".repeat(64),
+            null,
+            false,
+            0,
+            graph);
+    ExecuteAgentRunResult terminal =
+        new ExecuteAgentRunResult(
+            ExecuteAgentRunResult.SCHEMA_VERSION,
+            root.agentRunId(),
+            root.logicalRunId(),
+            root.attemptId(),
+            root.attemptNo(),
+            ExecuteAgentRunResult.Outcome.FAILED,
+            null,
+            null,
+            0,
+            false,
+            "EVIDENCE_AGENT_RUN_FAILED",
+            false,
+            AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
+            command.occurredAt().plusSeconds(1));
+    return new TargetRoomAgentRunTerminalNoCommit(
+        TargetRoomAgentRunTerminalNoCommit.SCHEMA_VERSION,
+        command,
+        1,
+        0,
+        0,
+        CaseProcessWorkflowProtocol.roomWorkflowId(
+            command.caseId(), RoomType.EVIDENCE, command.roomEpoch()),
+        "room-run-recovery",
+        "evidence-room-recovery.v1",
+        "a".repeat(64),
+        "b".repeat(64),
+        root,
+        terminal,
+        AgentRunAttemptStatus.FAILED,
+        terminal.errorCode(),
+        terminal.retryable(),
+        terminal.recoveryAction(),
+        terminal.lastSequenceNo(),
+        terminal.completedAt(),
+        false);
   }
 
   private static ActiveChildDescriptor descriptor(ProvisionRoomEpoch request, String runId) {

@@ -199,13 +199,75 @@ class CaseCommandServiceTest {
         verify(projectionRepository, never()).findById(any());
     }
 
+    @Test
+    void evidenceOpeningAndSubmissionPersistStableActorScopePairWhileAdjacentCommandsStaySingleton() {
+        arrangeWritableProjection();
+        when(disputeCase.getMerchantId()).thenReturn("merchant-command");
+
+        var opening =
+                accept(
+                        "command.scope.opening",
+                        CommandType.EVIDENCE_OPENING,
+                        RoomType.EVIDENCE,
+                        "a".repeat(64),
+                        user());
+        var submission =
+                accept(
+                        "command.scope.submission",
+                        CommandType.EVIDENCE_SUBMIT,
+                        RoomType.EVIDENCE,
+                        "b".repeat(64),
+                        user());
+        var merchantOpening =
+                accept(
+                        "command.scope.merchant",
+                        CommandType.EVIDENCE_OPENING,
+                        RoomType.EVIDENCE,
+                        "c".repeat(64),
+                        new AuthenticatedActor("merchant-command", ActorRole.MERCHANT));
+        var completion =
+                accept(
+                        "command.scope.completion",
+                        CommandType.PARTY_EVIDENCE_COMPLETE,
+                        RoomType.EVIDENCE,
+                        "d".repeat(64),
+                        user());
+
+        arrangeWritableProjection(RoomType.HEARING);
+        var hearing =
+                accept(
+                        "command.scope.hearing",
+                        CommandType.HEARING_STATEMENT,
+                        RoomType.HEARING,
+                        "e".repeat(64),
+                        user());
+
+        assertThat(opening.actorRef()).isEqualTo(submission.actorRef());
+        assertThat(opening.actorRef().actorScopes())
+                .containsExactly(
+                        "case:" + CASE_ID + ":command:EVIDENCE_OPENING",
+                        "case:" + CASE_ID + ":command:EVIDENCE_SUBMIT");
+        assertThat(merchantOpening.actorRef()).isNotEqualTo(opening.actorRef());
+        assertThat(merchantOpening.actorRef().actorId()).isEqualTo("merchant-command");
+        assertThat(merchantOpening.actorRef().actorScopes())
+                .containsExactlyElementsOf(opening.actorRef().actorScopes());
+        assertThat(completion.actorRef().actorScopes())
+                .containsExactly("case:" + CASE_ID + ":command:PARTY_EVIDENCE_COMPLETE");
+        assertThat(hearing.actorRef().actorScopes())
+                .containsExactly("case:" + CASE_ID + ":command:HEARING_STATEMENT");
+    }
+
     private void arrangeWritableProjection() {
+        arrangeWritableProjection(RoomType.EVIDENCE);
+    }
+
+    private void arrangeWritableProjection(RoomType roomType) {
         when(disputeCase.getId()).thenReturn(CASE_ID);
         when(caseRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(disputeCase));
         when(projectionRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(projection));
         when(projection.getCaseId()).thenReturn(CASE_ID);
         when(projection.getTenantSurrogate()).thenReturn("legacy-default");
-        when(projection.getCurrentRoom()).thenReturn("EVIDENCE");
+        when(projection.getCurrentRoom()).thenReturn(roomType.name());
         when(projection.getWriterMode()).thenReturn(WriterMode.SHADOW);
         when(projection.getWriterActivationStatus()).thenReturn(WriterActivationStatus.READY);
         when(projection.getProcessRevision()).thenReturn(0L);
@@ -218,11 +280,11 @@ class CaseCommandServiceTest {
         when(projection.getTemporalRunId()).thenReturn("run-command-service");
         when(projection.getTemporalBuildId()).thenReturn("build-command-service");
         when(roomEpochRepository.findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
-                        CASE_ID, RoomType.EVIDENCE, 0))
+                        CASE_ID, roomType, 0))
                 .thenReturn(Optional.of(roomEpoch));
         when(roomEpoch.getCaseId()).thenReturn(CASE_ID);
         when(roomEpoch.getTenantSurrogate()).thenReturn("legacy-default");
-        when(roomEpoch.getRoomType()).thenReturn(RoomType.EVIDENCE);
+        when(roomEpoch.getRoomType()).thenReturn(roomType);
         when(roomEpoch.getRoomEpoch()).thenReturn(0L);
         when(roomEpoch.getLifecycleStatus()).thenReturn(EpochLifecycleStatus.ACTIVE);
         when(roomEpoch.getProvisioningStatus()).thenReturn(EpochProvisioningStatus.READY);
@@ -237,15 +299,20 @@ class CaseCommandServiceTest {
         when(roomEpoch.getRoomTemporalWorkflowId())
                 .thenReturn(
                         CaseProcessWorkflowProtocol.roomWorkflowId(
-                                CASE_ID, RoomType.EVIDENCE, 0));
+                                CASE_ID, roomType, 0));
         when(roomEpoch.getRoomTemporalRunId()).thenReturn("room-run-command-service");
         when(roomEpoch.getTemporalBuildId()).thenReturn("build-command-service");
     }
 
     private static AcceptCaseCommand command(String payloadHash) {
+        return command(CommandType.EVIDENCE_SUBMIT, RoomType.EVIDENCE, payloadHash);
+    }
+
+    private static AcceptCaseCommand command(
+            CommandType commandType, RoomType roomType, String payloadHash) {
         return new AcceptCaseCommand(
-                CommandType.EVIDENCE_SUBMIT,
-                RoomType.EVIDENCE,
+                commandType,
+                roomType,
                 0,
                 new PayloadRef(
                         "evidence-command.v1",
@@ -254,6 +321,23 @@ class CaseCommandServiceTest {
                         128),
                 0,
                 NOW.plusSeconds(3600));
+    }
+
+    private com.example.dispute.workflow.contract.v1.CaseCommandRef accept(
+            String commandId,
+            CommandType commandType,
+            RoomType roomType,
+            String payloadHash,
+            AuthenticatedActor actor) {
+        return service.accept(
+                        CASE_ID,
+                        commandId,
+                        command(commandType, roomType, payloadHash),
+                        actor,
+                        "TRACE_scope",
+                        "REQ_scope",
+                        null)
+                .command();
     }
 
     private static AuthenticatedActor user() {
