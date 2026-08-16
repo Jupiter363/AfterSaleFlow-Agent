@@ -39,6 +39,8 @@ public final class ReconciledTargetHearingFormalCommandMapper implements TargetH
     Objects.requireNonNull(authority, "authority");
     var evidence = Objects.requireNonNull(evidenceResolver.resolve(command.request(), command.result(), material), "evidence");
     verifyEvidence(command, material, evidence, authority);
+    authority = authority.withPartyStageDeadline(
+        material.material().partyStageAuthority(), evidence.committedAt());
     var loaded = Objects.requireNonNull(payloadReader.load(evidence.proposalDescriptor(), material), "loaded proposal");
     verifyLoaded(evidence, loaded);
     JsonNode proposal;

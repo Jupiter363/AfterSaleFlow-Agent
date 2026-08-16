@@ -1132,7 +1132,7 @@ def _merge_evidence_batch(
         "case_id": request.case_id,
         "matrix_id": matrix_id,
         "matrix_version": version,
-        "matrix_status": "WORKING",
+        "matrix_status": "FROZEN",
         "parent_ref": (
             {
                 "matrix_id": prior.matrix_id,

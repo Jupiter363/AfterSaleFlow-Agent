@@ -23,6 +23,9 @@ public interface TargetHearingFormalizationActivities {
   @ActivityMethod(name = "FormalizeTargetHearingPartyAction")
   PartyResult formalizeParty(PartyRequest request);
 
+  @ActivityMethod(name = "FormalizeTargetHearingPartyTimeout")
+  TimeoutResult formalizeTimeout(TimeoutRequest request);
+
   @ActivityMethod(name = "PrepareTargetHearingAgentStage")
   AgentStagePreparation prepareAgentStage(TransitionRequest request);
 
@@ -74,6 +77,19 @@ public interface TargetHearingFormalizationActivities {
     }
   }
 
+  record TimeoutRequest(TransitionRequest transition, String participantId) {
+    public TimeoutRequest {
+      transition = Objects.requireNonNull(transition, "transition");
+      if (!transition.expectedStage().isPartyWait()
+          || participantId == null
+          || participantId.isBlank()
+          || (!participantId.equals(transition.start().initiatorParticipantId())
+              && !participantId.equals(transition.start().respondentParticipantId()))) {
+        throw new IllegalArgumentException("target Hearing timeout request is invalid");
+      }
+    }
+  }
+
   record StageResult(HearingStageReceipt receipt) {
     public StageResult {
       receipt = Objects.requireNonNull(receipt, "receipt");
@@ -83,6 +99,18 @@ public interface TargetHearingFormalizationActivities {
   record PartyResult(HearingPartyTerminalReceipt receipt) {
     public PartyResult {
       receipt = Objects.requireNonNull(receipt, "receipt");
+    }
+  }
+
+  record TimeoutResult(
+      HearingPartyTerminalReceipt receipt,
+      boolean pendingSubmittedAction) {
+    public TimeoutResult {
+      if ((receipt == null && !pendingSubmittedAction)
+          || (receipt != null && pendingSubmittedAction)) {
+        throw new IllegalArgumentException(
+            "target Hearing timeout result must carry either a receipt or a pending action");
+      }
     }
   }
 

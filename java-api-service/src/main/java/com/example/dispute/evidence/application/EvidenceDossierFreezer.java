@@ -20,12 +20,23 @@ import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRep
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -41,6 +52,7 @@ public class EvidenceDossierFreezer {
     private final EvidenceDossierItemRepository dossierItemRepository;
     private final EvidenceItemRepository evidenceRepository;
     private final EvidenceVerificationRepository verificationRepository;
+    private final CaseIntakeDossierRepository intakeDossierRepository;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -50,6 +62,26 @@ public class EvidenceDossierFreezer {
     // 下游影响：「EvidenceDossierFreezer.EvidenceDossierFreezer(EvidenceDossierRepository,EvidenceDossierItemRepository,EvidenceItemRepository,EvidenceVerificationRepository,ObjectMapper,Clock)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
     // 系统意义：「EvidenceDossierFreezer.EvidenceDossierFreezer(EvidenceDossierRepository,EvidenceDossierItemRepository,EvidenceItemRepository,EvidenceVerificationRepository,ObjectMapper,Clock)」负责主链路中的“证据卷宗冻结器”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
     // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
+    @Autowired
+    public EvidenceDossierFreezer(
+            EvidenceDossierRepository dossierRepository,
+            EvidenceDossierItemRepository dossierItemRepository,
+            EvidenceItemRepository evidenceRepository,
+            EvidenceVerificationRepository verificationRepository,
+            CaseIntakeDossierRepository intakeDossierRepository,
+            ObjectMapper objectMapper,
+            Clock clock) {
+        this.dossierRepository = dossierRepository;
+        this.dossierItemRepository = dossierItemRepository;
+        this.evidenceRepository = evidenceRepository;
+        this.verificationRepository = verificationRepository;
+        this.intakeDossierRepository = intakeDossierRepository;
+        this.objectMapper = objectMapper;
+        this.clock = clock;
+    }
+
+    /** Legacy unit-construction seam; Spring production wiring always supplies matrix authority. */
+    @Deprecated(forRemoval = false)
     public EvidenceDossierFreezer(
             EvidenceDossierRepository dossierRepository,
             EvidenceDossierItemRepository dossierItemRepository,
@@ -57,12 +89,14 @@ public class EvidenceDossierFreezer {
             EvidenceVerificationRepository verificationRepository,
             ObjectMapper objectMapper,
             Clock clock) {
-        this.dossierRepository = dossierRepository;
-        this.dossierItemRepository = dossierItemRepository;
-        this.evidenceRepository = evidenceRepository;
-        this.verificationRepository = verificationRepository;
-        this.objectMapper = objectMapper;
-        this.clock = clock;
+        this(
+                dossierRepository,
+                dossierItemRepository,
+                evidenceRepository,
+                verificationRepository,
+                null,
+                objectMapper,
+                clock);
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.targetVersion(String)」。
@@ -115,6 +149,7 @@ public class EvidenceDossierFreezer {
     // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private EvidenceDossierEntity createFrozen(
             String caseId, int targetVersion, String actorId) {
+        ObjectNode caseMatrix = authoritativeCaseFactMatrix(caseId);
         // 封卷只纳入已正式提交且未被核验拒绝的证据；原始 EvidenceItem 不会被修改。
         // 每项同时绑定“冻结时刻的最新核验版本”，日后重跑不会改写旧卷宗结论。
         List<IncludedEvidence> included =
@@ -133,6 +168,7 @@ public class EvidenceDossierFreezer {
         List<Map<String, Object>> timeline = new ArrayList<>();
         List<Map<String, Object>> evidenceItems = new ArrayList<>();
         List<String> unmappedEvidence = new ArrayList<>();
+        List<FrozenFactEvidenceLink> frozenLinks = new ArrayList<>();
         Map<String, MatrixAccumulator> matrixByFact = new LinkedHashMap<>();
         Map<String, PartySummaryAccumulator> partySummary = new LinkedHashMap<>();
         partySummary.put("USER", new PartySummaryAccumulator());
@@ -223,6 +259,12 @@ public class EvidenceDossierFreezer {
                     unmappedEvidence.add(evidence.getId());
                 }
                 for (FactLinkSnapshot link : factLinks) {
+                    frozenLinks.add(
+                            new FrozenFactEvidenceLink(
+                                    evidence.getId(),
+                                    evidence.getSubmissionBatchId(),
+                                    link,
+                                    requiresHumanReview));
                     double linkScore = compositeScore * link.confidence();
                     matrixByFact
                             .computeIfAbsent(
@@ -270,10 +312,21 @@ public class EvidenceDossierFreezer {
         summary.put("handoff_notes", evidenceHandoffNotes(included));
         summary.put("frozen", true);
 
+        String dossierId = "DOSSIER_" + compactUuid();
         Map<String, Object> matrixSummary = new LinkedHashMap<>();
         matrixSummary.put(
                 "fact_evidence_matrix",
                 matrixByFact.values().stream().map(MatrixAccumulator::toMap).toList());
+        if (caseMatrix != null) {
+            matrixSummary.put(
+                    "fact_evidence_matrix_v2",
+                    frozenFactEvidenceMatrix(
+                            caseId,
+                            targetVersion,
+                            dossierId,
+                            caseMatrix,
+                            frozenLinks));
+        }
         matrixSummary.put(
                 "unmapped_evidence",
                 unmappedEvidence);
@@ -286,7 +339,7 @@ public class EvidenceDossierFreezer {
         EvidenceDossierEntity dossier =
                 dossierRepository.save(
                         EvidenceDossierEntity.frozen(
-                                "DOSSIER_" + compactUuid(),
+                                dossierId,
                                 caseId,
                                 targetVersion,
                                 actorId,
@@ -355,7 +408,225 @@ public class EvidenceDossierFreezer {
                             actorId));
         }
         dossierItemRepository.saveAll(snapshots);
+        // The caller may continue the same transaction with direct JDBC authority writes.
+        // Flush the complete immutable aggregate so its header and snapshots are visible there.
+        dossierRepository.flush();
         return dossier;
+    }
+
+    private ObjectNode authoritativeCaseFactMatrix(String caseId) {
+        if (intakeDossierRepository == null) {
+            return null;
+        }
+        String dossierJson =
+                intakeDossierRepository
+                        .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "formal intake dossier is required for evidence freeze"))
+                        .getDossierJson();
+        try {
+            JsonNode candidate = objectMapper.readTree(dossierJson).path("case_fact_matrix");
+            if (!candidate.isObject()
+                    || !"case_fact_matrix.v2"
+                            .equals(candidate.path("schema_version").asText())
+                    || !caseId.equals(candidate.path("case_id").asText())
+                    || candidate.path("matrix_id").asText("").isBlank()
+                    || candidate.path("matrix_version").asInt(0) < 1
+                    || !isContentHash(candidate.path("content_hash").asText())) {
+                throw new IllegalStateException(
+                        "formal case_fact_matrix.v2 authority is invalid for evidence freeze");
+            }
+            JsonNode rows = candidate.path("fact_rows");
+            if (!rows.isArray() || rows.isEmpty()) {
+                throw new IllegalStateException(
+                        "formal case_fact_matrix.v2 facts are required for evidence freeze");
+            }
+            Set<String> factIds = new LinkedHashSet<>();
+            for (JsonNode row : rows) {
+                String factId = row.path("fact_id").asText("").trim();
+                if (factId.isBlank() || !factIds.add(factId)) {
+                    throw new IllegalStateException(
+                            "formal case_fact_matrix.v2 fact authority is invalid");
+                }
+            }
+            return ((ObjectNode) candidate).deepCopy();
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("formal intake dossier is invalid JSON", exception);
+        }
+    }
+
+    private ObjectNode frozenFactEvidenceMatrix(
+            String caseId,
+            int targetVersion,
+            String dossierId,
+            ObjectNode caseMatrix,
+            List<FrozenFactEvidenceLink> frozenLinks) {
+        ObjectNode previous = previousFactEvidenceMatrix(caseId, targetVersion);
+        int matrixVersion = previous == null ? 1 : previous.path("matrix_version").asInt() + 1;
+        ObjectNode matrix = objectMapper.createObjectNode();
+        matrix.put("schema_version", "fact_evidence_matrix.v2");
+        matrix.put("case_id", caseId);
+        matrix.put(
+                "matrix_id",
+                "FACT_EVIDENCE_MATRIX_"
+                        + UUID.nameUUIDFromBytes(
+                                        (caseId + ':' + dossierId + ':' + matrixVersion)
+                                                .getBytes(StandardCharsets.UTF_8))
+                                .toString()
+                                .replace("-", "")
+                                .toUpperCase());
+        matrix.put("matrix_version", matrixVersion);
+        matrix.put("matrix_status", "FROZEN");
+        if (previous == null) {
+            matrix.putNull("parent_ref");
+        } else {
+            ObjectNode parent = matrix.putObject("parent_ref");
+            parent.put("matrix_id", previous.path("matrix_id").asText());
+            parent.put("matrix_version", previous.path("matrix_version").asInt());
+            parent.put("content_hash", previous.path("content_hash").asText());
+        }
+        matrix.put("case_fact_matrix_id", caseMatrix.path("matrix_id").asText());
+        matrix.put("case_fact_matrix_version", caseMatrix.path("matrix_version").asInt());
+        matrix.put("case_fact_matrix_hash", caseMatrix.path("content_hash").asText());
+        matrix.put("content_hash", "0".repeat(64));
+        matrix.putArray("source_refs").add(dossierId);
+
+        Set<String> knownFacts = new LinkedHashSet<>();
+        for (JsonNode row : caseMatrix.path("fact_rows")) {
+            knownFacts.add(row.path("fact_id").asText());
+        }
+        Set<String> linkKeys = new LinkedHashSet<>();
+        ArrayNode links = matrix.putArray("links");
+        for (FrozenFactEvidenceLink frozenLink : frozenLinks) {
+            FactLinkSnapshot link = frozenLink.link();
+            if (!knownFacts.contains(link.factId())) {
+                throw new IllegalStateException(
+                        "frozen evidence link references unknown formal fact_id: "
+                                + link.factId());
+            }
+            if (!linkKeys.add(link.factId() + '\u0000' + frozenLink.evidenceId())) {
+                throw new IllegalStateException(
+                        "frozen evidence links contain a duplicate fact/evidence pair");
+            }
+            ObjectNode item = links.addObject();
+            item.put("fact_id", link.factId());
+            item.put("evidence_id", frozenLink.evidenceId());
+            item.put("relation", link.relation());
+            item.put("reason", defaultText(link.reason(), link.factId()));
+            item.put("confidence", link.confidence());
+            if (frozenLink.sourceBatchId() == null
+                    || frozenLink.sourceBatchId().isBlank()) {
+                item.putNull("source_batch_id");
+            } else {
+                item.put("source_batch_id", frozenLink.sourceBatchId());
+            }
+        }
+
+        ArrayNode coverage = matrix.putArray("fact_coverage");
+        for (String factId : knownFacts) {
+            LinkedHashSet<String> evidenceIds = new LinkedHashSet<>();
+            boolean requiresHumanReview = false;
+            for (FrozenFactEvidenceLink link : frozenLinks) {
+                if (!factId.equals(link.link().factId())) {
+                    continue;
+                }
+                evidenceIds.add(link.evidenceId());
+                requiresHumanReview |= link.requiresHumanReview();
+            }
+            ObjectNode item = coverage.addObject();
+            item.put("fact_id", factId);
+            item.put(
+                    "coverage_status",
+                    requiresHumanReview
+                            ? "REQUIRES_HUMAN_REVIEW"
+                            : evidenceIds.isEmpty()
+                                    ? "NOT_COVERED_BY_FROZEN_DOSSIER"
+                                    : "COVERED_BY_FROZEN_DOSSIER");
+            item.set("evidence_ids", objectMapper.valueToTree(evidenceIds));
+            item.put(
+                    "note",
+                    evidenceIds.isEmpty()
+                            ? "该事实尚未被庭前冻结证据卷宗覆盖。"
+                            : requiresHumanReview
+                                    ? "该事实已有材料，但至少一份材料需要人工复核。"
+                                    : "该事实的关联材料来自庭前冻结证据卷宗。");
+        }
+        matrix.put("content_hash", pythonContentHash(matrix, "content_hash"));
+        return matrix;
+    }
+
+    private ObjectNode previousFactEvidenceMatrix(String caseId, int targetVersion) {
+        Optional<EvidenceDossierEntity> previous =
+                dossierRepository.findTopByCaseIdOrderByDossierVersionDesc(caseId);
+        if (previous.isEmpty()) {
+            return null;
+        }
+        EvidenceDossierEntity dossier = previous.get();
+        if (dossier.getDossierVersion() >= targetVersion) {
+            throw new IllegalStateException("evidence dossier version authority regressed");
+        }
+        try {
+            JsonNode candidate =
+                    objectMapper
+                            .readTree(dossier.getMatrixSummaryJson())
+                            .path("fact_evidence_matrix_v2");
+            if (candidate.isMissingNode() || candidate.isNull()) {
+                return null;
+            }
+            if (!candidate.isObject()) {
+                throw new IllegalStateException("previous frozen evidence matrix is not an object");
+            }
+            ObjectNode matrix = (ObjectNode) candidate;
+            if (!"fact_evidence_matrix.v2".equals(matrix.path("schema_version").asText())
+                    || !caseId.equals(matrix.path("case_id").asText())
+                    || !"FROZEN".equals(matrix.path("matrix_status").asText())
+                    || matrix.path("matrix_id").asText("").isBlank()
+                    || matrix.path("matrix_version").asInt(0) < 1
+                    || !isContentHash(matrix.path("content_hash").asText())
+                    || !matrix.path("content_hash")
+                            .asText()
+                            .equals(pythonContentHash(matrix, "content_hash"))) {
+                throw new IllegalStateException("previous frozen evidence matrix authority is invalid");
+            }
+            return matrix.deepCopy();
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("previous frozen evidence matrix is invalid JSON", exception);
+        }
+    }
+
+    private String pythonContentHash(ObjectNode value, String hashField) {
+        ObjectNode unsigned = value.deepCopy();
+        unsigned.remove(hashField);
+        try {
+            byte[] canonical = objectMapper.writeValueAsBytes(sortObjectMembers(unsigned));
+            return HexFormat.of()
+                    .formatHex(MessageDigest.getInstance("SHA-256").digest(canonical));
+        } catch (Exception exception) {
+            throw new IllegalStateException("cannot hash frozen evidence matrix", exception);
+        }
+    }
+
+    private JsonNode sortObjectMembers(JsonNode value) {
+        if (value.isObject()) {
+            ObjectNode sorted = objectMapper.createObjectNode();
+            List<String> fields = new ArrayList<>();
+            value.fieldNames().forEachRemaining(fields::add);
+            fields.sort(String::compareTo);
+            fields.forEach(field -> sorted.set(field, sortObjectMembers(value.get(field))));
+            return sorted;
+        }
+        if (value.isArray()) {
+            ArrayNode sorted = objectMapper.createArrayNode();
+            value.forEach(item -> sorted.add(sortObjectMembers(item)));
+            return sorted;
+        }
+        return value.deepCopy();
+    }
+
+    private static boolean isContentHash(String value) {
+        return value != null && value.matches("[a-f0-9]{64}");
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.withLatestStatus(EvidenceItemEntity)」。
@@ -961,6 +1232,12 @@ public class EvidenceDossierFreezer {
     // Java 语法：record 用于不可变数据载体，编译器会生成组件访问器和值语义方法。
     private record FactLinkSnapshot(
             String factId, String relation, String reason, double confidence) {}
+
+    private record FrozenFactEvidenceLink(
+            String evidenceId,
+            String sourceBatchId,
+            FactLinkSnapshot link,
+            boolean requiresHumanReview) {}
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】类型「MatrixAccumulator」。
     // 类型职责：承载矩阵Accumulator在当前业务模块中的规则与协作边界；本类型显式提供 「MatrixAccumulator」、「add」、「strongEnough」、「toMap」、「evidenceStrength」、「judgeAttention」。

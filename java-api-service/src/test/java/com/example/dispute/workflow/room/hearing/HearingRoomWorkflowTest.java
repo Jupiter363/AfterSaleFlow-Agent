@@ -101,6 +101,26 @@ class HearingRoomWorkflowTest {
   }
 
   @Test
+  void handoffOperationKeyBindsExactEpochAndJudgeV2Artifact() {
+    HearingRoomStart start = HearingReceiptTestFactory.start(
+        Instant.parse("2026-08-16T06:00:00Z"), Duration.ofMinutes(20));
+    String judgeV2Id = "hearing-judge_v2-exact-parent";
+    String judgeV2Hash = HearingReceiptTestFactory.hash("judge-v2-exact-parent");
+
+    String operationKey = HearingRoomWorkflowImpl.exactHandoffOperationKey(
+        start, judgeV2Id, judgeV2Hash);
+
+    assertThat(operationKey).isEqualTo(HearingOperationKeys.handoff(
+        start.tenantSurrogate(), start.caseId(), start.roomEpoch(), judgeV2Id, judgeV2Hash));
+    assertThat(operationKey).isNotEqualTo("hearing.handoff:" + start.caseId());
+    assertThat(HearingRoomWorkflowImpl.exactHandoffOperationKey(
+        start, "hearing-judge_v2-other-parent", judgeV2Hash)).isNotEqualTo(operationKey);
+    assertThat(HearingRoomWorkflowImpl.exactHandoffOperationKey(
+        start, judgeV2Id, HearingReceiptTestFactory.hash("judge-v2-other-hash")))
+        .isNotEqualTo(operationKey);
+  }
+
+  @Test
   void fullReceiptDrivenFlowPreservesDeadlineAndWaitsForJavaTimeoutReceipt()
       throws Exception {
     Started started = start("full", Duration.ofSeconds(3));

@@ -198,6 +198,32 @@ const settlements = computed(() => hearing.value?.settlements || []);
 const hearingStatus = computed(() => hearing.value?.status || {});
 const flowStageCode = computed(() => hearingFlowStage(hearingStatus.value));
 const flowStageMeta = computed(() => hearingFlowStageDefinition(flowStageCode.value));
+const emptyTranscriptCopy = computed(() => {
+  const stageCode = flowStageCode.value;
+  const stageLabel = flowStageMeta.value?.label || "庭审处理";
+  if (stageCode === "PARTY_ANSWERS_OPEN") {
+    return {
+      title: "等待双方回答",
+      body: "庭审状态机已自动进入双方回答阶段；当前尚未写入可追溯陈述，无需手工开庭。",
+    };
+  }
+  if (stageCode === "PARTY_EVIDENCE_OPEN") {
+    return {
+      title: "等待双方补充证据",
+      body: "庭审状态机已自动进入补充证据阶段；当前尚未写入可追溯材料，无需手工开庭。",
+    };
+  }
+  if (stageCode === "CLOSED") {
+    return {
+      title: "暂无可追溯庭审消息",
+      body: "庭审已结束，但当前没有可展示的正式庭审消息；系统不会用示例内容代替真实案卷。",
+    };
+  }
+  return {
+    title: `${stageLabel}进行中`,
+    body: `庭审状态机已自动进入“${stageLabel}”；当前尚未写入可追溯消息，无需手工开庭。`,
+  };
+});
 const questionSet = computed(
   () => hearing.value?.question_set || hearing.value?.questionSet || null,
 );
@@ -3021,8 +3047,8 @@ onBeforeUnmount(() => {
               class="court-transcript__empty"
               data-court-transcript-empty
             >
-              <strong>等待开庭消息</strong>
-              <small>当前庭审记录尚未写入可追溯消息；系统不会用示例陈述代替真实案卷。</small>
+              <strong>{{ emptyTranscriptCopy.title }}</strong>
+              <small>{{ emptyTranscriptCopy.body }}</small>
             </div>
           </div>
         </section>

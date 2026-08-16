@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.targete2e.rooms.hearing;
 
+import com.example.dispute.hearing.domain.HearingFlowStage;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,9 +17,11 @@ final class TargetHearingFormalPayloadFactory {
       JdbcTargetHearingFormalAuthorityLoader.FormalAuthorityBinding binding) {
     return switch (operation) {
       case "intake_questions" -> action(proposal, formalId, "hearing_intake_questions.v1",
-          "hearing_question_set.v1", "question_set_id", Set.of("schema_version", "case_id", "workflow_id", "stage_sequence", "speaker_role", "questions", "public_message"));
+          "hearing_question_set.v1", "question_set_id", HearingFlowStage.INTAKE_QUESTIONS_GENERATING,
+          binding, Set.of("schema_version", "case_id", "workflow_id", "stage_sequence", "speaker_role", "questions", "public_message"));
       case "evidence_requests" -> action(proposal, formalId, "hearing_evidence_requests.v1",
-          "hearing_evidence_request_set.v1", "request_set_id", Set.of("schema_version", "case_id", "workflow_id", "stage_sequence", "requests", "public_message"));
+          "hearing_evidence_request_set.v1", "request_set_id", HearingFlowStage.EVIDENCE_REQUESTS_GENERATING,
+          binding, Set.of("schema_version", "case_id", "workflow_id", "stage_sequence", "requests", "public_message"));
       case "intake_synthesis" -> matrix(proposal, "hearing_intake_synthesis.v1", "case_fact_matrix",
           Set.of("schema_version", "case_id", "workflow_id", "stage_sequence", "case_fact_matrix", "dispute_points", "issue_mappings", "public_message"));
       case "evidence_synthesis" -> matrix(proposal, "hearing_evidence_synthesis.v1", "fact_evidence_matrix",
@@ -34,10 +37,16 @@ final class TargetHearingFormalPayloadFactory {
   }
 
   private FormalPayload action(JsonNode source, String id, String sourceSchema, String formalSchema,
-      String idField, Set<String> fields) {
+      String idField, HearingFlowStage expectedStage,
+      JdbcTargetHearingFormalAuthorityLoader.FormalAuthorityBinding binding, Set<String> fields) {
     requireSource(source, sourceSchema, fields);
+    if (binding.authority().stage() != expectedStage || binding.matrixAuthority() == null) {
+      throw new IllegalStateException("target Hearing action matrix authority is absent");
+    }
     ObjectNode result = ((ObjectNode) source).deepCopy();
     result.put("schema_version", formalSchema); result.put(idField, id);
+    result.put("case_matrix_version", binding.matrixAuthority().version());
+    result.put("case_matrix_hash", binding.matrixAuthority().hash());
     return payload(result, false);
   }
 
@@ -50,17 +59,19 @@ final class TargetHearingFormalPayloadFactory {
   private FormalPayload decision(JsonNode source, String id, String sourceSchema, String formalSchema,
       String idField, JdbcTargetHearingFormalAuthorityLoader.FormalAuthorityBinding binding, Set<String> fields) {
     requireSource(source, sourceSchema, fields);
+    String operation = operation(sourceSchema);
+    requireDecisionSource(source, operation);
     var parents = binding.parents();
     if (parents.dossier() == null) throw new IllegalStateException("target Hearing dossier parent is absent");
-    requireDecisionParents(source, operation(sourceSchema), parents);
+    requireDecisionParents(source, operation, parents);
     ObjectNode result = mapper.createObjectNode();
     result.put("schema_version", formalSchema); result.put(idField, id);
     result.put("trial_dossier_id", parents.dossier().id()); result.put("trial_dossier_hash", parents.dossier().hash());
-    if ("jury_review".equals(operation(sourceSchema)) || "judge_v2".equals(operation(sourceSchema))) {
+    if ("jury_review".equals(operation) || "judge_v2".equals(operation)) {
       if (parents.proposal() == null) throw new IllegalStateException("target Hearing proposal parent is absent");
       result.put("proposal_id", parents.proposal().id()); result.put("proposal_content_hash", parents.proposal().hash());
     }
-    if ("judge_v2".equals(operation(sourceSchema))) {
+    if ("judge_v2".equals(operation)) {
       if (parents.report() == null) throw new IllegalStateException("target Hearing report parent is absent");
       result.put("report_id", parents.report().id()); result.put("report_content_hash", parents.report().hash());
       result.set("draft", source.path("draft").deepCopy()); result.put("public_text", source.path("public_message").asText());
@@ -83,16 +94,42 @@ final class TargetHearingFormalPayloadFactory {
     requireExactText(source, "trial_dossier_id", parents.dossier().id());
     requireExactText(source, "trial_dossier_hash", parents.dossier().hash());
     if ("jury_review".equals(operation) || "judge_v2".equals(operation)) {
-      if (parents.proposal() == null) throw new IllegalStateException("target Hearing proposal parent is absent");
+      if (parents.proposalSource() == null) {
+        throw new IllegalStateException("target Hearing proposal source parent is absent");
+      }
       String idField = "jury_review".equals(operation) ? "reviewed_proposal_id" : "parent_proposal_id";
       String hashField = "jury_review".equals(operation) ? "reviewed_proposal_hash" : "parent_proposal_hash";
-      requireExactText(source, idField, parents.proposal().id());
-      requireExactText(source, hashField, parents.proposal().hash());
+      requireExactText(source, idField, parents.proposalSource().id());
+      requireExactText(source, hashField, parents.proposalSource().hash());
     }
     if ("judge_v2".equals(operation)) {
-      if (parents.report() == null) throw new IllegalStateException("target Hearing report parent is absent");
-      requireExactText(source, "jury_review_id", parents.report().id());
-      requireExactText(source, "jury_review_hash", parents.report().hash());
+      if (parents.reportSource() == null) {
+        throw new IllegalStateException("target Hearing report source parent is absent");
+      }
+      requireExactText(source, "jury_review_id", parents.reportSource().id());
+      requireExactText(source, "jury_review_hash", parents.reportSource().hash());
+    }
+  }
+
+  private void requireDecisionSource(JsonNode source, String operation) {
+    String idField = switch (operation) {
+      case "judge_v1" -> "proposal_id";
+      case "jury_review" -> "review_id";
+      case "judge_v2" -> "judge_v2_id";
+      default -> throw new IllegalArgumentException("unsupported target Hearing decision operation");
+    };
+    String hashField = switch (operation) {
+      case "judge_v1" -> "proposal_hash";
+      case "jury_review" -> "review_hash";
+      case "judge_v2" -> "judge_v2_hash";
+      default -> throw new IllegalArgumentException("unsupported target Hearing decision operation");
+    };
+    if (!(source instanceof ObjectNode object)
+        || !object.path(idField).isTextual() || object.path(idField).asText().isBlank()
+        || !object.path(hashField).asText().matches("[0-9a-f]{64}")
+        || !object.path(hashField).asText().equals(
+            JdbcTargetHearingAgentStageInputFactory.pythonContentHash(mapper, object, hashField))) {
+      throw new IllegalArgumentException("target Hearing nested Python decision source is invalid");
     }
   }
 

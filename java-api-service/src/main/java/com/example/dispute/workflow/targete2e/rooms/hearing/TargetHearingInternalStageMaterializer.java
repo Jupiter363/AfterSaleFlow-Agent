@@ -29,6 +29,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -78,29 +79,31 @@ public final class TargetHearingInternalStageMaterializer {
     require(grant.activationId() != null && grant.graphKey().equals(TargetTypedRoomProtocol.GRAPH_KEY)
         && grant.graphVersion().equals(TargetTypedRoomProtocol.GRAPH_VERSION)
         && grant.checkpointSchemaVersion().equals(TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION), "activation pins");
-    String identity = stable(start.tenantSurrogate() + '\n' + start.caseId() + '\n' + start.roomEpoch() + '\n' + stage.name());
-    String commandId = "hearing-stage:" + stage.sequence() + ':' + identity;
-    String logicalRunId = "target-hearing-run:" + identity;
-    String attemptId = logicalRunId + ":1";
+    StageIdentity stageIdentity = materializeIdentity(start, stage);
+    String commandId = stageIdentity.commandId();
+    String logicalRunId = stageIdentity.logicalRunId();
+    String attemptId = stageIdentity.attemptId();
     JdbcTargetHearingAgentStageInputFactory.StageInput input = inputs.load(start, stage);
     ObjectNode event = mapper.createObjectNode(); event.put("schema_version", "target-e2e-hearing-stage-event.v1");
     event.put("case_id", start.caseId()); event.put("stage_sequence", stage.sequence()); event.put("operation", input.operation());
-    var published = hearingPublisher.publish(commandId, input.operation(), input.request(), input.fixtureProposal(),
-        input.fixtureWorkResults(), event);
-    Instant now = clock.instant();
-    RoomGraphCommand command = graph(commandId, logicalRunId, attemptId, start, transition.expectedProcessRevision(),
-        stage, published.domainSnapshotRef(), published.eventRef(), now);
+    var published = hearingPublisher.publish(commandId, input.operation(), input.sharedBarrierReceiptHash(),
+        input.request(), input.fixtureProposal(), input.fixtureWorkResults(), event);
+    AuthorityTimes authorityTimes = authorityTimes(clock.instant(), start.hearingDeadlineAt());
+    Instant now = authorityTimes.startedAt();
+    RoomGraphCommand command = graph(commandId, logicalRunId, attemptId, stageIdentity.threadId(), start, transition.expectedProcessRevision(),
+        stage, published.domainSnapshotRef(), published.eventRef(), authorityTimes.deadlineAt());
     var envelope = envelopes.wrapCommand(grant.activationId(), start.fencingToken(), command);
     Authority exchange = new Authority("target-e2e-room-exchange-authority.v1", grant.activationId(), start.fencingToken(),
         envelope.commandHash(), envelope.commandEnvelopeHash(), start.tenantSurrogate(), start.caseId(), "HEARING", start.roomEpoch(),
         command.threadId(), command.commandId(), command.logicalRunId(), command.attemptId(), command.requestHash(), command.graphKey(),
         command.graphVersion(), command.checkpointSchemaVersion(), command.processRevision(), command.stageCode(), command.stageSequence());
     hearingPublisher.bind(exchange, command, input.operation(), published);
+    String roomEpochId = authoritativeRoomEpochId(start);
     AgentRunCommandBindingFactory.Binding binding = bindings.bind(new AgentRunCommandBindingFactory.Context(
-        start.roomId(), start.caseId() + ':' + start.roomEpoch(), "HEARING_" + input.operation().toUpperCase(), commandId), command);
+        start.roomId(), roomEpochId, "HEARING_" + input.operation().toUpperCase(), commandId), command);
     LogicalRun logical = ledger.createOrLoad(new CreateLogicalRun(logicalRunId, start.tenantSurrogate(), start.caseId(), start.roomId(),
         "HEARING_" + input.operation().toUpperCase(), commandId, AgentRunProtocol.V2, AgentRunExecutorKind.TEMPORAL_ACTIVITY,
-        start.caseId() + ':' + start.roomEpoch(), RoomType.HEARING, start.roomEpoch(), transition.expectedProcessRevision(),
+        roomEpochId, RoomType.HEARING, start.roomEpoch(), transition.expectedProcessRevision(),
         start.fencingToken(), command.requestHash(), binding.logicalInputHash(), ATTEMPT_LIMIT, command.deadlineAt(), now));
     require(logical.agentRunId().equals(logicalRunId), "logical run replay");
     Attempt attempt = ledger.startNextAttempt(logicalRunId, new AttemptAllocation(1, command, binding), now);
@@ -110,24 +113,36 @@ public final class TargetHearingInternalStageMaterializer {
     CommandAdmission admission = new CommandAdmission(grant.activationId(), grant.activationManifestHash(),
         grant.isolatedDomainDbBindingHash(), start.tenantSurrogate(), start.caseId(), commandId,
         envelope.commandHash(), envelope.commandEnvelopeHash(), start.roomEpoch(), start.fencingToken());
-    materialStore.append(new TargetHearingCommandMaterial(TargetHearingCommandMaterial.SCHEMA_VERSION, admission, request,
+    materialStore.append(commandMaterial(start, admission, request,
         envelope.commandHash(), envelope.commandEnvelopeHash()));
     return request;
   }
 
-  private RoomGraphCommand graph(String commandId, String logicalRunId, String attemptId, HearingRoomStart start,
+  static TargetHearingCommandMaterial commandMaterial(
+      HearingRoomStart start, CommandAdmission admission, ExecuteAgentRunRequest request,
+      String commandHash, String commandEnvelopeHash) {
+    Objects.requireNonNull(start, "start");
+    var partyAuthority = new TargetHearingCommandMaterial.PartyStageAuthority(
+        TargetHearingCommandMaterial.PartyStageAuthority.SCHEMA_VERSION,
+        start.tenantSurrogate(), start.caseId(), start.roomEpoch(), start.fencingToken(),
+        start.partyStageWindowSeconds(), start.hearingDeadlineAt());
+    return new TargetHearingCommandMaterial(TargetHearingCommandMaterial.SCHEMA_VERSION,
+        admission, request, partyAuthority, commandHash, commandEnvelopeHash);
+  }
+
+  private RoomGraphCommand graph(String commandId, String logicalRunId, String attemptId, String threadId, HearingRoomStart start,
       long processRevision, HearingWorkflowStage stage, RoomGraphCommand.SnapshotRef domain,
-      RoomGraphCommand.SnapshotRef event, Instant now) {
+      RoomGraphCommand.SnapshotRef event, Instant deadlineAt) {
     RoomGraphCommand.InvocationContext invocation = new RoomGraphCommand.InvocationContext(pins.agentProfileId(),
         pins.promptVersion(), pins.modelProfileId(), "target-e2e-room-proposal-source.v1", pins.policyVersion(),
         pins.guardrailVersion(), List.of(), pins.envelopeKeyId(), "target-hearing-nonce:" + stable(commandId));
     RoomGraphCommand provisional = new RoomGraphCommand("room-graph-command.v1", commandId, logicalRunId, attemptId,
         start.tenantSurrogate(), start.caseId(), RoomType.HEARING, start.roomEpoch(), TargetTypedRoomProtocol.GRAPH_KEY,
-        TargetTypedRoomProtocol.GRAPH_VERSION, TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION, "grt.v1." + stable(start.caseId()),
+        TargetTypedRoomProtocol.GRAPH_VERSION, TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION, threadId,
         new RoomGraphCommand.ActorScope("hearing-control", ActorRole.SYSTEM, Audience.SYSTEM, List.of("hearing:" + stage.name())),
         processRevision, stage.name(), stage.sequence(), domain, event, invocation,
         new RoomGraphCommand.RetryBudget(2, ATTEMPT_LIMIT, 1),
-        start.hearingDeadlineAt().isBefore(now.plusSeconds(300)) ? start.hearingDeadlineAt() : now.plusSeconds(300),
+        deadlineAt,
         "00-" + stable(commandId).substring(0, 32) + "-0000000000000001-01", "0".repeat(64));
     ObjectNode body = mapper.valueToTree(provisional); body.remove("request_hash"); String requestHash = ContractJson.sha256Hex(body);
     return new RoomGraphCommand(provisional.schemaVersion(), provisional.commandId(), provisional.logicalRunId(), provisional.attemptId(),
@@ -135,6 +150,38 @@ public final class TargetHearingInternalStageMaterializer {
         provisional.graphVersion(), provisional.checkpointSchemaVersion(), provisional.threadId(), provisional.actorScope(), provisional.processRevision(),
         provisional.stageCode(), provisional.stageSequence(), provisional.domainSnapshotRef(), provisional.eventRef(), provisional.invocationContext(),
         provisional.retryBudget(), provisional.deadlineAt(), provisional.traceparent(), requestHash);
+  }
+  static AuthorityTimes authorityTimes(Instant startedAt, Instant hearingDeadlineAt) {
+    Objects.requireNonNull(startedAt, "startedAt"); Objects.requireNonNull(hearingDeadlineAt, "hearingDeadlineAt");
+    Instant canonicalStartedAt = startedAt.truncatedTo(ChronoUnit.MICROS);
+    Instant canonicalHearingDeadline = hearingDeadlineAt.truncatedTo(ChronoUnit.MICROS);
+    Instant generatedDeadline = canonicalStartedAt.plusSeconds(300);
+    return new AuthorityTimes(canonicalStartedAt,
+        canonicalHearingDeadline.isBefore(generatedDeadline) ? canonicalHearingDeadline : generatedDeadline);
+  }
+  record AuthorityTimes(Instant startedAt, Instant deadlineAt) {
+    AuthorityTimes { Objects.requireNonNull(startedAt); Objects.requireNonNull(deadlineAt); }
+  }
+  static String authoritativeRoomEpochId(HearingRoomStart start) {
+    Objects.requireNonNull(start, "start");
+    return start.epochId();
+  }
+  static StageIdentity materializeIdentity(HearingRoomStart start, HearingWorkflowStage stage) {
+    Objects.requireNonNull(start, "start"); Objects.requireNonNull(stage, "stage");
+    if (!stage.requiresAgentRun()) throw new IllegalArgumentException("only an internal Hearing agent stage can materialize");
+    String identity = stable(start.tenantSurrogate() + '\n' + start.caseId() + '\n' + start.roomEpoch() + '\n' + stage.name());
+    String logicalRunId = "target-hearing-run:" + identity;
+    return new StageIdentity(
+        "hearing-stage:" + stage.sequence() + ':' + identity,
+        logicalRunId,
+        logicalRunId + ":1",
+        "grt.v1." + identity);
+  }
+  record StageIdentity(String commandId, String logicalRunId, String attemptId, String threadId) {
+    StageIdentity {
+      Objects.requireNonNull(commandId); Objects.requireNonNull(logicalRunId);
+      Objects.requireNonNull(attemptId); Objects.requireNonNull(threadId);
+    }
   }
   private static String stable(String value) { return UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8)).toString().replace("-", ""); }
   private static void require(boolean value, String label) { if (!value) throw new IllegalStateException("target Hearing " + label + " drifted"); }

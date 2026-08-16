@@ -22,16 +22,22 @@ final class TargetHearingTrialDossier {
     require(caseId.equals(text(evidenceMatrix, "case_id")), "evidence matrix case binding");
     int caseVersion = positiveInt(caseMatrix, "matrix_version");
     int evidenceVersion = positiveInt(evidenceMatrix, "matrix_version");
-    String caseHash = exactHash(caseMatrix);
-    String evidenceHash = exactHash(evidenceMatrix);
+    String caseHash = exactHash(mapper, caseMatrix);
+    String evidenceHash = exactHash(mapper, evidenceMatrix);
     require("FROZEN".equals(text(evidenceMatrix, "matrix_status")), "frozen evidence matrix");
     require(text(evidenceMatrix, "case_fact_matrix_id").equals(text(caseMatrix, "matrix_id"))
         && evidenceMatrix.path("case_fact_matrix_version").asInt(-1) == caseVersion
         && caseHash.equals(text(evidenceMatrix, "case_fact_matrix_hash")), "matrix parent binding");
     String questionId = text(questionSet, "question_set_id");
     String requestId = text(requestSet, "request_set_id");
+    JsonNode questionParent = caseMatrix.path("parent_ref");
     require("hearing_question_set.v1".equals(text(questionSet, "schema_version"))
-        && caseId.equals(text(questionSet, "case_id")), "question set shape");
+        && caseId.equals(text(questionSet, "case_id")) && questionParent.isObject()
+        && positiveInt(questionParent, "matrix_version") + 1 == caseVersion
+        && questionSet.path("case_matrix_version").asInt(-1)
+            == positiveInt(questionParent, "matrix_version")
+        && text(questionParent, "content_hash").equals(text(questionSet, "case_matrix_hash")),
+        "question set binding");
     require("hearing_evidence_request_set.v1".equals(text(requestSet, "schema_version"))
         && requestSet.path("case_matrix_version").asInt(-1) == caseVersion
         && caseHash.equals(text(requestSet, "case_matrix_hash")), "request set binding");
@@ -48,7 +54,9 @@ final class TargetHearingTrialDossier {
     value.set("answer_bundles", answers.deepCopy()); value.put("request_set_id", requestId);
     value.set("evidence_request_set", requestSet.deepCopy());
     value.set("evidence_batches", evidenceBatches.deepCopy()); value.set("policy_rules", policyRules.deepCopy());
-    String hash = ContractJson.sha256Hex(value); value.put("content_hash", hash);
+    String hash = JdbcTargetHearingAgentStageInputFactory.pythonContentHash(
+        mapper, value, "content_hash");
+    value.put("content_hash", hash);
     return new Value(ContractJson.canonicalString(value), hash, caseVersion, caseHash, evidenceVersion,
         evidenceHash, questionId, requestId);
   }
@@ -58,9 +66,11 @@ final class TargetHearingTrialDossier {
     if (!value.isObject()) throw new IllegalStateException("target Hearing " + name + " is absent");
     return (ObjectNode) value;
   }
-  private static String exactHash(ObjectNode value) {
+  private static String exactHash(ObjectMapper mapper, ObjectNode value) {
     String hash = text(value, "content_hash"); ObjectNode unsigned = value.deepCopy(); unsigned.remove("content_hash");
-    require(hash.equals(ContractJson.sha256Hex(unsigned)), "matrix content hash"); return hash;
+    require(hash.equals(JdbcTargetHearingAgentStageInputFactory.pythonContentHash(
+        mapper, unsigned, "content_hash")), "matrix content hash");
+    return hash;
   }
   private static int positiveInt(JsonNode value, String field) { int result = value.path(field).asInt(-1); if (result < 1) throw new IllegalStateException("target Hearing " + field + " is invalid"); return result; }
   private static String text(JsonNode value, String field) { String result = value.path(field).asText(null); if (result == null || result.isBlank()) throw new IllegalStateException("target Hearing " + field + " is absent"); return result; }

@@ -97,6 +97,9 @@ public class ReviewApplicationService {
     static final String LEGACY_DECISION_AUTHORITY = "LEGACY_NONE";
     static final String TRUSTED_DECISION_AUTHORITY = "SERVER_TRUSTED_SYNTHETIC";
     static final String TARGET_DECISION_AUTHORITY = "TARGET_REVIEW";
+    private static final String TARGET_HEARING_PROMPT_VERSION = "hearing-flow.v2";
+    private static final String TARGET_HEARING_PROFILE_VERSION = "hearing-judge-v2";
+    private static final String TARGET_HEARING_DRAFT_SCHEMA = "adjudication_draft.v2";
     private static final AuthenticatedActor SYSTEM =
             new AuthenticatedActor("temporal-worker", ActorRole.SYSTEM);
     private final FulfillmentCaseRepository caseRepository;
@@ -467,7 +470,13 @@ public class ReviewApplicationService {
             throw new IdempotencyConflictException(
                     "a trusted Outcome decision cannot be replayed through the legacy endpoint");
         }
-        if (targetEpoch(task.getCaseId()) != null) {
+        if (isTargetHearingTask(task)) {
+            if (targetEpoch(task.getCaseId()) == null) {
+                throw new BusinessException(
+                        ErrorCode.CASE_STATUS_INVALID,
+                        "target-origin review task has no active Review epoch",
+                        Map.of("task_id", task.getId(), "packet_id", task.getPacketId()));
+            }
             return transactions.execute(ignored -> decideTarget(taskId, command, actor));
         }
         // 审批事实先在事务内完成版本、哈希和幂等校验并提交。
@@ -479,6 +488,51 @@ public class ReviewApplicationService {
                     result.approvalRecordId(), actor, command.idempotencyKey());
         }
         return result;
+    }
+
+    private boolean isTargetHearingTask(ReviewTaskEntity task) {
+        ReviewPacketEntity packet = packetRepository
+                .findById(task.getPacketId())
+                .orElseThrow(() -> notFound("review packet", task.getPacketId()));
+        if (!task.getCaseId().equals(packet.getCaseId())
+                || !task.getPlanId().equals(packet.getPlanId())) {
+            throw new IdempotencyConflictException(
+                    "review task does not bind its frozen review packet");
+        }
+        JsonNode draft = read(packet.getDraftJson());
+        boolean targetPrompt = TARGET_HEARING_PROMPT_VERSION.equals(packet.getPromptVersion());
+        boolean targetProfile = TARGET_HEARING_PROFILE_VERSION.equals(packet.getProfileVersion());
+        boolean targetDraft = TARGET_HEARING_DRAFT_SCHEMA.equals(
+                draft.path("schema_version").asText());
+        if (!targetPrompt && !targetProfile && !targetDraft) {
+            return false;
+        }
+        JsonNode agentRunRefs = read(packet.getAgentRunRefsJson());
+        boolean validAgentRunRefs = agentRunRefs.isArray() && agentRunRefs.size() == 3;
+        if (validAgentRunRefs) {
+            for (JsonNode agentRunRef : agentRunRefs) {
+                if (!agentRunRef.isTextual() || agentRunRef.asText().isBlank()) {
+                    validAgentRunRefs = false;
+                    break;
+                }
+            }
+        }
+        String draftId = draft.path("draft_id").asText();
+        String draftHash = draft.path("content_hash").asText();
+        if (!targetPrompt
+                || !targetProfile
+                || !targetDraft
+                || packet.getAdjudicationDraftVersion() != 2
+                || packet.getDeliberationReportVersion() != 1
+                || !packet.isFrozen()
+                || !"FROZEN".equals(packet.getPacketStatus())
+                || draftId.isBlank()
+                || !draftHash.matches("[0-9a-f]{64}")
+                || !validAgentRunRefs) {
+            throw new IdempotencyConflictException(
+                    "target Hearing review task has an invalid frozen origin manifest");
+        }
+        return true;
     }
 
     private ReviewDecisionView decideTarget(

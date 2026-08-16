@@ -457,27 +457,64 @@ public final class JdbcHearingFormalFinalizer implements HearingFormalFinalizer 
                 .addValue("roomEpoch", authority.roomEpoch())
                 .addValue("processRevision", authority.processRevision())
                 .addValue("fencingToken", authority.fencingToken())
-                .addValue("executorKind", authority.writerMode().name().equals("TEMPORAL")
-                        ? "TEMPORAL_ACTIVITY"
-                        : "LEGACY_WORKER");
-        requireOne(
-                """
-                select count(*)
-                  from agent_run
-                 where id = :agentRunId
-                   and case_id = :caseId
-                   and tenant_surrogate = :tenant
-                   and room_epoch_id = :epochId
-                   and room_type = 'HEARING'
-                   and room_epoch = :roomEpoch
-                   and process_revision = :processRevision
-                   and fencing_token = :fencingToken
-                   and executor_kind = :executorKind
-                   and run_status = 'COMPLETED'
-                   and final_result_hash = :resultHash
-                """,
-                parameters,
-                "HEARING_AGENT_RUN_NOT_TERMINAL");
+                .addValue("executorKind", authority.writerMode() == com.example.dispute.hearing.domain.HearingWriterMode.TEMPORAL
+                        ? "TEMPORAL_ACTIVITY" : "LEGACY_WORKER");
+        switch (authority.writerMode()) {
+            case TEMPORAL -> requireOne(
+                    """
+                    select count(*)
+                      from agent_run run
+                      join agent_run_attempt attempt
+                        on attempt.agent_run_id = run.id
+                     where run.id = :agentRunId
+                       and run.case_id = :caseId
+                       and run.tenant_surrogate = :tenant
+                       and run.room_epoch_id = :epochId
+                       and run.room_type = 'HEARING'
+                       and run.room_epoch = :roomEpoch
+                       and run.process_revision = :processRevision
+                       and run.fencing_token = :fencingToken
+                       and run.protocol = 'agent-stream.v2'
+                       and run.executor_kind = :executorKind
+                       and attempt.executor_kind = :executorKind
+                       and run.result_ready_attempt_id = attempt.id
+                       and run.final_result_hash = :resultHash
+                       and attempt.result_hash = run.final_result_hash
+                       and attempt.final_frame_observed = true
+                       and attempt.completed_at is not null
+                       and (
+                            (run.run_status = 'RESULT_READY'
+                             and run.finalization_status = 'UNCOMMITTED'
+                             and run.committed_attempt_id is null
+                             and attempt.attempt_status = 'RESULT_READY')
+                         or (run.run_status = 'COMPLETED'
+                             and run.finalization_status = 'COMMITTED'
+                             and run.committed_attempt_id = attempt.id
+                             and attempt.attempt_status = 'COMPLETED')
+                       )
+                    """,
+                    parameters,
+                    "HEARING_AGENT_RUN_NOT_TERMINAL");
+            case LEGACY -> requireOne(
+                    """
+                    select count(*)
+                      from agent_run
+                     where id = :agentRunId
+                       and case_id = :caseId
+                       and tenant_surrogate = :tenant
+                       and room_epoch_id = :epochId
+                       and room_type = 'HEARING'
+                       and room_epoch = :roomEpoch
+                       and process_revision = :processRevision
+                       and fencing_token = :fencingToken
+                       and executor_kind = :executorKind
+                       and run_status = 'COMPLETED'
+                       and final_result_hash = :resultHash
+                    """,
+                    parameters,
+                    "HEARING_AGENT_RUN_NOT_TERMINAL");
+            case SHADOW -> throw rejected("HEARING_AGENT_RUN_NOT_TERMINAL");
+        }
     }
 
     private void requireDossier(MapSqlParameterSource parameters) {

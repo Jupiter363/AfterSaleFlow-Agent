@@ -790,11 +790,27 @@ describe("HearingCourtView", () => {
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("shows an empty transcript state instead of fabricated courtroom messages when no backend messages exist", async () => {
-    const { wrapper } = await mountView({ initialMessages: [] });
+  it("describes the active state-machine stage when no durable courtroom message exists yet", async () => {
+    const { wrapper } = await mountView({
+      initialMessages: [],
+      initialHearing: {
+        ...hearing,
+        status: {
+          flow_schema_version: "hearing_flow.v2",
+          flow_stage: "INTAKE_QUESTIONS_GENERATING",
+          stage_sequence: 4,
+          stage_status: "RUNNING",
+          party_statuses: { USER: "PENDING", MERCHANT: "PENDING" },
+        },
+        question_set: null,
+      },
+    });
 
     const transcript = wrapper.get("[data-court-transcript]");
-    expect(transcript.text()).toContain("等待开庭消息");
+    expect(transcript.text()).toContain("生成问题进行中");
+    expect(transcript.text()).toContain("庭审状态机已自动进入");
+    expect(transcript.text()).toContain("无需手工开庭");
+    expect(transcript.text()).not.toContain("等待开庭消息");
     expect(transcript.text()).not.toContain("用户称门口监控未见快递员投递");
     expect(transcript.text()).not.toContain("商家需说明发货记录");
     expect(transcript.find("[data-court-message]").exists()).toBe(false);

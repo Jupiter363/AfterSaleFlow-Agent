@@ -356,13 +356,7 @@ public final class JdbcTargetHearingBootstrapActivities
   }
 
   private void createInitialFlowAndProjection(ProvisionRoomEpoch provision, EpochRow epoch) {
-    String hearingStateId =
-        exactlyOne(
-            jdbc.query(
-                "select id from hearing_state where case_id = ? for update",
-                (row, ignored) -> row.getString("id"),
-                provision.caseId()),
-            "target Hearing state is absent or ambiguous");
+    String hearingStateId = ensureInitialHearingState(provision);
     List<String> existingFlows =
         jdbc.query(
             "select id from hearing_flow_instance where case_id = ? for update",
@@ -403,7 +397,7 @@ public final class JdbcTargetHearingBootstrapActivities
                 id, flow_instance_id, case_id, stage_code, stage_sequence, processor_role,
                 stage_status, shared_deadline_at, input_json, output_json, agent_run_id,
                 started_at, completed_at, created_at, updated_at, created_by, updated_by
-            ) values (?, ?, ?, 'COURT_PREPARING', 1, 'SYSTEM', 'PENDING', null,
+            ) values (?, ?, ?, 'COURT_PREPARING', 1, 'SYSTEM', 'RUNNING', null,
                 '{}'::jsonb, '{}'::jsonb, null, now(), null, now(), now(), ?, ?)
             """,
             stageId,
@@ -412,6 +406,84 @@ public final class JdbcTargetHearingBootstrapActivities
             CONTROL_ACTOR,
             CONTROL_ACTOR);
     require(inserted == 1, "target Hearing initial stage creation failed");
+  }
+
+  private String ensureInitialHearingState(ProvisionRoomEpoch provision) {
+    String expectedId =
+        stableId("hearing-state-", provision.epochId() + ':' + provision.roomId());
+    int inserted =
+        jdbc.update(
+            """
+            insert into hearing_state (
+                id, case_id, workflow_id, hearing_status, current_node, round_no,
+                confidence, manual_required, graph_state_json, pending_requests_json,
+                manual_flags_json, waiting_until, completed_at, created_at, updated_at,
+                created_by, updated_by
+            ) values (?, ?, ?, 'RUNNING', 'COURT_PREPARING', 0,
+                null, false, '{}'::jsonb, '[]'::jsonb, '[]'::jsonb,
+                null, null, now(), now(), ?, ?)
+            on conflict (case_id) do nothing
+            """,
+            expectedId,
+            provision.caseId(),
+            provision.roomId(),
+            CONTROL_ACTOR,
+            CONTROL_ACTOR);
+    require(inserted == 0 || inserted == 1, "target Hearing state creation was ambiguous");
+    InitialHearingState state =
+        exactlyOne(
+            jdbc.query(
+                """
+                select id, case_id, workflow_id, hearing_status, current_node, round_no,
+                       confidence is null as confidence_absent,
+                       manual_required,
+                       graph_state_json = '{}'::jsonb as graph_state_empty,
+                       pending_requests_json = '[]'::jsonb as pending_requests_empty,
+                       manual_flags_json = '[]'::jsonb as manual_flags_empty,
+                       waiting_until is null as waiting_absent,
+                       completed_at is null as completion_absent,
+                       created_by, updated_by
+                  from hearing_state
+                 where case_id = ?
+                 for update
+                """,
+                (row, ignored) ->
+                    new InitialHearingState(
+                        row.getString("id"),
+                        row.getString("case_id"),
+                        row.getString("workflow_id"),
+                        row.getString("hearing_status"),
+                        row.getString("current_node"),
+                        row.getInt("round_no"),
+                        row.getBoolean("confidence_absent"),
+                        row.getBoolean("manual_required"),
+                        row.getBoolean("graph_state_empty"),
+                        row.getBoolean("pending_requests_empty"),
+                        row.getBoolean("manual_flags_empty"),
+                        row.getBoolean("waiting_absent"),
+                        row.getBoolean("completion_absent"),
+                        row.getString("created_by"),
+                        row.getString("updated_by")),
+                provision.caseId()),
+            "target Hearing state is absent or ambiguous");
+    require(
+        expectedId.equals(state.id())
+            && provision.caseId().equals(state.caseId())
+            && provision.roomId().equals(state.workflowId())
+            && "RUNNING".equals(state.hearingStatus())
+            && "COURT_PREPARING".equals(state.currentNode())
+            && state.roundNo() == 0
+            && state.confidenceAbsent()
+            && !state.manualRequired()
+            && state.graphStateEmpty()
+            && state.pendingRequestsEmpty()
+            && state.manualFlagsEmpty()
+            && state.waitingAbsent()
+            && state.completionAbsent()
+            && CONTROL_ACTOR.equals(state.createdBy())
+            && CONTROL_ACTOR.equals(state.updatedBy()),
+        "target Hearing state authority drifted");
+    return state.id();
   }
 
   private void requireExactReplay(
@@ -444,7 +516,7 @@ public final class JdbcTargetHearingBootstrapActivities
                and flow.current_stage = 'COURT_PREPARING' and flow.stage_sequence = 1
                and flow.flow_status = 'ACTIVE' and flow.shared_deadline_at is null
                and stage.stage_code = 'COURT_PREPARING' and stage.stage_sequence = 1
-               and stage.processor_role = 'SYSTEM' and stage.stage_status = 'PENDING'
+               and stage.processor_role = 'SYSTEM' and stage.stage_status = 'RUNNING'
                and stage.shared_deadline_at is null and stage.completed_at is null
              for update of flow, stage
             """,
@@ -531,6 +603,23 @@ public final class JdbcTargetHearingBootstrapActivities
       String writerMode) {}
 
   record Participants(String initiatorId, String respondentId) {}
+
+  private record InitialHearingState(
+      String id,
+      String caseId,
+      String workflowId,
+      String hearingStatus,
+      String currentNode,
+      int roundNo,
+      boolean confidenceAbsent,
+      boolean manualRequired,
+      boolean graphStateEmpty,
+      boolean pendingRequestsEmpty,
+      boolean manualFlagsEmpty,
+      boolean waitingAbsent,
+      boolean completionAbsent,
+      String createdBy,
+      String updatedBy) {}
 
   private record CaseProjectionRow(String activationStatus, String temporalRunId) {}
 

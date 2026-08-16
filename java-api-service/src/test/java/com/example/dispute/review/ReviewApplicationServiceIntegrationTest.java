@@ -15,8 +15,11 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.mock;
 
+import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.audit.AuditRecorder;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
@@ -26,6 +29,10 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.ReviewTaskStatus;
 import com.example.dispute.domain.model.RouteType;
+import com.example.dispute.hearing.domain.HearingAuthorityExpectation;
+import com.example.dispute.hearing.domain.HearingAuthorityLedger;
+import com.example.dispute.hearing.domain.HearingFlowStage;
+import com.example.dispute.hearing.domain.HearingWriterMode;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalPolicyDecisionEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.RemedyPlanEntity;
@@ -45,16 +52,36 @@ import com.example.dispute.review.application.ReviewOutcomeReceiptContext;
 import com.example.dispute.review.application.ReviewPacketAuthorizationView;
 import com.example.dispute.review.domain.ApprovalPolicyDecision;
 import com.example.dispute.review.domain.ReviewPacketContentHasher;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
+import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingFormalizationActivities;
+import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalCompletion;
+import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingInternalStageMaterializer;
+import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochSelectionAuthority;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -64,9 +91,12 @@ import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -112,9 +142,17 @@ class ReviewApplicationServiceIntegrationTest {
     @Autowired ReviewPacketRepository packets; @Autowired ApprovalRecordRepository approvals;
     @Autowired ApprovalPolicyDecisionRepository policyDecisions;
     @Autowired EntityManager entityManager;
+    @Autowired DataSource dataSource;
+    @Autowired PlatformTransactionManager transactionManager;
     @MockitoBean AuditRecorder audit;
     @MockitoBean PostReviewOrchestrationService postReviewOrchestration;
     @MockitoBean CaseLifecycleNotificationService lifecycleNotifications;
+    @MockitoBean CaseCommandService caseCommandService;
+    @MockitoBean CaseEventService caseEventService;
+    @MockitoBean com.example.dispute.review.application.ReviewTargetDecisionHandoffWriter
+            targetHandoffWriter;
+    @MockitoBean TargetRoomCommandIngress targetRoomCommandIngress;
+    @MockitoBean TargetRoomEpochSelectionAuthority targetRoomEpochSelectionAuthority;
 
     // 所属模块：【平台人工终审 / 自动化测试层】「ReviewApplicationServiceIntegrationTest.seed()」。
     // 具体功能：「ReviewApplicationServiceIntegrationTest.seed()」：在每个测试场景运行前创建「FulfillmentCaseEntity.create」、「RemedyPlanEntity.pendingApproval」、「postReviewOrchestration.orchestrate」、「invocation.getArgument」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
@@ -215,6 +253,144 @@ class ReviewApplicationServiceIntegrationTest {
                                     .isEqualTo(CaseStatus.WAITING_HUMAN_REVIEW);
                             assertThat(persistedCase.getCurrentRoom()).isEqualTo("REVIEW");
                         });
+    }
+
+    @Test
+    void targetHearingTaskCannotFallBackToLegacyBeforeReviewEpochReady() {
+        String taskId = service.createForWorkflow("CASE_review", "REMEDY_review");
+        var task = tasks.findById(taskId).orElseThrow();
+        var packet = packets.findById(task.getPacketId()).orElseThrow();
+        entityManager
+                .createNativeQuery(
+                        """
+                        update review_packet
+                           set prompt_version = 'hearing-flow.v2',
+                               profile_version = 'hearing-judge-v2',
+                               adjudication_draft_version = 2,
+                               deliberation_report_version = 1,
+                               agent_run_refs_json = cast(:agentRuns as jsonb),
+                               draft_json = cast(:draftJson as jsonb)
+                         where id = :packetId
+                        """)
+                .setParameter(
+                        "agentRuns",
+                        "[\"RUN_REVIEW_JUDGE_V1\",\"RUN_REVIEW_JURY\",\"RUN_REVIEW_JUDGE_V2\"]")
+                .setParameter(
+                        "draftJson",
+                        """
+                        {"schema_version":"adjudication_draft.v2",
+                         "draft_id":"DRAFT_REVIEW_TARGET_V2",
+                         "content_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+                        """)
+                .setParameter("packetId", packet.getId())
+                .executeUpdate();
+        entityManager.flush();
+        entityManager.clear();
+
+        var taskBefore = tasks.findById(taskId).orElseThrow();
+        var caseBefore = cases.findById("CASE_review").orElseThrow();
+        ReviewTaskStatus taskStatusBefore = taskBefore.getTaskStatus();
+        String decisionBefore = taskBefore.getDecisionJson();
+        CaseStatus caseStatusBefore = caseBefore.getCaseStatus();
+        String roomBefore = caseBefore.getCurrentRoom();
+        long caseVersionBefore = caseBefore.getVersion();
+        long approvalCountBefore = approvals.count();
+        AuthenticatedActor reviewer =
+                new AuthenticatedActor("reviewer-local", ActorRole.PLATFORM_REVIEWER);
+
+        assertThatThrownBy(
+                        () ->
+                                service.decide(
+                                        taskId,
+                                        new ReviewDecisionCommand(
+                                                ApprovalDecisionType.APPROVE,
+                                                "target Review epoch is not ready",
+                                                null,
+                                                "target-review-pre-epoch"),
+                                        reviewer))
+                .isInstanceOfSatisfying(
+                        BusinessException.class,
+                        failure -> {
+                            assertThat(failure.errorCode()).isEqualTo(ErrorCode.CASE_STATUS_INVALID);
+                            assertThat(failure.getMessage()).contains("active Review epoch");
+                        });
+        entityManager.clear();
+
+        assertThat(tasks.findById(taskId))
+                .hasValueSatisfying(
+                        persisted -> {
+                            assertThat(persisted.getTaskStatus()).isEqualTo(taskStatusBefore);
+                            assertThat(persisted.getDecisionJson()).isEqualTo(decisionBefore);
+                        });
+        assertThat(cases.findById("CASE_review"))
+                .hasValueSatisfying(
+                        persisted -> {
+                            assertThat(persisted.getCaseStatus()).isEqualTo(caseStatusBefore);
+                            assertThat(persisted.getCurrentRoom()).isEqualTo(roomBefore);
+                            assertThat(persisted.getVersion()).isEqualTo(caseVersionBefore);
+                        });
+        assertThat(approvals.count()).isEqualTo(approvalCountBefore);
+        verify(postReviewOrchestration, never()).orchestrate(anyString(), any(), anyString());
+    }
+
+    @Test
+    void targetHearingProducerPacketPassesClosedReviewConsumerManifest() throws Exception {
+        TargetReviewProducerFixture fixture = seedTargetReviewProducerAuthority();
+        String operationKey = "review-packet-producer-consumer";
+
+        String taskId = produceTargetReviewTask(fixture, operationKey, fixture.draftHash());
+        entityManager.flush();
+        entityManager.clear();
+        AuthenticatedActor reviewer =
+                new AuthenticatedActor("reviewer-local", ActorRole.PLATFORM_REVIEWER);
+        var packetBeforeReplay = service.packet(taskId, reviewer);
+
+        assertThat(produceTargetReviewTask(fixture, operationKey, fixture.draftHash()))
+                .isEqualTo(taskId);
+        entityManager.flush();
+        entityManager.clear();
+        assertThat(service.packet(taskId, reviewer)).isEqualTo(packetBeforeReplay);
+
+        long packetCount = packets.count();
+        long taskCount = tasks.count();
+        long approvalCount = approvals.count();
+        assertThatThrownBy(() -> produceTargetReviewTask(
+                        fixture, operationKey + "-drift", "0".repeat(64)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("target Hearing row is absent or ambiguous");
+        assertThat(packets.count()).isEqualTo(packetCount);
+        assertThat(tasks.count()).isEqualTo(taskCount);
+        assertThat(approvals.count()).isEqualTo(approvalCount);
+        verify(postReviewOrchestration, never()).orchestrate(anyString(), any(), anyString());
+
+        installReadyTargetReviewEpoch(fixture.caseId());
+        installTargetReviewRuntimeStubs(fixture.caseId());
+        service.start(taskId, reviewer);
+        var decision = service.decide(
+                taskId,
+                new ReviewDecisionCommand(
+                        ApprovalDecisionType.APPROVE,
+                        "approve exact frozen Target Hearing packet",
+                        null,
+                        "target-hearing-producer-consumer"),
+                reviewer);
+
+        assertThat(decision.taskStatus()).isEqualTo("APPROVED");
+        assertThat(decision.caseStatus()).isEqualTo("APPROVED_FOR_EXECUTION");
+        assertThat(decision.executionAllowed()).isTrue();
+        assertThat(packetBeforeReplay.promptVersion()).isEqualTo("hearing-flow.v2");
+        assertThat(packetBeforeReplay.profileVersion()).isEqualTo("hearing-judge-v2");
+        assertThat(packetBeforeReplay.adjudicationDraftVersion()).isEqualTo(2);
+        assertThat(packetBeforeReplay.deliberationReportVersion()).isEqualTo(1);
+        assertThat(packetBeforeReplay.agentRunRefs())
+                .isEqualTo(new ObjectMapper().readTree(
+                        "[\"RUN_REVIEW_JUDGE_V1\",\"RUN_REVIEW_JURY\",\"RUN_REVIEW_JUDGE_V2\"]"));
+        assertThat(packetBeforeReplay.caseSummary()).isEqualTo(fixture.caseSummary());
+        assertThat(packetBeforeReplay.claims()).isEqualTo(fixture.claims());
+        assertThat(packetBeforeReplay.issues()).isEqualTo(fixture.issues());
+        assertThat(packetBeforeReplay.evidenceMatrix()).isEqualTo(fixture.evidenceMatrix());
+        assertThat(packetBeforeReplay.riskFlags()).isEqualTo(fixture.riskFlags());
+        verify(postReviewOrchestration, never()).orchestrate(anyString(), any(), anyString());
     }
 
     // 所属模块：【平台人工终审 / 自动化测试层】「ReviewApplicationServiceIntegrationTest.createsPacketAndOnlyReviewerCanModifyApproveWithDiff()」。
@@ -511,6 +687,457 @@ class ReviewApplicationServiceIntegrationTest {
                 .isInstanceOf(IdempotencyConflictException.class);
         verify(postReviewOrchestration,never()).orchestrate(anyString(),any(),anyString());
     }
+
+    private TargetReviewProducerFixture seedTargetReviewProducerAuthority() {
+        String caseId = "CASE_REVIEW_TARGET_PRODUCER";
+        String flowId = "FLOW_REVIEW_TARGET_PRODUCER";
+        String dossierId = "DOSSIER_REVIEW_TARGET_PRODUCER";
+        String proposalId = "PROPOSAL_REVIEW_TARGET_PRODUCER";
+        String reportId = "REPORT_REVIEW_TARGET_PRODUCER";
+        String draftId = "DRAFT_REVIEW_TARGET_PRODUCER";
+        FulfillmentCaseEntity dispute = FulfillmentCaseEntity.create(
+                caseId,
+                "ORDER_REVIEW_TARGET_PRODUCER",
+                null,
+                "user-review-target",
+                "merchant-review-target",
+                "CREATE_REVIEW_TARGET_PRODUCER",
+                "CONDITION_MISMATCH",
+                "Target Hearing frozen review summary",
+                "The locked Hearing chain carries exact claims and evidence.",
+                RiskLevel.HIGH,
+                "user-review-target");
+        dispute.completeIntake(
+                "CONDITION_MISMATCH",
+                CaseStatus.INTAKE_COMPLETED,
+                RiskLevel.HIGH,
+                "{\"claim\":\"target hearing authority\"}",
+                "user-review-target");
+        dispute.markDossierBuilt("user-review-target");
+        dispute.applyRoute(RouteType.FULL_HEARING, "user-review-target");
+        dispute.markRemedyPlanned("hearing-control");
+        cases.saveAndFlush(dispute);
+
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        String caseMatrixHash = "a".repeat(64);
+        String evidenceMatrixHash = "b".repeat(64);
+        ObjectNode claims = mapper.createObjectNode();
+        claims.put("schema_version", "case-fact-matrix.v1");
+        claims.put("content_hash", caseMatrixHash);
+        claims.putArray("fact_rows").addObject()
+                .put("fact_key", "FACT_TARGET_HEARING")
+                .put("summary", "locked substantive claim");
+        ObjectNode evidenceMatrix = mapper.createObjectNode();
+        evidenceMatrix.put("schema_version", "fact-evidence-matrix.v1");
+        evidenceMatrix.put("content_hash", evidenceMatrixHash);
+        evidenceMatrix.put("matrix_status", "FROZEN");
+        evidenceMatrix.putArray("entries").addObject()
+                .put("fact_key", "FACT_TARGET_HEARING")
+                .put("evidence_ref", "EVIDENCE_TARGET_HEARING");
+        ObjectNode dossier = mapper.createObjectNode();
+        dossier.put("schema_version", "trial_dossier.v1");
+        dossier.put("trial_dossier_id", dossierId);
+        dossier.put("case_id", caseId);
+        dossier.put("frozen_at", "2026-08-15T00:00:00Z");
+        dossier.put("case_matrix_version", 2);
+        dossier.put("case_matrix_hash", caseMatrixHash);
+        dossier.set("case_fact_matrix", claims.deepCopy());
+        dossier.put("evidence_matrix_version", 3);
+        dossier.put("evidence_matrix_hash", evidenceMatrixHash);
+        dossier.set("fact_evidence_matrix", evidenceMatrix.deepCopy());
+        dossier.put("question_set_id", "QUESTION_SET_REVIEW_TARGET");
+        dossier.set("question_set", mapper.createObjectNode().put("question", "locked question"));
+        dossier.putArray("answer_bundles").addObject().put("party", "USER");
+        dossier.withArray("answer_bundles").addObject().put("party", "MERCHANT");
+        dossier.put("request_set_id", "REQUEST_SET_REVIEW_TARGET");
+        dossier.set("evidence_request_set", mapper.createObjectNode().put("request", "locked request"));
+        dossier.putArray("evidence_batches").addObject().put("party", "USER");
+        dossier.withArray("evidence_batches").addObject().put("party", "MERCHANT");
+        String dossierHash = seal(dossier);
+
+        ObjectNode proposal = mapper.createObjectNode();
+        proposal.put("schema_version", "judge_proposal.v1");
+        proposal.put("proposal_id", proposalId);
+        proposal.put("trial_dossier_id", dossierId);
+        proposal.put("trial_dossier_hash", dossierHash);
+        proposal.put("public_text", "locked Judge V1 proposal");
+        String proposalHash = seal(proposal);
+        ObjectNode report = mapper.createObjectNode();
+        report.put("schema_version", "jury_review_report.v1");
+        report.put("report_id", reportId);
+        report.put("trial_dossier_id", dossierId);
+        report.put("trial_dossier_hash", dossierHash);
+        report.put("proposal_id", proposalId);
+        report.put("proposal_content_hash", proposalHash);
+        report.put("public_text", "locked jury review");
+        String reportHash = seal(report);
+        var issues = mapper.createArrayNode();
+        issues.addObject()
+                .put("issue_key", "ISSUE_TARGET_HEARING")
+                .put("finding", "locked issue finding");
+        var riskFlags = mapper.createArrayNode();
+        riskFlags.addObject()
+                .put("risk_code", "RISK_TARGET_HEARING")
+                .put("reason", "locked reviewer attention");
+        ObjectNode draftDecision = mapper.createObjectNode();
+        draftDecision.set("fact_findings", issues.deepCopy());
+        draftDecision.putArray("evidence_assessment").addObject()
+                .put("evidence_ref", "EVIDENCE_TARGET_HEARING")
+                .put("assessment", "locked assessment");
+        draftDecision.putArray("policy_application").addObject()
+                .put("policy_ref", "POLICY_TARGET_HEARING");
+        draftDecision.set("reviewer_attention", riskFlags.deepCopy());
+        draftDecision.put("recommended_decision", "APPROVE");
+        draftDecision.put("confidence", 0.93);
+        draftDecision.put("draft_text", "locked Judge V2 draft");
+        ObjectNode draft = mapper.createObjectNode();
+        draft.put("schema_version", "adjudication_draft.v2");
+        draft.put("draft_id", draftId);
+        draft.put("trial_dossier_id", dossierId);
+        draft.put("trial_dossier_hash", dossierHash);
+        draft.put("proposal_id", proposalId);
+        draft.put("proposal_content_hash", proposalHash);
+        draft.put("report_id", reportId);
+        draft.put("report_content_hash", reportHash);
+        draft.put("public_text", "locked Judge V2 draft");
+        draft.set("draft", draftDecision);
+        String draftHash = seal(draft);
+
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        String hearingRoomWorkflowId =
+                CaseProcessWorkflowProtocol.roomWorkflowId(caseId, RoomType.HEARING, 1);
+        jdbc.update("""
+                insert into case_room (
+                    id, case_id, room_type, room_status, opened_at,
+                    metadata_json, created_by, updated_by
+                ) values (?, ?, 'HEARING', 'OPEN', now(), '{}'::jsonb, 'test', 'test')
+                """, flowId, caseId);
+        jdbc.update("""
+                insert into case_room_epoch (
+                    id, tenant_surrogate, case_id, room_id, room_type, room_epoch,
+                    writer_mode, lifecycle_status, provisioning_status, process_revision,
+                    room_revision, fencing_token, temporal_workflow_id, temporal_run_id,
+                    room_temporal_workflow_id, room_temporal_run_id, temporal_build_id,
+                    graph_key, graph_version, checkpoint_schema_version, stream_protocol,
+                    selection_schema_version, process_contract_version, workflow_type,
+                    room_workflow_type, room_workflow_build_id, activated_at, provisioned_at,
+                    created_at, updated_at
+                ) values (
+                    'EPOCH_HEARING_REVIEW_TARGET', 'TENANT_REVIEW_TARGET', ?, ?, 'HEARING', 1,
+                    'TEMPORAL', 'ACTIVE', 'READY', 9, 3, 17, ?, 'case-run-hearing-target',
+                    ?, 'room-run-hearing-target', 'hearing-build-v1', ?, ?, ?, ?, ?, ?, ?, ?,
+                    'hearing-build-v1', now(), now(), now(), now()
+                )
+                """,
+                caseId,
+                flowId,
+                CaseProcessWorkflowProtocol.caseWorkflowId("TENANT_REVIEW_TARGET", caseId),
+                hearingRoomWorkflowId,
+                TargetTypedRoomProtocol.GRAPH_KEY,
+                TargetTypedRoomProtocol.GRAPH_VERSION,
+                TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
+                TargetTypedRoomProtocol.STREAM_PROTOCOL,
+                TargetTypedRoomProtocol.SELECTION_SCHEMA_VERSION,
+                TargetTypedRoomProtocol.PROCESS_CONTRACT_VERSION,
+                TargetTypedRoomProtocol.CASE_WORKFLOW_TYPE,
+                TargetTypedRoomProtocol.workflowType(RoomType.HEARING));
+        jdbc.queryForObject(
+                "select set_config('app.hearing_authority_commit', 'on', true)", String.class);
+        jdbc.queryForObject(
+                "select set_config('app.hearing_epoch_id', 'EPOCH_HEARING_REVIEW_TARGET', true)",
+                String.class);
+        jdbc.queryForObject(
+                "select set_config('app.hearing_temporal_namespace', 'review-test', true)",
+                String.class);
+        jdbc.update("""
+                insert into hearing_state (
+                    id, case_id, workflow_id, hearing_status, current_node,
+                    created_by, updated_by
+                ) values (?, ?, ?, 'COMPLETED', 'HUMAN_REVIEW_OPEN', 'test', 'test')
+                """, "HEARING_STATE_REVIEW_TARGET", caseId, "hearing:" + caseId);
+        jdbc.update("""
+                insert into hearing_flow_instance (
+                    id, case_id, hearing_state_id, current_stage, stage_sequence,
+                    flow_status, created_at, updated_at, created_by, updated_by
+                ) values (?, ?, ?, 'HUMAN_REVIEW_OPEN', 14, 'HUMAN_REVIEW', now(), now(), 'test', 'test')
+                """, flowId, caseId, "HEARING_STATE_REVIEW_TARGET");
+        jdbc.update("""
+                insert into hearing_trial_dossier (
+                    id, case_id, flow_instance_id, case_matrix_version, case_matrix_hash,
+                    evidence_matrix_version, evidence_matrix_hash, question_set_id, request_set_id,
+                    payload_json, content_hash, frozen_at, created_at, created_by
+                ) values (?, ?, ?, 2, ?, 3, ?, ?, ?, cast(? as jsonb), ?, now(), now(), 'test')
+                """, dossierId, caseId, flowId, caseMatrixHash, evidenceMatrixHash,
+                "QUESTION_SET_REVIEW_TARGET", "REQUEST_SET_REVIEW_TARGET",
+                ContractJson.canonicalString(dossier), dossierHash);
+        insertCompletedAgentRun(jdbc, caseId, "RUN_REVIEW_JUDGE_V1", "PRESIDING_JUDGE");
+        insertCompletedAgentRun(jdbc, caseId, "RUN_REVIEW_JURY", "JURY_PANEL");
+        insertCompletedAgentRun(jdbc, caseId, "RUN_REVIEW_JUDGE_V2", "PRESIDING_JUDGE");
+        insertCompletedHearingStage(jdbc, flowId, caseId, "STAGE_REVIEW_JUDGE_V1", 11,
+                "JUDGE_V1_GENERATING", "PRESIDING_JUDGE", "RUN_REVIEW_JUDGE_V1", proposal);
+        insertCompletedHearingStage(jdbc, flowId, caseId, "STAGE_REVIEW_JURY", 12,
+                "JURY_REVIEWING", "JURY_PANEL", "RUN_REVIEW_JURY", report);
+        insertCompletedHearingStage(jdbc, flowId, caseId, "STAGE_REVIEW_JUDGE_V2", 13,
+                "JUDGE_V2_GENERATING", "PRESIDING_JUDGE", "RUN_REVIEW_JUDGE_V2", draft);
+        insertDecisionArtifact(jdbc, caseId, flowId, dossierId, dossierHash,
+                proposalId, proposalHash, reportId, reportHash, draftId, draftHash,
+                proposal, report, draft);
+        jdbc.update("""
+                insert into policy_rule (
+                    id, rule_code, rule_version, rule_name, rule_scope, rule_status,
+                    effective_from, priority, condition_json, outcome_json,
+                    source_document_json, created_by, updated_by
+                ) values (
+                    'POLICY_REVIEW_TARGET_PRODUCER', 'REVIEW_TARGET_PRODUCER', 1,
+                    'Target Review producer policy', 'REVIEW', 'ACTIVE', now() - interval '1 day',
+                    100, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 'test', 'test'
+                ) on conflict (id) do nothing
+                """);
+
+        ObjectNode caseSummary = mapper.createObjectNode();
+        caseSummary.put("case_id", caseId);
+        caseSummary.put("title", "Target Hearing frozen review summary");
+        caseSummary.put("description", "The locked Hearing chain carries exact claims and evidence.");
+        caseSummary.put("route_type", "FULL_HEARING");
+        caseSummary.put("risk_level", "HIGH");
+        caseSummary.put("trial_dossier_id", dossierId);
+        caseSummary.put("trial_dossier_hash", dossierHash);
+        return new TargetReviewProducerFixture(
+                caseId, flowId, dossierId, dossierHash, proposalId, proposalHash,
+                reportId, reportHash, draftId, draftHash, caseSummary, claims,
+                issues, evidenceMatrix, riskFlags);
+    }
+
+    private void insertCompletedAgentRun(
+            JdbcTemplate jdbc, String caseId, String runId, String role) {
+        jdbc.update("""
+                insert into agent_run (
+                    id, case_id, agent_id, agent_role, profile_version, prompt_version,
+                    skill_version, ruleset_version, run_status, started_at, completed_at,
+                    trace_id, created_by
+                ) values (?, ?, ?, ?, 'hearing-judge-v2', 'hearing-flow.v2',
+                    'hearing-skill-v2', 'ruleset-current', 'COMPLETED',
+                    now() - interval '1 second', now(), ?, 'test')
+                """, runId, caseId, "agent:" + runId, role, "trace:" + runId);
+    }
+
+    private void insertCompletedHearingStage(
+            JdbcTemplate jdbc, String flowId, String caseId, String stageId, int sequence,
+            String stageCode, String role, String runId, JsonNode output) {
+        jdbc.update("""
+                insert into hearing_flow_stage (
+                    id, flow_instance_id, case_id, stage_code, stage_sequence,
+                    processor_role, stage_status, input_json, output_json, agent_run_id,
+                    started_at, completed_at, created_at, updated_at, created_by, updated_by
+                ) values (?, ?, ?, ?, ?, ?, 'COMPLETED', '{}'::jsonb, cast(? as jsonb), ?,
+                    now() - interval '1 second', now(), now(), now(), 'test', 'test')
+                """, stageId, flowId, caseId, stageCode, sequence, role,
+                ContractJson.canonicalString(output), runId);
+    }
+
+    private void insertDecisionArtifact(
+            JdbcTemplate jdbc, String caseId, String flowId, String dossierId, String dossierHash,
+            String proposalId, String proposalHash, String reportId, String reportHash,
+            String draftId, String draftHash, JsonNode proposal, JsonNode report, JsonNode draft) {
+        jdbc.update("""
+                insert into hearing_flow_artifact (
+                    id, case_id, flow_instance_id, trial_dossier_id, trial_dossier_hash,
+                    artifact_type, schema_version, content_hash, payload_json, agent_run_id,
+                    created_at, created_by
+                ) values (?, ?, ?, ?, ?, 'JUDGE_PROPOSAL', 'judge_proposal.v1', ?, cast(? as jsonb), ?, now(), 'test')
+                """, proposalId, caseId, flowId, dossierId, dossierHash, proposalHash,
+                ContractJson.canonicalString(proposal), "RUN_REVIEW_JUDGE_V1");
+        jdbc.update("""
+                insert into hearing_flow_artifact (
+                    id, case_id, flow_instance_id, trial_dossier_id, trial_dossier_hash,
+                    artifact_type, schema_version, proposal_id, proposal_content_hash,
+                    content_hash, payload_json, agent_run_id, created_at, created_by
+                ) values (?, ?, ?, ?, ?, 'JURY_REVIEW_REPORT', 'jury_review_report.v1', ?, ?, ?, cast(? as jsonb), ?, now(), 'test')
+                """, reportId, caseId, flowId, dossierId, dossierHash, proposalId, proposalHash,
+                reportHash, ContractJson.canonicalString(report), "RUN_REVIEW_JURY");
+        jdbc.update("""
+                insert into hearing_flow_artifact (
+                    id, case_id, flow_instance_id, trial_dossier_id, trial_dossier_hash,
+                    artifact_type, schema_version, proposal_id, proposal_content_hash,
+                    report_id, report_content_hash, content_hash, payload_json, agent_run_id,
+                    created_at, created_by
+                ) values (?, ?, ?, ?, ?, 'ADJUDICATION_DRAFT', 'adjudication_draft.v2',
+                    ?, ?, ?, ?, ?, cast(? as jsonb), ?, now(), 'test')
+                """, draftId, caseId, flowId, dossierId, dossierHash, proposalId, proposalHash,
+                reportId, reportHash, draftHash, ContractJson.canonicalString(draft),
+                "RUN_REVIEW_JUDGE_V2");
+    }
+
+    private String produceTargetReviewTask(
+            TargetReviewProducerFixture fixture, String operationKey, String draftHash) {
+        try {
+            JdbcTargetHearingFormalizationActivities producer =
+                    new JdbcTargetHearingFormalizationActivities(
+                            dataSource,
+                            new TransactionTemplate(transactionManager),
+                            mock(TargetHearingFormalCompletion.class),
+                            mock(TargetHearingInternalStageMaterializer.class),
+                            mock(HearingAuthorityLedger.class),
+                            new ObjectMapper().findAndRegisterModules());
+            Class<?> cursorType = Class.forName(
+                    JdbcTargetHearingFormalizationActivities.class.getName() + "$Cursor");
+            Class<?> parentType = Class.forName(
+                    JdbcTargetHearingFormalizationActivities.class.getName() + "$Parent");
+            Constructor<?> cursorConstructor = cursorType.getDeclaredConstructor(
+                    HearingAuthorityExpectation.class, String.class, String.class, String.class);
+            Constructor<?> parentConstructor = parentType.getDeclaredConstructor(
+                    String.class, String.class);
+            cursorConstructor.setAccessible(true);
+            parentConstructor.setAccessible(true);
+            HearingAuthorityExpectation authority = new HearingAuthorityExpectation(
+                    "TENANT_REVIEW_TARGET",
+                    fixture.caseId(),
+                    fixture.flowId(),
+                    "EPOCH_HEARING_REVIEW_TARGET",
+                    1,
+                    HearingWriterMode.TEMPORAL,
+                    HearingFlowStage.HUMAN_REVIEW_OPEN,
+                    14,
+                    9,
+                    3,
+                    17);
+            Object cursor = cursorConstructor.newInstance(
+                    authority, fixture.flowId(), "STAGE_REVIEW_OPEN", "{}");
+            Object dossier = parentConstructor.newInstance(fixture.dossierId(), fixture.dossierHash());
+            Object proposal = parentConstructor.newInstance(fixture.proposalId(), fixture.proposalHash());
+            Object report = parentConstructor.newInstance(fixture.reportId(), fixture.reportHash());
+            Object draft = parentConstructor.newInstance(fixture.draftId(), draftHash);
+            Method ensure = JdbcTargetHearingFormalizationActivities.class.getDeclaredMethod(
+                    "ensureReviewProjection",
+                    cursorType,
+                    parentType,
+                    parentType,
+                    parentType,
+                    parentType,
+                    String.class);
+            ensure.setAccessible(true);
+            Object review = ensure.invoke(
+                    producer, cursor, dossier, proposal, report, draft, operationKey);
+            Method id = parentType.getDeclaredMethod("id");
+            id.setAccessible(true);
+            return (String) id.invoke(review);
+        } catch (InvocationTargetException failure) {
+            if (failure.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new IllegalStateException(failure.getCause());
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException("Target Review producer test seam failed", failure);
+        }
+    }
+
+    private void installReadyTargetReviewEpoch(String caseId) {
+        String tenant = "TENANT_REVIEW_TARGET";
+        String roomId = "ROOM_REVIEW_TARGET_PRODUCER";
+        String roomWorkflowId =
+                CaseProcessWorkflowProtocol.roomWorkflowId(caseId, RoomType.REVIEW, 1);
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        jdbc.update("""
+                update case_room_epoch
+                set lifecycle_status = 'TERMINAL',
+                    process_revision = process_revision + 1,
+                    terminal_at = now(),
+                    updated_at = now(),
+                    version = version + 1
+                where id = 'EPOCH_HEARING_REVIEW_TARGET'
+                  and case_id = ?
+                  and lifecycle_status = 'ACTIVE'
+                """, caseId);
+        jdbc.update("""
+                insert into case_room (
+                    id, case_id, room_type, room_status, opened_at,
+                    metadata_json, created_by, updated_by
+                ) values (?, ?, 'REVIEW', 'OPEN', now(), '{}'::jsonb, 'test', 'test')
+                """, roomId, caseId);
+        jdbc.update("""
+                insert into case_room_epoch (
+                    id, tenant_surrogate, case_id, room_id, room_type, room_epoch,
+                    writer_mode, lifecycle_status, provisioning_status, process_revision,
+                    room_revision, fencing_token, temporal_workflow_id, temporal_run_id,
+                    room_temporal_workflow_id, room_temporal_run_id, temporal_build_id,
+                    graph_key, graph_version, checkpoint_schema_version, stream_protocol,
+                    selection_schema_version, process_contract_version, workflow_type,
+                    room_workflow_type, room_workflow_build_id, activated_at, provisioned_at,
+                    created_at, updated_at
+                ) values (
+                    'EPOCH_REVIEW_TARGET_PRODUCER', ?, ?, ?, 'REVIEW', 1,
+                    'TEMPORAL', 'ACTIVE', 'READY', 9, 3, 17, ?, 'case-run-review-target',
+                    ?, 'room-run-review-target', 'review-build-v1', ?, ?, ?, ?, ?, ?, ?, ?,
+                    'review-build-v1', now(), now(), now(), now()
+                )
+                """,
+                tenant,
+                caseId,
+                roomId,
+                CaseProcessWorkflowProtocol.caseWorkflowId(tenant, caseId),
+                roomWorkflowId,
+                TargetTypedRoomProtocol.GRAPH_KEY,
+                TargetTypedRoomProtocol.GRAPH_VERSION,
+                TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
+                TargetTypedRoomProtocol.STREAM_PROTOCOL,
+                TargetTypedRoomProtocol.SELECTION_SCHEMA_VERSION,
+                TargetTypedRoomProtocol.PROCESS_CONTRACT_VERSION,
+                TargetTypedRoomProtocol.CASE_WORKFLOW_TYPE,
+                TargetTypedRoomProtocol.workflowType(RoomType.REVIEW));
+        entityManager.flush();
+        entityManager.clear();
+    }
+
+    private void installTargetReviewRuntimeStubs(String caseId) {
+        CaseTimelineEventEntity event = mock(CaseTimelineEventEntity.class);
+        when(event.getSequenceNo()).thenReturn(1L);
+        when(caseEventService.recordLifecycleEvent(
+                        anyString(), anyString(), anyString(), any(), anyString(), anyString()))
+                .thenReturn(event);
+        when(targetRoomEpochSelectionAuthority.authorize(any()))
+                .thenAnswer(invocation -> {
+                    TargetRoomEpochSelectionAuthority.Request request = invocation.getArgument(0);
+                    assertThat(request.caseId()).isEqualTo(caseId);
+                    return Optional.of(new TargetRoomEpochSelectionAuthority.Grant(
+                            "p9act.v1." + "1".repeat(32),
+                            "2".repeat(64),
+                            "3".repeat(64),
+                            request,
+                            TargetTypedRoomProtocol.SELECTION_SCHEMA_VERSION,
+                            TargetTypedRoomProtocol.PROCESS_CONTRACT_VERSION,
+                            TargetTypedRoomProtocol.CASE_WORKFLOW_TYPE,
+                            "case-build-v1",
+                            TargetTypedRoomProtocol.workflowType(RoomType.REVIEW),
+                            "review-build-v1",
+                            TargetTypedRoomProtocol.GRAPH_KEY,
+                            TargetTypedRoomProtocol.GRAPH_VERSION,
+                            TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
+                            TargetTypedRoomProtocol.STREAM_PROTOCOL));
+                });
+    }
+
+    private static String seal(ObjectNode value) {
+        String hash = ContractJson.sha256Hex(value);
+        value.put("content_hash", hash);
+        return hash;
+    }
+
+    private record TargetReviewProducerFixture(
+            String caseId,
+            String flowId,
+            String dossierId,
+            String dossierHash,
+            String proposalId,
+            String proposalHash,
+            String reportId,
+            String reportHash,
+            String draftId,
+            String draftHash,
+            JsonNode caseSummary,
+            JsonNode claims,
+            JsonNode issues,
+            JsonNode evidenceMatrix,
+            JsonNode riskFlags) {}
 
     @ParameterizedTest
     @ValueSource(strings={

@@ -1,11 +1,21 @@
 package com.example.dispute.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.example.dispute.hearing.domain.HearingArtifactType;
 import com.example.dispute.hearing.domain.HearingAuthorityCommit;
 import com.example.dispute.hearing.domain.HearingAuthorityExpectation;
+import com.example.dispute.hearing.domain.HearingAuthorityLedger;
+import com.example.dispute.hearing.domain.HearingAuthorityRejectedException;
+import com.example.dispute.hearing.domain.HearingDomainReceipt;
+import com.example.dispute.hearing.domain.HearingFlowActionType;
 import com.example.dispute.hearing.domain.HearingFlowStage;
 import com.example.dispute.hearing.domain.HearingFormalFinalizer;
 import com.example.dispute.hearing.domain.HearingFormalRequestHash;
@@ -21,12 +31,21 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 class HearingFormalFinalizerContractTest {
 
@@ -246,6 +265,150 @@ class HearingFormalFinalizerContractTest {
         assertThat(Modifier.isFinal(JdbcHearingFormalFinalizer.class.getModifiers())).isTrue();
     }
 
+    @Test
+    void temporalResultReadyAttemptIsFinalizableExactlyOnceAndLifecycleDriftFailsClosed() {
+        String runId = "target-hearing-run:finalizable-contract";
+        String attemptId = runId + ":1";
+        String resultHash = "e".repeat(64);
+        HearingAuthorityExpectation authority = authority(
+                HearingFlowStage.INTAKE_QUESTIONS_GENERATING, 4, 17, 6);
+        Instant deadline = NOW.plusSeconds(600);
+        HearingFormalTransition transition = new HearingFormalTransition(
+                "STAGE_4", HearingFlowStage.PARTY_ANSWERS_OPEN, 5, deadline,
+                "STAGE_5", "{}", "{}", ACTOR);
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("schema_version", HearingFlowActionType.QUESTION_SET.schemaVersion());
+        String payloadJson = json(payload);
+        String contentHash = sha256(canonicalJson(payload));
+        String actionId = "ACTION_QUESTION_SET_FINALIZABLE";
+        String requestHash = HearingFormalRequestHash.compute(
+                "ACTION", authority, transition, actionId, HearingFlowActionType.QUESTION_SET,
+                HearingFlowActionType.QUESTION_SET.schemaVersion(), null, null, null,
+                contentHash, runId, resultHash, null, ACTOR);
+        HearingAuthorityCommit commit = commit(
+                authority, HearingAuthorityCommit.OperationType.FINALIZE,
+                "hearing.finalize:tenant-1:CASE_1:2:4:QUESTION_SET:" + requestHash,
+                requestHash);
+        HearingFormalFinalizer.ActionCommand command = new HearingFormalFinalizer.ActionCommand(
+                commit, transition, actionId, HearingFlowActionType.QUESTION_SET,
+                HearingFlowActionType.QUESTION_SET.schemaVersion(), null, null, null,
+                payloadJson, contentHash, runId, resultHash, null, ACTOR);
+
+        NamedParameterJdbcTemplate jdbc = mock(NamedParameterJdbcTemplate.class);
+        AgentLifecycle lifecycle = new AgentLifecycle(runId, attemptId, resultHash, authority);
+        AtomicReference<String> lifecycleSql = new AtomicReference<>();
+        when(jdbc.queryForObject(
+                anyString(), any(MapSqlParameterSource.class), eq(Integer.class)))
+                .thenAnswer(invocation -> {
+                    String sql = invocation.getArgument(0);
+                    MapSqlParameterSource parameters = invocation.getArgument(1);
+                    if (sql.contains("from hearing_flow_stage")) {
+                        return 1;
+                    }
+                    if (sql.contains("from agent_run")) {
+                        lifecycleSql.set(sql);
+                        return lifecycle.matches(sql, parameters) ? 1 : 0;
+                    }
+                    throw new AssertionError("unexpected cardinality query: " + sql);
+                });
+        when(jdbc.queryForObject(anyString(), any(Map.class), eq(Long.class))).thenReturn(1L);
+        AtomicInteger actionInserts = new AtomicInteger();
+        when(jdbc.update(anyString(), any(MapSqlParameterSource.class)))
+                .thenAnswer(invocation -> {
+                    if (((String) invocation.getArgument(0)).contains("insert into hearing_flow_action")) {
+                        actionInserts.incrementAndGet();
+                    }
+                    return 1;
+                });
+
+        HearingAuthorityLedger ledger = mock(HearingAuthorityLedger.class);
+        AtomicReference<HearingDomainReceipt> storedReceipt = new AtomicReference<>();
+        when(ledger.commitOrReplay(
+                any(HearingAuthorityCommit.class), any(HearingAuthorityLedger.FormalCommitAction.class)))
+                .thenAnswer(invocation -> {
+                    HearingDomainReceipt replay = storedReceipt.get();
+                    if (replay != null) {
+                        return replay;
+                    }
+                    HearingAuthorityLedger.FormalCommitAction mutation = invocation.getArgument(1);
+                    mutation.commit();
+                    HearingDomainReceipt receipt = mock(HearingDomainReceipt.class);
+                    storedReceipt.set(receipt);
+                    return receipt;
+                });
+        JdbcHearingFormalFinalizer finalizer = new JdbcHearingFormalFinalizer(jdbc, ledger);
+
+        HearingDomainReceipt first = finalizer.appendAction(command);
+        assertThat(first).isSameAs(storedReceipt.get());
+        assertThat(actionInserts).hasValue(1);
+        assertThat(lifecycleSql.get())
+                .contains(
+                        "join agent_run_attempt attempt",
+                        "run.protocol = 'agent-stream.v2'",
+                        "run.run_status = 'RESULT_READY'",
+                        "run.finalization_status = 'UNCOMMITTED'",
+                        "run.result_ready_attempt_id = attempt.id",
+                        "run.committed_attempt_id is null",
+                        "attempt.attempt_status = 'RESULT_READY'",
+                        "attempt.result_hash = run.final_result_hash",
+                        "attempt.final_frame_observed = true",
+                        "attempt.completed_at is not null",
+                        "run.run_status = 'COMPLETED'",
+                        "run.finalization_status = 'COMMITTED'",
+                        "run.committed_attempt_id = attempt.id",
+                        "attempt.attempt_status = 'COMPLETED'");
+
+        lifecycle.completedCommitted();
+        HearingDomainReceipt replay = finalizer.appendAction(command);
+        assertThat(replay).isSameAs(first);
+        assertThat(actionInserts).hasValue(1);
+        assertThatCode(() -> invokeAgentRunGuard(finalizer, authority, runId, resultHash))
+                .doesNotThrowAnyException();
+
+        List<Consumer<AgentLifecycle>> temporalDrifts = new ArrayList<>();
+        temporalDrifts.add(value -> value.attemptId = null);
+        temporalDrifts.add(value -> value.attemptId = "target-hearing-run:different:1");
+        temporalDrifts.add(value -> value.committedAttemptId = value.attemptId);
+        temporalDrifts.add(value -> value.attemptResultHash = HASH_D);
+        temporalDrifts.add(value -> value.roomType = "EVIDENCE");
+        temporalDrifts.add(value -> value.roomEpoch++);
+        temporalDrifts.add(value -> value.processRevision++);
+        temporalDrifts.add(value -> value.fencingToken++);
+        temporalDrifts.add(value -> value.runExecutor = "LEGACY_WORKER");
+        temporalDrifts.add(value -> value.attemptExecutor = "LEGACY_WORKER");
+        temporalDrifts.add(value -> value.finalFrameObserved = false);
+        temporalDrifts.add(value -> value.completedAt = null);
+        temporalDrifts.add(value -> value.runStatus = "RUNNING");
+        temporalDrifts.add(value -> value.runStatus = "FAILED");
+        for (Consumer<AgentLifecycle> drift : temporalDrifts) {
+            lifecycle.resultReadyUncommitted();
+            drift.accept(lifecycle);
+            assertThatThrownBy(() -> invokeAgentRunGuard(finalizer, authority, runId, resultHash))
+                    .isInstanceOf(HearingAuthorityRejectedException.class)
+                    .extracting(failure -> ((HearingAuthorityRejectedException) failure).code())
+                    .isEqualTo("HEARING_AGENT_RUN_NOT_TERMINAL");
+        }
+
+        HearingAuthorityExpectation legacyAuthority = new HearingAuthorityExpectation(
+                authority.tenantSurrogate(), authority.caseId(), authority.flowInstanceId(),
+                authority.epochId(), authority.roomEpoch(), HearingWriterMode.LEGACY,
+                authority.stage(), authority.stageSequence(), authority.processRevision(),
+                authority.roomRevision(), 0);
+        lifecycle.resultReadyUncommitted();
+        lifecycle.protocol = "agent_stream.v1";
+        lifecycle.runExecutor = "LEGACY_WORKER";
+        lifecycle.attemptExecutor = "LEGACY_WORKER";
+        lifecycle.fencingToken = 0;
+        assertThatThrownBy(() -> invokeAgentRunGuard(
+                finalizer, legacyAuthority, runId, resultHash))
+                .isInstanceOf(HearingAuthorityRejectedException.class)
+                .extracting(failure -> ((HearingAuthorityRejectedException) failure).code())
+                .isEqualTo("HEARING_AGENT_RUN_NOT_TERMINAL");
+        lifecycle.runStatus = "COMPLETED";
+        assertThatCode(() -> invokeAgentRunGuard(
+                finalizer, legacyAuthority, runId, resultHash)).doesNotThrowAnyException();
+    }
+
     private static HearingAuthorityExpectation authority(
             HearingFlowStage stage, int sequence, long processRevision, long roomRevision) {
         return new HearingAuthorityExpectation(
@@ -347,6 +510,132 @@ class HearingFormalFinalizerContractTest {
                     .digest(value.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException(impossible);
+        }
+    }
+
+    private static void invokeAgentRunGuard(
+            JdbcHearingFormalFinalizer finalizer,
+            HearingAuthorityExpectation authority,
+            String agentRunId,
+            String resultHash) {
+        try {
+            Method guard = JdbcHearingFormalFinalizer.class.getDeclaredMethod(
+                    "requireTerminalAgentRun",
+                    HearingAuthorityExpectation.class, String.class, String.class);
+            guard.setAccessible(true);
+            guard.invoke(finalizer, authority, agentRunId, resultHash);
+        } catch (InvocationTargetException failure) {
+            if (failure.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new IllegalStateException(failure.getCause());
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
+    private static final class AgentLifecycle {
+        private final String runId;
+        private final String expectedAttemptId;
+        private final String expectedResultHash;
+        private final HearingAuthorityExpectation authority;
+        private String protocol;
+        private String runStatus;
+        private String finalizationStatus;
+        private String resultReadyAttemptId;
+        private String committedAttemptId;
+        private String finalResultHash;
+        private String roomType;
+        private long roomEpoch;
+        private long processRevision;
+        private long fencingToken;
+        private String runExecutor;
+        private String attemptId;
+        private String attemptStatus;
+        private String attemptExecutor;
+        private String attemptResultHash;
+        private boolean finalFrameObserved;
+        private Instant completedAt;
+
+        private AgentLifecycle(
+                String runId,
+                String attemptId,
+                String resultHash,
+                HearingAuthorityExpectation authority) {
+            this.runId = runId;
+            this.expectedAttemptId = attemptId;
+            this.expectedResultHash = resultHash;
+            this.authority = authority;
+            resultReadyUncommitted();
+        }
+
+        private void resultReadyUncommitted() {
+            protocol = "agent-stream.v2";
+            runStatus = "RESULT_READY";
+            finalizationStatus = "UNCOMMITTED";
+            resultReadyAttemptId = expectedAttemptId;
+            committedAttemptId = null;
+            finalResultHash = expectedResultHash;
+            roomType = "HEARING";
+            roomEpoch = authority.roomEpoch();
+            processRevision = authority.processRevision();
+            fencingToken = authority.fencingToken();
+            runExecutor = "TEMPORAL_ACTIVITY";
+            attemptId = expectedAttemptId;
+            attemptStatus = "RESULT_READY";
+            attemptExecutor = "TEMPORAL_ACTIVITY";
+            attemptResultHash = expectedResultHash;
+            finalFrameObserved = true;
+            completedAt = NOW;
+        }
+
+        private void completedCommitted() {
+            resultReadyUncommitted();
+            runStatus = "COMPLETED";
+            finalizationStatus = "COMMITTED";
+            committedAttemptId = expectedAttemptId;
+            attemptStatus = "COMPLETED";
+        }
+
+        private boolean matches(String sql, MapSqlParameterSource parameters) {
+            boolean common = runId.equals(parameters.getValue("agentRunId"))
+                    && expectedResultHash.equals(parameters.getValue("resultHash"))
+                    && authority.tenantSurrogate().equals(parameters.getValue("tenant"))
+                    && authority.caseId().equals(parameters.getValue("caseId"))
+                    && authority.epochId().equals(parameters.getValue("epochId"))
+                    && roomEpoch == ((Number) parameters.getValue("roomEpoch")).longValue()
+                    && processRevision == ((Number) parameters.getValue("processRevision")).longValue()
+                    && fencingToken == ((Number) parameters.getValue("fencingToken")).longValue()
+                    && "HEARING".equals(roomType)
+                    && finalResultHash.equals(expectedResultHash);
+            if ("LEGACY_WORKER".equals(parameters.getValue("executorKind"))) {
+                return common && "LEGACY_WORKER".equals(runExecutor)
+                        && "COMPLETED".equals(runStatus)
+                        && sql.contains("run_status = 'COMPLETED'")
+                        && !sql.contains("run_status = 'RESULT_READY'");
+            }
+            boolean exactSql = sql.contains("join agent_run_attempt attempt")
+                    && sql.contains("run.protocol = 'agent-stream.v2'")
+                    && sql.contains("run.result_ready_attempt_id = attempt.id")
+                    && sql.contains("attempt.result_hash = run.final_result_hash")
+                    && sql.contains("attempt.final_frame_observed = true")
+                    && sql.contains("attempt.completed_at is not null");
+            boolean commonAttempt = expectedAttemptId.equals(resultReadyAttemptId)
+                    && expectedAttemptId.equals(attemptId)
+                    && expectedResultHash.equals(attemptResultHash)
+                    && "TEMPORAL_ACTIVITY".equals(runExecutor)
+                    && "TEMPORAL_ACTIVITY".equals(attemptExecutor)
+                    && finalFrameObserved
+                    && completedAt != null;
+            boolean precommit = "RESULT_READY".equals(runStatus)
+                    && "UNCOMMITTED".equals(finalizationStatus)
+                    && committedAttemptId == null
+                    && "RESULT_READY".equals(attemptStatus);
+            boolean committed = "COMPLETED".equals(runStatus)
+                    && "COMMITTED".equals(finalizationStatus)
+                    && expectedAttemptId.equals(committedAttemptId)
+                    && "COMPLETED".equals(attemptStatus);
+            return exactSql && common && commonAttempt && (precommit || committed);
         }
     }
 }

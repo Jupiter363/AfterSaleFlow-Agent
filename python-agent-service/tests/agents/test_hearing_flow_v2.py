@@ -1233,8 +1233,13 @@ def test_evidence_synthesis_consumes_complete_batch_and_prior_matrix() -> None:
     )
     assert len(synthesis_call["case_data"]["evidence_assessments"]) == 2
     assert len(synthesis_call["case_data"]["merged_fact_evidence_matrix"]["links"]) == 3
+    assert (
+        synthesis_call["case_data"]["merged_fact_evidence_matrix"]["matrix_status"]
+        == "FROZEN"
+    )
     assert result.fact_evidence_matrix.schema_version == "fact_evidence_matrix.v2"
     assert result.fact_evidence_matrix.matrix_version == 3
+    assert result.fact_evidence_matrix.matrix_status == "FROZEN"
     assert result.fact_evidence_matrix.parent_ref.matrix_id == "FACT_EVIDENCE_MATRIX_prior"
     assert (
         result.fact_evidence_matrix.case_fact_matrix_version
@@ -1254,6 +1259,13 @@ def test_evidence_synthesis_consumes_complete_batch_and_prior_matrix() -> None:
     }
     assert coverage["FACT_DELIVERY"] == "COVERED_BY_FROZEN_DOSSIER"
     assert coverage["FACT_RECIPIENT"] == "REQUIRES_HUMAN_REVIEW"
+    assert (
+        content_hash(result.fact_evidence_matrix, hash_field="content_hash")
+        == result.fact_evidence_matrix.content_hash
+    )
+
+    replay = HearingFlowWorkflows(runner).evidence_synthesis(request)
+    assert replay == result
 
 
 def test_evidence_synthesis_assesses_the_present_file_when_other_party_times_out() -> None:

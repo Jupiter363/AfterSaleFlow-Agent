@@ -97,21 +97,9 @@ public final class JdbcTargetHearingCommandMaterialStore implements TargetHearin
       statement.setLong(5, route.fencingToken());
       try (ResultSet result = statement.executeQuery()) {
         if (!result.next()) return Optional.empty();
+        Snapshot snapshot = snapshot(result);
         if (result.next()) throw new IllegalStateException("Hearing route is ambiguous");
-        CommandAdmission admission = new CommandAdmission(result.getString("activation_id"),
-            result.getString("activation_manifest_hash"), result.getString("isolated_domain_db_binding_hash"),
-            result.getString("tenant_surrogate"), result.getString("case_id"), result.getString("command_id"),
-            result.getString("command_hash"), result.getString("command_envelope_hash"),
-            result.getLong("room_epoch"), result.getLong("room_fencing_token"));
-        String json = result.getString("material_canonical_json");
-        JsonNode node = mapper.readTree(json);
-        if (!ContractJson.canonicalString(node).equals(json) || !ContractJson.sha256Hex(node).equals(result.getString("material_sha256"))) {
-          throw new IllegalStateException("stored Hearing material hash mismatch");
-        }
-        TargetHearingCommandMaterial material = mapper.treeToValue(node, TargetHearingCommandMaterial.class);
-        if (!material.admission().equals(admission)) throw new IllegalStateException("stored Hearing material admission mismatch");
-        return Optional.of(new Snapshot(result.getString("admission_id"), admission, material,
-            result.getString("material_sha256"), result.getTimestamp("stored_at").toInstant()));
+        return Optional.of(snapshot);
       }
     } catch (SQLException | JsonProcessingException failure) {
       throw new IllegalStateException("target Hearing material read failed", failure);

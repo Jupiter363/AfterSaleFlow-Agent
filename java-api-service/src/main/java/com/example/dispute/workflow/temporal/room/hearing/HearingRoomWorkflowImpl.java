@@ -41,6 +41,10 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
   private static final int MAX_INBOX_RECEIPTS = 64;
   private static final int MAX_PENDING_RECEIPTS = 64;
   private static final int MAX_AGENT_RUN_FINALIZATION_RECEIPTS = 64;
+  private static final String HANDOFF_OPERATION_KEY_CHANGE_ID =
+      "target-hearing-exact-handoff-operation-key-v1";
+  private static final String PARTY_TIMEOUT_FORMALIZATION_CHANGE_ID =
+      "target-hearing-party-timeout-formalization-v1";
   private final TargetHearingFormalizationActivities formalization =
       Workflow.newActivityStub(
           TargetHearingFormalizationActivities.class,
@@ -93,6 +97,8 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
   private String agentResultReceiptId;
   private String handoffReceiptId;
   private String handoffReceiptHash;
+  private String handoffParentId;
+  private String handoffParentHash;
   private CancellationScope activeTimerScope;
   private Promise<Void> activeTimer;
   private Promise<Void> activeTimerCallback;
@@ -384,7 +390,12 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     }
     if (stage == HearingWorkflowStage.HUMAN_REVIEW_OPEN) {
       if (handoffReceiptId == null) {
-        stageCompleted(formalization.handoff(transition("hearing.handoff:" + start.caseId())).receipt());
+        int version = Workflow.getVersion(
+            HANDOFF_OPERATION_KEY_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+        String operationKey = version == Workflow.DEFAULT_VERSION
+            ? "hearing.handoff:" + start.caseId()
+            : exactHandoffOperationKey(start, handoffParentId, handoffParentHash);
+        stageCompleted(formalization.handoff(transition(operationKey)).receipt());
       } else {
         stageCompleted(formalization.close(transition(HearingOperationKeys.close(
             start.tenantSurrogate(), start.caseId(), start.roomEpoch(), handoffReceiptHash))).receipt());
@@ -550,6 +561,14 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
       }
     }
 
+    if (!sameStage
+        && isTargetChild()
+        && stage == HearingWorkflowStage.JUDGE_V2_GENERATING
+        && committed.stage() == HearingWorkflowStage.HUMAN_REVIEW_OPEN
+        && !bindHandoffParent(committed)) {
+      return false;
+    }
+
     orderedOperationKeys.add(committed.operationKey());
     if (sameStage
         && committed.operationType() == HearingAuthorityCommit.OperationType.AGENT_RESULT) {
@@ -562,6 +581,34 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
       advanceTo(committed.stage(), committed.stageDeadlineAt());
     }
     return true;
+  }
+
+  private boolean bindHandoffParent(HearingCommittedReceipt committed) {
+    String prefix = "urn:hearing:artifact:";
+    if (!committed.resultRef().startsWith(prefix)
+        || committed.resultRef().length() == prefix.length()
+        || handoffParentId != null
+        || handoffParentHash != null) {
+      failProtocol("HEARING_HANDOFF_PARENT_ARTIFACT_INVALID");
+      return false;
+    }
+    String parentId = committed.resultRef().substring(prefix.length());
+    try {
+      exactHandoffOperationKey(start, parentId, committed.resultHash());
+    } catch (RuntimeException failure) {
+      failProtocol("HEARING_HANDOFF_PARENT_ARTIFACT_INVALID");
+      return false;
+    }
+    handoffParentId = parentId;
+    handoffParentHash = committed.resultHash();
+    return true;
+  }
+
+  public static String exactHandoffOperationKey(
+      HearingRoomStart start, String judgeV2Id, String judgeV2Hash) {
+    Objects.requireNonNull(start, "start must not be null");
+    return HearingOperationKeys.handoff(
+        start.tenantSurrogate(), start.caseId(), start.roomEpoch(), judgeV2Id, judgeV2Hash);
   }
 
   private boolean processPartyReceipt(HearingPartyTerminalReceipt receipt) {
@@ -598,6 +645,9 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     orderedOperationKeys.add(committed.operationKey());
     if (!sameStage) {
       advanceTo(committed.stage(), committed.stageDeadlineAt());
+    } else if (deadlineReached
+        && receipt.terminalStatus() != HearingPartyTerminalReceipt.TerminalStatus.AUTO_TIMEOUT) {
+      inbox.addLast(WorkflowEvent.timer(stage, stageSequence));
     }
     return true;
   }
@@ -626,18 +676,51 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     if (stage != timerStage || stageSequence != timerSequence || !stage.isPartyWait()) {
       return;
     }
-    if (deadlineReached) {
-      return;
+    if (!deadlineReached) {
+      deadlineReached = true;
+      orderedOperationKeys.add(
+          HearingOperationKeys.partyDeadline(
+              start.tenantSurrogate(), start.caseId(), start.roomEpoch(), stage, stageSequence));
     }
-    deadlineReached = true;
-    orderedOperationKeys.add(
-        HearingOperationKeys.partyDeadline(
-            start.tenantSurrogate(), start.caseId(), start.roomEpoch(), stage, stageSequence));
     if (!partyTerminals.containsKey(start.initiatorParticipantId())) {
       timeoutRequired.add(start.initiatorParticipantId());
     }
     if (!partyTerminals.containsKey(start.respondentParticipantId())) {
       timeoutRequired.add(start.respondentParticipantId());
+    }
+    if (!isTargetChild()) {
+      return;
+    }
+    int version = Workflow.getVersion(
+        PARTY_TIMEOUT_FORMALIZATION_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+    if (version == Workflow.DEFAULT_VERSION) {
+      return;
+    }
+    formalizeRequiredTimeouts();
+  }
+
+  private void formalizeRequiredTimeouts() {
+    List<String> participants = List.of(
+        start.initiatorParticipantId(), start.respondentParticipantId());
+    for (String participantId : participants) {
+      if (!stage.isPartyWait() || partyTerminals.containsKey(participantId)) {
+        continue;
+      }
+      String operationKey = HearingOperationKeys.partyTerminal(
+          start.tenantSurrogate(), start.caseId(), start.roomEpoch(), stage, stageSequence,
+          participantId, "AUTO_TIMEOUT");
+      TargetHearingFormalizationActivities.TimeoutResult result =
+          formalization.formalizeTimeout(
+              new TargetHearingFormalizationActivities.TimeoutRequest(
+                  transition(operationKey), participantId));
+      if (result.pendingSubmittedAction()) {
+        return;
+      }
+      queueCommittedReceipt(WorkflowEvent.party(result.receipt()));
+      drainCommittedReceipts();
+      if (!"RUNNING".equals(status) || !stage.isPartyWait()) {
+        return;
+      }
     }
   }
 
