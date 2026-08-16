@@ -2,10 +2,16 @@ package com.example.dispute.workflow.room.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.example.dispute.hearing.domain.HearingAuthorityCommit;
 import com.example.dispute.workflow.activity.hearing.HearingDomainReceiptAdapter;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.example.dispute.workflow.contract.v1.RoomGraphResult;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
@@ -27,9 +33,12 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.common.WorkflowExecutionHistory;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
@@ -351,6 +360,139 @@ class HearingRoomWorkflowTest {
             "hearing_question_set.v1"));
     assertThat(awaitStage(started.workflow(), HearingWorkflowStage.PARTY_ANSWERS_OPEN).status())
         .isEqualTo("RUNNING");
+  }
+
+  @Test
+  void agentStageFinalizationRequestRequiresCompletedExactResultAndReplaysByteIdentically()
+      throws Exception {
+    TargetHearingFormalizationActivities.TransitionRequest transition =
+        mock(TargetHearingFormalizationActivities.TransitionRequest.class);
+    ExecuteAgentRunRequest request = mock(ExecuteAgentRunRequest.class);
+    String logicalRunId = "target-hearing-run:completed-gate";
+    String attemptId = logicalRunId + ":1";
+    when(request.agentRunId()).thenReturn(logicalRunId);
+    when(request.logicalRunId()).thenReturn(logicalRunId);
+    when(request.attemptId()).thenReturn(attemptId);
+    when(request.attemptNo()).thenReturn(1L);
+    when(request.attemptLimit()).thenReturn(3);
+
+    String resultHash = "a".repeat(64);
+    RoomGraphResult graph = mock(RoomGraphResult.class);
+    when(graph.logicalRunId()).thenReturn(logicalRunId);
+    when(graph.attemptId()).thenReturn(attemptId);
+    when(graph.outputHash()).thenReturn(resultHash);
+    ExecuteAgentRunResult completed = mock(ExecuteAgentRunResult.class);
+    when(completed.outcome()).thenReturn(ExecuteAgentRunResult.Outcome.COMPLETED);
+    when(completed.agentRunId()).thenReturn(logicalRunId);
+    when(completed.logicalRunId()).thenReturn(logicalRunId);
+    when(completed.attemptId()).thenReturn(attemptId);
+    when(completed.attemptNo()).thenReturn(1L);
+    when(completed.graphResult()).thenReturn(graph);
+    when(completed.resultHash()).thenReturn(resultHash);
+
+    TargetHearingFormalizationActivities.AgentStageFinalizationRequest first =
+        completedAgentStageFinalizationRequest(transition, request, completed);
+    TargetHearingFormalizationActivities.AgentStageFinalizationRequest replay =
+        completedAgentStageFinalizationRequest(transition, request, completed);
+    assertThat(replay).isEqualTo(first);
+    assertThat(first.transition()).isSameAs(transition);
+    assertThat(first.request()).isSameAs(request);
+    assertThat(first.result()).isSameAs(completed);
+
+    ExecuteAgentRunResult terminalFailure = mock(ExecuteAgentRunResult.class);
+    when(terminalFailure.outcome()).thenReturn(ExecuteAgentRunResult.Outcome.FAILED);
+    when(terminalFailure.errorCode()).thenReturn("GRAPH_STREAM_INTERNAL_ERROR");
+    when(terminalFailure.retryable()).thenReturn(false);
+    when(terminalFailure.recoveryAction()).thenReturn(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+    when(terminalFailure.agentRunId()).thenReturn("target-hearing-run:terminal-failure");
+    when(terminalFailure.attemptId()).thenReturn("target-hearing-run:terminal-failure:1");
+    assertThatThrownBy(
+            () -> completedAgentStageFinalizationRequest(transition, request, terminalFailure))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            failure -> {
+              assertThat(failure.getType()).isEqualTo("GRAPH_STREAM_INTERNAL_ERROR");
+              assertThat(failure.isNonRetryable()).isTrue();
+            });
+
+    ExecuteAgentRunResult retryableFailure = mock(ExecuteAgentRunResult.class);
+    when(retryableFailure.outcome()).thenReturn(ExecuteAgentRunResult.Outcome.FAILED);
+    when(retryableFailure.errorCode()).thenReturn("PROVIDER_UNAVAILABLE");
+    when(retryableFailure.retryable()).thenReturn(true);
+    when(retryableFailure.recoveryAction())
+        .thenReturn(AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT);
+    when(retryableFailure.agentRunId()).thenReturn("target-hearing-run:retryable-failure");
+    when(retryableFailure.attemptId()).thenReturn("target-hearing-run:retryable-failure:1");
+    assertThatThrownBy(
+            () -> completedAgentStageFinalizationRequest(transition, request, retryableFailure))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            failure -> {
+              assertThat(failure.getType()).isEqualTo("PROVIDER_UNAVAILABLE");
+              assertThat(failure.isNonRetryable()).isFalse();
+            });
+
+    ExecuteAgentRunResult cancelled = mock(ExecuteAgentRunResult.class);
+    when(cancelled.outcome()).thenReturn(ExecuteAgentRunResult.Outcome.CANCELLED);
+    when(cancelled.errorCode()).thenReturn("AGENT_RUN_CANCELLED");
+    when(cancelled.retryable()).thenReturn(false);
+    when(cancelled.recoveryAction()).thenReturn(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+    when(cancelled.agentRunId()).thenReturn("target-hearing-run:cancelled");
+    when(cancelled.attemptId()).thenReturn("target-hearing-run:cancelled:1");
+    assertThatThrownBy(() -> completedAgentStageFinalizationRequest(transition, request, cancelled))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            failure -> {
+              assertThat(failure.getType()).isEqualTo("AGENT_RUN_CANCELLED");
+              assertThat(failure.isNonRetryable()).isTrue();
+            });
+
+    ExecuteAgentRunResult malformed = mock(ExecuteAgentRunResult.class);
+    when(malformed.outcome()).thenReturn(ExecuteAgentRunResult.Outcome.COMPLETED);
+    when(malformed.agentRunId()).thenReturn(logicalRunId);
+    when(malformed.logicalRunId()).thenReturn(logicalRunId);
+    when(malformed.attemptId()).thenReturn(attemptId);
+    when(malformed.attemptNo()).thenReturn(1L);
+    when(malformed.graphResult()).thenReturn(graph);
+    when(malformed.resultHash()).thenReturn("b".repeat(64));
+    assertThatThrownBy(() -> completedAgentStageFinalizationRequest(transition, request, malformed))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            failure -> {
+              assertThat(failure.getType()).isEqualTo("TARGET_HEARING_AGENT_RESULT_INVALID");
+              assertThat(failure.isNonRetryable()).isTrue();
+            });
+    when(malformed.graphResult()).thenReturn(null);
+    when(malformed.resultHash()).thenReturn(null);
+    assertThatThrownBy(() -> completedAgentStageFinalizationRequest(transition, request, malformed))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            failure -> {
+              assertThat(failure.getType()).isEqualTo("TARGET_HEARING_AGENT_RESULT_INVALID");
+              assertThat(failure.isNonRetryable()).isTrue();
+            });
+  }
+
+  private static TargetHearingFormalizationActivities.AgentStageFinalizationRequest
+      completedAgentStageFinalizationRequest(
+          TargetHearingFormalizationActivities.TransitionRequest transition,
+          ExecuteAgentRunRequest request,
+          ExecuteAgentRunResult result) throws Exception {
+    Method method = HearingRoomWorkflowImpl.class.getDeclaredMethod(
+        "completedAgentStageFinalizationRequest",
+        TargetHearingFormalizationActivities.TransitionRequest.class,
+        ExecuteAgentRunRequest.class,
+        ExecuteAgentRunResult.class);
+    method.setAccessible(true);
+    try {
+      return (TargetHearingFormalizationActivities.AgentStageFinalizationRequest)
+          method.invoke(null, transition, request, result);
+    } catch (InvocationTargetException failure) {
+      if (failure.getCause() instanceof RuntimeException runtime) {
+        throw runtime;
+      }
+      throw failure;
+    }
   }
 
   private Started start(String suffix, Duration partyWindow) {

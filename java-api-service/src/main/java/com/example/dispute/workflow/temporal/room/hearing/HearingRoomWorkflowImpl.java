@@ -18,6 +18,7 @@ import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFi
 import com.example.dispute.workflow.targete2e.temporal.room.hearing.TargetHearingBootstrapActivities;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.CancellationScope;
 import io.temporal.workflow.Promise;
@@ -395,13 +396,14 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
       return;
     }
     if (stage.requiresAgentRun()) {
+      TargetHearingFormalizationActivities.TransitionRequest agentTransition =
+          transition(agentOperationKey());
       ExecuteAgentRunRequest request =
-          formalization.prepareAgentStage(transition(agentOperationKey())).request();
+          formalization.prepareAgentStage(agentTransition).request();
       ExecuteAgentRunResult result = launchAgentRunChild(request);
       TargetHearingFormalizationActivities.AgentStageResult formalResult =
           formalization.finalizeAgentStage(
-              new TargetHearingFormalizationActivities.AgentStageFinalizationRequest(
-                  transition(agentOperationKey()), request, result));
+              completedAgentStageFinalizationRequest(agentTransition, request, result));
       stageCompleted(formalResult.finalizerReceipt());
       return;
     }
@@ -461,6 +463,71 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
                 .setParentClosePolicy(PARENT_CLOSE_POLICY_ABANDON)
                 .build());
     return child.run(request);
+  }
+
+  private static TargetHearingFormalizationActivities.AgentStageFinalizationRequest
+      completedAgentStageFinalizationRequest(
+          TargetHearingFormalizationActivities.TransitionRequest transition,
+          ExecuteAgentRunRequest request,
+          ExecuteAgentRunResult result) {
+    transition = Objects.requireNonNull(transition, "transition");
+    request = Objects.requireNonNull(request, "request");
+    result = Objects.requireNonNull(result, "result");
+    if (result.outcome() == null) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Target Hearing AgentRun result outcome is absent",
+          "TARGET_HEARING_AGENT_RESULT_INVALID");
+    }
+    if (result.outcome() != ExecuteAgentRunResult.Outcome.COMPLETED) {
+      if (result.errorCode() == null
+          || result.errorCode().isBlank()
+          || result.recoveryAction() == null
+          || result.agentRunId() == null
+          || result.agentRunId().isBlank()
+          || result.attemptId() == null
+          || result.attemptId().isBlank()) {
+        throw ApplicationFailure.newNonRetryableFailure(
+            "Target Hearing AgentRun failure result is malformed",
+            "TARGET_HEARING_AGENT_RESULT_INVALID");
+      }
+      String message = "Target Hearing AgentRun ended with " + result.outcome().name();
+      Object[] details = {
+          result.agentRunId(),
+          result.attemptId(),
+          result.outcome().name(),
+          result.recoveryAction().name()
+      };
+      if (result.retryable()) {
+        throw ApplicationFailure.newFailure(message, result.errorCode(), details);
+      }
+      throw ApplicationFailure.newNonRetryableFailure(message, result.errorCode(), details);
+    }
+
+    var graphResult = result.graphResult();
+    boolean exact =
+        graphResult != null
+            && result.agentRunId() != null
+            && !result.agentRunId().isBlank()
+            && result.logicalRunId() != null
+            && !result.logicalRunId().isBlank()
+            && result.attemptId() != null
+            && !result.attemptId().isBlank()
+            && result.resultHash() != null
+            && result.resultHash().matches("[0-9a-f]{64}")
+            && Objects.equals(result.agentRunId(), request.agentRunId())
+            && Objects.equals(result.logicalRunId(), request.logicalRunId())
+            && result.attemptNo() >= request.attemptNo()
+            && result.attemptNo() <= request.attemptLimit()
+            && Objects.equals(graphResult.logicalRunId(), result.logicalRunId())
+            && Objects.equals(graphResult.attemptId(), result.attemptId())
+            && Objects.equals(graphResult.outputHash(), result.resultHash());
+    if (!exact) {
+      throw ApplicationFailure.newNonRetryableFailure(
+          "Target Hearing completed AgentRun result is malformed",
+          "TARGET_HEARING_AGENT_RESULT_INVALID");
+    }
+    return new TargetHearingFormalizationActivities.AgentStageFinalizationRequest(
+        transition, request, result);
   }
 
   private static boolean matchesPartyCommand(HearingWorkflowStage stage, CommandType commandType) {
