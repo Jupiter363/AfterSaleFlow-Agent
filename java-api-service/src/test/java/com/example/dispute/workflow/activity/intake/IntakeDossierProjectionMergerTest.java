@@ -437,6 +437,62 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void acceptsFirstReadyNoRemarkAsOneActorBoundSuccessorTransition() throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        ObjectNode notReadyPartition =
+                handoffRemarkPartition(current, "USER", "NOT_READY", null);
+        ObjectNode notReadyPatch = partyIntakePatch(
+                "USER", partyIntakeEntry(0), partyIntakeEntry(0));
+        notReadyPatch.set("handoff_remark_partition", notReadyPartition);
+        MergeResult before = merger.merge(
+                current,
+                proposal(notReadyPatch, null),
+                matrixAuthority(ActorRole.USER));
+
+        String factId = before.dossier().at("/case_fact_matrix/fact_rows/0/fact_id").asText();
+        ObjectNode noRemarkPartition = handoffRemarkPartition(
+                before.dossier(), "USER", "NO_EXTRA_REMARKS", null);
+        ObjectNode noRemarkState =
+                ((ObjectNode) before.dossier().path("party_intake_state")).deepCopy();
+        ObjectNode noRemarkUser = readyPartyIntakeEntry(
+                "NO_EXTRA_REMARKS", "MESSAGE_HANDOFF_THRESHOLD_USER");
+        noRemarkUser.withObject("handoff_notes").put("latest_remark", "无额外备注。");
+        noRemarkState.set("USER", noRemarkUser);
+        ObjectNode noRemarkPatch = JSON.createObjectNode();
+        noRemarkPatch.set("party_intake_state", noRemarkState);
+        copyPartyMirror(noRemarkPatch, noRemarkUser);
+        noRemarkPatch.set("handoff_remark_partition", noRemarkPartition);
+        MatrixAuthority sameMessageAuthority = matrixAuthority(
+                ActorRole.USER,
+                "MESSAGE_HANDOFF_THRESHOLD_USER",
+                SourceType.ROOM_MESSAGE);
+
+        MergeResult terminal = merger.merge(
+                before.dossier(),
+                proposal(
+                        noRemarkPatch,
+                        carryForwardDraft(factId),
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                sameMessageAuthority);
+
+        JsonNode successor = terminal.dossier().path("case_fact_matrix");
+        JsonNode partition = terminal.dossier().path("handoff_remark_partition");
+        assertThat(successor.path("matrix_version").asLong())
+                .isEqualTo(before.dossier().at("/case_fact_matrix/matrix_version").asLong() + 1);
+        assertThat(partition.at("/parties/USER/remark_status").asText())
+                .isEqualTo("NO_EXTRA_REMARKS");
+        assertThat(partition.path("case_fact_matrix_id")).isEqualTo(successor.path("matrix_id"));
+        assertThat(partition.path("case_fact_matrix_version"))
+                .isEqualTo(successor.path("matrix_version"));
+        assertThat(partition.path("case_fact_matrix_hash"))
+                .isEqualTo(successor.path("content_hash"));
+        assertThat(terminal.dossier().at("/party_intake_state/USER/handoff_notes/latest_remark")
+                        .asText())
+                .isEqualTo("无额外备注。");
+    }
+
+    @Test
     void buildsTheUnifiedMatrixFromTrustedClaimFactsWhenTheModelOmitsTheClaimBranch()
             throws Exception {
         JsonNode modelPatch = JSON.readTree(

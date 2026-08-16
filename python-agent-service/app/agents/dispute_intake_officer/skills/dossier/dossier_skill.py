@@ -543,10 +543,16 @@ class CaseDetailDossierSkill:
                     "INTAKE_PARTY_STATE_MODEL_AUTHORITY_FORBIDDEN",
                     "model output cannot create or advance party-scoped Intake authority",
                 )
-        if conversation_action in _INTAKE_REMARK_ACK_ACTIONS:
+        if conversation_action == "ACK_REMARK":
             raise _party_intake_state_error(
                 "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
-                "remark acknowledgement requires frozen substantive authority",
+                "an actual remark requires previously frozen substantive authority",
+            )
+        combined_no_remark = conversation_action == "ACK_NO_REMARK"
+        if combined_no_remark and effective_matrix_delta is None:
+            raise _party_intake_state_error(
+                "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
+                "a same-turn no-remark acknowledgement requires a substantive matrix delta",
             )
         previous_phase_source_message_id = str(
             previous_actor_entry["handoff_notes"].get("phase_source_message_id") or ""
@@ -665,11 +671,15 @@ class CaseDetailDossierSkill:
                 str(quality.get("improvement_reason") or "")
             )
 
+        actor_remark_status = "NOT_READY"
         if quality["ready_for_next_step"]:
-            if conversation_action != "INVITE_OPTIONAL_REMARK":
+            if conversation_action not in {
+                "INVITE_OPTIONAL_REMARK",
+                "ACK_NO_REMARK",
+            }:
                 raise _party_intake_state_error(
                     "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
-                    "the first ready turn must invite the optional remark in the same turn",
+                    "the first ready turn must invite the optional remark or acknowledge an explicit same-turn no-remark decision",
                 )
             if not current_message_id:
                 raise _party_intake_state_error(
@@ -677,11 +687,20 @@ class CaseDetailDossierSkill:
                     "the first ready turn requires an authenticated participant message",
                 )
             missing_info["next_questions"] = []
-            _ensure_handoff_notes(
+            actor_remark_status = (
+                "NO_EXTRA_REMARKS"
+                if combined_no_remark
+                else "WAITING_FOR_REMARK"
+            )
+            notes = _ensure_handoff_notes(
                 detail,
-                remark_status="WAITING_FOR_REMARK",
+                remark_status=actor_remark_status,
                 phase_source_message_id=current_message_id,
             )
+            notes["latest_remark"] = (
+                "无额外备注。" if combined_no_remark else ""
+            )
+            notes["remarks"] = []
         else:
             if conversation_action != "ASK_SUBSTANTIVE":
                 raise _party_intake_state_error(
@@ -735,7 +754,7 @@ class CaseDetailDossierSkill:
                 party_intake_state=party_intake_state,
                 previous_partition=previous_remark_partition,
                 actor_role=actor_role,
-                actor_status="WAITING_FOR_REMARK",
+                actor_status=actor_remark_status,
                 actor_source=_room_message_remark_source(
                     message_id=current_message_id,
                     role=actor_role,

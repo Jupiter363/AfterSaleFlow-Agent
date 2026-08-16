@@ -2585,6 +2585,7 @@ def _validate_handoff_remark_transition(
     allowed = {
         ("NOT_READY", "READY_PENDING_REMARK_INVITE"),
         ("NOT_READY", "WAITING_FOR_REMARK"),
+        ("NOT_READY", "NO_EXTRA_REMARKS"),
         ("READY_PENDING_REMARK_INVITE", "HAS_REMARKS"),
         ("READY_PENDING_REMARK_INVITE", "NO_EXTRA_REMARKS"),
         ("WAITING_FOR_REMARK", "HAS_REMARKS"),
@@ -3964,33 +3965,71 @@ def _require_pending_formal_matrix_derivation(
         else None
     )
     if conversation_action in {"ACK_REMARK", "ACK_NO_REMARK"}:
-        if matrix_patch is not None:
-            raise IntakeGraphContractError("INTAKE_REMARK_MATRIX_PATCH_FORBIDDEN")
-        previous_context = state.get("baseline_previous_case_detail")
-        if _is_baseline_context_envelope(previous_context):
-            previous = unwrap_verified_baseline_previous_case_detail(state)
-        elif isinstance(previous_context, Mapping):
-            # ``validate_state`` has already validated the legacy scroll
-            # snapshot before this derivation check.  It remains read-only and
-            # is replaced by the current hash-bound envelope at commit.
-            previous = deepcopy(dict(previous_context))
-        else:
-            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
-        frozen_matrix = previous.get("case_fact_matrix")
+        private_binding = envelope.get("private_binding")
+        actor_role = (
+            private_binding.get("audience")
+            if isinstance(private_binding, Mapping)
+            else None
+        )
         partition = dossier.get("handoff_remark_partition")
+        parties = (
+            partition.get("parties") if isinstance(partition, Mapping) else None
+        )
+        actor_partition = (
+            parties.get(actor_role)
+            if actor_role in {"USER", "MERCHANT"}
+            and isinstance(parties, Mapping)
+            else None
+        )
+        authority_input = envelope.get("authority_input_matrix")
         formal_matrix = envelope.get("formal_matrix")
-        if (
-            not isinstance(frozen_matrix, Mapping)
-            or not isinstance(partition, Mapping)
-            or not isinstance(formal_matrix, Mapping)
-            or dict(formal_matrix) != dict(frozen_matrix)
-            or partition.get("case_fact_matrix_id") != frozen_matrix.get("matrix_id")
-            or partition.get("case_fact_matrix_version")
-            != frozen_matrix.get("matrix_version")
-            or partition.get("case_fact_matrix_hash") != frozen_matrix.get("content_hash")
-        ):
-            raise IntakeGraphContractError("INTAKE_REMARK_FROZEN_MATRIX_CONFLICT")
-        return
+        parent_ref = (
+            formal_matrix.get("parent_ref")
+            if isinstance(formal_matrix, Mapping)
+            else None
+        )
+        combined_substantive_no_remark = bool(
+            conversation_action == "ACK_NO_REMARK"
+            and matrix_patch is not None
+            and isinstance(authority_input, Mapping)
+            and isinstance(formal_matrix, Mapping)
+            and isinstance(parent_ref, Mapping)
+            and isinstance(actor_partition, Mapping)
+            and actor_partition.get("party_role") == actor_role
+            and actor_partition.get("remark_status") == "NO_EXTRA_REMARKS"
+            and parent_ref.get("matrix_id") == authority_input.get("matrix_id")
+            and parent_ref.get("matrix_version")
+            == authority_input.get("matrix_version")
+            and parent_ref.get("content_hash") == authority_input.get("content_hash")
+        )
+        if not combined_substantive_no_remark:
+            if matrix_patch is not None:
+                raise IntakeGraphContractError("INTAKE_REMARK_MATRIX_PATCH_FORBIDDEN")
+            previous_context = state.get("baseline_previous_case_detail")
+            if _is_baseline_context_envelope(previous_context):
+                previous = unwrap_verified_baseline_previous_case_detail(state)
+            elif isinstance(previous_context, Mapping):
+                # ``validate_state`` has already validated the legacy scroll
+                # snapshot before this derivation check.  It remains read-only and
+                # is replaced by the current hash-bound envelope at commit.
+                previous = deepcopy(dict(previous_context))
+            else:
+                raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+            frozen_matrix = previous.get("case_fact_matrix")
+            partition = dossier.get("handoff_remark_partition")
+            if (
+                not isinstance(frozen_matrix, Mapping)
+                or not isinstance(partition, Mapping)
+                or not isinstance(formal_matrix, Mapping)
+                or dict(formal_matrix) != dict(frozen_matrix)
+                or partition.get("case_fact_matrix_id") != frozen_matrix.get("matrix_id")
+                or partition.get("case_fact_matrix_version")
+                != frozen_matrix.get("matrix_version")
+                or partition.get("case_fact_matrix_hash")
+                != frozen_matrix.get("content_hash")
+            ):
+                raise IntakeGraphContractError("INTAKE_REMARK_FROZEN_MATRIX_CONFLICT")
+            return
     try:
         expected = finalize_case_fact_matrix(
             request=_derivation_request_with_authority_input(envelope),

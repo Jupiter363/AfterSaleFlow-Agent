@@ -53,6 +53,70 @@ _TARGET_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MISSING_FIELD_IDENTIFIER_PREFIX = "MISSING_"
 
 
+def intake_actor_authority_is_exactly_not_ready(
+    previous: Mapping[str, Any],
+    *,
+    actor: str,
+) -> bool:
+    """Recognize only the explicit modern actor-scoped NOT_READY authority."""
+
+    if actor not in {"USER", "MERCHANT"}:
+        return False
+    party_state = previous.get("party_intake_state")
+    actor_entry = party_state.get(actor) if isinstance(party_state, Mapping) else None
+    notes = actor_entry.get("handoff_notes") if isinstance(actor_entry, Mapping) else None
+    quality = actor_entry.get("intake_quality") if isinstance(actor_entry, Mapping) else None
+    admission = actor_entry.get("admission") if isinstance(actor_entry, Mapping) else None
+    if (
+        not isinstance(party_state, Mapping)
+        or party_state.get("schema_version") != "party-intake-state.v1"
+        or not isinstance(notes, Mapping)
+        or notes.get("remark_status") != "NOT_READY"
+        or not isinstance(quality, Mapping)
+        or quality.get("ready_for_next_step") is not False
+        or not isinstance(admission, Mapping)
+        or admission.get("recommendation")
+        not in {"NEED_MORE_INFO", "NOT_ADMISSIBLE"}
+    ):
+        return False
+    partition = previous.get("handoff_remark_partition")
+    if partition is None:
+        return True
+    if not isinstance(partition, Mapping):
+        return False
+    parties = partition.get("parties")
+    actor_partition = parties.get(actor) if isinstance(parties, Mapping) else None
+    return bool(
+        partition.get("schema_version") == "handoff_remark_partition.v1"
+        and isinstance(actor_partition, Mapping)
+        and actor_partition.get("party_role") == actor
+        and actor_partition.get("remark_status") == "NOT_READY"
+        and "source" not in actor_partition
+    )
+
+
+def intake_request_actor_is_exactly_not_ready(request: IntakeTurnRequest) -> bool:
+    """Select only a modern pre-threshold turn for the authenticated actor.
+
+    Unknown and legacy shapes return ``False`` so acknowledgement turns retain
+    the established frozen-matrix path.  The combined substantive/no-remark path
+    is available only when the durable actor state explicitly says NOT_READY.
+    """
+
+    if (
+        not isinstance(request, IntakeTurnRequest)
+        or request.turn_source != "ROOM_MESSAGE"
+        or request.current_user_message is None
+        or request.agent_context.actor_role not in {"USER", "MERCHANT"}
+        or not isinstance(request.previous_case_detail, Mapping)
+    ):
+        return False
+    return intake_actor_authority_is_exactly_not_ready(
+        request.previous_case_detail,
+        actor=request.agent_context.actor_role,
+    )
+
+
 def build_intake_baseline_memory_summary(
     initial_case_facts: Mapping[str, Any],
     *,
@@ -315,12 +379,14 @@ def adapt_intake_baseline_output_with_scroll_snapshot(
             source_text=source_text,
         )
     )
-    return _target_draft_and_scroll_snapshot(projected, output)
+    return _target_draft_and_scroll_snapshot(projected, output, request=request)
 
 
 def _target_draft_and_scroll_snapshot(
     projected: Mapping[str, Any],
     output: IntakeCaseDetailLlmOutput,
+    *,
+    request: IntakeTurnRequest,
 ) -> tuple[IntakeCognitionDraft, dict[str, Any]]:
     raw_scroll_snapshot = projected.get("scroll_snapshot")
     if not isinstance(raw_scroll_snapshot, Mapping):
@@ -330,7 +396,15 @@ def _target_draft_and_scroll_snapshot(
     detail.pop("case_fact_matrix", None)
     detail.pop("unilateral_case_matrix", None)
     matrix = output.case_matrix_delta or output.unilateral_case_matrix
-    if output.conversation_action in {"ACK_REMARK", "ACK_NO_REMARK"}:
+    combined_substantive_no_remark = bool(
+        output.conversation_action == "ACK_NO_REMARK"
+        and matrix is not None
+        and intake_request_actor_is_exactly_not_ready(request)
+    )
+    if (
+        output.conversation_action in {"ACK_REMARK", "ACK_NO_REMARK"}
+        and not combined_substantive_no_remark
+    ):
         matrix = None
     recommendation = str(projected["admission_recommendation"])
     quality = detail.get("intake_quality")

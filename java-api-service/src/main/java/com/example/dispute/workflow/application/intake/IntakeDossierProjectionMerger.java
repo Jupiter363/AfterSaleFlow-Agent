@@ -763,7 +763,10 @@ public final class IntakeDossierProjectionMerger {
         String from = previousActor.path("remark_status").asText();
         String to = proposedActor.path("remark_status").asText();
         boolean legalStatus = switch (from) {
-            case "NOT_READY" -> Set.of("READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK")
+            case "NOT_READY" -> Set.of(
+                            "READY_PENDING_REMARK_INVITE",
+                            "WAITING_FOR_REMARK",
+                            "NO_EXTRA_REMARKS")
                     .contains(to);
             case "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK" ->
                 "HAS_REMARKS".equals(to) || "NO_EXTRA_REMARKS".equals(to);

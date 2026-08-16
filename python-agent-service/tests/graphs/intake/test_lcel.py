@@ -3591,6 +3591,240 @@ def test_canonical_no_extra_remark_after_ready_handoff_commits_exact_authority(
     assert substantive_transport.generate_calls == 1
 
 
+def test_exact_uat_merchant_substantive_no_remark_closes_in_same_turn(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    (
+        opening_projected,
+        _,
+        opening_event,
+        _,
+        _,
+        opening_transport,
+    ) = _project_imported_formal_m0_respondent_opening(
+        bindings,
+        version_pins,
+        snapshot,
+        event,
+        "intake-dossier.v2",
+        carry_prior_user_handoff_partition=True,
+    )
+    opening_result = copy.deepcopy(opening_projected)
+    opening_result.update(checkpoint_terminal(opening_projected))
+    opening_context = opening_result["baseline_previous_case_detail"]
+    opening_snapshot = opening_context["snapshot"]
+    opening_matrix = opening_context["formal_matrix"]
+    opening_row = opening_matrix["fact_rows"][0]
+    expected_user = copy.deepcopy(
+        opening_snapshot["handoff_remark_partition"]["parties"]["USER"]
+    )
+
+    exact_text = (
+        "本方确认争议标的是该订单商品及加急配送服务，订单确认页记载7月10日前送达；"
+        "仓库按时交承运方，但承运环节延误，商品于7月15日签收。\n"
+        "双方无争议的是迟到五天及加急配送费人民币30元；本方对迟延发生在承运环节的记录负责说明，"
+        "但争议替代购买是否必要以及人民币270元金额。\n"
+        "客服沟通记录对应本方对迟延的确认，仓库交接记录和物流轨迹对应履约时间线；"
+        "本方直接回应诉求为退还30元加急配送费，不接受270元替代购买费用。\n"
+        "没有其他重大事实、异议或附加条件，并确认以上内容可提交。"
+    )
+    exact_event = copy.deepcopy(event)
+    exact_event.update(
+        event_id="EVENT_P4_MERCHANT_EXACT_NO_REMARK_2",
+        message_id="MESSAGE_P4_MERCHANT_EXACT_NO_REMARK_2",
+        sequence_no=opening_result["last_event_sequence"] + 1,
+        domain_revision=opening_event["domain_revision"] + 1,
+        audience="MERCHANT",
+        source_type="ROOM_MESSAGE",
+        text=exact_text,
+        source_refs=["MESSAGE_P4_MERCHANT_EXACT_NO_REMARK_2"],
+        occurred_at="2026-08-16T14:15:39Z",
+    )
+    exact_event["event_hash"] = canonical_sha256_omitting(
+        exact_event,
+        "event_hash",
+    )
+
+    def document_for(
+        turn_event: dict[str, Any],
+        *,
+        action: str,
+        missing_fields: list[str] | None = None,
+    ) -> dict[str, Any]:
+        document = _ready_handoff_document(turn_event)
+        document.update(
+            conversation_action=action,
+            room_utterance=(
+                "已收到贵方关于订单履约及赔偿诉求的完整说明。贵方确认迟延并同意退还30元加急配送费，"
+                "不接受270元替代购买费用；贵方确认无其他补充，本案接待环节已结束。"
+                if action == "ACK_NO_REMARK"
+                else "当前案情信息已完整。请确认是否还有可选交接备注；没有备注可以直接确认提交。"
+            ),
+            missing_fields=list(missing_fields or []),
+        )
+        document["dossier_patch"]["party_positions"]["merchant_claim"] = turn_event[
+            "text"
+        ]
+        document["dossier_patch"]["respondent_attitude"] = {
+            "respondent_role": "MERCHANT",
+            "attitude": "DISAGREE",
+            "position": turn_event["text"],
+        }
+        document["matrix_patch"] = {
+            "schema_version": "case_fact_matrix.delta.v2",
+            "fact_rows": [
+                {
+                    "fact_key": opening_row["fact_id"],
+                    "category": opening_row["category"],
+                    "fact_target": opening_row["fact_target"],
+                    "materiality": opening_row["materiality"],
+                    "stance": "DENY",
+                    "position_summary": turn_event["text"],
+                    "asserted_value": "不接受270元替代购买费用",
+                    "source_scope": "CURRENT_SOURCE",
+                    "conflict_summary": "双方对替代购买费用是否应承担存在争议。",
+                }
+            ],
+            "summary_source_fact_keys": [opening_row["fact_id"]],
+            "respondent_claim": {
+                "attitude": "DISAGREE",
+                "position_summary": turn_event["text"],
+            },
+        }
+        return document
+
+    respondent_bindings = copy.deepcopy(bindings)
+    respondent_bindings["private"]["audience"] = "MERCHANT"
+    fresh_snapshot = copy.deepcopy(snapshot)
+    fresh_snapshot["own_messages"][0]["audience"] = "MERCHANT"
+    materialized_dossier = copy.deepcopy(opening_snapshot)
+    materialized_dossier.setdefault("references", {})[
+        "order_reference"
+    ] = "ORDER_UAT_DELAY_1001"
+    materialized_formal = materialized_dossier["case_fact_matrix"]
+    for row in materialized_formal["fact_rows"]:
+        row["evidence_coverage_status"] = "PENDING_EVIDENCE_REVIEW"
+    materialized_formal["content_hash"] = case_fact_matrix_content_hash(
+        materialized_formal
+    )
+    materialized_dossier["handoff_remark_partition"][
+        "case_fact_matrix_hash"
+    ] = materialized_formal["content_hash"]
+    fresh_snapshot["current_dossier"] = materialized_dossier
+    fresh_snapshot["domain_revision"] = opening_event["domain_revision"]
+    fresh_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        fresh_snapshot,
+        "snapshot_hash",
+    )
+    fresh_state = new_intake_graph_state(
+        bindings=respondent_bindings,
+        version_pins=version_pins,
+    )
+    fresh_state["bindings"]["command"].update(
+        command_id="COMMAND_P4_MERCHANT_EXACT_NO_REMARK_2",
+        logical_run_id="RUN_P4_MERCHANT_EXACT_NO_REMARK_2",
+        attempt_id="ATTEMPT_P4_MERCHANT_EXACT_NO_REMARK_2_1",
+    )
+    merchant_context = _agent_context(
+        role="MERCHANT",
+        case_id=snapshot["case_id"],
+        agent_session_id=snapshot["agent_session_id"],
+        invocation_id="ATTEMPT_P4_MERCHANT_EXACT_NO_REMARK_2_1",
+    )
+
+    def graph_for(document: dict[str, Any]):
+        transport = IntakeTransport(document)
+        graph = compile_intake_v2_graph(
+            intake_lcel=build_intake_model_node(
+                transport=transport,
+                profile=_profile(),
+                policy=_policy().model_copy(
+                    update={
+                        "invocation_id": "ATTEMPT_P4_MERCHANT_EXACT_NO_REMARK_2_1",
+                        "trusted_system_sha256": system_prompt_sha256(
+                            _trusted_system_prompt(merchant_context)
+                        ),
+                    }
+                ),
+                agent_context=merchant_context,
+            ).runnable
+        )
+        return graph, transport
+
+    exact_document = document_for(exact_event, action="ACK_NO_REMARK")
+    exact_graph, exact_transport = graph_for(exact_document)
+    projected = exact_graph.invoke(
+        copy.deepcopy(fresh_state),
+        context=_bootstrap_event_context(fresh_snapshot, exact_event),
+        interrupt_before=["checkpoint_terminal"],
+    )
+    terminal = checkpoint_terminal(copy.deepcopy(projected))
+    replayed = checkpoint_terminal(copy.deepcopy(projected))
+    final_context = projected["baseline_pending_case_detail"]
+    final_snapshot = final_context["snapshot"]
+    final_matrix = final_context["formal_matrix"]
+    final_partition = final_snapshot["handoff_remark_partition"]
+    final_merchant = final_partition["parties"]["MERCHANT"]
+
+    assert exact_transport.generate_calls == 1
+    assert terminal == replayed
+    assert terminal["result_json"]["conversation_action"] == "ACK_NO_REMARK"
+    assert final_merchant["remark_status"] == "NO_EXTRA_REMARKS"
+    assert final_merchant["source"]["message_id"] == exact_event["message_id"]
+    assert final_merchant["latest_remark"] == ""
+    assert final_merchant["remarks"] == []
+    assert final_partition["parties"]["USER"] == expected_user
+    assert final_matrix["matrix_version"] == materialized_formal["matrix_version"] + 1
+    assert final_matrix["parent_ref"] == {
+        "matrix_id": materialized_formal["matrix_id"],
+        "matrix_version": materialized_formal["matrix_version"],
+        "content_hash": materialized_formal["content_hash"],
+    }
+    assert {
+        "matrix_id": final_partition["case_fact_matrix_id"],
+        "matrix_version": final_partition["case_fact_matrix_version"],
+        "content_hash": final_partition["case_fact_matrix_hash"],
+    } == {
+        "matrix_id": final_matrix["matrix_id"],
+        "matrix_version": final_matrix["matrix_version"],
+        "content_hash": final_matrix["content_hash"],
+    }
+
+    incomplete_graph, incomplete_transport = graph_for(
+        document_for(
+            exact_event,
+            action="ACK_NO_REMARK",
+            missing_fields=["REQUESTED_RESOLUTION"],
+        )
+    )
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
+    ):
+        incomplete_graph.invoke(
+            copy.deepcopy(fresh_state),
+            context=_bootstrap_event_context(fresh_snapshot, exact_event),
+        )
+    assert incomplete_transport.generate_calls == 1
+
+    remark_graph, remark_transport = graph_for(
+        document_for(exact_event, action="ACK_REMARK")
+    )
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
+    ):
+        remark_graph.invoke(
+            copy.deepcopy(fresh_state),
+            context=_bootstrap_event_context(fresh_snapshot, exact_event),
+        )
+    assert remark_transport.generate_calls == 1
+    assert opening_transport.generate_calls == 1
+
+
 def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
     bindings,
     version_pins,

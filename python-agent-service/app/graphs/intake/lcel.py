@@ -52,6 +52,7 @@ from app.graphs.intake.baseline import (
     adapt_intake_baseline_output,
     build_intake_baseline_request,
     intake_baseline_authorized_fact_ids,
+    intake_request_actor_is_exactly_not_ready,
     normalize_model_matrix_fact_key_payload,
     prepare_intake_baseline_invocation,
 )
@@ -2306,7 +2307,12 @@ def _post_normalizer_formal_matrix(
     materialized = merge_intake_dossier(state["dossier_draft"], patch)
     matrix_patch = draft.matrix_patch
     action = _conversation_action(draft)
-    if action in {"ACK_REMARK", "ACK_NO_REMARK"}:
+    request = build_intake_baseline_request(state, agent_context=agent_context)
+    combined_substantive_no_remark = bool(
+        action == "ACK_NO_REMARK"
+        and intake_request_actor_is_exactly_not_ready(request)
+    )
+    if action in {"ACK_REMARK", "ACK_NO_REMARK"} and not combined_substantive_no_remark:
         if matrix_patch is not None:
             raise IntakeGraphContractError("INTAKE_REMARK_MATRIX_PATCH_FORBIDDEN")
         previous = _verified_previous_case_detail(state)
@@ -2335,10 +2341,13 @@ def _post_normalizer_formal_matrix(
             != frozen_matrix.get("content_hash")
         ):
             raise IntakeGraphContractError("INTAKE_REMARK_FROZEN_MATRIX_CONFLICT")
-        request = build_intake_baseline_request(state, agent_context=agent_context)
         request_base = request.model_dump(mode="json")
         request_base["previous_case_detail"] = None
         return deepcopy(dict(frozen_matrix)), materialized, request_base
+    if combined_substantive_no_remark and matrix_patch is None:
+        raise IntakeGraphContractError(
+            "INTAKE_SUBSTANTIVE_NO_REMARK_MATRIX_REQUIRED"
+        )
     if matrix_patch is None:
         delta = None
     else:
@@ -2353,7 +2362,6 @@ def _post_normalizer_formal_matrix(
         except ValueError as error:
             raise IntakeGraphContractError("INTAKE_BASELINE_FORMAL_MATRIX_INVALID") from error
     try:
-        request = build_intake_baseline_request(state, agent_context=agent_context)
         matrix = finalize_case_fact_matrix(
             request=request,
             case_detail=deepcopy(materialized),
