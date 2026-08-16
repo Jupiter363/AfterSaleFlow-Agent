@@ -3,7 +3,15 @@ package com.example.dispute.workflow.room.hearing;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.hearing.domain.HearingAuthorityCommit;
+import com.example.dispute.workflow.activity.hearing.HearingDomainReceiptAdapter;
+import com.example.dispute.workflow.contract.v1.CaseCommandRef;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.temporal.room.hearing.HearingOperationKeys;
+import com.example.dispute.workflow.temporal.room.hearing.HearingPartyCommand;
 import com.example.dispute.workflow.temporal.room.hearing.HearingPartyTerminalReceipt;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomSnapshot;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart;
@@ -11,8 +19,10 @@ import com.example.dispute.workflow.temporal.room.hearing.HearingRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.hearing.HearingStageReceipt;
 import com.example.dispute.workflow.temporal.room.hearing.HearingWorkflowStage;
+import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalizationActivities;
 import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import io.temporal.activity.Activity;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -23,6 +33,10 @@ import io.temporal.worker.Worker;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,12 +48,17 @@ class HearingRoomWorkflowTest {
 
   private TestWorkflowEnvironment environment;
   private WorkflowClient client;
+  private SequencingFormalizationActivities sequencingFormalization;
 
   @BeforeEach
   void setUp() {
     environment = TestWorkflowEnvironment.newInstance();
     Worker worker = environment.newWorker(TASK_QUEUE);
     worker.registerWorkflowImplementationTypes(HearingRoomWorkflowImpl.class);
+    sequencingFormalization = new SequencingFormalizationActivities();
+    environment
+        .newWorker("case-control")
+        .registerActivitiesImplementations(sequencingFormalization);
     environment.start();
     client = environment.getWorkflowClient();
   }
@@ -101,7 +120,7 @@ class HearingRoomWorkflowTest {
   }
 
   @Test
-  void handoffOperationKeyBindsExactEpochAndJudgeV2Artifact() {
+  void handoffOperationKeyBindsExactEpochAndJudgeV2Artifact() throws Exception {
     HearingRoomStart start = HearingReceiptTestFactory.start(
         Instant.parse("2026-08-16T06:00:00Z"), Duration.ofMinutes(20));
     String judgeV2Id = "hearing-judge_v2-exact-parent";
@@ -111,13 +130,85 @@ class HearingRoomWorkflowTest {
         start, judgeV2Id, judgeV2Hash);
 
     assertThat(operationKey).isEqualTo(HearingOperationKeys.handoff(
-        start.tenantSurrogate(), start.caseId(), start.roomEpoch(), judgeV2Id, judgeV2Hash));
+        start.tenantSurrogate(), start.caseId(), start.epochId(), start.roomEpoch(),
+        judgeV2Id, judgeV2Hash));
     assertThat(operationKey).isNotEqualTo("hearing.handoff:" + start.caseId());
+    assertThat(HearingOperationKeys.handoff(
+        start.tenantSurrogate(), start.caseId(), "EPOCH_OTHER", start.roomEpoch(),
+        judgeV2Id, judgeV2Hash)).isNotEqualTo(operationKey);
     assertThat(HearingRoomWorkflowImpl.exactHandoffOperationKey(
         start, "hearing-judge_v2-other-parent", judgeV2Hash)).isNotEqualTo(operationKey);
     assertThat(HearingRoomWorkflowImpl.exactHandoffOperationKey(
         start, judgeV2Id, HearingReceiptTestFactory.hash("judge-v2-other-hash")))
         .isNotEqualTo(operationKey);
+
+    Started replayable = start("exact-handoff-key", Duration.ofMinutes(20));
+    advanceTo(replayable, HearingWorkflowStage.HUMAN_REVIEW_OPEN);
+    HearingRoomSnapshot review = replayable.workflow().state();
+    replayable.workflow().stageCompleted(
+        replayable.receipts().handoff(review, judgeV2Id, judgeV2Hash));
+    HearingRoomSnapshot handedOff = awaitState(
+        replayable.workflow(), state -> state.handoffReceiptId() != null);
+    assertThat(handedOff.status()).isEqualTo("RUNNING");
+    assertThat(handedOff.orderedOperationKeys()).contains(operationKey);
+    WorkflowReplayer.replayWorkflowExecution(
+        client.fetchHistory(replayable.workflowId()), HearingRoomWorkflowImpl.class);
+  }
+
+  @Test
+  void concurrentPartyCommandsSequenceFromOneStageSnapshotAndReplayFailClosed()
+      throws Exception {
+    Started concurrent = start("party-command-concurrent", Duration.ofMinutes(20));
+    advanceTo(concurrent, HearingWorkflowStage.PARTY_ANSWERS_OPEN);
+    HearingRoomSnapshot shared = concurrent.workflow().state();
+    sequencingFormalization.setPartyDeadline(shared.stageDeadlineAt());
+    HearingPartyCommand initiator = partyCommand(
+        concurrent.start(), "CMD_CONCURRENT_I", ActorRole.USER, 1,
+        shared.processRevision(), shared.roomRevision());
+    HearingPartyCommand respondent = partyCommand(
+        concurrent.start(), "CMD_CONCURRENT_R", ActorRole.MERCHANT, 2,
+        shared.processRevision(), shared.roomRevision());
+
+    concurrent.workflow().partyCommandAccepted(initiator);
+    concurrent.workflow().partyCommandAccepted(respondent);
+
+    HearingRoomSnapshot advanced = awaitStage(
+        concurrent.workflow(), HearingWorkflowStage.INTAKE_SYNTHESIZING);
+    assertThat(advanced.status()).isEqualTo("RUNNING");
+    assertThat(advanced.processRevision()).isEqualTo(shared.processRevision() + 2);
+    assertThat(advanced.roomRevision()).isEqualTo(shared.roomRevision() + 2);
+    assertThat(advanced.rejectedSignalCount()).isZero();
+    concurrent.workflow().partyCommandAccepted(initiator);
+    HearingRoomSnapshot replayed = awaitState(
+        concurrent.workflow(), state -> state.duplicateSignalCount() == 1);
+    assertThat(replayed.processRevision()).isEqualTo(advanced.processRevision());
+    assertThat(sequencingFormalization.commandIdsFor(concurrent.workflowId()))
+        .containsExactly("CMD_CONCURRENT_I", "CMD_CONCURRENT_R");
+    WorkflowReplayer.replayWorkflowExecution(
+        client.fetchHistory(concurrent.workflowId()), HearingRoomWorkflowImpl.class);
+
+    Started conflicting = start("party-command-conflict", Duration.ofMinutes(20));
+    advanceTo(conflicting, HearingWorkflowStage.PARTY_ANSWERS_OPEN);
+    HearingRoomSnapshot conflictSource = conflicting.workflow().state();
+    sequencingFormalization.setPartyDeadline(conflictSource.stageDeadlineAt());
+    HearingPartyCommand first = partyCommand(
+        conflicting.start(), "CMD_CONFLICT_I_1", ActorRole.USER, 1,
+        conflictSource.processRevision(), conflictSource.roomRevision());
+    HearingPartyCommand sameParticipant = partyCommand(
+        conflicting.start(), "CMD_CONFLICT_I_2", ActorRole.USER, 2,
+        conflictSource.processRevision(), conflictSource.roomRevision());
+    conflicting.workflow().partyCommandAccepted(first);
+    awaitState(conflicting.workflow(), state -> state.partyTerminals().size() == 1);
+    conflicting.workflow().partyCommandAccepted(sameParticipant);
+
+    HearingRoomSnapshot failed = WorkflowStub.fromTyped(conflicting.workflow())
+        .getResult(HearingRoomSnapshot.class);
+    assertThat(failed.status()).isEqualTo("FAILED");
+    assertThat(failed.protocolErrorCode()).isEqualTo("HEARING_PARTY_ALREADY_TERMINAL");
+    assertThat(sequencingFormalization.commandIdsFor(conflicting.workflowId()))
+        .containsExactly("CMD_CONFLICT_I_1");
+    WorkflowReplayer.replayWorkflowExecution(
+        client.fetchHistory(conflicting.workflowId()), HearingRoomWorkflowImpl.class);
   }
 
   @Test
@@ -350,6 +441,41 @@ class HearingRoomWorkflowTest {
     return window.isBefore(start.hearingDeadlineAt()) ? window : start.hearingDeadlineAt();
   }
 
+  private static HearingPartyCommand partyCommand(
+      HearingRoomStart start,
+      String commandId,
+      ActorRole role,
+      long sequence,
+      long expectedProcessRevision,
+      long expectedRoomRevision) {
+    String participantId = role == ActorRole.USER
+        ? start.initiatorParticipantId()
+        : start.respondentParticipantId();
+    String payloadHash = HearingReceiptTestFactory.hash("payload:" + commandId);
+    CaseCommandRef command = new CaseCommandRef(
+        "case-command-ref.v1",
+        commandId,
+        start.tenantSurrogate(),
+        start.caseId(),
+        sequence,
+        CommandType.HEARING_STATEMENT,
+        RoomType.HEARING,
+        start.roomEpoch(),
+        new ActorRef(participantId, role, List.of("hearing:party")),
+        new PayloadRef(
+            "case-timeline-event.v1",
+            "urn:case-timeline-event:" + commandId,
+            payloadHash,
+            1),
+        expectedProcessRevision,
+        start.openedAt().plusSeconds(sequence),
+        start.hearingDeadlineAt(),
+        "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+        HearingReceiptTestFactory.hash("request:" + commandId));
+    return new HearingPartyCommand(
+        command, start.fencingToken(), expectedProcessRevision, expectedRoomRevision);
+  }
+
   private static String artifactType(HearingWorkflowStage stage) {
     return switch (stage) {
       case INTAKE_QUESTIONS_GENERATING -> "hearing_question_set.v1";
@@ -392,4 +518,87 @@ class HearingRoomWorkflowTest {
       String workflowId,
       HearingRoomStart start,
       HearingReceiptTestFactory receipts) {}
+
+  private static final class SequencingFormalizationActivities
+      implements TargetHearingFormalizationActivities {
+
+    private final Map<String, LinkedHashSet<String>> commandIdsByWorkflow =
+        new ConcurrentHashMap<>();
+    private volatile Instant partyDeadline;
+
+    void setPartyDeadline(Instant partyDeadline) {
+      this.partyDeadline = partyDeadline;
+    }
+
+    List<String> commandIdsFor(String workflowId) {
+      return List.copyOf(commandIdsByWorkflow.getOrDefault(workflowId, new LinkedHashSet<>()));
+    }
+
+    @Override
+    public PartyResult formalizeParty(PartyRequest request) {
+      String workflowId = Activity.getExecutionContext().getInfo().getWorkflowId();
+      LinkedHashSet<String> commandIds = commandIdsByWorkflow.computeIfAbsent(
+          workflowId, ignored -> new LinkedHashSet<>());
+      commandIds.add(request.command().commandId());
+      boolean advance = commandIds.size() == 2;
+      HearingWorkflowStage source = request.transition().expectedStage();
+      HearingWorkflowStage target = advance ? source.next() : source;
+      String participantId = request.command().actorRef().actorRole() == ActorRole.USER
+          ? request.transition().start().initiatorParticipantId()
+          : request.transition().start().respondentParticipantId();
+      HearingReceiptTestFactory receipts =
+          new HearingReceiptTestFactory(request.transition().start());
+      var domainReceipt = receipts.domainReceipt(
+          source,
+          request.transition().expectedProcessRevision(),
+          request.transition().expectedRoomRevision(),
+          request.transition().expectedProcessRevision() + 1,
+          HearingAuthorityCommit.OperationType.PARTY_TERMINAL,
+          request.transition().operationKey(),
+          HearingReceiptTestFactory.hash("party-command:" + request.command().commandId()),
+          target,
+          advance ? null : partyDeadline,
+          "party-command");
+      return new PartyResult(HearingDomainReceiptAdapter.party(
+          domainReceipt,
+          request.command().commandId(),
+          participantId,
+          HearingPartyTerminalReceipt.TerminalStatus.SUBMITTED));
+    }
+
+    @Override
+    public StageResult bootstrapNext(TransitionRequest request) {
+      throw new AssertionError("unexpected bootstrap formalization");
+    }
+
+    @Override
+    public TimeoutResult formalizeTimeout(TimeoutRequest request) {
+      throw new AssertionError("unexpected timeout formalization");
+    }
+
+    @Override
+    public AgentStagePreparation prepareAgentStage(TransitionRequest request) {
+      throw new AssertionError("unexpected Agent stage preparation");
+    }
+
+    @Override
+    public AgentStageResult finalizeAgentStage(AgentStageFinalizationRequest request) {
+      throw new AssertionError("unexpected Agent stage finalization");
+    }
+
+    @Override
+    public StageResult freezeDossier(TransitionRequest request) {
+      throw new AssertionError("unexpected dossier freezing");
+    }
+
+    @Override
+    public StageResult handoff(TransitionRequest request) {
+      throw new AssertionError("unexpected handoff");
+    }
+
+    @Override
+    public StageResult close(TransitionRequest request) {
+      throw new AssertionError("unexpected close");
+    }
+  }
 }

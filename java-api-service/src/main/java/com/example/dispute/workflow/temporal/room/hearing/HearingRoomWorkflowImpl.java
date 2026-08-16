@@ -329,14 +329,17 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     }
     if (!stage.isPartyWait()
         || partyCommand.fencingToken() != start.fencingToken()
-        || partyCommand.expectedProcessRevision() != processRevision
-        || partyCommand.expectedRoomRevision() != roomRevision
+        || !matchesPartyCommandCoordinates(partyCommand)
         || !matchesPartyCommand(stage, partyCommand.command().commandType())) {
       failProtocol("HEARING_PARTY_COMMAND_STAGE_OR_COORDINATE_MISMATCH");
       return;
     }
-    observedPartyCommands.put(partyCommand.command().commandId(), partyCommand);
     String participant = participantFor(partyCommand.command());
+    if (partyTerminals.containsKey(participant)) {
+      failProtocol("HEARING_PARTY_ALREADY_TERMINAL");
+      return;
+    }
+    observedPartyCommands.put(partyCommand.command().commandId(), partyCommand);
     String operationKey =
         HearingOperationKeys.partyTerminal(
             start.tenantSurrogate(),
@@ -354,6 +357,24 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
                     transition, partyCommand.command()))
             .receipt();
     queueCommittedReceipt(WorkflowEvent.party(receipt));
+  }
+
+  private boolean matchesPartyCommandCoordinates(HearingPartyCommand partyCommand) {
+    if (partyCommand.expectedProcessRevision() == processRevision
+        && partyCommand.expectedRoomRevision() == roomRevision) {
+      return true;
+    }
+    if (partyTerminals.size() != 1) {
+      return false;
+    }
+    HearingCommittedReceipt first = partyTerminals.values().iterator().next().committed();
+    return first.sourceStage() == stage
+        && first.sourceStageSequence() == stageSequence
+        && first.stage() == stage
+        && first.sourceProcessRevision() == partyCommand.expectedProcessRevision()
+        && first.sourceRoomRevision() == partyCommand.expectedRoomRevision()
+        && first.processRevision() == processRevision
+        && first.roomRevision() == roomRevision;
   }
 
   private boolean formalizationRequired() {
@@ -391,10 +412,14 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     if (stage == HearingWorkflowStage.HUMAN_REVIEW_OPEN) {
       if (handoffReceiptId == null) {
         int version = Workflow.getVersion(
-            HANDOFF_OPERATION_KEY_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
-        String operationKey = version == Workflow.DEFAULT_VERSION
-            ? "hearing.handoff:" + start.caseId()
-            : exactHandoffOperationKey(start, handoffParentId, handoffParentHash);
+            HANDOFF_OPERATION_KEY_CHANGE_ID, Workflow.DEFAULT_VERSION, 2);
+        String operationKey = switch (version) {
+          case Workflow.DEFAULT_VERSION -> "hearing.handoff:" + start.caseId();
+          case 1 -> HearingOperationKeys.handoff(
+              start.tenantSurrogate(), start.caseId(), start.roomEpoch(),
+              handoffParentId, handoffParentHash);
+          default -> exactHandoffOperationKey(start, handoffParentId, handoffParentHash);
+        };
         stageCompleted(formalization.handoff(transition(operationKey)).receipt());
       } else {
         stageCompleted(formalization.close(transition(HearingOperationKeys.close(
@@ -608,7 +633,8 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
       HearingRoomStart start, String judgeV2Id, String judgeV2Hash) {
     Objects.requireNonNull(start, "start must not be null");
     return HearingOperationKeys.handoff(
-        start.tenantSurrogate(), start.caseId(), start.roomEpoch(), judgeV2Id, judgeV2Hash);
+        start.tenantSurrogate(), start.caseId(), start.epochId(), start.roomEpoch(),
+        judgeV2Id, judgeV2Hash);
   }
 
   private boolean processPartyReceipt(HearingPartyTerminalReceipt receipt) {

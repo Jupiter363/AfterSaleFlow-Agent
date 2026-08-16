@@ -187,7 +187,7 @@ public final class HearingReceiptTestFactory {
     long eventSequence = source.lastCommittedEventSequence() + 1;
     String requestHash = hash("handoff:" + eventSequence);
     String operationKey = HearingOperationKeys.handoff(
-        TENANT, CASE_ID, ROOM_EPOCH, judgeV2Id, judgeV2Hash);
+        TENANT, CASE_ID, EPOCH_ID, ROOM_EPOCH, judgeV2Id, judgeV2Hash);
     return HearingDomainReceiptAdapter.stage(
         domainReceipt(
             source.stage(),

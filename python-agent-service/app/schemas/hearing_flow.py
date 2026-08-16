@@ -542,6 +542,12 @@ class HearingEvidenceSynthesisResult(StrictModel):
     evidence_gaps: Annotated[list[ShortText], Field(max_length=100)] = Field(default_factory=list)
     public_message: LongText
 
+    @model_validator(mode="after")
+    def require_terminal_matrix(self) -> "HearingEvidenceSynthesisResult":
+        if self.fact_evidence_matrix.matrix_status != "FROZEN":
+            raise ValueError("terminal hearing evidence matrix must be frozen")
+        return self
+
 
 class HearingAnswerItemV1(StrictModel):
     question_id: Identifier

@@ -1,5 +1,9 @@
 package com.example.dispute.workflow.temporal.room.hearing;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.Objects;
 
 /** Exact cross-runtime Hearing operation-key formulas. */
@@ -88,6 +92,18 @@ public final class HearingOperationKeys {
         + component(judgeV2Id, "judgeV2Id") + ':' + hash(judgeV2Hash, "judgeV2Hash");
   }
 
+  public static String handoff(
+      String tenantSurrogate,
+      String caseId,
+      String epochId,
+      long roomEpoch,
+      String judgeV2Id,
+      String judgeV2Hash) {
+    return prefix("handoff", tenantSurrogate, caseId, roomEpoch)
+        + handoffParentComponent(epochId, judgeV2Id) + ':'
+        + hash(judgeV2Hash, "judgeV2Hash");
+  }
+
   public static String close(
       String tenantSurrogate, String caseId, long roomEpoch, String handoffReceiptHash) {
     return prefix("close", tenantSurrogate, caseId, roomEpoch)
@@ -134,6 +150,18 @@ public final class HearingOperationKeys {
       throw new IllegalArgumentException(field + " must be lowercase SHA-256");
     }
     return value;
+  }
+
+  private static String handoffParentComponent(String epochId, String judgeV2Id) {
+    String exactEpochId = component(epochId, "epochId");
+    String exactJudgeV2Id = component(judgeV2Id, "judgeV2Id");
+    try {
+      return HexFormat.of().formatHex(
+          MessageDigest.getInstance("SHA-256")
+              .digest((exactEpochId + ':' + exactJudgeV2Id).getBytes(StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException impossible) {
+      throw new IllegalStateException("SHA-256 is unavailable", impossible);
+    }
   }
 
   private static long positive(long value, String field) {

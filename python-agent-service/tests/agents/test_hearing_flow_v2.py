@@ -20,6 +20,7 @@ from app.schemas import (
     HearingEvidenceFileAssessmentLlmOutput,
     HearingEvidenceRequestsRequest,
     HearingEvidenceSynthesisRequest,
+    HearingEvidenceSynthesisResult,
     HearingAnswerBundleV1,
     HearingIntakeQuestionsLlmOutput,
     HearingIntakeQuestionsRequest,
@@ -1263,6 +1264,14 @@ def test_evidence_synthesis_consumes_complete_batch_and_prior_matrix() -> None:
         content_hash(result.fact_evidence_matrix, hash_field="content_hash")
         == result.fact_evidence_matrix.content_hash
     )
+
+    working_terminal = result.model_dump(mode="json")
+    working_terminal["fact_evidence_matrix"]["matrix_status"] = "WORKING"
+    working_terminal["fact_evidence_matrix"]["content_hash"] = _hash_payload(
+        working_terminal["fact_evidence_matrix"]
+    )
+    with pytest.raises(ValueError, match="terminal hearing evidence matrix must be frozen"):
+        HearingEvidenceSynthesisResult.model_validate(working_terminal)
 
     replay = HearingFlowWorkflows(runner).evidence_synthesis(request)
     assert replay == result
