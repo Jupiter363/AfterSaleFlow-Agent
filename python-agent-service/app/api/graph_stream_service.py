@@ -34,7 +34,7 @@ from app.graph_runtime.ledger import AttemptStatus, ResultRecord
 from app.graph_runtime.provider_intent import GatewayProviderCallIntentRecorder
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
-from app.llm import bind_provider_call_intent_recorder
+from app.llm import AgentOutputSchemaError, bind_provider_call_intent_recorder
 from app.model_runtime.transports import ModelTransportOutputError
 from app.security.invocation_envelope import VerifiedInvocation
 
@@ -109,7 +109,9 @@ def _log_lease_heartbeat_stage(
     )
 
 
-def _model_transport_output_error_code(error: ModelTransportOutputError) -> str:
+def _model_transport_output_error_code(
+    error: ModelTransportOutputError | AgentOutputSchemaError,
+) -> str:
     if error.safe_code in _MODEL_TRANSPORT_OUTPUT_ERROR_CODES:
         return error.safe_code
     return _MODEL_TRANSPORT_OUTPUT_ERROR_FALLBACK
@@ -1155,7 +1157,7 @@ class GatewayBackedGraphCommandStreamService:
         if cancelled:
             code = "GRAPH_STREAM_CANCELLED"
             classification = "STREAM_INTERRUPTED"
-        elif isinstance(error, ModelTransportOutputError):
+        elif isinstance(error, (ModelTransportOutputError, AgentOutputSchemaError)):
             code = _model_transport_output_error_code(error)
             classification = _MODEL_TRANSPORT_OUTPUT_ERROR_CLASSIFICATION
         else:

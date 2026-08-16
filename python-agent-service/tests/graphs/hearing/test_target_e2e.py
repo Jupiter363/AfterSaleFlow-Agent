@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import inspect
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -21,6 +23,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, ConfigDict
 import pytest
 
+from app.agents.hearing_flow import HearingFlowWorkflows
+from app.api.graph_stream_service import _model_transport_output_error_code
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.contracts.v1.models import RoomGraphCommand
 from app.graph_runtime.checkpoint import (
@@ -61,6 +65,17 @@ from app.graphs.hearing.target_e2e import (
     build_target_e2e_hearing_provider,
     target_e2e_hearing_family_registrations,
 )
+from app.harness.model_runner import HarnessModelRunner
+from app.harness.prompt_composer import PromptRepository
+from app.llm import AgentOutputSchemaError, LiteLlmProxyClient
+from app.model_runtime.transports import ModelTransportOutputError
+from app.schemas import (
+    CaseFactMatrixV2,
+    HearingIntakeQuestionsLlmOutput,
+    HearingIntakeQuestionsRequest,
+    content_hash,
+)
+from app.streaming import AgentStreamObserver, bind_stream_observer
 
 
 THREAD_ID = "grt.v1." + "9" * 32
@@ -619,6 +634,253 @@ def test_target_recovery_reuses_checkpoint_without_repeating_model_execution() -
     assert provider.model_calls == 1
     assert first.source == replay.source
     assert first.runtime_binding_sha256 == replay.runtime_binding_sha256
+
+
+def test_hearing_intake_closed_world_fact_violation_repairs_once_and_replays_exactly() -> None:
+    operation = HearingOperation.INTAKE_QUESTIONS
+    execution, _ = _execution(operation)
+    matrix_payload: dict[str, Any] = {
+        "schema_version": "case_fact_matrix.v2",
+        "case_id": execution.admission.command.case_id,
+        "matrix_id": "CASE_MATRIX_hearing_target",
+        "matrix_version": 2,
+        "matrix_kind": "BILATERAL_FROZEN",
+        "parent_ref": None,
+        "content_hash": "0" * 64,
+        "party_map": {"initiator_role": "USER", "respondent_role": "MERCHANT"},
+        "source_refs": ["SOURCE_USER", "SOURCE_MERCHANT"],
+        "case_overview": {
+            "neutral_summary": "用户称未收到商品，商家称物流已签收。",
+            "core_conflict": "包裹是否实际交付。",
+            "summary_source_fact_ids": ["FACT_DELIVERY"],
+        },
+        "claims": {
+            "initiator_claim": {
+                "initiator_role": "USER",
+                "requested_resolution": "REFUND",
+                "requested_amount": 100.0,
+                "requested_items": "商品",
+                "reason_summary": "未收到商品。",
+                "position_summary": "用户要求退款。",
+                "source_refs": ["SOURCE_USER"],
+            },
+            "respondent_reported_by_initiator": None,
+            "respondent_direct": {
+                "respondent_role": "MERCHANT",
+                "attitude": "DISAGREE",
+                "position_summary": "商家认为已经签收。",
+                "alternative_proposal": None,
+                "source_refs": ["SOURCE_MERCHANT"],
+            },
+            "claim_conflict": "双方对实际交付有争议。",
+        },
+        "fact_rows": [
+            {
+                "fact_id": "FACT_DELIVERY",
+                "category": "LOGISTICS",
+                "fact_target": "物流系统记录包裹已签收",
+                "materiality": "CORE",
+                "origin": {
+                    "introduced_stage": "INITIATOR_INTAKE",
+                    "source_refs": ["SOURCE_USER"],
+                },
+                "positions": {
+                    "USER": {
+                        "stance": "DENY",
+                        "position_summary": "用户否认本人收到。",
+                        "asserted_value": "未收到",
+                        "source_type": "DIRECT_PARTY_STATEMENT",
+                        "source_refs": ["SOURCE_USER"],
+                    },
+                    "MERCHANT": {
+                        "stance": "CONFIRM",
+                        "position_summary": "商家确认物流已签收。",
+                        "asserted_value": "已签收",
+                        "source_type": "DIRECT_PARTY_STATEMENT",
+                        "source_refs": ["SOURCE_MERCHANT"],
+                    },
+                },
+                "party_alignment": {
+                    "status": "CONTESTED",
+                    "agreed_statement": None,
+                    "conflict_summary": "是否实际交付存在争议。",
+                },
+                "requires_resolution": True,
+                "truth_status": "NOT_EVALUATED",
+                "evidence_coverage_status": "COVERED_BY_FROZEN_DOSSIER",
+            }
+        ],
+        "fact_relationships": [],
+        "generation_ref": {
+            "actor_role": "MERCHANT",
+            "source_stage": "RESPONDENT_INTAKE",
+            "latest_source_ref": "SOURCE_MERCHANT",
+            "source_context_hash": "b" * 64,
+        },
+        "fact_indexes": {
+            "not_computed_fact_ids": [],
+            "agreed_fact_ids": [],
+            "partially_agreed_fact_ids": [],
+            "contested_fact_ids": ["FACT_DELIVERY"],
+            "one_sided_fact_ids": [],
+            "unresolved_fact_ids": [],
+            "core_fact_ids": ["FACT_DELIVERY"],
+            "requires_resolution_fact_ids": ["FACT_DELIVERY"],
+        },
+    }
+    normalized_matrix = CaseFactMatrixV2.model_validate(matrix_payload).model_dump(
+        mode="json"
+    )
+    normalized_matrix["content_hash"] = content_hash(
+        normalized_matrix,
+        hash_field="content_hash",
+    )
+    matrix = CaseFactMatrixV2.model_validate(normalized_matrix)
+    request = HearingIntakeQuestionsRequest.model_validate(
+        {
+            "flow_schema_version": "hearing_flow.v2",
+            "case_id": execution.admission.command.case_id,
+            "workflow_id": "WORKFLOW_hearing_target",
+            "stage_code": "INTAKE_QUESTIONS",
+            "stage_sequence": execution.admission.command.stage_sequence,
+            "case_fact_matrix": matrix.model_dump(mode="json"),
+            "max_questions": 1,
+        }
+    )
+    invalid = {
+        "questions": [
+            {
+                "fact_ids": ["FACT_UNKNOWN_BUT_WELL_FORMED"],
+                "issue_statement": "请双方说明包裹是否实际交付。",
+                "party_prompts": {
+                    "USER": "请用户说明是否实际收到包裹。",
+                    "MERCHANT": "请商家说明物流签收依据。",
+                },
+            }
+        ],
+        "public_message": "该无效引用响应不得公开。",
+    }
+    corrected = {
+        **invalid,
+        "questions": [{**invalid["questions"][0], "fact_ids": ["FACT_DELIVERY"]}],
+        "public_message": "请双方围绕交付事实作答。",
+    }
+
+    def client_with(outputs: list[dict[str, Any]]):
+        calls: list[dict[str, Any]] = []
+
+        def handler(provider_request: httpx.Request) -> httpx.Response:
+            body = json.loads(provider_request.content)
+            calls.append(body)
+            output = outputs[min(len(calls) - 1, len(outputs) - 1)]
+            return httpx.Response(
+                200,
+                json={
+                    "model": "hearing-test-model",
+                    "choices": [
+                        {"message": {"content": json.dumps(output, ensure_ascii=False)}}
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        client = LiteLlmProxyClient(
+            "http://litellm:4000",
+            "hearing-test-model",
+            "test-key",
+            transport=transport,
+            async_transport=transport,
+        )
+        return client, calls
+
+    client, provider_calls = client_with([invalid, corrected])
+    workflows = HearingFlowWorkflows(
+        HarnessModelRunner(llm=client, prompts=PromptRepository())
+    )
+
+    class _GovernedProvider:
+        async def load(
+            self,
+            current_execution: GatewayExecution,
+        ) -> HearingTargetE2ELoadedInvocation:
+            invocation = workflows.target_e2e_invocation(operation, request)
+            command = current_execution.admission.command
+            return HearingTargetE2ELoadedInvocation(
+                operation=operation,
+                request=request,
+                invocation=invocation,
+                snapshot_uri=command.domain_snapshot_ref.uri,
+                snapshot_hash=command.domain_snapshot_ref.sha256,
+                event_uri=None,
+                event_hash=None,
+            )
+
+    saver = _MemoryFencedSaver(execution.fence)
+    store = _PayloadStore()
+    adapter = HearingTargetE2ERuntimeAdapter(
+        checkpointer=saver,
+        invocation_provider=_GovernedProvider(),
+        payload_store=store,
+    )
+    published = []
+    observer = AgentStreamObserver(
+        operation="hearing_intake_questions",
+        run_id="RUN_hearing_semantic_repair",
+        publish=published.append,
+    )
+    with bind_stream_observer(observer):
+        first = asyncio.run(adapter.execute(execution))
+    replay = asyncio.run(adapter.execute(execution))
+
+    assert len(provider_calls) == 2
+    assert "response_format" in provider_calls[0]
+    assert "response_format" not in provider_calls[1]
+    assert provider_calls[0]["response_format"]["json_schema"]["schema"] == (
+        HearingIntakeQuestionsLlmOutput.model_json_schema()
+    )
+    assert len(store.calls) == 2
+    assert store.calls[0][2] == store.calls[1][2]
+    assert first.source.model_dump_json() == replay.source.model_dump_json()
+    assert first.proposal_hash == replay.proposal_hash
+    assert [event.type for event in published] == ["visible_delta", "usage"]
+    assert published[0].node_name == "hearing_intake_questions"
+    assert published[0].field == "public_message"
+    assert published[0].delta == corrected["public_message"]
+
+    exhausted_client, exhausted_calls = client_with([invalid, invalid])
+    exhausted_workflows = HearingFlowWorkflows(
+        HarnessModelRunner(llm=exhausted_client, prompts=PromptRepository())
+    )
+    with pytest.raises(ModelTransportOutputError) as exhausted:
+        exhausted_workflows.intake_questions(request)
+    assert exhausted.value.safe_code == "AGENT_OUTPUT_SCHEMA_REPAIR_EXHAUSTED"
+    assert len(exhausted_calls) == 2
+    assert _model_transport_output_error_code(exhausted.value) == (
+        "AGENT_OUTPUT_SCHEMA_REPAIR_EXHAUSTED"
+    )
+    assert _model_transport_output_error_code(
+        AgentOutputSchemaError(
+            "hearing_intake_questions",
+            "private detail",
+            safe_code="PRIVATE_UNKNOWN_OUTPUT_CODE",
+        )
+    ) == "AGENT_OUTPUT_SCHEMA_INVALID"
+
+    invalid_matrix_payload = matrix.model_dump(mode="json")
+    invalid_matrix_payload["content_hash"] = "0" * 64
+    invalid_request = request.model_copy(
+        update={"case_fact_matrix": CaseFactMatrixV2.model_validate(invalid_matrix_payload)}
+    )
+    calls_before_negative = len(provider_calls)
+    with pytest.raises(AgentOutputSchemaError) as deterministic:
+        workflows.intake_questions(invalid_request)
+    assert deterministic.value.safe_code == "AGENT_OUTPUT_SCHEMA_INVALID"
+    assert len(provider_calls) == calls_before_negative
 
 
 def test_target_adapter_rejects_shadow_lane_before_provider_or_store() -> None:

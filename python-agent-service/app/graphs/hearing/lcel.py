@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -38,6 +39,7 @@ class GovernedHearingModelAdapter(Runnable[PromptValue, AIMessage], Generic[TOut
         model_runner: Any,
         node_name: str,
         output_type: type[TOutput],
+        semantic_validator: Callable[[TOutput], TOutput] | None = None,
         tool_policy: tuple[()] = EMPTY_HEARING_TOOL_POLICY,
     ) -> None:
         if model_runner is None or not callable(getattr(model_runner, "invoke_structured", None)):
@@ -51,6 +53,7 @@ class GovernedHearingModelAdapter(Runnable[PromptValue, AIMessage], Generic[TOut
         self._model_runner = model_runner
         self.node_name = node_name
         self.output_type = output_type
+        self.semantic_validator = semantic_validator
         self.tool_policy = tool_policy
 
     def invoke(
@@ -77,10 +80,15 @@ class GovernedHearingModelAdapter(Runnable[PromptValue, AIMessage], Generic[TOut
         if not isinstance(case_data, dict):
             raise HearingLcelContractError("HEARING_PROMPT_PAYLOAD_INVALID")
 
+        invocation: dict[str, Any] = {
+            "node_name": self.node_name,
+            "case_data": case_data,
+            "output_type": self.output_type,
+        }
+        if self.semantic_validator is not None:
+            invocation["semantic_validator"] = self.semantic_validator
         generation = self._model_runner.invoke_structured(
-            node_name=self.node_name,
-            case_data=case_data,
-            output_type=self.output_type,
+            **invocation,
         )
         value = self.output_type.model_validate(generation.value)
         return AIMessage(content=value.model_dump_json())
@@ -99,6 +107,7 @@ def build_hearing_lcel(
     model_runner: Any,
     node_name: str,
     output_type: type[TOutput],
+    semantic_validator: Callable[[TOutput], TOutput] | None = None,
 ) -> HearingLcelFlow[TOutput]:
     relative_prompt = HEARING_MODEL_NODE_PROMPTS.get(node_name)
     if relative_prompt is None:
@@ -117,6 +126,7 @@ def build_hearing_lcel(
         model_runner=model_runner,
         node_name=node_name,
         output_type=output_type,
+        semantic_validator=semantic_validator,
     )
     parser = PydanticOutputParser(pydantic_object=output_type)
     runnable = cast(RunnableSequence, prompt | model | parser)
@@ -143,11 +153,13 @@ def invoke_hearing_lcel(
     node_name: str,
     case_data: dict[str, Any],
     output_type: type[TOutput],
+    semantic_validator: Callable[[TOutput], TOutput] | None = None,
 ) -> TOutput:
     flow = build_hearing_lcel(
         model_runner=model_runner,
         node_name=node_name,
         output_type=output_type,
+        semantic_validator=semantic_validator,
     )
     encoded = json.dumps(
         case_data,

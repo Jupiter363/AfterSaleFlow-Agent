@@ -46,6 +46,7 @@ from app.graph_runtime.errors import (
 )
 from app.graph_runtime.identity import ThreadIdentity
 from app.graphs.intake.errors import IntakeGraphContractError
+from app.llm import AgentOutputSchemaError
 from app.model_runtime.transports import ModelTransportOutputError
 from app.graph_runtime.target_e2e import (
     TARGET_E2E_COMMAND_PATH,
@@ -909,7 +910,7 @@ async def _stream_ndjson(
             validator,
             error_code="GRAPH_STREAM_PROTOCOL_REJECTED",
         )
-    except ModelTransportOutputError as error:
+    except (ModelTransportOutputError, AgentOutputSchemaError) as error:
         _log_safe_failure("graph stream model output", error)
         yield _encode_terminal_error(
             codec,

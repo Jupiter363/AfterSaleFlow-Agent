@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar, cast
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model, model_validator
 from typing_extensions import TypedDict
 
 from app.graph_runtime.state_lens import StateLens
@@ -32,7 +32,12 @@ from app.model_runtime.profiles import (
 )
 from app.model_runtime.runnable_factory import ModelNodeSpec, build_model_node
 from app.model_runtime.transports import StructuredClientTransport
-from app.streaming import VisibleFieldSpec, current_stream_observer
+from app.streaming import (
+    IncrementalVisibleJsonProjector,
+    VisibleFieldSpec,
+    bind_stream_observer,
+    current_stream_observer,
+)
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -160,6 +165,7 @@ class HarnessModelRunner:
         agent_context: AgentInvocationContext | None = None,
         prompt_profile_id: str | None = None,
         evidence_assets: LoadedEvidenceAssets | None = None,
+        semantic_validator: Callable[[T], T] | None = None,
     ) -> HarnessGeneration[T]:
         """执行一次非流式结构化模型调用。"""
 
@@ -168,10 +174,11 @@ class HarnessModelRunner:
             if evidence_assets is not None
             else ()
         )
+        governed_output_type = _semantic_output_type(output_type, semantic_validator)
         prepared = self._prepare(
             node_name=node_name,
             case_data=case_data,
-            output_type=output_type,
+            output_type=governed_output_type,
             context_sections=context_sections,
             context_pack=context_pack,
             max_input_tokens=max_input_tokens,
@@ -180,20 +187,43 @@ class HarnessModelRunner:
         )
         built = self._build_node(
             node_name=node_name,
-            output_type=output_type,
+            output_type=governed_output_type,
             prepared=prepared,
             visible_fields=(),
             user_content_parts=user_content_parts,
+            semantic_repair=semantic_validator is not None,
         )
         capture = InvocationMetadataCapture()
         state = {"human_prompt": prepared.user_prompt}
-        patch = built.runnable.invoke(
-            state,
-            config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
-        )
+        observer = current_stream_observer()
+        if semantic_validator is not None and observer is not None:
+            observer.raise_if_cancelled()
+            with bind_stream_observer(cast(Any, None)):
+                patch = built.runnable.invoke(
+                    state,
+                    config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
+                )
+            observer.raise_if_cancelled()
+        else:
+            patch = built.runnable.invoke(
+                state,
+                config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
+            )
         value = output_type.model_validate(patch["value"])
         messages = tuple(built.prompt.invoke(state).messages)
         metadata = capture.metadata
+        if semantic_validator is not None and observer is not None:
+            projector = IncrementalVisibleJsonProjector(
+                observer.visible_fields_for(node_name)
+            )
+            for field, delta in projector.feed(value.model_dump_json()):
+                observer.visible_delta(node_name, field, delta)
+            observer.usage(
+                node_name=node_name,
+                model=str(metadata["model"]),
+                latency_ms=int(metadata["latency_ms"]),
+                token_usage=dict(metadata["token_usage"]),
+            )
         return HarnessGeneration(
             value=value,
             model=str(metadata["model"]),
@@ -381,6 +411,7 @@ class HarnessModelRunner:
         prepared: PreparedHarnessInvocation,
         visible_fields: tuple[VisibleFieldSpec, ...],
         user_content_parts: tuple[dict[str, Any], ...],
+        semantic_repair: bool = False,
     ):
         lens = StateLens(
             name=f"{node_name}.harness_lens",
@@ -396,6 +427,16 @@ class HarnessModelRunner:
             raw_trusted_context=prepared.raw_trusted_context,
             prompt_version=prepared.resolved_prompt_profile_id,
         )
+        if semantic_repair and "retry_budget" not in prepared.raw_trusted_context:
+            if profile.max_provider_attempts < 2:
+                raise ValueError("semantic output repair requires two provider attempts")
+            policy = ModelInvocationPolicy.model_validate(
+                {
+                    **policy.model_dump(mode="python"),
+                    "provider_attempts_remaining": 2,
+                    "repairs_remaining": 1,
+                }
+            )
         spec = ModelNodeSpec(
             node_name=node_name,
             lens=lens,
@@ -575,6 +616,32 @@ def _select_harness_prompt(state: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _identity_guardrail(value: T) -> T:
     return value
+
+
+def _semantic_output_type(
+    output_type: type[T],
+    semantic_validator: Callable[[T], T] | None,
+) -> type[T]:
+    if semantic_validator is None:
+        return output_type
+
+    @model_validator(mode="after")
+    def require_semantic_contract(value: BaseModel) -> BaseModel:
+        candidate = output_type.model_validate(value)
+        validated = semantic_validator(candidate)
+        if validated is not candidate:
+            raise TypeError("semantic validator must return the validated value")
+        return value
+
+    constrained = create_model(
+        output_type.__name__,
+        __base__=output_type,
+        __module__=output_type.__module__,
+        __validators__={"_governed_semantic_contract": require_semantic_contract},
+    )
+    if constrained.model_json_schema() != output_type.model_json_schema():
+        raise ValueError("semantic output model changed the provider JSON Schema")
+    return cast(type[T], constrained)
 
 
 def _harness_patch(value: BaseModel) -> Mapping[str, Any]:

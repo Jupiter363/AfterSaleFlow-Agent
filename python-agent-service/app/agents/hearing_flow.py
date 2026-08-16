@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from typing import Any, Iterable
 
 from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
@@ -80,12 +81,16 @@ class HearingFlowWorkflows:
             expected_case_id=request.case_id,
             node_name="hearing_intake_questions",
         )
+        known = _case_fact_ids(request.case_fact_matrix)
         output = self._invoke(
             "hearing_intake_questions",
             request,
             HearingIntakeQuestionsLlmOutput,
+            semantic_validator=lambda value: _validate_intake_question_fact_membership(
+                value,
+                known,
+            ),
         )
-        known = _case_fact_ids(request.case_fact_matrix)
         questions: list[HearingIntakeQuestion] = []
         seen: set[tuple[tuple[str, ...], str]] = set()
         for item in output.questions:
@@ -590,14 +595,29 @@ class HearingFlowWorkflows:
             )
         return invocation
 
-    def _invoke(self, node_name: str, request: Any, output_type: Any) -> Any:
+    def _invoke(
+        self,
+        node_name: str,
+        request: Any,
+        output_type: Any,
+        *,
+        semantic_validator: Callable[[Any], Any] | None = None,
+    ) -> Any:
         return self._invoke_payload(
             node_name,
             {"request": request.model_dump(mode="json")},
             output_type,
+            semantic_validator=semantic_validator,
         )
 
-    def _invoke_payload(self, node_name: str, case_data: dict[str, Any], output_type: Any) -> Any:
+    def _invoke_payload(
+        self,
+        node_name: str,
+        case_data: dict[str, Any],
+        output_type: Any,
+        *,
+        semantic_validator: Callable[[Any], Any] | None = None,
+    ) -> Any:
         if self._model_runner is None:
             raise AgentServiceUnavailable(f"{node_name} model runner is unavailable")
         return invoke_hearing_lcel(
@@ -605,6 +625,7 @@ class HearingFlowWorkflows:
             node_name=node_name,
             case_data=case_data,
             output_type=output_type,
+            semantic_validator=semantic_validator,
         )
 
 
@@ -1383,6 +1404,15 @@ def _validate_dossier_request(request: Any, node_name: str) -> None:
 
 def _case_fact_ids(matrix: Any) -> set[str]:
     return {item.fact_id for item in matrix.fact_rows}
+
+
+def _validate_intake_question_fact_membership(
+    output: HearingIntakeQuestionsLlmOutput,
+    known: set[str],
+) -> HearingIntakeQuestionsLlmOutput:
+    if any(set(item.fact_ids) - known for item in output.questions):
+        raise ValueError("intake questions reference facts outside the frozen matrix")
+    return output
 
 
 def _validated_fact_ids(values: Iterable[str], known: set[str]) -> list[str]:
