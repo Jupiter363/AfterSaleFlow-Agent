@@ -106,7 +106,6 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     from copy import deepcopy
     from dataclasses import replace
     from pathlib import Path
-    from threading import Event as ThreadEvent
     from types import SimpleNamespace
 
     from langgraph.checkpoint.memory import InMemorySaver
@@ -130,8 +129,6 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
     from app.harness.model_runner import (
         HarnessGeneration,
-        HarnessStreamCompleted,
-        HarnessStreamDelta,
     )
     from app.schemas import EvidenceTurnRequest, EvidenceTurnResult
     from app.security.graph_runtime import GraphSecurityRuntime
@@ -275,28 +272,30 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     class MatrixSpecificOpeningRunner:
         def __init__(self) -> None:
             self.calls = 0
-            self.substantive_emitted = ThreadEvent()
-            self.release_completion = ThreadEvent()
-            self.completed = ThreadEvent()
+            self.substantive_emitted = asyncio.Event()
+            self.release_completion = asyncio.Event()
+            self.completed = asyncio.Event()
 
-        def invoke_structured_stream(self, **kwargs):
+        async def ainvoke_structured(self, **kwargs):
             self.calls += 1
             output_type = kwargs["output_type"]
+            observer = current_stream_observer()
+            assert observer is not None
             visible_prefix = EVIDENCE_CANONICAL_OPENING + provider_substantive
             for index, chunk in enumerate(visible_prefix):
                 if index == len(visible_prefix) - 1:
                     self.substantive_emitted.set()
-                yield HarnessStreamDelta(
-                    kind="visible_delta",
-                    field="room_utterance",
-                    delta=chunk,
+                observer.visible_delta(
+                    "evidence_turn",
+                    "room_utterance",
+                    chunk,
                 )
-            assert self.release_completion.wait(timeout=2.0)
+            await asyncio.wait_for(self.release_completion.wait(), timeout=2.0)
             for chunk in provider_unsafe:
-                yield HarnessStreamDelta(
-                    kind="visible_delta",
-                    field="room_utterance",
-                    delta=chunk,
+                observer.visible_delta(
+                    "evidence_turn",
+                    "room_utterance",
+                    chunk,
                 )
             generation = HarnessGeneration(
                 value=output_type(
@@ -331,8 +330,14 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 context=SimpleNamespace(),
                 messages=(),
             )
+            observer.usage(
+                node_name="evidence_turn",
+                model=generation.model,
+                latency_ms=generation.latency_ms,
+                token_usage=generation.token_usage,
+            )
             self.completed.set()
-            yield HarnessStreamCompleted(kind="completed", generation=generation)
+            return generation
 
     class FencedMemorySaver(InMemorySaver):
         def __init__(self) -> None:
