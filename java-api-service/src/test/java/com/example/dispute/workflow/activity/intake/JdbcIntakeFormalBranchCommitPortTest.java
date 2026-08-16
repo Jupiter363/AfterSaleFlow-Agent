@@ -122,18 +122,29 @@ class JdbcIntakeFormalBranchCommitPortTest {
     }
 
     @Test
-    void acceptedBranchReplaysTheExactReceiptAfterCommandAndProjectionAdvance() {
+    void emptyRemarkConfirmationFinalizesHandoffAndReplaysWithoutMessages() throws Exception {
         Fixture fixture = fixture("ACCEPT", BranchOperation.INITIATOR_ACCEPT);
         insertFixture(fixture);
         Harness harness = harness(fixture);
 
         BranchCommitReceipt first = harness.port().commit(fixture.request());
+        String finalizedDossier = scalar(
+                "select dossier_json::text from case_intake_dossier where case_id = ?",
+                fixture.caseId());
         BranchCommitReceipt replay = harness.port().commit(fixture.request());
         BranchCommitReceipt reconciled =
                 harness.port().commit(reconciliationRequest(fixture.request()));
+        BranchCommitRequest conflict = new BranchCommitRequest(
+                "intake-branch-commit-request.v1",
+                fixture.envelope(),
+                fixture.operation(),
+                fixture.request().operationKey(),
+                sha256("changed-confirmation-authority"));
 
         assertThat(replay).isEqualTo(first);
         assertThat(reconciled).isEqualTo(first);
+        assertThatThrownBy(() -> harness.port().commit(conflict))
+                .isInstanceOf(IntakeFinalizationRejectedException.class);
         assertThat(scalar("select command_status from case_command where command_id = ?",
                         fixture.envelope().commandId()))
                 .isEqualTo("APPLIED");
@@ -152,6 +163,48 @@ class JdbcIntakeFormalBranchCommitPortTest {
         assertThat(count("select count(*) from case_timeline_event where case_id = ?",
                         fixture.caseId()))
                 .isEqualTo(1);
+        assertThat(count("select count(*) from case_intake_party_completion where case_id = ?",
+                        fixture.caseId()))
+                .isEqualTo(1);
+        assertThat(count("select count(*) from room_message where case_id = ?", fixture.caseId()))
+                .isZero();
+        assertThat(number("select dossier_version from case_intake_dossier where case_id = ?",
+                        fixture.caseId()))
+                .isEqualTo(4);
+        assertThat(scalar("select dossier_json::text from case_intake_dossier where case_id = ?",
+                        fixture.caseId()))
+                .isEqualTo(finalizedDossier);
+        assertThat(objectMapper.readTree(finalizedDossier)
+                        .at("/party_intake_state/USER/handoff_notes/remark_status")
+                        .asText())
+                .isEqualTo("NO_EXTRA_REMARKS");
+        assertThat(objectMapper.readTree(finalizedDossier)
+                        .at("/party_intake_state/USER/handoff_notes/latest_remark")
+                        .asText())
+                .isEqualTo("无额外备注。");
+        assertThat(objectMapper.readTree(finalizedDossier)
+                        .at("/party_intake_state/USER/handoff_notes/remarks")
+                        .size())
+                .isZero();
+        assertThat(objectMapper.readTree(finalizedDossier).path("handoff_notes"))
+                .isEqualTo(objectMapper.readTree(finalizedDossier)
+                        .at("/party_intake_state/USER/handoff_notes"));
+        assertThat(objectMapper.readTree(finalizedDossier)
+                        .at("/handoff_remark_partition/parties/USER/source/source_kind")
+                        .asText())
+                .isEqualTo("FORMAL_CONFIRMATION");
+        assertThat(objectMapper.readTree(finalizedDossier)
+                        .at("/handoff_remark_partition/parties/USER/source/command_id")
+                        .asText())
+                .isEqualTo(fixture.envelope().commandId());
+        assertThat(objectMapper.readTree(finalizedDossier)
+                        .at("/handoff_remark_partition/parties/USER/source/request_hash")
+                        .asText())
+                .isEqualTo(fixture.request().requestHash());
+        assertThat(objectMapper.readTree(finalizedDossier)
+                        .at("/handoff_remark_partition/parties/USER/latest_remark")
+                        .asText())
+                .isEmpty();
         assertThat(scalar("select title from fulfillment_dispute_case where id = ?", fixture.caseId()))
                 .isEqualTo("DOMAIN_INITIATOR_ACCEPT");
         assertCommandAndOperationReceiptsMatch(fixture);
@@ -163,6 +216,155 @@ class JdbcIntakeFormalBranchCommitPortTest {
                         any(),
                         any(),
                         eq(TimelineEventMode.FORMAL_TYPED_ONLY));
+
+        Fixture withRemark = fixture("ACCEPT_WITH_REMARK", BranchOperation.INITIATOR_ACCEPT);
+        insertFixture(withRemark);
+        insertConfirmationDossier(withRemark, "HAS_REMARKS", "请书记官核对物流节点。");
+        Harness remarkHarness = harness(withRemark);
+        String existingDossier = scalar(
+                "select dossier_json::text from case_intake_dossier where case_id = ?",
+                withRemark.caseId());
+
+        remarkHarness.port().commit(withRemark.request());
+
+        assertThat(number("select dossier_version from case_intake_dossier where case_id = ?",
+                        withRemark.caseId()))
+                .isEqualTo(3);
+        assertThat(scalar("select dossier_json::text from case_intake_dossier where case_id = ?",
+                        withRemark.caseId()))
+                .isEqualTo(existingDossier);
+        assertThat(count("select count(*) from room_message where case_id = ?", withRemark.caseId()))
+                .isZero();
+
+        Fixture withoutRemark = fixture("ACCEPT_WITHOUT_REMARK", BranchOperation.INITIATOR_ACCEPT);
+        insertFixture(withoutRemark);
+        insertConfirmationDossier(withoutRemark, "NO_EXTRA_REMARKS", null);
+        Harness noRemarkHarness = harness(withoutRemark);
+        String existingNoRemarkDossier = scalar(
+                "select dossier_json::text from case_intake_dossier where case_id = ?",
+                withoutRemark.caseId());
+
+        noRemarkHarness.port().commit(withoutRemark.request());
+
+        assertThat(number("select dossier_version from case_intake_dossier where case_id = ?",
+                        withoutRemark.caseId()))
+                .isEqualTo(3);
+        assertThat(scalar("select dossier_json::text from case_intake_dossier where case_id = ?",
+                        withoutRemark.caseId()))
+                .isEqualTo(existingNoRemarkDossier);
+        assertThat(count("select count(*) from room_message where case_id = ?", withoutRemark.caseId()))
+                .isZero();
+
+        Fixture legacyWaiting = fixture("ACCEPT_LEGACY_WAITING", BranchOperation.INITIATOR_ACCEPT);
+        insertFixture(legacyWaiting);
+        jdbc.update(
+                "update case_intake_dossier set dossier_json = dossier_json - 'handoff_remark_partition' where case_id = ?",
+                legacyWaiting.caseId());
+        Harness legacyWaitingHarness = harness(legacyWaiting);
+
+        legacyWaitingHarness.port().commit(legacyWaiting.request());
+
+        String createdPartitionDossier = scalar(
+                "select dossier_json::text from case_intake_dossier where case_id = ?",
+                legacyWaiting.caseId());
+        assertThat(objectMapper.readTree(createdPartitionDossier)
+                        .at("/handoff_remark_partition/parties/USER/source/source_kind")
+                        .asText())
+                .isEqualTo("FORMAL_CONFIRMATION");
+        assertThat(objectMapper.readTree(createdPartitionDossier)
+                        .at("/handoff_remark_partition/parties/MERCHANT/remark_status")
+                        .asText())
+                .isEqualTo("NOT_READY");
+        assertThat(count("select count(*) from room_message where case_id = ?", legacyWaiting.caseId()))
+                .isZero();
+
+        Fixture mismatchedNoRemark = fixture(
+                "ACCEPT_MISMATCHED_NO_REMARK",
+                BranchOperation.INITIATOR_ACCEPT,
+                "另一条确认备注");
+        insertFixture(mismatchedNoRemark);
+        insertConfirmationDossier(mismatchedNoRemark, "NO_EXTRA_REMARKS", null);
+        Harness mismatchedNoRemarkHarness = harness(mismatchedNoRemark);
+
+        assertRejectedWithNoWrites(
+                mismatchedNoRemark, mismatchedNoRemarkHarness, mismatchedNoRemark.request());
+        assertThat(number("select dossier_version from case_intake_dossier where case_id = ?",
+                        mismatchedNoRemark.caseId()))
+                .isEqualTo(3);
+        assertThat(count("select count(*) from case_intake_party_completion where case_id = ?",
+                        mismatchedNoRemark.caseId()))
+                .isZero();
+
+        Fixture mismatchedRemark = fixture(
+                "ACCEPT_MISMATCHED_REMARK",
+                BranchOperation.INITIATOR_ACCEPT,
+                "另一条确认备注");
+        insertFixture(mismatchedRemark);
+        insertConfirmationDossier(
+                mismatchedRemark, "HAS_REMARKS", "请书记官核对物流节点。");
+        Harness mismatchedHarness = harness(mismatchedRemark);
+
+        assertRejectedWithNoWrites(
+                mismatchedRemark, mismatchedHarness, mismatchedRemark.request());
+        assertThat(number("select dossier_version from case_intake_dossier where case_id = ?",
+                        mismatchedRemark.caseId()))
+                .isEqualTo(3);
+        assertThat(count("select count(*) from case_intake_party_completion where case_id = ?",
+                        mismatchedRemark.caseId()))
+                .isZero();
+
+        Fixture unsupported = fixture("ACCEPT_UNSUPPORTED", BranchOperation.INITIATOR_ACCEPT);
+        insertFixture(unsupported);
+        insertConfirmationDossier(unsupported, "READY_PENDING_REMARK_INVITE", null);
+        Harness unsupportedHarness = harness(unsupported);
+
+        assertRejectedWithNoWrites(unsupported, unsupportedHarness, unsupported.request());
+        assertThat(number("select dossier_version from case_intake_dossier where case_id = ?",
+                        unsupported.caseId()))
+                .isEqualTo(3);
+        assertThat(count("select count(*) from case_intake_party_completion where case_id = ?",
+                        unsupported.caseId()))
+                .isZero();
+        assertThat(count("select count(*) from room_message where case_id = ?", unsupported.caseId()))
+                .isZero();
+
+        Fixture missing = fixture("ACCEPT_MISSING_HANDOFF", BranchOperation.INITIATOR_ACCEPT);
+        insertFixture(missing);
+        jdbc.update("delete from case_intake_dossier where case_id = ?", missing.caseId());
+        Harness missingHarness = harness(missing);
+
+        assertRejectedWithNoWrites(missing, missingHarness, missing.request());
+        assertThat(count("select count(*) from case_intake_party_completion where case_id = ?",
+                        missing.caseId()))
+                .isZero();
+
+        Fixture foreign = fixture("ACCEPT_FOREIGN_REMARK", BranchOperation.INITIATOR_ACCEPT);
+        insertFixture(foreign);
+        insertConfirmationDossier(foreign, "HAS_REMARKS", "请书记官核对物流节点。");
+        jdbc.update(
+                """
+                update case_intake_dossier
+                   set dossier_json = jsonb_set(
+                       jsonb_set(
+                           dossier_json,
+                           '{party_intake_state,USER,handoff_notes,remarks,0,role}',
+                           '"MERCHANT"'::jsonb),
+                       '{handoff_notes,remarks,0,role}',
+                       '"MERCHANT"'::jsonb)
+                 where case_id = ?
+                """,
+                foreign.caseId());
+        Harness foreignHarness = harness(foreign);
+
+        assertRejectedWithNoWrites(foreign, foreignHarness, foreign.request());
+        assertThat(number("select dossier_version from case_intake_dossier where case_id = ?",
+                        foreign.caseId()))
+                .isEqualTo(3);
+        assertThat(count("select count(*) from case_intake_party_completion where case_id = ?",
+                        foreign.caseId()))
+                .isZero();
+        assertThat(count("select count(*) from room_message where case_id = ?", foreign.caseId()))
+                .isZero();
     }
 
     @Test
@@ -642,6 +844,11 @@ class JdbcIntakeFormalBranchCommitPortTest {
                 currentRoom,
                 "DOMAIN_" + fixture.operation().name(),
                 fixture.caseId());
+        if (fixture.operation() == BranchOperation.INITIATOR_ACCEPT) {
+            insertCompletion(fixture, "initiator");
+        } else if (fixture.operation() == BranchOperation.RESPONDENT_CONFIRM) {
+            insertCompletion(fixture, "respondent");
+        }
         if (currentRoom == null) {
             jdbc.update(
                     "update case_room set room_status = 'CLOSED', closed_at = ?, updated_at = ? where id = ?",
@@ -683,6 +890,11 @@ class JdbcIntakeFormalBranchCommitPortTest {
     }
 
     private static Fixture fixture(String label, BranchOperation operation) {
+        return fixture(label, operation, null);
+    }
+
+    private static Fixture fixture(
+            String label, BranchOperation operation, String confirmationNote) {
         int sequence = SEQUENCE.incrementAndGet();
         String suffix = label + '_' + sequence;
         String caseId = "CASE_BRANCH_" + suffix;
@@ -743,7 +955,7 @@ class JdbcIntakeFormalBranchCommitPortTest {
                         operation != BranchOperation.INITIATOR_REJECT,
                         "REFUND_DISPUTE",
                         RiskLevel.MEDIUM,
-                        null);
+                        confirmationNote);
         ResolvedBranchCommand resolved = new ResolvedBranchCommand(
                 operation,
                 "intake-branch-command.v1",
@@ -969,6 +1181,152 @@ class JdbcIntakeFormalBranchCommitPortTest {
                 now,
                 now,
                 now);
+        if (fixture.operation() != BranchOperation.CANCEL) {
+            insertConfirmationDossier(fixture, "WAITING_FOR_REMARK", null);
+        }
+    }
+
+    private static void insertConfirmationDossier(
+            Fixture fixture, String remarkStatus, String remark) {
+        ObjectNode dossier = objectMapper.createObjectNode();
+        dossier.put("schema_version", "intake-dossier.v2");
+        ObjectNode partyState = dossier.putObject("party_intake_state");
+        partyState.put("schema_version", "party-intake-state.v1");
+        putPartyIntakeEntry(partyState.putObject("USER"), "USER", "NOT_READY", null);
+        putPartyIntakeEntry(partyState.putObject("MERCHANT"), "MERCHANT", "NOT_READY", null);
+        ObjectNode actorEntry = (ObjectNode) partyState.path(fixture.actorRole());
+        putPartyIntakeEntry(actorEntry, fixture.actorRole(), remarkStatus, remark);
+        dossier.set("handoff_notes", actorEntry.path("handoff_notes").deepCopy());
+        ObjectNode matrix = dossier.putObject("case_fact_matrix");
+        matrix.put("matrix_id", "CASE_MATRIX_" + sha256(fixture.caseId()).substring(0, 20).toUpperCase());
+        matrix.put("matrix_version", 2);
+        matrix.put("content_hash", sha256("matrix:" + fixture.caseId()));
+        ObjectNode partition = dossier.putObject("handoff_remark_partition");
+        partition.put("schema_version", "handoff_remark_partition.v1");
+        partition.set("case_fact_matrix_id", matrix.path("matrix_id").deepCopy());
+        partition.set("case_fact_matrix_version", matrix.path("matrix_version").deepCopy());
+        partition.set("case_fact_matrix_hash", matrix.path("content_hash").deepCopy());
+        ObjectNode parties = partition.putObject("parties");
+        putRemarkPartitionParty(parties.putObject("USER"), "USER", "NOT_READY", null);
+        putRemarkPartitionParty(parties.putObject("MERCHANT"), "MERCHANT", "NOT_READY", null);
+        putRemarkPartitionParty(
+                (ObjectNode) parties.path(fixture.actorRole()),
+                fixture.actorRole(),
+                remarkStatus,
+                remark);
+        OffsetDateTime now = NOW.atOffset(ZoneOffset.UTC);
+        jdbc.update(
+                """
+                insert into case_intake_dossier (
+                    id, case_id, room_type, dossier_version, dossier_json,
+                    quality_score, ready_for_next_step, admission_recommendation,
+                    source_turn_no, created_at, updated_at, created_by, updated_by
+                ) values (?, ?, 'INTAKE', 3, cast(? as jsonb),
+                    100, true, 'ACCEPTED', 3, ?, ?, 'test', 'test')
+                on conflict (case_id, room_type) do update
+                   set dossier_version = excluded.dossier_version,
+                       dossier_json = excluded.dossier_json,
+                       quality_score = excluded.quality_score,
+                       ready_for_next_step = excluded.ready_for_next_step,
+                       admission_recommendation = excluded.admission_recommendation,
+                       source_turn_no = excluded.source_turn_no,
+                       updated_at = excluded.updated_at,
+                       updated_by = excluded.updated_by
+                """,
+                "DOS_" + sha256(fixture.caseId()).substring(0, 60),
+                fixture.caseId(),
+                ContractJson.canonicalString(dossier),
+                now,
+                now);
+    }
+
+    private static void putPartyIntakeEntry(
+            ObjectNode entry, String role, String remarkStatus, String remark) {
+        boolean ready = !"NOT_READY".equals(remarkStatus);
+        ObjectNode quality = entry.putObject("intake_quality");
+        quality.put("score", ready ? 100 : 0);
+        quality.put("threshold", 85);
+        quality.put("ready_for_next_step", ready);
+        ObjectNode breakdown = quality.putObject("score_breakdown");
+        breakdown.put("references", ready ? 15 : 0);
+        breakdown.put("event_story", ready ? 20 : 0);
+        breakdown.put("party_positions", ready ? 20 : 0);
+        breakdown.put("requested_resolution", ready ? 15 : 0);
+        breakdown.put("risk_and_conflicts", ready ? 15 : 0);
+        breakdown.put("next_action_clarity", ready ? 15 : 0);
+        quality.put(
+                "improvement_reason",
+                ready ? "信息完整度已达到提交阈值。" : "等待当前参与方补充案情。");
+        ObjectNode missing = entry.putObject("missing_information");
+        missing.putArray("blocking_gaps");
+        missing.putArray("nice_to_have_gaps");
+        missing.putArray("next_questions");
+        ObjectNode handoff = entry.putObject("handoff_notes");
+        handoff.put("remark_status", remarkStatus);
+        handoff.put(
+                "phase_source_message_id",
+                "NOT_READY".equals(remarkStatus)
+                        ? ""
+                        : remark == null ? "MESSAGE_PHASE_" + role : "MESSAGE_REMARK_" + role);
+        handoff.put(
+                "latest_remark",
+                "NO_EXTRA_REMARKS".equals(remarkStatus)
+                        ? "无额外备注。"
+                        : remark == null ? "" : remark);
+        var remarks = handoff.putArray("remarks");
+        if (remark != null) {
+            ObjectNode item = remarks.addObject();
+            item.put("role", role);
+            item.put("text", remark);
+            item.put("source_message_id", "MESSAGE_REMARK_" + role);
+            item.put("turn_source", "CURRENT_MESSAGE");
+        }
+        handoff.put("instruction", "可补充交接备注。");
+        ObjectNode admission = entry.putObject("admission");
+        admission.put("recommendation", ready ? "ACCEPTED" : "NEED_MORE_INFO");
+        admission.put("reasoning", "");
+        admission.put("confidence", 1);
+    }
+
+    private static void putRemarkPartitionParty(
+            ObjectNode party, String role, String remarkStatus, String remark) {
+        party.removeAll();
+        party.put("party_role", role);
+        party.put("remark_status", remarkStatus);
+        if (!"NOT_READY".equals(remarkStatus)) {
+            ObjectNode source = party.putObject("source");
+            source.put("source_kind", "ROOM_MESSAGE");
+            source.put(
+                    "message_id",
+                    remark == null ? "MESSAGE_PHASE_" + role : "MESSAGE_REMARK_" + role);
+            source.put(
+                    "message_hash",
+                    remarkSourceHash(
+                            source.path("message_id").asText(),
+                            role,
+                            remark == null ? "无备注" : remark));
+        }
+        party.put("latest_remark", remark == null ? "" : remark);
+        var remarks = party.putArray("remarks");
+        if (remark != null) {
+            ObjectNode item = remarks.addObject();
+            item.put("party_role", role);
+            item.put("text", remark);
+            item.put("source_message_id", "MESSAGE_REMARK_" + role);
+            item.put(
+                    "source_message_hash",
+                    remarkSourceHash("MESSAGE_REMARK_" + role, role, remark));
+            item.put("turn_source", "ROOM_MESSAGE");
+        }
+    }
+
+    private static String remarkSourceHash(String messageId, String role, String text) {
+        ObjectNode material = objectMapper.createObjectNode();
+        material.put("message_id", messageId);
+        material.put("role", role);
+        material.put("source", "ROOM_MESSAGE");
+        material.put("text", text);
+        return ContractJson.sha256Hex(material);
     }
 
     private static void insertInitiatorCompletion(Fixture fixture) {
@@ -1109,7 +1467,7 @@ class JdbcIntakeFormalBranchCommitPortTest {
                 fixture.envelope().processRevision() + 1,
                 fixture.envelope().roomRevision() + 1,
                 "INTAKE_DOSSIER_" + sha256(fixture.caseId()).substring(0, 48),
-                3,
+                4,
                 matrix);
     }
 

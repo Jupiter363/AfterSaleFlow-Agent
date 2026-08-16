@@ -306,15 +306,12 @@ public final class IntakeRespondentMatrixFreezer {
                     "respondent matrix candidate has no complete fact rows");
         }
         for (JsonNode row : rows) {
-            JsonNode respondent =
-                    row.path("positions").path(authority.respondentRole().name());
-            if ("UNKNOWN".equals(respondent.path("stance").asText())
-                    || "NOT_COMPUTED".equals(
+            if ("NOT_COMPUTED".equals(
                             row.path("party_alignment").path("status").asText())
                     || !row.path("requires_resolution").isBoolean()) {
                 throw rejected(
                         "INTAKE_RESPONDENT_MATRIX_NOT_READY",
-                        "READY_TO_CONFIRM cannot freeze an unresolved respondent placeholder");
+                        "READY_TO_CONFIRM requires computed alignment and resolution markers");
             }
         }
     }

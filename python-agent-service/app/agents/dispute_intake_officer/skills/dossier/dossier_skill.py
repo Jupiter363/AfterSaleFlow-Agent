@@ -15,6 +15,7 @@ from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2
 from app.agents.dispute_intake_officer.case_fact_matrix import (
     finalize_case_fact_matrix,
 )
+from app.contracts.v1.codec import canonical_sha256
 from app.llm import AgentOutputSchemaError
 
 
@@ -64,21 +65,46 @@ _DIRECT_ATTITUDE_CLAUSE_BOUNDARY = re.compile(
     re.IGNORECASE,
 )
 _DIRECT_ATTITUDE_COORDINATION_BOUNDARY = re.compile(r"[；;，,]+")
+_DIRECT_ATTITUDE_HISTORICAL_SCOPE_ZH = re.compile(
+    r"(?:最初|起初|此前|之前|原先|先前|曾经|原本|一开始|早先)"
+)
+_DIRECT_ATTITUDE_CURRENT_SCOPE_ZH = re.compile(
+    r"^\s*(?:(?:本公司|本人|我方|我们|本方|我司|我|用户|买家|客户|消费者|"
+    r"商家|卖家|店铺|商户|客服)\s*)?(?:现阶段|现在|目前|当前|如今|现)"
+)
 _DIRECT_ATTITUDE_CONDITIONAL_SCOPE_ZH = re.compile(
     r"(?:^|\s)(?:如|若|如果|倘若|一旦|只要|只有|经|待)"
     r"|(?:在|于).{0,32}(?:条件下|情况下|确认后|检测后|完成后)"
+    r"|(?:条件|要求|标准).{0,12}(?:满足|符合|达成|成立)(?:时|后|则)?"
+    r"|(?:无法|不能|未能).{0,16}(?:时|则|的情况下)"
+    r"|(?:否则|反之)"
 )
-_DIRECT_ATTITUDE_PRECONDITION_REFUSAL_ZH = re.compile(
-    r"未经|尚未|未(?:经|完成|确认|检测)|"
-    r"(?:在|于).{0,32}(?:之前|以前|前)"
+_DIRECT_ATTITUDE_REMEDY_ACTION_ZH = re.compile(
+    r"延长保修|更换|换货|退款|退货|维修|补偿|赔偿|退还|延保|补发|重发"
 )
-_DIRECT_ATTITUDE_SATISFIED_CONDITION_ZH = re.compile(
-    r"(?:已|已经)(?:确认|检测|完成|符合(?:换货|退款|退货|维修)?条件)"
-    r"|(?:检测|确认).{0,8}(?:已经|已)完成"
+_DIRECT_ATTITUDE_INVESTIGATION_ACTION_ZH = re.compile(r"送检|检测|核查|调查|核验|验证|排查|查验")
+_DIRECT_ATTITUDE_INVESTIGATION_AGREEMENT_ZH = re.compile(
+    rf"(?:同意|接受|愿意|支持).{{0,12}}"
+    rf"(?:{_DIRECT_ATTITUDE_INVESTIGATION_ACTION_ZH.pattern})"
 )
-_DIRECT_ATTITUDE_ACTION_ZH = re.compile(
-    r"换货|退款|退货|维修|送检|检测|补偿|赔偿|退还|延长保修|延保|补发|重发"
+_DIRECT_ATTITUDE_CONDITIONAL_REMEDY_COMMITMENT_ZH = re.compile(
+    rf"(?:则|就|将|会|可|可以|愿意|同意|接受).{{0,12}}"
+    rf"(?:{_DIRECT_ATTITUDE_REMEDY_ACTION_ZH.pattern})"
 )
+_DIRECT_ATTITUDE_REMEDY_SCOPE_ZH = {
+    "更换": "EXCHANGE",
+    "换货": "EXCHANGE",
+    "退款": "REFUND",
+    "退还": "REFUND",
+    "退货": "RETURN",
+    "维修": "REPAIR",
+    "补偿": "COMPENSATION",
+    "赔偿": "COMPENSATION",
+    "延长保修": "WARRANTY_EXTENSION",
+    "延保": "WARRANTY_EXTENSION",
+    "补发": "RESHIP",
+    "重发": "RESHIP",
+}
 _DIRECT_ATTITUDE_SIGNAL_EN = re.compile(
     r"\b(?:partially\s+(?:agree|agreed|accept|accepted)|agree|agreed|agrees|accept|"
     r"accepted|accepts|reject|rejected|rejects|refuse|refused|refuses|disagree|"
@@ -113,11 +139,12 @@ _DIRECT_ATTITUDE_ROLE_SELF_ZH = {
     "MERCHANT": re.compile(r"^\s*(?:商家|卖家|店铺|商户|客服)(?P<body>.*)$"),
 }
 _DIRECT_ATTITUDE_THIRD_PARTY_ZH = (
-    r"(?:用户|买家|客户|消费者|对方|商家|卖家|店铺|商户|客服|平台|第三方)"
+    r"(?:平台客服|用户|买家|客户|消费者|对方|商家|卖家|店铺|商户|客服|平台|第三方)"
 )
 _DIRECT_ATTITUDE_ATTRIBUTION_ZH = re.compile(
     rf"(?:的是|由)\s*{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}"
-    rf"|(?:据|按|根据)\s*{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}"
+    rf"|(?:据|按|根据)\s*{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}(?:的)?\s*"
+    r"(?:说法|意见|观点|立场|态度|回复|回应|答复|方案|建议)"
     rf"|{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}.{{0,12}}"
     r"(?:说|表示|回复|回应|答复|声称|称|认为|提出|建议|"
     r"部分(?:同意|接受)|同意|接受|拒绝|不同意|不支持|不接受|愿意|"
@@ -128,7 +155,9 @@ _DIRECT_ATTITUDE_THIRD_PARTY_TOPIC_ZH = re.compile(
     r"(?:处理意见|意见|立场|方案|建议|说法).{0,8}(?:如下|是|为|包括)\s*$"
 )
 _DIRECT_ATTITUDE_THIRD_PARTY_PROPOSAL_OBJECT_ZH = re.compile(
-    rf"(?:由\s*)?{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}\s*(?:所\s*)?(?:提出|建议)的"
+    rf"(?:由\s*)?{_DIRECT_ATTITUDE_THIRD_PARTY_ZH}\s*(?:所\s*)?"
+    r"(?:(?:提出|建议)的|的)(?P<object>"
+    r"[^，,。！？!?；;]{0,24}(?:请求|诉求|方案|建议|要求|主张))"
 )
 _DIRECT_ATTITUDE_DEFERRED_ATTRIBUTION_ZH = re.compile(
     rf"[（(]\s*(?:以上|上述|前述|该内容|这些内容)?\s*(?:为|是|属于)?\s*"
@@ -216,6 +245,7 @@ CASE_DETAIL_TOP_LEVEL_FIELDS = frozenset(
         "handoff_notes",
         "party_intake_state",
         "case_fact_matrix",
+        "handoff_remark_partition",
         "unilateral_case_matrix",
     }
 )
@@ -251,6 +281,44 @@ _PARTY_INTAKE_REMARK_STATUSES = frozenset(
 _PARTY_INTAKE_READY_REMARK_STATUSES = _PARTY_INTAKE_REMARK_STATUSES - {
     "NOT_READY"
 }
+_INTAKE_CONVERSATION_ACTIONS = frozenset(
+    {
+        "ASK_SUBSTANTIVE",
+        "INVITE_OPTIONAL_REMARK",
+        "ACK_REMARK",
+        "ACK_NO_REMARK",
+    }
+)
+_INTAKE_REMARK_ACK_ACTIONS = frozenset({"ACK_REMARK", "ACK_NO_REMARK"})
+_HANDOFF_REMARK_PARTITION_SCHEMA_VERSION = "handoff_remark_partition.v1"
+_HANDOFF_REMARK_PARTITION_FIELDS = frozenset(
+    {
+        "schema_version",
+        "case_fact_matrix_id",
+        "case_fact_matrix_version",
+        "case_fact_matrix_hash",
+        "parties",
+    }
+)
+_HANDOFF_REMARK_PARTY_BASE_FIELDS = frozenset(
+    {"party_role", "remark_status", "latest_remark", "remarks"}
+)
+_ROOM_MESSAGE_REMARK_SOURCE_FIELDS = frozenset(
+    {"source_kind", "message_id", "message_hash"}
+)
+_FORMAL_CONFIRMATION_REMARK_SOURCE_FIELDS = frozenset(
+    {"source_kind", "command_id", "request_hash"}
+)
+_HANDOFF_REMARK_ENTRY_FIELDS = frozenset(
+    {
+        "party_role",
+        "text",
+        "source_message_id",
+        "source_message_hash",
+        "turn_source",
+    }
+)
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _PARTY_INTAKE_RECOMMENDATIONS = frozenset(
     {"NEED_MORE_INFO", "ACCEPTED", "NOT_ADMISSIBLE"}
 )
@@ -343,6 +411,7 @@ class CaseDetailDossierSkill:
         self,
         *,
         request: IntakeTurnRequest,
+        conversation_action: str,
         room_utterance: str,
         llm_case_detail: dict[str, Any] | None,
         llm_dossier_patch: dict[str, Any] | None,
@@ -356,6 +425,11 @@ class CaseDetailDossierSkill:
         ) = None,
         llm_unilateral_case_matrix: UnilateralCaseMatrixDraftV1 | None = None,
     ) -> DossierRenderResult:
+        if conversation_action not in _INTAKE_CONVERSATION_ACTIONS:
+            raise _party_intake_state_error(
+                "INTAKE_CONVERSATION_ACTION_INVALID",
+                "conversation_action is not supported by the Intake reducer",
+            )
         if llm_case_matrix_delta is not None and llm_unilateral_case_matrix is not None:
             raise ValueError("provide only llm_case_matrix_delta")
         effective_matrix_delta = llm_case_matrix_delta or llm_unilateral_case_matrix
@@ -390,6 +464,75 @@ class CaseDetailDossierSkill:
         )
         bounded_llm_case_detail = _case_detail_fields_only(llm_case_detail or {})
         proposed_party_state = bounded_llm_case_detail.pop("party_intake_state", None)
+        proposed_remark_partition = bounded_llm_case_detail.pop(
+            "handoff_remark_partition",
+            None,
+        )
+        previous_actor_entry = copy.deepcopy(party_intake_state[actor_role])
+        previous_remark_status = _handoff_remark_status(previous_actor_entry)
+        previous_remark_partition = _validated_handoff_remark_partition(
+            previous.get("handoff_remark_partition"),
+            matrix=previous.get("case_fact_matrix"),
+            source="persisted handoff_remark_partition",
+            allow_missing=True,
+        )
+        if previous_remark_partition is None and any(
+            _handoff_remark_status(party_intake_state[role]) != "NOT_READY"
+            for role in _PARTY_INTAKE_ROLES
+        ):
+            if not isinstance(previous.get("case_fact_matrix"), dict):
+                raise _party_intake_state_error(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_REQUIRED",
+                    "ready Intake authority requires the persisted handoff remark partition",
+                )
+            previous_remark_partition = _legacy_handoff_remark_partition(
+                matrix=previous["case_fact_matrix"],
+                party_intake_state=party_intake_state,
+                request=request,
+            )
+            previous["handoff_remark_partition"] = copy.deepcopy(
+                previous_remark_partition
+            )
+        previous_actor_partition = (
+            previous_remark_partition["parties"][actor_role]
+            if previous_remark_partition is not None
+            else None
+        )
+        previous_partition_status = (
+            str(previous_actor_partition["remark_status"])
+            if previous_actor_partition is not None
+            else previous_remark_status
+        )
+        if (
+            previous_actor_partition is not None
+            and previous_partition_status != previous_remark_status
+        ):
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_AUTHORITY_CONFLICT",
+                "persisted handoff partition and party Intake state disagree",
+            )
+        actor_substantive_frozen = previous_partition_status != "NOT_READY"
+        if actor_substantive_frozen:
+            return _render_frozen_handoff_remark_turn(
+                request=request,
+                conversation_action=conversation_action,
+                room_utterance=room_utterance,
+                previous=previous,
+                party_intake_state=party_intake_state,
+                actor_role=actor_role,
+                previous_actor_entry=previous_actor_entry,
+                previous_partition=previous_remark_partition,
+                effective_matrix_delta=effective_matrix_delta,
+                llm_case_detail=bounded_llm_case_detail,
+                llm_admission_recommendation=llm_admission_recommendation,
+                llm_missing_fields=llm_missing_fields,
+                llm_confidence=llm_confidence,
+            )
+        if proposed_remark_partition is not None:
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_MODEL_AUTHORITY_FORBIDDEN",
+                "model output cannot create handoff remark authority",
+            )
         if proposed_party_state is not None:
             validated_proposal = _validated_party_intake_state(
                 proposed_party_state,
@@ -400,12 +543,14 @@ class CaseDetailDossierSkill:
                     "INTAKE_PARTY_STATE_MODEL_AUTHORITY_FORBIDDEN",
                     "model output cannot create or advance party-scoped Intake authority",
                 )
-        previous_actor_entry = copy.deepcopy(party_intake_state[actor_role])
-        previous_remark_status = _handoff_remark_status(previous_actor_entry)
+        if conversation_action in _INTAKE_REMARK_ACK_ACTIONS:
+            raise _party_intake_state_error(
+                "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
+                "remark acknowledgement requires frozen substantive authority",
+            )
         previous_phase_source_message_id = str(
             previous_actor_entry["handoff_notes"].get("phase_source_message_id") or ""
         )
-        previous_waiting_for_remark = previous_remark_status == "WAITING_FOR_REMARK"
         detail = self._default_case_detail(request)
         detail = _deep_merge(detail, previous if _is_case_detail(previous) else {})
         _set_party_intake_mirror(detail, previous_actor_entry)
@@ -521,40 +666,28 @@ class CaseDetailDossierSkill:
             )
 
         if quality["ready_for_next_step"]:
-            if (
-                previous_remark_status == "READY_PENDING_REMARK_INVITE"
-                and has_current_actor_answer
-                and current_message_id != previous_phase_source_message_id
-            ):
-                missing_info["next_questions"] = []
-                next_remark_status = "WAITING_FOR_REMARK"
-            elif previous_remark_status in {
-                "WAITING_FOR_REMARK",
-                "HAS_REMARKS",
-                "NO_EXTRA_REMARKS",
-            }:
-                missing_info["next_questions"] = []
-                next_remark_status = previous_remark_status
-            else:
-                next_remark_status = "READY_PENDING_REMARK_INVITE"
-                substantive_questions = [
-                    question
-                    for question in _list_values(missing_info.get("next_questions"))
-                    if _is_substantive_case_question(question)
-                ]
-                missing_info["next_questions"] = (
-                    substantive_questions[:1]
-                    or [_question_for_quality_gap(score_breakdown)]
+            if conversation_action != "INVITE_OPTIONAL_REMARK":
+                raise _party_intake_state_error(
+                    "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
+                    "the first ready turn must invite the optional remark in the same turn",
                 )
-            phase_source_message_id = previous_phase_source_message_id
-            if next_remark_status != previous_remark_status:
-                phase_source_message_id = current_message_id
+            if not current_message_id:
+                raise _party_intake_state_error(
+                    "INTAKE_HANDOFF_REMARK_SOURCE_REQUIRED",
+                    "the first ready turn requires an authenticated participant message",
+                )
+            missing_info["next_questions"] = []
             _ensure_handoff_notes(
                 detail,
-                remark_status=next_remark_status,
-                phase_source_message_id=phase_source_message_id,
+                remark_status="WAITING_FOR_REMARK",
+                phase_source_message_id=current_message_id,
             )
         else:
+            if conversation_action != "ASK_SUBSTANTIVE":
+                raise _party_intake_state_error(
+                    "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
+                    "an incomplete Intake turn must ask substantive questions",
+                )
             phase_source_message_id = previous_phase_source_message_id
             if previous_remark_status != "NOT_READY" and current_message_id:
                 phase_source_message_id = current_message_id
@@ -570,13 +703,6 @@ class CaseDetailDossierSkill:
                     score_breakdown
                 )
                 missing_info["next_questions"] = [question]
-        _record_handoff_remark_if_needed(
-            detail,
-            request,
-            previous_waiting_for_remark=previous_waiting_for_remark,
-            previous_phase_source_message_id=previous_phase_source_message_id,
-        )
-
         admission = _ensure_dict(detail, "admission")
         if quality["ready_for_next_step"]:
             admission["recommendation"] = "ACCEPTED"
@@ -603,6 +729,24 @@ class CaseDetailDossierSkill:
             delta=effective_matrix_delta,
         ).model_dump(mode="json")
         detail.pop("unilateral_case_matrix", None)
+        if quality["ready_for_next_step"]:
+            detail["handoff_remark_partition"] = _initial_handoff_remark_partition(
+                matrix=detail["case_fact_matrix"],
+                party_intake_state=party_intake_state,
+                previous_partition=previous_remark_partition,
+                actor_role=actor_role,
+                actor_status="WAITING_FOR_REMARK",
+                actor_source=_room_message_remark_source(
+                    message_id=current_message_id,
+                    role=actor_role,
+                    text=str(current_message.text),
+                ),
+            )
+        else:
+            # Before the threshold there is no frozen matrix to which a remark
+            # partition can bind.  Creating one here would make the next
+            # substantive matrix revision look like an authority rebind.
+            detail.pop("handoff_remark_partition", None)
 
         operations = [
             {
@@ -663,9 +807,9 @@ class CaseDetailDossierSkill:
         )
 
     # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：类/闭包内部方法。
-    # 具体功能：`_trusted_references` 围绕业务引用号计算该函数独立负责的业务派生值；关键协作调用：`join`、`previous.get`、`previous_refs.get`；返回/更新字段：`order_reference`、`after_sales_reference`、`logistics_reference`。
-    # 上下游：上游为 表单、当前参与方私聊、上一版卷宗；下游为 本文件的 `_first_match`。
-    # 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
+    # 具体功能：`_trusted_references` 围绕业务引用号核对可信业务引用。
+    # 上下游：上游为 Intake 请求；下游为确定性卷宗归并。
+    # 系统意义：只接受表单、既有权威或参与方原文中的业务引用。
     def _trusted_references(self, request: IntakeTurnRequest) -> dict[str, str]:
         current_text = (
             request.current_user_message.text
@@ -699,23 +843,13 @@ class CaseDetailDossierSkill:
             ),
         }
 
-    # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：类/闭包内部方法。
-    # 具体功能：`_hard_missing_fields` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`trusted_refs.get`、`missing.append`。
-    # 上下游：上游为 表单、当前参与方私聊、上一版卷宗；下游为 协作调用 `trusted_refs.get`、`missing.append`。
-    # 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
     @staticmethod
     def _hard_missing_fields(trusted_refs: dict[str, str]) -> list[str]:
         missing: list[str] = []
         if not trusted_refs.get("order_reference"):
             missing.append("ORDER_REFERENCE")
-        if not trusted_refs.get("logistics_reference"):
-            missing.append("LOGISTICS_REFERENCE")
         return missing
 
-    # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：类/闭包内部方法。
-    # 具体功能：`_default_case_detail` 围绕本阶段状态计算该函数独立负责的业务派生值；返回/更新字段：`schema_version`、`case_story`、`references`、`party_positions`。
-    # 上下游：上游为 本文件的 `CaseDetailDossierSkill.render`；下游为 本文件的 `_turn_source_text`、`_party_role_or_default`、`_default_claim_resolution`、`_default_respondent_attitude`。
-    # 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
     def _default_case_detail(self, request: IntakeTurnRequest) -> dict[str, Any]:
         source_text = _turn_source_text(request)
         initial = request.initial_case_facts
@@ -739,16 +873,8 @@ class CaseDetailDossierSkill:
                 "logistics_reference": "",
             },
             "party_positions": {
-                "user_claim": (
-                    source_text
-                    if initiator_role == "USER"
-                    else ""
-                ),
-                "merchant_claim": (
-                    source_text
-                    if initiator_role == "MERCHANT"
-                    else ""
-                ),
+                "user_claim": source_text if initiator_role == "USER" else "",
+                "merchant_claim": source_text if initiator_role == "MERCHANT" else "",
                 "raw_statement": (
                     request.current_user_message.text
                     if request.current_user_message is not None
@@ -767,17 +893,9 @@ class CaseDetailDossierSkill:
                 ),
                 "expected_resolution_text": "",
             },
-            "claim_resolution": _default_claim_resolution(
-                initial,
-                source_text,
-            ),
-            "respondent_attitude": _default_respondent_attitude(
-                initial
-            ),
-            "dispute_core_state": _default_dispute_core_state(
-                initial,
-                source_text,
-            ),
+            "claim_resolution": _default_claim_resolution(initial, source_text),
+            "respondent_attitude": _default_respondent_attitude(initial),
+            "dispute_core_state": _default_dispute_core_state(initial, source_text),
             "risk_assessment": {
                 "case_grade": "LOW",
                 "risk_signals": [],
@@ -815,6 +933,577 @@ class CaseDetailDossierSkill:
             },
         }
 
+
+def _render_frozen_handoff_remark_turn(
+    *,
+    request: IntakeTurnRequest,
+    conversation_action: str,
+    room_utterance: str,
+    previous: dict[str, Any],
+    party_intake_state: dict[str, Any],
+    actor_role: str,
+    previous_actor_entry: dict[str, Any],
+    previous_partition: dict[str, Any] | None,
+    effective_matrix_delta: CaseFactMatrixDeltaV2 | UnilateralCaseMatrixDraftV1 | None,
+    llm_case_detail: dict[str, Any],
+    llm_admission_recommendation: str,
+    llm_missing_fields: list[str],
+    llm_confidence: float,
+) -> DossierRenderResult:
+    if conversation_action not in _INTAKE_REMARK_ACK_ACTIONS:
+        raise _party_intake_state_error(
+            "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
+            "frozen substantive authority accepts only a remark acknowledgement",
+        )
+    if effective_matrix_delta is not None:
+        # Matrix material from a post-threshold model output is non-authoritative;
+        # retain the exact frozen matrix instead of deriving another version.
+        effective_matrix_delta = None
+    # Model-authored core/matrix material is non-authoritative once the threshold
+    # snapshot is frozen. It is intentionally ignored; only the structured
+    # conversation action and authenticated participant message may advance the
+    # remark partition.
+    del llm_case_detail, llm_admission_recommendation, llm_missing_fields
+    if not isinstance(previous.get("case_fact_matrix"), dict):
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_MATRIX_REQUIRED",
+            "frozen substantive authority requires a formal case fact matrix",
+        )
+    current = request.current_user_message
+    if (
+        current is None
+        or request.turn_source != "ROOM_MESSAGE"
+        or current.source != "ROOM_MESSAGE"
+        or str(current.role or "").upper() != actor_role
+        or not str(current.message_id or "").strip()
+        or not str(current.text or "").strip()
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_SOURCE_REQUIRED",
+            "remark acknowledgement requires an authenticated participant ROOM_MESSAGE",
+        )
+
+    if previous_partition is None:
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_PARTITION_REQUIRED",
+            "frozen substantive authority requires the handoff remark partition",
+        )
+    partition = copy.deepcopy(previous_partition)
+    current_text = str(current.text)
+    current_message_id = str(current.message_id).strip()
+    current_message_hash = _room_message_remark_hash(
+        message_id=current_message_id,
+        role=actor_role,
+        text=current_text,
+    )
+    actor_partition = partition["parties"][actor_role]
+    existing_by_source = {
+        str(item["source_message_id"]): item for item in actor_partition["remarks"]
+    }
+    existing = existing_by_source.get(current_message_id)
+    source = {
+        "source_kind": "ROOM_MESSAGE",
+        "message_id": current_message_id,
+        "message_hash": current_message_hash,
+    }
+    notes = copy.deepcopy(previous_actor_entry["handoff_notes"])
+    source_replays_phase = (
+        str(actor_partition.get("source", {}).get("message_id") or "")
+        == current_message_id
+    )
+
+    if conversation_action == "ACK_REMARK":
+        remark = {
+            "party_role": actor_role,
+            "text": current_text,
+            "source_message_id": current_message_id,
+            "source_message_hash": current_message_hash,
+            "turn_source": "ROOM_MESSAGE",
+        }
+        if existing is not None and existing != remark:
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_REPLAY_CONFLICT",
+                "a remark source message cannot bind changed text or hash",
+            )
+        if existing is None and source_replays_phase:
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_REPLAY_CONFLICT",
+                "a phase source message cannot be rebound as a remark",
+            )
+        if existing is None:
+            actor_partition["remarks"].append(remark)
+        actor_partition["remark_status"] = "HAS_REMARKS"
+        actor_partition["source"] = source
+        actor_partition["latest_remark"] = current_text
+        notes["remark_status"] = "HAS_REMARKS"
+        notes["phase_source_message_id"] = current_message_id
+        notes["latest_remark"] = current_text
+        compatibility_remark = {
+            "role": actor_role,
+            "text": current_text,
+            "source_message_id": current_message_id,
+            "turn_source": "ROOM_MESSAGE",
+        }
+        compatibility_by_source = {
+            str(item.get("source_message_id")): item
+            for item in notes["remarks"]
+            if isinstance(item, dict)
+        }
+        prior_compatibility = compatibility_by_source.get(current_message_id)
+        if prior_compatibility is not None and prior_compatibility != compatibility_remark:
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_REPLAY_CONFLICT",
+                "nested handoff replay conflicts with the participant message",
+            )
+        if prior_compatibility is None:
+            notes["remarks"].append(compatibility_remark)
+    else:
+        if existing is not None:
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_REPLAY_CONFLICT",
+                "a persisted remark source cannot be rebound as no-remark authority",
+            )
+        actor_had_remarks = bool(actor_partition["remarks"])
+        if source_replays_phase and not actor_had_remarks:
+            if (
+                actor_partition["remark_status"] != "NO_EXTRA_REMARKS"
+                or actor_partition.get("source") != source
+                or actor_partition["latest_remark"]
+                or actor_partition["remarks"]
+            ):
+                raise _party_intake_state_error(
+                    "INTAKE_HANDOFF_REMARK_REPLAY_CONFLICT",
+                    "a no-remark source message cannot bind changed text or hash",
+                )
+        elif actor_partition["remark_status"] == "NO_EXTRA_REMARKS":
+            # Another explicit no-remark turn is a semantic no-op. The existing
+            # source remains the authority because NO_EXTRA_REMARKS has no
+            # same-status source-rebinding transition.
+            pass
+        if actor_had_remarks:
+            # "No further remarks" after one or more real remarks is an Agent
+            # acknowledgement only.  The append-only HAS_REMARKS authority is
+            # already complete and must remain byte-for-byte unchanged.
+            actor_partition["remark_status"] = "HAS_REMARKS"
+            actor_partition["latest_remark"] = str(
+                actor_partition["remarks"][-1]["text"]
+            )
+            notes["remark_status"] = "HAS_REMARKS"
+            notes["latest_remark"] = str(notes["remarks"][-1]["text"])
+        elif actor_partition["remark_status"] != "NO_EXTRA_REMARKS":
+            actor_partition["remark_status"] = "NO_EXTRA_REMARKS"
+            actor_partition["latest_remark"] = ""
+            actor_partition["remarks"] = []
+            actor_partition["source"] = source
+            notes["remark_status"] = "NO_EXTRA_REMARKS"
+            notes["latest_remark"] = "无额外备注。"
+            notes["remarks"] = []
+            notes["phase_source_message_id"] = current_message_id
+
+    detail = copy.deepcopy(previous)
+    detail["handoff_remark_partition"] = _validated_handoff_remark_partition(
+        partition,
+        matrix=detail["case_fact_matrix"],
+        source="derived handoff_remark_partition",
+        allow_missing=False,
+    )
+    current_actor_entry = copy.deepcopy(previous_actor_entry)
+    current_actor_entry["handoff_notes"] = notes
+    party_intake_state[actor_role] = _validated_party_intake_entry(
+        current_actor_entry,
+        role=actor_role,
+        source="derived frozen current actor entry",
+    )
+    detail["party_intake_state"] = copy.deepcopy(party_intake_state)
+    _set_party_intake_mirror(detail, party_intake_state[actor_role])
+    score = int(party_intake_state[actor_role]["intake_quality"]["score"])
+    confidence = _clamp_confidence(
+        party_intake_state[actor_role]["admission"].get(
+            "confidence",
+            llm_confidence,
+        )
+    )
+    operations = [
+        {
+            "type": "UPSERT_CASE_DETAIL",
+            "target_key": "case_detail",
+            "animation": "ink-write",
+            "value": detail,
+        },
+        {
+            "type": "SET_QUALITY_SCORE",
+            "target_key": "intake_quality",
+            "animation": "score-rise",
+            "value": score,
+        },
+    ]
+    return DossierRenderResult(
+        dossier_patch={
+            "case_detail": detail,
+            "room_utterance_source": room_utterance,
+        },
+        scroll_snapshot=detail,
+        canvas_operations=operations,
+        admission_recommendation="ACCEPTED",
+        missing_fields=[],
+        confidence=confidence,
+    )
+
+
+def _matrix_remark_partition_binding(matrix: Any) -> dict[str, Any]:
+    if not isinstance(matrix, dict):
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_MATRIX_REQUIRED",
+            "handoff remark authority requires a case fact matrix",
+        )
+    matrix_id = matrix.get("matrix_id")
+    matrix_version = matrix.get("matrix_version")
+    content_hash = matrix.get("content_hash")
+    if (
+        not isinstance(matrix_id, str)
+        or not matrix_id
+        or type(matrix_version) is not int
+        or matrix_version < 1
+        or not isinstance(content_hash, str)
+        or _SHA256_HEX_RE.fullmatch(content_hash) is None
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_MATRIX_INVALID",
+            "handoff remark matrix binding is malformed",
+        )
+    return {
+        "case_fact_matrix_id": matrix_id,
+        "case_fact_matrix_version": matrix_version,
+        "case_fact_matrix_hash": content_hash,
+    }
+
+
+def _room_message_remark_hash(*, message_id: str, role: str, text: str) -> str:
+    return canonical_sha256(
+        {
+            "message_id": message_id,
+            "role": role,
+            "source": "ROOM_MESSAGE",
+            "text": text,
+        }
+    )
+
+
+def _room_message_remark_source(
+    *,
+    message_id: str,
+    role: str,
+    text: str,
+) -> dict[str, str]:
+    normalized_id = str(message_id or "").strip()
+    normalized_role = _require_party_actor_role(role)
+    normalized_text = str(text or "")
+    if not normalized_id or not normalized_text.strip():
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_SOURCE_REQUIRED",
+            "ROOM_MESSAGE remark authority requires message id and text",
+        )
+    return {
+        "source_kind": "ROOM_MESSAGE",
+        "message_id": normalized_id,
+        "message_hash": _room_message_remark_hash(
+            message_id=normalized_id,
+            role=normalized_role,
+            text=normalized_text,
+        ),
+    }
+
+
+def _default_handoff_remark_party(role: str) -> dict[str, Any]:
+    return {
+        "party_role": _require_party_actor_role(role),
+        "remark_status": "NOT_READY",
+        "latest_remark": "",
+        "remarks": [],
+    }
+
+
+def _legacy_handoff_remark_partition(
+    *,
+    matrix: dict[str, Any],
+    party_intake_state: dict[str, Any],
+    request: IntakeTurnRequest,
+) -> dict[str, Any]:
+    parties: dict[str, dict[str, Any]] = {}
+    for role in _PARTY_INTAKE_ROLES:
+        entry = party_intake_state[role]
+        notes = entry["handoff_notes"]
+        status = str(notes["remark_status"])
+        party = _default_handoff_remark_party(role)
+        if status == "NOT_READY":
+            parties[role] = party
+            continue
+        source_message_id = str(notes["phase_source_message_id"] or "").strip()
+        source_text = _participant_message_text_for_source(
+            request,
+            message_id=source_message_id,
+            role=role,
+        )
+        party["remark_status"] = status
+        party["source"] = _room_message_remark_source(
+            message_id=source_message_id,
+            role=role,
+            text=source_text,
+        )
+        if status == "HAS_REMARKS":
+            remarks = []
+            for legacy_remark in notes["remarks"]:
+                remark_id = str(legacy_remark["source_message_id"])
+                remark_text = str(legacy_remark["text"])
+                remarks.append(
+                    {
+                        "party_role": role,
+                        "text": remark_text,
+                        "source_message_id": remark_id,
+                        "source_message_hash": _room_message_remark_hash(
+                            message_id=remark_id,
+                            role=role,
+                            text=remark_text,
+                        ),
+                        "turn_source": "ROOM_MESSAGE",
+                    }
+                )
+            party["latest_remark"] = str(notes["latest_remark"])
+            party["remarks"] = remarks
+        elif status == "NO_EXTRA_REMARKS":
+            party["latest_remark"] = ""
+            party["remarks"] = []
+        parties[role] = party
+    upgraded = _validated_handoff_remark_partition(
+        {
+            "schema_version": _HANDOFF_REMARK_PARTITION_SCHEMA_VERSION,
+            **_matrix_remark_partition_binding(matrix),
+            "parties": parties,
+        },
+        matrix=matrix,
+        source="legacy handoff_remark_partition upgrade",
+        allow_missing=False,
+    )
+    if upgraded is None:
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+            "legacy handoff remark partition upgrade produced no authority",
+        )
+    return upgraded
+
+
+def _participant_message_text_for_source(
+    request: IntakeTurnRequest,
+    *,
+    message_id: str,
+    role: str,
+) -> str:
+    messages = [
+        *request.initiator_statement_transcript,
+        *request.recent_dialogue_messages,
+    ]
+    if request.current_user_message is not None:
+        messages.append(request.current_user_message)
+    for message in messages:
+        if (
+            getattr(message, "message_id", None) == message_id
+            and getattr(message, "role", None) == role
+        ):
+            return str(message.text)
+    raise _party_intake_state_error(
+        "INTAKE_HANDOFF_REMARK_SOURCE_UNAVAILABLE",
+        "legacy ready authority cannot be upgraded without its participant message",
+    )
+
+
+def _initial_handoff_remark_partition(
+    *,
+    matrix: dict[str, Any],
+    party_intake_state: dict[str, Any],
+    previous_partition: dict[str, Any] | None,
+    actor_role: str,
+    actor_status: str,
+    actor_source: dict[str, str] | None,
+) -> dict[str, Any]:
+    actor = _require_party_actor_role(actor_role)
+    if actor_status not in _PARTY_INTAKE_REMARK_STATUSES:
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_STATUS_INVALID",
+            "handoff remark status is not supported",
+        )
+    if previous_partition is not None:
+        parties = copy.deepcopy(previous_partition["parties"])
+    else:
+        parties = {
+            role: _default_handoff_remark_party(role) for role in _PARTY_INTAKE_ROLES
+        }
+    parties[actor]["remark_status"] = actor_status
+    if actor_status != "NOT_READY":
+        if actor_source is None:
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_SOURCE_REQUIRED",
+                "non-NOT_READY handoff authority requires a source",
+            )
+        parties[actor]["source"] = copy.deepcopy(actor_source)
+    return {
+        "schema_version": _HANDOFF_REMARK_PARTITION_SCHEMA_VERSION,
+        **_matrix_remark_partition_binding(matrix),
+        "parties": parties,
+    }
+
+
+def _validated_handoff_remark_partition(
+    value: Any,
+    *,
+    matrix: Any,
+    source: str,
+    allow_missing: bool,
+) -> dict[str, Any] | None:
+    if value is None and allow_missing:
+        return None
+    if not isinstance(value, dict) or set(value) != _HANDOFF_REMARK_PARTITION_FIELDS:
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+            f"{source} has an invalid top-level shape",
+        )
+    if value.get("schema_version") != _HANDOFF_REMARK_PARTITION_SCHEMA_VERSION:
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+            f"{source} has an unsupported schema_version",
+        )
+    expected_binding = _matrix_remark_partition_binding(matrix)
+    if any(value.get(field) != expected for field, expected in expected_binding.items()):
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_MATRIX_CONFLICT",
+            f"{source} does not bind the adjacent case fact matrix",
+        )
+    parties = value.get("parties")
+    if not isinstance(parties, dict) or set(parties) != set(_PARTY_INTAKE_ROLES):
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+            f"{source}.parties must contain exactly USER and MERCHANT",
+        )
+    validated = {
+        "schema_version": _HANDOFF_REMARK_PARTITION_SCHEMA_VERSION,
+        **expected_binding,
+        "parties": {},
+    }
+    for role in _PARTY_INTAKE_ROLES:
+        party = parties.get(role)
+        if not isinstance(party, dict):
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_PARTY_INVALID",
+                f"{source}.{role} is malformed",
+            )
+        status = party.get("remark_status")
+        expected_fields = set(_HANDOFF_REMARK_PARTY_BASE_FIELDS)
+        if status != "NOT_READY":
+            expected_fields.add("source")
+        if set(party) != expected_fields or party.get("party_role") != role:
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_PARTY_INVALID",
+                f"{source}.{role} has an invalid shape or party_role",
+            )
+        if status not in _PARTY_INTAKE_REMARK_STATUSES:
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_STATUS_INVALID",
+                f"{source}.{role} has an unsupported remark_status",
+            )
+        source_value = party.get("source")
+        if status != "NOT_READY":
+            _validate_handoff_remark_source(source_value, source=f"{source}.{role}.source")
+        latest = party.get("latest_remark")
+        remarks = party.get("remarks")
+        if not isinstance(latest, str) or not isinstance(remarks, list):
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_PARTY_INVALID",
+                f"{source}.{role} has malformed remark data",
+            )
+        seen_ids: set[str] = set()
+        for remark in remarks:
+            _validate_handoff_remark_entry(remark, role=role, source=source)
+            source_id = str(remark["source_message_id"])
+            if source_id in seen_ids:
+                raise _party_intake_state_error(
+                    "INTAKE_HANDOFF_REMARK_REPLAY_CONFLICT",
+                    f"{source}.{role} repeats a remark source message",
+                )
+            seen_ids.add(source_id)
+        if status == "HAS_REMARKS":
+            canonical_payload = bool(remarks) and latest == remarks[-1]["text"]
+        else:
+            canonical_payload = not latest and not remarks
+        if not canonical_payload:
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_STATUS_CONFLICT",
+                f"{source}.{role} status and remark payload disagree",
+            )
+        validated["parties"][role] = copy.deepcopy(party)
+    return validated
+
+
+def _validate_handoff_remark_source(value: Any, *, source: str) -> None:
+    if not isinstance(value, dict):
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_SOURCE_INVALID",
+            f"{source} is malformed",
+        )
+    source_kind = value.get("source_kind")
+    if source_kind == "ROOM_MESSAGE":
+        fields = _ROOM_MESSAGE_REMARK_SOURCE_FIELDS
+        identifiers = ("message_id", "message_hash")
+    elif source_kind == "FORMAL_CONFIRMATION":
+        fields = _FORMAL_CONFIRMATION_REMARK_SOURCE_FIELDS
+        identifiers = ("command_id", "request_hash")
+    else:
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_SOURCE_INVALID",
+            f"{source} has an unsupported source_kind",
+        )
+    if (
+        set(value) != fields
+        or not isinstance(value.get(identifiers[0]), str)
+        or not value[identifiers[0]]
+        or not isinstance(value.get(identifiers[1]), str)
+        or _SHA256_HEX_RE.fullmatch(value[identifiers[1]]) is None
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_SOURCE_INVALID",
+            f"{source} has malformed source identity",
+        )
+
+
+def _validate_handoff_remark_entry(
+    value: Any,
+    *,
+    role: str,
+    source: str,
+) -> None:
+    if (
+        not isinstance(value, dict)
+        or set(value) != _HANDOFF_REMARK_ENTRY_FIELDS
+        or value.get("party_role") != role
+        or value.get("turn_source") != "ROOM_MESSAGE"
+        or any(
+            not isinstance(value.get(field), str) or not value[field]
+            for field in (
+                "text",
+                "source_message_id",
+                "source_message_hash",
+            )
+        )
+        or _SHA256_HEX_RE.fullmatch(value["source_message_hash"]) is None
+        or value["source_message_hash"]
+        != _room_message_remark_hash(
+            message_id=value["source_message_id"],
+            role=role,
+            text=value["text"],
+        )
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_HANDOFF_REMARK_ENTRY_INVALID",
+            f"{source}.{role} contains a malformed or unauthenticated remark",
+        )
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
 # 具体功能：`_case_detail_fields_only` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`value.items`。
@@ -2191,22 +2880,7 @@ def _enforce_respondent_attitude_source(
 # 上下游：上游为 本文件的 `_remove_ungrounded_respondent_attitude`、`_enforce_respondent_attitude_source`；下游为 协作调用 `strip`、`re.search`。
 # 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
 def _has_explicit_respondent_report(text: str, initiator_role: str) -> bool:
-    normalized = str(text or "").strip()
-    if not normalized:
-        return False
-    party_pattern = (
-        r"(?:用户|买家|客户|对方)"
-        if initiator_role == "MERCHANT"
-        else r"(?:商家|卖家|店铺|商户|客服|对方)"
-    )
-    attitude_pattern = (
-        r"(?:说|表示|回复|回应|答复|同意|接受|拒绝|不同意|不支持|"
-        r"要求|提出|建议|愿意|承诺|让我|让其|未回应|没回应|没有回应)"
-    )
-    return bool(
-        re.search(rf"{party_pattern}.{{0,24}}{attitude_pattern}", normalized)
-        or re.search(rf"{attitude_pattern}.{{0,16}}{party_pattern}", normalized)
-    )
+    return bool(_reported_attitude_position(text, initiator_role))
 
 
 def _direct_attitude_clauses(text: str) -> list[tuple[str, str | None]]:
@@ -2223,6 +2897,32 @@ def _direct_attitude_clauses(text: str) -> list[tuple[str, str | None]]:
     if clause:
         clauses.append((clause, preceding_boundary))
     return clauses
+
+
+def _direct_attitude_current_transition_clauses_zh(
+    clauses: list[tuple[str, str | None]],
+    *,
+    authenticated_current_message: bool,
+) -> list[tuple[str, str | None]] | None:
+    """Scope an explicit historical-to-current transition to its current stance."""
+
+    if not authenticated_current_message:
+        return None
+    historical_attitude_seen = False
+    for index, (clause, _) in enumerate(clauses):
+        if (
+            _DIRECT_ATTITUDE_HISTORICAL_SCOPE_ZH.search(clause) is not None
+            and _DIRECT_ATTITUDE_SIGNAL_ZH.search(clause) is not None
+        ):
+            historical_attitude_seen = True
+            continue
+        if (
+            historical_attitude_seen
+            and _DIRECT_ATTITUDE_CURRENT_SCOPE_ZH.match(clause) is not None
+            and _DIRECT_ATTITUDE_SIGNAL_ZH.search(clause) is not None
+        ):
+            return clauses[index:]
+    return None
 
 
 def _direct_attitude_self_subject_zh(
@@ -2247,7 +2947,7 @@ def _direct_attitude_semantic_clause_zh(
     respondent_role: str | None = None,
 ) -> str:
     semantic_clause = _DIRECT_ATTITUDE_THIRD_PARTY_PROPOSAL_OBJECT_ZH.sub(
-        "第三方方案",
+        lambda match: "其" + match.group("object"),
         clause,
     )
     role_subject = _DIRECT_ATTITUDE_ROLE_SELF_ZH.get(
@@ -2292,8 +2992,63 @@ def _direct_attitude_explicit_third_party_topic_zh(
     )
 
 
-def _direct_attitude_action_terms_zh(clause: str) -> set[str]:
-    return set(_DIRECT_ATTITUDE_ACTION_ZH.findall(clause))
+def _direct_attitude_remedy_scopes_zh(clause: str) -> set[str]:
+    return {
+        _DIRECT_ATTITUDE_REMEDY_SCOPE_ZH[term]
+        for term in _DIRECT_ATTITUDE_REMEDY_ACTION_ZH.findall(clause)
+    }
+
+
+def _direct_attitude_asserted_remedy_scopes_zh(clause: str) -> set[str]:
+    signal = _DIRECT_ATTITUDE_SIGNAL_ZH.search(clause)
+    if signal is None:
+        return set()
+    return _direct_attitude_remedy_scopes_zh(clause[signal.start() :])
+
+
+def _direct_attitude_conditional_remedy_scopes_zh(clause: str) -> set[str]:
+    commitment = _DIRECT_ATTITUDE_CONDITIONAL_REMEDY_COMMITMENT_ZH.search(clause)
+    if commitment is None:
+        return set()
+    return _direct_attitude_remedy_scopes_zh(clause[commitment.start() :])
+
+
+def _direct_attitude_has_investigation_agreement_zh(clause: str) -> bool:
+    for agreement in _DIRECT_ATTITUDE_INVESTIGATION_AGREEMENT_ZH.finditer(clause):
+        if not any(
+            condition.start() < agreement.start()
+            for condition in _DIRECT_ATTITUDE_CONDITIONAL_SCOPE_ZH.finditer(clause)
+        ):
+            return True
+    return False
+
+
+def _direct_attitude_action_scoped_alternative(
+    *,
+    authenticated_current_message: bool,
+    respondent_role: str | None,
+    codes: set[str],
+    refused_remedy_scopes: set[str],
+    conditional_remedy_scopes: set[str],
+    investigation_agreement_seen: bool,
+) -> bool:
+    """Resolve only a conditional plan whose remedies are distinct from the refusal."""
+
+    if not authenticated_current_message:
+        return False
+    if str(respondent_role or "").upper() not in _DIRECT_ATTITUDE_ROLE_SELF_ZH:
+        return False
+    if not {"AGREE", "DISAGREE"}.issubset(codes) or not codes.issubset(
+        {"AGREE", "DISAGREE", "ALTERNATIVE_PROPOSED"}
+    ):
+        return False
+    if (
+        not investigation_agreement_seen
+        or not refused_remedy_scopes
+        or not conditional_remedy_scopes
+    ):
+        return False
+    return refused_remedy_scopes.isdisjoint(conditional_remedy_scopes)
 
 
 def _direct_attitude_scope_body_zh(
@@ -2319,6 +3074,102 @@ def _direct_attitude_semantic_clause_en(clause: str) -> str:
     )
 
 
+def _direct_attitude_mixes_attribution_zh(
+    clause: str,
+    *,
+    respondent_role: str | None = None,
+) -> bool:
+    semantic_clause = _direct_attitude_semantic_clause_zh(
+        clause,
+        respondent_role=respondent_role,
+    )
+    if _DIRECT_ATTITUDE_ATTRIBUTION_ZH.search(semantic_clause) is None:
+        return False
+    self_terms = r"(?:本公司|本人|我方|我们|本方|我司|我)"
+    role = str(respondent_role or "").upper()
+    if role == "USER":
+        self_terms += r"|(?:用户|买家|客户|消费者)"
+        foreign_terms = r"(?:对方|商家|卖家|店铺|商户|客服|平台|第三方)"
+    elif role == "MERCHANT":
+        self_terms += r"|(?:商家|卖家|店铺|商户|客服)"
+        foreign_terms = r"(?:用户|买家|客户|消费者|对方|平台|第三方)"
+    else:
+        foreign_terms = _DIRECT_ATTITUDE_THIRD_PARTY_ZH
+    for subject in re.finditer(self_terms, semantic_clause):
+        subject_scope = semantic_clause[subject.end() :]
+        signal = _DIRECT_ATTITUDE_SIGNAL_ZH.search(subject_scope)
+        if signal is None:
+            continue
+        intervening_party = re.search(
+            foreign_terms,
+            subject_scope[: signal.start()],
+        )
+        if intervening_party is not None:
+            if role not in _DIRECT_ATTITUDE_ROLE_SELF_ZH:
+                return True
+            continue
+        preceding_reporters = list(
+            re.finditer(foreign_terms, semantic_clause[: subject.start()])
+        )
+        if preceding_reporters:
+            reporter_scope = semantic_clause[
+                preceding_reporters[-1].end() : subject.start()
+            ]
+            if _DIRECT_ATTITUDE_SIGNAL_ZH.search(reporter_scope) is None:
+                continue
+        return True
+    return False
+
+
+def _direct_attitude_mixes_attribution_en(
+    clause: str,
+    *,
+    respondent_role: str | None = None,
+) -> bool:
+    if _DIRECT_ATTITUDE_ATTRIBUTION_EN.search(clause) is None:
+        return False
+    role = str(respondent_role or "").upper()
+    if role == "USER":
+        foreign_terms = r"(?:merchant|seller|store|counterparty)"
+    elif role == "MERCHANT":
+        foreign_terms = r"(?:buyer|customer|consumer|counterparty)"
+    else:
+        foreign_terms = _DIRECT_ATTITUDE_THIRD_PARTY_EN
+    for subject in re.finditer(
+        r"\b(?:i|we|our\s+(?:company|side|firm|business|organization))\b",
+        clause,
+        re.IGNORECASE,
+    ):
+        subject_scope = clause[subject.end() :]
+        signal = _DIRECT_ATTITUDE_SIGNAL_EN.search(subject_scope)
+        if signal is None:
+            continue
+        intervening_party = re.search(
+            rf"\b(?:the\s+)?{foreign_terms}\b",
+            subject_scope[: signal.start()],
+            re.IGNORECASE,
+        )
+        if intervening_party is not None:
+            if role not in _DIRECT_ATTITUDE_ROLE_SELF_ZH:
+                return True
+            continue
+        preceding_reporters = list(
+            re.finditer(
+                rf"\b(?:the\s+)?{foreign_terms}\b",
+                clause[: subject.start()],
+                re.IGNORECASE,
+            )
+        )
+        if preceding_reporters:
+            reporter_scope = clause[
+                preceding_reporters[-1].end() : subject.start()
+            ]
+            if _DIRECT_ATTITUDE_SIGNAL_EN.search(reporter_scope) is None:
+                continue
+        return True
+    return False
+
+
 def detect_direct_respondent_attitude(
     text: str,
     *,
@@ -2341,15 +3192,22 @@ def detect_direct_respondent_attitude(
     resolved: list[str] = []
     unresolved_signal = False
     third_party_signal = False
-    conditional_agreement_terms: set[str] = set()
-    precondition_refusal_terms: set[str] = set()
+    mixed_attribution_signal = False
+    refused_remedy_scopes: set[str] = set()
+    conditional_remedy_scopes: set[str] = set()
+    investigation_agreement_seen = False
     authenticated_current_message = (
         source_authority == RESPONDENT_AUTHORED_CURRENT_MESSAGE
     )
     chinese_speaker_context = "SELF" if authenticated_current_message else "UNKNOWN"
     persistent_third_party_topic = False
-    satisfied_condition_seen = False
     clauses = _direct_attitude_clauses(normalized)
+    current_transition_clauses = _direct_attitude_current_transition_clauses_zh(
+        clauses,
+        authenticated_current_message=authenticated_current_message,
+    )
+    if current_transition_clauses is not None:
+        clauses = current_transition_clauses
     for clause_index, (clause, preceding_boundary) in enumerate(clauses):
         coordinated_with_previous = (
             preceding_boundary is not None
@@ -2387,11 +3245,25 @@ def detect_direct_respondent_attitude(
             persistent_third_party_topic = (
                 persistent_third_party_topic or explicit_third_party_topic
             )
-        if _DIRECT_ATTITUDE_SATISFIED_CONDITION_ZH.search(clause):
-            satisfied_condition_seen = True
-        if _DIRECT_ATTITUDE_SIGNAL_ZH.search(clause):
+        scoped_clause = clause
+        if clause_index > 0 and coordinated_with_previous:
+            scoped_clause = clauses[clause_index - 1][0] + preceding_boundary + clause
+        scoped_body = _direct_attitude_scope_body_zh(
+            scoped_clause,
+            respondent_role=respondent_role,
+        )
+        semantic_clause_zh = _direct_attitude_semantic_clause_zh(
+            clause,
+            respondent_role=respondent_role,
+        )
+        if _DIRECT_ATTITUDE_SIGNAL_ZH.search(semantic_clause_zh):
             if explicit_third_party or chinese_speaker_context == "THIRD_PARTY":
                 third_party_signal = True
+                if explicit_third_party and _direct_attitude_mixes_attribution_zh(
+                    clause,
+                    respondent_role=respondent_role,
+                ):
+                    mixed_attribution_signal = True
                 code = "NONE"
             else:
                 code = _direct_respondent_attitude_clause_zh(
@@ -2402,36 +3274,34 @@ def detect_direct_respondent_attitude(
             if code is None:
                 unresolved_signal = True
             elif code != "NONE":
-                resolved.append(code)
-                scoped_clause = clause
-                if (
-                    clause_index > 0
-                    and coordinated_with_previous
-                ):
-                    scoped_clause = (
-                        clauses[clause_index - 1][0]
-                        + preceding_boundary
-                        + clause
-                    )
-                scoped_body = _direct_attitude_scope_body_zh(
-                    scoped_clause,
-                    respondent_role=respondent_role,
+                remedy_scopes = _direct_attitude_asserted_remedy_scopes_zh(clause)
+                investigation_agreement = (
+                    code == "AGREE"
+                    and _direct_attitude_has_investigation_agreement_zh(clause)
                 )
+                if investigation_agreement:
+                    investigation_agreement_seen = True
+                if investigation_agreement and not remedy_scopes:
+                    continue
+                resolved.append(code)
                 if code == "AGREE" and _DIRECT_ATTITUDE_CONDITIONAL_SCOPE_ZH.search(
                     scoped_body
                 ):
-                    conditional_agreement_terms.update(
-                        _direct_attitude_action_terms_zh(clause)
-                    )
-                if (
-                    code == "DISAGREE"
-                    and _DIRECT_ATTITUDE_PRECONDITION_REFUSAL_ZH.search(scoped_clause)
-                    and not satisfied_condition_seen
-                ):
-                    precondition_refusal_terms.update(
-                        _direct_attitude_action_terms_zh(clause)
-                    )
+                    conditional_remedy_scopes.update(remedy_scopes)
+                if code == "DISAGREE":
+                    refused_remedy_scopes.update(remedy_scopes)
             continue
+        if (
+            authenticated_current_message
+            and chinese_speaker_context == "SELF"
+            and not explicit_third_party
+            and _DIRECT_ATTITUDE_CONDITIONAL_SCOPE_ZH.search(scoped_body)
+            and _DIRECT_ATTITUDE_CONDITIONAL_REMEDY_COMMITMENT_ZH.search(clause)
+        ):
+            conditional_remedy_scopes.update(
+                _direct_attitude_conditional_remedy_scopes_zh(clause)
+            )
+            resolved.append("AGREE")
         if _DIRECT_ATTITUDE_SIGNAL_EN.search(clause):
             semantic_clause = _direct_attitude_semantic_clause_en(clause)
             explicit_third_party = (
@@ -2439,6 +3309,11 @@ def detect_direct_respondent_attitude(
             )
             if explicit_third_party:
                 third_party_signal = True
+                if _direct_attitude_mixes_attribution_en(
+                    semantic_clause,
+                    respondent_role=respondent_role,
+                ):
+                    mixed_attribution_signal = True
                 code = "NONE"
             else:
                 code = _direct_respondent_attitude_clause_en(semantic_clause)
@@ -2447,14 +3322,27 @@ def detect_direct_respondent_attitude(
             elif code != "NONE":
                 resolved.append(code)
     codes = set(resolved)
-    if unresolved_signal or (third_party_signal and resolved):
-        return DirectRespondentAttitudeDetection("UNRESOLVED")
-    code = _reduce_direct_respondent_attitude_codes(
-        codes,
-        coherent_conditional_stance=bool(
-            conditional_agreement_terms & precondition_refusal_terms
-        ),
+    authenticated_party_scope = (
+        authenticated_current_message
+        and str(respondent_role or "").upper() in _DIRECT_ATTITUDE_ROLE_SELF_ZH
     )
+    if (
+        unresolved_signal
+        or mixed_attribution_signal
+        or (third_party_signal and resolved and not authenticated_party_scope)
+    ):
+        return DirectRespondentAttitudeDetection("UNRESOLVED")
+    if _direct_attitude_action_scoped_alternative(
+        authenticated_current_message=authenticated_current_message,
+        respondent_role=respondent_role,
+        codes=codes,
+        refused_remedy_scopes=refused_remedy_scopes,
+        conditional_remedy_scopes=conditional_remedy_scopes,
+        investigation_agreement_seen=investigation_agreement_seen,
+    ):
+        code = "ALTERNATIVE_PROPOSED"
+    else:
+        code = _reduce_direct_respondent_attitude_codes(codes)
     if code is not None:
         return DirectRespondentAttitudeDetection(
             "SUBSTANTIVE",
@@ -2511,6 +3399,14 @@ def _direct_respondent_attitude_clause_zh(
         body = semantic_clause.strip()
     else:
         body = subject_body
+    no_alternative = re.compile(
+        r"(?:并|且|也)?(?:不|未|没有)\s*(?:提出|提供|给出|建议)\s*"
+        rf"(?:任何|其他|其它|额外)?\s*"
+        rf"(?:(?:{_DIRECT_ATTITUDE_REMEDY_ACTION_ZH.pattern})\s*)?"
+        r"(?:替代方案|方案|建议)"
+    )
+    denied_alternative = no_alternative.search(body) is not None
+    body = no_alternative.sub("", body)
     if re.fullmatch(r"(?:尚未|未|没有)\s*(?:明确)?表态", body):
         return "NONE"
     if re.search(r"(?:并非|不是|没有|未)\s*(?:不同意|不接受|拒绝|不支持)", body):
@@ -2522,20 +3418,24 @@ def _direct_respondent_attitude_clause_zh(
         codes.add("DISAGREE")
         remaining_body = negative_positive.sub("", remaining_body)
     partial = re.compile(r"部分(?:同意|接受)|只(?:同意|接受)")
-    if partial.search(remaining_body):
+    partial_match = partial.search(remaining_body)
+    if partial_match:
         codes.add("PARTIALLY_AGREE")
         remaining_body = partial.sub("", remaining_body)
     disagreement = re.compile(r"不同意|不接受|拒绝|不支持")
     if disagreement.search(remaining_body):
         codes.add("DISAGREE")
         remaining_body = disagreement.sub("", remaining_body)
-    if re.search(r"同意|接受|支持|愿意", remaining_body):
+    if partial_match is None and re.search(r"同意|接受|支持|愿意", remaining_body):
         codes.add("AGREE")
     if re.search(r"提出|建议|替代方案", body):
         codes.add("ALTERNATIVE_PROPOSED")
     if re.search(r"要求补充|需要更多信息", body):
         codes.add("NEED_MORE_INFO")
-    return _reduce_direct_respondent_attitude_codes(codes)
+    reduced = _reduce_direct_respondent_attitude_codes(codes)
+    if reduced is None and denied_alternative and not codes:
+        return "NONE"
+    return reduced
 
 
 def _direct_respondent_attitude_clause_en(clause: str) -> str | None:
@@ -2681,10 +3581,7 @@ def _reported_attitude_position(text: str, initiator_role: str) -> str:
     extracted: list[str] = []
     for sentence in re.split(r"(?<=[。！？!?])", normalized):
         sentence = sentence.strip()
-        if not sentence or not _has_explicit_respondent_report(
-            sentence,
-            initiator_role,
-        ):
+        if not sentence:
             continue
         attributed = ""
         for party in re.finditer(party_pattern, sentence):

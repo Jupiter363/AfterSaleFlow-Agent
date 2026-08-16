@@ -12,6 +12,7 @@
   "source_snapshot_hash": "a576823e72e44f62b08249af84f295fe5cc3ac09f3335ab96b2846fa7e5f9743",
   "source_event_hash": "5da4ebd5b5ff75ea8af5c955c01f2cf18138892d07ad6ca74be7c7fb50ff5815",
   "room_utterance": "The submitted facts were recorded for confirmation.",
+  "conversation_action": "ASK_SUBSTANTIVE",
   "dossier_patch": {
     "schema_version": "intake-dossier.v2",
     "case_story": {"one_sentence_summary": "Synthetic damaged-order dispute."},
@@ -47,5 +48,5 @@
     "guardrail_version": "intake-guardrail.v2",
     "tool_policy_version": "no-tools.v1"
   },
-  "proposal_hash": "932145b6d2b7acb7f2c2360c6f7af2c90eaa60ded301a280084aca1820fa4008"
+  "proposal_hash": "af3912bd3f5b73d4cd696036ab09cdb7153405cf48da6b1c47236c885136f7ab"
 }

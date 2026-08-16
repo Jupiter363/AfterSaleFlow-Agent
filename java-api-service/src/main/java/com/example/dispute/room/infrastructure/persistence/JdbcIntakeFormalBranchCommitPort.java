@@ -14,6 +14,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
+import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger;
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver;
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver.ResolvedBranchCommand;
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommitPort;
@@ -34,6 +35,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -42,10 +44,12 @@ import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.RecoverableDataAccessException;
@@ -284,6 +288,7 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                         "INTAKE_BRANCH_ROOM_MISSING", "locked Intake room no longer exists"));
         AuthenticatedActor actor =
                 new AuthenticatedActor(authority.actorId(), ActorRole.valueOf(authority.actorRole()));
+        reconcileConfirmationHandoff(request, resolved, authority, now);
 
         long eventSequence = nextEventSequence(request.envelope().caseId());
         EventCoordinates eventCoordinates = eventCoordinates(request, eventSequence);
@@ -751,6 +756,334 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
         }
         requirePartyCompletionState(request, authority);
         return authority;
+    }
+
+    private void reconcileConfirmationHandoff(
+            BranchCommitRequest request,
+            ResolvedBranchCommand resolved,
+            AuthorityRows authority,
+            OffsetDateTime now) {
+        if (request.operation() == BranchOperation.CANCEL) {
+            return;
+        }
+        IntakeConfirmationCommand confirmation = requiredConfirmation(resolved);
+        List<ConfirmationDossierRow> rows = jdbc.query(
+                """
+                select id, dossier_version, dossier_json::text as dossier_json
+                  from case_intake_dossier
+                 where case_id = :caseId
+                   and room_type = 'INTAKE'
+                 for update
+                """,
+                Map.of("caseId", request.envelope().caseId()),
+                (row, ignored) -> new ConfirmationDossierRow(
+                        row.getString("id"),
+                        row.getLong("dossier_version"),
+                        row.getString("dossier_json")));
+        if (rows.size() != 1) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISSING",
+                    "formal Intake confirmation requires one exact current dossier");
+        }
+
+        ConfirmationDossierRow row = rows.getFirst();
+        ObjectNode dossier;
+        try {
+            JsonNode decoded = objectMapper.readTree(row.dossierJson());
+            if (!(decoded instanceof ObjectNode object)) {
+                throw new IllegalArgumentException("dossier is not an object");
+            }
+            dossier = object;
+        } catch (JsonProcessingException | IllegalArgumentException failure) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_INVALID",
+                    "formal Intake confirmation dossier cannot be decoded",
+                    failure);
+        }
+        IntakeDossierProjectionMerger.requireCanonicalHandoffRemarkPartition(dossier);
+
+        JsonNode partyState = dossier.get("party_intake_state");
+        String actorRole = authority.actorRole();
+        if (!"intake-dossier.v2".equals(dossier.path("schema_version").asText(null))
+                || !hasExactFields(
+                        partyState, Set.of("schema_version", "USER", "MERCHANT"))
+                || !"party-intake-state.v1".equals(
+                        partyState.path("schema_version").asText(null))
+                || !Set.of("USER", "MERCHANT").contains(actorRole)) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_INVALID",
+                    "formal Intake confirmation has unsupported party handoff authority");
+        }
+        JsonNode actorEntry = partyState.get(actorRole);
+        if (!hasExactFields(
+                actorEntry,
+                Set.of(
+                        "intake_quality",
+                        "missing_information",
+                        "handoff_notes",
+                        "admission"))) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_INVALID",
+                    "formal Intake confirmation current-party authority is malformed");
+        }
+        JsonNode handoff = actorEntry.get("handoff_notes");
+        if (!hasExactFields(
+                        handoff,
+                        Set.of(
+                                "remark_status",
+                                "phase_source_message_id",
+                                "latest_remark",
+                                "remarks",
+                                "instruction"))
+                || !handoff.equals(dossier.get("handoff_notes"))) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISMATCH",
+                    "formal Intake confirmation current-party handoff is not the exact dossier mirror");
+        }
+
+        String status = handoff.path("remark_status").asText(null);
+        String confirmationNote = confirmation.confirmationNote();
+        if ("HAS_REMARKS".equals(status)) {
+            requireCanonicalExistingRemarks(handoff, actorRole, confirmationNote);
+            requirePartitionMatchesExistingHandoff(dossier, actorRole, handoff, status);
+            return;
+        }
+        if ("NO_EXTRA_REMARKS".equals(status)) {
+            requireCanonicalNoExtraRemarks(handoff, confirmationNote);
+            requirePartitionMatchesExistingHandoff(dossier, actorRole, handoff, status);
+            return;
+        }
+        if (!"WAITING_FOR_REMARK".equals(status)
+                || confirmationNote != null
+                || !handoff.path("phase_source_message_id").isTextual()
+                || handoff.path("phase_source_message_id").textValue().isBlank()
+                || !handoff.path("latest_remark").isTextual()
+                || !handoff.path("latest_remark").textValue().isEmpty()
+                || !handoff.path("remarks").isArray()
+                || !handoff.path("remarks").isEmpty()
+                || !handoff.path("instruction").isTextual()) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISMATCH",
+                    "blank formal Intake confirmation requires WAITING_FOR_REMARK authority");
+        }
+        requirePartitionMatchesExistingHandoff(dossier, actorRole, handoff, status);
+
+        ObjectNode finalizedHandoff = (ObjectNode) handoff;
+        finalizedHandoff.put("remark_status", "NO_EXTRA_REMARKS");
+        finalizedHandoff.put("latest_remark", "无额外备注。");
+        finalizedHandoff.putArray("remarks");
+        dossier.set("handoff_notes", finalizedHandoff.deepCopy());
+        finalizeFormalConfirmationPartition(dossier, actorRole, request);
+        IntakeDossierProjectionMerger.requireCanonicalHandoffRemarkPartition(dossier);
+        int changed = jdbc.update(
+                """
+                update case_intake_dossier
+                   set dossier_version = dossier_version + 1,
+                       dossier_json = cast(:dossierJson as jsonb),
+                       updated_at = :now,
+                       updated_by = :actorId
+                 where id = :id
+                   and dossier_version = :dossierVersion
+                """,
+                new MapSqlParameterSource()
+                        .addValue("id", row.id())
+                        .addValue("dossierVersion", row.version())
+                        .addValue("dossierJson", ContractJson.canonicalString(dossier))
+                        .addValue("now", now)
+                        .addValue("actorId", authority.actorId()));
+        if (changed != 1) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_STALE",
+                    "formal Intake confirmation handoff changed while locked");
+        }
+    }
+
+    private static void requirePartitionMatchesExistingHandoff(
+            ObjectNode dossier, String actorRole, JsonNode handoff, String expectedStatus) {
+        JsonNode partition = dossier.get("handoff_remark_partition");
+        if (partition == null) {
+            return;
+        }
+        JsonNode party = partition.path("parties").path(actorRole);
+        if (!expectedStatus.equals(party.path("remark_status").asText(null))) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISMATCH",
+                    "formal Intake confirmation partition status differs from party authority");
+        }
+        JsonNode source = party.path("source");
+        if ("ROOM_MESSAGE".equals(source.path("source_kind").asText(null))
+                && !source.path("message_id")
+                        .equals(handoff.path("phase_source_message_id"))) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISMATCH",
+                    "formal Intake confirmation partition source differs from party phase authority");
+        }
+        if ("HAS_REMARKS".equals(expectedStatus)) {
+            JsonNode partitionRemarks = party.path("remarks");
+            JsonNode handoffRemarks = handoff.path("remarks");
+            if (!party.path("latest_remark").equals(handoff.path("latest_remark"))
+                    || partitionRemarks.size() != handoffRemarks.size()) {
+                throw rejected(
+                        "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISMATCH",
+                        "formal Intake confirmation partition remarks differ from party authority");
+            }
+            for (int index = 0; index < partitionRemarks.size(); index++) {
+                JsonNode partitionRemark = partitionRemarks.get(index);
+                JsonNode handoffRemark = handoffRemarks.get(index);
+                if (!partitionRemark.path("party_role").equals(handoffRemark.path("role"))
+                        || !partitionRemark.path("text").equals(handoffRemark.path("text"))
+                        || !partitionRemark
+                                .path("source_message_id")
+                                .equals(handoffRemark.path("source_message_id"))) {
+                    throw rejected(
+                            "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISMATCH",
+                            "formal Intake confirmation partition remark source differs from party authority");
+                }
+            }
+        } else if (!party.path("latest_remark").asText("").isEmpty()
+                || !party.path("remarks").isEmpty()) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISMATCH",
+                    "formal Intake confirmation partition has unexpected remark content");
+        }
+    }
+
+    private static void finalizeFormalConfirmationPartition(
+            ObjectNode dossier, String actorRole, BranchCommitRequest request) {
+        JsonNode partition = dossier.get("handoff_remark_partition");
+        if (partition == null) {
+            JsonNode matrix = dossier.path("case_fact_matrix");
+            if (!matrix.isObject()) {
+                throw rejected(
+                        "INTAKE_CONFIRM_HANDOFF_AUTHORITY_INVALID",
+                        "formal Intake confirmation cannot create a partition without a formal matrix");
+            }
+            ObjectNode created = dossier.putObject("handoff_remark_partition");
+            created.put("schema_version", "handoff_remark_partition.v1");
+            created.set("case_fact_matrix_id", matrix.path("matrix_id").deepCopy());
+            created.set("case_fact_matrix_version", matrix.path("matrix_version").deepCopy());
+            created.set("case_fact_matrix_hash", matrix.path("content_hash").deepCopy());
+            ObjectNode parties = created.putObject("parties");
+            for (String role : List.of("USER", "MERCHANT")) {
+                if (role.equals(actorRole)) {
+                    parties.set(role, formalConfirmationNoRemark(role, request));
+                } else {
+                    JsonNode handoff = dossier.path("party_intake_state")
+                            .path(role)
+                            .path("handoff_notes");
+                    if (!hasExactFields(
+                                    handoff,
+                                    Set.of(
+                                            "remark_status",
+                                            "phase_source_message_id",
+                                            "latest_remark",
+                                            "remarks",
+                                            "instruction"))
+                            || !"NOT_READY".equals(
+                                    handoff.path("remark_status").asText(null))
+                            || !handoff.path("phase_source_message_id").isTextual()
+                            || !handoff.path("phase_source_message_id").textValue().isEmpty()
+                            || !handoff.path("latest_remark").isTextual()
+                            || !handoff.path("latest_remark").textValue().isEmpty()
+                            || !handoff.path("remarks").isArray()
+                            || !handoff.path("remarks").isEmpty()) {
+                        throw rejected(
+                                "INTAKE_CONFIRM_HANDOFF_AUTHORITY_INVALID",
+                                "formal Intake confirmation cannot reconstruct foreign remark authority");
+                    }
+                    ObjectNode notReady = parties.putObject(role);
+                    notReady.put("party_role", role);
+                    notReady.put("remark_status", "NOT_READY");
+                    notReady.put("latest_remark", "");
+                    notReady.putArray("remarks");
+                }
+            }
+            return;
+        }
+        ((ObjectNode) partition.path("parties"))
+                .set(actorRole, formalConfirmationNoRemark(actorRole, request));
+    }
+
+    private static ObjectNode formalConfirmationNoRemark(
+            String actorRole, BranchCommitRequest request) {
+        ObjectNode finalized = JsonNodeFactory.instance.objectNode();
+        finalized.put("party_role", actorRole);
+        finalized.put("remark_status", "NO_EXTRA_REMARKS");
+        ObjectNode source = finalized.putObject("source");
+        source.put("source_kind", "FORMAL_CONFIRMATION");
+        source.put("command_id", request.envelope().commandId());
+        source.put("request_hash", request.requestHash());
+        finalized.put("latest_remark", "");
+        finalized.putArray("remarks");
+        return finalized;
+    }
+
+    private static void requireCanonicalExistingRemarks(
+            JsonNode handoff, String actorRole, String confirmationNote) {
+        JsonNode latest = handoff.path("latest_remark");
+        JsonNode remarks = handoff.path("remarks");
+        if (!handoff.path("phase_source_message_id").isTextual()
+                || handoff.path("phase_source_message_id").textValue().isBlank()
+                || !latest.isTextual()
+                || latest.textValue().isBlank()
+                || !remarks.isArray()
+                || remarks.isEmpty()
+                || !handoff.path("instruction").isTextual()
+                || (confirmationNote != null && !confirmationNote.equals(latest.textValue()))) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISMATCH",
+                    "formal Intake confirmation note differs from existing remark authority");
+        }
+        Set<String> sourceMessageIds = new HashSet<>();
+        for (JsonNode remark : remarks) {
+            if (!hasExactFields(
+                            remark,
+                            Set.of("role", "text", "source_message_id", "turn_source"))
+                    || !actorRole.equals(remark.path("role").asText(null))
+                    || !remark.path("text").isTextual()
+                    || remark.path("text").textValue().isBlank()
+                    || !remark.path("source_message_id").isTextual()
+                    || remark.path("source_message_id").textValue().isBlank()
+                    || !remark.path("turn_source").isTextual()
+                    || remark.path("turn_source").textValue().isBlank()
+                    || !sourceMessageIds.add(remark.path("source_message_id").textValue())) {
+                throw rejected(
+                        "INTAKE_CONFIRM_HANDOFF_AUTHORITY_INVALID",
+                        "formal Intake confirmation existing remarks are not canonical");
+            }
+        }
+        if (!latest.textValue().equals(remarks.get(remarks.size() - 1).path("text").asText())) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISMATCH",
+                    "formal Intake confirmation latest remark differs from its source authority");
+        }
+    }
+
+    private static void requireCanonicalNoExtraRemarks(
+            JsonNode handoff, String confirmationNote) {
+        JsonNode latest = handoff.path("latest_remark");
+        JsonNode remarks = handoff.path("remarks");
+        if (!handoff.path("phase_source_message_id").isTextual()
+                || handoff.path("phase_source_message_id").textValue().isBlank()
+                || !latest.isTextual()
+                || !"无额外备注。".equals(latest.textValue())
+                || !remarks.isArray()
+                || !remarks.isEmpty()
+                || !handoff.path("instruction").isTextual()
+                || (confirmationNote != null && !confirmationNote.equals(latest.textValue()))) {
+            throw rejected(
+                    "INTAKE_CONFIRM_HANDOFF_AUTHORITY_MISMATCH",
+                    "formal Intake confirmation differs from existing no-remark authority");
+        }
+    }
+
+    private static boolean hasExactFields(JsonNode value, Set<String> expected) {
+        if (value == null || !value.isObject() || value.size() != expected.size()) {
+            return false;
+        }
+        Set<String> actual = new HashSet<>();
+        value.fieldNames().forEachRemaining(actual::add);
+        return actual.equals(expected);
     }
 
     private void requirePartyCompletionState(
@@ -1492,6 +1825,8 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
             String initiatorRole,
             String respondentId,
             String respondentRole) {}
+
+    private record ConfirmationDossierRow(String id, long version, String dossierJson) {}
 
     private record OperationRow(
             String id,

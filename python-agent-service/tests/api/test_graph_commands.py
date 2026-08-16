@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ from app.graph_runtime.errors import (
     GraphLeaseLostError,
     GraphNewAgentAttemptRequiredError,
 )
+from app.graph_runtime import intake_executor as intake_executor_module
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graph_runtime.identity import ActorScopeBinding, RoomType, ThreadIdentity
 from app.graph_runtime.target_e2e import (
@@ -48,6 +50,7 @@ from app.graph_runtime.target_e2e import (
     VerifiedTargetE2EInvocation,
     target_e2e_command_hash,
 )
+from app.model_runtime.transports import ModelTransportOutputError
 from app.security.invocation_envelope import (
     InvocationEnvelopeVerifier,
     ResolvedVerificationKey,
@@ -194,6 +197,50 @@ def test_log_safe_failure_records_stable_intake_error_code(
     ]
 
 
+def test_log_safe_failure_records_closed_graph_contract_intake_code_without_mutation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    error_code = "INTAKE_ACTION_GATE_ROOM_MISMATCH"
+    error = GraphContractError(error_code)
+    original_args = error.args
+    original_public_code = error.code
+
+    _log_safe_failure("graph stream runtime", error)
+
+    assert caplog.messages == [
+        "graph stream runtime failed: "
+        "error_type=GraphContractError "
+        f"error_code={error_code}"
+    ]
+    assert error.args == original_args == (error_code,)
+    assert error.code == original_public_code == "GRAPH_CONTRACT_REJECTED"
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "private binding detail",
+        "https://example.test/failure?token=secret",
+        "first line\nsecond line",
+        "INTAKE_API_TOKEN_SECRET",
+    ),
+)
+def test_log_safe_failure_omits_arbitrary_graph_contract_messages(
+    caplog: pytest.LogCaptureFixture,
+    message: str,
+) -> None:
+    error = GraphContractError(message)
+
+    _log_safe_failure("graph stream runtime", error)
+
+    assert caplog.messages == [
+        "graph stream runtime failed: error_type=GraphContractError"
+    ]
+    assert message not in caplog.text
+    assert error.args == (message,)
+    assert error.code == "GRAPH_CONTRACT_REJECTED"
+
+
 @pytest.mark.parametrize(
     "message",
     (
@@ -213,6 +260,169 @@ def test_log_safe_failure_omits_unstable_error_messages(
 
     assert caplog.messages == ["intake contract validation failed: error_type=ValueError"]
     assert message not in caplog.text
+
+
+def test_log_safe_failure_records_only_trusted_closed_intake_executor_stage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stage_type = getattr(
+        intake_executor_module,
+        "IntakeExecutorDiagnosticStage",
+        None,
+    )
+    error_type = getattr(
+        intake_executor_module,
+        "IntakeExecutorDiagnosticError",
+        None,
+    )
+    boundary = getattr(
+        intake_executor_module,
+        "_intake_executor_diagnostic_error",
+        None,
+    )
+    assert stage_type is not None, "trusted Intake executor stage enum is missing"
+    assert error_type is not None, "trusted Intake executor diagnostic error is missing"
+    assert callable(boundary), "trusted Intake executor diagnostic boundary is missing"
+    expected_stages = {
+        "GRAPH_STREAM_ADVANCE",
+        "GRAPH_STREAM_CLOSE",
+        "TERMINAL_STATE_REHYDRATE",
+        "TERMINAL_PUBLIC_BINDING",
+        "CHECKPOINT_PREFLIGHT",
+        "PROPOSAL_STORE_PUT",
+        "RESULT_MATERIALIZE",
+        "FORMAL_COMMIT",
+        "TERMINAL_PUBLIC_REPLAY",
+    }
+    assert {member.name for member in stage_type} == expected_stages
+    assert {member.value for member in stage_type} == expected_stages
+    assert set(stage_type.__members__) == expected_stages
+    assert len(stage_type.__members__) == len(stage_type) == len(expected_stages)
+
+    stage = stage_type.PROPOSAL_STORE_PUT
+    private_message = "provider payload api_token=private-message"
+    private_cause = "https://provider.test/private?case_id=CASE_PRIVATE"
+    source = GraphContractError(private_message)
+    error = boundary(source, stage=stage)
+    error.__cause__ = RuntimeError(private_cause)
+    original_type = type(error)
+    original_args = error.args
+
+    assert type(error) is error_type
+    assert isinstance(error, GraphContractError)
+    assert error.args == source.args == (private_message,)
+    assert error.code == source.code == "GRAPH_CONTRACT_REJECTED"
+    _log_safe_failure("graph stream runtime", error)
+
+    assert caplog.messages == [
+        "graph stream runtime failed: "
+        "error_type=IntakeExecutorDiagnosticError "
+        "diagnostic_stage=PROPOSAL_STORE_PUT"
+    ]
+    assert private_message not in caplog.text
+    assert private_cause not in caplog.text
+    assert type(error) is original_type
+    assert error.args == original_args
+    assert error.code == "GRAPH_CONTRACT_REJECTED"
+
+    stable_code = "INTAKE_ACTION_GATE_ROOM_MISMATCH"
+    stable_error = GraphContractError(stable_code)
+    stable_args = stable_error.args
+    stable_public_code = stable_error.code
+    stable_wrapped = boundary(
+        stable_error,
+        stage=stage_type.GRAPH_STREAM_ADVANCE,
+    )
+    assert stable_wrapped is stable_error
+    assert not hasattr(stable_wrapped, "diagnostic_stage")
+    assert stable_wrapped.args == stable_args == (stable_code,)
+    assert stable_wrapped.code == stable_public_code == "GRAPH_CONTRACT_REJECTED"
+
+    caplog.clear()
+    _log_safe_failure("graph stream runtime", stable_wrapped)
+    assert caplog.messages == [
+        "graph stream runtime failed: "
+        "error_type=GraphContractError "
+        f"error_code={stable_code}"
+    ]
+    assert stable_wrapped is stable_error
+    assert stable_error.args == stable_args
+    assert stable_error.code == stable_public_code
+
+    command, instance = _command()
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    before = _client(
+        command=command,
+        private_key=private_key,
+        service=FakeStreamService((), failure_before=error),
+    ).post(
+        "/internal/graphs/commands/stream",
+        content=json.dumps(instance),
+        headers={
+            "Authorization": f"Bearer {_token(command, private_key)}",
+            "Content-Type": "application/json",
+        },
+    )
+    assert before.status_code == 409
+    assert before.json() == {"code": "GRAPH_CONTRACT_REJECTED", "retryable": False}
+    assert private_message not in before.text
+    assert private_cause not in before.text
+
+    after = _client(
+        command=command,
+        private_key=private_key,
+        service=FakeStreamService(
+            (_event(command, "attempt_started", 0),),
+            failure_after=error,
+        ),
+    ).post(
+        "/internal/graphs/commands/stream",
+        content=json.dumps(instance),
+        headers={
+            "Authorization": f"Bearer {_token(command, private_key)}",
+            "Content-Type": "application/json",
+        },
+    )
+    assert after.status_code == 200
+    after_events = [json.loads(line) for line in after.text.splitlines()]
+    assert [event["event_type"] for event in after_events] == ["attempt_started", "error"]
+    assert after_events[-1]["payload"] == {
+        "error_code": "GRAPH_CONTRACT_REJECTED",
+        "retryable": False,
+    }
+    assert private_message not in after.text
+    assert private_cause not in after.text
+    assert type(error) is original_type
+    assert error.args == original_args
+
+    class GraphContractSubclass(GraphContractError):
+        pass
+
+    class ForeignStage(str, Enum):
+        UNKNOWN = "PROPOSAL_STORE_PUT"
+
+    forged_plain = GraphContractError("plain api_token=private")
+    forged_plain.diagnostic_stage = stage  # type: ignore[attr-defined]
+    forged_string = GraphContractError("string api_token=private")
+    forged_string.diagnostic_stage = "PROPOSAL_STORE_PUT"  # type: ignore[attr-defined]
+    forged_unknown = GraphContractError("unknown api_token=private")
+    forged_unknown.diagnostic_stage = ForeignStage.UNKNOWN  # type: ignore[attr-defined]
+    subclass = GraphContractSubclass("subclass api_token=private")
+    subclass.diagnostic_stage = stage  # type: ignore[attr-defined]
+    negatives = (forged_plain, forged_string, forged_unknown, subclass)
+
+    caplog.clear()
+    for candidate in negatives:
+        _log_safe_failure("graph stream runtime", candidate)
+
+    assert all("diagnostic_stage=" not in message for message in caplog.messages)
+    assert caplog.messages == [
+        "graph stream runtime failed: error_type=GraphContractError",
+        "graph stream runtime failed: error_type=GraphContractError",
+        "graph stream runtime failed: error_type=GraphContractError",
+        "graph stream runtime failed: error_type=GraphContractSubclass",
+    ]
+    assert "api_token=private" not in caplog.text
 
 
 def _command() -> tuple[RoomGraphCommand, dict[str, Any]]:
@@ -843,6 +1053,27 @@ def test_attempt_aborted_is_a_valid_attempt_terminal_event() -> None:
             GraphContractError("private binding detail"),
             "error",
             {"error_code": "GRAPH_CONTRACT_REJECTED", "retryable": False},
+        ),
+        (
+            ModelTransportOutputError(
+                "private schema repair detail",
+                safe_code="AGENT_OUTPUT_SCHEMA_REPAIR_EXHAUSTED",
+                node_name="private-node",
+            ),
+            "error",
+            {
+                "error_code": "AGENT_OUTPUT_SCHEMA_REPAIR_EXHAUSTED",
+                "retryable": False,
+            },
+        ),
+        (
+            ModelTransportOutputError(
+                "private unknown schema detail",
+                safe_code="PRIVATE_UNKNOWN_OUTPUT_CODE",
+                node_name="private-node",
+            ),
+            "error",
+            {"error_code": "AGENT_OUTPUT_SCHEMA_INVALID", "retryable": False},
         ),
         (
             RuntimeError("private provider response"),

@@ -28,13 +28,21 @@ from app.agents.dispute_intake_officer.case_fact_matrix import (
     respondent_opening_carry_delta,
 )
 from app.graph_runtime.state_lens import StateLens
-from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
+from app.agents.dispute_intake_officer.schemas import (
+    IntakeCaseDetailLlmOutput,
+    IntakeFreshFormOpeningLlmOutput,
+    IntakeRemarkAcknowledgementLlmOutput,
+    IntakeRespondentOpeningLlmOutput,
+    intake_case_detail_output_type,
+    materialize_intake_case_detail_output,
+)
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     DIRECT_RESPONDENT_CONFIDENCE,
     DIRECT_RESPONDENT_SOURCE,
     RESPONDENT_AUTHORED_CURRENT_MESSAGE,
     SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
     SUBJECTIVE_RESPONDENT_SOURCE,
+    _reported_attitude_position,
     attributed_reported_respondent_attitude,
     detect_direct_respondent_attitude,
 )
@@ -59,6 +67,8 @@ from app.graphs.intake.validators import (
     MATRIX_AUTHORITY_RECORD_KEY,
     build_baseline_pending_case_detail,
     next_intake_cognitive_revision,
+    rebind_matrix_successor_handoff_partition,
+    rebind_respondent_opening_handoff_partition,
     unwrap_verified_baseline_previous_case_detail,
     validated_respondent_opening_frozen_context,
     validate_cognition_patch,
@@ -74,6 +84,7 @@ from app.model_runtime.profiles import (
 )
 from app.model_runtime.transports import ModelTransport
 from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2 as FormalCaseFactMatrixDeltaV2
+from app.schemas.final_agents import IntakeTurnRequest
 from app.schemas.intake_case_matrix import (
     UnilateralCaseMatrixDraftV1 as FormalUnilateralCaseMatrixDraftV1,
 )
@@ -90,9 +101,49 @@ from app.streaming import TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
 INTAKE_SYSTEM_PROMPT = PromptComposer().render_system_prompt(BASELINE_INTAKE_NODE_NAME)
 
 _TARGET_INTAKE_VISIBLE_FIELDS = TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
+_FRESH_FORM_OPENING_VISIBLE_FIELDS = tuple(
+    spec
+    for spec in _TARGET_INTAKE_VISIBLE_FIELDS
+    if spec.field
+    in {
+        "room_utterance",
+        "case_detail.case_story.one_sentence_summary",
+        "case_detail.case_story",
+    }
+)
+_RESPONDENT_OPENING_VISIBLE_FIELDS = tuple(
+    spec for spec in _TARGET_INTAKE_VISIBLE_FIELDS if spec.field == "room_utterance"
+)
+_PARTY_INTAKE_GOVERNANCE_FIELDS = (
+    "intake_quality",
+    "missing_information",
+    "handoff_notes",
+    "admission",
+    "party_intake_state",
+)
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _NO_TOOLS_POLICY_VERSION = "no-tools.v1"
+INTAKE_ACTION_GATE_KEY_PREFIX = "intake-action-gate:v1:"
+INTAKE_ACTION_GATE_SCHEMA_VERSION = "intake-action-gate.v1"
+INTAKE_ACTION_GATE_KIND = "INTAKE_ACTION_GATE"
+_INTAKE_CONVERSATION_ACTIONS = frozenset(
+    {
+        "ASK_SUBSTANTIVE",
+        "INVITE_OPTIONAL_REMARK",
+        "ACK_REMARK",
+        "ACK_NO_REMARK",
+    }
+)
+INTAKE_ACTION_GATE_ACTION_STATUSES = {
+    "ASK_SUBSTANTIVE": frozenset({"NOT_READY"}),
+    "INVITE_OPTIONAL_REMARK": frozenset({"WAITING_FOR_REMARK"}),
+    "ACK_REMARK": frozenset({"HAS_REMARKS"}),
+    # A participant may say "no further remarks" after one or more remarks.
+    # That Agent turn is acknowledged while the existing HAS_REMARKS authority
+    # remains unchanged and append-only.
+    "ACK_NO_REMARK": frozenset({"NO_EXTRA_REMARKS", "HAS_REMARKS"}),
+}
 _ABSENT_RESPONDENT_ATTITUDES = frozenset(
     {"UNKNOWN", "PLATFORM_UNKNOWN", "NOT_RESPONDED", "NOT_ADDRESSED"}
 )
@@ -210,6 +261,97 @@ class _BehaviorAttributeSeal:
     snapshot: Any
 
 
+class IntakeRouteModelRunnable(
+    Runnable[IntakeGraphStateV2, Mapping[str, Any]]
+):
+    """Select a sealed provider-output contract from validated route authority."""
+
+    def __init__(
+        self,
+        *,
+        agent_context: AgentInvocationContext,
+        default_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]],
+        fresh_form_opening_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]],
+        remark_acknowledgement_flow: Runnable[
+            IntakeGraphStateV2, Mapping[str, Any]
+        ],
+        respondent_opening_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]],
+    ) -> None:
+        self.name = "intake_lcel.route_model"
+        self._agent_context = agent_context
+        self._default_flow = default_flow
+        self._fresh_form_opening_flow = fresh_form_opening_flow
+        self._remark_acknowledgement_flow = remark_acknowledgement_flow
+        self._respondent_opening_flow = respondent_opening_flow
+
+    def invoke(
+        self,
+        input: IntakeGraphStateV2,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Mapping[str, Any]:
+        if kwargs:
+            raise IntakeGraphContractError("INTAKE_LCEL_OVERRIDES_FORBIDDEN")
+        return self._select_flow(input).invoke(input, config=config)
+
+    async def ainvoke(
+        self,
+        input: IntakeGraphStateV2,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Mapping[str, Any]:
+        if kwargs:
+            raise IntakeGraphContractError("INTAKE_LCEL_OVERRIDES_FORBIDDEN")
+        return await self._select_flow(input).ainvoke(input, config=config)
+
+    def stream(
+        self,
+        input: IntakeGraphStateV2,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Iterator[Mapping[str, Any]]:
+        if kwargs:
+            raise IntakeGraphContractError("INTAKE_LCEL_OVERRIDES_FORBIDDEN")
+        yield from self._select_flow(input).stream(input, config=config)
+
+    async def astream(
+        self,
+        input: IntakeGraphStateV2,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[Mapping[str, Any]]:
+        if kwargs:
+            raise IntakeGraphContractError("INTAKE_LCEL_OVERRIDES_FORBIDDEN")
+        async for chunk in self._select_flow(input).astream(input, config=config):
+            yield chunk
+
+    def _select_flow(
+        self,
+        state: IntakeGraphStateV2,
+    ) -> Runnable[IntakeGraphStateV2, Mapping[str, Any]]:
+        route = state.get("route")
+        if route == "respondent_opening":
+            validated_respondent_opening_frozen_context(state)
+            return self._respondent_opening_flow
+        if route in {"initialize", "message"}:
+            request = build_intake_baseline_request(
+                state,
+                agent_context=self._agent_context,
+            )
+            if (
+                intake_case_detail_output_type(request)
+                is IntakeFreshFormOpeningLlmOutput
+            ):
+                return self._fresh_form_opening_flow
+            if (
+                intake_case_detail_output_type(request)
+                is IntakeRemarkAcknowledgementLlmOutput
+            ):
+                return self._remark_acknowledgement_flow
+            return self._default_flow
+        raise IntakeGraphContractError("INTAKE_LCEL_ROUTE_INVALID")
+
+
 def _iter_runnable_nodes(runnable: Runnable) -> Iterator[Runnable]:
     yield runnable
     if type(runnable) is RunnableSequence:
@@ -222,6 +364,12 @@ def _iter_runnable_nodes(runnable: Runnable) -> Iterator[Runnable]:
         parallel = cast(RunnableParallel, runnable)
         for step in parallel.steps__.values():
             yield from _iter_runnable_nodes(step)
+    elif type(runnable) is IntakeRouteModelRunnable:
+        route_model = cast(IntakeRouteModelRunnable, runnable)
+        yield from _iter_runnable_nodes(route_model._default_flow)
+        yield from _iter_runnable_nodes(route_model._fresh_form_opening_flow)
+        yield from _iter_runnable_nodes(route_model._remark_acknowledgement_flow)
+        yield from _iter_runnable_nodes(route_model._respondent_opening_flow)
 
 
 def _seal_behavior_methods(
@@ -335,6 +483,30 @@ def _seal_runnable_structure(runnable: Runnable) -> _RunnableStructureSeal:
                 (key, _seal_runnable_structure(step)) for key, step in parallel.steps__.items()
             ),
         )
+    if type(runnable) is IntakeRouteModelRunnable:
+        route_model = cast(IntakeRouteModelRunnable, runnable)
+        return _RunnableStructureSeal(
+            runnable=runnable,
+            sequence_middle=None,
+            parallel_steps=None,
+            children=(
+                ("default_flow", _seal_runnable_structure(route_model._default_flow)),
+                (
+                    "fresh_form_opening_flow",
+                    _seal_runnable_structure(route_model._fresh_form_opening_flow),
+                ),
+                (
+                    "remark_acknowledgement_flow",
+                    _seal_runnable_structure(
+                        route_model._remark_acknowledgement_flow
+                    ),
+                ),
+                (
+                    "respondent_opening_flow",
+                    _seal_runnable_structure(route_model._respondent_opening_flow),
+                ),
+            ),
+        )
     return _RunnableStructureSeal(
         runnable=runnable,
         sequence_middle=None,
@@ -364,6 +536,20 @@ def _matches_runnable_structure(value: Runnable, seal: _RunnableStructureSeal) -
             return False
         return all(
             _matches_runnable_structure(parallel.steps__[key], child)
+            for key, child in seal.children
+        )
+    if type(value) is IntakeRouteModelRunnable:
+        route_model = cast(IntakeRouteModelRunnable, value)
+        current_flows = {
+            "default_flow": route_model._default_flow,
+            "fresh_form_opening_flow": route_model._fresh_form_opening_flow,
+            "remark_acknowledgement_flow": (
+                route_model._remark_acknowledgement_flow
+            ),
+            "respondent_opening_flow": route_model._respondent_opening_flow,
+        }
+        return tuple(current_flows) == tuple(key for key, _ in seal.children) and all(
+            _matches_runnable_structure(current_flows[key], child)
             for key, child in seal.children
         )
     return not seal.children
@@ -638,8 +824,20 @@ class BuiltIntakeModelNode:
     prompt: ChatPromptTemplate
     model: GovernedChatModel
     parser: PydanticOutputParser[IntakeCaseDetailLlmOutput]
+    fresh_form_opening_model: GovernedChatModel
+    fresh_form_opening_parser: PydanticOutputParser[
+        IntakeFreshFormOpeningLlmOutput
+    ]
+    remark_acknowledgement_model: GovernedChatModel
+    remark_acknowledgement_parser: PydanticOutputParser[
+        IntakeRemarkAcknowledgementLlmOutput
+    ]
+    respondent_opening_model: GovernedChatModel
+    respondent_opening_parser: PydanticOutputParser[IntakeRespondentOpeningLlmOutput]
     preflight: Runnable[IntakeGraphStateV2, IntakeGraphStateV2]
-    model_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]]
+    model_router: IntakeRouteModelRunnable
+    model_flow: RunnableSequence
+    routed_model_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]]
     guardrail: Runnable[Mapping[str, Any], Mapping[str, Any]]
     patch_projector: Runnable[Mapping[str, Any], dict[str, Any]]
     runnable: Runnable[IntakeGraphStateV2, dict[str, Any]]
@@ -828,6 +1026,7 @@ class IntakeGuardrailRunnable(Runnable[Mapping[str, Any], Mapping[str, Any]]):
         _validate_business_output(
             state,
             draft,
+            agent_context=self._agent_context,
             room_utterance_is_baseline_finalized=True,
         )
         return value
@@ -900,6 +1099,11 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
             exclude_unset=True,
         )
         output_hash = canonical_sha256(draft_json)
+        action_gate = (
+            None
+            if state.get("route") == "respondent_opening"
+            else _intake_action_gate(state, draft)
+        )
         baseline_pending_case_detail = build_baseline_pending_case_detail(
             state,
             terminal_draft=draft_json,
@@ -939,11 +1143,16 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
             },
             "usage_by_invocation": {self._policy.invocation_id: usage},
         }
-        return validate_cognition_patch(
+        validated = validate_cognition_patch(
             state,
             patch,
             require_baseline_pending_context=True,
         )
+        if action_gate is not None:
+            validated["node_results"] = {
+                INTAKE_ACTION_GATE_KEY_PREFIX + action_gate["source_turn_hash"]: action_gate
+            }
+        return validated
 
 
 def _intake_response_message_id(
@@ -970,6 +1179,35 @@ def _intake_response_message_id(
     )
 
 
+def _intake_action_gate(
+    state: Mapping[str, Any],
+    draft: IntakeCognitionDraft,
+) -> dict[str, Any]:
+    """Bind the reducer-approved visible reply to this exact authorized turn."""
+
+    source_turn_hash = state.get("last_event_hash") or state.get(
+        "initial_snapshot_hash"
+    )
+    action = _conversation_action(draft)
+    reducer_status = _actor_remark_status(state, draft)
+    if (
+        not isinstance(source_turn_hash, str)
+        or _SHA256.fullmatch(source_turn_hash) is None
+        or reducer_status not in INTAKE_ACTION_GATE_ACTION_STATUSES[action]
+    ):
+        raise IntakeGraphContractError("INTAKE_ACTION_GATE_BINDING_INVALID")
+    room_sha256 = hashlib.sha256(draft.room_utterance.encode("utf-8")).hexdigest()
+    gate = {
+        "schema_version": INTAKE_ACTION_GATE_SCHEMA_VERSION,
+        "kind": INTAKE_ACTION_GATE_KIND,
+        "conversation_action": action,
+        "reducer_status": reducer_status,
+        "room_utterance_sha256": room_sha256,
+        "source_turn_hash": source_turn_hash,
+    }
+    return gate
+
+
 @dataclass(frozen=True, slots=True)
 class _IntakeComponentSeal:
     lens: StateLens[IntakeGraphStateV2, IntakePromptInput]
@@ -993,6 +1231,57 @@ class _IntakeComponentSeal:
     parser: PydanticOutputParser[IntakeCaseDetailLlmOutput]
     parser_pydantic_object: type[IntakeCaseDetailLlmOutput]
     parser_diff: bool
+    fresh_form_opening_model: GovernedChatModel
+    fresh_form_opening_model_profile: ModelProfile
+    fresh_form_opening_model_policy: ModelInvocationPolicy
+    fresh_form_opening_model_profile_snapshot: ModelProfile
+    fresh_form_opening_model_policy_snapshot: ModelInvocationPolicy
+    fresh_form_opening_model_output_type: type[IntakeFreshFormOpeningLlmOutput]
+    fresh_form_opening_parser: PydanticOutputParser[
+        IntakeFreshFormOpeningLlmOutput
+    ]
+    fresh_form_opening_parser_pydantic_object: type[
+        IntakeFreshFormOpeningLlmOutput
+    ]
+    fresh_form_opening_parser_diff: bool
+    remark_acknowledgement_model: GovernedChatModel
+    remark_acknowledgement_model_profile: ModelProfile
+    remark_acknowledgement_model_policy: ModelInvocationPolicy
+    remark_acknowledgement_model_profile_snapshot: ModelProfile
+    remark_acknowledgement_model_policy_snapshot: ModelInvocationPolicy
+    remark_acknowledgement_model_output_type: type[
+        IntakeRemarkAcknowledgementLlmOutput
+    ]
+    remark_acknowledgement_parser: PydanticOutputParser[
+        IntakeRemarkAcknowledgementLlmOutput
+    ]
+    remark_acknowledgement_parser_pydantic_object: type[
+        IntakeRemarkAcknowledgementLlmOutput
+    ]
+    remark_acknowledgement_parser_diff: bool
+    respondent_opening_model: GovernedChatModel
+    respondent_opening_model_profile: ModelProfile
+    respondent_opening_model_policy: ModelInvocationPolicy
+    respondent_opening_model_profile_snapshot: ModelProfile
+    respondent_opening_model_policy_snapshot: ModelInvocationPolicy
+    respondent_opening_model_output_type: type[IntakeRespondentOpeningLlmOutput]
+    respondent_opening_parser: PydanticOutputParser[IntakeRespondentOpeningLlmOutput]
+    respondent_opening_parser_pydantic_object: type[IntakeRespondentOpeningLlmOutput]
+    respondent_opening_parser_diff: bool
+    model_router: IntakeRouteModelRunnable
+    model_router_name: str
+    model_router_agent_context: AgentInvocationContext
+    model_router_agent_context_snapshot: AgentInvocationContext
+    model_router_default_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]]
+    model_router_fresh_form_opening_flow: Runnable[
+        IntakeGraphStateV2, Mapping[str, Any]
+    ]
+    model_router_remark_acknowledgement_flow: Runnable[
+        IntakeGraphStateV2, Mapping[str, Any]
+    ]
+    model_router_respondent_opening_flow: Runnable[
+        IntakeGraphStateV2, Mapping[str, Any]
+    ]
     preflight: IntakeModelPreflightRunnable
     guardrail: IntakeGuardrailRunnable
     patch_projector: IntakePatchProjectorRunnable
@@ -1011,6 +1300,28 @@ class _IntakeComponentSeal:
     model_user_content_parts_snapshot: tuple[dict[str, Any], ...]
     model_visible_fields: tuple[Any, ...]
     model_visible_field_names: frozenset[str]
+    fresh_form_opening_model_clock: Callable[[], Any]
+    fresh_form_opening_model_cancelled: Callable[[], bool]
+    fresh_form_opening_model_user_content_parts: tuple[dict[str, Any], ...]
+    fresh_form_opening_model_user_content_parts_snapshot: tuple[
+        dict[str, Any], ...
+    ]
+    fresh_form_opening_model_visible_fields: tuple[Any, ...]
+    fresh_form_opening_model_visible_field_names: frozenset[str]
+    remark_acknowledgement_model_clock: Callable[[], Any]
+    remark_acknowledgement_model_cancelled: Callable[[], bool]
+    remark_acknowledgement_model_user_content_parts: tuple[dict[str, Any], ...]
+    remark_acknowledgement_model_user_content_parts_snapshot: tuple[
+        dict[str, Any], ...
+    ]
+    remark_acknowledgement_model_visible_fields: tuple[Any, ...]
+    remark_acknowledgement_model_visible_field_names: frozenset[str]
+    respondent_opening_model_clock: Callable[[], Any]
+    respondent_opening_model_cancelled: Callable[[], bool]
+    respondent_opening_model_user_content_parts: tuple[dict[str, Any], ...]
+    respondent_opening_model_user_content_parts_snapshot: tuple[dict[str, Any], ...]
+    respondent_opening_model_visible_fields: tuple[Any, ...]
+    respondent_opening_model_visible_field_names: frozenset[str]
 
 
 def _seal_intake_components(
@@ -1019,6 +1330,19 @@ def _seal_intake_components(
     prompt: ChatPromptTemplate,
     model: GovernedChatModel,
     parser: PydanticOutputParser[IntakeCaseDetailLlmOutput],
+    fresh_form_opening_model: GovernedChatModel,
+    fresh_form_opening_parser: PydanticOutputParser[
+        IntakeFreshFormOpeningLlmOutput
+    ],
+    remark_acknowledgement_model: GovernedChatModel,
+    remark_acknowledgement_parser: PydanticOutputParser[
+        IntakeRemarkAcknowledgementLlmOutput
+    ],
+    respondent_opening_model: GovernedChatModel,
+    respondent_opening_parser: PydanticOutputParser[
+        IntakeRespondentOpeningLlmOutput
+    ],
+    model_router: IntakeRouteModelRunnable,
     preflight: IntakeModelPreflightRunnable,
     guardrail: IntakeGuardrailRunnable,
     patch_projector: IntakePatchProjectorRunnable,
@@ -1027,6 +1351,50 @@ def _seal_intake_components(
     agent_context: AgentInvocationContext,
     pipeline: RunnableSequence,
 ) -> _IntakeComponentSeal:
+    model_behavior_methods = (
+        "_generate",
+        "_agenerate",
+        "_stream",
+        "_astream",
+        "_generate_with_retry",
+        "_agenerate_with_retry",
+        "_request",
+        "_sync_generate",
+        "_sync_stream",
+        "_sync_call",
+        "_validated_result",
+        "_validated_visible_delta",
+        "_message",
+        "_visible_chunk",
+        "_final_chunk",
+        "_metadata",
+        "_attempts_allowed",
+        "_guard",
+        "_remaining_seconds",
+        "_retry_possible",
+        "_sync_backoff",
+        "_async_backoff",
+        "generate_prompt",
+        "agenerate_prompt",
+        "generate",
+        "agenerate",
+        "_generate_with_cache",
+        "_agenerate_with_cache",
+        "_should_stream",
+        "_get_invocation_params",
+        "_convert_input",
+    )
+    parser_behavior_methods = (
+        "parse",
+        "aparse",
+        "parse_result",
+        "aparse_result",
+        "_parse_obj",
+        "_parser_exception",
+        "_transform",
+        "_atransform",
+        "get_name",
+    )
     explicit_methods = (
         (lens, ("_select", "_aselect")),
         (
@@ -1046,57 +1414,22 @@ def _seal_intake_components(
         (preflight, ("_validate",)),
         (guardrail, ("_guard",)),
         (patch_projector, ("_project",)),
-        (
-            model,
-            (
-                "_generate",
-                "_agenerate",
-                "_stream",
-                "_astream",
-                "_generate_with_retry",
-                "_agenerate_with_retry",
-                "_request",
-                "_sync_generate",
-                "_sync_stream",
-                "_sync_call",
-                "_validated_result",
-                "_validated_visible_delta",
-                "_message",
-                "_visible_chunk",
-                "_final_chunk",
-                "_metadata",
-                "_attempts_allowed",
-                "_guard",
-                "_remaining_seconds",
-                "_retry_possible",
-                "_sync_backoff",
-                "_async_backoff",
-                "generate_prompt",
-                "agenerate_prompt",
-                "generate",
-                "agenerate",
-                "_generate_with_cache",
-                "_agenerate_with_cache",
-                "_should_stream",
-                "_get_invocation_params",
-                "_convert_input",
-            ),
-        ),
-        (
-            parser,
-            (
-                "parse",
-                "aparse",
-                "parse_result",
-                "aparse_result",
-                "_parse_obj",
-                "_parser_exception",
-                "_transform",
-                "_atransform",
-                "get_name",
-            ),
-        ),
+        (model, model_behavior_methods),
+        (fresh_form_opening_model, model_behavior_methods),
+        (remark_acknowledgement_model, model_behavior_methods),
+        (respondent_opening_model, model_behavior_methods),
+        (parser, parser_behavior_methods),
+        (fresh_form_opening_parser, parser_behavior_methods),
+        (remark_acknowledgement_parser, parser_behavior_methods),
+        (respondent_opening_parser, parser_behavior_methods),
+        (model_router, ("_select_flow",)),
         (model._transport, ("generate", "agenerate", "stream", "astream")),
+        (fresh_form_opening_model._transport, ("generate", "agenerate", "stream", "astream")),
+        (
+            remark_acknowledgement_model._transport,
+            ("generate", "agenerate", "stream", "astream"),
+        ),
+        (respondent_opening_model._transport, ("generate", "agenerate", "stream", "astream")),
     )
     return _IntakeComponentSeal(
         lens=lens,
@@ -1120,6 +1453,69 @@ def _seal_intake_components(
         parser=parser,
         parser_pydantic_object=parser.pydantic_object,
         parser_diff=parser.diff,
+        fresh_form_opening_model=fresh_form_opening_model,
+        fresh_form_opening_model_profile=fresh_form_opening_model.profile,
+        fresh_form_opening_model_policy=fresh_form_opening_model.policy,
+        fresh_form_opening_model_profile_snapshot=deepcopy(
+            fresh_form_opening_model.profile
+        ),
+        fresh_form_opening_model_policy_snapshot=deepcopy(
+            fresh_form_opening_model.policy
+        ),
+        fresh_form_opening_model_output_type=(
+            fresh_form_opening_model._output_type
+        ),
+        fresh_form_opening_parser=fresh_form_opening_parser,
+        fresh_form_opening_parser_pydantic_object=(
+            fresh_form_opening_parser.pydantic_object
+        ),
+        fresh_form_opening_parser_diff=fresh_form_opening_parser.diff,
+        remark_acknowledgement_model=remark_acknowledgement_model,
+        remark_acknowledgement_model_profile=remark_acknowledgement_model.profile,
+        remark_acknowledgement_model_policy=remark_acknowledgement_model.policy,
+        remark_acknowledgement_model_profile_snapshot=deepcopy(
+            remark_acknowledgement_model.profile
+        ),
+        remark_acknowledgement_model_policy_snapshot=deepcopy(
+            remark_acknowledgement_model.policy
+        ),
+        remark_acknowledgement_model_output_type=(
+            remark_acknowledgement_model._output_type
+        ),
+        remark_acknowledgement_parser=remark_acknowledgement_parser,
+        remark_acknowledgement_parser_pydantic_object=(
+            remark_acknowledgement_parser.pydantic_object
+        ),
+        remark_acknowledgement_parser_diff=remark_acknowledgement_parser.diff,
+        respondent_opening_model=respondent_opening_model,
+        respondent_opening_model_profile=respondent_opening_model.profile,
+        respondent_opening_model_policy=respondent_opening_model.policy,
+        respondent_opening_model_profile_snapshot=deepcopy(
+            respondent_opening_model.profile
+        ),
+        respondent_opening_model_policy_snapshot=deepcopy(
+            respondent_opening_model.policy
+        ),
+        respondent_opening_model_output_type=respondent_opening_model._output_type,
+        respondent_opening_parser=respondent_opening_parser,
+        respondent_opening_parser_pydantic_object=(
+            respondent_opening_parser.pydantic_object
+        ),
+        respondent_opening_parser_diff=respondent_opening_parser.diff,
+        model_router=model_router,
+        model_router_name=model_router.name,
+        model_router_agent_context=model_router._agent_context,
+        model_router_agent_context_snapshot=deepcopy(model_router._agent_context),
+        model_router_default_flow=model_router._default_flow,
+        model_router_fresh_form_opening_flow=(
+            model_router._fresh_form_opening_flow
+        ),
+        model_router_remark_acknowledgement_flow=(
+            model_router._remark_acknowledgement_flow
+        ),
+        model_router_respondent_opening_flow=(
+            model_router._respondent_opening_flow
+        ),
         preflight=preflight,
         guardrail=guardrail,
         patch_projector=patch_projector,
@@ -1138,6 +1534,50 @@ def _seal_intake_components(
         model_user_content_parts_snapshot=deepcopy(model._user_content_parts),
         model_visible_fields=model._visible_fields,
         model_visible_field_names=model._visible_field_names,
+        fresh_form_opening_model_clock=fresh_form_opening_model._clock,
+        fresh_form_opening_model_cancelled=fresh_form_opening_model._cancelled,
+        fresh_form_opening_model_user_content_parts=(
+            fresh_form_opening_model._user_content_parts
+        ),
+        fresh_form_opening_model_user_content_parts_snapshot=deepcopy(
+            fresh_form_opening_model._user_content_parts
+        ),
+        fresh_form_opening_model_visible_fields=(
+            fresh_form_opening_model._visible_fields
+        ),
+        fresh_form_opening_model_visible_field_names=(
+            fresh_form_opening_model._visible_field_names
+        ),
+        remark_acknowledgement_model_clock=remark_acknowledgement_model._clock,
+        remark_acknowledgement_model_cancelled=(
+            remark_acknowledgement_model._cancelled
+        ),
+        remark_acknowledgement_model_user_content_parts=(
+            remark_acknowledgement_model._user_content_parts
+        ),
+        remark_acknowledgement_model_user_content_parts_snapshot=deepcopy(
+            remark_acknowledgement_model._user_content_parts
+        ),
+        remark_acknowledgement_model_visible_fields=(
+            remark_acknowledgement_model._visible_fields
+        ),
+        remark_acknowledgement_model_visible_field_names=(
+            remark_acknowledgement_model._visible_field_names
+        ),
+        respondent_opening_model_clock=respondent_opening_model._clock,
+        respondent_opening_model_cancelled=respondent_opening_model._cancelled,
+        respondent_opening_model_user_content_parts=(
+            respondent_opening_model._user_content_parts
+        ),
+        respondent_opening_model_user_content_parts_snapshot=deepcopy(
+            respondent_opening_model._user_content_parts
+        ),
+        respondent_opening_model_visible_fields=(
+            respondent_opening_model._visible_fields
+        ),
+        respondent_opening_model_visible_field_names=(
+            respondent_opening_model._visible_field_names
+        ),
     )
 
 
@@ -1181,10 +1621,134 @@ def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
     ):
         return False
 
+    fresh_form_opening_model = seal.fresh_form_opening_model
+    if (
+        fresh_form_opening_model.profile
+        is not seal.fresh_form_opening_model_profile
+        or fresh_form_opening_model.policy
+        is not seal.fresh_form_opening_model_policy
+        or fresh_form_opening_model._output_type
+        is not seal.fresh_form_opening_model_output_type
+        or fresh_form_opening_model.profile
+        != seal.fresh_form_opening_model_profile_snapshot
+        or fresh_form_opening_model.policy
+        != seal.fresh_form_opening_model_policy_snapshot
+        or fresh_form_opening_model._transport is not seal.model_transport
+        or fresh_form_opening_model._clock
+        is not seal.fresh_form_opening_model_clock
+        or fresh_form_opening_model._cancelled
+        is not seal.fresh_form_opening_model_cancelled
+        or fresh_form_opening_model._user_content_parts
+        is not seal.fresh_form_opening_model_user_content_parts
+        or fresh_form_opening_model._user_content_parts
+        != seal.fresh_form_opening_model_user_content_parts_snapshot
+        or fresh_form_opening_model._visible_fields
+        is not seal.fresh_form_opening_model_visible_fields
+        or fresh_form_opening_model._visible_field_names
+        is not seal.fresh_form_opening_model_visible_field_names
+    ):
+        return False
+
+    remark_acknowledgement_model = seal.remark_acknowledgement_model
+    if (
+        remark_acknowledgement_model.profile
+        is not seal.remark_acknowledgement_model_profile
+        or remark_acknowledgement_model.policy
+        is not seal.remark_acknowledgement_model_policy
+        or remark_acknowledgement_model._output_type
+        is not seal.remark_acknowledgement_model_output_type
+        or remark_acknowledgement_model.profile
+        != seal.remark_acknowledgement_model_profile_snapshot
+        or remark_acknowledgement_model.policy
+        != seal.remark_acknowledgement_model_policy_snapshot
+        or remark_acknowledgement_model._transport is not seal.model_transport
+        or remark_acknowledgement_model._clock
+        is not seal.remark_acknowledgement_model_clock
+        or remark_acknowledgement_model._cancelled
+        is not seal.remark_acknowledgement_model_cancelled
+        or remark_acknowledgement_model._user_content_parts
+        is not seal.remark_acknowledgement_model_user_content_parts
+        or remark_acknowledgement_model._user_content_parts
+        != seal.remark_acknowledgement_model_user_content_parts_snapshot
+        or remark_acknowledgement_model._visible_fields
+        is not seal.remark_acknowledgement_model_visible_fields
+        or remark_acknowledgement_model._visible_field_names
+        is not seal.remark_acknowledgement_model_visible_field_names
+    ):
+        return False
+
+    respondent_opening_model = seal.respondent_opening_model
+    if (
+        respondent_opening_model.profile is not seal.respondent_opening_model_profile
+        or respondent_opening_model.policy is not seal.respondent_opening_model_policy
+        or respondent_opening_model._output_type
+        is not seal.respondent_opening_model_output_type
+        or respondent_opening_model.profile
+        != seal.respondent_opening_model_profile_snapshot
+        or respondent_opening_model.policy
+        != seal.respondent_opening_model_policy_snapshot
+        or respondent_opening_model._transport is not seal.model_transport
+        or respondent_opening_model._clock
+        is not seal.respondent_opening_model_clock
+        or respondent_opening_model._cancelled
+        is not seal.respondent_opening_model_cancelled
+        or respondent_opening_model._user_content_parts
+        is not seal.respondent_opening_model_user_content_parts
+        or respondent_opening_model._user_content_parts
+        != seal.respondent_opening_model_user_content_parts_snapshot
+        or respondent_opening_model._visible_fields
+        is not seal.respondent_opening_model_visible_fields
+        or respondent_opening_model._visible_field_names
+        is not seal.respondent_opening_model_visible_field_names
+    ):
+        return False
+
     parser = seal.parser
     if (
         parser.pydantic_object is not seal.parser_pydantic_object
         or parser.diff is not seal.parser_diff
+    ):
+        return False
+
+    fresh_form_opening_parser = seal.fresh_form_opening_parser
+    if (
+        fresh_form_opening_parser.pydantic_object
+        is not seal.fresh_form_opening_parser_pydantic_object
+        or fresh_form_opening_parser.diff
+        is not seal.fresh_form_opening_parser_diff
+    ):
+        return False
+
+    remark_acknowledgement_parser = seal.remark_acknowledgement_parser
+    if (
+        remark_acknowledgement_parser.pydantic_object
+        is not seal.remark_acknowledgement_parser_pydantic_object
+        or remark_acknowledgement_parser.diff
+        is not seal.remark_acknowledgement_parser_diff
+    ):
+        return False
+
+    respondent_opening_parser = seal.respondent_opening_parser
+    if (
+        respondent_opening_parser.pydantic_object
+        is not seal.respondent_opening_parser_pydantic_object
+        or respondent_opening_parser.diff
+        is not seal.respondent_opening_parser_diff
+    ):
+        return False
+
+    model_router = seal.model_router
+    if (
+        model_router.name != seal.model_router_name
+        or model_router._agent_context is not seal.model_router_agent_context
+        or model_router._agent_context != seal.model_router_agent_context_snapshot
+        or model_router._default_flow is not seal.model_router_default_flow
+        or model_router._fresh_form_opening_flow
+        is not seal.model_router_fresh_form_opening_flow
+        or model_router._remark_acknowledgement_flow
+        is not seal.model_router_remark_acknowledgement_flow
+        or model_router._respondent_opening_flow
+        is not seal.model_router_respondent_opening_flow
     ):
         return False
 
@@ -1281,15 +1845,111 @@ def build_intake_model_node(
         visible_fields=_TARGET_INTAKE_VISIBLE_FIELDS,
     )
     parser = PydanticOutputParser(pydantic_object=IntakeCaseDetailLlmOutput)
+    fresh_form_opening_profile = deepcopy(profile)
+    fresh_form_opening_policy = deepcopy(policy)
+    fresh_form_opening_model = GovernedChatModel(
+        transport=transport,
+        output_type=IntakeFreshFormOpeningLlmOutput,
+        profile=fresh_form_opening_profile,
+        policy=fresh_form_opening_policy,
+        visible_fields=_FRESH_FORM_OPENING_VISIBLE_FIELDS,
+    )
+    fresh_form_opening_parser = PydanticOutputParser(
+        pydantic_object=IntakeFreshFormOpeningLlmOutput
+    )
+    remark_acknowledgement_profile = deepcopy(profile)
+    remark_acknowledgement_policy = deepcopy(policy)
+    remark_acknowledgement_model = GovernedChatModel(
+        transport=transport,
+        output_type=IntakeRemarkAcknowledgementLlmOutput,
+        profile=remark_acknowledgement_profile,
+        policy=remark_acknowledgement_policy,
+        visible_fields=_RESPONDENT_OPENING_VISIBLE_FIELDS,
+    )
+    remark_acknowledgement_parser = PydanticOutputParser(
+        pydantic_object=IntakeRemarkAcknowledgementLlmOutput
+    )
+    if (
+        len(_RESPONDENT_OPENING_VISIBLE_FIELDS) != 1
+        or _RESPONDENT_OPENING_VISIBLE_FIELDS[0].field != "room_utterance"
+    ):
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_OPENING_OUTPUT_CONTRACT_INVALID"
+        )
+    respondent_opening_profile = deepcopy(profile)
+    respondent_opening_policy = deepcopy(policy)
+    respondent_opening_model = GovernedChatModel(
+        transport=transport,
+        output_type=IntakeRespondentOpeningLlmOutput,
+        profile=respondent_opening_profile,
+        policy=respondent_opening_policy,
+        visible_fields=_RESPONDENT_OPENING_VISIBLE_FIELDS,
+    )
+    respondent_opening_parser = PydanticOutputParser(
+        pydantic_object=IntakeRespondentOpeningLlmOutput
+    )
     preflight = IntakeModelPreflightRunnable(profile=profile, policy=policy)
     parsed_generation = RunnableParallel(
         message=RunnablePassthrough(),
         draft=parser,
     )
-    model_flow = lens | prompt | model | parsed_generation
+    default_model_flow = lens | prompt | model | parsed_generation
+    fresh_form_opening_parsed_generation = RunnableParallel(
+        message=RunnablePassthrough(),
+        draft=fresh_form_opening_parser,
+    )
+    fresh_form_opening_model_flow = (
+        lens
+        | prompt
+        | fresh_form_opening_model
+        | fresh_form_opening_parsed_generation
+    )
+    remark_acknowledgement_parsed_generation = RunnableParallel(
+        message=RunnablePassthrough(),
+        draft=remark_acknowledgement_parser,
+    )
+    remark_acknowledgement_model_flow = (
+        lens
+        | prompt
+        | remark_acknowledgement_model
+        | remark_acknowledgement_parsed_generation
+    )
+    respondent_opening_parsed_generation = RunnableParallel(
+        message=RunnablePassthrough(),
+        draft=respondent_opening_parser,
+    )
+    respondent_opening_model_flow = (
+        lens
+        | prompt
+        | respondent_opening_model
+        | respondent_opening_parsed_generation
+    )
+    model_router = IntakeRouteModelRunnable(
+        agent_context=agent_context,
+        default_flow=cast(
+            Runnable[IntakeGraphStateV2, Mapping[str, Any]],
+            default_model_flow,
+        ),
+        fresh_form_opening_flow=cast(
+            Runnable[IntakeGraphStateV2, Mapping[str, Any]],
+            fresh_form_opening_model_flow,
+        ),
+        remark_acknowledgement_flow=cast(
+            Runnable[IntakeGraphStateV2, Mapping[str, Any]],
+            remark_acknowledgement_model_flow,
+        ),
+        respondent_opening_flow=cast(
+            Runnable[IntakeGraphStateV2, Mapping[str, Any]],
+            respondent_opening_model_flow,
+        ),
+    )
+    routed_model_flow = cast(
+        Runnable[IntakeGraphStateV2, Mapping[str, Any]],
+        model_router,
+    )
     state_and_generation = RunnableParallel(
         state=RunnablePassthrough(),
-        generation=model_flow,
+        generation=routed_model_flow,
     )
     guardrail = IntakeGuardrailRunnable(
         profile=profile,
@@ -1310,6 +1970,13 @@ def build_intake_model_node(
         prompt=prompt,
         model=model,
         parser=parser,
+        fresh_form_opening_model=fresh_form_opening_model,
+        fresh_form_opening_parser=fresh_form_opening_parser,
+        remark_acknowledgement_model=remark_acknowledgement_model,
+        remark_acknowledgement_parser=remark_acknowledgement_parser,
+        respondent_opening_model=respondent_opening_model,
+        respondent_opening_parser=respondent_opening_parser,
+        model_router=model_router,
         preflight=preflight,
         guardrail=guardrail,
         patch_projector=patch_projector,
@@ -1329,8 +1996,16 @@ def build_intake_model_node(
         prompt=prompt,
         model=model,
         parser=parser,
+        fresh_form_opening_model=fresh_form_opening_model,
+        fresh_form_opening_parser=fresh_form_opening_parser,
+        remark_acknowledgement_model=remark_acknowledgement_model,
+        remark_acknowledgement_parser=remark_acknowledgement_parser,
+        respondent_opening_model=respondent_opening_model,
+        respondent_opening_parser=respondent_opening_parser,
         preflight=preflight,
-        model_flow=cast(Runnable[IntakeGraphStateV2, Mapping[str, Any]], model_flow),
+        model_router=model_router,
+        model_flow=cast(RunnableSequence, default_model_flow),
+        routed_model_flow=routed_model_flow,
         guardrail=guardrail,
         patch_projector=patch_projector,
         runnable=cast(Runnable[IntakeGraphStateV2, dict[str, Any]], runnable),
@@ -1414,6 +2089,14 @@ def _generation_parts_with_baseline_context(
         draft=normalized,
     )
     if typed_state.get("route") == "respondent_opening":
+        opening_authority = validated_respondent_opening_frozen_context(typed_state)
+        materialized_public_dossier = (
+            rebind_respondent_opening_handoff_partition(
+                materialized_public_dossier,
+                authority_dossier=opening_authority,
+                successor_matrix=baseline_formal_matrix,
+            )
+        )
         opening_request = build_intake_baseline_request(
             typed_state,
             agent_context=agent_context,
@@ -1427,6 +2110,18 @@ def _generation_parts_with_baseline_context(
             exclude_none=True,
             exclude_unset=True,
         )
+        rebound_partition = materialized_public_dossier.get(
+            "handoff_remark_partition"
+        )
+        if rebound_partition is not None:
+            dossier_patch = normalized_payload.get("dossier_patch")
+            if not isinstance(dossier_patch, dict):
+                raise IntakeGraphContractError(
+                    "INTAKE_RESPONDENT_OPENING_HANDOFF_REMARK_INVALID"
+                )
+            dossier_patch["handoff_remark_partition"] = deepcopy(
+                rebound_partition
+            )
         normalized_payload["matrix_patch"] = opening_patch
         normalized = IntakeCognitionDraft.model_validate(normalized_payload)
     return (
@@ -1457,29 +2152,49 @@ def _adapt_and_normalize_generation_parts(
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     message = generation.get("message")
     draft = generation.get("draft")
-    if not isinstance(message, AIMessage) or not isinstance(
-        draft,
-        IntakeCaseDetailLlmOutput,
-    ):
+    if not isinstance(message, AIMessage):
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     typed_state = cast(IntakeGraphStateV2, state)
+    fresh_form_request: IntakeTurnRequest | None = None
     if typed_state.get("route") == "respondent_opening":
-        validated_respondent_opening_frozen_context(typed_state)
-        adapted = IntakeCognitionDraft.model_validate(
-            {
-                "room_utterance": draft.room_utterance,
-                "dossier_patch": {},
-                "matrix_patch": None,
-                "readiness": "INCOMPLETE",
-                "missing_fields": [],
-                "recommendation": "NEED_MORE_INFO",
-                "knowledge_answer_mode": "NONE",
-                "confidence": draft.confidence,
-            }
+        if not isinstance(draft, IntakeRespondentOpeningLlmOutput):
+            raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
+        adapted = _governed_respondent_opening_draft(
+            typed_state,
+            agent_context=agent_context,
+            draft=draft,
         )
-        # Every model-authored dossier/matrix field is intentionally discarded.
-        # The formal M0 successor is derived later from the internal event ref.
         return typed_state, message, adapted, adapted
+    if isinstance(draft, IntakeFreshFormOpeningLlmOutput):
+        request = build_intake_baseline_request(
+            typed_state,
+            agent_context=agent_context,
+        )
+        if (
+            request.turn_source == "FORM_SUBMISSION"
+            and intake_case_detail_output_type(request)
+            is IntakeFreshFormOpeningLlmOutput
+        ):
+            fresh_form_request = request
+        try:
+            draft = materialize_intake_case_detail_output(request, draft)
+        except (TypeError, ValueError) as error:
+            raise IntakeGraphContractError(
+                "INTAKE_FRESH_FORM_OPENING_AUTHORITY_INVALID"
+            ) from error
+    if isinstance(draft, IntakeRemarkAcknowledgementLlmOutput):
+        request = build_intake_baseline_request(
+            typed_state,
+            agent_context=agent_context,
+        )
+        try:
+            draft = materialize_intake_case_detail_output(request, draft)
+        except (TypeError, ValueError) as error:
+            raise IntakeGraphContractError(
+                "INTAKE_REMARK_ACKNOWLEDGEMENT_AUTHORITY_INVALID"
+            ) from error
+    if not isinstance(draft, IntakeCaseDetailLlmOutput):
+        raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     try:
         adapted = adapt_intake_baseline_output(
             typed_state,
@@ -1489,12 +2204,86 @@ def _adapt_and_normalize_generation_parts(
     except AgentOutputSchemaError as error:
         raise IntakeGraphContractError(error.safe_code) from None
     normalized = _normalize_model_matrix_fact_keys(typed_state, adapted)
-    normalized = _normalize_model_respondent_attitude(typed_state, normalized)
+    normalized = _normalize_model_respondent_attitude(
+        typed_state,
+        normalized,
+        fresh_form_request=fresh_form_request,
+    )
     return (
         typed_state,
         message,
         adapted,
         _normalize_model_dispute_core_state(typed_state, normalized),
+    )
+
+
+def _governed_respondent_opening_draft(
+    state: IntakeGraphStateV2,
+    *,
+    agent_context: AgentInvocationContext,
+    draft: IntakeRespondentOpeningLlmOutput,
+) -> IntakeCognitionDraft:
+    """Govern one opening without admitting provider dossier or matrix authority."""
+
+    frozen_context = validated_respondent_opening_frozen_context(state)
+    request = build_intake_baseline_request(state, agent_context=agent_context)
+    case_story = frozen_context.get("case_story")
+    trusted_summary = (
+        str(case_story.get("one_sentence_summary") or "").strip()
+        if isinstance(case_story, Mapping)
+        else ""
+    )
+    if not trusted_summary:
+        trusted_summary = "RESPONDENT_OPENING"
+    try:
+        sanitized_output = IntakeCaseDetailLlmOutput.model_validate(
+            {
+                "conversation_action": "ASK_SUBSTANTIVE",
+                "room_utterance": draft.room_utterance,
+                "case_detail": {
+                    "case_story": {"one_sentence_summary": trusted_summary}
+                },
+                "case_matrix_delta": respondent_opening_carry_delta(request=request),
+                "confidence": draft.confidence,
+            }
+        )
+        governed = adapt_intake_baseline_output(
+            state,
+            agent_context=agent_context,
+            output=sanitized_output,
+        )
+    except AgentOutputSchemaError as error:
+        raise IntakeGraphContractError(error.safe_code) from None
+    except ValueError as error:
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_OPENING_GOVERNANCE_INVALID"
+        ) from error
+
+    governed_patch = governed.dossier_patch.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    if any(field not in governed_patch for field in _PARTY_INTAKE_GOVERNANCE_FIELDS):
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_OPENING_GOVERNANCE_INVALID"
+        )
+    phase_patch = {
+        field: deepcopy(governed_patch[field])
+        for field in _PARTY_INTAKE_GOVERNANCE_FIELDS
+    }
+    return IntakeCognitionDraft.model_validate(
+        {
+            "conversation_action": "ASK_SUBSTANTIVE",
+            "room_utterance": draft.room_utterance,
+            "dossier_patch": phase_patch,
+            "matrix_patch": None,
+            "readiness": "INCOMPLETE",
+            "missing_fields": [],
+            "recommendation": "NEED_MORE_INFO",
+            "knowledge_answer_mode": "NONE",
+            "confidence": draft.confidence,
+        }
     )
 
 
@@ -1516,6 +2305,40 @@ def _post_normalizer_formal_matrix(
     patch = draft.dossier_patch.model_dump(mode="json", exclude_none=True, exclude_unset=True)
     materialized = merge_intake_dossier(state["dossier_draft"], patch)
     matrix_patch = draft.matrix_patch
+    action = _conversation_action(draft)
+    if action in {"ACK_REMARK", "ACK_NO_REMARK"}:
+        if matrix_patch is not None:
+            raise IntakeGraphContractError("INTAKE_REMARK_MATRIX_PATCH_FORBIDDEN")
+        previous = _verified_previous_case_detail(state)
+        frozen_matrix = previous.get("case_fact_matrix")
+        frozen_partition = previous.get("handoff_remark_partition")
+        materialized_partition = materialized.get("handoff_remark_partition")
+        if (
+            not isinstance(frozen_matrix, Mapping)
+            or not isinstance(frozen_partition, Mapping)
+            or not isinstance(materialized_partition, Mapping)
+            or any(
+                materialized_partition.get(partition_field)
+                != frozen_partition.get(partition_field)
+                for partition_field in (
+                    "schema_version",
+                    "case_fact_matrix_id",
+                    "case_fact_matrix_version",
+                    "case_fact_matrix_hash",
+                )
+            )
+            or materialized_partition.get("case_fact_matrix_id")
+            != frozen_matrix.get("matrix_id")
+            or materialized_partition.get("case_fact_matrix_version")
+            != frozen_matrix.get("matrix_version")
+            or materialized_partition.get("case_fact_matrix_hash")
+            != frozen_matrix.get("content_hash")
+        ):
+            raise IntakeGraphContractError("INTAKE_REMARK_FROZEN_MATRIX_CONFLICT")
+        request = build_intake_baseline_request(state, agent_context=agent_context)
+        request_base = request.model_dump(mode="json")
+        request_base["previous_case_detail"] = None
+        return deepcopy(dict(frozen_matrix)), materialized, request_base
     if matrix_patch is None:
         delta = None
     else:
@@ -1551,6 +2374,8 @@ def _post_normalizer_formal_matrix(
 def _normalize_model_respondent_attitude(
     state: IntakeGraphStateV2,
     draft: IntakeCognitionDraft,
+    *,
+    fresh_form_request: IntakeTurnRequest | None = None,
 ) -> IntakeCognitionDraft:
     """Keep respondent silence out of the unilateral claim projection.
 
@@ -1566,6 +2391,12 @@ def _normalize_model_respondent_attitude(
     attitude = draft.dossier_patch.respondent_attitude
     if attitude is None:
         return draft
+    if fresh_form_request is not None:
+        return _require_deterministic_initial_form_respondent_attitude(
+            state,
+            draft,
+            request=fresh_form_request,
+        )
     grounded = _grounded_respondent_attitude(state)
     prior = _prior_authoritative_respondent_attitude(state)
     prior_is_substantive = _validate_prior_respondent_attitude_authority(state, prior)
@@ -1600,6 +2431,85 @@ def _normalize_model_respondent_attitude(
     return _pin_model_respondent_attitude_position(draft, grounded.position)
 
 
+def _require_deterministic_initial_form_respondent_attitude(
+    state: IntakeGraphStateV2,
+    draft: IntakeCognitionDraft,
+    *,
+    request: IntakeTurnRequest,
+) -> IntakeCognitionDraft:
+    """Retain only the reducer's exact, form-grounded subjective report."""
+
+    if (
+        request.turn_source != "FORM_SUBMISSION"
+        or intake_case_detail_output_type(request)
+        is not IntakeFreshFormOpeningLlmOutput
+    ):
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+        )
+    private = state.get("bindings", {}).get("private", {})
+    authority = state.get("node_results", {}).get(MATRIX_AUTHORITY_RECORD_KEY)
+    initial = request.initial_case_facts
+    initiator_role = getattr(initial, "initiator_role", None)
+    if (
+        not isinstance(authority, Mapping)
+        or authority.get("schema_version") != "intake-matrix-authority.v1"
+        or authority.get("kind") != "MATRIX_AUTHORITY"
+        or authority.get("actor_role") not in {"USER", "MERCHANT"}
+        or authority.get("initiator_role") not in {"USER", "MERCHANT"}
+        or authority.get("actor_role") != authority.get("initiator_role")
+        or authority.get("actor_role") != private.get("audience")
+        or authority.get("actor_role") != request.agent_context.actor_role
+        or authority.get("initiator_role") != initiator_role
+    ):
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+        )
+
+    description = str(getattr(initial, "form_description", None) or "").strip()
+    attributed_position = _reported_attitude_position(description, initiator_role)
+    reported_attitude = attributed_reported_respondent_attitude(
+        description,
+        initiator_role,
+    )
+    if not description or not attributed_position or reported_attitude is None:
+        return _without_respondent_attitude_patch(draft)
+
+    attitude = draft.dossier_patch.respondent_attitude
+    expected_fields = {
+        "respondent_role",
+        "attitude",
+        "position",
+        "source",
+        "confidence",
+        "confidence_note",
+        "grounding",
+    }
+    expected_respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
+    confidence = attitude.get("confidence") if isinstance(attitude, Mapping) else None
+    grounding = attitude.get("grounding") if isinstance(attitude, Mapping) else None
+    if (
+        not isinstance(attitude, Mapping)
+        or set(attitude) != expected_fields
+        or attitude.get("respondent_role") != expected_respondent_role
+        or attitude.get("attitude") not in _SUBSTANTIVE_RESPONDENT_ATTITUDES
+        or not isinstance(attitude.get("position"), str)
+        or attitude.get("position") != attributed_position
+        or attitude.get("source") != SUBJECTIVE_RESPONDENT_SOURCE
+        or isinstance(confidence, bool)
+        or not isinstance(confidence, int | float)
+        or not 0 <= confidence <= 1
+        or attitude.get("confidence_note")
+        != SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE
+        or not isinstance(grounding, Mapping)
+        or dict(grounding) != {"source": "INITIAL_FORM", "message_id": ""}
+    ):
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+        )
+    return draft
+
+
 def _prior_authoritative_respondent_attitude(
     state: IntakeGraphStateV2,
 ) -> dict[str, Any] | None:
@@ -1617,6 +2527,27 @@ def _prior_authoritative_respondent_attitude(
         return None
     attitude = previous.get("respondent_attitude")
     return deepcopy(dict(attitude)) if isinstance(attitude, Mapping) else None
+
+
+def _verified_previous_case_detail(
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return only a verified envelope snapshot or validated legacy snapshot.
+
+    New checkpoints use the hash-bound baseline envelope.  Legacy checkpoints
+    retain their already validated scroll snapshot directly; supporting that
+    read-only shape is necessary for a safe first post-deployment remark turn.
+    """
+
+    previous_context = state.get("baseline_previous_case_detail")
+    if (
+        isinstance(previous_context, Mapping)
+        and previous_context.get("schema_version") == "intake-baseline-context.v1"
+    ):
+        return unwrap_verified_baseline_previous_case_detail(state)
+    if not isinstance(previous_context, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+    return deepcopy(dict(previous_context))
 
 
 def _validate_prior_respondent_attitude_authority(
@@ -2168,13 +3099,21 @@ def _validate_business_output(
     state: IntakeGraphStateV2,
     draft: IntakeCognitionDraft,
     *,
+    agent_context: AgentInvocationContext,
     room_utterance_is_baseline_finalized: bool = False,
 ) -> None:
     output = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
     catalog = _source_catalog(state)
     existing_fact_ids = intake_baseline_authorized_fact_ids(state)
+    previous_context = state.get("baseline_previous_case_detail")
+    previous_public = merge_intake_dossier(state["dossier_draft"], {})
+    validation_authority = (
+        _verified_previous_case_detail(state)
+        if previous_context is not None
+        else previous_public
+    )
     _validate_output_tree(
-        output,
+        _business_output_guard_view(validation_authority, output),
         audience=state["bindings"]["private"]["audience"],
         source_catalog=catalog,
         existing_fact_ids=existing_fact_ids,
@@ -2185,9 +3124,31 @@ def _validate_business_output(
     if not isinstance(patch, dict):
         raise IntakeGraphContractError("INTAKE_LCEL_DOSSIER_PATCH_INVALID")
     merged = merge_intake_dossier(state["dossier_draft"], patch)
-    previous_public = merge_intake_dossier(state["dossier_draft"], {})
+    isolated_patch = patch
+    if (
+        output.get("matrix_patch") is not None
+        and previous_public.get("handoff_remark_partition") is not None
+    ):
+        successor_matrix, _, _ = _post_normalizer_formal_matrix(
+            state,
+            agent_context=agent_context,
+            draft=draft,
+        )
+        previous_context = state.get("baseline_previous_case_detail")
+        authority_dossier = (
+            _verified_previous_case_detail(state)
+            if previous_context is not None
+            else state["dossier_draft"]
+        )
+        previous_public = rebind_matrix_successor_handoff_partition(
+            previous_public,
+            authority_dossier=authority_dossier,
+            successor_matrix=successor_matrix,
+        )
+        isolated_patch = deepcopy(patch)
+        isolated_patch.pop("handoff_remark_partition", None)
     validate_dossier_transition(previous_public, merged)
-    validate_dossier_transition({}, patch)
+    validate_dossier_transition({}, isolated_patch)
 
     readiness = draft.readiness
     recommendation = draft.recommendation
@@ -2195,6 +3156,158 @@ def _validate_business_output(
         recommendation == "NOT_ADMISSIBLE" and readiness != "NEEDS_REVIEW"
     ):
         raise IntakeGraphContractError("INTAKE_LCEL_READINESS_PRECONDITION_FAILED")
+
+    # Respondent opening owns only the opening text.  Its deterministic M0 carry
+    # deliberately predates the optional-remark action protocol.
+    if state.get("route") == "respondent_opening":
+        return
+    action = _conversation_action(draft)
+    reducer_status = _actor_remark_status(state, draft)
+    expected_statuses = INTAKE_ACTION_GATE_ACTION_STATUSES[action]
+    if reducer_status not in expected_statuses:
+        raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_REDUCER_CONFLICT")
+
+    questions = _actor_next_questions(state, draft)
+    if action == "ASK_SUBSTANTIVE":
+        if readiness != "INCOMPLETE" or not questions:
+            raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_TEXT_CONFLICT")
+        return
+    if readiness != "READY_TO_CONFIRM" or questions:
+        raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_TEXT_CONFLICT")
+
+
+def _business_output_guard_view(
+    authority_dossier: Mapping[str, Any],
+    output: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Hide only an exact trusted formal-confirmation carry from model-field scanning.
+
+    The baseline adapter may copy Java's frozen handoff source into the normalized
+    draft.  ``command_id`` remains forbidden everywhere else: a source is removed
+    only from this disposable validation view when its canonical identity, role,
+    status, and partition schema exactly match the authoritative prior dossier.
+    The original output is retained for the existing dossier/matrix transition
+    checks below this guard.
+    """
+
+    validation_view = deepcopy(dict(output))
+    authority_partition = authority_dossier.get("handoff_remark_partition")
+    dossier_patch = validation_view.get("dossier_patch")
+    output_partition = (
+        dossier_patch.get("handoff_remark_partition")
+        if isinstance(dossier_patch, Mapping)
+        else None
+    )
+    if (
+        not isinstance(authority_partition, Mapping)
+        or not isinstance(output_partition, Mapping)
+        or authority_partition.get("schema_version") != "handoff_remark_partition.v1"
+        or output_partition.get("schema_version")
+        != authority_partition.get("schema_version")
+    ):
+        return validation_view
+
+    authority_parties = authority_partition.get("parties")
+    output_parties = output_partition.get("parties")
+    if not isinstance(authority_parties, Mapping) or not isinstance(
+        output_parties,
+        Mapping,
+    ):
+        return validation_view
+
+    for role in ("USER", "MERCHANT"):
+        authority_party = authority_parties.get(role)
+        output_party = output_parties.get(role)
+        if not isinstance(authority_party, Mapping) or not isinstance(
+            output_party,
+            dict,
+        ):
+            continue
+        authority_source = authority_party.get("source")
+        output_source = output_party.get("source")
+        if (
+            authority_party.get("party_role") == role
+            and output_party.get("party_role") == role
+            and output_party.get("remark_status")
+            == authority_party.get("remark_status")
+            and _is_canonical_formal_confirmation_source(authority_source)
+            and isinstance(output_source, Mapping)
+            and dict(output_source) == dict(authority_source)
+        ):
+            output_party.pop("source")
+    return validation_view
+
+
+def _is_canonical_formal_confirmation_source(value: Any) -> bool:
+    return bool(
+        isinstance(value, Mapping)
+        and set(value) == {"source_kind", "command_id", "request_hash"}
+        and value.get("source_kind") == "FORMAL_CONFIRMATION"
+        and isinstance(value.get("command_id"), str)
+        and _IDENTIFIER.fullmatch(value["command_id"])
+        and isinstance(value.get("request_hash"), str)
+        and _SHA256.fullmatch(value["request_hash"])
+    )
+
+
+def _conversation_action(draft: IntakeCognitionDraft) -> str:
+    action = getattr(draft, "conversation_action", None)
+    if action not in _INTAKE_CONVERSATION_ACTIONS:
+        raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_INVALID")
+    return cast(str, action)
+
+
+def _actor_intake_entry(
+    state: Mapping[str, Any],
+    draft: IntakeCognitionDraft,
+) -> Mapping[str, Any]:
+    actor = state.get("bindings", {}).get("private", {}).get("audience")
+    party_state = draft.dossier_patch.party_intake_state
+    if actor not in {"USER", "MERCHANT"} or party_state is None:
+        raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_REDUCER_CONFLICT")
+    entry = getattr(party_state, cast(str, actor), None)
+    if not isinstance(entry, Mapping):
+        raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_REDUCER_CONFLICT")
+    return entry
+
+
+def _actor_remark_status(
+    state: Mapping[str, Any],
+    draft: IntakeCognitionDraft,
+) -> str:
+    entry = _actor_intake_entry(state, draft)
+    notes = entry.get("handoff_notes")
+    status = notes.get("remark_status") if isinstance(notes, Mapping) else None
+    partition = draft.dossier_patch.handoff_remark_partition
+    actor = state.get("bindings", {}).get("private", {}).get("audience")
+    partition_party = (
+        getattr(partition.parties, cast(str, actor), None)
+        if partition is not None and actor in {"USER", "MERCHANT"}
+        else None
+    )
+    if not isinstance(status, str):
+        raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_REDUCER_CONFLICT")
+    if partition_party is None:
+        if status == "NOT_READY":
+            return status
+        raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_REDUCER_CONFLICT")
+    if partition_party.remark_status != status:
+        raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_REDUCER_CONFLICT")
+    return status
+
+
+def _actor_next_questions(
+    state: Mapping[str, Any],
+    draft: IntakeCognitionDraft,
+) -> tuple[str, ...]:
+    entry = _actor_intake_entry(state, draft)
+    missing = entry.get("missing_information")
+    questions = missing.get("next_questions") if isinstance(missing, Mapping) else None
+    if not isinstance(questions, list) or any(
+        not isinstance(question, str) or not question.strip() for question in questions
+    ):
+        raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_REDUCER_CONFLICT")
+    return tuple(questions)
 
 
 def _validate_output_tree(
@@ -2434,6 +3547,10 @@ def _canonical_text(value: Any) -> str:
 
 __all__ = [
     "BuiltIntakeModelNode",
+    "INTAKE_ACTION_GATE_ACTION_STATUSES",
+    "INTAKE_ACTION_GATE_KEY_PREFIX",
+    "INTAKE_ACTION_GATE_KIND",
+    "INTAKE_ACTION_GATE_SCHEMA_VERSION",
     "INTAKE_SYSTEM_PROMPT",
     "IntakePromptInput",
     "build_intake_model_node",

@@ -11,6 +11,7 @@
   "cognitive_revision": 2,
   "source_snapshot_hash": "0000000000000000000000000000000000000000000000000000000000000000",
   "room_utterance": "I opened the evidence room.",
+  "conversation_action": "ASK_SUBSTANTIVE",
   "dossier_patch": {"schema_version": "intake-dossier.v2", "memory_frame": {"secret": true}},
   "readiness": "READY_TO_CONFIRM",
   "missing_fields": [],

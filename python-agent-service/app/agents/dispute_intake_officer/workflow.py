@@ -10,8 +10,12 @@ from typing import Annotated, Any
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
-from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
-from app.agents.dispute_intake_officer.room_utterance import phase_safe_room_utterance
+from app.agents.dispute_intake_officer.schemas import (
+    IntakeCaseDetailLlmOutput,
+    IntakeConversationAction,
+    intake_case_detail_output_type,
+    materialize_intake_case_detail_output,
+)
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     CaseDetailDossierSkill,
     SUBJECTIVE_RESPONDENT_SOURCE,
@@ -41,6 +45,7 @@ class IntakeTurnGraphState(TypedDict):
     actor_role: str
     memory_frame: dict[str, Any]
     llm_output: NotRequired[IntakeCaseDetailLlmOutput]
+    conversation_action: NotRequired[IntakeConversationAction]
     room_utterance: NotRequired[str]
     dossier_patch: NotRequired[dict[str, Any]]
     scroll_snapshot: NotRequired[dict[str, Any]]
@@ -193,18 +198,22 @@ def _reason_with_llm_node(model_runner: Any | None):
                 validated_request,
                 actor_role=state["actor_role"],
             )
+            output_type = intake_case_detail_output_type(validated_request)
             generation = model_runner.invoke_structured(
                 node_name="intake_turn_case_detail",
                 case_data={
                     "context_contract": "intake_turn_context.v2",
                 },
-                output_type=IntakeCaseDetailLlmOutput,
+                output_type=output_type,
                 agent_context=agent_context,
                 prompt_profile_id=agent_context.prompt_profile_id,
                 context_pack=context_pack,
             )
             return {
-                "llm_output": generation.value,
+                "llm_output": materialize_intake_case_detail_output(
+                    validated_request,
+                    generation.value,
+                ),
                 "executed_nodes": ["reason_with_llm"],
             }
         # 统一记录上下文后再分类异常：已知服务/Schema 错误保留类型，其余包装为服务不可用供 API 稳定映射。
@@ -300,6 +309,11 @@ def _subjective_only_snapshot(
         sanitized,
         actor_role=actor_role,
     )
+    remark_partition = sanitized.get("handoff_remark_partition")
+    current_actor_partition = _current_actor_remark_prompt_partition(
+        remark_partition,
+        actor_role=actor_role,
+    )
     matrix = sanitized.get("case_fact_matrix")
     if _is_respondent_matrix_view(matrix, actor_role=actor_role):
         projected_matrix = _respondent_matrix_prompt_projection(matrix)
@@ -307,13 +321,53 @@ def _subjective_only_snapshot(
             {"case_fact_matrix": projected_matrix} if projected_matrix else {}
         )
         projected.update(copy.deepcopy(current_actor_mirror))
+        if current_actor_partition:
+            projected["handoff_remark_partition"] = current_actor_partition
         return projected
     sanitized.pop("party_intake_state", None)
     sanitized.update(copy.deepcopy(current_actor_mirror))
+    if current_actor_partition:
+        sanitized["handoff_remark_partition"] = current_actor_partition
+    else:
+        sanitized.pop("handoff_remark_partition", None)
     attitude = sanitized.get("respondent_attitude")
     if not _has_subjective_source(attitude):
         sanitized.pop("respondent_attitude", None)
     return _compact_case_detail_snapshot(sanitized)
+
+
+def _current_actor_remark_prompt_partition(
+    value: Any,
+    *,
+    actor_role: str,
+) -> dict[str, Any]:
+    """Expose only the current party's remark phase and append-only texts."""
+
+    if not isinstance(value, dict):
+        return {}
+    parties = value.get("parties")
+    actor = parties.get(actor_role) if isinstance(parties, dict) else None
+    if not isinstance(actor, dict):
+        return {}
+    remarks = actor.get("remarks")
+    return _non_empty_mapping(
+        {
+            "schema_version": value.get("schema_version"),
+            "party_role": actor.get("party_role"),
+            "remark_status": actor.get("remark_status"),
+            "latest_remark": actor.get("latest_remark"),
+            "remarks": [
+                {
+                    "text": item.get("text"),
+                    "source_message_id": item.get("source_message_id"),
+                }
+                for item in remarks
+                if isinstance(item, dict)
+            ]
+            if isinstance(remarks, list)
+            else [],
+        }
+    )
 
 
 def _is_respondent_matrix_view(value: Any, *, actor_role: str) -> bool:
@@ -564,6 +618,10 @@ def _compact_case_detail_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    remark_partition = snapshot.get("handoff_remark_partition")
+    if isinstance(remark_partition, dict):
+        compact["handoff_remark_partition"] = copy.deepcopy(remark_partition)
+
     case_matrix = snapshot.get("case_fact_matrix")
     if isinstance(case_matrix, dict):
         fact_rows = case_matrix.get("fact_rows")
@@ -703,6 +761,7 @@ def project_intake_case_detail_output(
     output = IntakeCaseDetailLlmOutput.model_validate(output)
     rendered = CaseDetailDossierSkill().render(
         request=request,
+        conversation_action=output.conversation_action,
         room_utterance=output.room_utterance,
         llm_case_detail=output.case_detail,
         llm_dossier_patch=output.dossier_patch,
@@ -715,14 +774,11 @@ def project_intake_case_detail_output(
             output.case_matrix_delta or output.unilateral_case_matrix
         ),
     )
-    room_utterance = phase_safe_room_utterance(
-        output.room_utterance,
-        rendered.scroll_snapshot,
-    )
     dossier_patch = copy.deepcopy(rendered.dossier_patch)
-    dossier_patch["room_utterance_source"] = room_utterance
+    dossier_patch["room_utterance_source"] = output.room_utterance
     return {
-        "room_utterance": room_utterance,
+        "conversation_action": output.conversation_action,
+        "room_utterance": output.room_utterance,
         "dossier_patch": dossier_patch,
         "scroll_snapshot": rendered.scroll_snapshot,
         "canvas_operations": rendered.canvas_operations,

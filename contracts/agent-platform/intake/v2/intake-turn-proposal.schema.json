@@ -7,7 +7,8 @@
   "required": [
     "schema_version", "command_id", "logical_run_id", "attempt_id", "case_id",
     "room_epoch", "thread_id", "actor_scope_hash", "agent_session_id",
-    "cognitive_revision", "source_snapshot_hash", "room_utterance", "dossier_patch",
+    "cognitive_revision", "source_snapshot_hash", "room_utterance", "conversation_action",
+    "dossier_patch",
     "readiness", "missing_fields", "recommendation", "knowledge_answer_mode",
     "confidence", "profile_versions", "proposal_hash"
   ],
@@ -25,6 +26,11 @@
     "source_snapshot_hash": {"$ref": "#/$defs/sha256"},
     "source_event_hash": {"$ref": "#/$defs/sha256"},
     "room_utterance": {"type": "string", "minLength": 1, "maxLength": 20000},
+    "conversation_action": {
+      "enum": [
+        "ASK_SUBSTANTIVE", "INVITE_OPTIONAL_REMARK", "ACK_REMARK", "ACK_NO_REMARK"
+      ]
+    },
     "dossier_patch": {"$ref": "#/$defs/dossier_patch"},
     "matrix_patch": {
       "oneOf": [
@@ -111,7 +117,146 @@
         "intake_quality": {"$ref": "#/$defs/bounded_branch"},
         "admission": {"$ref": "#/$defs/bounded_branch"},
         "handoff_notes": {"$ref": "#/$defs/bounded_branch"},
-        "party_intake_state": {"$ref": "#/$defs/party_intake_state"}
+        "party_intake_state": {"$ref": "#/$defs/party_intake_state"},
+        "handoff_remark_partition": {"$ref": "#/$defs/handoff_remark_partition"}
+      }
+    },
+    "handoff_remark_partition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "case_fact_matrix_id", "case_fact_matrix_version",
+        "case_fact_matrix_hash", "parties"
+      ],
+      "properties": {
+        "schema_version": {"const": "handoff_remark_partition.v1"},
+        "case_fact_matrix_id": {"$ref": "#/$defs/identifier"},
+        "case_fact_matrix_version": {"type": "integer", "minimum": 1},
+        "case_fact_matrix_hash": {"$ref": "#/$defs/sha256"},
+        "parties": {"$ref": "#/$defs/handoff_remark_parties"}
+      }
+    },
+    "handoff_remark_parties": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["USER", "MERCHANT"],
+      "properties": {
+        "USER": {"$ref": "#/$defs/handoff_remark_user_party"},
+        "MERCHANT": {"$ref": "#/$defs/handoff_remark_merchant_party"}
+      }
+    },
+    "handoff_remark_user_party": {
+      "allOf": [
+        {"$ref": "#/$defs/handoff_remark_party"},
+        {"properties": {"party_role": {"const": "USER"}}}
+      ]
+    },
+    "handoff_remark_merchant_party": {
+      "allOf": [
+        {"$ref": "#/$defs/handoff_remark_party"},
+        {"properties": {"party_role": {"const": "MERCHANT"}}}
+      ]
+    },
+    "handoff_remark_party": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["party_role", "remark_status", "latest_remark", "remarks"],
+      "properties": {
+        "party_role": {"enum": ["USER", "MERCHANT"]},
+        "remark_status": {
+          "enum": [
+            "NOT_READY", "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK",
+            "HAS_REMARKS", "NO_EXTRA_REMARKS"
+          ]
+        },
+        "source": {"$ref": "#/$defs/handoff_remark_source"},
+        "latest_remark": {"type": "string", "maxLength": 8192},
+        "remarks": {
+          "type": "array", "maxItems": 128,
+          "items": {"$ref": "#/$defs/handoff_remark_entry"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"remark_status": {"const": "NOT_READY"}}},
+          "then": {
+            "not": {"required": ["source"]},
+            "properties": {
+              "latest_remark": {"const": ""},
+              "remarks": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "remark_status": {
+                "enum": [
+                  "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK",
+                  "NO_EXTRA_REMARKS"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": ["source"],
+            "properties": {
+              "latest_remark": {"const": ""},
+              "remarks": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"remark_status": {"const": "HAS_REMARKS"}}},
+          "then": {
+            "required": ["source"],
+            "properties": {
+              "source": {"$ref": "#/$defs/room_message_remark_source"},
+              "latest_remark": {"minLength": 1},
+              "remarks": {"minItems": 1}
+            }
+          }
+        }
+      ]
+    },
+    "handoff_remark_source": {
+      "oneOf": [
+        {"$ref": "#/$defs/room_message_remark_source"},
+        {"$ref": "#/$defs/formal_confirmation_remark_source"}
+      ]
+    },
+    "room_message_remark_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kind", "message_id", "message_hash"],
+      "properties": {
+        "source_kind": {"const": "ROOM_MESSAGE"},
+        "message_id": {"$ref": "#/$defs/identifier"},
+        "message_hash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "formal_confirmation_remark_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kind", "command_id", "request_hash"],
+      "properties": {
+        "source_kind": {"const": "FORMAL_CONFIRMATION"},
+        "command_id": {"$ref": "#/$defs/identifier"},
+        "request_hash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "handoff_remark_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "party_role", "text", "source_message_id", "source_message_hash", "turn_source"
+      ],
+      "properties": {
+        "party_role": {"enum": ["USER", "MERCHANT"]},
+        "text": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "source_message_id": {"$ref": "#/$defs/identifier"},
+        "source_message_hash": {"$ref": "#/$defs/sha256"},
+        "turn_source": {"const": "ROOM_MESSAGE"}
       }
     },
     "party_intake_state": {

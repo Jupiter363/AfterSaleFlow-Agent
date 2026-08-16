@@ -350,8 +350,10 @@ class IntakeExchangeP0Test {
                         "../contracts/agent-platform/intake/v2/fixtures/valid/"
                                 + "intake-turn-proposal-valid.json")
                 .toFile());
+        proposal.put("conversation_action", "ASK_SUBSTANTIVE");
         ObjectNode dossier = (ObjectNode) proposal.required("dossier_patch");
         dossier.set("party_intake_state", partyIntakeState());
+        dossier.set("handoff_remark_partition", handoffRemarkPartition());
         byte[] acceptedPayload = canonicalProposal(proposal);
         var validator = new IntakeExchangeCanonicalPayloadValidator();
 
@@ -373,6 +375,18 @@ class IntakeExchangeP0Test {
                         oneSided.required("proposal_hash").textValue(),
                         oneSidedPayload.length,
                         oneSidedPayload))
+                .isInstanceOf(IntakeExchangeAuthorityValidationPort.Rejected.class)
+                .hasMessageContaining("violates intake-turn-proposal.v2");
+
+        ObjectNode unknownPartitionBranch = proposal.deepCopy();
+        ((ObjectNode) unknownPartitionBranch.at("/dossier_patch/handoff_remark_partition"))
+                .putObject("internal_notes");
+        byte[] unknownPartitionPayload = canonicalProposal(unknownPartitionBranch);
+        assertThatThrownBy(() -> validator.requireValid(
+                        "intake-turn-proposal.v2",
+                        unknownPartitionBranch.required("proposal_hash").textValue(),
+                        unknownPartitionPayload.length,
+                        unknownPartitionPayload))
                 .isInstanceOf(IntakeExchangeAuthorityValidationPort.Rejected.class)
                 .hasMessageContaining("violates intake-turn-proposal.v2");
 
@@ -771,6 +785,37 @@ class IntakeExchangeP0Test {
         admission.put("reasoning", "");
         admission.put("confidence", 0.0d);
         return entry;
+    }
+
+    private static ObjectNode handoffRemarkPartition() {
+        ObjectNode partition = MAPPER.createObjectNode();
+        partition.put("schema_version", "handoff_remark_partition.v1");
+        partition.put("case_fact_matrix_id", "MATRIX_P4");
+        partition.put("case_fact_matrix_version", 1);
+        partition.put("case_fact_matrix_hash", "a".repeat(64));
+        ObjectNode parties = partition.putObject("parties");
+
+        ObjectNode user = parties.putObject("USER");
+        user.put("party_role", "USER");
+        user.put("remark_status", "HAS_REMARKS");
+        ObjectNode source = user.putObject("source");
+        source.put("source_kind", "ROOM_MESSAGE");
+        source.put("message_id", "MESSAGE_P4_USER_2");
+        source.put("message_hash", "b".repeat(64));
+        user.put("latest_remark", "The delivery date was added.");
+        ObjectNode remark = user.putArray("remarks").addObject();
+        remark.put("party_role", "USER");
+        remark.put("text", "The delivery date was added.");
+        remark.put("source_message_id", "MESSAGE_P4_USER_2");
+        remark.put("source_message_hash", "b".repeat(64));
+        remark.put("turn_source", "ROOM_MESSAGE");
+
+        ObjectNode merchant = parties.putObject("MERCHANT");
+        merchant.put("party_role", "MERCHANT");
+        merchant.put("remark_status", "NOT_READY");
+        merchant.put("latest_remark", "");
+        merchant.putArray("remarks");
+        return partition;
     }
 
     private static ProposalPutRequest putRequest(byte[] payload, String sha256) {

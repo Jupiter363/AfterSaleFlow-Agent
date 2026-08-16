@@ -107,6 +107,9 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
     private static final String GRAPH_BINDING_HASH = "f".repeat(64);
     private static final String GRAPH_CODE_BUILD_ID = "graph-code-projection-recovery";
     private static final String LOGICAL_INPUT_HASH = "b".repeat(64);
+    private static final String CASE_INGRESS_REQUEST_HASH = "4".repeat(64);
+    private static final String CASE_PAYLOAD_SHA256 = "9".repeat(64);
+    private static final String ROOT_RETRYABLE_ERROR_CODE = "GRAPH_LEASE_LOST";
     private static final String RESULT_HASH = "c".repeat(64);
     private static final String TARGET_PROPOSAL_HASH = "d".repeat(64);
     private static final String FORMAL_PROPOSAL_HASH = "5".repeat(64);
@@ -233,7 +236,7 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
     void completeConsumedEventAdoptsExactlyBoundRecoveredWinningAttempt() throws Exception {
         Fixture fixture = fixture();
         insertFixture(fixture);
-        assertRecoveredWinnerPreconditions(fixture);
+        assertRecoveredWinnerPreconditions(fixture, "ABORTED");
         assertPersistedTypedContextCanonicalAuthority(ORIGINAL_COMMAND_ID);
         assertPersistedTypedContextCanonicalAuthority(WINNING_COMMAND_ID);
         assertPersistedTypedCommandCanonicalAuthority(
@@ -282,6 +285,81 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                                 applied.completedAt()));
         assertThat(projectionState()).isEqualTo(appliedState);
         assertProjectionAppliedOnce();
+    }
+
+    @Test
+    void completeConsumedEventSeparatesIngressAndRetryableRecoveredRootRequestAuthorities()
+            throws Exception {
+        Fixture fixture = fixture();
+        insertFixture(fixture);
+        bindDistinctIngressAndRetryableFailedRoot(fixture);
+        assertRecoveredWinnerPreconditions(fixture, "FAILED");
+        assertDistinctIngressAndRecoveredRootAuthority(fixture);
+        long formalOperationCount = countFormalOperations();
+        long formalEventCount = countFormalEvents();
+
+        CompletionResult applied = service.completeConsumedEvent(fixture.projectionCommand());
+        ProjectionState appliedState = projectionState();
+        CompletionResult replayed = service.completeConsumedEvent(fixture.projectionCommand());
+
+        assertThat(applied.outcome()).isEqualTo(CompletionOutcome.APPLIED);
+        assertThat(applied.logicalRunId()).isEqualTo(LOGICAL_RUN_ID);
+        assertThat(applied.attemptId()).isEqualTo(WINNING_ATTEMPT_ID);
+        assertThat(replayed)
+                .isEqualTo(
+                        new CompletionResult(
+                                CompletionOutcome.IDEMPOTENT_REPLAY,
+                                applied.logicalRunId(),
+                                applied.attemptId(),
+                                applied.processRevision(),
+                                applied.roomRevision(),
+                                applied.lastCaseEventSequence(),
+                                applied.resultRef(),
+                                applied.resultSha256(),
+                                applied.completedAt()));
+        assertThat(projectionState()).isEqualTo(appliedState);
+        assertProjectionAppliedOnce();
+        assertThat(countFormalOperations()).isEqualTo(formalOperationCount);
+        assertThat(countFormalEvents()).isEqualTo(formalEventCount);
+    }
+
+    @Test
+    void completeConsumedEventRejectsRecoveredRunHashDriftFromRootGraphRequest()
+            throws Exception {
+        Fixture fixture = fixture();
+        insertFixture(fixture);
+        bindDistinctIngressAndRetryableFailedRoot(fixture);
+        assertThat(
+                        jdbc.update(
+                                "update agent_run set request_hash = ? where id = ?",
+                                "0".repeat(64),
+                                LOGICAL_RUN_ID))
+                .isEqualTo(1);
+
+        assertRejectedWithoutProjectionMutation(
+                fixture, "INTAKE_PROJECTION_RECOVERED_AUTHORITY_INVALID");
+    }
+
+    @Test
+    void completeConsumedEventRejectsRecoveredPredecessorTerminalAuthorityDrift()
+            throws Exception {
+        assertRejectedPredecessorAuthorityDrift(
+                "COMPLETED", ROOT_RETRYABLE_ERROR_CODE, true, "CREATE_NEXT_ATTEMPT", true);
+        useFixtureScope(FIXTURE_SEQUENCE.incrementAndGet());
+        assertRejectedPredecessorAuthorityDrift(
+                "RESULT_READY", ROOT_RETRYABLE_ERROR_CODE, true, "CREATE_NEXT_ATTEMPT", true);
+        useFixtureScope(FIXTURE_SEQUENCE.incrementAndGet());
+        assertRejectedPredecessorAuthorityDrift(
+                "FAILED", "", true, "CREATE_NEXT_ATTEMPT", true);
+        useFixtureScope(FIXTURE_SEQUENCE.incrementAndGet());
+        assertRejectedPredecessorAuthorityDrift(
+                "FAILED", ROOT_RETRYABLE_ERROR_CODE, false, "CREATE_NEXT_ATTEMPT", true);
+        useFixtureScope(FIXTURE_SEQUENCE.incrementAndGet());
+        assertRejectedPredecessorAuthorityDrift(
+                "FAILED", ROOT_RETRYABLE_ERROR_CODE, true, null, true);
+        useFixtureScope(FIXTURE_SEQUENCE.incrementAndGet());
+        assertRejectedPredecessorAuthorityDrift(
+                "FAILED", ROOT_RETRYABLE_ERROR_CODE, true, "CREATE_NEXT_ATTEMPT", false);
     }
 
     @Test
@@ -622,7 +700,12 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                         "INTAKE_ACTIVE",
                         1,
                         source.domainSnapshotRef(),
-                        source.eventRef(),
+                        new RoomGraphCommand.SnapshotRef(
+                                CASE_COMMAND_ROW_ID,
+                                "intake-command.v1",
+                                "urn:test:intake:projection-original",
+                                CASE_PAYLOAD_SHA256,
+                                32),
                         source.invocationContext(),
                         source.retryBudget(),
                         NOW.plusSeconds(1_800),
@@ -925,14 +1008,17 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                     created_at, updated_at
                 ) values (?, ?, ?, ?, 1, 'INTAKE_MESSAGE', 'INTAKE', 0,
                     'user-projection', 'USER', '["intake:message"]'::jsonb,
-                    'intake-command.v1', 'urn:test:intake:projection-original', ?, 32, 1,
+                    ?, ?, ?, ?, 1,
                     ?, ?, ?, ?, 'ORCHESTRATION_ACCEPTED', ?, ?, ?, ?)
                 """,
                 CASE_COMMAND_ROW_ID,
                 ORIGINAL_COMMAND_ID,
                 TENANT,
                 CASE_ID,
-                fixture.rootCommand().requestHash(),
+                fixture.rootCommand().eventRef().schemaVersion(),
+                fixture.rootCommand().eventRef().uri(),
+                fixture.rootCommand().eventRef().sha256(),
+                fixture.rootCommand().eventRef().sizeBytes(),
                 now,
                 at(NOW.plusSeconds(1_800)),
                 fixture.rootCommand().traceparent(),
@@ -1111,11 +1197,11 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                     started_at, completed_at, created_at, updated_at, created_by,
                     lineage_schema_version, command_id, command_request_hash,
                     logical_input_hash, command_json, previous_attempt_id, reset_required,
-                    public_sequence_offset, termination_code
+                    public_sequence_offset, termination_code, error_code, error_retryable
                 ) values (?, ?, ?, ?, 'TEMPORAL_ACTIVITY', 'synthetic', ?, 'synthetic-v1',
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, cast(? as jsonb), 10, 5, 15, 1,
                     ?, true, ?, ?, ?, ?, ?, 'test', 'agent-run-attempt-lineage.v1',
-                    ?, ?, ?, cast(? as jsonb), ?, ?, ?, ?)
+                    ?, ?, ?, cast(? as jsonb), ?, ?, ?, ?, ?, ?)
                 """,
                 command.attemptId(),
                 LOGICAL_RUN_ID,
@@ -1146,7 +1232,9 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                 previousAttemptId,
                 resetRequired,
                 publicSequenceOffset,
-                terminationCode);
+                terminationCode,
+                resultHash == null ? ROOT_RETRYABLE_ERROR_CODE : null,
+                resultHash == null);
     }
 
     private void insertMaterial(
@@ -1269,7 +1357,66 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                 at(NOW));
     }
 
-    private void assertRecoveredWinnerPreconditions(Fixture fixture) {
+    private void bindDistinctIngressAndRetryableFailedRoot(Fixture fixture) {
+        assertThat(CASE_INGRESS_REQUEST_HASH).isNotEqualTo(fixture.rootCommand().requestHash());
+        assertThat(
+                        jdbc.update(
+                                "update case_command set request_hash = ? where id = ?",
+                                CASE_INGRESS_REQUEST_HASH,
+                                CASE_COMMAND_ROW_ID))
+                .isEqualTo(1);
+        assertThat(
+                        jdbc.update(
+                                """
+                                update agent_run_attempt
+                                   set attempt_status = 'FAILED',
+                                       error_code = ?,
+                                       error_retryable = true,
+                                       public_output_emitted = false,
+                                       final_frame_observed = false,
+                                       last_sequence_no = 0,
+                                       termination_code = 'CREATE_NEXT_ATTEMPT'
+                                 where id = ?
+                                """,
+                                ROOT_RETRYABLE_ERROR_CODE,
+                                ROOT_ATTEMPT_ID))
+                .isEqualTo(1);
+    }
+
+    private void assertRejectedPredecessorAuthorityDrift(
+            String status,
+            String errorCode,
+            boolean retryable,
+            String terminationCode,
+            boolean completed)
+            throws Exception {
+        Fixture fixture = fixture();
+        insertFixture(fixture);
+        bindDistinctIngressAndRetryableFailedRoot(fixture);
+        assertThat(
+                        jdbc.update(
+                                """
+                                update agent_run_attempt
+                                   set attempt_status = ?,
+                                       error_code = ?,
+                                       error_retryable = ?,
+                                       termination_code = ?,
+                                       completed_at = case when ? then completed_at else null end
+                                 where id = ?
+                                """,
+                                status,
+                                errorCode,
+                                retryable,
+                                terminationCode,
+                                completed,
+                                ROOT_ATTEMPT_ID))
+                .isEqualTo(1);
+
+        assertRejectedWithoutProjectionMutation(
+                fixture, "INTAKE_PROJECTION_RECOVERED_AUTHORITY_INVALID");
+    }
+
+    private void assertRecoveredWinnerPreconditions(Fixture fixture, String rootStatus) {
         assertThat(ORIGINAL_COMMAND_ID).isNotEqualTo(WINNING_COMMAND_ID);
         assertThat(fixture.targetReceipt().proposalHash())
                 .isNotEqualTo(fixture.formalReceipt().proposalHash());
@@ -1293,7 +1440,7 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                                    and winner.attempt_status = 'COMPLETED'
                                    and winner.command_id = ?
                                    and root.attempt_no = 1
-                                   and root.attempt_status = 'ABORTED'
+                                   and root.attempt_status = ?
                                    and root.command_id = ?
                                    and root.previous_attempt_id is null
                                    and root.termination_code = 'CREATE_NEXT_ATTEMPT'
@@ -1301,6 +1448,7 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                                 Long.class,
                                 LOGICAL_RUN_ID,
                                 WINNING_COMMAND_ID,
+                                rootStatus,
                                 ORIGINAL_COMMAND_ID))
                 .isEqualTo(1);
         assertThat(
@@ -1362,6 +1510,96 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
         assertThat(text("case_command", "command_id", CASE_COMMAND_ROW_ID))
                 .isEqualTo(ORIGINAL_COMMAND_ID);
         assertThat(countProjectionOperations()).isZero();
+    }
+
+    private void assertDistinctIngressAndRecoveredRootAuthority(Fixture fixture) {
+        assertThat(
+                        jdbc.queryForObject(
+                                "select request_hash from case_command where id = ?",
+                                String.class,
+                                CASE_COMMAND_ROW_ID))
+                .isEqualTo(CASE_INGRESS_REQUEST_HASH);
+        assertThat(
+                        jdbc.queryForObject(
+                                "select request_hash from agent_run where id = ?",
+                                String.class,
+                                LOGICAL_RUN_ID))
+                .isEqualTo(fixture.rootCommand().requestHash());
+        assertThat(
+                        jdbc.queryForObject(
+                                "select request_hash from agent_run_attempt where id = ?",
+                                String.class,
+                                ROOT_ATTEMPT_ID))
+                .isEqualTo(fixture.rootCommand().requestHash());
+        assertThat(
+                        jdbc.queryForObject(
+                                "select command_request_hash from agent_run_attempt where id = ?",
+                                String.class,
+                                ROOT_ATTEMPT_ID))
+                .isEqualTo(fixture.rootCommand().requestHash());
+        assertThat(
+                        jdbc.queryForObject(
+                                """
+                                select count(*)
+                                  from agent_run_attempt
+                                 where id = ?
+                                   and attempt_status = 'FAILED'
+                                   and error_code = ?
+                                   and error_retryable
+                                   and termination_code = 'CREATE_NEXT_ATTEMPT'
+                                   and not public_output_emitted
+                                   and not final_frame_observed
+                                   and last_sequence_no = 0
+                                """,
+                                Long.class,
+                                ROOT_ATTEMPT_ID,
+                                ROOT_RETRYABLE_ERROR_CODE))
+                .isEqualTo(1);
+        assertThat(
+                        jdbc.queryForObject(
+                                """
+                                select count(*)
+                                  from agent_run_attempt
+                                 where agent_run_id = ?
+                                   and attempt_status = 'COMPLETED'
+                                   and id = ?
+                                   and result_hash = ?
+                                """,
+                                Long.class,
+                                LOGICAL_RUN_ID,
+                                WINNING_ATTEMPT_ID,
+                                RESULT_HASH))
+                .isEqualTo(1);
+        assertThat(countFormalOperations()).isEqualTo(1);
+        assertThat(countFormalEvents()).isEqualTo(1);
+    }
+
+    private long countFormalOperations() {
+        return jdbc.queryForObject(
+                """
+                select count(*)
+                  from domain_operation
+                 where case_id = ?
+                   and operation_type = 'INTAKE_TURN_FINALIZE'
+                   and operation_status = 'COMPLETED'
+                """,
+                Long.class,
+                CASE_ID);
+    }
+
+    private long countFormalEvents() {
+        return jdbc.queryForObject(
+                """
+                select count(*)
+                  from case_timeline_event
+                 where case_id = ?
+                   and id = ?
+                   and event_json ->> 'message_id' = ?
+                """,
+                Long.class,
+                CASE_ID,
+                FORMAL_EVENT_ID,
+                FORMAL_MESSAGE_ID);
     }
 
     private void assertRejectedWithoutProjectionMutation(

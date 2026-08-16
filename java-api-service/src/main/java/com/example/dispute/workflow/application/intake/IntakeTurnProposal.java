@@ -23,6 +23,7 @@ public record IntakeTurnProposal(
         String sourceSnapshotHash,
         String sourceEventHash,
         String roomUtterance,
+        ConversationAction conversationAction,
         JsonNode dossierPatch,
         JsonNode matrixPatch,
         Readiness readiness,
@@ -52,6 +53,7 @@ public record IntakeTurnProposal(
             sourceEventHash = IntakeContractSupport.sha256(sourceEventHash, "sourceEventHash");
         }
         roomUtterance = IntakeContractSupport.boundedText(roomUtterance, 20_000, "roomUtterance");
+        conversationAction = Objects.requireNonNull(conversationAction, "conversationAction");
         dossierPatch = IntakeContractSupport.immutableJson(dossierPatch, "dossierPatch");
         if (matrixPatch != null && !matrixPatch.isNull()) {
             matrixPatch = IntakeContractSupport.immutableJson(matrixPatch, "matrixPatch");
@@ -75,6 +77,55 @@ public record IntakeTurnProposal(
         proposalHash = IntakeContractSupport.sha256(proposalHash, "proposalHash");
     }
 
+    public IntakeTurnProposal(
+            String schemaVersion,
+            String commandId,
+            String logicalRunId,
+            String attemptId,
+            String caseId,
+            long roomEpoch,
+            String threadId,
+            String actorScopeHash,
+            String agentSessionId,
+            long cognitiveRevision,
+            String sourceSnapshotHash,
+            String sourceEventHash,
+            String roomUtterance,
+            JsonNode dossierPatch,
+            JsonNode matrixPatch,
+            Readiness readiness,
+            List<String> missingFields,
+            Recommendation recommendation,
+            KnowledgeAnswerMode knowledgeAnswerMode,
+            BigDecimal confidence,
+            ProfileVersions profileVersions,
+            String proposalHash) {
+        this(
+                schemaVersion,
+                commandId,
+                logicalRunId,
+                attemptId,
+                caseId,
+                roomEpoch,
+                threadId,
+                actorScopeHash,
+                agentSessionId,
+                cognitiveRevision,
+                sourceSnapshotHash,
+                sourceEventHash,
+                roomUtterance,
+                ConversationAction.ASK_SUBSTANTIVE,
+                dossierPatch,
+                matrixPatch,
+                readiness,
+                missingFields,
+                recommendation,
+                knowledgeAnswerMode,
+                confidence,
+                profileVersions,
+                proposalHash);
+    }
+
     @Override
     public JsonNode dossierPatch() {
         return dossierPatch.deepCopy();
@@ -89,6 +140,13 @@ public record IntakeTurnProposal(
         INCOMPLETE,
         READY_TO_CONFIRM,
         NEEDS_REVIEW
+    }
+
+    public enum ConversationAction {
+        ASK_SUBSTANTIVE,
+        INVITE_OPTIONAL_REMARK,
+        ACK_REMARK,
+        ACK_NO_REMARK
     }
 
     public enum Recommendation {

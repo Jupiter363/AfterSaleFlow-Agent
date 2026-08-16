@@ -33,6 +33,7 @@ from app.graphs.intake.baseline import (
 from app.graphs.intake.contracts import (
     CaseFactMatrixDeltaV2,
     DossierPatch,
+    HandoffRemarkPartition,
     IntakeCognitionDraft,
     IntakeDomainSnapshot,
     IntakeTurnEvent,
@@ -377,9 +378,9 @@ _BASELINE_CONTEXT_PROPOSAL_IDENTITY_FIELDS = frozenset(
         "source_event_hash",
     }
 )
-_BASELINE_SCROLL_SNAPSHOT_FIELDS = CASE_DETAIL_TOP_LEVEL_FIELDS - frozenset(
-    {"unilateral_case_matrix"}
-)
+_BASELINE_SCROLL_SNAPSHOT_FIELDS = (
+    CASE_DETAIL_TOP_LEVEL_FIELDS | frozenset({"handoff_remark_partition"})
+) - frozenset({"unilateral_case_matrix"})
 _BASELINE_SCROLL_SNAPSHOT_SCHEMA_VERSIONS = frozenset(
     {"intake_case_detail.v1", "intake-dossier.v2"}
 )
@@ -467,6 +468,15 @@ def validate_snapshot(
             raise IntakeGraphContractError("INTAKE_SNAPSHOT_MESSAGE_TOO_LARGE")
     if len(sequences) != len(set(sequences)) or sequences != sorted(sequences):
         raise IntakeGraphContractError("INTAKE_SNAPSHOT_MESSAGE_SEQUENCE_INVALID")
+    current_dossier = snapshot.get("current_dossier")
+    if not isinstance(current_dossier, Mapping):
+        raise IntakeGraphContractError("INTAKE_SNAPSHOT_SCHEMA_INVALID")
+    _validate_handoff_remark_partition(
+        current_dossier.get("handoff_remark_partition"),
+        formal_matrix=current_dossier.get("case_fact_matrix"),
+        require_formal_matrix=True,
+        error_code="INTAKE_SNAPSHOT_HANDOFF_REMARK_INVALID",
+    )
     _verify_self_hash(snapshot, "snapshot_hash", "INTAKE_SNAPSHOT_HASH_INVALID")
     _validate_safe_json(snapshot)
 
@@ -616,6 +626,12 @@ def validate_proposal_binding(
     }
     if any(proposal.get(field) != value for field, value in expected.items()):
         raise IntakeGraphContractError("INTAKE_PROPOSAL_BINDING_MISMATCH")
+    draft = state.get("terminal_draft")
+    if (
+        not isinstance(draft, Mapping)
+        or proposal.get("conversation_action") != draft.get("conversation_action")
+    ):
+        raise IntakeGraphContractError("INTAKE_PROPOSAL_ACTION_MISMATCH")
     expected_event_hash = state.get("last_event_hash")
     if proposal.get("source_event_hash") != expected_event_hash:
         raise IntakeGraphContractError("INTAKE_PROPOSAL_SOURCE_MISMATCH")
@@ -2263,7 +2279,14 @@ def _matches_previous_matrix_semantics(
     return all(draft.get(field) == value for field, value in expected.items())
 
 
-def validate_dossier_transition(previous: Mapping[str, Any], current: Mapping[str, Any]) -> None:
+def validate_dossier_transition(
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+    *,
+    actor_role: str | None = None,
+    current_message: Mapping[str, Any] | None = None,
+    formal_matrix: Mapping[str, Any] | None = None,
+) -> None:
     previous_ids, previous_bindings, previous_sources = _stable_dossier_index(previous)
     current_ids, current_bindings, current_sources = _stable_dossier_index(current)
     if not previous_ids <= current_ids or not previous_sources <= current_sources:
@@ -2271,6 +2294,394 @@ def validate_dossier_transition(previous: Mapping[str, Any], current: Mapping[st
     for stable_id, binding in previous_bindings.items():
         if current_bindings.get(stable_id) != binding:
             raise IntakeGraphContractError("INTAKE_DOSSIER_STABLE_ID_REBOUND")
+    _validate_handoff_remark_transition(
+        previous.get("handoff_remark_partition"),
+        current.get("handoff_remark_partition"),
+        actor_role=actor_role,
+        current_message=current_message,
+        formal_matrix=formal_matrix,
+    )
+
+
+def handoff_remark_message_hash(
+    *,
+    party_role: str,
+    message_id: str,
+    text: str,
+) -> str:
+    """Return the Java ContractJson-compatible participant-message identity."""
+
+    return canonical_sha256(
+        {
+            "message_id": message_id,
+            "role": party_role,
+            "source": "ROOM_MESSAGE",
+            "text": text,
+        }
+    )
+
+
+def _validate_handoff_remark_partition(
+    value: Any,
+    *,
+    formal_matrix: Any = None,
+    require_formal_matrix: bool = False,
+    error_code: str = "INTAKE_DOSSIER_HANDOFF_REMARK_INVALID",
+) -> Mapping[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise IntakeGraphContractError(error_code)
+    _validate_model(HandoffRemarkPartition, value, error_code)
+    for role in ("USER", "MERCHANT"):
+        party = value["parties"][role]
+        for remark in party["remarks"]:
+            if remark["source_message_hash"] != handoff_remark_message_hash(
+                party_role=role,
+                message_id=remark["source_message_id"],
+                text=remark["text"],
+            ):
+                raise IntakeGraphContractError(error_code)
+    if require_formal_matrix or formal_matrix is not None:
+        if not isinstance(formal_matrix, Mapping) or (
+            value.get("case_fact_matrix_id") != formal_matrix.get("matrix_id")
+            or value.get("case_fact_matrix_version") != formal_matrix.get("matrix_version")
+            or value.get("case_fact_matrix_hash") != formal_matrix.get("content_hash")
+        ):
+            raise IntakeGraphContractError(error_code)
+    return value
+
+
+def rebind_respondent_opening_handoff_partition(
+    public_dossier: Mapping[str, Any],
+    *,
+    authority_dossier: Mapping[str, Any],
+    successor_matrix: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Atomically carry an existing remark partition across respondent opening.
+
+    ``RESPONDENT_OPENING`` is a server-owned control event.  Its deterministic
+    matrix finalizer advances the initiator-frozen matrix to an authority-neutral
+    bilateral successor, but the event owns no participant message and therefore
+    cannot change either party's remark status, source, or append-only entries.
+    Validate the incoming partition against the trusted pre-opening matrix, then
+    update only its adjacent-matrix triple and validate that successor binding.
+    """
+
+    error_code = "INTAKE_RESPONDENT_OPENING_HANDOFF_REMARK_INVALID"
+    if (
+        not isinstance(public_dossier, Mapping)
+        or not isinstance(authority_dossier, Mapping)
+        or not isinstance(successor_matrix, Mapping)
+    ):
+        raise IntakeGraphContractError(error_code)
+
+    authority_matrix = authority_dossier.get("case_fact_matrix")
+    authority_partition = _validate_handoff_remark_partition(
+        authority_dossier.get("handoff_remark_partition"),
+        formal_matrix=authority_matrix,
+        require_formal_matrix=True,
+        error_code=error_code,
+    )
+    carried_partition = public_dossier.get("handoff_remark_partition")
+    if authority_partition is None:
+        if carried_partition is not None:
+            raise IntakeGraphContractError(error_code)
+        return deepcopy(dict(public_dossier))
+    if not isinstance(carried_partition, Mapping) or dict(carried_partition) != dict(
+        authority_partition
+    ):
+        raise IntakeGraphContractError(error_code)
+
+    rebound_dossier = deepcopy(dict(public_dossier))
+    rebound_partition = deepcopy(dict(authority_partition))
+    rebound_partition["case_fact_matrix_id"] = successor_matrix.get("matrix_id")
+    rebound_partition["case_fact_matrix_version"] = successor_matrix.get(
+        "matrix_version"
+    )
+    rebound_partition["case_fact_matrix_hash"] = successor_matrix.get("content_hash")
+    _validate_handoff_remark_partition(
+        rebound_partition,
+        formal_matrix=successor_matrix,
+        require_formal_matrix=True,
+        error_code=error_code,
+    )
+    if rebound_partition.get("parties") != authority_partition.get("parties"):
+        raise IntakeGraphContractError(error_code)
+    rebound_dossier["handoff_remark_partition"] = rebound_partition
+    return rebound_dossier
+
+
+def rebind_matrix_successor_handoff_partition(
+    public_dossier: Mapping[str, Any],
+    *,
+    authority_dossier: Mapping[str, Any],
+    successor_matrix: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Move an unchanged handoff partition onto one validated matrix successor.
+
+    Matrix authorization and finalization happen before this helper is called.
+    This boundary accepts only their exact parent-bound successor and changes
+    only the partition's adjacent-matrix triple. Party state remains the prior
+    authority so the ordinary transition validator can independently authorize
+    the current actor's subsequent phase change.
+    """
+
+    error_code = "INTAKE_DOSSIER_HANDOFF_MATRIX_REBIND_INVALID"
+    if (
+        not isinstance(public_dossier, Mapping)
+        or not isinstance(authority_dossier, Mapping)
+        or not isinstance(successor_matrix, Mapping)
+    ):
+        raise IntakeGraphContractError(error_code)
+    authority_matrix = authority_dossier.get("case_fact_matrix")
+    authority_partition = _validate_handoff_remark_partition(
+        authority_dossier.get("handoff_remark_partition"),
+        formal_matrix=authority_matrix,
+        require_formal_matrix=True,
+        error_code=error_code,
+    )
+    carried_partition = public_dossier.get("handoff_remark_partition")
+    authority_case_id = (
+        authority_matrix.get("case_id")
+        if isinstance(authority_matrix, Mapping)
+        else None
+    )
+    authority_version = (
+        authority_matrix.get("matrix_version")
+        if isinstance(authority_matrix, Mapping)
+        else None
+    )
+    successor_version = successor_matrix.get("matrix_version")
+    if not isinstance(authority_case_id, str):
+        raise IntakeGraphContractError(error_code)
+    try:
+        _validate_baseline_formal_matrix(
+            authority_matrix,
+            expected_case_id=authority_case_id,
+        )
+        _validate_baseline_formal_matrix(
+            successor_matrix,
+            expected_case_id=authority_case_id,
+        )
+    except IntakeGraphContractError as error:
+        raise IntakeGraphContractError(error_code) from error
+    if (
+        authority_partition is None
+        or not isinstance(authority_matrix, Mapping)
+        or not isinstance(carried_partition, Mapping)
+        or dict(carried_partition) != dict(authority_partition)
+        or type(authority_version) is not int
+        or type(successor_version) is not int
+        or successor_version != authority_version + 1
+        or successor_matrix.get("party_map") != authority_matrix.get("party_map")
+        or successor_matrix.get("parent_ref")
+        != {
+            "matrix_id": authority_matrix.get("matrix_id"),
+            "matrix_version": authority_matrix.get("matrix_version"),
+            "content_hash": authority_matrix.get("content_hash"),
+        }
+    ):
+        raise IntakeGraphContractError(error_code)
+
+    rebound_dossier = deepcopy(dict(public_dossier))
+    rebound_partition = deepcopy(dict(authority_partition))
+    rebound_partition["case_fact_matrix_id"] = successor_matrix.get("matrix_id")
+    rebound_partition["case_fact_matrix_version"] = successor_matrix.get(
+        "matrix_version"
+    )
+    rebound_partition["case_fact_matrix_hash"] = successor_matrix.get("content_hash")
+    _validate_handoff_remark_partition(
+        rebound_partition,
+        formal_matrix=successor_matrix,
+        require_formal_matrix=True,
+        error_code=error_code,
+    )
+    if rebound_partition.get("parties") != authority_partition.get("parties"):
+        raise IntakeGraphContractError(error_code)
+    rebound_dossier["handoff_remark_partition"] = rebound_partition
+    return rebound_dossier
+
+
+def _validate_handoff_remark_transition(
+    previous: Any,
+    current: Any,
+    *,
+    actor_role: str | None,
+    current_message: Mapping[str, Any] | None,
+    formal_matrix: Mapping[str, Any] | None,
+) -> None:
+    previous_partition = _validate_handoff_remark_partition(previous)
+    current_partition = _validate_handoff_remark_partition(
+        current,
+        formal_matrix=formal_matrix,
+        require_formal_matrix=actor_role is not None,
+    )
+    if previous_partition is None and current_partition is None:
+        return
+    if current_partition is None:
+        raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_REMARK_DELETED")
+    if previous_partition is None and actor_role is None:
+        # LCEL also validates an isolated patch to detect self-conflicting stable
+        # identities.  Without the prior dossier or actor/message authority it
+        # may validate the strict partition shape and self-hashes only; the real
+        # previous-to-current transition is checked again at the apply boundary
+        # with all trusted inputs present.
+        return
+    if previous_partition is not None and any(
+        current_partition.get(field) != previous_partition.get(field)
+        for field in (
+            "schema_version",
+            "case_fact_matrix_id",
+            "case_fact_matrix_version",
+            "case_fact_matrix_hash",
+        )
+    ):
+        if not _is_actor_bound_matrix_successor_rebind(
+            previous_partition,
+            current_partition,
+            actor_role=actor_role,
+            formal_matrix=formal_matrix,
+        ):
+            raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_MATRIX_REBOUND")
+
+    current_parties = current_partition["parties"]
+    previous_parties = previous_partition["parties"] if previous_partition is not None else None
+    changed_roles = {
+        role
+        for role in ("USER", "MERCHANT")
+        if previous_parties is None or current_parties[role] != previous_parties[role]
+    }
+    if previous_parties is None:
+        # Introducing the partition materializes both canonical party slots.
+        # A foreign slot has no authority to start beyond NOT_READY.
+        active_roles = {
+            role
+            for role in ("USER", "MERCHANT")
+            if current_parties[role]["remark_status"] != "NOT_READY"
+        }
+        if len(active_roles) > 1:
+            raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_PARTY_UNAUTHORIZED")
+        changed_roles = active_roles
+
+    if actor_role is not None:
+        if actor_role not in {"USER", "MERCHANT"} or not changed_roles <= {actor_role}:
+            raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_PARTY_UNAUTHORIZED")
+    elif len(changed_roles) > 1:
+        raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_PARTY_UNAUTHORIZED")
+    if not changed_roles:
+        return
+
+    changed_role = next(iter(changed_roles))
+    before = previous_parties[changed_role] if previous_parties is not None else {
+        "party_role": changed_role,
+        "remark_status": "NOT_READY",
+        "latest_remark": "",
+        "remarks": [],
+    }
+    after = current_parties[changed_role]
+    before_status = before["remark_status"]
+    after_status = after["remark_status"]
+    allowed = {
+        ("NOT_READY", "READY_PENDING_REMARK_INVITE"),
+        ("NOT_READY", "WAITING_FOR_REMARK"),
+        ("READY_PENDING_REMARK_INVITE", "HAS_REMARKS"),
+        ("READY_PENDING_REMARK_INVITE", "NO_EXTRA_REMARKS"),
+        ("WAITING_FOR_REMARK", "HAS_REMARKS"),
+        ("WAITING_FOR_REMARK", "NO_EXTRA_REMARKS"),
+        ("HAS_REMARKS", "HAS_REMARKS"),
+        ("NO_EXTRA_REMARKS", "HAS_REMARKS"),
+    }
+    if (before_status, after_status) not in allowed:
+        raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_STATUS_TRANSITION_INVALID")
+
+    before_remarks = before["remarks"]
+    after_remarks = after["remarks"]
+    if after_status == "HAS_REMARKS":
+        append_count = len(after_remarks) - len(before_remarks)
+        if append_count not in {0, 1} or after_remarks[: len(before_remarks)] != before_remarks:
+            raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_REMARK_APPEND_INVALID")
+    elif after_remarks != before_remarks:
+        raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_REMARK_APPEND_INVALID")
+
+    source = after.get("source")
+    if not isinstance(source, Mapping) or source.get("source_kind") != "ROOM_MESSAGE":
+        # Java may introduce FORMAL_CONFIRMATION authority at its own trusted
+        # commit boundary.  Python accepts that authority only as exact carry,
+        # which returned above before any changed-party transition is evaluated.
+        raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_SOURCE_UNAUTHORIZED")
+    if actor_role is not None or current_message is not None:
+        _validate_current_handoff_message(
+            role=changed_role,
+            source=source,
+            current_message=current_message,
+        )
+    if after_status == "HAS_REMARKS" and len(after_remarks) == len(before_remarks) + 1:
+        latest = after_remarks[-1]
+        if (
+            latest.get("source_message_id") != source.get("message_id")
+            or latest.get("source_message_hash") != source.get("message_hash")
+        ):
+            raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_REMARK_SOURCE_MISMATCH")
+
+
+def _is_actor_bound_matrix_successor_rebind(
+    previous_partition: Mapping[str, Any],
+    current_partition: Mapping[str, Any],
+    *,
+    actor_role: str | None,
+    formal_matrix: Mapping[str, Any] | None,
+) -> bool:
+    """Recognize only apply-time rebind to the validated immediate successor."""
+
+    if actor_role not in {"USER", "MERCHANT"} or not isinstance(formal_matrix, Mapping):
+        return False
+    previous_version = previous_partition.get("case_fact_matrix_version")
+    current_version = current_partition.get("case_fact_matrix_version")
+    return bool(
+        previous_partition.get("schema_version")
+        == current_partition.get("schema_version")
+        and type(previous_version) is int
+        and type(current_version) is int
+        and current_version == previous_version + 1
+        and formal_matrix.get("parent_ref")
+        == {
+            "matrix_id": previous_partition.get("case_fact_matrix_id"),
+            "matrix_version": previous_version,
+            "content_hash": previous_partition.get("case_fact_matrix_hash"),
+        }
+        and current_partition.get("case_fact_matrix_id")
+        == formal_matrix.get("matrix_id")
+        and current_version == formal_matrix.get("matrix_version")
+        and current_partition.get("case_fact_matrix_hash")
+        == formal_matrix.get("content_hash")
+    )
+
+
+def _validate_current_handoff_message(
+    *,
+    role: str,
+    source: Mapping[str, Any],
+    current_message: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(current_message, Mapping):
+        raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_CURRENT_MESSAGE_MISSING")
+    message_id = current_message.get("message_id")
+    text = current_message.get("content")
+    if (
+        current_message.get("role") != "HUMAN"
+        or current_message.get("audience") != role
+        or not isinstance(message_id, str)
+        or not isinstance(text, str)
+        or source.get("message_id") != message_id
+        or source.get("message_hash")
+        != handoff_remark_message_hash(
+            party_role=role,
+            message_id=message_id,
+            text=text,
+        )
+    ):
+        raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_CURRENT_MESSAGE_MISMATCH")
 
 
 def _validate_binding(
@@ -2460,6 +2871,7 @@ def _validate_state_payloads(state: IntakeGraphStateV2) -> None:
     if not isinstance(dossier, dict):
         raise IntakeGraphContractError("INTAKE_DOSSIER_INVALID")
     _validate_safe_json(dossier)
+    _validate_handoff_remark_partition(dossier.get("handoff_remark_partition"))
     _validate_optional_state_refs(state)
     _validate_baseline_case_detail_contexts(state)
     readiness = state.get("readiness")
@@ -3096,6 +3508,12 @@ def _validate_baseline_scroll_snapshot(
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
     if expected_case_id is not None and matrix.get("case_id") != expected_case_id:
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    _validate_handoff_remark_partition(
+        snapshot.get("handoff_remark_partition"),
+        formal_matrix=matrix,
+        require_formal_matrix=True,
+        error_code="INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID",
+    )
 
 
 def _validate_baseline_formal_matrix(
@@ -3539,6 +3957,40 @@ def _require_pending_formal_matrix_derivation(
     dossier = state.get("dossier_draft")
     if not isinstance(dossier, Mapping) or "case_fact_matrix" in dossier:
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_INVALID")
+    terminal_draft = state.get("terminal_draft")
+    conversation_action = (
+        terminal_draft.get("conversation_action")
+        if isinstance(terminal_draft, Mapping)
+        else None
+    )
+    if conversation_action in {"ACK_REMARK", "ACK_NO_REMARK"}:
+        if matrix_patch is not None:
+            raise IntakeGraphContractError("INTAKE_REMARK_MATRIX_PATCH_FORBIDDEN")
+        previous_context = state.get("baseline_previous_case_detail")
+        if _is_baseline_context_envelope(previous_context):
+            previous = unwrap_verified_baseline_previous_case_detail(state)
+        elif isinstance(previous_context, Mapping):
+            # ``validate_state`` has already validated the legacy scroll
+            # snapshot before this derivation check.  It remains read-only and
+            # is replaced by the current hash-bound envelope at commit.
+            previous = deepcopy(dict(previous_context))
+        else:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+        frozen_matrix = previous.get("case_fact_matrix")
+        partition = dossier.get("handoff_remark_partition")
+        formal_matrix = envelope.get("formal_matrix")
+        if (
+            not isinstance(frozen_matrix, Mapping)
+            or not isinstance(partition, Mapping)
+            or not isinstance(formal_matrix, Mapping)
+            or dict(formal_matrix) != dict(frozen_matrix)
+            or partition.get("case_fact_matrix_id") != frozen_matrix.get("matrix_id")
+            or partition.get("case_fact_matrix_version")
+            != frozen_matrix.get("matrix_version")
+            or partition.get("case_fact_matrix_hash") != frozen_matrix.get("content_hash")
+        ):
+            raise IntakeGraphContractError("INTAKE_REMARK_FROZEN_MATRIX_CONFLICT")
+        return
     try:
         expected = finalize_case_fact_matrix(
             request=_derivation_request_with_authority_input(envelope),

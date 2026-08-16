@@ -33,6 +33,12 @@ ThreadId = Annotated[
     StringConstraints(pattern=r"^grt\.v1\.[0-9a-f]{32}$"),
 ]
 Audience = Literal["USER", "MERCHANT"]
+IntakeConversationAction = Literal[
+    "ASK_SUBSTANTIVE",
+    "INVITE_OPTIONAL_REMARK",
+    "ACK_REMARK",
+    "ACK_NO_REMARK",
+]
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 PositiveInt = Annotated[int, Field(strict=True, ge=1)]
 RESPONDENT_OPENING_MARKER = "RESPONDENT_OPENING"
@@ -326,6 +332,115 @@ class PartyIntakeState(StrictIntakeModel):
         return self
 
 
+class RoomMessageRemarkSource(StrictIntakeModel):
+    source_kind: Literal["ROOM_MESSAGE"]
+    message_id: Identifier
+    message_hash: Sha256
+
+
+class FormalConfirmationRemarkSource(StrictIntakeModel):
+    source_kind: Literal["FORMAL_CONFIRMATION"]
+    command_id: Identifier
+    request_hash: Sha256
+
+
+HandoffRemarkSource = Annotated[
+    RoomMessageRemarkSource | FormalConfirmationRemarkSource,
+    Field(discriminator="source_kind"),
+]
+
+
+class HandoffRemarkEntry(StrictIntakeModel):
+    party_role: Audience
+    text: str = Field(min_length=1, max_length=8192)
+    source_message_id: Identifier
+    source_message_hash: Sha256
+    turn_source: Literal["ROOM_MESSAGE"]
+
+    @model_validator(mode="after")
+    def reject_blank_text(self) -> HandoffRemarkEntry:
+        if not self.text.strip():
+            raise ValueError("handoff remark text cannot be blank")
+        return self
+
+
+class HandoffRemarkParty(StrictIntakeModel):
+    party_role: Audience
+    remark_status: Literal[
+        "NOT_READY",
+        "READY_PENDING_REMARK_INVITE",
+        "WAITING_FOR_REMARK",
+        "HAS_REMARKS",
+        "NO_EXTRA_REMARKS",
+    ]
+    source: HandoffRemarkSource | None = None
+    latest_remark: str = Field(max_length=8192)
+    remarks: tuple[HandoffRemarkEntry, ...] = Field(max_length=128)
+
+    @model_validator(mode="after")
+    def require_canonical_status_payload(self) -> HandoffRemarkParty:
+        if "source" in self.model_fields_set and self.source is None:
+            raise ValueError("handoff remark source cannot be null")
+        if self.remark_status == "NOT_READY":
+            if self.source is not None or self.latest_remark or self.remarks:
+                raise ValueError("NOT_READY cannot carry source or remark authority")
+        elif self.source is None:
+            raise ValueError("ready handoff remark state requires source authority")
+
+        if self.remark_status in {
+            "READY_PENDING_REMARK_INVITE",
+            "WAITING_FOR_REMARK",
+            "NO_EXTRA_REMARKS",
+        }:
+            canonical_payload = not self.latest_remark and not self.remarks
+        elif self.remark_status == "HAS_REMARKS":
+            canonical_payload = (
+                bool(self.latest_remark)
+                and bool(self.remarks)
+                and self.remarks[-1].text == self.latest_remark
+            )
+        else:
+            canonical_payload = not self.latest_remark and not self.remarks
+        if not canonical_payload:
+            raise ValueError("handoff remark status and payload disagree")
+        if self.remark_status == "HAS_REMARKS":
+            latest = self.remarks[-1]
+            if (
+                not isinstance(self.source, RoomMessageRemarkSource)
+                or self.source.message_id != latest.source_message_id
+                or self.source.message_hash != latest.source_message_hash
+            ):
+                raise ValueError("HAS_REMARKS must bind its latest room message")
+
+        source_ids: set[str] = set()
+        for remark in self.remarks:
+            if remark.party_role != self.party_role:
+                raise ValueError("handoff remark belongs to another party")
+            if remark.source_message_id in source_ids:
+                raise ValueError("handoff remarks repeat a source message")
+            source_ids.add(remark.source_message_id)
+        return self
+
+
+class HandoffRemarkParties(StrictIntakeModel):
+    USER: HandoffRemarkParty
+    MERCHANT: HandoffRemarkParty
+
+    @model_validator(mode="after")
+    def require_role_key_binding(self) -> HandoffRemarkParties:
+        if self.USER.party_role != "USER" or self.MERCHANT.party_role != "MERCHANT":
+            raise ValueError("handoff remark party keys must bind their exact roles")
+        return self
+
+
+class HandoffRemarkPartition(StrictIntakeModel):
+    schema_version: Literal["handoff_remark_partition.v1"]
+    case_fact_matrix_id: Identifier
+    case_fact_matrix_version: PositiveInt
+    case_fact_matrix_hash: Sha256
+    parties: HandoffRemarkParties
+
+
 class SnapshotMessage(StrictIntakeModel):
     message_id: Identifier
     role: Literal["HUMAN", "AI"]
@@ -412,14 +527,20 @@ class DossierPatch(StrictIntakeModel):
     admission: dict[str, Any] | None = Field(default=None, max_length=64)
     handoff_notes: dict[str, Any] | None = Field(default=None, max_length=64)
     party_intake_state: PartyIntakeState | None = None
+    handoff_remark_partition: HandoffRemarkPartition | None = None
 
     @model_validator(mode="after")
     def reject_explicit_null_branches(self) -> DossierPatch:
         if any(getattr(self, name) is None for name in self.model_fields_set):
             raise ValueError("dossier patch branches cannot be null")
-        _reject_dossier_matrix_authority(
-            self.model_dump(mode="python", exclude_none=True, exclude_unset=True)
-        )
+        public_branches = self.model_dump(mode="python", exclude_none=True, exclude_unset=True)
+        # ``handoff_remark_partition`` is a strict, Java-compatible binding to
+        # the adjacent formal matrix.  Validate it through its dedicated model,
+        # then retain the pre-existing recursive matrix-authority ban for every
+        # model-controlled dossier branch.  This is intentionally not a global
+        # exemption for matrix-looking keys elsewhere in the dossier.
+        public_branches.pop("handoff_remark_partition", None)
+        _reject_dossier_matrix_authority(public_branches)
         if self.party_intake_state is not None:
             missing_mirrors = _PARTY_INTAKE_ENTRY_FIELDS - self.model_fields_set
             if missing_mirrors:
@@ -582,6 +703,7 @@ MatrixPatch = UnilateralCaseMatrixDraftV1 | CaseFactMatrixDeltaV2
 
 
 class IntakeCognitionDraft(StrictIntakeModel):
+    conversation_action: IntakeConversationAction
     room_utterance: str = Field(min_length=1, max_length=20000)
     dossier_patch: DossierPatch
     matrix_patch: MatrixPatch | None = None
@@ -635,6 +757,7 @@ class IntakeCognitionDraft(StrictIntakeModel):
             "admission",
             "handoff_notes",
             "party_intake_state",
+            "handoff_remark_partition",
         ):
             if field_name in canonical_dossier and canonical_dossier[field_name] is None:
                 canonical_dossier.pop(field_name)
@@ -697,6 +820,7 @@ class IntakeTurnProposal(StrictIntakeModel):
     cognitive_revision: PositiveInt
     source_snapshot_hash: Sha256
     source_event_hash: Sha256 | None = None
+    conversation_action: IntakeConversationAction
     room_utterance: str = Field(min_length=1, max_length=20000)
     dossier_patch: DossierPatch
     matrix_patch: MatrixPatch | None = None

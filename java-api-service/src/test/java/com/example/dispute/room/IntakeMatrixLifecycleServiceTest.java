@@ -59,6 +59,34 @@ class IntakeMatrixLifecycleServiceTest {
     }
 
     @Test
+    void bilateralValidationAcceptsOnlyGroundedExplicitUnknownRespondentPositions()
+            throws Exception {
+        ObjectNode grounded = bilateralMatrix();
+        ObjectNode groundedRespondent = (ObjectNode) grounded.at("/fact_rows/0/positions/MERCHANT");
+        groundedRespondent.put("stance", "UNKNOWN");
+        grounded.put("content_hash", ContractJson.sha256Hex(grounded));
+
+        ObjectNode ungrounded = grounded.deepCopy();
+        ungrounded.remove("content_hash");
+        ObjectNode ungroundedRespondent =
+                (ObjectNode) ungrounded.at("/fact_rows/0/positions/MERCHANT");
+        ungroundedRespondent.put("source_type", "NO_DIRECT_POSITION");
+        ungroundedRespondent.putArray("source_refs");
+        ungrounded.put("content_hash", ContractJson.sha256Hex(ungrounded));
+
+        when(repository.findByCaseIdAndRoomType(CASE_ID, RoomType.INTAKE))
+                .thenReturn(Optional.of(dossier(grounded)), Optional.of(dossier(ungrounded)));
+
+        ObjectNode validated = service.requireBilateralFrozen(dispute());
+
+        assertThat(validated.at("/fact_rows/0/positions/MERCHANT/stance").asText())
+                .isEqualTo("UNKNOWN");
+        assertThatThrownBy(() -> service.requireBilateralFrozen(dispute()))
+                .isInstanceOf(IntakeFinalizationRejectedException.class)
+                .hasMessage("bilateral matrix lacks an independently derived respondent position");
+    }
+
+    @Test
     void respondentTimeoutWritesAnRfc8785CanonicalMatrixHash() throws Exception {
         ObjectNode matrix = timeoutInitiatorMatrix();
         matrix.put("content_hash", ContractJson.sha256Hex(matrix));

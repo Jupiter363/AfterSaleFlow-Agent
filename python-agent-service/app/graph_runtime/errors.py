@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 from psycopg import OperationalError
 from psycopg import errors as psycopg_errors
 from psycopg_pool import PoolTimeout, TooManyRequests
@@ -19,6 +21,61 @@ class GraphRuntimeError(RuntimeError):
 
 class GraphContractError(GraphRuntimeError, ValueError):
     code = "GRAPH_CONTRACT_REJECTED"
+
+
+STABLE_INTAKE_GRAPH_CONTRACT_ERROR_CODES = frozenset(
+    {
+        "INTAKE_ACTION_GATE_ACTION_MISMATCH",
+        "INTAKE_ACTION_GATE_DUPLICATE",
+        "INTAKE_ACTION_GATE_INVALID",
+        "INTAKE_ACTION_GATE_MISSING",
+        "INTAKE_ACTION_GATE_ROOM_MISMATCH",
+        "INTAKE_ACTION_GATE_SOURCE_INVALID",
+        "INTAKE_ACTION_GATE_SOURCE_MISMATCH",
+        "INTAKE_ACTION_GATE_UPDATE_INVALID",
+        "INTAKE_CUSTOM_VISIBLE_DELTA_FORBIDDEN",
+        "INTAKE_PUBLIC_UPDATE_BYPASS_FORBIDDEN",
+        "INTAKE_RESPONDENT_ATTITUDE_STREAM_INVALID",
+        "INTAKE_RESPONDENT_OPENING_ACTION_GATE_FORBIDDEN",
+        "INTAKE_ROOM_UTTERANCE_STREAM_INVALID",
+        "INTAKE_ROOM_UTTERANCE_STREAM_NORMALIZATION_DIVERGED",
+        "INTAKE_ROOM_UTTERANCE_STREAM_ORDER_INVALID",
+        "INTAKE_TARGET_CANONICAL_REPLAY_FIELD_INVALID",
+        "INTAKE_TARGET_REPLY_FIRST_REPLAY_ORDER_INVALID",
+        "INTAKE_USAGE_STREAM_DUPLICATE",
+    }
+)
+
+
+class IntakeExecutorDiagnosticStage(str, Enum):
+    """Closed, non-sensitive boundaries for an Intake executor contract failure."""
+
+    GRAPH_STREAM_ADVANCE = "GRAPH_STREAM_ADVANCE"
+    GRAPH_STREAM_CLOSE = "GRAPH_STREAM_CLOSE"
+    TERMINAL_STATE_REHYDRATE = "TERMINAL_STATE_REHYDRATE"
+    TERMINAL_PUBLIC_BINDING = "TERMINAL_PUBLIC_BINDING"
+    CHECKPOINT_PREFLIGHT = "CHECKPOINT_PREFLIGHT"
+    PROPOSAL_STORE_PUT = "PROPOSAL_STORE_PUT"
+    RESULT_MATERIALIZE = "RESULT_MATERIALIZE"
+    FORMAL_COMMIT = "FORMAL_COMMIT"
+    TERMINAL_PUBLIC_REPLAY = "TERMINAL_PUBLIC_REPLAY"
+
+
+class IntakeExecutorDiagnosticError(GraphContractError):
+    """Internal carrier that preserves the public contract and original arguments."""
+
+    def __init__(
+        self,
+        source: GraphContractError,
+        *,
+        stage: IntakeExecutorDiagnosticStage,
+    ) -> None:
+        if type(source) is not GraphContractError:
+            raise TypeError("Intake executor diagnostics require an exact GraphContractError")
+        if type(stage) is not IntakeExecutorDiagnosticStage:
+            raise TypeError("Intake executor diagnostic stage is not trusted")
+        Exception.__init__(self, *source.args)
+        self.diagnostic_stage = stage
 
 
 class GraphThreadNotFoundError(GraphRuntimeError):

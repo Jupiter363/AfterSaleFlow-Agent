@@ -13,6 +13,7 @@ import anyio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.api.graph_stream_service import _model_transport_output_error_code
 from app.api.graph_reconciliation_service import (
     GraphReconciliationService,
     TargetE2EReconciliationArtifacts,
@@ -30,6 +31,7 @@ from app.graph_runtime.errors import (
     GraphCommandDeadlineError,
     GraphCommandNotFoundError,
     GraphCommandStateError,
+    GraphContractError,
     GraphGatewayDisabledError,
     GraphLeaseLostError,
     GraphLeaseUnavailableError,
@@ -37,10 +39,14 @@ from app.graph_runtime.errors import (
     GraphNonceReplayError,
     GraphResultNotCommittedError,
     GraphRuntimeError,
+    IntakeExecutorDiagnosticError,
+    IntakeExecutorDiagnosticStage,
+    STABLE_INTAKE_GRAPH_CONTRACT_ERROR_CODES,
     normalize_transient_persistence_error,
 )
 from app.graph_runtime.identity import ThreadIdentity
 from app.graphs.intake.errors import IntakeGraphContractError
+from app.model_runtime.transports import ModelTransportOutputError
 from app.graph_runtime.target_e2e import (
     TARGET_E2E_COMMAND_PATH,
     TargetE2EGraphCommandEnvelope,
@@ -67,6 +73,7 @@ TARGET_E2E_RECONCILE_PATH = "/internal/graphs/target-e2e/commands/reconcile"
 TARGET_E2E_PROPOSAL_SOURCE_PATH = "/internal/graphs/target-e2e/commands/proposal-source"
 _TERMINAL_EVENTS = frozenset({"attempt_aborted", "final", "error"})
 _STABLE_INTAKE_ERROR_CODE_PATTERN = re.compile(r"^INTAKE_[A-Z0-9_]{1,120}$")
+_STABLE_GRAPH_CONTRACT_INTAKE_ERROR_CODES = STABLE_INTAKE_GRAPH_CONTRACT_ERROR_CODES
 _NO_STORE_HEADERS: Mapping[str, str] = {
     "Cache-Control": "no-store, no-transform",
     "Pragma": "no-cache",
@@ -902,6 +909,13 @@ async def _stream_ndjson(
             validator,
             error_code="GRAPH_STREAM_PROTOCOL_REJECTED",
         )
+    except ModelTransportOutputError as error:
+        _log_safe_failure("graph stream model output", error)
+        yield _encode_terminal_error(
+            codec,
+            validator,
+            error_code=_model_transport_output_error_code(error),
+        )
     except Exception as error:
         persistence_error = normalize_transient_persistence_error(error)
         if persistence_error is not None:
@@ -1125,14 +1139,34 @@ def _reconciliation_error_response(
 
 
 def _log_safe_failure(stage: str, error: Exception) -> None:
-    if isinstance(error, IntakeGraphContractError) and _STABLE_INTAKE_ERROR_CODE_PATTERN.fullmatch(
-        error.code
+    error_code: str | None = None
+    if isinstance(error, IntakeGraphContractError):
+        if _STABLE_INTAKE_ERROR_CODE_PATTERN.fullmatch(error.code):
+            error_code = error.code
+    elif (
+        isinstance(error, GraphContractError)
+        and len(error.args) == 1
+        and isinstance(error.args[0], str)
+        and error.args[0] in _STABLE_GRAPH_CONTRACT_INTAKE_ERROR_CODES
     ):
+        error_code = error.args[0]
+    if error_code is not None:
         LOGGER.error(
             "%s failed: error_type=%s error_code=%s",
             stage,
             type(error).__name__,
-            error.code,
+            error_code,
+        )
+        return
+    if (
+        type(error) is IntakeExecutorDiagnosticError
+        and type(error.diagnostic_stage) is IntakeExecutorDiagnosticStage
+    ):
+        LOGGER.error(
+            "%s failed: error_type=%s diagnostic_stage=%s",
+            stage,
+            type(error).__name__,
+            error.diagnostic_stage.value,
         )
         return
     LOGGER.error("%s failed: error_type=%s", stage, type(error).__name__)

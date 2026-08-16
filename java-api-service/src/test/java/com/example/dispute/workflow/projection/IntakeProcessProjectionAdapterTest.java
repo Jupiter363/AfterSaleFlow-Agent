@@ -47,6 +47,7 @@ class IntakeProcessProjectionAdapterTest {
         verify(jdbc).query(sql.capture(), parameters.capture(), any(RowMapper.class));
         assertThat(sql.getValue())
                 .contains(
+                        "epoch.room_type = projection.current_room",
                         "epoch.room_epoch = projection.room_epoch",
                         "epoch.fencing_token = projection.fencing_token",
                         "epoch.lifecycle_status in ('ACTIVE', 'TERMINAL')",
@@ -61,6 +62,63 @@ class IntakeProcessProjectionAdapterTest {
                         "command_admission_pending");
         assertThat(parameters.getValue().getValue("actorId")).isEqualTo("user-safe");
         assertThat(parameters.getValue().getValue("actorRole")).isEqualTo("USER");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void advancedRoomRequiresTerminalLatestIntakeAndReturnsCompletedCurrentProjection() {
+        NamedParameterJdbcOperations jdbc = mock(NamedParameterJdbcOperations.class);
+        ProjectionRow evidenceTuple = new ProjectionRow(
+                "TEMPORAL",
+                "READY",
+                0,
+                8,
+                2,
+                "COMPLETED",
+                OffsetDateTime.parse("2026-08-13T22:49:10Z"),
+                "TEMPORAL",
+                "ACTIVE",
+                "READY",
+                0L,
+                8L,
+                0L,
+                2L,
+                "case-process-contract.v1",
+                "room-epoch-selection.v2",
+                "agent-stream.v2",
+                "case-build-1",
+                "evidence-build-1",
+                "target-e2e-graph.2026-07-27.1",
+                "target-e2e-checkpoint.v1",
+                null,
+                null,
+                null,
+                null);
+        when(jdbc.query(anyString(), any(SqlParameterSource.class), any(RowMapper.class)))
+                .thenReturn(List.of(evidenceTuple));
+        IntakeProcessProjectionAdapter scopedAdapter =
+                new IntakeProcessProjectionAdapter(jdbc);
+
+        IntakeProcessProjectionView view = scopedAdapter
+                .read("CASE_ADVANCED", new AuthenticatedActor("merchant-safe", ActorRole.MERCHANT))
+                .orElseThrow();
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).query(sql.capture(), any(SqlParameterSource.class), any(RowMapper.class));
+        assertThat(sql.getValue())
+                .contains(
+                        "projection.current_room in ('EVIDENCE', 'HEARING', 'REVIEW')",
+                        "completed_intake.lifecycle_status = 'TERMINAL'",
+                        "completed_intake.provisioning_status = 'READY'",
+                        "completed_intake.temporal_workflow_id =",
+                        "projection.temporal_workflow_id",
+                        "newer_intake.room_epoch >");
+        assertThat(view.projectionState()).isEqualTo("CURRENT");
+        assertThat(view.roomPhase()).isEqualTo("COMPLETED");
+        assertThat(view.pendingState()).isEqualTo("NONE");
+        assertThat(view.processRevision()).isEqualTo(8);
+        assertThat(view.roomRevision()).isZero();
+        assertThat(view.fencingToken()).isEqualTo(2);
     }
 
     @Test

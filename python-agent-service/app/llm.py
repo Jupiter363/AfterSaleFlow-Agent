@@ -2026,6 +2026,26 @@ class _AsyncStructuredStreamState:
         try:
             value = self.output_type.model_validate_json(content)
         except (TypeError, ValidationError, ValueError) as exception:
+            validation_details: object = type(exception).__name__
+            if isinstance(exception, ValidationError):
+                validation_details = [
+                    {
+                        "loc": tuple(str(part) for part in detail.get("loc", ())),
+                        "type": str(detail.get("type") or "unknown"),
+                    }
+                    for detail in exception.errors(
+                        include_input=False,
+                        include_url=False,
+                        include_context=False,
+                    )
+                ]
+            LOGGER.error(
+                "async structured stream output validation failed: node=%s "
+                "response_chars=%s details=%s",
+                self.node_name,
+                len(content),
+                validation_details,
+            )
             raise AgentOutputSchemaError(
                 self.node_name,
                 f"{self.node_name} returned invalid streamed structured output",

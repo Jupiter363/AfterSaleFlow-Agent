@@ -240,9 +240,10 @@ class IntakeRespondentMatrixFreezerTest {
         ObjectNode wrongSource = ordinaryRespondentDelta(opening);
         ((ObjectNode) wrongSource.at("/fact_rows/0"))
                 .put("source_scope", "PREVIOUS_MATRIX");
-        assertThatThrownBy(() -> freezer.deriveCandidate(
-                        opening, wrongSource, respondentAuthority()))
-                .isInstanceOf(IntakeFinalizationRejectedException.class);
+        ObjectNode rebound = freezer.deriveCandidate(
+                opening, wrongSource, respondentAuthority());
+        assertThat(rebound.at("/fact_rows/0/positions/MERCHANT/source_refs/0").asText())
+                .isEqualTo("MESSAGE_RESPONDENT_2");
 
         assertThatThrownBy(() -> freezer.deriveCandidate(
                         openingBilateralMatrix(),
@@ -544,10 +545,12 @@ class IntakeRespondentMatrixFreezerTest {
         ObjectNode substantivePrevious = (ObjectNode) completeDelta();
         ((ObjectNode) substantivePrevious.at("/fact_rows/0"))
                 .put("source_scope", "PREVIOUS_MATRIX");
-        assertRejected(
-                "INTAKE_RESPONDENT_MATRIX_SOURCE_SCOPE_INVALID",
-                () -> freezer.deriveCandidate(
-                        initiatorMatrix(), substantivePrevious, respondentAuthority()));
+        ObjectNode reboundSubstantive = freezer.deriveCandidate(
+                initiatorMatrix(), substantivePrevious, respondentAuthority());
+        assertThat(reboundSubstantive
+                        .at("/fact_rows/0/positions/MERCHANT/source_refs/0")
+                        .asText())
+                .isEqualTo("MESSAGE_RESPONDENT_2");
 
         ObjectNode newPreviousAndCurrent = (ObjectNode) completeDelta();
         ((ObjectNode) newPreviousAndCurrent.at("/fact_rows/1"))
@@ -556,16 +559,29 @@ class IntakeRespondentMatrixFreezerTest {
                 initiatorMatrix(), newPreviousAndCurrent, respondentAuthority());
         assertThat(accepted.at("/fact_rows/1/origin/source_refs/0").asText())
                 .isEqualTo("MESSAGE_RESPONDENT_2");
+    }
 
-        ObjectNode unknown = (ObjectNode) completeDelta();
-        ObjectNode unknownRow = (ObjectNode) unknown.at("/fact_rows/0");
-        unknownRow.put("stance", "UNKNOWN");
-        unknownRow.putNull("asserted_value");
+    @Test
+    void explicitCurrentSourceUnknownIsAReadyEvidenceResolutionPosition() throws Exception {
+        ObjectNode delta = (ObjectNode) completeDelta();
+        ObjectNode row = (ObjectNode) delta.at("/fact_rows/0");
+        row.put("stance", "UNKNOWN");
+        row.putNull("asserted_value");
+
         ObjectNode candidate = freezer.deriveCandidate(
-                initiatorMatrix(), unknown, respondentAuthority());
-        assertRejected(
-                "INTAKE_RESPONDENT_MATRIX_NOT_READY",
-                () -> freezer.requireCompleteForFreeze(candidate, respondentAuthority()));
+                initiatorMatrix(), delta, respondentAuthority());
+
+        assertThat(candidate.at("/fact_rows/0/positions/MERCHANT/stance").asText())
+                .isEqualTo("UNKNOWN");
+        assertThat(candidate.at("/fact_rows/0/positions/MERCHANT/source_type").asText())
+                .isEqualTo("DIRECT_PARTY_STATEMENT");
+        assertThat(candidate.at("/fact_rows/0/positions/MERCHANT/source_refs/0").asText())
+                .isEqualTo("MESSAGE_RESPONDENT_2");
+        assertThat(candidate.at("/fact_rows/0/party_alignment/status").asText())
+                .isEqualTo("ONE_SIDED");
+        assertThat(candidate.at("/fact_rows/0/requires_resolution").asBoolean()).isTrue();
+
+        freezer.requireCompleteForFreeze(candidate, respondentAuthority());
     }
 
     private static ObjectNode initiatorMatrix() {

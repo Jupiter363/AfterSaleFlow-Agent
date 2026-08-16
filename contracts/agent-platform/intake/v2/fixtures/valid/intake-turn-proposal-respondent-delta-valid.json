@@ -12,6 +12,7 @@
   "source_snapshot_hash": "a576823e72e44f62b08249af84f295fe5cc3ac09f3335ab96b2846fa7e5f9743",
   "source_event_hash": "5da4ebd5b5ff75ea8af5c955c01f2cf18138892d07ad6ca74be7c7fb50ff5815",
   "room_utterance": "The response to the submitted facts was recorded.",
+  "conversation_action": "ASK_SUBSTANTIVE",
   "dossier_patch": {
     "schema_version": "intake-dossier.v2",
     "respondent_attitude": {"attitude": "DISAGREE"}
@@ -52,5 +53,5 @@
     "guardrail_version": "intake-guardrail.v2",
     "tool_policy_version": "no-tools.v1"
   },
-  "proposal_hash": "c7a6ce362e32c073c07da3b35a1bc91b1b7c031e950d704098c3b20d07829782"
+  "proposal_hash": "c3f33638a0e4537be7973b87f72f733c3168acd4aa17c5ebcfe047c37179eb59"
 }

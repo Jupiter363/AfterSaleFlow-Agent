@@ -20,6 +20,8 @@ public final class IntakeDossierProjectionMerger {
 
     private static final String DOSSIER_SCHEMA_VERSION = "intake-dossier.v2";
     private static final String PARTY_INTAKE_STATE_SCHEMA_VERSION = "party-intake-state.v1";
+    private static final String HANDOFF_REMARK_PARTITION_SCHEMA_VERSION =
+            "handoff_remark_partition.v1";
     private static final List<String> PARTY_INTAKE_ROLES = List.of("USER", "MERCHANT");
     private static final Set<String> PARTY_INTAKE_ENTRY_FIELDS = Set.of(
             "intake_quality", "missing_information", "handoff_notes", "admission");
@@ -46,7 +48,43 @@ public final class IntakeDossierProjectionMerger {
             "intake_quality",
             "admission",
             "handoff_notes",
-            "party_intake_state");
+            "party_intake_state",
+            "handoff_remark_partition");
+
+    private static final Set<String> HANDOFF_REMARK_PARTITION_FIELDS = Set.of(
+            "schema_version",
+            "case_fact_matrix_id",
+            "case_fact_matrix_version",
+            "case_fact_matrix_hash",
+            "parties");
+    private static final Set<String> HANDOFF_REMARK_PARTY_FIELDS = Set.of(
+            "party_role",
+            "remark_status",
+            "latest_remark",
+            "remarks");
+    private static final Set<String> HANDOFF_REMARK_PARTY_FIELDS_WITH_SOURCE = Set.of(
+            "party_role", "remark_status", "source", "latest_remark", "remarks");
+    private static final Set<String> HANDOFF_REMARK_ROOM_SOURCE_FIELDS =
+            Set.of("source_kind", "message_id", "message_hash");
+    private static final Set<String> HANDOFF_REMARK_CONFIRM_SOURCE_FIELDS =
+            Set.of("source_kind", "command_id", "request_hash");
+    private static final Set<String> HANDOFF_REMARK_FIELDS = Set.of(
+            "party_role",
+            "text",
+            "source_message_id",
+            "source_message_hash",
+            "turn_source");
+    private static final Set<String> HANDOFF_REMARK_STATUSES = Set.of(
+            "NOT_READY",
+            "READY_PENDING_REMARK_INVITE",
+            "WAITING_FOR_REMARK",
+            "HAS_REMARKS",
+            "NO_EXTRA_REMARKS");
+    private static final Set<String> POST_THRESHOLD_HANDOFF_STATUSES = Set.of(
+            "READY_PENDING_REMARK_INVITE",
+            "WAITING_FOR_REMARK",
+            "HAS_REMARKS",
+            "NO_EXTRA_REMARKS");
 
     private static final Set<String> FORBIDDEN_KEYS = Set.of(
             "memory_frame",
@@ -155,6 +193,11 @@ public final class IntakeDossierProjectionMerger {
         if (!patch.isObject()) {
             throw rejected("INTAKE_DOSSIER_PATCH_INVALID", "dossier patch is not an object");
         }
+        rejectNestedHandoffRemarkPartition(current);
+        rejectNestedHandoffRemarkPartition(patch);
+        validateHandoffRemarkPartition(current.get("handoff_remark_partition"));
+        validateHandoffRemarkPartition(patch.get("handoff_remark_partition"));
+        requireHandoffRemarkPartitionMatrixBinding(current);
         patch.fieldNames().forEachRemaining(name -> {
             if ("case_fact_matrix".equals(name) || "unilateral_case_matrix".equals(name)) {
                 throw rejected(
@@ -168,13 +211,25 @@ public final class IntakeDossierProjectionMerger {
             }
         });
         rejectForbiddenKeys(patch);
-        rejectDerivedMatrixDossierKeys(patch);
+        ObjectNode nonPartitionPatch = ((ObjectNode) patch).deepCopy();
+        nonPartitionPatch.remove("handoff_remark_partition");
+        rejectDerivedMatrixDossierKeys(nonPartitionPatch);
         requirePartyIntakeTransition(current, (ObjectNode) patch, matrixAuthority);
+        requireNewAcknowledgementPartition(current, (ObjectNode) patch, matrixAuthority);
+        requireHandoffRemarkPartitionTransition(
+                current.get("handoff_remark_partition"),
+                patch.get("handoff_remark_partition"),
+                matrixAuthority);
 
         boolean hasPersistedClaim = current.path("claim_resolution").isObject()
                 || current.path("requested_resolution").isObject();
         ObjectNode merged = (ObjectNode) current.deepCopy();
-        deepMerge(merged, (ObjectNode) patch);
+        ObjectNode ordinaryPatch = ((ObjectNode) patch).deepCopy();
+        JsonNode proposedRemarkPartition = ordinaryPatch.remove("handoff_remark_partition");
+        deepMerge(merged, ordinaryPatch);
+        if (proposedRemarkPartition != null) {
+            merged.set("handoff_remark_partition", proposedRemarkPartition.deepCopy());
+        }
         projectOmittedCurrentPartyMirror(merged, (ObjectNode) patch, matrixAuthority);
         if (!hasPersistedClaim) {
             applyClaimAuthority(merged, matrixAuthority);
@@ -309,11 +364,16 @@ public final class IntakeDossierProjectionMerger {
         if (formalAuthorityValidated) {
             merged.remove("unilateral_case_matrix");
         }
+        if (matrixChanged || (proposedRemarkPartition != null && matrixAuthority != null)) {
+            rebindHandoffRemarkPartitionToMatrix(merged);
+        }
 
         if (proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
                 && matrixAuthority != null
                 && matrixAuthority.actorRole() == matrixAuthority.respondentRole()
-                && !matrixChanged) {
+                && !matrixChanged
+                && !isPostThresholdHandoff(
+                        current, matrixAuthority.actorRole())) {
             throw rejected(
                     "INTAKE_RESPONDENT_MATRIX_NOT_READY",
                     "respondent readiness requires a complete bilateral matrix delta");
@@ -321,6 +381,10 @@ public final class IntakeDossierProjectionMerger {
 
         normalizeProjectionMetadata(merged, (ObjectNode) patch, proposal);
         requirePartyIntakeProjection(merged, matrixAuthority);
+        validateHandoffRemarkPartition(merged.get("handoff_remark_partition"));
+        requireHandoffRemarkPartitionMatrixBinding(merged);
+        requireHandoffRemarkPartitionPartyStateConsistency(merged);
+        requirePostThresholdSubstantiveFreeze(current, merged, matrixAuthority);
         requireStableTransition(current, merged);
         int qualityScore = qualityScore(merged, proposal);
         boolean ready = proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM;
@@ -347,6 +411,474 @@ public final class IntakeDossierProjectionMerger {
                 target.set(field.getKey(), incoming.deepCopy());
             }
         }
+    }
+
+    private static void rejectNestedHandoffRemarkPartition(JsonNode root) {
+        if (root == null || !root.isObject()) {
+            return;
+        }
+        root.fields().forEachRemaining(field -> {
+            if (!"handoff_remark_partition".equals(field.getKey())) {
+                rejectNestedHandoffRemarkPartitionValue(field.getValue());
+            }
+        });
+    }
+
+    private static void rejectNestedHandoffRemarkPartitionValue(JsonNode value) {
+        if (value == null) {
+            return;
+        }
+        if (value.isObject()) {
+            if (value.has("handoff_remark_partition")) {
+                throw rejected(
+                        "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                        "handoff remark partition is allowed only at the dossier root");
+            }
+            value.forEach(IntakeDossierProjectionMerger::rejectNestedHandoffRemarkPartitionValue);
+        } else if (value.isArray()) {
+            value.forEach(IntakeDossierProjectionMerger::rejectNestedHandoffRemarkPartitionValue);
+        }
+    }
+
+    private static void validateHandoffRemarkPartition(JsonNode partition) {
+        if (partition == null) {
+            return;
+        }
+        requireExactObjectFields(
+                partition,
+                HANDOFF_REMARK_PARTITION_FIELDS,
+                "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                "handoff remark partition has an unsupported shape");
+        JsonNode version = partition.path("case_fact_matrix_version");
+        if (!HANDOFF_REMARK_PARTITION_SCHEMA_VERSION.equals(
+                        partition.path("schema_version").asText(null))
+                || !isIdentifier(partition.path("case_fact_matrix_id"))
+                || !version.isIntegralNumber()
+                || !version.canConvertToLong()
+                || version.longValue() < 1
+                || !isSha256(partition.path("case_fact_matrix_hash"))) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                    "handoff remark partition has invalid matrix authority scalars");
+        }
+        JsonNode parties = partition.path("parties");
+        requireExactObjectFields(
+                parties,
+                Set.of("USER", "MERCHANT"),
+                "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                "handoff remark partition must contain both exact parties");
+        PARTY_INTAKE_ROLES.forEach(role -> validateHandoffRemarkParty(parties.path(role), role));
+    }
+
+    private static void validateHandoffRemarkParty(JsonNode party, String role) {
+        String status = party.path("remark_status").asText(null);
+        Set<String> fields = "NOT_READY".equals(status)
+                ? HANDOFF_REMARK_PARTY_FIELDS
+                : HANDOFF_REMARK_PARTY_FIELDS_WITH_SOURCE;
+        requireExactObjectFields(
+                party,
+                fields,
+                "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                "handoff remark party authority has an unsupported shape");
+        JsonNode statusNode = party.path("remark_status");
+        JsonNode latest = party.path("latest_remark");
+        JsonNode remarks = party.path("remarks");
+        if (!role.equals(party.path("party_role").asText(null))
+                || !statusNode.isTextual()
+                || !HANDOFF_REMARK_STATUSES.contains(statusNode.textValue())
+                || !latest.isTextual()
+                || !remarks.isArray()) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                    "handoff remark party authority has invalid scalar types");
+        }
+        JsonNode source = party.get("source");
+        String sourceKind = source == null ? null : source.path("source_kind").asText(null);
+        validateHandoffRemarkSource(source, sourceKind);
+
+        Set<String> sourceIds = new HashSet<>();
+        for (JsonNode remark : remarks) {
+            requireExactObjectFields(
+                    remark,
+                    HANDOFF_REMARK_FIELDS,
+                    "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                    "handoff remark entry has an unsupported shape");
+            JsonNode text = remark.path("text");
+            JsonNode sourceId = remark.path("source_message_id");
+            JsonNode sourceHash = remark.path("source_message_hash");
+            if (!role.equals(remark.path("party_role").asText(null))
+                    || !text.isTextual()
+                    || text.textValue().isEmpty()
+                    || !isIdentifier(sourceId)
+                    || !isSha256(sourceHash)
+                    || !"ROOM_MESSAGE".equals(remark.path("turn_source").asText(null))
+                    || !sourceIds.add(sourceId.textValue())
+                    || !sourceHash.textValue().equals(handoffRemarkSourceHash(remark))) {
+                throw rejected(
+                        "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                        "handoff remark entry has invalid or rebound source authority");
+            }
+        }
+
+        boolean canonical = switch (status) {
+            case "NOT_READY" -> source == null && latest.textValue().isEmpty() && remarks.isEmpty();
+            case "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK" ->
+                "ROOM_MESSAGE".equals(sourceKind)
+                        && latest.textValue().isEmpty()
+                        && remarks.isEmpty();
+            case "NO_EXTRA_REMARKS" -> Set.of("ROOM_MESSAGE", "FORMAL_CONFIRMATION")
+                            .contains(sourceKind)
+                    && latest.textValue().isEmpty()
+                    && remarks.isEmpty();
+            case "HAS_REMARKS" -> "ROOM_MESSAGE".equals(sourceKind)
+                    && !remarks.isEmpty()
+                    && latest.textValue()
+                            .equals(remarks.get(remarks.size() - 1).path("text").textValue())
+                    && source.path("message_id").equals(
+                            remarks.get(remarks.size() - 1).path("source_message_id"))
+                    && source.path("message_hash").equals(
+                            remarks.get(remarks.size() - 1).path("source_message_hash"));
+            default -> false;
+        };
+        if (!canonical) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                    "handoff remark status does not match its canonical payload");
+        }
+    }
+
+    private static void validateHandoffRemarkSource(JsonNode source, String sourceKind) {
+        if (source == null) {
+            return;
+        }
+        if ("ROOM_MESSAGE".equals(sourceKind)) {
+            requireExactObjectFields(
+                    source,
+                    HANDOFF_REMARK_ROOM_SOURCE_FIELDS,
+                    "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                    "handoff remark room-message source has an unsupported shape");
+            if (!isIdentifier(source.path("message_id"))
+                    || !isSha256(source.path("message_hash"))) {
+                throw rejected(
+                        "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                        "handoff remark room-message source has invalid authority scalars");
+            }
+            return;
+        }
+        if ("FORMAL_CONFIRMATION".equals(sourceKind)) {
+            requireExactObjectFields(
+                    source,
+                    HANDOFF_REMARK_CONFIRM_SOURCE_FIELDS,
+                    "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                    "handoff remark confirmation source has an unsupported shape");
+            if (!isIdentifier(source.path("command_id"))
+                    || !isSha256(source.path("request_hash"))) {
+                throw rejected(
+                        "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                        "handoff remark confirmation source has invalid authority scalars");
+            }
+            return;
+        }
+        throw rejected(
+                "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                "handoff remark source discriminator is unsupported");
+    }
+
+    private static String handoffRemarkSourceHash(JsonNode remark) {
+        ObjectNode material = JsonNodeFactory.instance.objectNode();
+        material.set("message_id", remark.path("source_message_id").deepCopy());
+        material.set("role", remark.path("party_role").deepCopy());
+        material.set("source", remark.path("turn_source").deepCopy());
+        material.set("text", remark.path("text").deepCopy());
+        return ContractJson.sha256Hex(material);
+    }
+
+    private static boolean isIdentifier(JsonNode value) {
+        return value.isTextual()
+                && IntakeContractSupport.IDENTIFIER.matcher(value.textValue()).matches();
+    }
+
+    private static boolean isSha256(JsonNode value) {
+        return value.isTextual()
+                && IntakeContractSupport.SHA256.matcher(value.textValue()).matches();
+    }
+
+    private static void requireHandoffRemarkPartitionMatrixBinding(JsonNode dossier) {
+        JsonNode partition = dossier.get("handoff_remark_partition");
+        if (partition == null) {
+            return;
+        }
+        JsonNode matrix = dossier.path("case_fact_matrix");
+        if (!matrix.isObject()
+                || !matrix.path("matrix_id").equals(partition.path("case_fact_matrix_id"))
+                || !matrix.path("matrix_version")
+                        .equals(partition.path("case_fact_matrix_version"))
+                || !matrix.path("content_hash")
+                        .equals(partition.path("case_fact_matrix_hash"))) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_MATRIX_MISMATCH",
+                    "handoff remark partition is not bound to the adjacent formal matrix");
+        }
+    }
+
+    private static void rebindHandoffRemarkPartitionToMatrix(ObjectNode dossier) {
+        JsonNode partition = dossier.get("handoff_remark_partition");
+        if (partition == null) {
+            return;
+        }
+        JsonNode matrix = dossier.path("case_fact_matrix");
+        if (!(partition instanceof ObjectNode partitionObject) || !matrix.isObject()) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_MATRIX_MISMATCH",
+                    "handoff remark partition cannot bind the Java-derived formal matrix");
+        }
+        partitionObject.set("case_fact_matrix_id", matrix.path("matrix_id").deepCopy());
+        partitionObject.set("case_fact_matrix_version", matrix.path("matrix_version").deepCopy());
+        partitionObject.set("case_fact_matrix_hash", matrix.path("content_hash").deepCopy());
+    }
+
+    private static void requireNewAcknowledgementPartition(
+            JsonNode current, ObjectNode patch, MatrixAuthority authority) {
+        JsonNode proposedState = patch.get("party_intake_state");
+        if (proposedState == null || authority == null) {
+            return;
+        }
+        String role = authority.actorRole().name();
+        String proposedStatus = proposedState.path(role)
+                .path("handoff_notes")
+                .path("remark_status")
+                .asText();
+        String previousStatus = current.path("party_intake_state")
+                .path(role)
+                .path("handoff_notes")
+                .path("remark_status")
+                .asText("NOT_READY");
+        if (!previousStatus.equals(proposedStatus)
+                && Set.of("HAS_REMARKS", "NO_EXTRA_REMARKS").contains(proposedStatus)
+                && !patch.has("handoff_remark_partition")) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_REQUIRED",
+                    "new Intake remark acknowledgements require the formal remark partition");
+        }
+    }
+
+    private static void requireHandoffRemarkPartitionPartyStateConsistency(JsonNode dossier) {
+        JsonNode partition = dossier.get("handoff_remark_partition");
+        JsonNode state = dossier.get("party_intake_state");
+        if (partition == null) {
+            return;
+        }
+        if (state == null) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_MIRROR_MISMATCH",
+                    "handoff remark partition requires party Intake authority");
+        }
+        for (String role : PARTY_INTAKE_ROLES) {
+            JsonNode party = partition.path("parties").path(role);
+            JsonNode handoff = state.path(role).path("handoff_notes");
+            String status = party.path("remark_status").asText();
+            if (!status.equals(handoff.path("remark_status").asText(null))) {
+                throw rejected(
+                        "INTAKE_HANDOFF_REMARK_PARTITION_MIRROR_MISMATCH",
+                        "handoff remark partition status differs from party Intake authority");
+            }
+            JsonNode source = party.path("source");
+            if ("ROOM_MESSAGE".equals(source.path("source_kind").asText(null))
+                    && !source.path("message_id")
+                            .equals(handoff.path("phase_source_message_id"))) {
+                throw rejected(
+                        "INTAKE_HANDOFF_REMARK_PARTITION_MIRROR_MISMATCH",
+                        "handoff remark partition source differs from party Intake authority");
+            }
+            if (!"HAS_REMARKS".equals(status)) {
+                continue;
+            }
+            JsonNode partitionRemarks = party.path("remarks");
+            JsonNode handoffRemarks = handoff.path("remarks");
+            if (!party.path("latest_remark").equals(handoff.path("latest_remark"))
+                    || partitionRemarks.size() != handoffRemarks.size()) {
+                throw rejected(
+                        "INTAKE_HANDOFF_REMARK_PARTITION_MIRROR_MISMATCH",
+                        "handoff remark partition content differs from party Intake authority");
+            }
+            for (int index = 0; index < partitionRemarks.size(); index++) {
+                JsonNode partitionRemark = partitionRemarks.get(index);
+                JsonNode handoffRemark = handoffRemarks.get(index);
+                if (!partitionRemark.path("party_role").equals(handoffRemark.path("role"))
+                        || !partitionRemark.path("text").equals(handoffRemark.path("text"))
+                        || !partitionRemark
+                                .path("source_message_id")
+                                .equals(handoffRemark.path("source_message_id"))) {
+                    throw rejected(
+                            "INTAKE_HANDOFF_REMARK_PARTITION_MIRROR_MISMATCH",
+                            "handoff remark partition entries differ from party Intake authority");
+                }
+            }
+        }
+    }
+
+    private static void requireHandoffRemarkPartitionTransition(
+            JsonNode previous, JsonNode proposed, MatrixAuthority authority) {
+        if (proposed == null) {
+            return;
+        }
+        if (authority == null) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_AUTHORITY_REQUIRED",
+                    "handoff remark partition requires current Java party authority");
+        }
+        String actorRole = authority.actorRole().name();
+        String otherRole = actorRole.equals("USER") ? "MERCHANT" : "USER";
+        JsonNode proposedActor = proposed.at("/parties/" + actorRole);
+        if (previous == null) {
+            JsonNode proposedOther = proposed.at("/parties/" + otherRole);
+            if (!"NOT_READY".equals(proposedOther.path("remark_status").asText(null))) {
+                throw rejected(
+                        "INTAKE_HANDOFF_REMARK_PARTITION_FOREIGN_DRIFT",
+                        "new handoff remark partition may initialize only the current party");
+            }
+            String status = proposedActor.path("remark_status").asText();
+            if (!"NOT_READY".equals(status)) {
+                requireCurrentHandoffRemarkSource(proposedActor, authority);
+            }
+            return;
+        }
+
+        JsonNode previousOther = previous.at("/parties/" + otherRole);
+        JsonNode proposedOther = proposed.at("/parties/" + otherRole);
+        if (!previousOther.equals(proposedOther)) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_FOREIGN_DRIFT",
+                    "handoff remark partition changes the non-current party authority");
+        }
+        JsonNode previousActor = previous.at("/parties/" + actorRole);
+        if (previousActor.equals(proposedActor)) {
+            if (proposedActor.has("source")) {
+                requireCurrentHandoffRemarkSource(proposedActor, authority);
+            }
+            return;
+        }
+        requireCurrentHandoffRemarkSource(proposedActor, authority);
+
+        String from = previousActor.path("remark_status").asText();
+        String to = proposedActor.path("remark_status").asText();
+        boolean legalStatus = switch (from) {
+            case "NOT_READY" -> Set.of("READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK")
+                    .contains(to);
+            case "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK" ->
+                "HAS_REMARKS".equals(to) || "NO_EXTRA_REMARKS".equals(to);
+            case "HAS_REMARKS", "NO_EXTRA_REMARKS" -> "HAS_REMARKS".equals(to);
+            default -> false;
+        };
+        if (!legalStatus) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_TRANSITION_INVALID",
+                    "handoff remark partition status transition is not authorized");
+        }
+
+        JsonNode previousRemarks = previousActor.path("remarks");
+        JsonNode proposedRemarks = proposedActor.path("remarks");
+        if (proposedRemarks.size() < previousRemarks.size()
+                || proposedRemarks.size() > previousRemarks.size() + 1) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_APPEND_INVALID",
+                    "handoff remarks must advance by at most one append-only entry");
+        }
+        for (int index = 0; index < previousRemarks.size(); index++) {
+            if (!previousRemarks.get(index).equals(proposedRemarks.get(index))) {
+                throw rejected(
+                        "INTAKE_HANDOFF_REMARK_PARTITION_APPEND_INVALID",
+                        "handoff remark replay rebinds prior source authority");
+            }
+        }
+        int appended = proposedRemarks.size() - previousRemarks.size();
+        if (("HAS_REMARKS".equals(to) && appended != 1)
+                || (!"HAS_REMARKS".equals(to) && appended != 0)) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_APPEND_INVALID",
+                    "handoff remark transition does not match its append authority");
+        }
+    }
+
+    public static void requireCanonicalHandoffRemarkPartition(JsonNode dossier) {
+        if (dossier == null || !dossier.isObject()) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                    "handoff remark partition dossier is not an object");
+        }
+        rejectNestedHandoffRemarkPartition(dossier);
+        validateHandoffRemarkPartition(dossier.get("handoff_remark_partition"));
+        requireHandoffRemarkPartitionMatrixBinding(dossier);
+        requireHandoffRemarkPartitionPartyStateConsistency(dossier);
+    }
+
+    private static void requireCurrentHandoffRemarkSource(
+            JsonNode proposedActor, MatrixAuthority authority) {
+        if (authority.sourceType() != SourceType.ROOM_MESSAGE
+                || !"ROOM_MESSAGE".equals(
+                        proposedActor.path("source").path("source_kind").asText(null))
+                || !authority.sourceRef()
+                        .equals(proposedActor.path("source").path("message_id").asText(null))) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_SOURCE_MISMATCH",
+                    "handoff remark transition is not bound to the current party message");
+        }
+    }
+
+    private static boolean isPostThresholdHandoff(JsonNode dossier, ActorRole actorRole) {
+        JsonNode partition = dossier.get("handoff_remark_partition");
+        String status;
+        if (partition != null && partition.isObject()) {
+            status = partition.path("parties")
+                    .path(actorRole.name())
+                    .path("remark_status")
+                    .asText();
+        } else {
+            status = dossier.path("party_intake_state")
+                    .path(actorRole.name())
+                    .path("handoff_notes")
+                    .path("remark_status")
+                    .asText();
+        }
+        return POST_THRESHOLD_HANDOFF_STATUSES.contains(status);
+    }
+
+    private static void requirePostThresholdSubstantiveFreeze(
+            JsonNode previous, JsonNode merged, MatrixAuthority authority) {
+        if (authority == null
+                || !isPostThresholdHandoff(previous, authority.actorRole())) {
+            return;
+        }
+        if (!substantiveProjection(previous).equals(substantiveProjection(merged))) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_SUBSTANTIVE_DRIFT",
+                    "post-threshold Intake messages cannot change frozen substantive authority");
+        }
+        JsonNode proposed = merged.get("handoff_remark_partition");
+        if (proposed != null
+                && authority != null
+                && authority.sourceType() != SourceType.ROOM_MESSAGE
+                && !previous.get("handoff_remark_partition").equals(proposed)) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_SOURCE_MISMATCH",
+                    "post-threshold handoff changes require a current party message");
+        }
+    }
+
+    private static ObjectNode substantiveProjection(JsonNode dossier) {
+        ObjectNode substantive = ((ObjectNode) dossier).deepCopy();
+        substantive.remove("handoff_remark_partition");
+        substantive.remove("handoff_notes");
+        JsonNode state = substantive.path("party_intake_state");
+        if (state.isObject()) {
+            for (String role : PARTY_INTAKE_ROLES) {
+                JsonNode entry = state.path(role);
+                if (entry.isObject()) {
+                    ((ObjectNode) entry).remove("handoff_notes");
+                }
+            }
+        }
+        return substantive;
     }
 
     private static void requireRespondentOpeningCarry(

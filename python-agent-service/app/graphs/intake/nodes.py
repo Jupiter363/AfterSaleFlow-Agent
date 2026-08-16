@@ -29,6 +29,7 @@ from app.graphs.intake.validators import (
     ingress,
     bootstrap_event_ingress,
     matrix_authority_record,
+    rebind_respondent_opening_handoff_partition,
     require_respondent_opening_matrix_authority,
     validate_cognition_patch,
     validate_dossier_transition,
@@ -64,6 +65,7 @@ _DOSSIER_BRANCHES = frozenset(
         "admission",
         "handoff_notes",
         "party_intake_state",
+        "handoff_remark_partition",
     }
 )
 _PARTY_INTAKE_MIRROR_BRANCHES = (
@@ -160,6 +162,7 @@ def deterministic_message_fallback(
         # envelope from a failed prior command from being bound or promoted.
         "baseline_pending_case_detail": None,
         "terminal_draft": {
+            "conversation_action": "ASK_SUBSTANTIVE",
             "room_utterance": "已记录本轮接待信息，正在继续整理案情。",
             "dossier_patch": {},
             "matrix_patch": None,
@@ -207,7 +210,33 @@ def apply_dossier_patch(state: IntakeGraphStateV2) -> dict[str, Any]:
     _validate_party_intake_patch_authority(state, patch)
     dossier = merge_intake_dossier(state["dossier_draft"], patch)
     previous_public = merge_intake_dossier(state["dossier_draft"], {})
-    validate_dossier_transition(previous_public, dossier)
+    if state.get("route") == "respondent_opening":
+        opening_authority = require_respondent_opening_matrix_authority(state)
+        successor_matrix = _current_handoff_formal_matrix(state)
+        if not isinstance(successor_matrix, Mapping):
+            raise IntakeGraphContractError(
+                "INTAKE_RESPONDENT_OPENING_HANDOFF_REMARK_INVALID"
+            )
+        rebound_previous = rebind_respondent_opening_handoff_partition(
+            previous_public,
+            authority_dossier=opening_authority,
+            successor_matrix=successor_matrix,
+        )
+        validate_dossier_transition(
+            rebound_previous,
+            dossier,
+            actor_role=state["bindings"]["private"]["audience"],
+            current_message=None,
+            formal_matrix=successor_matrix,
+        )
+    else:
+        validate_dossier_transition(
+            previous_public,
+            dossier,
+            actor_role=state["bindings"]["private"]["audience"],
+            current_message=_current_handoff_message(state),
+            formal_matrix=_current_handoff_formal_matrix(state),
+        )
     return validate_node_patch(state, {"dossier_draft": dossier})
 
 
@@ -242,6 +271,69 @@ def _validate_party_intake_patch_authority(
         or party_state.get(other) != previous.get(other)
     ):
         raise IntakeGraphContractError("INTAKE_DOSSIER_PARTY_STATE_UNAUTHORIZED")
+
+
+def _current_handoff_message(state: IntakeGraphStateV2) -> Mapping[str, Any] | None:
+    """Return the exact participant message whose Agent turn is being applied."""
+
+    if state.get("route") != "message":
+        return None
+    sequence = state.get("last_event_sequence")
+    event_hash = state.get("last_event_hash")
+    audience = state["bindings"]["private"]["audience"]
+    matches = [
+        message
+        for message in state["messages"].values()
+        if message.get("role") == "HUMAN"
+        and message.get("audience") == audience
+        and message.get("sequence") == sequence
+        and message.get("source_hash") == event_hash
+    ]
+    if len(matches) > 1:
+        raise IntakeGraphContractError("INTAKE_DOSSIER_HANDOFF_CURRENT_MESSAGE_CONFLICT")
+    return matches[0] if matches else None
+
+
+def _current_handoff_formal_matrix(
+    state: IntakeGraphStateV2,
+) -> Mapping[str, Any] | None:
+    """Select only a trusted capsule/import matrix adjacent to the public dossier."""
+
+    draft = state.get("terminal_draft")
+    matrix_patch = draft.get("matrix_patch") if isinstance(draft, Mapping) else None
+    if matrix_patch is None:
+        # A post-threshold remark turn carries the already selected matrix from
+        # its trusted prior capsule; it must not bind the partition to a newly
+        # derived candidate that Java will not persist for this turn.
+        previous = state.get("baseline_previous_case_detail")
+        if isinstance(previous, Mapping):
+            snapshot = previous.get("snapshot")
+            if isinstance(snapshot, Mapping):
+                formal = snapshot.get("case_fact_matrix")
+                if isinstance(formal, Mapping):
+                    return formal
+            formal = previous.get("authority_input_matrix")
+            if isinstance(formal, Mapping):
+                return formal
+    pending = state.get("baseline_pending_case_detail")
+    if isinstance(pending, Mapping):
+        formal = pending.get("formal_matrix")
+        if isinstance(formal, Mapping):
+            return formal
+    imported = state["dossier_draft"].get("case_fact_matrix")
+    if isinstance(imported, Mapping):
+        return imported
+    previous = state.get("baseline_previous_case_detail")
+    if isinstance(previous, Mapping):
+        formal = previous.get("formal_matrix")
+        if isinstance(formal, Mapping):
+            return formal
+        snapshot = previous.get("snapshot")
+        if isinstance(snapshot, Mapping):
+            formal = snapshot.get("case_fact_matrix")
+            if isinstance(formal, Mapping):
+                return formal
+    return None
 
 
 def validate_readiness(state: IntakeGraphStateV2) -> dict[str, Any]:
@@ -292,6 +384,7 @@ def project_intake_proposal(state: IntakeGraphStateV2) -> dict[str, Any]:
         "agent_session_id": private["agent_session_id"],
         "cognitive_revision": state["cognitive_revision"],
         "source_snapshot_hash": state["initial_snapshot_hash"],
+        "conversation_action": _required_conversation_action(draft),
         "room_utterance": _required_text(draft, "room_utterance"),
         "dossier_patch": deepcopy(cast(dict[str, Any], draft["dossier_patch"])),
         "matrix_patch": deepcopy(draft.get("matrix_patch")),
@@ -618,6 +711,18 @@ def _required_text(value: Mapping[str, Any], member: str) -> str:
     if not isinstance(text, str) or not text or len(text) > 20_000:
         raise IntakeGraphContractError("INTAKE_ROOM_UTTERANCE_INVALID")
     return text
+
+
+def _required_conversation_action(value: Mapping[str, Any]) -> str:
+    action = value.get("conversation_action")
+    if action not in {
+        "ASK_SUBSTANTIVE",
+        "INVITE_OPTIONAL_REMARK",
+        "ACK_REMARK",
+        "ACK_NO_REMARK",
+    }:
+        raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_INVALID")
+    return cast(str, action)
 
 
 def _confidence(value: Any) -> float:

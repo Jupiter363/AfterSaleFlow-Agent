@@ -5,6 +5,7 @@ import base64
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
-from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
+from app.agents.dispute_intake_officer.schemas import IntakeFreshFormOpeningLlmOutput
 from app.agents.evidence_clerk.workflow import EVIDENCE_TURN_MODEL_NODE_NAME
 import app.graph_runtime.intake_executor as intake_executor
 import app.graph_runtime.production_bindings as production_bindings
@@ -47,6 +48,8 @@ from app.graph_runtime.errors import (
     GraphTerminalBindingError,
     GraphThreadBindingError,
     GraphVersionUnavailableError,
+    IntakeExecutorDiagnosticError,
+    IntakeExecutorDiagnosticStage,
 )
 from app.graph_runtime.gateway import AdmissionAction, GatewayExecution
 from app.graph_runtime.identity import (
@@ -77,6 +80,11 @@ from app.graph_runtime.checkpoint import FENCE_CONTEXT_KEY, bind_fence_context
 from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
 from app.graphs.intake.contracts import IntakeTurnProposal
 from app.graphs.intake.errors import IntakeGraphContractError
+from app.graphs.intake.lcel import (
+    INTAKE_ACTION_GATE_KEY_PREFIX,
+    INTAKE_ACTION_GATE_KIND,
+    INTAKE_ACTION_GATE_SCHEMA_VERSION,
+)
 from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graph_runtime.production_bindings import (
     _advance_revision,
@@ -101,8 +109,10 @@ from app.model_runtime.transports import (
     ModelTransportCompleted,
     ModelTransportRequest,
     ModelTransportResult,
+    ModelTransportVisibleDelta,
     StructuredClientTransport,
 )
+from app.streaming import IncrementalVisibleJsonProjector
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -482,38 +492,37 @@ def _intake_version(command: RoomGraphCommand) -> VersionBinding:
 def _strict_baseline_opening_output() -> dict[str, Any]:
     """A valid retained-baseline response for a snapshot-only opening turn."""
 
-    return IntakeCaseDetailLlmOutput.model_validate(
+    return IntakeFreshFormOpeningLlmOutput.model_validate(
         {
-            "room_utterance": "Please confirm the requested resolution.",
-            "case_detail": {
-                "case_story": {
-                    "one_sentence_summary": (
-                        "The imported case concerns the reported damaged order."
-                    )
-                }
-            },
-            "unilateral_case_matrix": {
-                "schema_version": "unilateral_case_matrix.draft.v1",
-                "fact_rows": [
-                    {
-                        "fact_key": "NEW_CASE_SUMMARY",
-                        "category": "OTHER",
-                        "fact_target": "The order was reported damaged.",
-                        "materiality": "CORE",
-                        "position_summary": "The user reports a damaged order.",
-                        "asserted_value": "The order was reported damaged.",
-                        "source_scope": "CURRENT_SOURCE",
+            "conversation_action": "ASK_SUBSTANTIVE",
+            "room_utterance": "What resolution would you like for the damaged order?",
+                "case_detail": {
+                    "case_story": {
+                        "one_sentence_summary": (
+                            "The imported case concerns the reported damaged order."
+                        )
                     }
-                ],
-                "summary_source_fact_keys": ["NEW_CASE_SUMMARY"],
-            },
-            "admission_recommendation": "NEED_MORE_INFO",
-            "missing_fields": ["requested_resolution_detail"],
-            "knowledge_query_intent": False,
-            "knowledge_answer_mode": "NONE",
-            "confidence": 0.82,
-        }
-    ).model_dump(mode="json", exclude_none=True)
+                },
+                "case_matrix_delta": {
+                    "schema_version": "case_fact_matrix.delta.v2",
+                    "fact_rows": [
+                        {
+                            "fact_key": "NEW_CASE_SUMMARY",
+                            "category": "OTHER",
+                            "fact_target": "The order was reported damaged.",
+                            "materiality": "CORE",
+                            "stance": "CONFIRM",
+                            "position_summary": "The user reports a damaged order.",
+                            "asserted_value": "The order was reported damaged.",
+                            "source_scope": "CURRENT_SOURCE",
+                        }
+                    ],
+                    "summary_source_fact_keys": ["NEW_CASE_SUMMARY"],
+                },
+                "missing_fields": ["requested_resolution_detail"],
+                "confidence": 0.82,
+            }
+        ).model_dump(mode="json", exclude_none=True)
 
 
 class _StrictBaselineIntakeTransport:
@@ -560,7 +569,7 @@ class _StrictBaselineIntakeTransport:
 
     def _assert_baseline_opening_request(self, request: ModelTransportRequest) -> None:
         assert request.node_name == BASELINE_INTAKE_NODE_NAME
-        assert request.output_type is IntakeCaseDetailLlmOutput
+        assert request.output_type is IntakeFreshFormOpeningLlmOutput
         assert len(request.messages) == 2
         system_prompt = str(request.messages[0].content)
         human_prompt = str(request.messages[1].content)
@@ -585,6 +594,75 @@ def _strict_baseline_opening_transport(
         agent_session_id=execution.thread_record.identity.agent_session_id,
         output=output,
     )
+
+
+class _StrictStreamingBaselineIntakeTransport(_StrictBaselineIntakeTransport):
+    """Expose controlled governed deltas while retaining the exact opening request checks."""
+
+    async def astream(self, request: ModelTransportRequest):
+        self.generate_calls += 1
+        self.requests.append(request)
+        self._assert_baseline_opening_request(request)
+        document = json.dumps(
+            self._output,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        projector = IncrementalVisibleJsonProjector(request.visible_fields)
+        for offset in range(0, len(document), 19):
+            for field, delta in projector.feed(document[offset : offset + 19]):
+                yield ModelTransportVisibleDelta(field=field, delta=delta)
+        yield ModelTransportCompleted(
+            result=ModelTransportResult(
+                json_document=document,
+                model="intake-model",
+                latency_ms=4,
+                token_usage={"input": 8, "output": 5, "total": 13},
+            )
+        )
+
+
+class _ExactFenceInMemorySaver(InMemorySaver):
+    def __init__(self, execution: GatewayExecution) -> None:
+        super().__init__()
+        self._execution = execution
+        self.preflights = 0
+        self.commits = 0
+
+    def get_tuple(self, config: Any) -> Any:
+        saved = super().get_tuple(config)
+        if saved is None:
+            return None
+        return saved._replace(
+            config=bind_fence_context(saved.config, self._execution.fence)
+        )
+
+    async def avalidate_external_terminal_checkpoint(
+        self,
+        config: Any,
+        **kwargs: Any,
+    ) -> None:
+        self.preflights += 1
+        assert kwargs == {"cognitive_revision": 1}
+        assert config["configurable"][FENCE_CONTEXT_KEY] is self._execution.fence
+
+    async def acommit_external_terminal(
+        self,
+        config: Any,
+        commit: Any,
+    ) -> dict[str, Any]:
+        self.commits += 1
+        assert self.preflights == 1
+        effective = replace(
+            self._execution.fence,
+            result_ref=commit.result.result_ref,
+            result_hash=commit.result.result_hash,
+            proposal_hash=commit.result.proposal_hash,
+            result_envelope_hash=commit.result.result_envelope_hash,
+        )
+        configurable = dict(config["configurable"])
+        configurable[FENCE_CONTEXT_KEY] = effective
+        return {"configurable": configurable}
 
 
 def _intake_execution(
@@ -662,6 +740,84 @@ def _target_candidate_intake_execution(command: RoomGraphCommand) -> GatewayExec
             binding_hash="d" * 64,
             code_build_id="target-intake-build",
         ),
+    )
+
+
+def _target_action_gate_update(
+    *,
+    room_utterance: str,
+    source_turn_hash: str,
+    conversation_action: str = "ASK_SUBSTANTIVE",
+    reducer_status: str = "NOT_READY",
+    room_utterance_sha256: str | None = None,
+    key_source_turn_hash: str | None = None,
+    terminal_conversation_action: str | None = None,
+    duplicate: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    gate = {
+        "schema_version": INTAKE_ACTION_GATE_SCHEMA_VERSION,
+        "kind": INTAKE_ACTION_GATE_KIND,
+        "conversation_action": conversation_action,
+        "reducer_status": reducer_status,
+        "room_utterance_sha256": room_utterance_sha256
+        or hashlib.sha256(room_utterance.encode("utf-8")).hexdigest(),
+        "source_turn_hash": source_turn_hash,
+    }
+    key_hash = key_source_turn_hash or source_turn_hash
+    gates = {INTAKE_ACTION_GATE_KEY_PREFIX + key_hash: gate}
+    if duplicate:
+        gates[INTAKE_ACTION_GATE_KEY_PREFIX + "f" * 64] = deepcopy(gate)
+    return (
+        "updates",
+        {
+            "intake_lcel": {
+                "node_results": gates,
+                "terminal_draft": {
+                    "conversation_action": terminal_conversation_action
+                    or conversation_action,
+                    "room_utterance": room_utterance,
+                },
+            }
+        },
+    )
+
+
+def _target_terminal_state(
+    *,
+    source_turn_hash: str,
+    reducer_status: str = "NOT_READY",
+) -> dict[str, Any]:
+    return {
+        "terminal_draft": {"same": True},
+        "result_json": {"same": True},
+        "cognitive_revision": 1,
+        "initial_snapshot_hash": source_turn_hash,
+        "bindings": {"private": {"audience": "USER"}},
+        "party_intake_state": {
+            "schema_version": "party-intake-state.v1",
+            "USER": {"handoff_notes": {"remark_status": reducer_status}},
+        },
+    }
+
+
+def _target_dossier_payload(
+    payload: dict[str, Any],
+    *,
+    reducer_status: str = "NOT_READY",
+) -> dict[str, Any]:
+    return {
+        **deepcopy(payload),
+        "party_intake_state": {
+            "schema_version": "party-intake-state.v1",
+            "USER": {"handoff_notes": {"remark_status": reducer_status}},
+        },
+    }
+
+
+def _target_snapshot_context(source_turn_hash: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        ingress_kind="SNAPSHOT",
+        ingress_payload={"snapshot_hash": source_turn_hash},
     )
 
 
@@ -1289,6 +1445,7 @@ def test_target_e2e_composite_registers_the_exact_intake_provider_binding() -> N
                 evidence_model=evidence_model,
             )
 
+
 def test_target_evidence_invocation_binding_accepts_stable_capability_pair_for_opening_and_submission() -> None:
     base = _command()
     opening_capability = f"case:{base.case_id}:command:EVIDENCE_OPENING"
@@ -1468,6 +1625,7 @@ def test_target_evidence_invocation_binding_accepts_stable_capability_pair_for_o
                     opening=opening,
                 ),
             )
+
 
 def test_target_e2e_explicit_provider_factory_bypasses_live_model_client(
     monkeypatch: pytest.MonkeyPatch,
@@ -1875,6 +2033,264 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
 
     with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_PATCH_UNAUTHORIZED"):
         bundle.terminal_proposal(authority_injected)
+
+
+@pytest.mark.asyncio
+async def test_target_intake_executor_runs_real_fresh_opening_preview_to_terminal() -> None:
+    command, snapshot, payload = _intake_command()
+    execution = _target_candidate_intake_execution(command)
+    facts = snapshot["initial_case_facts"]
+    expected_output = _strict_baseline_opening_output()
+    transport = _StrictStreamingBaselineIntakeTransport(
+        form_source=facts["form_source"],
+        form_description=facts["form_description"],
+        agent_session_id=execution.thread_record.identity.agent_session_id,
+        output=expected_output,
+    )
+
+    exchange_requests: list[dict[str, Any]] = []
+    response_counts = {"load": 0, "put": 0}
+
+    async def exchange_handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.headers["accept"] == "application/json"
+        assert request.headers["content-type"] == "application/json"
+        assert request.headers["x-service-secret"] == "test-java-service-secret"
+        body = json.loads(request.content)
+        assert request.content == canonicalize(body)
+        assert body["authority"]["command_id"] == command.command_id
+        assert body["authority"]["logical_run_id"] == command.logical_run_id
+        assert body["authority"]["attempt_id"] == command.attempt_id
+        assert body["authority"]["request_hash"] == command.request_hash
+        exchange_requests.append(body)
+        if request.url.path == INTAKE_PAYLOAD_LOAD_PATH:
+            response_counts["load"] += 1
+            assert body["schema_version"] == "intake-payload-load-request.v1"
+            assert body["object_ref"] == command.domain_snapshot_ref.model_dump(mode="json")
+            reference = body["object_ref"]
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                json={
+                    "schema_version": "intake-payload-load-response.v1",
+                    "authority": body["authority"],
+                    "receipt": {
+                        "schema_version": "intake-payload-load-receipt.v1",
+                        "artifact_id": reference["artifact_id"],
+                        "content_schema_version": reference["schema_version"],
+                        "uri": reference["uri"],
+                        "object_version": "version-1",
+                        "sha256": reference["sha256"],
+                        "size_bytes": reference["size_bytes"],
+                    },
+                    "canonical_payload_base64": base64.b64encode(payload).decode("ascii"),
+                },
+            )
+        assert request.url.path == INTAKE_PROPOSAL_PUT_PATH
+        response_counts["put"] += 1
+        assert body["schema_version"] == "intake-proposal-put-request.v1"
+        proposal = body["proposal"]
+        assert body["idempotency_key"] == (
+            f"intake.proposal:{command.thread_id}:{command.command_id}:{proposal['sha256']}"
+        )
+        assert body["checkpoint_ns"] == ""
+        assert body["checkpoint_id"]
+        assert body["cognitive_revision"] == 1
+        proposal_payload = base64.b64decode(
+            proposal["canonical_payload_base64"],
+            validate=True,
+        )
+        proposal_document = json.loads(proposal_payload)
+        assert len(proposal_payload) == proposal["size_bytes"]
+        assert proposal_payload == canonicalize(proposal_document)
+        assert canonical_sha256_omitting(proposal_document, "proposal_hash") == proposal["sha256"]
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "schema_version": "intake-proposal-put-response.v1",
+                "authority": body["authority"],
+                "checkpoint_ns": body["checkpoint_ns"],
+                "checkpoint_id": body["checkpoint_id"],
+                "cognitive_revision": body["cognitive_revision"],
+                "receipt": {
+                    "schema_version": "intake-proposal-put-receipt.v1",
+                    "artifact_id": proposal["artifact_id"],
+                    "content_schema_version": proposal["schema_version"],
+                    "uri": f"s3://intake-proposals/{proposal['artifact_id']}.json",
+                    "object_version": "version-1",
+                    "sha256": proposal["sha256"],
+                    "size_bytes": proposal["size_bytes"],
+                },
+            },
+        )
+
+    saver = _ExactFenceInMemorySaver(execution)
+    exchange = JavaIntakeExchangeClient(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(exchange_handler),
+    )
+    registration = _executor_registration(
+        _intake_config(command),
+        GraphExecutorKernel(
+            saver=cast(Any, saver),
+            gateway=cast(Any, object()),
+            durable_bulkhead=cast(Any, object()),
+        ),
+        intake_transport=transport,
+        intake_exchange=exchange,
+        intake_provider="synthetic",
+        intake_model="intake-model",
+    )
+    assert isinstance(registration.executor, CompiledIntakeGraphShadowExecutor)
+
+    await exchange.aopen()
+    try:
+        events = [event async for event in registration.executor.stream(execution)]
+    finally:
+        await exchange.aclose()
+    room_events = [
+        event
+        for event in events
+        if event.event_type == "visible_delta" and event.payload.field == "room_utterance"
+    ]
+
+    assert events[0].event_type == "attempt_started"
+    assert events[-1].event_type == "final"
+    assert sum(event.event_type == "final" for event in events) == 1
+    assert room_events
+    assert "".join(event.payload.delta or "" for event in room_events) == expected_output[
+        "room_utterance"
+    ]
+    assert max(event.sequence_no for event in room_events) < events[-1].sequence_no
+    assert transport.generate_calls == 1
+    assert len(transport.requests) == 1
+    assert response_counts == {"load": 1, "put": 1}
+    assert len(exchange_requests) == 2
+    load_request, put_request = exchange_requests
+    assert load_request["authority"] == put_request["authority"]
+    assert base64.b64decode(
+        put_request["proposal"]["canonical_payload_base64"],
+        validate=True,
+    ) == canonicalize(json.loads(base64.b64decode(
+        put_request["proposal"]["canonical_payload_base64"],
+        validate=True,
+    )))
+    assert saver.preflights == 1
+    assert saver.commits == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["exact_graph_contract", "graph_contract_subclass", "non_graph_contract"],
+)
+async def test_target_intake_executor_binds_only_exact_proposal_store_contract_failure(
+    failure_kind: str,
+) -> None:
+    command, snapshot, payload = _intake_command()
+    execution = _target_candidate_intake_execution(command)
+    facts = snapshot["initial_case_facts"]
+    transport = _StrictStreamingBaselineIntakeTransport(
+        form_source=facts["form_source"],
+        form_description=facts["form_description"],
+        agent_session_id=execution.thread_record.identity.agent_session_id,
+        output=_strict_baseline_opening_output(),
+    )
+
+    class SpecializedGraphContractError(GraphContractError):
+        pass
+
+    source_error: Exception
+    if failure_kind == "exact_graph_contract":
+        source_error = GraphContractError("synthetic proposal store contract failure")
+    elif failure_kind == "graph_contract_subclass":
+        source_error = SpecializedGraphContractError("synthetic specialized store failure")
+    else:
+        source_error = ValueError("synthetic non-graph store failure")
+    response_counts = {"load": 0, "put": 0}
+
+    async def exchange_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert request.content == canonicalize(body)
+        if request.url.path == INTAKE_PAYLOAD_LOAD_PATH:
+            response_counts["load"] += 1
+            reference = body["object_ref"]
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                json={
+                    "schema_version": "intake-payload-load-response.v1",
+                    "authority": body["authority"],
+                    "receipt": {
+                        "schema_version": "intake-payload-load-receipt.v1",
+                        "artifact_id": reference["artifact_id"],
+                        "content_schema_version": reference["schema_version"],
+                        "uri": reference["uri"],
+                        "object_version": "version-1",
+                        "sha256": reference["sha256"],
+                        "size_bytes": reference["size_bytes"],
+                    },
+                    "canonical_payload_base64": base64.b64encode(payload).decode("ascii"),
+                },
+            )
+        assert request.url.path == INTAKE_PROPOSAL_PUT_PATH
+        response_counts["put"] += 1
+        raise source_error
+
+    saver = _ExactFenceInMemorySaver(execution)
+    exchange = JavaIntakeExchangeClient(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(exchange_handler),
+    )
+    registration = _executor_registration(
+        _intake_config(command),
+        GraphExecutorKernel(
+            saver=cast(Any, saver),
+            gateway=cast(Any, object()),
+            durable_bulkhead=cast(Any, object()),
+        ),
+        intake_transport=transport,
+        intake_exchange=exchange,
+        intake_provider="synthetic",
+        intake_model="intake-model",
+    )
+    events = []
+
+    async def collect() -> None:
+        async for event in registration.executor.stream(execution):
+            events.append(event)
+
+    await exchange.aopen()
+    try:
+        if failure_kind == "exact_graph_contract":
+            with pytest.raises(IntakeExecutorDiagnosticError) as caught:
+                await collect()
+            assert type(caught.value) is IntakeExecutorDiagnosticError
+            assert caught.value.args == source_error.args
+            assert caught.value.code == GraphContractError.code
+            assert (
+                caught.value.diagnostic_stage
+                is IntakeExecutorDiagnosticStage.PROPOSAL_STORE_PUT
+            )
+        else:
+            with pytest.raises(type(source_error)) as caught:
+                await collect()
+            assert caught.value is source_error
+            assert type(caught.value) is type(source_error)
+            assert caught.value.args == source_error.args
+    finally:
+        await exchange.aclose()
+
+    assert events[0].event_type == "attempt_started"
+    assert all(event.event_type != "final" for event in events)
+    assert transport.generate_calls == 1
+    assert len(transport.requests) == 1
+    assert response_counts == {"load": 1, "put": 1}
+    assert saver.preflights == 1
+    assert saver.commits == 0
 
 
 @pytest.mark.asyncio
@@ -2476,7 +2892,7 @@ async def test_compiled_intake_executor_reads_latest_terminal_checkpoint_without
             return result
 
     async def load_context(*_: Any, **__: Any) -> object:
-        return object()
+        return SimpleNamespace(ingress_kind="SNAPSHOT", ingress_payload={})
 
     def snapshot(snapshot: object, selected_execution: GatewayExecution):
         assert selected_execution is execution
@@ -2768,7 +3184,7 @@ async def test_compiled_intake_executor_suppresses_provisional_dossier_without_m
             return result
 
     async def load_context(*_: Any, **__: Any) -> object:
-        return object()
+        return SimpleNamespace(ingress_kind="SNAPSHOT", ingress_payload={})
 
     monkeypatch.setattr(
         "app.graph_runtime.intake_executor.build_governed_intake_runtime",
@@ -2889,6 +3305,7 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
 ) -> None:
     command, _, _ = _intake_command()
     execution = _target_candidate_intake_execution(command)
+    source_turn_hash = "e" * 64
     first_two_questions = (
         "请确认订单号？商品故障对您的使用造成了什么影响？"
     )
@@ -2928,13 +3345,9 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
 
     class DossierPatch:
         def model_dump(self, **_: Any) -> dict[str, Any]:
-            return deepcopy(dossier_payload)
+            return _target_dossier_payload(dossier_payload)
 
-    state = {
-        "terminal_draft": {"same": True},
-        "result_json": {"same": True},
-        "cognitive_revision": 1,
-    }
+    state = _target_terminal_state(source_turn_hash=source_turn_hash)
     final_config = bind_fence_context(
         {
             "configurable": {
@@ -2946,6 +3359,7 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
         execution.fence,
     )
     proposal = SimpleNamespace(
+        conversation_action="ASK_SUBSTANTIVE",
         room_utterance=terminal_room_utterance,
         dossier_patch=DossierPatch(),
     )
@@ -3000,7 +3414,7 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
         source_completed = False
 
         async def astream(self, input: Any, config: Any, **kwargs: Any):
-            assert kwargs["stream_mode"] == ["messages", "custom"]
+            assert kwargs["stream_mode"] == ["messages", "custom", "updates"]
             yield (
                 "messages",
                 (
@@ -3040,6 +3454,10 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
                     ),
                     {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
                 ),
+            )
+            yield _target_action_gate_update(
+                room_utterance=terminal_room_utterance,
+                source_turn_hash=source_turn_hash,
             )
             yield (
                 "messages",
@@ -3104,7 +3522,7 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
             return result
 
     async def load_context(*_: Any, **__: Any) -> object:
-        return object()
+        return _target_snapshot_context(source_turn_hash)
 
     graph = Graph()
     monkeypatch.setattr(
@@ -3200,10 +3618,9 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
             ("case_detail.references", raw_dossier_delta),
         ]
         assert visible_commit_states == [False, False, False]
-        # The third visible frame is a provisional board update.  It must reach
-        # the client before the graph source completes; the later failure is
-        # still fail-closed and lets the client discard this provisional view.
-        assert visible_source_completion_states == [False, False, False]
+        # Room text is public while the source is open. The board is retained
+        # until the graph has produced the matching terminal proposal.
+        assert visible_source_completion_states == [False, False, True]
         assert saver.preflights == 1
         assert store.calls == 1
         assert saver.commits == (1 if failure_stage == "commit" else 0)
@@ -3241,9 +3658,9 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
         event.payload.delta or "" for event in room_events
     ) == terminal_room_utterance
     assert visible_commit_states == [False, False, False]
-    # The board is emitted while the source is still open, after both room
-    # chunks.  The terminal commit remains the durable authority.
-    assert visible_source_completion_states == [False, False, False]
+    # Room text is emitted while the source is open; the board remains
+    # terminal-bound and is released only after streamed/terminal equality.
+    assert visible_source_completion_states == [False, False, True]
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
@@ -3267,18 +3684,220 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("gate_case", "expected_code"),
+    [
+        ("missing", "INTAKE_ACTION_GATE_MISSING"),
+        ("duplicate", "INTAKE_ACTION_GATE_UPDATE_INVALID"),
+        ("room_hash", "INTAKE_ACTION_GATE_ROOM_MISMATCH"),
+        ("source_key", "INTAKE_ACTION_GATE_INVALID"),
+        ("action_status", "INTAKE_ACTION_GATE_INVALID"),
+        ("stale_current_source", "INTAKE_ACTION_GATE_SOURCE_MISMATCH"),
+        ("same_status_action_substitution", "INTAKE_ACTION_GATE_ACTION_MISMATCH"),
+    ],
+)
+async def test_target_intake_executor_rejects_invalid_action_gate_without_formal_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    gate_case: str,
+    expected_code: str,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _target_candidate_intake_execution(command)
+    room_utterance = "请确认订单号？请说明商品故障造成的影响？"
+    source_turn_hash = "e" * 64
+
+    class Saver:
+        def __init__(self) -> None:
+            self.preflights = 0
+            self.commits = 0
+
+        async def avalidate_external_terminal_checkpoint(
+            self,
+            *args: Any,
+            **kwargs: Any,
+        ) -> None:
+            self.preflights += 1
+            raise AssertionError("an invalid gate must fail before terminal preflight")
+
+        async def acommit_external_terminal(self, *args: Any, **kwargs: Any) -> None:
+            self.commits += 1
+            raise AssertionError("an invalid gate must fail before terminal commit")
+
+    saver = Saver()
+
+    def room_candidate() -> tuple[str, tuple[Any, dict[str, str]]]:
+        return (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="",
+                    additional_kwargs={
+                        "governed_events": [
+                            {
+                                "schema_version": "governed-model-event.v1",
+                                "event_type": "visible_delta",
+                                "node_name": BASELINE_INTAKE_NODE_NAME,
+                                "field": "room_utterance",
+                                "delta": room_utterance,
+                            }
+                        ]
+                    },
+                ),
+                {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+            ),
+        )
+
+    class Graph:
+        checkpointer = saver
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def astream(self, input: Any, config: Any, **kwargs: Any):
+            try:
+                assert kwargs["stream_mode"] == ["messages", "custom", "updates"]
+                yield room_candidate()
+                if gate_case == "missing":
+                    return
+                gate_kwargs: dict[str, Any] = {}
+                gate_source_turn_hash = source_turn_hash
+                if gate_case == "duplicate":
+                    gate_kwargs["duplicate"] = True
+                elif gate_case == "room_hash":
+                    gate_kwargs["room_utterance_sha256"] = "0" * 64
+                elif gate_case == "source_key":
+                    gate_kwargs["key_source_turn_hash"] = "d" * 64
+                elif gate_case == "action_status":
+                    gate_kwargs["reducer_status"] = "WAITING_FOR_REMARK"
+                elif gate_case == "stale_current_source":
+                    gate_source_turn_hash = "d" * 64
+                elif gate_case == "same_status_action_substitution":
+                    gate_kwargs.update(
+                        conversation_action="ACK_REMARK",
+                        reducer_status="HAS_REMARKS",
+                        terminal_conversation_action="ACK_NO_REMARK",
+                    )
+                yield _target_action_gate_update(
+                    room_utterance=room_utterance,
+                    source_turn_hash=gate_source_turn_hash,
+                    **gate_kwargs,
+                )
+            finally:
+                self.closed = True
+
+        async def aget_state(self, config: Any) -> object:
+            raise AssertionError("an invalid gate must fail before terminal state")
+
+    class Store:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def put(self, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            raise AssertionError("an invalid gate must fail before proposal storage")
+
+    async def load_context(*_: Any, **__: Any) -> object:
+        return _target_snapshot_context(source_turn_hash)
+
+    graph = Graph()
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(graph=graph),
+    )
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_input",
+        staticmethod(lambda _: {}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_config",
+        staticmethod(lambda _: {"configurable": {}}),
+    )
+
+    class Loader:
+        async def load(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the test harness patches the Intake context loader")
+
+    store = Store()
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=Loader(),
+        proposal_store=store,
+    )
+
+    events = []
+    with pytest.raises(GraphContractError, match=expected_code):
+        async for event in executor.stream(execution):
+            events.append(event)
+
+    assert [event.event_type for event in events] == [
+        "attempt_started",
+        "visible_delta",
+    ]
+    assert (events[1].payload.field, events[1].payload.delta) == (
+        "room_utterance",
+        room_utterance,
+    )
+    assert all(event.event_type != "final" for event in events)
+    assert graph.closed is True
+    assert store.calls == 0
+    assert saver.preflights == 0
+    assert saver.commits == 0
+
+
+def test_target_intake_executor_rejects_same_status_action_substitution_at_terminal() -> None:
+    room_utterance = "已记录该备注，当前材料可以直接提交确认。"
+    source_turn_hash = "e" * 64
+    gate_update = _target_action_gate_update(
+        room_utterance=room_utterance,
+        source_turn_hash=source_turn_hash,
+        conversation_action="ACK_REMARK",
+        reducer_status="HAS_REMARKS",
+    )
+    gate = next(
+        iter(gate_update[1]["intake_lcel"]["node_results"].values())
+    )
+
+    class DossierPatch:
+        def model_dump(self, **_: Any) -> dict[str, Any]:
+            return _target_dossier_payload({}, reducer_status="HAS_REMARKS")
+
+    proposal = SimpleNamespace(
+        conversation_action="ACK_NO_REMARK",
+        room_utterance=room_utterance,
+        dossier_patch=DossierPatch(),
+    )
+
+    with pytest.raises(
+        GraphTerminalBindingError,
+        match="action gate differs from terminal authority",
+    ):
+        CompiledIntakeGraphShadowExecutor._require_terminal_action_gate(
+            state=_target_terminal_state(
+                source_turn_hash=source_turn_hash,
+                reducer_status="HAS_REMARKS",
+            ),
+            proposal=cast(Any, proposal),
+            gate=gate,
+            terminal_room_utterance=room_utterance,
+        )
+
+
+@pytest.mark.asyncio
 async def test_target_intake_executor_uses_canonical_reply_then_board_when_no_preview(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command, _, _ = _intake_command()
     execution = _target_candidate_intake_execution(command)
     terminal_room_utterance = "Committed baseline reply."
+    source_turn_hash = "e" * 64
     raw_board_delta = '{"order_reference":"RAW-BEFORE-ROOM"}'
-    state = {
-        "terminal_draft": {"same": True},
-        "result_json": {"same": True},
-        "cognitive_revision": 1,
-    }
+    state = _target_terminal_state(source_turn_hash=source_turn_hash)
     final_config = bind_fence_context(
         {
             "configurable": {
@@ -3292,9 +3911,12 @@ async def test_target_intake_executor_uses_canonical_reply_then_board_when_no_pr
 
     class DossierPatch:
         def model_dump(self, **_: Any) -> dict[str, Any]:
-            return {"references": {"order_reference": "ORDER-TERMINAL-NO-PREVIEW"}}
+            return _target_dossier_payload(
+                {"references": {"order_reference": "ORDER-TERMINAL-NO-PREVIEW"}}
+            )
 
     proposal = SimpleNamespace(
+        conversation_action="ASK_SUBSTANTIVE",
         room_utterance=terminal_room_utterance,
         dossier_patch=DossierPatch(),
     )
@@ -3339,9 +3961,10 @@ async def test_target_intake_executor_uses_canonical_reply_then_board_when_no_pr
 
     class Graph:
         checkpointer = saver
+        source_completed = False
 
         async def astream(self, input: Any, config: Any, **kwargs: Any):
-            assert kwargs["stream_mode"] == ["messages", "custom"]
+            assert kwargs["stream_mode"] == ["messages", "custom", "updates"]
             yield (
                 "messages",
                 (
@@ -3362,6 +3985,11 @@ async def test_target_intake_executor_uses_canonical_reply_then_board_when_no_pr
                     {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
                 ),
             )
+            yield _target_action_gate_update(
+                room_utterance=terminal_room_utterance,
+                source_turn_hash=source_turn_hash,
+            )
+            self.source_completed = True
 
         async def aget_state(self, config: Any) -> object:
             return object()
@@ -3397,7 +4025,7 @@ async def test_target_intake_executor_uses_canonical_reply_then_board_when_no_pr
             return result
 
     async def load_context(*_: Any, **__: Any) -> object:
-        return object()
+        return _target_snapshot_context(source_turn_hash)
 
     graph = Graph()
     monkeypatch.setattr(
@@ -3464,17 +4092,27 @@ async def test_target_intake_executor_uses_canonical_reply_then_board_when_no_pr
 
     events = []
     visible_commit_states = []
+    visible_source_completion_states = []
     async for event in executor.stream(execution):
         events.append(event)
         if event.event_type == "visible_delta":
             visible_commit_states.append(saver.terminal_committed)
+            visible_source_completion_states.append(
+                (event.payload.field, graph.source_completed)
+            )
 
     visible = [event for event in events if event.event_type == "visible_delta"]
     room_events = [event for event in visible if event.payload.field == "room_utterance"]
     board_events = [event for event in visible if event not in room_events]
 
     assert "".join(event.payload.delta or "" for event in room_events) == terminal_room_utterance
-    assert all(visible_commit_states)
+    assert visible_commit_states == [False] * len(visible)
+    assert visible_source_completion_states[0] == ("room_utterance", False)
+    assert all(
+        source_completed
+        for field, source_completed in visible_source_completion_states
+        if field != "room_utterance"
+    )
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
@@ -3490,6 +4128,7 @@ async def test_target_intake_preview_does_not_turn_graph_failure_into_formal_res
 ) -> None:
     command, _, _ = _intake_command()
     execution = _target_candidate_intake_execution(command)
+    source_turn_hash = "e" * 64
     saver = object()
     preview = "Provisional response before the provider failure."
 
@@ -3501,7 +4140,7 @@ async def test_target_intake_preview_does_not_turn_graph_failure_into_formal_res
 
         async def astream(self, input: Any, config: Any, **kwargs: Any):
             try:
-                assert kwargs["stream_mode"] == ["messages", "custom"]
+                assert kwargs["stream_mode"] == ["messages", "custom", "updates"]
                 yield (
                     "messages",
                     (
@@ -3535,7 +4174,7 @@ async def test_target_intake_preview_does_not_turn_graph_failure_into_formal_res
             raise AssertionError("a failed graph must not store a formal proposal")
 
     async def load_context(*_: Any, **__: Any) -> object:
-        return object()
+        return _target_snapshot_context(source_turn_hash)
 
     graph = Graph()
     monkeypatch.setattr(
@@ -3573,35 +4212,42 @@ async def test_target_intake_preview_does_not_turn_graph_failure_into_formal_res
         async for event in executor.stream(execution):
             events.append(event)
 
-    assert [event.event_type for event in events] == ["attempt_started", "visible_delta"]
-    assert events[-1].payload.field == "room_utterance"
-    assert events[-1].payload.delta == preview
+    # The governed room prefix is a resettable public preview. A later provider
+    # failure still cannot create a final event, proposal, preflight, or commit.
+    assert [event.event_type for event in events] == [
+        "attempt_started",
+        "visible_delta",
+    ]
+    assert (events[1].payload.field, events[1].payload.delta) == (
+        "room_utterance",
+        preview,
+    )
+    assert all(event.event_type != "final" for event in events)
     assert graph.closed is True
     assert store.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_target_intake_executor_replays_only_phase_safe_terminal_when_raw_reply_is_rewritten(
+async def test_target_intake_executor_streams_governed_ready_handoff_equal_to_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command, _, _ = _intake_command()
     execution = _target_candidate_intake_execution(command)
-    canonical_question = "商家当时对退款诉求给出的具体答复是什么？"
-    raw_room_utterance = (
-        f"{canonical_question}当前信息已经完整，可以提交。"
-        "请问还有备注需要交接吗？另外，平台还应核实什么【RAW_PRIVATE】？"
+    source_turn_hash = "e" * 64
+    baseline_ready_handoff = (
+        "已记录本轮补充，当前信息已经可以提交。"
+        "请问还有没有需要备注给证据书记官或后续审理环节的案情内容？"
     )
     assert (
-        intake_executor._normalized_intake_room_utterance(raw_room_utterance)
-        == raw_room_utterance
+        intake_executor._normalized_intake_room_utterance(baseline_ready_handoff)
+        == baseline_ready_handoff
     )
-    governed_room_utterance = canonical_question
+    governed_room_utterance = baseline_ready_handoff
     raw_dossier_delta = '{"order_reference":"RAW-UNCOMMITTED"}'
-    state = {
-        "terminal_draft": {"same": True},
-        "result_json": {"same": True},
-        "cognitive_revision": 1,
-    }
+    state = _target_terminal_state(
+        source_turn_hash=source_turn_hash,
+        reducer_status="WAITING_FOR_REMARK",
+    )
     final_config = bind_fence_context(
         {
             "configurable": {
@@ -3615,15 +4261,13 @@ async def test_target_intake_executor_replays_only_phase_safe_terminal_when_raw_
 
     class DossierPatch:
         def model_dump(self, **_: Any) -> dict[str, Any]:
-            return {
-                "references": {"order_reference": "ORDER-READY-HANDOFF"},
-                "missing_information": {"next_questions": [canonical_question]},
-                "handoff_notes": {
-                    "remark_status": "READY_PENDING_REMARK_INVITE",
-                },
-            }
+            return _target_dossier_payload(
+                {"references": {"order_reference": "ORDER-READY-HANDOFF"}},
+                reducer_status="WAITING_FOR_REMARK",
+            )
 
     proposal = SimpleNamespace(
+        conversation_action="INVITE_OPTIONAL_REMARK",
         room_utterance=governed_room_utterance,
         dossier_patch=DossierPatch(),
     )
@@ -3675,11 +4319,18 @@ async def test_target_intake_executor_replays_only_phase_safe_terminal_when_raw_
         checkpointer = saver
 
         async def astream(self, input: Any, config: Any, **kwargs: Any):
-            assert kwargs["stream_mode"] == ["messages", "custom"]
+            assert kwargs["stream_mode"] == ["messages", "custom", "updates"]
             for field, delta in (
-                ("room_utterance", raw_room_utterance),
+                ("room_utterance", governed_room_utterance),
                 ("case_detail.references", raw_dossier_delta),
             ):
+                if field != "room_utterance":
+                    yield _target_action_gate_update(
+                        room_utterance=governed_room_utterance,
+                        source_turn_hash=source_turn_hash,
+                        conversation_action="INVITE_OPTIONAL_REMARK",
+                        reducer_status="WAITING_FOR_REMARK",
+                    )
                 yield (
                     "messages",
                     (
@@ -3741,7 +4392,7 @@ async def test_target_intake_executor_replays_only_phase_safe_terminal_when_raw_
             return result
 
     async def load_context(*_: Any, **__: Any) -> object:
-        return object()
+        return _target_snapshot_context(source_turn_hash)
 
     monkeypatch.setattr(
         "app.graph_runtime.intake_executor.build_governed_intake_runtime",
@@ -3821,22 +4472,17 @@ async def test_target_intake_executor_replays_only_phase_safe_terminal_when_raw_
     assert "".join(
         event.payload.delta or "" for event in room_events
     ) == governed_room_utterance
-    assert visible_commit_states and not any(visible_commit_states)
+    assert visible_commit_states == [False, False]
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
     all_visible_text = "".join(event.payload.delta or "" for event in visible)
     assert governed_room_utterance in all_visible_text
-    assert raw_room_utterance not in all_visible_text
-    assert "【RAW_PRIVATE】" not in all_visible_text
-    assert raw_dossier_delta not in all_visible_text
-    board_by_field = {event.payload.field: event.payload.delta for event in board_events}
-    assert json.loads(board_by_field["case_detail.references"]) == {
-        "order_reference": "ORDER-READY-HANDOFF"
-    }
-    assert json.loads(board_by_field["case_detail.missing_information"]) == {
-        "next_questions": [canonical_question]
-    }
+    assert raw_dossier_delta in all_visible_text
+    assert baseline_ready_handoff in all_visible_text
+    assert [(event.payload.field, event.payload.delta) for event in board_events] == [
+        ("case_detail.references", raw_dossier_delta)
+    ]
     assert events[-1].event_type == "final"
     assert saver.preflights == 1
     assert store.calls == 1
@@ -3845,7 +4491,7 @@ async def test_target_intake_executor_replays_only_phase_safe_terminal_when_raw_
 
 
 @pytest.mark.asyncio
-async def test_target_intake_executor_buffers_then_streams_exact_terminal_questions_before_board(
+async def test_target_intake_executor_streams_three_full_width_questions_before_streaming_board(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command, _, _ = _intake_command()
@@ -3858,18 +4504,16 @@ async def test_target_intake_executor_buffers_then_streams_exact_terminal_questi
     )
     raw_room_utterance = "".join(raw_room_deltas)
     expected_live_room_after_each_delta = tuple(
-        "" for _ in raw_room_deltas
+        "".join(raw_room_deltas[: index + 1])
+        for index in range(len(raw_room_deltas))
     )
     terminal_room_utterance = raw_room_utterance
+    source_turn_hash = "e" * 64
     assert raw_room_utterance.count("？") == 3
     assert "?" not in raw_room_utterance
     assert "1." in raw_room_utterance and "2." in raw_room_utterance
 
-    state = {
-        "terminal_draft": {"same": True},
-        "result_json": {"same": True},
-        "cognitive_revision": 1,
-    }
+    state = _target_terminal_state(source_turn_hash=source_turn_hash)
     final_config = bind_fence_context(
         {
             "configurable": {
@@ -3880,7 +4524,17 @@ async def test_target_intake_executor_buffers_then_streams_exact_terminal_questi
         },
         execution.fence,
     )
-    proposal = SimpleNamespace(room_utterance=terminal_room_utterance)
+    class DossierPatch:
+        def model_dump(self, **_: Any) -> dict[str, Any]:
+            return _target_dossier_payload(
+                {"references": {"order_reference": "ORDER-QUESTION-PROJECTION"}}
+            )
+
+    proposal = SimpleNamespace(
+        conversation_action="ASK_SUBSTANTIVE",
+        room_utterance=terminal_room_utterance,
+        dossier_patch=DossierPatch(),
+    )
     canonical = SimpleNamespace(
         artifact_id="intake-proposal-question-projection",
         schema_version="intake-turn-proposal.v2",
@@ -3961,14 +4615,11 @@ async def test_target_intake_executor_buffers_then_streams_exact_terminal_questi
             self.source_completed = False
             self.room_after_each_delta: list[str] = []
             self.room_before_board = ""
+            self.gate_release_requested = asyncio.Event()
 
         async def astream(self, input: Any, config: Any, **kwargs: Any):
-            assert kwargs["stream_mode"] == ["messages", "custom"]
-            for raw_delta, expected_live_room in zip(
-                raw_room_deltas,
-                expected_live_room_after_each_delta,
-                strict=True,
-            ):
+            assert kwargs["stream_mode"] == ["messages", "custom", "updates"]
+            for raw_delta in raw_room_deltas:
                 yield governed_visible_delta("room_utterance", raw_delta)
                 visible_room = "".join(
                     event.payload.delta or ""
@@ -3977,7 +4628,12 @@ async def test_target_intake_executor_buffers_then_streams_exact_terminal_questi
                     and event.payload.field == "room_utterance"
                 )
                 self.room_after_each_delta.append(visible_room)
-                assert visible_room == expected_live_room
+                if len(self.room_after_each_delta) == 1:
+                    await self.gate_release_requested.wait()
+            yield _target_action_gate_update(
+                room_utterance=terminal_room_utterance,
+                source_turn_hash=source_turn_hash,
+            )
             self.room_before_board = "".join(
                 event.payload.delta or ""
                 for event in events
@@ -4028,7 +4684,7 @@ async def test_target_intake_executor_buffers_then_streams_exact_terminal_questi
             return result
 
     async def load_context(*_: Any, **__: Any) -> object:
-        return object()
+        return _target_snapshot_context(source_turn_hash)
 
     graph = Graph()
     monkeypatch.setattr(
@@ -4096,13 +4752,36 @@ async def test_target_intake_executor_buffers_then_streams_exact_terminal_questi
 
     visible_commit_states = []
     visible_source_completion_states = []
-    async for event in executor.stream(execution):
-        events.append(event)
-        if event.event_type == "visible_delta":
-            visible_commit_states.append(saver.terminal_committed)
-            visible_source_completion_states.append(
-                (event.payload.field, graph.source_completed)
-            )
+    first_room_visible = asyncio.Event()
+
+    async def collect() -> None:
+        async for event in executor.stream(execution):
+            events.append(event)
+            if event.event_type == "visible_delta":
+                visible_commit_states.append(saver.terminal_committed)
+                visible_source_completion_states.append(
+                    (event.payload.field, graph.source_completed)
+                )
+                if event.payload.field == "room_utterance":
+                    first_room_visible.set()
+
+    collector = asyncio.create_task(collect())
+    try:
+        # The first governed Target room delta must reach the consumer while the
+        # graph is still blocked before its terminal-derived action gate.
+        await asyncio.wait_for(first_room_visible.wait(), timeout=1.0)
+        assert graph.gate_release_requested.is_set() is False
+        assert graph.source_completed is False
+        assert saver.preflights == 0
+        assert store.calls == 0
+        assert saver.commits == 0
+        graph.gate_release_requested.set()
+        await asyncio.wait_for(collector, timeout=1.0)
+    finally:
+        graph.gate_release_requested.set()
+        if not collector.done():
+            collector.cancel()
+        await asyncio.gather(collector, return_exceptions=True)
 
     visible = [event for event in events if event.event_type == "visible_delta"]
     room_events = [event for event in visible if event.payload.field == "room_utterance"]
@@ -4110,13 +4789,13 @@ async def test_target_intake_executor_buffers_then_streams_exact_terminal_questi
     visible_text = "".join(event.payload.delta or "" for event in visible)
 
     assert graph.room_after_each_delta == list(expected_live_room_after_each_delta)
-    assert graph.room_before_board == ""
+    assert graph.room_before_board == expected_live_room_after_each_delta[-1]
     assert events[1].payload.field == "room_utterance"
     assert events[1].payload.delta == raw_room_deltas[0]
     assert [event.payload.delta for event in room_events] == list(raw_room_deltas)
     streamed_room_utterance = "".join(event.payload.delta or "" for event in room_events)
     assert streamed_room_utterance == terminal_room_utterance == raw_room_utterance
-    assert "【RAW_THIRD_QUESTION】" not in graph.room_before_board
+    assert "【RAW_THIRD_QUESTION】" in graph.room_before_board
     assert "【RAW_THIRD_QUESTION】" in visible_text
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
@@ -4125,6 +4804,11 @@ async def test_target_intake_executor_buffers_then_streams_exact_terminal_questi
         ("case_detail.references", raw_board_delta)
     ]
     assert visible_commit_states == [False] * len(visible)
+    assert all(
+        not source_completed
+        for field, source_completed in visible_source_completion_states
+        if field == "room_utterance"
+    )
     assert visible_source_completion_states[-1] == ("case_detail.references", True)
     assert events[-2].event_type == "usage"
     assert events[-1].event_type == "final"
@@ -4140,6 +4824,7 @@ async def test_target_intake_executor_rejects_room_append_after_root_close(
 ) -> None:
     command, _, _ = _intake_command()
     execution = _target_candidate_intake_execution(command)
+    source_turn_hash = "e" * 64
     saver = object()
 
     def governed_visible_delta(field: str, delta: str) -> tuple[str, tuple[Any, dict[str, str]]]:
@@ -4168,8 +4853,12 @@ async def test_target_intake_executor_rejects_room_append_after_root_close(
         checkpointer = saver
 
         async def astream(self, input: Any, config: Any, **kwargs: Any):
-            assert kwargs["stream_mode"] == ["messages", "custom"]
+            assert kwargs["stream_mode"] == ["messages", "custom", "updates"]
             yield governed_visible_delta("room_utterance", "Please confirm the order number?")
+            yield _target_action_gate_update(
+                room_utterance="Please confirm the order number?",
+                source_turn_hash=source_turn_hash,
+            )
             yield governed_visible_delta(
                 "case_detail.references",
                 '{"order_reference":"RAW-AFTER-ROOM"}',
@@ -4180,7 +4869,7 @@ async def test_target_intake_executor_rejects_room_append_after_root_close(
             raise AssertionError("the order breach must fail before terminal state")
 
     async def load_context(*_: Any, **__: Any) -> object:
-        return object()
+        return _target_snapshot_context(source_turn_hash)
 
     monkeypatch.setattr(
         "app.graph_runtime.intake_executor.build_governed_intake_runtime",
@@ -4220,9 +4909,15 @@ async def test_target_intake_executor_rejects_room_append_after_root_close(
         async for event in executor.stream(execution):
             events.append(event)
 
-    # Target visible content remains private until terminal governance.  A source
-    # order breach therefore cannot leak either its room prefix or provisional board.
-    assert [event.event_type for event in events] == ["attempt_started"]
+    # The first room chunk is already public, but the terminal-bound board must
+    # remain private when a later room-order breach fails the stream.
+    assert [event.event_type for event in events] == [
+        "attempt_started",
+        "visible_delta",
+    ]
+    assert [(event.payload.field, event.payload.delta) for event in events[1:]] == [
+        ("room_utterance", "Please confirm the order number?"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -4243,13 +4938,18 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
     )
     streamed_room_utterance = "Please confirm the requested resolution."
     terminal_room_utterance = "Please describe the desired resolution."
+    source_turn_hash = "e" * 64
     provisional_board_delta = '{"order_reference":"PROVISIONAL-BEFORE-MISMATCH"}'
     assert streamed_room_utterance != terminal_room_utterance
-    state = {
-        "terminal_draft": {"same": True},
-        "result_json": {"same": True},
-        "cognitive_revision": 1,
-    }
+    state = (
+        _target_terminal_state(source_turn_hash=source_turn_hash)
+        if target_candidate
+        else {
+            "terminal_draft": {"same": True},
+            "result_json": {"same": True},
+            "cognitive_revision": 1,
+        }
+    )
     final_config = bind_fence_context(
         {
             "configurable": {
@@ -4260,19 +4960,12 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
         },
         execution.fence,
     )
-
     class DossierPatch:
         def model_dump(self, **_: Any) -> dict[str, Any]:
-            return {
-                "missing_information": {
-                    "next_questions": ["Which exact order record should be checked?"],
-                },
-                "handoff_notes": {
-                    "remark_status": "READY_PENDING_REMARK_INVITE",
-                },
-            }
+            return _target_dossier_payload({})
 
     proposal = SimpleNamespace(
+        conversation_action="ASK_SUBSTANTIVE",
         room_utterance=terminal_room_utterance,
         dossier_patch=DossierPatch(),
     )
@@ -4296,7 +4989,11 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
         checkpointer = saver
 
         async def astream(self, input, config, **kwargs):
-            assert kwargs["stream_mode"] == ["messages", "custom"]
+            expected_modes = ["messages", "custom", "updates"] if target_candidate else [
+                "messages",
+                "custom",
+            ]
+            assert kwargs["stream_mode"] == expected_modes
             yield (
                 "messages",
                 (
@@ -4317,6 +5014,11 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
                     {"langgraph_node": "intake_lcel"},
                 ),
             )
+            if target_candidate:
+                yield _target_action_gate_update(
+                    room_utterance=streamed_room_utterance,
+                    source_turn_hash=source_turn_hash,
+                )
             yield (
                 "messages",
                 (
@@ -4350,7 +5052,7 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
             raise AssertionError("room mismatch must fail before proposal storage")
 
     async def load_context(*_: Any, **__: Any) -> object:
-        return object()
+        return _target_snapshot_context(source_turn_hash)
 
     monkeypatch.setattr(
         "app.graph_runtime.intake_executor.build_governed_intake_runtime",
@@ -4394,23 +5096,27 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
     events = []
     with pytest.raises(
         GraphTerminalBindingError,
-        match="streamed room utterance differs from normalized terminal proposal",
+        match=(
+            "action gate differs from terminal authority"
+            if target_candidate
+            else "streamed room utterance differs from normalized terminal proposal"
+        ),
     ):
         async for event in executor.stream(execution):
             events.append(event)
 
-    if target_candidate:
-        assert [event.event_type for event in events] == ["attempt_started"]
-    else:
-        assert [event.event_type for event in events] == [
-            "attempt_started",
-            "visible_delta",
-            "visible_delta",
-        ]
-        assert [(event.payload.field, event.payload.delta) for event in events[1:]] == [
-            ("room_utterance", streamed_room_utterance),
-            ("case_detail.references", provisional_board_delta),
-        ]
+    expected_visible = [("room_utterance", streamed_room_utterance)]
+    if not target_candidate:
+        expected_visible.append(
+            ("case_detail.references", provisional_board_delta)
+        )
+    assert [event.event_type for event in events] == [
+        "attempt_started",
+        *("visible_delta" for _ in expected_visible),
+    ]
+    assert [(event.payload.field, event.payload.delta) for event in events[1:]] == (
+        expected_visible
+    )
     assert saver.preflights == 0
     assert saver.commits == 0
     assert store.calls == 0

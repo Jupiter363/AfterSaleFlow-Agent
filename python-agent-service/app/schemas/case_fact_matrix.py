@@ -282,9 +282,29 @@ class CaseFactMatrixDeltaV2(StrictModel):
 
     @model_validator(mode="after")
     def keys_are_valid(self) -> "CaseFactMatrixDeltaV2":
-        keys = [row.fact_key for row in self.fact_rows]
-        if len(keys) != len(set(keys)):
-            raise ValueError("case fact delta keys must be unique")
-        if not set(self.summary_source_fact_keys).issubset(set(keys)):
-            raise ValueError("summary_source_fact_keys must reference delta facts")
+        effective_rows: list[CaseFactDeltaRowV2] = []
+        row_payloads: dict[str, dict[str, object]] = {}
+        for row in self.fact_rows:
+            payload = row.model_dump(mode="json")
+            existing = row_payloads.get(row.fact_key)
+            if existing is None:
+                row_payloads[row.fact_key] = payload
+                effective_rows.append(row)
+            elif existing != payload:
+                raise ValueError("case fact delta keys must be unique")
+
+        effective_keys = set(row_payloads)
+        effective_summary_keys: list[str] = []
+        seen_summary_keys: set[str] = set()
+        for key in self.summary_source_fact_keys:
+            if key in effective_keys and key not in seen_summary_keys:
+                seen_summary_keys.add(key)
+                effective_summary_keys.append(key)
+        if not effective_summary_keys:
+            raise ValueError(
+                "summary_source_fact_keys must reference at least one delta fact"
+            )
+
+        self.fact_rows = effective_rows
+        self.summary_source_fact_keys = effective_summary_keys
         return self

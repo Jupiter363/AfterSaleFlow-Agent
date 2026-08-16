@@ -24,7 +24,37 @@ public class IntakeProcessProjectionAdapter {
                    projection.room_epoch as projection_room_epoch,
                    projection.process_revision as projection_process_revision,
                    projection.fencing_token as projection_fencing_token,
-                   projection.room_phase,
+                   case
+                       when projection.current_room in ('EVIDENCE', 'HEARING', 'REVIEW')
+                        and exists (
+                            select 1
+                              from case_room_epoch completed_intake
+                             where completed_intake.tenant_surrogate =
+                                   projection.tenant_surrogate
+                               and completed_intake.case_id = projection.case_id
+                               and completed_intake.room_type = 'INTAKE'
+                               and completed_intake.lifecycle_status = 'TERMINAL'
+                               and completed_intake.provisioning_status = 'READY'
+                               and completed_intake.writer_mode = projection.writer_mode
+                               and completed_intake.process_revision <=
+                                   projection.process_revision
+                               and completed_intake.temporal_workflow_id =
+                                   projection.temporal_workflow_id
+                               and completed_intake.temporal_run_id =
+                                   projection.temporal_run_id
+                               and not exists (
+                                   select 1
+                                     from case_room_epoch newer_intake
+                                    where newer_intake.tenant_surrogate =
+                                          completed_intake.tenant_surrogate
+                                      and newer_intake.case_id = completed_intake.case_id
+                                      and newer_intake.room_type = 'INTAKE'
+                                      and newer_intake.room_epoch >
+                                          completed_intake.room_epoch
+                               )
+                        ) then 'COMPLETED'
+                       else projection.room_phase
+                   end as room_phase,
                    projection.projected_at,
                    epoch.writer_mode as epoch_writer_mode,
                    epoch.lifecycle_status as epoch_lifecycle_status,
@@ -56,7 +86,7 @@ public class IntakeProcessProjectionAdapter {
               from case_process_projection projection
               left join case_room_epoch epoch
                 on epoch.case_id = projection.case_id
-               and epoch.room_type = 'INTAKE'
+               and epoch.room_type = projection.current_room
                and epoch.room_epoch = projection.room_epoch
                and epoch.fencing_token = projection.fencing_token
                and epoch.lifecycle_status in ('ACTIVE', 'TERMINAL')

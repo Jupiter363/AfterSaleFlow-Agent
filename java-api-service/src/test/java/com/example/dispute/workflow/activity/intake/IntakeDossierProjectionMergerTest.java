@@ -241,6 +241,202 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void carriesStrictRemarkPartitionWithoutChangingMatrixAndRejectsMalformedBindings()
+            throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        JsonNode frozenMatrix = current.path("case_fact_matrix").deepCopy();
+        ObjectNode waiting = handoffRemarkPartition(current, "USER", "WAITING_FOR_REMARK", null);
+        ObjectNode waitingPatch = partyIntakePatch(
+                "USER",
+                readyPartyIntakeEntry(
+                        "WAITING_FOR_REMARK", "MESSAGE_HANDOFF_THRESHOLD_USER"),
+                partyIntakeEntry(0));
+        waitingPatch.set("handoff_remark_partition", waiting);
+        MatrixAuthority thresholdAuthority = matrixAuthority(
+                ActorRole.USER, "MESSAGE_HANDOFF_THRESHOLD_USER", SourceType.ROOM_MESSAGE);
+
+        MergeResult threshold = merger.merge(
+                current,
+                proposal(
+                        waitingPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                thresholdAuthority);
+
+        assertThat(threshold.dossier().path("case_fact_matrix")).isEqualTo(frozenMatrix);
+        assertThat(threshold.dossier().path("handoff_remark_partition")).isEqualTo(waiting);
+        assertThat(threshold.dossier().at("/case_fact_matrix/handoff_remark_partition").isMissingNode())
+                .isTrue();
+        assertThat(threshold.dossier().at("/handoff_notes/handoff_remark_partition").isMissingNode())
+                .isTrue();
+
+        ObjectNode preThresholdPartition =
+                handoffRemarkPartition(current, "USER", "NOT_READY", null);
+        ObjectNode preThresholdPatch = partyIntakePatch(
+                "USER", partyIntakeEntry(0), partyIntakeEntry(0));
+        preThresholdPatch.set("handoff_remark_partition", preThresholdPartition);
+        MergeResult preThreshold = merger.merge(
+                current,
+                proposal(preThresholdPatch, null),
+                matrixAuthority(ActorRole.USER));
+
+        String factId = frozenMatrix.at("/fact_rows/0/fact_id").asText();
+        ObjectNode modelSuccessorClaim = preThresholdPartition.deepCopy();
+        modelSuccessorClaim.put("case_fact_matrix_id", "MATRIX_MODEL_SUCCESSOR");
+        modelSuccessorClaim.put(
+                "case_fact_matrix_version", frozenMatrix.path("matrix_version").asLong() + 1);
+        modelSuccessorClaim.put("case_fact_matrix_hash", "e".repeat(64));
+        ObjectNode matrixChangePatch = JSON.createObjectNode();
+        matrixChangePatch.set("handoff_remark_partition", modelSuccessorClaim);
+        MergeResult matrixAdvanced = merger.merge(
+                preThreshold.dossier(),
+                proposal(matrixChangePatch, carryForwardDraft(factId)),
+                matrixAuthority(ActorRole.USER));
+        JsonNode successorMatrix = matrixAdvanced.dossier().path("case_fact_matrix");
+        JsonNode reboundPartition =
+                matrixAdvanced.dossier().path("handoff_remark_partition");
+        assertThat(successorMatrix.path("matrix_version").asLong())
+                .isEqualTo(frozenMatrix.path("matrix_version").asLong() + 1);
+        assertThat(reboundPartition.path("case_fact_matrix_id"))
+                .isEqualTo(successorMatrix.path("matrix_id"));
+        assertThat(reboundPartition.path("case_fact_matrix_version"))
+                .isEqualTo(successorMatrix.path("matrix_version"));
+        assertThat(reboundPartition.path("case_fact_matrix_hash"))
+                .isEqualTo(successorMatrix.path("content_hash"));
+        assertThat(reboundPartition.path("parties"))
+                .isEqualTo(preThresholdPartition.path("parties"));
+        assertThat(reboundPartition.path("case_fact_matrix_id"))
+                .isNotEqualTo(modelSuccessorClaim.path("case_fact_matrix_id"));
+        assertThat(reboundPartition.path("case_fact_matrix_hash"))
+                .isNotEqualTo(modelSuccessorClaim.path("case_fact_matrix_hash"));
+
+        String remark = "请在交接时核对售后物流记录。";
+        ObjectNode acknowledged = handoffRemarkPartition(
+                threshold.dossier(), "USER", "HAS_REMARKS", remark);
+        acknowledged.put("case_fact_matrix_id", "MATRIX_MODEL_ACKNOWLEDGEMENT");
+        acknowledged.put(
+                "case_fact_matrix_version", frozenMatrix.path("matrix_version").asLong() + 7);
+        acknowledged.put("case_fact_matrix_hash", "f".repeat(64));
+        ObjectNode acknowledgedPatch = JSON.createObjectNode();
+        ObjectNode acknowledgedState =
+                ((ObjectNode) threshold.dossier().path("party_intake_state")).deepCopy();
+        ObjectNode acknowledgedUser = readyPartyIntakeEntry(
+                "HAS_REMARKS", "MESSAGE_HANDOFF_REMARK_USER");
+        ObjectNode acknowledgedHandoff = acknowledgedUser.withObject("handoff_notes");
+        acknowledgedHandoff.put("latest_remark", remark);
+        acknowledgedHandoff
+                .withArray("remarks")
+                .addObject()
+                .put("role", "USER")
+                .put("text", remark)
+                .put("source_message_id", "MESSAGE_HANDOFF_REMARK_USER")
+                .put("turn_source", "CURRENT_MESSAGE");
+        acknowledgedState.set("USER", acknowledgedUser);
+        acknowledgedPatch.set("party_intake_state", acknowledgedState);
+        copyPartyMirror(acknowledgedPatch, acknowledgedState.path("USER"));
+        acknowledgedPatch.set("handoff_remark_partition", acknowledged);
+        MatrixAuthority remarkAuthority = matrixAuthority(
+                ActorRole.USER, "MESSAGE_HANDOFF_REMARK_USER", SourceType.ROOM_MESSAGE);
+
+        MergeResult carried = merger.merge(
+                threshold.dossier(),
+                proposal(
+                        acknowledgedPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                remarkAuthority);
+        MergeResult replay = merger.merge(
+                carried.dossier(),
+                proposal(
+                        acknowledgedPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                remarkAuthority);
+
+        assertThat(carried.dossier().path("case_fact_matrix")).isEqualTo(frozenMatrix);
+        JsonNode authoritativeAcknowledgement =
+                carried.dossier().path("handoff_remark_partition");
+        assertThat(authoritativeAcknowledgement.path("case_fact_matrix_id"))
+                .isEqualTo(frozenMatrix.path("matrix_id"));
+        assertThat(authoritativeAcknowledgement.path("case_fact_matrix_version"))
+                .isEqualTo(frozenMatrix.path("matrix_version"));
+        assertThat(authoritativeAcknowledgement.path("case_fact_matrix_hash"))
+                .isEqualTo(frozenMatrix.path("content_hash"));
+        assertThat(authoritativeAcknowledgement.path("parties"))
+                .isEqualTo(acknowledged.path("parties"));
+        assertThat(replay.dossier().path("handoff_remark_partition"))
+                .isEqualTo(authoritativeAcknowledgement);
+
+        ObjectNode malformed = acknowledged.deepCopy();
+        malformed.withObject("parties").withObject("USER").put("unknown", true);
+        ObjectNode malformedPatch = JSON.createObjectNode();
+        malformedPatch.set("handoff_remark_partition", malformed);
+        assertRejected(
+                "INTAKE_HANDOFF_REMARK_PARTITION_INVALID",
+                () -> merger.merge(
+                        threshold.dossier(),
+                        proposal(
+                                malformedPatch,
+                                null,
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of()),
+                        remarkAuthority));
+
+        ObjectNode mismatched = acknowledged.deepCopy();
+        mismatched.put("case_fact_matrix_hash", "f".repeat(64));
+        ObjectNode mismatchedPatch = JSON.createObjectNode();
+        mismatchedPatch.set("handoff_remark_partition", mismatched);
+        assertRejected(
+                "INTAKE_HANDOFF_REMARK_PARTITION_AUTHORITY_REQUIRED",
+                () -> merger.merge(
+                        current,
+                        proposal(
+                                mismatchedPatch,
+                                null,
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of()),
+                        null));
+
+        ObjectNode foreignDrift = acknowledged.deepCopy();
+        foreignDrift
+                .withObject("parties")
+                .withObject("MERCHANT")
+                .put("remark_status", "NO_EXTRA_REMARKS")
+                .putObject("source")
+                .put("source_kind", "ROOM_MESSAGE")
+                .put("message_id", "MESSAGE_FOREIGN_MERCHANT")
+                .put("message_hash", "a".repeat(64));
+        ObjectNode foreignPatch = JSON.createObjectNode();
+        foreignPatch.set("handoff_remark_partition", foreignDrift);
+        assertRejected(
+                "INTAKE_HANDOFF_REMARK_PARTITION_FOREIGN_DRIFT",
+                () -> merger.merge(
+                        threshold.dossier(),
+                        proposal(
+                                foreignPatch,
+                                null,
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of()),
+                        remarkAuthority));
+
+        ObjectNode substantiveDrift = acknowledgedPatch.deepCopy();
+        substantiveDrift.putObject("case_story").put("post_threshold", "forbidden");
+        assertRejected(
+                "INTAKE_HANDOFF_REMARK_SUBSTANTIVE_DRIFT",
+                () -> merger.merge(
+                        threshold.dossier(),
+                        proposal(
+                                substantiveDrift,
+                                null,
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of()),
+                        remarkAuthority));
+    }
+
+    @Test
     void buildsTheUnifiedMatrixFromTrustedClaimFactsWhenTheModelOmitsTheClaimBranch()
             throws Exception {
         JsonNode modelPatch = JSON.readTree(
@@ -1692,6 +1888,62 @@ class IntakeDossierProjectionMergerTest {
                 ActorRole.MERCHANT,
                 respondent ? "MESSAGE_P4_MERCHANT_2" : "MESSAGE_P4_USER_2",
                 (respondent ? "e" : "c").repeat(64));
+    }
+
+    private static ObjectNode handoffRemarkPartition(
+            JsonNode dossier, String actorRole, String status, String remark) {
+        JsonNode matrix = dossier.path("case_fact_matrix");
+        ObjectNode partition = JSON.createObjectNode();
+        partition.put("schema_version", "handoff_remark_partition.v1");
+        partition.set("case_fact_matrix_id", matrix.path("matrix_id").deepCopy());
+        partition.set("case_fact_matrix_version", matrix.path("matrix_version").deepCopy());
+        partition.set("case_fact_matrix_hash", matrix.path("content_hash").deepCopy());
+        ObjectNode parties = partition.putObject("parties");
+        putHandoffRemarkParty(parties.putObject("USER"), "USER", "NOT_READY", null);
+        putHandoffRemarkParty(parties.putObject("MERCHANT"), "MERCHANT", "NOT_READY", null);
+        putHandoffRemarkParty(
+                (ObjectNode) parties.path(actorRole), actorRole, status, remark);
+        return partition;
+    }
+
+    private static void putHandoffRemarkParty(
+            ObjectNode party, String role, String status, String remark) {
+        party.removeAll();
+        party.put("party_role", role);
+        party.put("remark_status", status);
+        if (!"NOT_READY".equals(status)) {
+            ObjectNode source = party.putObject("source");
+            source.put("source_kind", "ROOM_MESSAGE");
+            String messageId = remark == null
+                    ? "MESSAGE_HANDOFF_THRESHOLD_" + role
+                    : "MESSAGE_HANDOFF_REMARK_" + role;
+            source.put("message_id", messageId);
+            source.put(
+                    "message_hash",
+                    handoffRemarkSourceHash(messageId, role, remark == null ? "threshold" : remark));
+        }
+        party.put("latest_remark", remark == null ? "" : remark);
+        ArrayNode remarks = party.putArray("remarks");
+        if (remark != null) {
+            ObjectNode entry = remarks.addObject();
+            entry.put("party_role", role);
+            entry.put("text", remark);
+            entry.put("source_message_id", "MESSAGE_HANDOFF_REMARK_" + role);
+            entry.put(
+                    "source_message_hash",
+                    handoffRemarkSourceHash(
+                            "MESSAGE_HANDOFF_REMARK_" + role, role, remark));
+            entry.put("turn_source", "ROOM_MESSAGE");
+        }
+    }
+
+    private static String handoffRemarkSourceHash(String messageId, String role, String text) {
+        ObjectNode material = JSON.createObjectNode();
+        material.put("message_id", messageId);
+        material.put("role", role);
+        material.put("source", "ROOM_MESSAGE");
+        material.put("text", text);
+        return ContractJson.sha256Hex(material);
     }
 
     private static MatrixAuthority matrixAuthority(ActorRole actorRole, SourceType sourceType) {

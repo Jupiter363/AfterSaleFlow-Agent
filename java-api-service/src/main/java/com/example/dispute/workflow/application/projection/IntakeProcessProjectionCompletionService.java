@@ -805,6 +805,7 @@ public class IntakeProcessProjectionCompletionService {
                                     requiredLong(left.attempt(), "attempt_no"),
                                     requiredLong(right.attempt(), "attempt_no")));
             validateRecoveredLineage(evidence, run, winnerRow, attempts);
+            validateRecoveredExecutionAuthority(original, run, attempts);
 
             ValidatedRecoveredAttempt winner = attempts.get(attempts.size() - 1);
             validateRecoveredWinnerTerminalAuthority(
@@ -843,6 +844,7 @@ public class IntakeProcessProjectionCompletionService {
         requireText(original, "case_id", evidence.caseId());
         requireText(original, "command_type", evidence.commandType());
         requireText(original, "room_type", "INTAKE");
+        requireSha256(original, "request_hash");
         requireText(original, "request_hash", evidence.commandRequestHash());
         requireLong(original, "case_command_sequence", evidence.commandSequence());
         requireLong(original, "room_epoch", evidence.roomEpoch());
@@ -974,7 +976,6 @@ public class IntakeProcessProjectionCompletionService {
                 requiredText(run, "committed_attempt_id"));
         requireText(run, "committed_attempt_id", receipt.attemptId());
         requireText(run, "final_result_hash", receipt.resultHash());
-        requireText(run, "request_hash", evidence.commandRequestHash());
         requireSha256(run, "logical_input_hash");
         if (requiredLong(run, "attempt_limit") < 1) {
             throw new IllegalArgumentException("AgentRun attempt limit is invalid");
@@ -1056,6 +1057,8 @@ public class IntakeProcessProjectionCompletionService {
                 "lineage_schema_version",
                 "agent-run-attempt-lineage.v1");
         requireText(attempt, "command_id", command.commandId());
+        requireSha256(attempt, "request_hash");
+        requireSha256(attempt, "command_request_hash");
         requireText(attempt, "request_hash", command.requestHash());
         requireText(attempt, "command_request_hash", command.requestHash());
         requireText(
@@ -1227,8 +1230,6 @@ public class IntakeProcessProjectionCompletionService {
             if (index == 0) {
                 if (optionalText(row, "previous_attempt_id") != null
                         || !evidence.commandId().equals(commandId)
-                        || !evidence.commandRequestHash()
-                                .equals(current.command().requestHash())
                         || requiredBoolean(row, "reset_required")
                         || requiredLong(row, "public_sequence_offset") != 0) {
                     throw new IllegalArgumentException(
@@ -1246,8 +1247,10 @@ public class IntakeProcessProjectionCompletionService {
             }
             if (index < attempts.size() - 1) {
                 String status = requiredText(row, "attempt_status");
-                if (!"CREATE_NEXT_ATTEMPT".equals(optionalText(row, "termination_code"))
-                        || Set.of("PENDING", "RUNNING", "EXECUTING").contains(status)
+                requiredText(row, "error_code");
+                if (!Set.of("FAILED", "ABORTED", "CANCELLED").contains(status)
+                        || !"CREATE_NEXT_ATTEMPT".equals(optionalText(row, "termination_code"))
+                        || !requiredBoolean(row, "error_retryable")
                         || !hasPresent(row, "completed_at")) {
                     throw new IllegalArgumentException(
                             "recovered predecessor was not terminally advanced");
@@ -1270,6 +1273,34 @@ public class IntakeProcessProjectionCompletionService {
             throw new IllegalArgumentException(
                     "recovered winner does not match the committed AgentRun attempt");
         }
+    }
+
+    private void validateRecoveredExecutionAuthority(
+            JsonNode original, JsonNode run, List<ValidatedRecoveredAttempt> attempts) {
+        ValidatedRecoveredAttempt root = attempts.get(0);
+        RoomGraphCommand rootCommand = root.command();
+        requireText(original, "command_id", rootCommand.commandId());
+        requireSha256(original, "payload_sha256");
+        for (ValidatedRecoveredAttempt current : attempts) {
+            RoomGraphCommand command = current.command();
+            RoomGraphCommand.SnapshotRef eventRef =
+                    Objects.requireNonNull(
+                            command.eventRef(), "lineage command event reference");
+            requireText(original, "payload_schema_version", eventRef.schemaVersion());
+            requireText(original, "payload_uri", eventRef.uri());
+            requireText(original, "payload_sha256", eventRef.sha256());
+            requireLong(original, "payload_size_bytes", eventRef.sizeBytes());
+            requireInstant(original, "deadline_at", command.deadlineAt());
+            if (!current.context().threadId().equals(command.threadId())
+                    || current.context().deadlineEpochMillis()
+                            != command.deadlineAt().toEpochMilli()) {
+                throw new IllegalArgumentException(
+                        "recovered attempt context does not bind its Graph command");
+            }
+        }
+
+        requireSha256(run, "request_hash");
+        requireText(run, "request_hash", rootCommand.requestHash());
     }
 
     private void validateRecoveredWinnerTerminalAuthority(

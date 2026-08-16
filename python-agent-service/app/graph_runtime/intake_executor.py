@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import aclosing
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol, cast
 
 from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableConfig
 
-from app.agents.dispute_intake_officer.room_utterance import phase_safe_room_utterance
 from app.contracts.v1.models import (
     AgentStreamEvent,
     AgentStreamPayload,
@@ -29,7 +30,13 @@ from app.graph_runtime.checkpoint import (
     bind_fence_context,
 )
 from app.graph_runtime.compiled_executor import GraphPublicUpdate
-from app.graph_runtime.errors import GraphContractError, GraphTerminalBindingError
+from app.graph_runtime.errors import (
+    GraphContractError,
+    GraphTerminalBindingError,
+    IntakeExecutorDiagnosticError,
+    IntakeExecutorDiagnosticStage,
+    STABLE_INTAKE_GRAPH_CONTRACT_ERROR_CODES,
+)
 from app.graph_runtime.gateway import GatewayExecution
 from app.graph_runtime.intake_binding import (
     IntakeInputLoader,
@@ -48,13 +55,17 @@ from app.graph_runtime.target_e2e import (
     TargetE2ERoomProposalSource,
 )
 from app.graphs.intake.lcel import (
+    INTAKE_ACTION_GATE_ACTION_STATUSES,
+    INTAKE_ACTION_GATE_KEY_PREFIX,
+    INTAKE_ACTION_GATE_KIND,
+    INTAKE_ACTION_GATE_SCHEMA_VERSION,
     _ABSENT_RESPONDENT_ATTITUDES,
     _SUBSTANTIVE_RESPONDENT_ATTITUDES,
     _normalized_intake_room_utterance,
     _respondent_attitude_discriminator,
 )
 from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
-from app.graphs.intake.contracts import IntakeTurnProposal
+from app.graphs.intake.contracts import IntakeTurnProposal, RESPONDENT_OPENING_MARKER
 from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
 from app.graphs.intake.validators import validate_state
@@ -90,6 +101,23 @@ _AGENT_STREAM_DELTA_MAX_LENGTH = 4096
 # projector retains incomplete JSON escape sequences between slices, so a
 # multi-byte UTF-8 character can never be split for a downstream consumer.
 _TARGET_INTAKE_CANONICAL_REPLAY_SOURCE_CHUNK_LENGTH = 64
+_SHA256_HEX_LENGTH = 64
+
+
+def _intake_executor_diagnostic_error(
+    source: GraphContractError,
+    *,
+    stage: IntakeExecutorDiagnosticStage,
+) -> GraphContractError:
+    """Bind a generic failure to one reviewed executor boundary without exposing text."""
+
+    if (
+        len(source.args) == 1
+        and isinstance(source.args[0], str)
+        and source.args[0] in STABLE_INTAKE_GRAPH_CONTRACT_ERROR_CODES
+    ):
+        return source
+    return IntakeExecutorDiagnosticError(source, stage=stage)
 
 
 class CompiledIntakeStateGraphPort(Protocol):
@@ -141,6 +169,26 @@ class CompiledIntakeGraphShadowExecutor:
         self,
         execution: GatewayExecution,
     ) -> AsyncIterator[AgentStreamEvent]:
+        diagnostic_stage = [IntakeExecutorDiagnosticStage.GRAPH_STREAM_ADVANCE]
+        source = self._stream(execution, diagnostic_stage=diagnostic_stage)
+        try:
+            async with aclosing(source):
+                async for event in source:
+                    yield event
+        except GraphContractError as error:
+            if type(error) is not GraphContractError:
+                raise
+            raise _intake_executor_diagnostic_error(
+                error,
+                stage=diagnostic_stage[0],
+            ) from None
+
+    async def _stream(
+        self,
+        execution: GatewayExecution,
+        *,
+        diagnostic_stage: list[IntakeExecutorDiagnosticStage],
+    ) -> AsyncIterator[AgentStreamEvent]:
         runtime_execution = (
             self._runtime_execution_projector(execution)
             if self._runtime_execution_projector is not None
@@ -174,21 +222,85 @@ class CompiledIntakeGraphShadowExecutor:
         pending_usage_update: GraphPublicUpdate | None = None
         streamed_room_utterance_parts: list[str] = []
         target_visible_updates: list[GraphPublicUpdate] = []
+        target_action_gate: Mapping[str, Any] | None = None
+        target_gate_update_observed = False
+        target_room_synthesized_from_gate = False
         room_utterance_received = False
+        target_room_released = False
+        target_opening_without_action_gate = context.ingress_kind in {
+            "EVENT",
+            "BOOTSTRAP_EVENT",
+        } and self._context_is_respondent_opening(context)
         room_utterance_completed = False
         case_detail_seen_before_room_utterance = False
         target_reply_then_board = self._uses_target_reply_then_board_boundary(execution)
+        target_source_turn_hash = (
+            self._context_source_turn_hash(context)
+            if target_reply_then_board and not target_opening_without_action_gate
+            else None
+        )
+        stream_modes = ["messages", "custom"]
+        if target_reply_then_board:
+            stream_modes.append("updates")
         source = graph.astream(
             graph_input,
             config,
             context=context,
-            stream_mode=["messages", "custom"],
+            stream_mode=stream_modes,
         )
         close = getattr(source, "aclose", None)
         if not callable(close):
             raise GraphContractError("compiled Intake Graph stream is not closable")
         try:
             async for candidate in source:
+                if target_reply_then_board:
+                    (
+                        is_update,
+                        observed_gate,
+                        gated_room_utterance,
+                    ) = self._target_action_gate_update(
+                        candidate,
+                        expected_source_turn_hash=target_source_turn_hash,
+                    )
+                    if is_update:
+                        if observed_gate is None:
+                            continue
+                        target_gate_update_observed = True
+                        if not observed_gate:
+                            if not target_opening_without_action_gate:
+                                raise GraphContractError("INTAKE_ACTION_GATE_MISSING")
+                            continue
+                        if target_action_gate is not None:
+                            raise GraphContractError("INTAKE_ACTION_GATE_DUPLICATE")
+                        target_action_gate = observed_gate
+                        if room_utterance_received:
+                            self._require_action_gate_matches_room(
+                                gate=observed_gate,
+                                room_utterance="".join(streamed_room_utterance_parts),
+                            )
+                        else:
+                            self._require_action_gate_matches_room(
+                                gate=observed_gate,
+                                room_utterance=gated_room_utterance or "",
+                            )
+                            for room_update in self._authoritative_room_utterance_updates(
+                                gated_room_utterance or ""
+                            ):
+                                self._validate_public_update(room_update)
+                                yield self._event(
+                                    execution,
+                                    sequence,
+                                    room_update.event_type,
+                                    room_update.payload,
+                                )
+                                sequence += 1
+                            streamed_room_utterance_parts.append(
+                                gated_room_utterance or ""
+                            )
+                            room_utterance_received = True
+                            target_room_released = True
+                            target_room_synthesized_from_gate = True
+                        continue
                 for update in self._public_updates(candidate):
                     self._validate_public_update(update)
                     if update.event_type == "usage":
@@ -204,6 +316,7 @@ class CompiledIntakeGraphShadowExecutor:
                         if (
                             room_utterance_completed
                             or case_detail_seen_before_room_utterance
+                            or (target_reply_then_board and target_action_gate is not None)
                         ):
                             raise GraphContractError(
                                 "INTAKE_ROOM_UTTERANCE_STREAM_ORDER_INVALID"
@@ -246,7 +359,19 @@ class CompiledIntakeGraphShadowExecutor:
                             ):
                                 self._validate_public_update(room_update)
                                 if target_reply_then_board:
-                                    target_visible_updates.append(room_update)
+                                    # Governed room text is provisional SSE state and
+                                    # may be reset by the attempt lifecycle. Publish it
+                                    # immediately so provider TTFT is not coupled to the
+                                    # terminal dossier/action-gate projection. The exact
+                                    # full text remains gate/hash/terminal-bound below.
+                                    yield self._event(
+                                        execution,
+                                        sequence,
+                                        room_update.event_type,
+                                        room_update.payload,
+                                    )
+                                    sequence += 1
+                                    target_room_released = True
                                 else:
                                     yield self._event(
                                         execution,
@@ -302,9 +427,27 @@ class CompiledIntakeGraphShadowExecutor:
                             update.payload,
                         )
                         sequence += 1
-        finally:
+        except BaseException:
+            diagnostic_stage[0] = IntakeExecutorDiagnosticStage.GRAPH_STREAM_ADVANCE
+            try:
+                await cast(Callable[[], Awaitable[None]], close)()
+            except BaseException:
+                diagnostic_stage[0] = IntakeExecutorDiagnosticStage.GRAPH_STREAM_CLOSE
+                raise
+            raise
+        else:
+            diagnostic_stage[0] = IntakeExecutorDiagnosticStage.GRAPH_STREAM_CLOSE
             await cast(Callable[[], Awaitable[None]], close)()
 
+        diagnostic_stage[0] = IntakeExecutorDiagnosticStage.TERMINAL_STATE_REHYDRATE
+        if target_reply_then_board and not target_gate_update_observed:
+            raise GraphContractError("INTAKE_ACTION_GATE_MISSING")
+        if (
+            target_reply_then_board
+            and target_opening_without_action_gate
+            and target_action_gate is not None
+        ):
+            raise GraphContractError("INTAKE_RESPONDENT_OPENING_ACTION_GATE_FORBIDDEN")
         snapshot = await graph.aget_state(self._latest_checkpoint_config(config))
         state, final_config = self._snapshot(snapshot, runtime_execution)
         proposal = IntakeRuntimeBundle.terminal_proposal(state)
@@ -319,6 +462,7 @@ class CompiledIntakeGraphShadowExecutor:
         checkpoint_id = str(configurable.get("checkpoint_id") or "")
         revision = state["cognitive_revision"]
 
+        diagnostic_stage[0] = IntakeExecutorDiagnosticStage.TERMINAL_PUBLIC_BINDING
         if target_reply_then_board:
             # Target's baseline-finalized proposal is the only formal room text.
             # It must already satisfy the public normalizer as an identity;
@@ -327,31 +471,55 @@ class CompiledIntakeGraphShadowExecutor:
             terminal_room_utterance = self._authoritative_terminal_room_utterance(
                 proposal.room_utterance
             )
+            if target_opening_without_action_gate:
+                if state.get("route") != "respondent_opening":
+                    raise GraphTerminalBindingError(
+                        "Intake respondent opening lost its terminal route"
+                    )
+            else:
+                if target_action_gate is None:
+                    raise GraphTerminalBindingError("Intake Target action gate is missing")
+                if room_utterance_received:
+                    self._require_terminal_action_gate(
+                        state=state,
+                        proposal=proposal,
+                        gate=target_action_gate,
+                        terminal_room_utterance=terminal_room_utterance,
+                    )
         else:
             terminal_room_utterance = self._normalized_terminal_room_utterance(
                 proposal.room_utterance
             )
         if target_reply_then_board and room_utterance_received:
             streamed_room_utterance = "".join(streamed_room_utterance_parts)
-            if streamed_room_utterance == terminal_room_utterance:
-                governed_target_updates = tuple(target_visible_updates)
-            elif self._is_authorized_phase_safe_room_utterance_rewrite(
+            self._require_streamed_room_utterance_matches_terminal(
                 streamed=streamed_room_utterance,
                 terminal=terminal_room_utterance,
-                proposal=proposal,
-            ):
-                governed_target_updates = self._target_canonical_replay_updates(proposal)
-            else:
-                self._require_streamed_room_utterance_matches_terminal(
-                    streamed=streamed_room_utterance,
-                    terminal=terminal_room_utterance,
+            )
+            if not target_room_released and not target_opening_without_action_gate:
+                raise GraphTerminalBindingError(
+                    "Intake Target room utterance was not released by its action gate"
                 )
-                raise AssertionError("unreachable")
-            # Target model deltas remain private until the completed baseline
-            # proposal proves which room utterance is authoritative.  This keeps
-            # the existing reply-before-board stream shape while preventing a
-            # phase-safe rewrite from replacing text that was already public.
-            for update in governed_target_updates:
+            if target_room_synthesized_from_gate:
+                canonical_updates = self._target_canonical_replay_updates(proposal)
+                canonical_room = "".join(
+                    update.payload.delta or ""
+                    for update in canonical_updates
+                    if update.payload.field == _INTAKE_ROOM_UTTERANCE_FIELD
+                )
+                self._require_streamed_room_utterance_matches_terminal(
+                    streamed=canonical_room,
+                    terminal=streamed_room_utterance,
+                )
+                target_visible_updates.extend(
+                    update
+                    for update in canonical_updates
+                    if update.payload.field != _INTAKE_ROOM_UTTERANCE_FIELD
+                )
+            # The action-gated room is already public. Board updates remain
+            # private until terminal equality succeeds, then release in their
+            # original governed order.
+            for update in target_visible_updates:
                 self._validate_public_update(update)
                 yield self._event(
                     execution,
@@ -379,17 +547,35 @@ class CompiledIntakeGraphShadowExecutor:
                 )
                 sequence += 1
 
-        await self._saver.avalidate_external_terminal_checkpoint(
-            final_config,
-            cognitive_revision=revision,
-        )
-        stored = await self._proposal_store.put(
-            execution,
-            proposal=canonical,
-            checkpoint_ns=checkpoint_ns,
-            checkpoint_id=checkpoint_id,
-            cognitive_revision=revision,
-        )
+        diagnostic_stage[0] = IntakeExecutorDiagnosticStage.CHECKPOINT_PREFLIGHT
+        try:
+            await self._saver.avalidate_external_terminal_checkpoint(
+                final_config,
+                cognitive_revision=revision,
+            )
+        except GraphContractError as error:
+            if type(error) is not GraphContractError:
+                raise
+            raise _intake_executor_diagnostic_error(
+                error,
+                stage=IntakeExecutorDiagnosticStage.CHECKPOINT_PREFLIGHT,
+            ) from None
+        diagnostic_stage[0] = IntakeExecutorDiagnosticStage.PROPOSAL_STORE_PUT
+        try:
+            stored = await self._proposal_store.put(
+                execution,
+                proposal=canonical,
+                checkpoint_ns=checkpoint_ns,
+                checkpoint_id=checkpoint_id,
+                cognitive_revision=revision,
+            )
+        except GraphContractError as error:
+            if type(error) is not GraphContractError:
+                raise
+            raise _intake_executor_diagnostic_error(
+                error,
+                stage=IntakeExecutorDiagnosticStage.PROPOSAL_STORE_PUT,
+            ) from None
         if (
             stored.artifact_id != canonical.artifact_id
             or stored.schema_version != canonical.schema_version
@@ -399,6 +585,7 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "stored Intake proposal differs from the checkpointed proposal"
             )
+        diagnostic_stage[0] = IntakeExecutorDiagnosticStage.RESULT_MATERIALIZE
         result = self._materializer(
             execution,
             checkpoint_id=checkpoint_id,
@@ -412,10 +599,19 @@ class CompiledIntakeGraphShadowExecutor:
             ),
             target_proposal_source=self._target_proposal_source(execution, stored),
         ).materialize(checkpoint_ns, checkpoint_id, fence=execution.fence)
-        saved = await self._saver.acommit_external_terminal(
-            final_config,
-            ExternalTerminalCommit(result=result, cognitive_revision=revision),
-        )
+        diagnostic_stage[0] = IntakeExecutorDiagnosticStage.FORMAL_COMMIT
+        try:
+            saved = await self._saver.acommit_external_terminal(
+                final_config,
+                ExternalTerminalCommit(result=result, cognitive_revision=revision),
+            )
+        except GraphContractError as error:
+            if type(error) is not GraphContractError:
+                raise
+            raise _intake_executor_diagnostic_error(
+                error,
+                stage=IntakeExecutorDiagnosticStage.FORMAL_COMMIT,
+            ) from None
         saved_fence = (saved.get("configurable") or {}).get(FENCE_CONTEXT_KEY)
         if (
             not isinstance(saved_fence, GraphFenceContext)
@@ -427,6 +623,7 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "Intake generic result was not bound to the terminal fence"
             )
+        diagnostic_stage[0] = IntakeExecutorDiagnosticStage.TERMINAL_PUBLIC_REPLAY
         if target_reply_then_board and not room_utterance_received:
             # A parser / provider that never exposed a governed preview retains the
             # durable canonical fallback.  It is intentionally reply-first and runs
@@ -562,6 +759,160 @@ class CompiledIntakeGraphShadowExecutor:
         return tuple(updates)
 
     @staticmethod
+    def _target_action_gate_update(
+        candidate: Any,
+        *,
+        expected_source_turn_hash: str | None,
+    ) -> tuple[bool, Mapping[str, Any] | None, str | None]:
+        """Read only the private ``intake_lcel`` completion update as a gate.
+
+        The same atomic node patch owns both the reducer/text gate and the exact
+        finalized draft text.  Returning them together lets a no-preview source
+        publish its Agent-authored reply before graph terminal processing without
+        trusting any later state reconstruction.
+        """
+
+        if not isinstance(candidate, tuple) or len(candidate) != 2:
+            return False, None, None
+        mode, payload = candidate
+        if mode != "updates":
+            return False, None, None
+        if not isinstance(payload, Mapping):
+            raise GraphContractError("INTAKE_ACTION_GATE_UPDATE_INVALID")
+        node_patch = payload.get("intake_lcel")
+        if node_patch is None:
+            return True, None, None
+        if not isinstance(node_patch, Mapping):
+            raise GraphContractError("INTAKE_ACTION_GATE_UPDATE_INVALID")
+        results = node_patch.get("node_results")
+        if results is None:
+            return True, {}, None
+        if not isinstance(results, Mapping) or len(results) != 1:
+            raise GraphContractError("INTAKE_ACTION_GATE_UPDATE_INVALID")
+        key, gate = next(iter(results.items()))
+        if (
+            not isinstance(key, str)
+            or not key.startswith(INTAKE_ACTION_GATE_KEY_PREFIX)
+            or not isinstance(gate, Mapping)
+        ):
+            raise GraphContractError("INTAKE_ACTION_GATE_UPDATE_INVALID")
+        CompiledIntakeGraphShadowExecutor._validate_action_gate(
+            key=key,
+            gate=gate,
+        )
+        terminal_draft = node_patch.get("terminal_draft")
+        room_utterance = (
+            terminal_draft.get("room_utterance")
+            if isinstance(terminal_draft, Mapping)
+            else None
+        )
+        conversation_action = (
+            terminal_draft.get("conversation_action")
+            if isinstance(terminal_draft, Mapping)
+            else None
+        )
+        if (
+            not isinstance(room_utterance, str)
+            or not room_utterance
+            or conversation_action not in INTAKE_ACTION_GATE_ACTION_STATUSES
+        ):
+            raise GraphContractError("INTAKE_ACTION_GATE_UPDATE_INVALID")
+        if gate.get("source_turn_hash") != expected_source_turn_hash:
+            raise GraphContractError("INTAKE_ACTION_GATE_SOURCE_MISMATCH")
+        if gate.get("conversation_action") != conversation_action:
+            raise GraphContractError("INTAKE_ACTION_GATE_ACTION_MISMATCH")
+        return True, gate, room_utterance
+
+    @staticmethod
+    def _validate_action_gate(*, key: str, gate: Mapping[str, Any]) -> None:
+        expected_fields = {
+            "schema_version",
+            "kind",
+            "conversation_action",
+            "reducer_status",
+            "room_utterance_sha256",
+            "source_turn_hash",
+        }
+        action = gate.get("conversation_action")
+        source_turn_hash = gate.get("source_turn_hash")
+        room_sha256 = gate.get("room_utterance_sha256")
+        if (
+            set(gate) != expected_fields
+            or gate.get("schema_version") != INTAKE_ACTION_GATE_SCHEMA_VERSION
+            or gate.get("kind") != INTAKE_ACTION_GATE_KIND
+            or action not in INTAKE_ACTION_GATE_ACTION_STATUSES
+            or gate.get("reducer_status")
+            not in INTAKE_ACTION_GATE_ACTION_STATUSES.get(action, frozenset())
+            or not CompiledIntakeGraphShadowExecutor._is_sha256(source_turn_hash)
+            or not CompiledIntakeGraphShadowExecutor._is_sha256(room_sha256)
+            or key != INTAKE_ACTION_GATE_KEY_PREFIX + cast(str, source_turn_hash)
+        ):
+            raise GraphContractError("INTAKE_ACTION_GATE_INVALID")
+
+    @staticmethod
+    def _require_action_gate_matches_room(
+        *,
+        gate: Mapping[str, Any],
+        room_utterance: str,
+    ) -> None:
+        if (
+            not room_utterance
+            or hashlib.sha256(room_utterance.encode("utf-8")).hexdigest()
+            != gate.get("room_utterance_sha256")
+        ):
+            raise GraphContractError("INTAKE_ACTION_GATE_ROOM_MISMATCH")
+
+    @classmethod
+    def _require_terminal_action_gate(
+        cls,
+        *,
+        state: Mapping[str, Any],
+        proposal: IntakeTurnProposal,
+        gate: Mapping[str, Any] | None,
+        terminal_room_utterance: str,
+    ) -> None:
+        if gate is None:
+            raise GraphTerminalBindingError("Intake Target action gate is missing")
+        source_turn_hash = state.get("last_event_hash") or state.get(
+            "initial_snapshot_hash"
+        )
+        if (
+            gate.get("source_turn_hash") != source_turn_hash
+            or gate.get("conversation_action") != proposal.conversation_action
+            or gate.get("room_utterance_sha256")
+            != hashlib.sha256(terminal_room_utterance.encode("utf-8")).hexdigest()
+        ):
+            raise GraphTerminalBindingError(
+                "Intake Target action gate differs from terminal authority"
+            )
+        action = gate.get("conversation_action")
+        dossier = proposal.dossier_patch.model_dump(
+            mode="python",
+            exclude_none=True,
+            exclude_unset=True,
+        )
+        actor = state.get("bindings", {}).get("private", {}).get("audience")
+        party_state = dossier.get("party_intake_state")
+        entry = party_state.get(actor) if isinstance(party_state, Mapping) else None
+        notes = entry.get("handoff_notes") if isinstance(entry, Mapping) else None
+        reducer_status = notes.get("remark_status") if isinstance(notes, Mapping) else None
+        if reducer_status not in INTAKE_ACTION_GATE_ACTION_STATUSES.get(
+            action,
+            frozenset(),
+        ):
+            raise GraphTerminalBindingError(
+                "Intake Target action gate differs from terminal reducer state"
+            )
+
+    @staticmethod
+    def _is_sha256(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == _SHA256_HEX_LENGTH
+            and all(character in "0123456789abcdef" for character in value)
+        )
+
+    @staticmethod
     def _validate_public_update(
         update: GraphPublicUpdate,
     ) -> None:
@@ -656,6 +1007,28 @@ class CompiledIntakeGraphShadowExecutor:
         return execution.fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE
 
     @staticmethod
+    def _context_is_respondent_opening(context: IntakeTurnContext) -> bool:
+        payload = context.ingress_payload
+        event = payload.get("event") if context.ingress_kind == "BOOTSTRAP_EVENT" else payload
+        return (
+            isinstance(event, Mapping)
+            and event.get("source_type") == RESPONDENT_OPENING_MARKER
+            and event.get("text") == RESPONDENT_OPENING_MARKER
+        )
+
+    @staticmethod
+    def _context_source_turn_hash(context: IntakeTurnContext) -> str:
+        payload = context.ingress_payload
+        if context.ingress_kind == "SNAPSHOT":
+            source_turn_hash = payload.get("snapshot_hash")
+        else:
+            event = payload.get("event") if context.ingress_kind == "BOOTSTRAP_EVENT" else payload
+            source_turn_hash = event.get("event_hash") if isinstance(event, Mapping) else None
+        if not CompiledIntakeGraphShadowExecutor._is_sha256(source_turn_hash):
+            raise GraphContractError("INTAKE_ACTION_GATE_SOURCE_INVALID")
+        return cast(str, source_turn_hash)
+
+    @staticmethod
     def _authoritative_terminal_room_utterance(room_utterance: object) -> str:
         """Validate, but never rewrite, a baseline-finalized Target reply."""
 
@@ -677,29 +1050,6 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "Intake streamed room utterance differs from normalized terminal proposal"
             )
-
-    @staticmethod
-    def _is_authorized_phase_safe_room_utterance_rewrite(
-        *,
-        streamed: str,
-        terminal: str,
-        proposal: IntakeTurnProposal,
-    ) -> bool:
-        """Accept only the baseline's exact first-readiness governance transform."""
-
-        if not streamed or streamed == terminal:
-            return False
-        try:
-            snapshot = proposal.dossier_patch.model_dump(
-                mode="python",
-                exclude_none=True,
-                exclude_unset=True,
-            )
-        except (AttributeError, TypeError, ValueError):
-            return False
-        if not isinstance(snapshot, dict):
-            return False
-        return phase_safe_room_utterance(streamed, snapshot) == terminal
 
     @staticmethod
     def _room_utterance_updates(room_utterance: str) -> tuple[GraphPublicUpdate, ...]:

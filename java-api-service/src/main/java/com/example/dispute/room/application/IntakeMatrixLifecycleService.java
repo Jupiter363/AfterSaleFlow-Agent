@@ -143,7 +143,8 @@ public class IntakeMatrixLifecycleService {
         for (JsonNode row : rows) {
             JsonNode respondent = row.path("positions").path(dispute.getRespondentRole().name());
             String stance = respondent.path("stance").asText();
-            if (!List.of("CONFIRM", "DENY", "PARTIAL", "NOT_ADDRESSED").contains(stance)
+            if (!List.of("CONFIRM", "DENY", "PARTIAL", "UNKNOWN", "NOT_ADDRESSED")
+                            .contains(stance)
                     || (!"NOT_ADDRESSED".equals(stance)
                             && (!"DIRECT_PARTY_STATEMENT".equals(
                                             respondent.path("source_type").asText())

@@ -31,7 +31,11 @@ class IntakeTurnProposalLoaderTest {
 
     @Test
     void reloadsCanonicalProposalAndVerifiesEveryAuthorityBinding() throws Exception {
-        JsonNode fixture = fixture();
+        ObjectNode fixture = (ObjectNode) fixture();
+        fixture.put("conversation_action", "ASK_SUBSTANTIVE");
+        fixture.put(
+                "proposal_hash",
+                IntakeContractHashes.canonicalHashExcluding(fixture, "proposal_hash"));
         byte[] payload = ContractJson.canonicalize(fixture);
         IntakeProposalReference reference = reference(fixture, payload);
         var reader = new ExactReader(reference, payload);
@@ -43,7 +47,21 @@ class IntakeTurnProposalLoaderTest {
                 .isEqualTo("AGENT_SESSION_P4_USER_1");
         assertThat(loaded.proposal().profileVersions().toolPolicyVersion())
                 .isEqualTo("no-tools.v1");
+        assertThat(loaded.proposal().conversationAction())
+                .isEqualTo(IntakeTurnProposal.ConversationAction.ASK_SUBSTANTIVE);
         assertThat(reader.calls).isOne();
+
+        fixture.put("conversation_action", "UNKNOWN_ACTION");
+        fixture.put(
+                "proposal_hash",
+                IntakeContractHashes.canonicalHashExcluding(fixture, "proposal_hash"));
+        byte[] unknownPayload = ContractJson.canonicalize(fixture);
+        IntakeProposalReference unknownReference = reference(fixture, unknownPayload);
+        assertRejected(
+                "INTAKE_PROPOSAL_SCHEMA_INVALID",
+                () -> new IntakeTurnProposalLoader(
+                                new ExactReader(unknownReference, unknownPayload))
+                        .load(unknownReference, authority(fixture)));
     }
 
     @Test

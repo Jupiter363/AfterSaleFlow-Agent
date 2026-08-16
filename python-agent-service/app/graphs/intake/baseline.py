@@ -13,7 +13,11 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, cast
 
-from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
+from app.agents.dispute_intake_officer.schemas import (
+    IntakeCaseDetailLlmOutput,
+    intake_case_detail_output_type,
+    is_exact_fresh_form_opening,
+)
 from app.agents.dispute_intake_officer.workflow import (
     build_intake_turn_context_pack,
     finalize_intake_projected_output,
@@ -250,12 +254,13 @@ def prepare_intake_baseline_invocation(
 
     request = build_intake_baseline_request(state, agent_context=agent_context)
     context_pack = build_intake_turn_context_pack(request)
+    output_type = intake_case_detail_output_type(request)
     return prepare_baseline_invocation(
         prompts=prompts or PromptRepository(),
         context_window=context_window or ContextWindowManager(),
         node_name=BASELINE_INTAKE_NODE_NAME,
         case_data={"context_contract": "intake_turn_context.v2"},
-        output_type=IntakeCaseDetailLlmOutput,
+        output_type=output_type,
         context_pack=context_pack,
         agent_context=agent_context,
         prompt_profile_id=agent_context.prompt_profile_id,
@@ -293,7 +298,11 @@ def adapt_intake_baseline_output_with_scroll_snapshot(
     """
 
     request = build_intake_baseline_request(state, agent_context=agent_context)
-    output = _normalize_intake_baseline_matrix_fact_keys(state, output)
+    output = _normalize_intake_baseline_matrix_fact_keys(
+        state,
+        request=request,
+        output=output,
+    )
     output = _canonicalize_intake_baseline_historical_matrix_carry(
         request=request,
         output=output,
@@ -321,6 +330,8 @@ def _target_draft_and_scroll_snapshot(
     detail.pop("case_fact_matrix", None)
     detail.pop("unilateral_case_matrix", None)
     matrix = output.case_matrix_delta or output.unilateral_case_matrix
+    if output.conversation_action in {"ACK_REMARK", "ACK_NO_REMARK"}:
+        matrix = None
     recommendation = str(projected["admission_recommendation"])
     quality = detail.get("intake_quality")
     ready = isinstance(quality, Mapping) and quality.get("ready_for_next_step") is True
@@ -334,6 +345,7 @@ def _target_draft_and_scroll_snapshot(
     return (
         IntakeCognitionDraft.model_validate(
             {
+                "conversation_action": output.conversation_action,
                 "room_utterance": projected["room_utterance"],
                 "dossier_patch": detail,
                 "matrix_patch": (matrix.model_dump(mode="json") if matrix is not None else None),
@@ -443,8 +455,61 @@ def normalize_model_matrix_fact_key_payload(
     return normalized
 
 
+def _canonicalize_fresh_form_matrix_fact_keys(
+    matrix_patch: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind a fresh form matrix proposal to its only available source authority."""
+
+    normalized = deepcopy(dict(matrix_patch))
+    if normalized.get("schema_version") not in {
+        "unilateral_case_matrix.draft.v1",
+        "case_fact_matrix.delta.v2",
+    }:
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+    rows = normalized.get("fact_rows")
+    summary_keys = normalized.get("summary_source_fact_keys")
+    if not isinstance(rows, list) or not isinstance(summary_keys, list):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+
+    canonical_by_key: dict[str, str] = {}
+    canonical_keys: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+        fact_key = row.get("fact_key")
+        if not isinstance(fact_key, str):
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+        if fact_key.startswith("FACT_"):
+            canonical_key = f"NEW_{fact_key.removeprefix('FACT_')}"
+        elif fact_key.startswith("NEW_"):
+            canonical_key = fact_key
+        else:
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+        if canonical_key in canonical_keys:
+            raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
+        canonical_by_key[fact_key] = canonical_key
+        canonical_keys.add(canonical_key)
+
+    normalized_summary_keys: list[str] = []
+    for fact_key in summary_keys:
+        if not isinstance(fact_key, str) or fact_key not in canonical_by_key:
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+        normalized_summary_keys.append(canonical_by_key[fact_key])
+    if len(normalized_summary_keys) != len(set(normalized_summary_keys)):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+
+    for row in rows:
+        row["fact_key"] = canonical_by_key[row["fact_key"]]
+        row["source_scope"] = "CURRENT_SOURCE"
+    normalized["fact_rows"] = rows
+    normalized["summary_source_fact_keys"] = normalized_summary_keys
+    return normalized
+
+
 def _normalize_intake_baseline_matrix_fact_keys(
     state: Mapping[str, Any],
+    *,
+    request: IntakeTurnRequest,
     output: IntakeCaseDetailLlmOutput,
 ) -> IntakeCaseDetailLlmOutput:
     """Normalize the parsed model matrix before the baseline reducer consumes it."""
@@ -456,13 +521,18 @@ def _normalize_intake_baseline_matrix_fact_keys(
         matrix_field = "unilateral_case_matrix"
         matrix = output.unilateral_case_matrix
     else:
+        if output.conversation_action in {"ACK_REMARK", "ACK_NO_REMARK"}:
+            return output
         raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_PATCH_INVALID")
 
     matrix_payload = matrix.model_dump(mode="json", exclude_none=True)
-    normalized_matrix = normalize_model_matrix_fact_key_payload(
-        matrix_payload,
-        authorized_fact_ids=intake_baseline_authorized_fact_ids(state),
-    )
+    if is_exact_fresh_form_opening(request):
+        normalized_matrix = _canonicalize_fresh_form_matrix_fact_keys(matrix_payload)
+    else:
+        normalized_matrix = normalize_model_matrix_fact_key_payload(
+            matrix_payload,
+            authorized_fact_ids=intake_baseline_authorized_fact_ids(state),
+        )
     if normalized_matrix == matrix_payload:
         return output
 
@@ -493,6 +563,7 @@ def _canonicalize_intake_baseline_historical_matrix_carry(
         return output
 
     previous_by_id: dict[str, Mapping[str, Any]] = {}
+    previous_ids_by_fingerprint: dict[tuple[str, str], list[str]] = {}
     for previous_row in previous_rows:
         if not isinstance(previous_row, Mapping):
             return output
@@ -500,6 +571,10 @@ def _canonicalize_intake_baseline_historical_matrix_carry(
         if not isinstance(fact_id, str) or fact_id in previous_by_id:
             return output
         previous_by_id[fact_id] = previous_row
+        fingerprint = _baseline_fact_fingerprint(previous_row)
+        if fingerprint is None:
+            return output
+        previous_ids_by_fingerprint.setdefault(fingerprint, []).append(fact_id)
 
     matrix_payload = matrix.model_dump(mode="json", exclude_none=True)
     rows = matrix_payload.get("fact_rows")
@@ -507,12 +582,27 @@ def _canonicalize_intake_baseline_historical_matrix_carry(
         return output
     actor_role = request.agent_context.actor_role
     changed = False
+    referenced_previous: set[str] = set()
+    row_key_by_previous_id: dict[str, str] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
-        previous_row = previous_by_id.get(row.get("fact_key"))
+        row_key = row.get("fact_key")
+        previous_id = row_key if isinstance(row_key, str) and row_key in previous_by_id else None
+        if previous_id is None:
+            fingerprint = _baseline_fact_fingerprint(row)
+            matches = (
+                previous_ids_by_fingerprint.get(fingerprint, [])
+                if fingerprint is not None
+                else []
+            )
+            if len(matches) == 1:
+                previous_id = matches[0]
+        previous_row = previous_by_id.get(previous_id) if previous_id is not None else None
         if previous_row is None:
             continue
+        referenced_previous.add(previous_id)
+        row_key_by_previous_id[previous_id] = str(row_key)
         for field in ("category", "fact_target", "materiality"):
             authoritative_value = deepcopy(previous_row.get(field))
             if row.get(field) != authoritative_value:
@@ -532,6 +622,55 @@ def _canonicalize_intake_baseline_historical_matrix_carry(
                 row[field] = authoritative_value
                 changed = True
 
+    for fact_id, previous_row in previous_by_id.items():
+        if fact_id in referenced_previous:
+            continue
+        positions = previous_row.get("positions")
+        position = positions.get(actor_role) if isinstance(positions, Mapping) else None
+        alignment = previous_row.get("party_alignment")
+        if not isinstance(position, Mapping) or not isinstance(alignment, Mapping):
+            return output
+        rows.append(
+            {
+                "fact_key": fact_id,
+                "category": deepcopy(previous_row.get("category")),
+                "fact_target": deepcopy(previous_row.get("fact_target")),
+                "materiality": deepcopy(previous_row.get("materiality")),
+                "stance": deepcopy(position.get("stance")),
+                "position_summary": deepcopy(position.get("position_summary")),
+                "asserted_value": deepcopy(position.get("asserted_value")),
+                "source_scope": "PREVIOUS_MATRIX",
+                "agreed_statement": deepcopy(alignment.get("agreed_statement")),
+                "conflict_summary": deepcopy(alignment.get("conflict_summary")),
+            }
+        )
+        referenced_previous.add(fact_id)
+        row_key_by_previous_id[fact_id] = fact_id
+        changed = True
+
+    overview = previous_matrix.get("case_overview")
+    previous_summary_ids = (
+        overview.get("summary_source_fact_ids")
+        if isinstance(overview, Mapping)
+        else None
+    )
+    summary_keys = matrix_payload.get("summary_source_fact_keys")
+    if not isinstance(previous_summary_ids, list) or not isinstance(summary_keys, list):
+        return output
+    carried_summary_keys = [
+        row_key_by_previous_id[fact_id]
+        for fact_id in previous_summary_ids
+        if fact_id in row_key_by_previous_id
+    ]
+    if len(carried_summary_keys) != len(previous_summary_ids):
+        return output
+    merged_summary_keys = list(
+        dict.fromkeys([*carried_summary_keys, *summary_keys])
+    )
+    if merged_summary_keys != summary_keys:
+        matrix_payload["summary_source_fact_keys"] = merged_summary_keys
+        changed = True
+
     if not changed:
         return output
     normalized_output = output.model_dump(mode="json", exclude_none=True)
@@ -540,6 +679,16 @@ def _canonicalize_intake_baseline_historical_matrix_carry(
         return IntakeCaseDetailLlmOutput.model_validate(normalized_output)
     except ValueError as error:
         raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_PATCH_INVALID") from error
+
+
+def _baseline_fact_fingerprint(
+    row: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    category = row.get("category")
+    target = row.get("fact_target")
+    if not isinstance(category, str) or not isinstance(target, str) or not target.strip():
+        return None
+    return category, re.sub(r"\s+", "", target).casefold()
 
 
 def _selected_previous_matrix(

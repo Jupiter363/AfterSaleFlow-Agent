@@ -315,6 +315,74 @@ def _existing_fact_delta(
     )
 
 
+def test_delta_normalizes_recoverable_provider_key_cardinality_without_merging_conflicts() -> (
+    None
+):
+    first_row = {
+        "fact_key": "NEW_PROVIDER_ORDER",
+        "category": "ORDER",
+        "fact_target": "Whether the order exists.",
+        "materiality": "CORE",
+        "stance": "CONFIRM",
+        "position_summary": "The current source confirms the order.",
+        "asserted_value": "confirmed",
+        "source_scope": "CURRENT_SOURCE",
+    }
+    second_row = {
+        "fact_key": "NEW_PROVIDER_DELIVERY",
+        "category": "FULFILLMENT",
+        "fact_target": "Whether delivery was completed.",
+        "materiality": "CORE",
+        "stance": "DENY",
+        "position_summary": "The current source disputes completed delivery.",
+        "asserted_value": "not delivered",
+        "source_scope": "CURRENT_SOURCE",
+    }
+    recoverable_payload = {
+        "fact_rows": [deepcopy(first_row), deepcopy(second_row), deepcopy(first_row)],
+        "summary_source_fact_keys": [
+            "NEW_PROVIDER_DELIVERY",
+            "NEW_PROVIDER_DANGLING",
+            "NEW_PROVIDER_ORDER",
+            "NEW_PROVIDER_DELIVERY",
+        ],
+    }
+    original_payload = deepcopy(recoverable_payload)
+
+    normalized = CaseFactMatrixDeltaV2.model_validate(recoverable_payload)
+
+    assert [row.fact_key for row in normalized.fact_rows] == [
+        "NEW_PROVIDER_ORDER",
+        "NEW_PROVIDER_DELIVERY",
+    ]
+    assert normalized.summary_source_fact_keys == [
+        "NEW_PROVIDER_DELIVERY",
+        "NEW_PROVIDER_ORDER",
+    ]
+    assert recoverable_payload == original_payload
+
+    conflicting_row = deepcopy(first_row)
+    conflicting_row["position_summary"] = "A conflicting provider position."
+    with pytest.raises(ValueError, match="case fact delta keys must be unique"):
+        CaseFactMatrixDeltaV2.model_validate(
+            {
+                "fact_rows": [first_row, conflicting_row],
+                "summary_source_fact_keys": [first_row["fact_key"]],
+            }
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="summary_source_fact_keys must reference at least one delta fact",
+    ):
+        CaseFactMatrixDeltaV2.model_validate(
+            {
+                "fact_rows": [first_row],
+                "summary_source_fact_keys": ["NEW_PROVIDER_DANGLING"],
+            }
+        )
+
+
 def _java_jcs_previous_matrix(case_id: str, *, requested_amount: int | None):
     previous = _single_fact_initiator_matrix(case_id).model_dump(mode="json")
     initiator_claim = previous["claims"]["initiator_claim"]
