@@ -5,6 +5,7 @@ import com.example.dispute.hearing.application.finalization.HearingFormalReceipt
 import com.example.dispute.hearing.domain.HearingAuthorityLedger;
 import com.example.dispute.hearing.infrastructure.persistence.JdbcHearingAuthorityLedger;
 import com.example.dispute.hearing.infrastructure.persistence.JdbcHearingFormalFinalizer;
+import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.targete2e.exchange.rooms.JdbcTargetE2eRoomObjectIndex;
 import com.example.dispute.workflow.targete2e.exchange.rooms.JdbcTargetE2eRoomProposalPayloadReader;
@@ -109,6 +110,15 @@ public class TargetE2eHearingArtifactConfiguration {
     return new HearingFormalReceiptService(
         new JdbcHearingFormalFinalizer(
             new NamedParameterJdbcTemplate(dataSource), targetE2eHearingAuthorityLedger));
+  }
+
+  @Bean
+  JdbcTargetHearingPublicTranscriptCommitter targetHearingPublicTranscriptCommitter(
+      DataSource dataSource,
+      ObjectMapper objectMapper,
+      CaseEventService caseEventService) {
+    return new JdbcTargetHearingPublicTranscriptCommitter(
+        dataSource, objectMapper, caseEventService::wakeUp);
   }
 
   @Bean
