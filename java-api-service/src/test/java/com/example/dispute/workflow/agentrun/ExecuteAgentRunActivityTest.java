@@ -31,6 +31,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import io.temporal.failure.ApplicationFailure;
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -365,6 +366,119 @@ class ExecuteAgentRunActivityTest {
                             assertThat(failure.getNextRetryDelay()).isPositive();
                         });
         verify(gateway, never()).execute(any(), any(), any(), any());
+    }
+
+    @Test
+    void attemptLoadFailureRetainsSanitizedRootCauseAcrossBoundedRetries()
+            throws Exception {
+        ExecuteAgentRunRequest request = requestWithActivityBudget(3);
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        AgentRunActivityContextProvider contexts = mock(AgentRunActivityContextProvider.class);
+        StackTraceElement sourceFrame = new StackTraceElement(
+                "org.postgresql.core.v3.QueryExecutorImpl",
+                "receiveErrorResponse",
+                "QueryExecutorImpl.java",
+                2714);
+        when(ledger.requireAllocatedAttempt(request)).thenAnswer(ignored -> {
+            throw attemptLoadInfrastructureFailure(sourceFrame);
+        });
+        when(contexts.current()).thenReturn(context(1), context(2), context(3));
+        ExecuteAgentRunActivityImpl activity = activity(ledger, gateway, contexts);
+
+        List<ApplicationFailure> failures = new ArrayList<>();
+        for (int temporalAttempt = 1; temporalAttempt <= 3; temporalAttempt++) {
+            assertThatThrownBy(() -> activity.execute(request))
+                    .isInstanceOfSatisfying(ApplicationFailure.class, failures::add);
+        }
+
+        assertThat(failures).hasSize(3);
+        assertThat(failures.subList(0, 2))
+                .allSatisfy(failure -> {
+                    assertThat(failure.getType())
+                            .isEqualTo(ExecuteAgentRunActivityImpl.RETRYABLE_FAILURE_TYPE);
+                    assertThat(failure.isNonRetryable()).isFalse();
+                    assertThat(failure.getNextRetryDelay()).isPositive();
+                    assertAttemptLoadDetails(failure, request, true);
+                    assertSanitizedLoadCause(failure, sourceFrame);
+                });
+        ApplicationFailure terminal = failures.get(2);
+        assertThat(terminal.getType())
+                .isEqualTo(ExecuteAgentRunActivityImpl.NON_RETRYABLE_FAILURE_TYPE);
+        assertThat(terminal.isNonRetryable()).isTrue();
+        assertAttemptLoadDetails(terminal, request, false);
+        assertSanitizedLoadCause(terminal, sourceFrame);
+
+        for (RuntimeException lineageConflict : List.of(
+                new IllegalArgumentException("attempt identity conflicts"),
+                new IllegalStateException("attempt lineage conflicts"))) {
+            AgentRunLedger conflictLedger = mock(AgentRunLedger.class);
+            AgentRunExecutionGateway conflictGateway = mock(AgentRunExecutionGateway.class);
+            when(conflictLedger.requireAllocatedAttempt(request)).thenThrow(lineageConflict);
+
+            assertThatThrownBy(
+                    () -> activity(conflictLedger, conflictGateway, () -> context(1))
+                            .execute(request))
+                    .isInstanceOfSatisfying(
+                            ApplicationFailure.class,
+                            failure -> {
+                                assertThat(failure.getType())
+                                        .isEqualTo(
+                                                ExecuteAgentRunActivityImpl
+                                                        .NON_RETRYABLE_FAILURE_TYPE);
+                                assertThat(failure.isNonRetryable()).isTrue();
+                                assertThat(failure.getDetails().get(2, String.class))
+                                        .isEqualTo("AGENT_RUN_LINEAGE_CONFLICT");
+                            });
+            verify(conflictLedger).requireAllocatedAttempt(request);
+            verifyNoInteractions(conflictGateway);
+        }
+
+        verify(ledger, times(3)).requireAllocatedAttempt(request);
+        verifyNoInteractions(gateway);
+        verify(ledger, never()).recordAttemptFailureResult(any(), any());
+    }
+
+    private static RuntimeException attemptLoadInfrastructureFailure(
+            StackTraceElement sourceFrame) {
+        SQLException sqlFailure = new SQLException(
+                "select secret_token from private_attempts where credential='do-not-leak'",
+                "40001");
+        RuntimeException infrastructureFailure = new RuntimeException(
+                "jdbc:postgresql://private-host/agent?password=do-not-leak",
+                sqlFailure);
+        infrastructureFailure.setStackTrace(new StackTraceElement[] {sourceFrame});
+        return infrastructureFailure;
+    }
+
+    private static void assertAttemptLoadDetails(
+            ApplicationFailure failure,
+            ExecuteAgentRunRequest request,
+            boolean retryable) {
+        assertThat(failure.getDetails().get(0, String.class)).isEqualTo(request.agentRunId());
+        assertThat(failure.getDetails().get(1, String.class)).isEqualTo(request.attemptId());
+        assertThat(failure.getDetails().get(2, String.class))
+                .isEqualTo("AGENT_RUN_ATTEMPT_LOAD_FAILED");
+        if (retryable) {
+            assertThat(failure.getDetails().get(3, String.class))
+                    .isEqualTo(AgentRunRecoveryAction.RETRY_SAME_COMMAND.name());
+        }
+    }
+
+    private static void assertSanitizedLoadCause(
+            ApplicationFailure failure,
+            StackTraceElement sourceFrame) {
+        assertThat(failure.getCause()).isInstanceOf(ApplicationFailure.class);
+        ApplicationFailure cause = (ApplicationFailure) failure.getCause();
+        assertThat(cause.getType()).isEqualTo(RuntimeException.class.getName());
+        assertThat(cause.getMessage()).contains("sanitized agent run attempt load cause");
+        assertThat(cause.getMessage())
+                .doesNotContain("secret_token", "credential", "password", "private-host");
+        assertThat(cause.getDetails().get(0, String.class))
+                .isEqualTo(SQLException.class.getName());
+        assertThat(cause.getDetails().get(1, String.class)).isEqualTo("40001");
+        assertThat(cause.getDetails().get(2, String.class)).isEqualTo("MESSAGE_REDACTED");
+        assertThat(cause.getStackTrace()).containsExactly(sourceFrame);
     }
 
     @Test

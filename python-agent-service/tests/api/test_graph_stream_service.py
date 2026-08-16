@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -58,6 +59,7 @@ from app.graph_runtime.persistence_models import GraphFenceContext, GraphGateway
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
 from app.llm import GovernedProviderRequest, LiteLlmProxyClient
+from app.model_runtime.transports import ModelTransportOutputError
 from app.security.invocation_envelope import VerifiedInvocation
 
 
@@ -908,6 +910,196 @@ async def test_lease_heartbeat_renews_while_downstream_pauses_after_attempt_star
     assert await gate.drain(0.01) is True
 
 
+def _heartbeat_observability_messages(
+    caplog: pytest.LogCaptureFixture,
+) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == graph_stream_service_module.__name__
+        and record.getMessage().startswith("graph_lease_heartbeat_")
+    ]
+
+
+def _assert_safe_heartbeat_observability(messages: list[str]) -> None:
+    assert messages
+    joined = "\n".join(messages)
+    for forbidden in (
+        "PRIVATE_EXCEPTION_DETAIL",
+        "postgresql://",
+        "SELECT ",
+        "request_hash=",
+        "result_hash=",
+        "payload=",
+        "model_text=",
+    ):
+        assert forbidden not in joined
+    assert all("monotonic_elapsed_ms=" in message for message in messages)
+    assert all("exception_class=" in message for message in messages)
+    allowed_fields = {
+        "operation_stage",
+        "thread_id",
+        "command_id",
+        "owner_id",
+        "fencing_token",
+        "input_lease_revision",
+        "input_lease_renewed_at",
+        "input_lease_expires_at",
+        "output_lease_revision",
+        "output_lease_renewed_at",
+        "output_lease_expires_at",
+        "monotonic_elapsed_ms",
+        "exception_class",
+    }
+    for message in messages:
+        event_name, *fields = message.split()
+        assert event_name in {
+            "graph_lease_heartbeat_stage_started",
+            "graph_lease_heartbeat_stage_succeeded",
+            "graph_lease_heartbeat_stage_failed",
+            "graph_lease_heartbeat_stage_cancelled",
+            "graph_lease_heartbeat_stage_stopped",
+        }
+        assert {field.split("=", 1)[0] for field in fields} == allowed_fields
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_observability_distinguishes_tick_stop_from_no_task(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=graph_stream_service_module.__name__)
+    admission = _admission(AdmissionAction.ACQUIRE)
+    gateway = _Gateway(admission)
+    service, _ = await _service(gateway, _Executor(), renewal_seconds=10)
+    stop_signal = asyncio.Event()
+    state = graph_stream_service_module._LeaseHeartbeatState(_execution(admission))
+
+    task = asyncio.create_task(
+        service._run_lease_heartbeat(
+            state,
+            stop_signal=stop_signal,
+            durable_terminal_signal=None,
+        )
+    )
+    await asyncio.sleep(0)
+    stop_signal.set()
+    await task
+
+    messages = _heartbeat_observability_messages(caplog)
+    joined = "\n".join(messages)
+    assert "graph_lease_heartbeat_stage_started operation_stage=TASK" in joined
+    assert "graph_lease_heartbeat_stage_started operation_stage=TICK_WAIT" in joined
+    assert "graph_lease_heartbeat_stage_stopped operation_stage=TICK_WAIT" in joined
+    assert gateway.renewed == 0
+    _assert_safe_heartbeat_observability(messages)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_observability_records_gateway_success(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=graph_stream_service_module.__name__)
+    admission = _admission(AdmissionAction.ACQUIRE)
+    stop_signal = asyncio.Event()
+
+    class OneRenewGateway(_Gateway):
+        async def renew_execution(self, execution: GatewayExecution) -> LeaseRecord:
+            self.renewed += 1
+            stop_signal.set()
+            return replace(execution.lease, revision=execution.lease.revision + 1)
+
+    gateway = OneRenewGateway(admission)
+    service, _ = await _service(gateway, _Executor(), renewal_seconds=0.001)
+    state = graph_stream_service_module._LeaseHeartbeatState(_execution(admission))
+
+    await asyncio.wait_for(
+        service._run_lease_heartbeat(
+            state,
+            stop_signal=stop_signal,
+            durable_terminal_signal=None,
+        ),
+        timeout=0.1,
+    )
+
+    messages = _heartbeat_observability_messages(caplog)
+    joined = "\n".join(messages)
+    assert "graph_lease_heartbeat_stage_succeeded operation_stage=TICK_WAIT" in joined
+    assert "graph_lease_heartbeat_stage_started operation_stage=GATEWAY_RENEW" in joined
+    assert "graph_lease_heartbeat_stage_succeeded operation_stage=GATEWAY_RENEW" in joined
+    assert "output_lease_revision=1" in joined
+    assert "graph_lease_heartbeat_stage_stopped operation_stage=TASK_GUARD" in joined
+    assert state.execution.lease.revision == 1
+    _assert_safe_heartbeat_observability(messages)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_observability_records_gateway_failure_without_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=graph_stream_service_module.__name__)
+    admission = _admission(AdmissionAction.ACQUIRE)
+
+    class FailedRenewGateway(_Gateway):
+        async def renew_execution(self, execution: GatewayExecution) -> LeaseRecord:
+            del execution
+            self.renewed += 1
+            raise RuntimeError("PRIVATE_EXCEPTION_DETAIL")
+
+    gateway = FailedRenewGateway(admission)
+    service, _ = await _service(gateway, _Executor(), renewal_seconds=0.001)
+    state = graph_stream_service_module._LeaseHeartbeatState(_execution(admission))
+
+    await asyncio.wait_for(
+        service._run_lease_heartbeat(
+            state,
+            stop_signal=asyncio.Event(),
+            durable_terminal_signal=None,
+        ),
+        timeout=0.1,
+    )
+
+    messages = _heartbeat_observability_messages(caplog)
+    joined = "\n".join(messages)
+    assert "graph_lease_heartbeat_stage_started operation_stage=GATEWAY_RENEW" in joined
+    assert "graph_lease_heartbeat_stage_failed operation_stage=TASK" in joined
+    assert "exception_class=RuntimeError" in joined
+    assert isinstance(state.failure, RuntimeError)
+    assert str(state.failure) == "PRIVATE_EXCEPTION_DETAIL"
+    _assert_safe_heartbeat_observability(messages)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_observability_preserves_task_cancellation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=graph_stream_service_module.__name__)
+    admission = _admission(AdmissionAction.ACQUIRE)
+    gateway = _Gateway(admission)
+    service, _ = await _service(gateway, _Executor(), renewal_seconds=10)
+    state = graph_stream_service_module._LeaseHeartbeatState(_execution(admission))
+    task = asyncio.create_task(
+        service._run_lease_heartbeat(
+            state,
+            stop_signal=asyncio.Event(),
+            durable_terminal_signal=None,
+        )
+    )
+    await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    messages = _heartbeat_observability_messages(caplog)
+    joined = "\n".join(messages)
+    assert "graph_lease_heartbeat_stage_started operation_stage=TASK" in joined
+    assert "graph_lease_heartbeat_stage_started operation_stage=TICK_WAIT" in joined
+    assert "graph_lease_heartbeat_stage_cancelled operation_stage=TASK" in joined
+    assert "exception_class=CancelledError" in joined
+    assert state.failure is None
+    _assert_safe_heartbeat_observability(messages)
+
+
 @pytest.mark.asyncio
 async def test_lease_heartbeat_stops_when_durable_terminal_arrives_between_ticks() -> None:
     """A delivery barrier cannot cause a fresh renewal after durable lease release."""
@@ -1284,6 +1476,68 @@ async def test_prefetched_source_exception_is_propagated_on_the_next_read() -> N
 
     assert gateway.finished == 1
     assert gateway.finished_statuses == [AttemptStatus.FAILED]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_code", "expected_classification"),
+    (
+        (
+            ModelTransportOutputError(
+                "private provider contract detail",
+                safe_code="AGENT_PROVIDER_CONTRACT_INVALID",
+                node_name="private-node",
+            ),
+            "AGENT_PROVIDER_CONTRACT_INVALID",
+            "MODEL_OUTPUT_INVALID",
+        ),
+        (
+            ModelTransportOutputError(
+                "private unknown model output detail",
+                safe_code="PRIVATE_UNKNOWN_OUTPUT_CODE",
+                node_name="private-node",
+            ),
+            "AGENT_OUTPUT_SCHEMA_INVALID",
+            "MODEL_OUTPUT_INVALID",
+        ),
+        (
+            RuntimeError("private generic source detail"),
+            "GRAPH_STREAM_INTERRUPTED",
+            "STREAM_INTERRUPTED",
+        ),
+    ),
+    ids=("allowlisted", "unknown_fallback", "generic_unchanged"),
+)
+async def test_preterminal_failure_persists_exact_safe_classification(
+    failure: Exception,
+    expected_code: str,
+    expected_classification: str,
+) -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    captured_finishes: list[dict[str, Any]] = []
+
+    class CapturingGateway(_Gateway):
+        async def finish_execution_attempt(
+            self,
+            execution: GatewayExecution,
+            **kwargs: Any,
+        ) -> GatewayExecution:
+            del execution
+            captured_finishes.append(dict(kwargs))
+            return _execution(admission)
+
+    gateway = CapturingGateway(admission)
+    service, _ = await _service(gateway, _Executor())
+
+    await service._abort_preterminal(_execution(admission), failure)
+
+    assert captured_finishes == [
+        {
+            "status": AttemptStatus.FAILED,
+            "error_code": expected_code,
+            "error_classification": expected_classification,
+        }
+    ]
 
 
 @pytest.mark.asyncio

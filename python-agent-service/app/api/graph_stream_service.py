@@ -6,6 +6,8 @@ import asyncio
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
+import logging
+import time
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -33,6 +35,7 @@ from app.graph_runtime.provider_intent import GatewayProviderCallIntentRecorder
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
 from app.llm import bind_provider_call_intent_recorder
+from app.model_runtime.transports import ModelTransportOutputError
 from app.security.invocation_envelope import VerifiedInvocation
 
 
@@ -43,6 +46,73 @@ SOURCE_QUIESCE_POST_DEADLINE_GRACE_SECONDS = 10.0
 RETAINED_CLEANUP_LIFECYCLE_SECONDS = 30.0
 _RETAINED_ABORT_RETRY_INITIAL_SECONDS = 0.05
 _RETAINED_ABORT_RETRY_MAX_SECONDS = 0.5
+_MODEL_TRANSPORT_OUTPUT_ERROR_CODES = frozenset(
+    {
+        "AGENT_OUTPUT_SCHEMA_INVALID",
+        "AGENT_OUTPUT_SCHEMA_REPAIR_EXHAUSTED",
+        "AGENT_PROVIDER_CONTRACT_INVALID",
+    }
+)
+_MODEL_TRANSPORT_OUTPUT_ERROR_FALLBACK = "AGENT_OUTPUT_SCHEMA_INVALID"
+_MODEL_TRANSPORT_OUTPUT_ERROR_CLASSIFICATION = "MODEL_OUTPUT_INVALID"
+_LEASE_OBSERVABILITY_EMPTY = "NONE"
+
+logger = logging.getLogger(__name__)
+
+
+def _log_lease_heartbeat_stage(
+    event_name: str,
+    *,
+    execution: GatewayExecution,
+    operation_stage: str,
+    started_at: float,
+    output_lease: Any | None = None,
+    error: BaseException | None = None,
+) -> None:
+    input_lease = execution.lease
+    logger.info(
+        "%s operation_stage=%s thread_id=%s command_id=%s owner_id=%s "
+        "fencing_token=%s input_lease_revision=%s input_lease_renewed_at=%s "
+        "input_lease_expires_at=%s output_lease_revision=%s "
+        "output_lease_renewed_at=%s output_lease_expires_at=%s "
+        "monotonic_elapsed_ms=%.3f exception_class=%s",
+        event_name,
+        operation_stage,
+        execution.fence.thread_id,
+        execution.fence.command_id,
+        execution.fence.owner_id,
+        execution.fence.fencing_token,
+        input_lease.revision,
+        input_lease.renewed_at.isoformat(timespec="microseconds"),
+        input_lease.lease_expires_at.isoformat(timespec="microseconds"),
+        (
+            output_lease.revision
+            if output_lease is not None
+            else _LEASE_OBSERVABILITY_EMPTY
+        ),
+        (
+            output_lease.renewed_at.isoformat(timespec="microseconds")
+            if output_lease is not None
+            else _LEASE_OBSERVABILITY_EMPTY
+        ),
+        (
+            output_lease.lease_expires_at.isoformat(timespec="microseconds")
+            if output_lease is not None
+            else _LEASE_OBSERVABILITY_EMPTY
+        ),
+        max(0.0, (time.monotonic() - started_at) * 1_000.0),
+        (
+            type(error).__name__[:128]
+            if error is not None
+            else _LEASE_OBSERVABILITY_EMPTY
+        ),
+    )
+
+
+def _model_transport_output_error_code(error: ModelTransportOutputError) -> str:
+    if error.safe_code in _MODEL_TRANSPORT_OUTPUT_ERROR_CODES:
+        return error.safe_code
+    return _MODEL_TRANSPORT_OUTPUT_ERROR_FALLBACK
 
 
 class GraphRetainedCleanupError(GraphContractError):
@@ -686,15 +756,22 @@ class GatewayBackedGraphCommandStreamService:
                             # Before a terminal is durably observed, every heartbeat
                             # failure remains authoritative and must fail closed.
                             self._raise_heartbeat_failure(heartbeat_state)
-                        # Keep exactly one source pull in flight while the caller
-                        # sends the current event.  Without this bounded prefetch,
-                        # an ASGI/HTTP backpressure gap after ``attempt_started``
-                        # prevents the executor from loading context or beginning
-                        # provider work until the next downstream read.
-                        next_event = asyncio.create_task(anext(iterator))
+                        # Do not start cold synchronous Graph work until the caller has
+                        # observed the current frame.  A task scheduled here can win the
+                        # ready queue before ASGI flushes ``attempt_started`` and monopolize
+                        # the event loop long enough for downstream disconnect cleanup to
+                        # cancel an otherwise-live lease.
+                        next_event = None
                     yield event
                     if terminal_seen:
                         next_event = None
+                    else:
+                        # The caller has resumed us only after processing the current
+                        # frame.  Recheck renewal authority before starting any new
+                        # provider/checkpoint work, then retain exactly one source pull.
+                        if heartbeat is not None and heartbeat.done():
+                            self._raise_heartbeat_failure(heartbeat_state)
+                        next_event = asyncio.create_task(anext(iterator))
                     continue
                 if heartbeat is not None and heartbeat in done and not heartbeat_deferred:
                     self._raise_heartbeat_failure(heartbeat_state)
@@ -955,26 +1032,90 @@ class GatewayBackedGraphCommandStreamService:
     ) -> None:
         """Renew independently of downstream reads until terminal durability is known."""
 
+        started_at = time.monotonic()
+        _log_lease_heartbeat_stage(
+            "graph_lease_heartbeat_stage_started",
+            execution=state.execution,
+            operation_stage="TASK",
+            started_at=started_at,
+        )
         try:
             while (
                 not stop_signal.is_set()
                 and not self._durable_terminal_reached(durable_terminal_signal)
             ):
+                _log_lease_heartbeat_stage(
+                    "graph_lease_heartbeat_stage_started",
+                    execution=state.execution,
+                    operation_stage="TICK_WAIT",
+                    started_at=started_at,
+                )
                 if not await self._await_heartbeat_tick(
                     stop_signal=stop_signal,
                     durable_terminal_signal=durable_terminal_signal,
                 ):
+                    _log_lease_heartbeat_stage(
+                        "graph_lease_heartbeat_stage_stopped",
+                        execution=state.execution,
+                        operation_stage="TICK_WAIT",
+                        started_at=started_at,
+                    )
                     return
+                _log_lease_heartbeat_stage(
+                    "graph_lease_heartbeat_stage_succeeded",
+                    execution=state.execution,
+                    operation_stage="TICK_WAIT",
+                    started_at=started_at,
+                )
                 if (
                     stop_signal.is_set()
                     or self._durable_terminal_reached(durable_terminal_signal)
                 ):
+                    _log_lease_heartbeat_stage(
+                        "graph_lease_heartbeat_stage_stopped",
+                        execution=state.execution,
+                        operation_stage="PRE_RENEW_GUARD",
+                        started_at=started_at,
+                    )
                     return
+                _log_lease_heartbeat_stage(
+                    "graph_lease_heartbeat_stage_started",
+                    execution=state.execution,
+                    operation_stage="GATEWAY_RENEW",
+                    started_at=started_at,
+                )
                 lease = await self._gateway.renew_execution(state.execution)
+                _log_lease_heartbeat_stage(
+                    "graph_lease_heartbeat_stage_succeeded",
+                    execution=state.execution,
+                    operation_stage="GATEWAY_RENEW",
+                    started_at=started_at,
+                    output_lease=lease,
+                )
                 state.execution = replace(state.execution, lease=lease)
-        except asyncio.CancelledError:
+            _log_lease_heartbeat_stage(
+                "graph_lease_heartbeat_stage_stopped",
+                execution=state.execution,
+                operation_stage="TASK_GUARD",
+                started_at=started_at,
+            )
+        except asyncio.CancelledError as error:
+            _log_lease_heartbeat_stage(
+                "graph_lease_heartbeat_stage_cancelled",
+                execution=state.execution,
+                operation_stage="TASK",
+                started_at=started_at,
+                error=error,
+            )
             raise
         except BaseException as error:
+            _log_lease_heartbeat_stage(
+                "graph_lease_heartbeat_stage_failed",
+                execution=state.execution,
+                operation_stage="TASK",
+                started_at=started_at,
+                error=error,
+            )
             state.failure = error
 
     async def _await_heartbeat_tick(
@@ -1011,7 +1152,15 @@ class GatewayBackedGraphCommandStreamService:
         error: BaseException,
     ) -> None:
         cancelled = isinstance(error, (asyncio.CancelledError, GeneratorExit))
-        code = "GRAPH_STREAM_CANCELLED" if cancelled else "GRAPH_STREAM_INTERRUPTED"
+        if cancelled:
+            code = "GRAPH_STREAM_CANCELLED"
+            classification = "STREAM_INTERRUPTED"
+        elif isinstance(error, ModelTransportOutputError):
+            code = _model_transport_output_error_code(error)
+            classification = _MODEL_TRANSPORT_OUTPUT_ERROR_CLASSIFICATION
+        else:
+            code = "GRAPH_STREAM_INTERRUPTED"
+            classification = "STREAM_INTERRUPTED"
         # Source and heartbeat ownership have already been joined by the caller.
         # The control pool and database statement/lock limits bound this exact-fence
         # transaction.  Its failure is authoritative cleanup failure and must not be
@@ -1020,7 +1169,7 @@ class GatewayBackedGraphCommandStreamService:
             execution,
             status=(AttemptStatus.CANCELLED if cancelled else AttemptStatus.FAILED),
             error_code=code,
-            error_classification="STREAM_INTERRUPTED",
+            error_classification=classification,
         )
 
     async def _complete_deferred_preterminal_cleanup(

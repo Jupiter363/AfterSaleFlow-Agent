@@ -12,6 +12,7 @@ import com.example.dispute.workflow.temporal.agentrun.AgentRunTemporalPolicy;
 import io.temporal.client.ActivityCanceledException;
 import io.temporal.client.ActivityCompletionException;
 import io.temporal.failure.ApplicationFailure;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -165,19 +166,51 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
             int retryLimit = Math.max(1, allowedActivityAttempts(request.command()));
             if (clock.instant().isBefore(request.command().deadlineAt())
                     && context.temporalAttempt() < retryLimit) {
-                throw retryFailure(
-                        request,
-                        context.temporalAttempt(),
+                ApplicationFailure retryFailure = ApplicationFailure.newFailureWithCause(
+                        "agent run infrastructure failure",
+                        RETRYABLE_FAILURE_TYPE,
+                        sanitizedAttemptLoadCause(infrastructureFailure),
+                        request.agentRunId(),
+                        request.attemptId(),
                         "AGENT_RUN_ATTEMPT_LOAD_FAILED",
-                        AgentRunRecoveryAction.RETRY_SAME_COMMAND);
+                        AgentRunRecoveryAction.RETRY_SAME_COMMAND.name());
+                retryFailure.setNextRetryDelay(
+                        retryDelay(request.command(), context.temporalAttempt()));
+                throw retryFailure;
             }
-            throw ApplicationFailure.newNonRetryableFailure(
+            throw ApplicationFailure.newNonRetryableFailureWithCause(
                     "agent run attempt load failed",
                     NON_RETRYABLE_FAILURE_TYPE,
+                    sanitizedAttemptLoadCause(infrastructureFailure),
                     request.agentRunId(),
                     request.attemptId(),
                     "AGENT_RUN_ATTEMPT_LOAD_FAILED");
         }
+    }
+
+    private static ApplicationFailure sanitizedAttemptLoadCause(
+            RuntimeException infrastructureFailure) {
+        Throwable rootCause = infrastructureFailure;
+        String sqlState = "UNAVAILABLE";
+        Throwable current = infrastructureFailure;
+        for (int depth = 0; current != null && depth < 16; depth++) {
+            rootCause = current;
+            if (current instanceof SQLException sqlFailure
+                    && sqlFailure.getSQLState() != null
+                    && sqlFailure.getSQLState().matches("[0-9A-Z]{5}")) {
+                sqlState = sqlFailure.getSQLState();
+            }
+            Throwable next = current.getCause();
+            current = next == current ? null : next;
+        }
+        ApplicationFailure sanitized = ApplicationFailure.newNonRetryableFailure(
+                "sanitized agent run attempt load cause",
+                infrastructureFailure.getClass().getName(),
+                rootCause.getClass().getName(),
+                sqlState,
+                "MESSAGE_REDACTED");
+        sanitized.setStackTrace(infrastructureFailure.getStackTrace());
+        return sanitized;
     }
 
     private ExecuteAgentRunResult handleFailure(

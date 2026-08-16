@@ -10,6 +10,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTransport;
+import com.example.dispute.workflow.infrastructure.agent.GraphCommandTransportException;
 import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationHttpTransport;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportSecurityProof;
@@ -175,6 +176,252 @@ class HttpTargetE2EGraphProposalClientTest {
         .containsExactly(StreamEventType.ATTEMPT_STARTED, StreamEventType.ATTEMPT_ABORTED);
     assertThat(events.getLast().payload().reasonCode()).isEqualTo("GRAPH_LEASE_LOST");
     assertThat(reconciliation.requests).isEmpty();
+  }
+
+  @Test
+  void nonRetryableGraphErrorEnvelopeClosesTheLogicalRunWithoutSealedCommandReplay() {
+    var codec = TargetE2EGraphTestFixtures.codec();
+    TargetE2ESealedGraphCommand sealed =
+        codec.sealCommand(
+            ACTIVATION_ID,
+            7L,
+            TargetE2EGraphTestFixtures.command(),
+            REGISTRY_BINDING,
+            (envelope, binding) -> credential());
+    AtomicInteger invocations = new AtomicInteger();
+    GraphTransportSecurityProof proof = mutualTlsProof();
+    GraphCommandHttpTransport rejected =
+        new FakeCommandTransport("0".repeat(64), proof) {
+          @Override
+          public void stream(
+              Request request, AgentRunCancellationToken cancellationToken, Listener listener) {
+            invocations.incrementAndGet();
+            listener.onResponse(errorHead(409, request.uri()));
+            listener.onLine(
+                "{\"code\":\"GRAPH_RETRY_BUDGET_EXHAUSTED\",\"retryable\":false}");
+          }
+        };
+    FakeReconciliationTransport reconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), proof);
+    var client = proposalClient(rejected, reconciliation, proof, codec);
+    List<AgentStreamEvent> events = new ArrayList<>();
+
+    assertThatThrownBy(
+            () ->
+                client.execute(
+                    sealed, Map.of(), events::add, new AgentRunCancellationToken()))
+        .isInstanceOfSatisfying(
+            TargetE2EGraphClientException.class,
+            failure -> {
+              assertThat(failure.errorCode()).isEqualTo("GRAPH_RETRY_BUDGET_EXHAUSTED");
+              assertThat(failure.recoveryAction())
+                  .isEqualTo(TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN);
+            });
+    assertThat(invocations).hasValue(1);
+    assertThat(events).isEmpty();
+    assertThat(reconciliation.requests).isEmpty();
+  }
+
+  @Test
+  void retryableAndInvalidGraphErrorResponsesPreserveClosedRecoverySemantics() {
+    var codec = TargetE2EGraphTestFixtures.codec();
+    TargetE2ESealedGraphCommand sealed =
+        codec.sealCommand(
+            ACTIVATION_ID,
+            7L,
+            TargetE2EGraphTestFixtures.command(),
+            REGISTRY_BINDING,
+            (envelope, binding) -> credential());
+    GraphTransportSecurityProof proof = mutualTlsProof();
+    AtomicInteger retryInvocations = new AtomicInteger();
+    GraphCommandHttpTransport retryable =
+        errorTransport(
+            proof,
+            409,
+            "application/json; charset=utf-8",
+            List.of("{\"code\":\"GRAPH_GATEWAY_NOT_READY\",\"retryable\":true}"),
+            retryInvocations);
+    FakeReconciliationTransport retryReconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), proof);
+    var retryClient = proposalClient(retryable, retryReconciliation, proof, codec);
+    List<AgentStreamEvent> events = new ArrayList<>();
+
+    assertThatThrownBy(
+            () ->
+                retryClient.execute(
+                    sealed, Map.of(), events::add, new AgentRunCancellationToken()))
+        .isInstanceOfSatisfying(
+            TargetE2EGraphClientException.class,
+            failure -> {
+              assertThat(failure.errorCode()).isEqualTo("GRAPH_GATEWAY_NOT_READY");
+              assertThat(failure.recoveryAction())
+                  .isEqualTo(
+                      TargetE2EGraphClientException.RecoveryAction.RETRY_SAME_SEALED_COMMAND);
+            });
+    assertThat(retryInvocations).hasValue(1);
+    assertThat(events).isEmpty();
+    assertThat(retryReconciliation.requests).isEmpty();
+
+    AtomicInteger non409Invocations = new AtomicInteger();
+    FakeReconciliationTransport non409Reconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), proof);
+    var non409Client =
+        proposalClient(
+            errorTransport(
+                proof,
+                401,
+                "application/json",
+                List.of("{\"code\":\"INVOCATION_AUTHORIZATION_REJECTED\",\"retryable\":false}"),
+                non409Invocations),
+            non409Reconciliation,
+            proof,
+            codec);
+    assertThatThrownBy(
+            () ->
+                non409Client.execute(
+                    sealed, Map.of(), events::add, new AgentRunCancellationToken()))
+        .isInstanceOfSatisfying(
+            TargetE2EGraphClientException.class,
+            failure -> {
+              assertThat(failure.errorCode()).isEqualTo("INVOCATION_AUTHORIZATION_REJECTED");
+              assertThat(failure.recoveryAction())
+                  .isEqualTo(TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN);
+            });
+    assertThat(non409Invocations).hasValue(1);
+    assertThat(events).isEmpty();
+    assertThat(non409Reconciliation.requests).isEmpty();
+
+    String privateBodyValue = "private-error-detail-must-not-be-logged";
+    record InvalidErrorResponse(int status, String contentType, List<String> lines) {}
+    List<InvalidErrorResponse> invalidResponses =
+        List.of(
+            new InvalidErrorResponse(409, "application/json", List.of("not-json")),
+            new InvalidErrorResponse(
+                409,
+                "application/json",
+                List.of(
+                    "{\"code\":\"GRAPH_RETRY_BUDGET_EXHAUSTED\",\"retryable\":false,"
+                        + "\"detail\":\""
+                        + privateBodyValue
+                        + "\"}")),
+            new InvalidErrorResponse(
+                409,
+                "application/json",
+                List.of("{\"code\":\"GRAPH_RETRY_BUDGET_EXHAUSTED\"}")),
+            new InvalidErrorResponse(
+                409,
+                "application/json",
+                List.of("{\"code\":7,\"retryable\":false}")),
+            new InvalidErrorResponse(
+                409,
+                "application/json",
+                List.of("{\"code\":\"invalid code\",\"retryable\":false}")),
+            new InvalidErrorResponse(
+                409,
+                "application/json",
+                List.of(
+                    "{\"code\":\"GRAPH_RETRY_BUDGET_EXHAUSTED\",\"retryable\":false}"
+                        + " {\"code\":\"GRAPH_GATEWAY_NOT_READY\",\"retryable\":true}")),
+            new InvalidErrorResponse(
+                409,
+                "application/json",
+                List.of(
+                    "{\"code\":\"GRAPH_GATEWAY_NOT_READY\","
+                        + "\"code\":\"GRAPH_RETRY_BUDGET_EXHAUSTED\","
+                        + "\"retryable\":false}")),
+            new InvalidErrorResponse(
+                409,
+                "application/json",
+                List.of(
+                    "{\"code\":\"GRAPH_GATEWAY_NOT_READY\","
+                        + "\"retryable\":true,\"retryable\":false}")),
+            new InvalidErrorResponse(
+                409,
+                "text/plain",
+                List.of("{\"code\":\"GRAPH_RETRY_BUDGET_EXHAUSTED\",\"retryable\":false}")),
+            new InvalidErrorResponse(
+                204,
+                "application/json",
+                List.of("{\"code\":\"GRAPH_RETRY_BUDGET_EXHAUSTED\",\"retryable\":false}")),
+            new InvalidErrorResponse(409, "application/json", List.of()),
+            new InvalidErrorResponse(
+                409,
+                "application/json",
+                List.of(
+                    "{\"code\":\"GRAPH_GATEWAY_NOT_READY\",\"retryable\":true}",
+                    "{\"code\":\"GRAPH_GATEWAY_NOT_READY\",\"retryable\":true}")));
+    Logger logger = (Logger) LoggerFactory.getLogger(HttpTargetE2EGraphProposalClient.class);
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    logger.addAppender(appender);
+    try {
+      for (InvalidErrorResponse invalid : invalidResponses) {
+        AtomicInteger invocations = new AtomicInteger();
+        FakeReconciliationTransport reconciliation =
+            new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), proof);
+        var client =
+            proposalClient(
+                errorTransport(
+                    proof,
+                    invalid.status(),
+                    invalid.contentType(),
+                    invalid.lines(),
+                    invocations),
+                reconciliation,
+                proof,
+                codec);
+
+        assertThatThrownBy(
+                () ->
+                    client.execute(
+                        sealed, Map.of(), events::add, new AgentRunCancellationToken()))
+            .isInstanceOfSatisfying(
+                TargetE2EGraphClientException.class,
+                failure -> {
+                  assertThat(failure.errorCode()).isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+                  assertThat(failure.recoveryAction())
+                      .isEqualTo(TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN);
+                });
+        assertThat(invocations).hasValue(1);
+        assertThat(events).isEmpty();
+        assertThat(reconciliation.requests).isEmpty();
+      }
+
+      AtomicInteger oversizedInvocations = new AtomicInteger();
+      GraphCommandHttpTransport oversized =
+          new FakeCommandTransport("0".repeat(64), proof) {
+            @Override
+            public void stream(
+                Request request, AgentRunCancellationToken cancellationToken, Listener listener) {
+              oversizedInvocations.incrementAndGet();
+              throw GraphCommandTransportException.protocolViolation(
+                  "Graph command response line exceeds its byte limit");
+            }
+          };
+      FakeReconciliationTransport oversizedReconciliation =
+          new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), proof);
+      var oversizedClient =
+          proposalClient(oversized, oversizedReconciliation, proof, codec);
+      assertThatThrownBy(
+              () ->
+                  oversizedClient.execute(
+                      sealed, Map.of(), events::add, new AgentRunCancellationToken()))
+          .isInstanceOfSatisfying(
+              TargetE2EGraphClientException.class,
+              failure -> {
+                assertThat(failure.errorCode()).isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+                assertThat(failure.recoveryAction())
+                    .isEqualTo(TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN);
+              });
+      assertThat(oversizedInvocations).hasValue(1);
+      assertThat(events).isEmpty();
+      assertThat(oversizedReconciliation.requests).isEmpty();
+      assertThat(appender.list)
+          .allSatisfy(event -> assertThat(event.getFormattedMessage()).doesNotContain(privateBodyValue));
+    } finally {
+      logger.detachAppender(appender);
+      appender.stop();
+    }
   }
 
   @Test
@@ -677,6 +924,38 @@ class HttpTargetE2EGraphProposalClientTest {
             "X-Agent-Run-Id", List.of(sealed.envelope().command().logicalRunId()),
             "X-Graph-Execution-Lane", List.of(sealed.envelope().executionLane()),
             "X-Graph-Activation-Id", List.of(activationId)));
+  }
+
+  private static GraphCommandHttpTransport.ResponseHead errorHead(int status, URI uri) {
+    return new GraphCommandHttpTransport.ResponseHead(
+        status,
+        uri,
+        Map.of(
+            "Content-Type", List.of("application/json; charset=utf-8"),
+            "Cache-Control", List.of("no-store, no-transform")));
+  }
+
+  private static GraphCommandHttpTransport errorTransport(
+      GraphTransportSecurityProof proof,
+      int status,
+      String contentType,
+      List<String> lines,
+      AtomicInteger invocations) {
+    return new FakeCommandTransport("0".repeat(64), proof) {
+      @Override
+      public void stream(
+          Request request, AgentRunCancellationToken cancellationToken, Listener listener) {
+        invocations.incrementAndGet();
+        listener.onResponse(
+            new ResponseHead(
+                status,
+                request.uri(),
+                Map.of(
+                    "Content-Type", List.of(contentType),
+                    "Cache-Control", List.of("no-store, no-transform"))));
+        lines.forEach(listener::onLine);
+      }
+    };
   }
 
   private static String event(

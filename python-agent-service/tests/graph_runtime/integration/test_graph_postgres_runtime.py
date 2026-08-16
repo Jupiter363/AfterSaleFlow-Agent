@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import json
@@ -12,6 +13,7 @@ from uuid import uuid4
 import psycopg
 from psycopg import AsyncConnection, sql
 from psycopg.errors import CheckViolation, InsufficientPrivilege
+from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 import pytest
 from testcontainers.postgres import PostgresContainer
@@ -2499,6 +2501,153 @@ async def test_real_blocked_renew_released_after_command_deadline_cannot_mutate_
                 renew_task.cancel()
             await asyncio.gather(renew_task, return_exceptions=True)
         await pool.close(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_real_cancelled_gateway_renew_finishes_transaction_and_returns_control_pool(
+    graph_database: _Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _migration_runner(graph_database).run()
+    await _seed_executable_command(graph_database)
+    control_pool = _runtime_pool(graph_database)
+    locker_pool = _runtime_pool(graph_database)
+    await control_pool.open(wait=True, timeout=10)
+    await locker_pool.open(wait=True, timeout=10)
+
+    lease_repository = PostgresLeaseRepository()
+    async with control_pool.connection(timeout=5) as connection:
+        initial_lease = await lease_repository.observe(connection, thread_id=THREAD_ID)
+        command_deadline_row = await (
+            await connection.execute(
+                """
+                select deadline_at from agent_graph_command
+                 where thread_id = %s and command_id = %s
+                """,
+                (THREAD_ID, COMMAND_ID),
+            )
+        ).fetchone()
+    assert initial_lease is not None
+    assert command_deadline_row is not None
+    command_deadline_at = command_deadline_row["deadline_at"]
+    assert isinstance(command_deadline_at, datetime)
+
+    lock_acquired = asyncio.Event()
+    release_lock = asyncio.Event()
+    renew_entered = asyncio.Event()
+    transaction_exit_started = asyncio.Event()
+    release_acquired_connections = asyncio.Event()
+    both_slots_acquired = asyncio.Event()
+    acquired_statuses: list[TransactionStatus] = []
+    original_renew = lease_repository.renew
+    original_connection = control_pool.connection
+
+    async def hold_lease_row() -> None:
+        async with locker_pool.connection(timeout=5) as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    "select 1 from agent_graph_lease where thread_id = %s for update",
+                    (THREAD_ID,),
+                )
+                lock_acquired.set()
+                await release_lock.wait()
+
+    async def observe_real_renew(connection: Any, **kwargs: Any) -> Any:
+        renew_entered.set()
+        return await original_renew(connection, **kwargs)
+
+    class ObservedConnection:
+        def __init__(self, connection: Any) -> None:
+            self._connection = connection
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._connection, name)
+
+        class ObservedTransaction:
+            def __init__(self, transaction: Any) -> None:
+                self._transaction = transaction
+
+            async def __aenter__(self) -> Any:
+                return await self._transaction.__aenter__()
+
+            async def __aexit__(self, *args: Any) -> Any:
+                transaction_exit_started.set()
+                await asyncio.sleep(0)
+                return await self._transaction.__aexit__(*args)
+
+        def transaction(self) -> Any:
+            return self.ObservedTransaction(self._connection.transaction())
+
+    @asynccontextmanager
+    async def observe_gateway_connection(*, timeout: float):
+        async with original_connection(timeout=timeout) as connection:
+            yield ObservedConnection(connection)
+
+    monkeypatch.setattr(lease_repository, "renew", observe_real_renew)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=SimpleNamespace(connection=observe_gateway_connection),
+        leases=lease_repository,
+        input_authorizer=object(),  # type: ignore[arg-type]
+        acquire_timeout_seconds=2,
+    )
+    execution = GatewayExecution(  # type: ignore[arg-type]
+        admission=SimpleNamespace(
+            command=SimpleNamespace(deadline_at=command_deadline_at)
+        ),
+        attempt=SimpleNamespace(),
+        lease=initial_lease,
+        fence=_fence(owner_id="worker-1", fencing_token=1),
+    )
+
+    locker_task = asyncio.create_task(hold_lease_row())
+    renew_task: asyncio.Task[Any] | None = None
+    acquire_tasks: list[asyncio.Task[Any]] = []
+    try:
+        await asyncio.wait_for(lock_acquired.wait(), timeout=2)
+        renew_task = asyncio.create_task(gateway.renew_execution(execution))
+        await asyncio.wait_for(renew_entered.wait(), timeout=2)
+        renew_task.cancel()
+        release_lock.set()
+        await asyncio.wait_for(transaction_exit_started.wait(), timeout=2)
+        renew_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await renew_task
+        await asyncio.wait_for(locker_task, timeout=2)
+
+        async def acquire_and_hold_slot() -> TransactionStatus:
+            async with control_pool.connection(timeout=0.25) as connection:
+                row = await (await connection.execute("select 1 as value")).fetchone()
+                assert row == {"value": 1}
+                acquired_statuses.append(connection.pgconn.transaction_status)
+                if len(acquired_statuses) == 2:
+                    both_slots_acquired.set()
+                await release_acquired_connections.wait()
+                return connection.pgconn.transaction_status
+
+        acquire_tasks = [
+            asyncio.create_task(acquire_and_hold_slot()),
+            asyncio.create_task(acquire_and_hold_slot()),
+        ]
+        await asyncio.wait_for(both_slots_acquired.wait(), timeout=0.5)
+        assert acquired_statuses == [TransactionStatus.IDLE, TransactionStatus.IDLE]
+        assert control_pool.get_stats().get("returns_bad", 0) == 0
+
+        async with locker_pool.connection(timeout=5) as connection:
+            durable_lease = await lease_repository.observe(connection, thread_id=THREAD_ID)
+        assert durable_lease == initial_lease
+    finally:
+        release_acquired_connections.set()
+        release_lock.set()
+        if renew_task is not None and not renew_task.done():
+            renew_task.cancel()
+        if not locker_task.done():
+            locker_task.cancel()
+        await asyncio.gather(locker_task, *(acquire_tasks or ()), return_exceptions=True)
+        if renew_task is not None:
+            await asyncio.gather(renew_task, return_exceptions=True)
+        await locker_pool.close(timeout=10)
+        await control_pool.close(timeout=10)
 
 
 @pytest.mark.asyncio

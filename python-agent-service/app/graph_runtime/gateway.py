@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 import hmac
+import logging
+import time
 from typing import Any, Final, Protocol, TypeVar
 
 from psycopg import errors as psycopg_errors
@@ -104,6 +106,58 @@ _CONTROL_PLANE_LEASE_SAFETY_MARGIN: Final[timedelta] = timedelta(seconds=2)
 _TARGET_E2E_GRAPH_KEY: Final[str] = "all-rooms.target-e2e.v1"
 _TARGET_E2E_LEGACY_PROMPT_VERSION: Final[str] = "all-rooms-prompt.target-e2e.v1"
 _TARGET_E2E_INTAKE_ROLES: Final[frozenset[str]] = frozenset({"USER", "MERCHANT"})
+_LEASE_OBSERVABILITY_EMPTY: Final[str] = "NONE"
+
+logger = logging.getLogger(__name__)
+
+
+def _log_lease_renewal_stage(
+    event_name: str,
+    *,
+    execution: GatewayExecution,
+    operation_stage: str,
+    started_at: float,
+    output_lease: LeaseRecord | None = None,
+    error: BaseException | None = None,
+) -> None:
+    input_lease = execution.lease
+    logger.info(
+        "%s operation_stage=%s thread_id=%s command_id=%s owner_id=%s "
+        "fencing_token=%s input_lease_revision=%s input_lease_renewed_at=%s "
+        "input_lease_expires_at=%s output_lease_revision=%s "
+        "output_lease_renewed_at=%s output_lease_expires_at=%s "
+        "monotonic_elapsed_ms=%.3f exception_class=%s",
+        event_name,
+        operation_stage,
+        execution.fence.thread_id,
+        execution.fence.command_id,
+        execution.fence.owner_id,
+        execution.fence.fencing_token,
+        input_lease.revision,
+        input_lease.renewed_at.isoformat(timespec="microseconds"),
+        input_lease.lease_expires_at.isoformat(timespec="microseconds"),
+        (
+            output_lease.revision
+            if output_lease is not None
+            else _LEASE_OBSERVABILITY_EMPTY
+        ),
+        (
+            output_lease.renewed_at.isoformat(timespec="microseconds")
+            if output_lease is not None
+            else _LEASE_OBSERVABILITY_EMPTY
+        ),
+        (
+            output_lease.lease_expires_at.isoformat(timespec="microseconds")
+            if output_lease is not None
+            else _LEASE_OBSERVABILITY_EMPTY
+        ),
+        max(0.0, (time.monotonic() - started_at) * 1_000.0),
+        (
+            type(error).__name__[:128]
+            if error is not None
+            else _LEASE_OBSERVABILITY_EMPTY
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -841,23 +895,263 @@ class GraphCommandGateway:
 
     async def renew_execution(self, execution: GatewayExecution) -> LeaseRecord:
         self._require_shadow()
+        started_at = time.monotonic()
+        _log_lease_renewal_stage(
+            "graph_lease_renewal_stage_started",
+            execution=execution,
+            operation_stage="OPERATION",
+            started_at=started_at,
+        )
 
         async def renew() -> LeaseRecord:
-            async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-                async with connection.transaction():
-                    return await self._leases.renew(
-                        connection,
-                        thread_id=execution.fence.thread_id,
-                        command_id=execution.fence.command_id,
-                        owner_id=execution.fence.owner_id,
-                        fencing_token=execution.fence.fencing_token,
-                        command_deadline_at=execution.admission.command.deadline_at,
+            operation_stage = "CONTROL_POOL_ACQUIRE"
+            operation_failure: BaseException | None = None
+            failure_logged = False
+            lease: LeaseRecord | None = None
+            _log_lease_renewal_stage(
+                "graph_lease_renewal_stage_started",
+                execution=execution,
+                operation_stage=operation_stage,
+                started_at=started_at,
+            )
+            try:
+                pool_connection = self._pool.connection(
+                    timeout=self._acquire_timeout_seconds
+                )
+                try:
+                    async with pool_connection as connection:
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_succeeded",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                        )
+                        operation_stage = "TRANSACTION_ENTER"
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_started",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                        )
+                        transaction = connection.transaction()
+                        try:
+                            async with transaction:
+                                _log_lease_renewal_stage(
+                                    "graph_lease_renewal_stage_succeeded",
+                                    execution=execution,
+                                    operation_stage=operation_stage,
+                                    started_at=started_at,
+                                )
+                                operation_stage = "LEASE_SQL"
+                                _log_lease_renewal_stage(
+                                    "graph_lease_renewal_stage_started",
+                                    execution=execution,
+                                    operation_stage=operation_stage,
+                                    started_at=started_at,
+                                )
+                                try:
+                                    lease = await self._leases.renew(
+                                        connection,
+                                        thread_id=execution.fence.thread_id,
+                                        command_id=execution.fence.command_id,
+                                        owner_id=execution.fence.owner_id,
+                                        fencing_token=execution.fence.fencing_token,
+                                        command_deadline_at=(
+                                            execution.admission.command.deadline_at
+                                        ),
+                                    )
+                                except BaseException as error:
+                                    operation_failure = error
+                                    failure_logged = True
+                                    _log_lease_renewal_stage(
+                                        (
+                                            "graph_lease_renewal_stage_cancelled"
+                                            if isinstance(error, asyncio.CancelledError)
+                                            else "graph_lease_renewal_stage_failed"
+                                        ),
+                                        execution=execution,
+                                        operation_stage=operation_stage,
+                                        started_at=started_at,
+                                        error=error,
+                                    )
+                                    operation_stage = "TRANSACTION_ROLLBACK"
+                                    _log_lease_renewal_stage(
+                                        "graph_lease_renewal_stage_started",
+                                        execution=execution,
+                                        operation_stage=operation_stage,
+                                        started_at=started_at,
+                                    )
+                                    raise
+                                _log_lease_renewal_stage(
+                                    "graph_lease_renewal_stage_succeeded",
+                                    execution=execution,
+                                    operation_stage=operation_stage,
+                                    started_at=started_at,
+                                    output_lease=lease,
+                                )
+                                operation_stage = "TRANSACTION_COMMIT"
+                                _log_lease_renewal_stage(
+                                    "graph_lease_renewal_stage_started",
+                                    execution=execution,
+                                    operation_stage=operation_stage,
+                                    started_at=started_at,
+                                    output_lease=lease,
+                                )
+                            _log_lease_renewal_stage(
+                                "graph_lease_renewal_stage_succeeded",
+                                execution=execution,
+                                operation_stage=operation_stage,
+                                    started_at=started_at,
+                                    output_lease=lease,
+                                )
+                        except BaseException as error:
+                            if operation_failure is error:
+                                _log_lease_renewal_stage(
+                                    "graph_lease_renewal_stage_succeeded",
+                                    execution=execution,
+                                    operation_stage=operation_stage,
+                                    started_at=started_at,
+                                    output_lease=lease,
+                                )
+                            else:
+                                operation_failure = error
+                                failure_logged = True
+                                _log_lease_renewal_stage(
+                                    (
+                                        "graph_lease_renewal_stage_cancelled"
+                                        if isinstance(error, asyncio.CancelledError)
+                                        else "graph_lease_renewal_stage_failed"
+                                    ),
+                                    execution=execution,
+                                    operation_stage=operation_stage,
+                                    started_at=started_at,
+                                    output_lease=lease,
+                                    error=error,
+                                )
+                            raise
+                        else:
+                            _log_lease_renewal_stage(
+                                "graph_lease_renewal_stage_succeeded",
+                                execution=execution,
+                                operation_stage=operation_stage,
+                                started_at=started_at,
+                                output_lease=lease,
+                            )
+                        finally:
+                            operation_stage = "CONTROL_POOL_RELEASE"
+                            _log_lease_renewal_stage(
+                                "graph_lease_renewal_stage_started",
+                                execution=execution,
+                                operation_stage=operation_stage,
+                                started_at=started_at,
+                                output_lease=lease,
+                            )
+                except BaseException as error:
+                    if operation_failure is error:
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_succeeded",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                            output_lease=lease,
+                        )
+                    else:
+                        failure_logged = True
+                        _log_lease_renewal_stage(
+                            (
+                                "graph_lease_renewal_stage_cancelled"
+                                if isinstance(error, asyncio.CancelledError)
+                                else "graph_lease_renewal_stage_failed"
+                            ),
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                            output_lease=lease,
+                            error=error,
+                        )
+                    raise
+                else:
+                    _log_lease_renewal_stage(
+                        "graph_lease_renewal_stage_succeeded",
+                        execution=execution,
+                        operation_stage=operation_stage,
+                        started_at=started_at,
+                        output_lease=lease,
                     )
+                if lease is None:
+                    raise GraphContractError("lease renewal returned no lease")
+                return lease
+            except asyncio.CancelledError as error:
+                if not failure_logged:
+                    _log_lease_renewal_stage(
+                        "graph_lease_renewal_stage_cancelled",
+                        execution=execution,
+                        operation_stage=operation_stage,
+                        started_at=started_at,
+                        error=error,
+                    )
+                raise
+            except BaseException as error:
+                if not failure_logged:
+                    _log_lease_renewal_stage(
+                        "graph_lease_renewal_stage_failed",
+                        execution=execution,
+                        operation_stage=operation_stage,
+                        started_at=started_at,
+                        error=error,
+                    )
+                raise
 
-        lease = await self._retry_control_plane_operation(
-            execution,
-            renew,
-            retry_lock_contention_until_command_deadline=True,
+        lifecycle_task = asyncio.create_task(
+            self._retry_control_plane_operation(
+                execution,
+                renew,
+                retry_lock_contention_until_command_deadline=True,
+            )
+        )
+        try:
+            lease = await asyncio.shield(lifecycle_task)
+        except asyncio.CancelledError as error:
+            if not lifecycle_task.done():
+                lifecycle_task.cancel()
+            while not lifecycle_task.done():
+                try:
+                    await asyncio.shield(lifecycle_task)
+                except asyncio.CancelledError:
+                    # Repeated caller cancellation must not interrupt the one
+                    # cancelled lifecycle while psycopg exits its transaction
+                    # and returns the exact checked-out connection to the pool.
+                    continue
+            try:
+                lifecycle_task.result()
+            except BaseException:
+                # The caller's original cancellation remains authoritative.
+                # Stage logging inside the lifecycle already records its exact
+                # SQL/transaction/release outcome before this task is drained.
+                pass
+            _log_lease_renewal_stage(
+                "graph_lease_renewal_stage_cancelled",
+                execution=execution,
+                operation_stage="OPERATION",
+                started_at=started_at,
+                error=error,
+            )
+            raise
+        except BaseException as error:
+            _log_lease_renewal_stage(
+                "graph_lease_renewal_stage_failed",
+                execution=execution,
+                operation_stage="OPERATION",
+                started_at=started_at,
+                error=error,
+            )
+            raise
+        _log_lease_renewal_stage(
+            "graph_lease_renewal_stage_succeeded",
+            execution=execution,
+            operation_stage="OPERATION",
+            started_at=started_at,
+            output_lease=lease,
         )
         return self._remember_lease(execution, lease)
 

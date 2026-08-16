@@ -9,6 +9,8 @@ import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTranspo
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandTransportException;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -22,6 +24,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,6 +36,8 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
   private static final Logger LOG = LoggerFactory.getLogger(HttpTargetE2EGraphProposalClient.class);
   private static final String DIAGNOSTIC_UNAVAILABLE = "UNAVAILABLE";
   private static final String DIAGNOSTIC_NOT_APPLICABLE = "NOT_APPLICABLE";
+  private static final Set<String> REMOTE_ERROR_FIELDS = Set.of("code", "retryable");
+  private static final Pattern ERROR_CODE = Pattern.compile("[A-Za-z0-9_.-]{1,128}");
 
   private final GraphCommandHttpTransport transport;
   private final HttpTargetE2EGraphReconciliationClient reconciliationClient;
@@ -66,6 +71,8 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
           "target Graph command and reconciliation clients must share one trusted base URI");
     }
     this.mapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
+    this.mapper.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+    this.mapper.enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     this.mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
     this.mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     this.endpoint = trustedBaseUri.resolve(PATH);
@@ -101,6 +108,9 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
     try {
       transport.stream(request, cancellationToken, session);
       cancellationToken.throwIfCancellationRequested();
+      if (session.errorResponse()) {
+        throw session.remoteFailure();
+      }
       session.requireComplete();
     } catch (TargetE2EGraphClientException exception) {
       if ("TARGET_E2E_GRAPH_PROTOCOL_REJECTED".equals(exception.errorCode())) {
@@ -185,6 +195,8 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
     private final AgentNdjsonStreamClient.V2ProtocolState protocolState;
     private final Consumer<AgentStreamEvent> sink;
     private boolean responseReceived;
+    private int statusCode;
+    private String remoteErrorLine;
     private AgentStreamEvent terminal;
     private long lastAcceptedSequence = -1;
     private ProtocolLineMetadata lastLineMetadata = ProtocolLineMetadata.unavailable();
@@ -209,14 +221,12 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
         throw TargetE2EGraphClientException.protocol(
             "target Graph command redirect is forbidden", null);
       }
-      if (response.statusCode() != 200) {
-        boolean retryable = Set.of(409, 429, 503).contains(response.statusCode());
-        throw TargetE2EGraphClientException.remote(
-            "TARGET_E2E_GRAPH_HTTP_" + response.statusCode(),
-            retryable,
-            "Python rejected target Graph command");
+      statusCode = response.statusCode();
+      if (statusCode == 200) {
+        requireResponseMetadata(response, envelope);
+      } else {
+        requireErrorResponseMetadata(response);
       }
-      requireResponseMetadata(response, envelope);
     }
 
     @Override
@@ -225,6 +235,14 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
       if (!responseReceived) {
         throw TargetE2EGraphClientException.protocol(
             "target Graph command emitted data before response metadata", null);
+      }
+      if (statusCode != 200) {
+        if (remoteErrorLine != null) {
+          throw TargetE2EGraphClientException.protocol(
+              "target Graph command returned multiple error envelopes", null);
+        }
+        remoteErrorLine = Objects.requireNonNull(line, "line");
+        return;
       }
       AgentStreamEvent event =
           AgentNdjsonStreamClient.parseV2Line(
@@ -248,6 +266,41 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
             "target Graph command stream ended without a terminal event", null);
       }
       protocolState.assertComplete();
+    }
+
+    private boolean errorResponse() {
+      return responseReceived && statusCode != 200;
+    }
+
+    private TargetE2EGraphClientException remoteFailure() {
+      if (remoteErrorLine == null) {
+        return TargetE2EGraphClientException.protocol(
+            "target Graph command error body is missing", null);
+      }
+      try {
+        JsonNode root = mapper.readTree(remoteErrorLine);
+        if (root == null
+            || !root.isObject()
+            || !root.properties().stream()
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toSet())
+                .equals(REMOTE_ERROR_FIELDS)
+            || !root.required("code").isTextual()
+            || !root.required("retryable").isBoolean()) {
+          throw new IllegalArgumentException("target Graph error envelope is invalid");
+        }
+        String code = root.required("code").asText();
+        if (!ERROR_CODE.matcher(code).matches()) {
+          throw new IllegalArgumentException("target Graph error code is invalid");
+        }
+        return TargetE2EGraphClientException.remote(
+            code,
+            root.required("retryable").asBoolean(),
+            "Python rejected target Graph command");
+      } catch (RuntimeException | com.fasterxml.jackson.core.JsonProcessingException failure) {
+        return TargetE2EGraphClientException.protocol(
+            "target Graph command error response is invalid", failure);
+      }
     }
 
     private AgentStreamEvent terminal() {
@@ -353,6 +406,29 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
     }
   }
 
+  private void requireErrorResponseMetadata(GraphCommandHttpTransport.ResponseHead response) {
+    List<String> contentType = headerValues(response.headers(), "content-type");
+    List<String> contentEncoding = headerValues(response.headers(), "content-encoding");
+    Set<String> cacheDirectives =
+        headerValues(response.headers(), "cache-control").stream()
+            .flatMap(value -> List.of(value.split(",", -1)).stream())
+            .map(value -> value.trim().toLowerCase(Locale.ROOT))
+            .collect(Collectors.toSet());
+    if (!endpoint.equals(response.uri())
+        || response.statusCode() < 400
+        || response.statusCode() > 599
+        || contentType.size() != 1
+        || !jsonUtf8(contentType.getFirst())
+        || contentEncoding.size() > 1
+        || (contentEncoding.size() == 1
+            && !"identity".equalsIgnoreCase(contentEncoding.getFirst().trim()))
+        || !cacheDirectives.contains("no-store")
+        || !cacheDirectives.contains("no-transform")) {
+      throw TargetE2EGraphClientException.protocol(
+          "target Graph command error response metadata is invalid", null);
+    }
+  }
+
   private static List<String> headerValues(Map<String, List<String>> headers, String expectedName) {
     List<String> values = new ArrayList<>();
     headers.forEach(
@@ -365,8 +441,16 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
   }
 
   private static boolean ndjsonUtf8(String value) {
+    return mediaTypeUtf8(value, "application/x-ndjson");
+  }
+
+  private static boolean jsonUtf8(String value) {
+    return mediaTypeUtf8(value, "application/json");
+  }
+
+  private static boolean mediaTypeUtf8(String value, String expected) {
     String[] parts = value.split(";", -1);
-    if (!"application/x-ndjson".equalsIgnoreCase(parts[0].trim())) {
+    if (!expected.equalsIgnoreCase(parts[0].trim())) {
       return false;
     }
     return parts.length == 1

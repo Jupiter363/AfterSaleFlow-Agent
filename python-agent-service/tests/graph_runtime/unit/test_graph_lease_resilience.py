@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,6 +16,7 @@ from psycopg_pool import PoolTimeout
 from app.graph_runtime.errors import (
     GraphCommandDeadlineError,
     GraphCommandStateError,
+    GraphContractError,
     GraphLeaseLostError,
 )
 from app.graph_runtime.gateway import (
@@ -32,24 +34,42 @@ THREAD_ID = f"grt.v1.{'a' * 32}"
 
 
 class _AsyncContext:
-    def __init__(self, value: Any, *, exit_error: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        value: Any,
+        *,
+        exit_error: BaseException | None = None,
+        suppress_error: bool = False,
+    ) -> None:
         self._value = value
         self._exit_error = exit_error
+        self._suppress_error = suppress_error
 
     async def __aenter__(self) -> Any:
         return self._value
 
-    async def __aexit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
+    async def __aexit__(self, _type: Any, _value: Any, _traceback: Any) -> bool:
         if self._exit_error is not None:
             raise self._exit_error
+        return self._suppress_error
 
 
 class _Connection:
-    def __init__(self, *, transaction_exit_error: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transaction_exit_error: BaseException | None = None,
+        transaction_suppresses_error: bool = False,
+    ) -> None:
         self._transaction_exit_error = transaction_exit_error
+        self._transaction_suppresses_error = transaction_suppresses_error
 
     def transaction(self) -> _AsyncContext:
-        return _AsyncContext(self, exit_error=self._transaction_exit_error)
+        return _AsyncContext(
+            self,
+            exit_error=self._transaction_exit_error,
+            suppress_error=self._transaction_suppresses_error,
+        )
 
 
 class _Pool:
@@ -57,14 +77,18 @@ class _Pool:
         self,
         *,
         connection_errors: list[BaseException | None] | None = None,
+        connection_exit_error: BaseException | None = None,
         transaction_exit_error: BaseException | None = None,
         transaction_exit_errors: list[BaseException | None] | None = None,
+        transaction_suppresses_error: bool = False,
     ) -> None:
         self._connection_errors = list(connection_errors or [])
+        self._connection_exit_error = connection_exit_error
         self._transaction_exit_error = transaction_exit_error
         self._transaction_exit_errors = (
             None if transaction_exit_errors is None else list(transaction_exit_errors)
         )
+        self._transaction_suppresses_error = transaction_suppresses_error
         self.connection_calls = 0
 
     def connection(self, *, timeout: float) -> _AsyncContext:
@@ -77,7 +101,13 @@ class _Pool:
         transaction_exit_error = self._transaction_exit_error
         if self._transaction_exit_errors is not None:
             transaction_exit_error = self._transaction_exit_errors.pop(0)
-        return _AsyncContext(_Connection(transaction_exit_error=transaction_exit_error))
+        return _AsyncContext(
+            _Connection(
+                transaction_exit_error=transaction_exit_error,
+                transaction_suppresses_error=self._transaction_suppresses_error,
+            ),
+            exit_error=self._connection_exit_error,
+        )
 
 
 @dataclass(frozen=True)
@@ -316,6 +346,337 @@ async def test_transient_renewal_recovers_on_control_pool() -> None:
     assert result is renewed
     assert leases.calls == 2
     assert all(call["command_deadline_at"] for call in leases.renew_kwargs)
+
+
+def _lease_observability_messages(
+    caplog: pytest.LogCaptureFixture,
+    *,
+    logger_name: str,
+) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == logger_name and record.getMessage().startswith("graph_lease_")
+    ]
+
+
+def _assert_safe_lease_observability(messages: list[str]) -> None:
+    assert messages
+    joined = "\n".join(messages)
+    for forbidden in (
+        "PRIVATE_EXCEPTION_DETAIL",
+        "postgresql://",
+        "SELECT ",
+        "request_hash=",
+        "result_hash=",
+        "payload=",
+        "model_text=",
+    ):
+        assert forbidden not in joined
+    assert all("monotonic_elapsed_ms=" in message for message in messages)
+    assert all("exception_class=" in message for message in messages)
+    allowed_fields = {
+        "operation_stage",
+        "thread_id",
+        "command_id",
+        "owner_id",
+        "fencing_token",
+        "input_lease_revision",
+        "input_lease_renewed_at",
+        "input_lease_expires_at",
+        "output_lease_revision",
+        "output_lease_renewed_at",
+        "output_lease_expires_at",
+        "monotonic_elapsed_ms",
+        "exception_class",
+    }
+    for message in messages:
+        event_name, *fields = message.split()
+        assert event_name in {
+            "graph_lease_renewal_stage_started",
+            "graph_lease_renewal_stage_succeeded",
+            "graph_lease_renewal_stage_failed",
+            "graph_lease_renewal_stage_cancelled",
+        }
+        assert {field.split("=", 1)[0] for field in fields} == allowed_fields
+
+
+@pytest.mark.asyncio
+async def test_renewal_observability_records_successful_blocking_stages(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=gateway_module.__name__)
+    initial = _lease(revision=3)
+    renewed = _lease(
+        renewed_at=initial.renewed_at + timedelta(seconds=10),
+        revision=4,
+    )
+    gateway = _gateway(pool=_Pool(), leases=_Leases([renewed]), ledger=_Ledger([]))
+
+    assert await gateway.renew_execution(_execution(initial)) is renewed
+
+    messages = _lease_observability_messages(
+        caplog,
+        logger_name=gateway_module.__name__,
+    )
+    joined = "\n".join(messages)
+    for stage in (
+        "OPERATION",
+        "CONTROL_POOL_ACQUIRE",
+        "TRANSACTION_ENTER",
+        "LEASE_SQL",
+        "TRANSACTION_COMMIT",
+        "CONTROL_POOL_RELEASE",
+    ):
+        assert f"operation_stage={stage}" in joined
+    assert "input_lease_revision=3" in joined
+    assert "output_lease_revision=4" in joined
+    assert "graph_lease_renewal_stage_succeeded operation_stage=OPERATION" in joined
+    _assert_safe_lease_observability(messages)
+
+
+@pytest.mark.asyncio
+async def test_renewal_observability_identifies_control_pool_acquire_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=gateway_module.__name__)
+    gateway = _gateway(
+        pool=_Pool(connection_errors=[RuntimeError("PRIVATE_EXCEPTION_DETAIL")]),
+        leases=_Leases([]),
+        ledger=_Ledger([]),
+    )
+
+    with pytest.raises(RuntimeError, match="PRIVATE_EXCEPTION_DETAIL"):
+        await gateway.renew_execution(_execution(_lease()))
+
+    messages = _lease_observability_messages(
+        caplog,
+        logger_name=gateway_module.__name__,
+    )
+    joined = "\n".join(messages)
+    assert (
+        "graph_lease_renewal_stage_failed "
+        "operation_stage=CONTROL_POOL_ACQUIRE" in joined
+    )
+    assert "exception_class=RuntimeError" in joined
+    _assert_safe_lease_observability(messages)
+
+
+@pytest.mark.asyncio
+async def test_renewal_observability_identifies_lease_sql_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=gateway_module.__name__)
+    gateway = _gateway(
+        pool=_Pool(),
+        leases=_Leases([GraphLeaseLostError("PRIVATE_EXCEPTION_DETAIL")]),
+        ledger=_Ledger([]),
+    )
+
+    with pytest.raises(GraphLeaseLostError, match="PRIVATE_EXCEPTION_DETAIL"):
+        await gateway.renew_execution(_execution(_lease()))
+
+    messages = _lease_observability_messages(
+        caplog,
+        logger_name=gateway_module.__name__,
+    )
+    joined = "\n".join(messages)
+    assert "graph_lease_renewal_stage_started operation_stage=LEASE_SQL" in joined
+    assert "graph_lease_renewal_stage_failed operation_stage=LEASE_SQL" in joined
+    assert "graph_lease_renewal_stage_started operation_stage=TRANSACTION_ROLLBACK" in joined
+    assert (
+        "graph_lease_renewal_stage_succeeded "
+        "operation_stage=TRANSACTION_ROLLBACK" in joined
+    )
+    assert (
+        "graph_lease_renewal_stage_succeeded "
+        "operation_stage=CONTROL_POOL_RELEASE" in joined
+    )
+    assert "exception_class=GraphLeaseLostError" in joined
+    _assert_safe_lease_observability(messages)
+
+
+@pytest.mark.asyncio
+async def test_renewal_observability_identifies_transaction_commit_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=gateway_module.__name__)
+    renewed = _lease(revision=2)
+    gateway = _gateway(
+        pool=_Pool(
+            transaction_exit_error=RuntimeError("PRIVATE_EXCEPTION_DETAIL")
+        ),
+        leases=_Leases([renewed]),
+        ledger=_Ledger([]),
+    )
+
+    with pytest.raises(RuntimeError, match="PRIVATE_EXCEPTION_DETAIL"):
+        await gateway.renew_execution(_execution(_lease()))
+
+    messages = _lease_observability_messages(
+        caplog,
+        logger_name=gateway_module.__name__,
+    )
+    joined = "\n".join(messages)
+    assert (
+        "graph_lease_renewal_stage_failed "
+        "operation_stage=TRANSACTION_COMMIT" in joined
+    )
+    assert "exception_class=RuntimeError" in joined
+    _assert_safe_lease_observability(messages)
+
+
+@pytest.mark.asyncio
+async def test_renewal_observability_distinguishes_rollback_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=gateway_module.__name__)
+    gateway = _gateway(
+        pool=_Pool(
+            transaction_exit_error=RuntimeError("PRIVATE_EXCEPTION_DETAIL")
+        ),
+        leases=_Leases([GraphLeaseLostError("PRIVATE_SQL_DETAIL")]),
+        ledger=_Ledger([]),
+    )
+
+    with pytest.raises(RuntimeError, match="PRIVATE_EXCEPTION_DETAIL"):
+        await gateway.renew_execution(_execution(_lease()))
+
+    messages = _lease_observability_messages(
+        caplog,
+        logger_name=gateway_module.__name__,
+    )
+    joined = "\n".join(messages)
+    assert "graph_lease_renewal_stage_failed operation_stage=LEASE_SQL" in joined
+    assert (
+        "graph_lease_renewal_stage_failed "
+        "operation_stage=TRANSACTION_ROLLBACK" in joined
+    )
+    assert "exception_class=RuntimeError" in joined
+    _assert_safe_lease_observability(messages)
+
+
+@pytest.mark.asyncio
+async def test_renewal_observability_distinguishes_control_pool_release_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=gateway_module.__name__)
+    renewed = _lease(revision=2)
+    gateway = _gateway(
+        pool=_Pool(connection_exit_error=RuntimeError("PRIVATE_EXCEPTION_DETAIL")),
+        leases=_Leases([renewed]),
+        ledger=_Ledger([]),
+    )
+
+    with pytest.raises(RuntimeError, match="PRIVATE_EXCEPTION_DETAIL"):
+        await gateway.renew_execution(_execution(_lease()))
+
+    messages = _lease_observability_messages(
+        caplog,
+        logger_name=gateway_module.__name__,
+    )
+    joined = "\n".join(messages)
+    assert (
+        "graph_lease_renewal_stage_succeeded "
+        "operation_stage=TRANSACTION_COMMIT" in joined
+    )
+    assert (
+        "graph_lease_renewal_stage_failed "
+        "operation_stage=CONTROL_POOL_RELEASE" in joined
+    )
+    assert "exception_class=RuntimeError" in joined
+    _assert_safe_lease_observability(messages)
+
+
+@pytest.mark.asyncio
+async def test_renewal_observability_keeps_missing_lease_fail_closed_after_suppression(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=gateway_module.__name__)
+    gateway = _gateway(
+        pool=_Pool(transaction_suppresses_error=True),
+        leases=_Leases([GraphLeaseLostError("PRIVATE_SQL_DETAIL")]),
+        ledger=_Ledger([]),
+    )
+
+    with pytest.raises(GraphContractError, match="lease renewal returned no lease"):
+        await gateway.renew_execution(_execution(_lease()))
+
+    messages = _lease_observability_messages(
+        caplog,
+        logger_name=gateway_module.__name__,
+    )
+    joined = "\n".join(messages)
+    assert "graph_lease_renewal_stage_failed operation_stage=LEASE_SQL" in joined
+    assert (
+        "graph_lease_renewal_stage_succeeded "
+        "operation_stage=CONTROL_POOL_RELEASE" in joined
+    )
+    assert "graph_lease_renewal_stage_failed operation_stage=OPERATION" in joined
+    assert "exception_class=GraphContractError" in joined
+    _assert_safe_lease_observability(messages)
+
+
+@pytest.mark.asyncio
+async def test_renewal_observability_marks_blocked_sql_cancellation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=gateway_module.__name__)
+    renew_started = asyncio.Event()
+
+    class BlockedRenewLeases(_Leases):
+        def __init__(self) -> None:
+            super().__init__([])
+
+        async def renew(self, _connection: Any, **kwargs: Any) -> LeaseRecord:
+            self.calls += 1
+            self.renew_kwargs.append(kwargs)
+            renew_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("blocked renewal unexpectedly resumed")
+
+    gateway = _gateway(
+        pool=_Pool(),
+        leases=BlockedRenewLeases(),
+        ledger=_Ledger([]),
+    )
+    task = asyncio.create_task(gateway.renew_execution(_execution(_lease())))
+    await asyncio.wait_for(renew_started.wait(), timeout=0.1)
+
+    messages_before_cancel = _lease_observability_messages(
+        caplog,
+        logger_name=gateway_module.__name__,
+    )
+    assert messages_before_cancel[-1].startswith(
+        "graph_lease_renewal_stage_started operation_stage=LEASE_SQL"
+    )
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    messages = _lease_observability_messages(
+        caplog,
+        logger_name=gateway_module.__name__,
+    )
+    joined = "\n".join(messages)
+    assert (
+        "graph_lease_renewal_stage_started "
+        "operation_stage=TRANSACTION_ROLLBACK" in joined
+    )
+    assert (
+        "graph_lease_renewal_stage_cancelled operation_stage=LEASE_SQL" in joined
+    )
+    assert (
+        "graph_lease_renewal_stage_succeeded "
+        "operation_stage=TRANSACTION_ROLLBACK" in joined
+    )
+    assert (
+        "graph_lease_renewal_stage_succeeded "
+        "operation_stage=CONTROL_POOL_RELEASE" in joined
+    )
+    assert "graph_lease_renewal_stage_cancelled operation_stage=OPERATION" in joined
+    assert "exception_class=CancelledError" in joined
+    _assert_safe_lease_observability(messages)
 
 
 @pytest.mark.asyncio
@@ -796,4 +1157,158 @@ async def test_real_lease_loss_does_not_start_provider() -> None:
         await provider_request()
 
     assert ledger.provider_calls == 1
+    assert provider_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_hearing_cold_start_flushes_attempt_before_prefetch_and_reaches_one_terminal() -> None:
+    from app.api.graph_stream_service import (
+        ExactShadowExecutorRegistry,
+        GatewayBackedGraphCommandStreamService,
+        GraphStreamAdmissionGate,
+    )
+
+    class StreamGateway:
+        def __init__(self, *, renewal_failure: BaseException | None = None) -> None:
+            self.renewal_failure = renewal_failure
+            self.renew_started = asyncio.Event()
+            self.finished = 0
+            self.cleaned = 0
+
+        async def renew_execution(self, execution: GatewayExecution) -> LeaseRecord:
+            self.renew_started.set()
+            if self.renewal_failure is not None:
+                raise self.renewal_failure
+            renewed_at = datetime.now(timezone.utc)
+            return replace(
+                execution.lease,
+                renewed_at=renewed_at,
+                lease_expires_at=renewed_at + timedelta(seconds=30),
+                revision=execution.lease.revision + 1,
+            )
+
+        async def finish_execution_attempt(
+            self,
+            execution: GatewayExecution,
+            **_kwargs: Any,
+        ) -> GatewayExecution:
+            self.finished += 1
+            return execution
+
+        def cleanup_execution_lease(self, _execution: GatewayExecution) -> None:
+            self.cleaned += 1
+
+    async def service(gateway: StreamGateway) -> GatewayBackedGraphCommandStreamService:
+        gate = GraphStreamAdmissionGate()
+        await gate.start()
+        return GatewayBackedGraphCommandStreamService(
+            gateway=gateway,  # type: ignore[arg-type]
+            executors=ExactShadowExecutorRegistry(),
+            owner_id="hearing-cold-start-owner",
+            admission_gate=gate,
+            lease_renewal_seconds=0.001,
+        )
+
+    execution = _execution(_lease())
+    checkpoints: list[str] = []
+    durable_results: dict[str, str] = {}
+    provider_calls = 0
+    command_id = execution.fence.command_id
+    result_hash = "7" * 64
+
+    async def collect_once(
+        stream_service: GatewayBackedGraphCommandStreamService,
+        gateway: StreamGateway,
+    ) -> list[str]:
+        first_frame_flushed = asyncio.Event()
+
+        async def hearing_no_provider_source():
+            nonlocal provider_calls
+            yield SimpleNamespace(event_type="attempt_started")
+            if not first_frame_flushed.is_set():
+                raise GraphLeaseLostError(
+                    "disconnect cleanup won before attempt_started was observable"
+                )
+            # Scale the observed ten-second cold compile while preserving its ordering:
+            # no provider call, then the first heartbeat and the deterministic graph.
+            import time
+
+            time.sleep(0.01)
+            await asyncio.wait_for(gateway.renew_started.wait(), timeout=0.1)
+            checkpoints.extend(
+                [
+                    "input",
+                    "step:0:proposal",
+                    "step:1:branch:to:project_proposal",
+                    "step:2:terminal",
+                ]
+            )
+            durable_results.setdefault(command_id, result_hash)
+            yield SimpleNamespace(event_type="final", result_hash=result_hash)
+
+        stream = stream_service._renewing_stream(
+            hearing_no_provider_source(),
+            execution,
+        )
+        observed = [(await anext(stream)).event_type]
+
+        async def mark_first_frame_flushed() -> None:
+            await asyncio.sleep(0)
+            first_frame_flushed.set()
+
+        await asyncio.create_task(mark_first_frame_flushed())
+        observed.extend([event.event_type async for event in stream])
+        return observed
+
+    healthy_gateway = StreamGateway()
+    healthy_service = await service(healthy_gateway)
+    assert await collect_once(healthy_service, healthy_gateway) == [
+        "attempt_started",
+        "final",
+    ]
+    assert await collect_once(healthy_service, healthy_gateway) == [
+        "attempt_started",
+        "final",
+    ]
+    assert checkpoints == [
+        "input",
+        "step:0:proposal",
+        "step:1:branch:to:project_proposal",
+        "step:2:terminal",
+    ] * 2
+    assert durable_results == {command_id: result_hash}
+    assert provider_calls == 0
+    assert healthy_gateway.finished == 0
+
+    displaced_gateway = StreamGateway(
+        renewal_failure=GraphLeaseLostError("lease was displaced before terminal")
+    )
+    displaced_service = await service(displaced_gateway)
+
+    async def blocked_source():
+        yield SimpleNamespace(event_type="attempt_started")
+        await asyncio.Event().wait()
+
+    displaced_stream = displaced_service._renewing_stream(
+        blocked_source(),
+        execution,
+    )
+    assert (await anext(displaced_stream)).event_type == "attempt_started"
+    with pytest.raises(GraphLeaseLostError, match="displaced before terminal"):
+        await anext(displaced_stream)
+    assert displaced_gateway.finished == 1
+
+    failing_gateway = StreamGateway()
+    failing_service = await service(failing_gateway)
+
+    async def failing_source():
+        yield SimpleNamespace(event_type="attempt_started")
+        raise RuntimeError("arbitrary Hearing source failure")
+
+    failing_stream = failing_service._renewing_stream(failing_source(), execution)
+    assert (await anext(failing_stream)).event_type == "attempt_started"
+    with pytest.raises(RuntimeError, match="arbitrary Hearing source failure"):
+        await anext(failing_stream)
+    assert failing_gateway.finished == 1
+    assert durable_results == {command_id: result_hash}
     assert provider_calls == 0
