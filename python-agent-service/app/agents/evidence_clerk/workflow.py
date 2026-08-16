@@ -25,16 +25,25 @@ from app.harness.evidence_context_assembler import (
 from app.harness.evidence_asset_loader import EvidenceAssetLoader
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.localization_policy import localize_internal_text
+from app.harness.model_runner import HarnessStreamCompleted, HarnessStreamDelta
 from app.llm import AgentServiceUnavailable
 from app.schemas import (
     EvidenceTurnLlmOutput,
     EvidenceTurnRequest,
     EvidenceTurnResult,
 )
+from app.streaming import VisibleFieldSpec, current_stream_observer
 
 
 LOGGER = logging.getLogger(__name__)
 EVIDENCE_TURN_MODEL_NODE_NAME = "evidence_turn"
+_EVIDENCE_VISIBLE_FIELDS = (
+    VisibleFieldSpec(
+        property_name="room_utterance",
+        field="room_utterance",
+        value_mode="string_prefix",
+    ),
+)
 
 
 class EvidenceTurnGraphState(TypedDict):
@@ -280,10 +289,10 @@ def _async_reason_with_llm_node(
         agent_context = AgentInvocationContext.model_validate(
             assembled.agent_context.model_dump(mode="python")
         )
-        async_invoke = getattr(model_runner, "ainvoke_structured", None)
-        if not callable(async_invoke):
+        stream_invoke = getattr(model_runner, "invoke_structured_stream", None)
+        if not callable(stream_invoke):
             raise AgentServiceUnavailable(
-                "evidence clerk native async model runner is unavailable"
+                "evidence clerk governed structured stream is unavailable"
             )
         try:
             loaded_assets = (
@@ -300,7 +309,11 @@ def _async_reason_with_llm_node(
                 loaded_assets,
                 asset_manifest,
             )
-            generation = await async_invoke(**invocation)
+            generation = await asyncio.to_thread(
+                _consume_evidence_model_stream,
+                stream_invoke,
+                invocation,
+            )
             return {
                 "llm_output": generation.value,
                 "asset_manifest": asset_manifest,
@@ -319,6 +332,57 @@ def _async_reason_with_llm_node(
             raise
 
     return reason_with_llm
+
+
+def _consume_evidence_model_stream(
+    stream_invoke: Any,
+    invocation: dict[str, Any],
+) -> Any:
+    """Bridge one provider stream into the governed Evidence public observer."""
+
+    observer = current_stream_observer()
+    if observer is None:
+        raise AgentServiceUnavailable(
+            "evidence clerk governed public stream observer is unavailable"
+        )
+    generation = None
+    for update in stream_invoke(
+        **invocation,
+        visible_fields=_EVIDENCE_VISIBLE_FIELDS,
+    ):
+        observer.raise_if_cancelled()
+        if isinstance(update, HarnessStreamDelta):
+            if update.field != "room_utterance" or not update.delta:
+                raise AgentServiceUnavailable(
+                    "evidence clerk governed structured stream delta is invalid"
+                )
+            observer.visible_delta(
+                EVIDENCE_TURN_MODEL_NODE_NAME,
+                update.field,
+                update.delta,
+            )
+            continue
+        if isinstance(update, HarnessStreamCompleted):
+            if generation is not None:
+                raise AgentServiceUnavailable(
+                    "evidence clerk governed structured stream completed twice"
+                )
+            generation = update.generation
+            continue
+        raise AgentServiceUnavailable(
+            "evidence clerk governed structured stream update is invalid"
+        )
+    if generation is None:
+        raise AgentServiceUnavailable(
+            "evidence clerk governed structured stream did not complete"
+        )
+    observer.usage(
+        node_name=EVIDENCE_TURN_MODEL_NODE_NAME,
+        model=generation.model,
+        latency_ms=generation.latency_ms,
+        token_usage=generation.token_usage,
+    )
+    return generation
 
 
 def _evidence_model_invocation(
@@ -419,6 +483,7 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
             fact_targets=request.allowed_fact_targets,
             evidence_assessments=evidence_assessments,
             human_review_tasks=human_review_tasks,
+            source_reply=output.room_utterance,
         )
     # 有逐证据评估时采用其平均值；没有评估才回退模型总置信度，最终再夹在 0..1 范围。
     assessment_confidence = (

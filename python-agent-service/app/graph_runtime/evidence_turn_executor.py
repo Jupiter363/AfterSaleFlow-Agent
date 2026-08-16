@@ -326,7 +326,18 @@ class CompiledEvidenceTurnExecutor:
         logical_run_id = execution.admission.command.logical_run_id
         if logical_run_id in self._preview_bridges:
             raise GraphContractError("EVIDENCE_PUBLIC_OUTPUT_RUN_ALREADY_ACTIVE")
-        bridge = _EvidencePreviewBridge(provider_request=provider_request)
+        current_event = provider_request.context_envelope.current_event
+        submission_observation_only = (
+            current_event.event_type == "PARTY_MESSAGE"
+            and current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
+            and bool(current_event.attachment_refs)
+        )
+        bridge = _EvidencePreviewBridge(
+            provider_request=provider_request,
+            policy=EvidencePublicOutputPolicy(
+                submission_observation_only=submission_observation_only
+            ),
+        )
         self._preview_bridges[logical_run_id] = bridge
 
         async def run_checkpointed_turn() -> tuple[_EvidenceTurnState, Mapping[str, Any]]:
@@ -828,6 +839,7 @@ class CompiledEvidenceTurnExecutor:
                 fact_targets=working_set.allowed_fact_targets,
                 evidence_assessments=result.evidence_assessments,
                 human_review_tasks=result.human_review_tasks,
+                source_reply=guarded_source_reply,
             )
             if result.room_utterance != expected_reply:
                 raise GraphContractError(

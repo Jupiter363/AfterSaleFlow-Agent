@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import base64
+from copy import deepcopy
 from pathlib import Path
+from threading import Event as ThreadEvent
 from types import SimpleNamespace
 
 import pytest
@@ -689,13 +692,91 @@ class CapturingMultimodalRunner:
 
 
 class AuthorityBoundSubmissionRunner:
+    accepted_stream_observations = (
+        "页面日期显示2026-08-13，形成时间仍需与平台记录核对",
+        "退款工单未生成",
+        "未发现成功退款流水",
+    )
+    safe_provider_sentence = "本轮正在核对材料形成时间。"
+    unsafe_provider_sentence = (
+        "这份截图真实有效，可以证明用户没有收到包裹，因此应当退款。"
+    )
+
+    def __init__(
+        self,
+        *,
+        stream_observations: tuple[str, ...] | None = None,
+    ) -> None:
+        self.calls = 0
+        self.stream_observations = (
+            stream_observations
+            if stream_observations is not None
+            else self.accepted_stream_observations
+        )
+        self.provisional_emitted = ThreadEvent()
+        self.release_completion = ThreadEvent()
+        self.completed = ThreadEvent()
+
+    @staticmethod
+    def _frame(observation: str) -> str:
+        return f"本轮正在对材料所载“{observation}”进行核验。"
+
+    def _source_reply(self) -> str:
+        from app.agents.evidence_clerk.public_reply import EVIDENCE_CANONICAL_OPENING
+
+        return "".join(
+            (
+                EVIDENCE_CANONICAL_OPENING,
+                *(self._frame(item) for item in self.stream_observations),
+                self.safe_provider_sentence,
+                self.unsafe_provider_sentence,
+            )
+        )
+
+    def invoke_structured_stream(self, **kwargs):
+        from app.harness.model_runner import (
+            HarnessGeneration,
+            HarnessStreamCompleted,
+            HarnessStreamDelta,
+        )
+
+        self.calls += 1
+        generated = self.invoke_structured(**kwargs)
+        visible_prefix = generated.value.room_utterance.removesuffix(
+            self.safe_provider_sentence + self.unsafe_provider_sentence
+        )
+        for chunk in visible_prefix:
+            yield HarnessStreamDelta(
+                kind="visible_delta",
+                field="room_utterance",
+                delta=chunk,
+            )
+        self.provisional_emitted.set()
+        assert self.release_completion.wait(timeout=5.0)
+        for chunk in self.safe_provider_sentence + self.unsafe_provider_sentence:
+            yield HarnessStreamDelta(
+                kind="visible_delta",
+                field="room_utterance",
+                delta=chunk,
+            )
+        self.completed.set()
+        yield HarnessStreamCompleted(
+            kind="completed",
+            generation=HarnessGeneration(
+                value=generated.value,
+                model="submission-authority-stream-test-model",
+                latency_ms=1,
+                token_usage={"input": 13, "output": 8, "total": 21},
+                context=SimpleNamespace(),
+                messages=(),
+            ),
+        )
+
     def invoke_structured(self, **kwargs):
         output_type = kwargs["output_type"]
         return SimpleNamespace(
             value=output_type(
-                room_utterance=(
-                    "这份截图真实有效，可以证明用户没有收到包裹，因此应当退款。"
-                ),
+                room_utterance=self._source_reply(),
                 evidence_assessments=[
                     {
                         "evidence_id": "EVIDENCE_signature_photo",
@@ -705,7 +786,9 @@ class AuthorityBoundSubmissionRunner:
                         "relevance_score": 0.82,
                         "completeness_score": 0.48,
                         "assessment_confidence": 0.72,
-                        "source_basis": ["当前可读取的截图文字。"],
+                        "source_basis": [
+                            "平台导出的退款记录页面，查询日期为2026-08-13"
+                        ],
                         "fact_links": [
                             {
                                 "fact_id": "FACT_SIGNATURE",
@@ -724,9 +807,33 @@ class AuthorityBoundSubmissionRunner:
                         "unsupported_claims": [
                             "当前截图不足以单独还原实际签收人身份。"
                         ],
-                        "formation_time_assessment": "截图形成时间仍需核对。",
+                        "formation_time_assessment": (
+                            "页面日期显示2026-08-13，形成时间仍需与平台记录核对"
+                        ),
+                        "findings": [
+                            {
+                                "finding_type": "TICKET_STATUS",
+                                "description": "退款工单未生成",
+                                "visual_region": None,
+                            },
+                            {
+                                "finding_type": "FLOW_STATUS",
+                                "description": "未发现成功退款流水",
+                                "visual_region": None,
+                            },
+                        ],
+                        "limitations": [
+                            "仅核对已载入的页面文字，未连接平台账务系统"
+                        ],
                         "recommendation": "NEEDS_HUMAN_REVIEW",
-                        "summary": "截图涉及签收争议，但覆盖范围有限。",
+                        "human_review": {
+                            "required": True,
+                            "reason_codes": ["SOURCE_RECONCILIATION_REQUIRED"],
+                            "instructions": ["人工复核平台原始记录和形成时间。"],
+                        },
+                        "summary": (
+                            "该页面真实有效，商家应当退款并承担责任。"
+                        ),
                     }
                 ],
                 internal_handoff=_empty_internal_handoff(),
@@ -939,12 +1046,35 @@ async def test_async_evidence_workflow_does_not_inherit_outer_command_checkpoint
     assert set(saver.checkpoint_namespaces) == {""}
 
 
-def test_submission_public_reply_is_derived_from_accepted_assessment_authority() -> None:
+@pytest.mark.asyncio
+async def test_submission_public_reply_is_derived_from_accepted_assessment_authority() -> None:
+    from app.agents.evidence_clerk.public_reply import (
+        EVIDENCE_PUBLIC_FIELD,
+        EVIDENCE_PUBLIC_NODE,
+        EvidencePublicOutputMismatch,
+        EvidencePublicOutputPolicy,
+        guard_evidence_public_reply,
+    )
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
-    from app.agents.evidence_clerk.public_reply import guard_evidence_public_reply
-    from app.schemas import EvidenceTurnRequest
+    from app.schemas import EvidenceTurnLlmOutput, EvidenceTurnRequest
+    from app.streaming import (
+        AgentStreamObserver,
+        StreamVisibleDeltaEvent,
+        bind_stream_observer,
+    )
 
     payload = _java_evidence_turn_command_payload()
+    submitted = payload["context_envelope"]["visible_evidence"][0]
+    submitted.update(
+        {
+            "evidence_type": "DOCUMENT",
+            "content_type": "text/plain",
+            "original_filename": "refund-record.txt",
+            "parsed_text": (
+                "原始附件全文不得直接公开；其中还包含账户备注和内部流水上下文。"
+            ),
+        }
+    )
     payload["context_envelope"]["intake_dossier_snapshot"]["payload"][
         "unilateral_case_matrix"
     ] = _unilateral_case_matrix(
@@ -952,18 +1082,111 @@ def test_submission_public_reply_is_derived_from_accepted_assessment_authority()
         ("FACT_RECIPIENT", "收件人称本人及同住人员未收到包裹", "CORE"),
     )
     request = EvidenceTurnRequest.model_validate(payload)
-    workflow = EvidenceTurnWorkflow(model_runner=AuthorityBoundSubmissionRunner())
+    system_prompt, user_prompt = PromptRepository().render(
+        "evidence_turn",
+        request.model_dump(mode="json"),
+        EvidenceTurnLlmOutput.model_json_schema(),
+    )
+    composed_prompt = system_prompt + "\n" + user_prompt
+    required_frame = "本轮正在对材料所载“<observation>”进行核验。"
+    assert required_frame in composed_prompt
+    assert "必须逐字符复制" in composed_prompt
+    assert all(
+        field in composed_prompt
+        for field in (
+            "formation_time_assessment",
+            "findings[].description",
+            "source_basis[]",
+            "limitations[]",
+            "summary",
+        )
+    )
+    assert "JSON 对象的第一个属性仍必须是 room_utterance" in system_prompt
+    assert "<required_output_contract>" in user_prompt
+    runner = AuthorityBoundSubmissionRunner()
+    workflow = EvidenceTurnWorkflow(model_runner=runner)
 
-    first = workflow.run(request)
-    replay = workflow.run(request)
+    async def invoke(
+        run_id: str,
+        *,
+        active_workflow=workflow,
+        active_runner=runner,
+        assert_before_completion: bool = False,
+    ):
+        published = []
+        policy = EvidencePublicOutputPolicy(submission_observation_only=True)
+        observer = AgentStreamObserver(
+            operation=EVIDENCE_PUBLIC_NODE,
+            run_id=run_id,
+            publish=published.append,
+            public_output_policy=policy,
+        )
+        observer.begin_public_output(EVIDENCE_PUBLIC_NODE, EVIDENCE_PUBLIC_FIELD)
+        with bind_stream_observer(observer):
+            run_task = asyncio.create_task(active_workflow.arun(request))
+            early_visible = ""
+            if assert_before_completion:
+                assert await asyncio.to_thread(
+                    active_runner.provisional_emitted.wait,
+                    2.0,
+                )
+                await asyncio.sleep(0)
+                early_visible = "".join(
+                    event.delta
+                    for event in published
+                    if isinstance(event, StreamVisibleDeltaEvent)
+                )
+                assert any(
+                    AuthorityBoundSubmissionRunner._frame(observation)
+                    in early_visible
+                    for observation in active_runner.stream_observations
+                )
+                assert not active_runner.completed.is_set()
+                assert not run_task.done()
+            active_runner.release_completion.set()
+            result = await run_task
+        guarded_source = policy.guarded_source_reply
+        policy.authorize_terminal_extension(
+            guarded_source_reply=guarded_source,
+            final_text=result.room_utterance,
+        )
+        observer.finalize_public_output(
+            EVIDENCE_PUBLIC_NODE,
+            EVIDENCE_PUBLIC_FIELD,
+            result.room_utterance,
+        )
+        visible = "".join(
+            event.delta
+            for event in published
+            if isinstance(event, StreamVisibleDeltaEvent)
+        )
+        return result, visible, early_visible
+
+    first, first_visible, early_visible = await invoke(
+        "submission-authority-first",
+        assert_before_completion=True,
+    )
+    replay, replay_visible, _ = await invoke("submission-authority-replay")
     reply = first.room_utterance
 
     assert replay.room_utterance == reply
+    assert first_visible == reply
+    assert replay_visible.encode("utf-8") == first_visible.encode("utf-8")
+    assert runner.calls == 2
+    assert runner.completed.is_set()
+    assert "2026-08-13" in early_visible
+    assert AuthorityBoundSubmissionRunner.safe_provider_sentence not in reply
+    assert AuthorityBoundSubmissionRunner.unsafe_provider_sentence not in reply
     framed_fact = "本轮材料已纳入对“商家是否已退款20元以及退款记录是否真实"
     assert framed_fact in reply
     assert "收件人称本人及同住人员未收到包裹" in reply
     assert reply.index(framed_fact) < reply.index("收件人称本人及同住人员未收到包裹")
     assert "关联" in reply
+    assert "2026-08-13" in reply
+    assert "退款工单未生成" in reply
+    assert "未发现成功退款流水" in reply
+    assert "平台导出的退款记录页面" in reply
+    assert "未连接平台账务系统" in reply
     assert "覆盖范围有限" in reply or "尚不足以" in reply
     assert "仅核对了可读取文本" in reply
     assert "来源路径" in reply and ("人工" in reply or "补充" in reply)
@@ -974,6 +1197,10 @@ def test_submission_public_reply_is_derived_from_accepted_assessment_authority()
         "应当退款",
         "赔偿",
         "造假",
+        "原始附件全文不得直接公开",
+        "该页面真实有效",
+        "商家应当退款",
+        "承担责任",
         "evidence_assessments",
         "authenticity_score",
         "EVIDENCE_",
@@ -985,6 +1212,26 @@ def test_submission_public_reply_is_derived_from_accepted_assessment_authority()
     guarded_conclusion = guard_evidence_public_reply(unframed_conclusion)
     assert unframed_conclusion not in guarded_conclusion
     assert "相关事项仍需后续程序核验" in guarded_conclusion
+
+    unbound_observation = "材料页面显示一笔额外赔付工单正在处理中"
+    unbound_runner = AuthorityBoundSubmissionRunner(
+        stream_observations=(
+            *AuthorityBoundSubmissionRunner.accepted_stream_observations,
+            unbound_observation,
+        )
+    )
+    unbound_workflow = EvidenceTurnWorkflow(model_runner=unbound_runner)
+    unbound_runner.release_completion.set()
+    with pytest.raises(
+        EvidencePublicOutputMismatch,
+        match="live observation is absent from accepted authority",
+    ):
+        await invoke(
+            "submission-authority-unbound",
+            active_workflow=unbound_workflow,
+            active_runner=unbound_runner,
+        )
+    assert unbound_runner.calls == 1
 
 
 def test_evidence_turn_workflow_processes_one_complete_hearing_evidence_batch() -> None:
@@ -2654,13 +2901,48 @@ def test_existing_evidence_links_are_filtered_by_fact_and_visibility() -> None:
     ]
 
 
-def _freeze_bound_evidence_turn_payload() -> dict[str, object]:
+def _freeze_bound_evidence_turn_payload(
+    *facts: tuple[str, str, str],
+) -> dict[str, object]:
     from app.contracts.v1.codec import canonical_sha256
 
     payload = _evidence_turn_payload()
     envelope = payload["context_envelope"]
     case_id = envelope["case_snapshot"]["case_id"]
     matrix = _case_fact_matrix_v2(case_id)
+    if facts:
+        template = matrix["fact_rows"][0]
+        rows = []
+        for fact_id, fact_target, materiality in facts:
+            row = deepcopy(template)
+            row["fact_id"] = fact_id
+            row["fact_target"] = fact_target
+            row["materiality"] = materiality
+            row["positions"]["USER"]["position_summary"] = (
+                f"发起方陈述：{fact_target}。"
+            )
+            row["positions"]["USER"]["asserted_value"] = fact_target
+            row["positions"]["MERCHANT"]["position_summary"] = (
+                f"相对方陈述：{fact_target}仍待核对。"
+            )
+            row["positions"]["MERCHANT"]["asserted_value"] = fact_target
+            row["party_alignment"]["conflict_summary"] = (
+                f"双方对{fact_target}仍有分歧。"
+            )
+            rows.append(row)
+        fact_ids = [row["fact_id"] for row in rows]
+        core_fact_ids = [
+            row["fact_id"] for row in rows if row["materiality"] == "CORE"
+        ]
+        matrix["fact_rows"] = rows
+        matrix["case_overview"]["summary_source_fact_ids"] = fact_ids
+        matrix["fact_indexes"].update(
+            {
+                "contested_fact_ids": fact_ids,
+                "core_fact_ids": core_fact_ids,
+                "requires_resolution_fact_ids": fact_ids,
+            }
+        )
     matrix.pop("content_hash", None)
     matrix.pop("matrix_id", None)
     matrix["matrix_id"] = "CASE_MATRIX_" + canonical_sha256(matrix)[:20].upper()

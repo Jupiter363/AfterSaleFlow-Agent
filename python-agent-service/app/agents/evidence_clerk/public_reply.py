@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 import re
 
 from app.harness.localization_policy import localize_internal_text
+from app.streaming import STREAM_MAX_VISIBLE_OUTPUT_CHARS
 
 
 EVIDENCE_PUBLIC_NODE = "evidence_turn"
@@ -51,6 +52,19 @@ _PROVISIONAL_FACT_OBJECT_FRAME_ZH = re.compile(
     r"“(?P<object>[^”]{1,1000})”"
     r"(?:的)?(?:关联性核对|核验|核对)(?:范围)?[。！？!?]$"
 )
+_ASSESSMENT_OBSERVATION_FRAME_ZH = re.compile(
+    r"^已验收评估记录的待复核观察为“(?P<object>[^”]{1,1000})”"
+    r"的材料内容核对[。！？!?]$"
+)
+_SUBMISSION_PROVISIONAL_OBSERVATION_FRAME_ZH = re.compile(
+    r"^本轮正在对材料所载“(?P<object>[^”]{1,1000})”进行核验。$"
+)
+_UNSAFE_ASSERTION_OR_DIRECTIVE_ZH = re.compile(
+    r"(?:责任|担责|过错|归责|造假|伪造|属实|真实有效|证据充分|"
+    r"(?:应当|应该|必须|需要|建议|要求|责令|决定|支持|同意|拒绝)"
+    r".{0,24}(?:退(?:款|货|费)|返款|赔偿|补偿|承担|负责))"
+)
+_ISO_CALENDAR_DATE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
 
 
 class EvidencePublicOutputPolicyError(RuntimeError):
@@ -101,9 +115,19 @@ def compose_evidence_opening_public_reply(
     if source_body.endswith(_RESPONSIBILITY_DISCLAIMER):
         source_body = source_body[: -len(_RESPONSIBILITY_DISCLAIMER)]
 
+    targets = tuple(fact_targets)
+    core_targets = tuple(
+        target
+        for target in targets
+        if str(target.get("materiality") or "") == "CORE"
+    )
+    if len(core_targets) > 100:
+        raise EvidencePublicOutputPolicyError(
+            "Evidence opening fact authority exceeds the governed limit"
+        )
     facts = _opening_items(
-        (target.get("fact") for target in fact_targets),
-        limit=3,
+        (target.get("fact") for target in core_targets),
+        limit=100,
     )
     questions = _opening_items(
         (
@@ -125,8 +149,7 @@ def compose_evidence_opening_public_reply(
         )
 
     fact_sentences = "".join(
-        f"待核验事实{index}：{_as_sentence(fact)}"
-        for index, fact in enumerate(facts, start=1)
+        f"待核验事项为“{fact}”的关联性核对。" for fact in facts
     )
     request_sentences = "".join(
         f"具体补充要求{index}：{_as_sentence(question)}"
@@ -138,7 +161,7 @@ def compose_evidence_opening_public_reply(
         + request_sentences
         + _RESPONSIBILITY_DISCLAIMER
     )
-    return guard_evidence_public_reply(composed)
+    return _guard_composed_reply(composed)
 
 
 def compose_evidence_submission_public_reply(
@@ -146,6 +169,7 @@ def compose_evidence_submission_public_reply(
     fact_targets: Iterable[Mapping[str, object]],
     evidence_assessments: Iterable[object],
     human_review_tasks: Iterable[Mapping[str, object]],
+    source_reply: str | None = None,
 ) -> str:
     """Derive a submission reply only from accepted assessment authority."""
 
@@ -192,6 +216,23 @@ def compose_evidence_submission_public_reply(
         bool(_authority_value(_authority_value(assessment, "human_review"), "required"))
         for assessment in assessments
     )
+    observations = _assessment_observations(assessments)
+    live_observations = _submission_live_observations(source_reply or "")
+    observation_set = set(observations)
+    if any(observation not in observation_set for observation in live_observations):
+        raise EvidencePublicOutputMismatch(
+            "Evidence submission live observation is absent from accepted authority"
+        )
+    live_set = set(live_observations)
+    live_observation_sentences = "".join(
+        _submission_observation_frame(observation)
+        for observation in live_observations
+    )
+    missing_observation_sentences = "".join(
+        f"已验收评估记录的待复核观察为“{observation}”的材料内容核对。"
+        for observation in observations
+        if observation not in live_set
+    )
 
     coverage_sentence = (
         "现有内容覆盖范围有限，尚不足以单独还原完整事实经过。"
@@ -208,11 +249,13 @@ def compose_evidence_submission_public_reply(
         if review_required
         else "请补充清晰原件、形成时间和来源路径，以便继续核对。"
     )
-    return guard_evidence_public_reply(
+    return _guard_composed_reply(
         "".join(
             (
                 EVIDENCE_CANONICAL_OPENING,
+                live_observation_sentences,
                 f"本轮材料已纳入对“{subject}”的关联性核对。",
+                missing_observation_sentences,
                 "当前材料可用于核对相关记录内容和时间信息。",
                 coverage_sentence,
                 "材料来源路径、形成时间和原始载体的一致性仍需按程序复核。",
@@ -227,13 +270,14 @@ def compose_evidence_submission_public_reply(
 class EvidencePublicOutputPolicy:
     """Release only complete guarded Evidence sentences from one JSON field."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, submission_observation_only: bool = False) -> None:
         self._source_text = ""
         self._visible_text = ""
         self._examined_sentence_count = 0
         self._live_release_blocked = False
         self._bootstrapped = False
         self._authorized_terminal_text: str | None = None
+        self._submission_observation_only = submission_observation_only
 
     @property
     def source_observed(self) -> bool:
@@ -319,6 +363,17 @@ class EvidencePublicOutputPolicy:
                 self._bootstrapped
                 and localized_sentence.strip() == EVIDENCE_CANONICAL_OPENING
             ):
+                continue
+            if self._submission_observation_only:
+                frame = _SUBMISSION_PROVISIONAL_OBSERVATION_FRAME_ZH.fullmatch(
+                    localized_sentence.strip()
+                )
+                if frame is None or _sentence_violates_public_boundary(
+                    localized_sentence.strip()
+                ):
+                    continue
+                self._visible_text += localized_sentence
+                public_deltas.append(localized_sentence)
                 continue
             if self._live_release_blocked or not _is_independently_safe_sentence(
                 localized_sentence
@@ -426,6 +481,71 @@ def _authority_items(value: object, field: str) -> tuple[object, ...]:
     return ()
 
 
+def _assessment_observations(assessments: tuple[object, ...]) -> tuple[str, ...]:
+    values: list[object] = []
+    for assessment in assessments:
+        values.append(_authority_value(assessment, "formation_time_assessment"))
+        values.extend(
+            _authority_value(finding, "description")
+            for finding in _authority_items(assessment, "findings")
+        )
+        values.extend(_authority_items(assessment, "source_basis"))
+        values.extend(_authority_items(assessment, "limitations"))
+        values.append(_authority_value(assessment, "summary"))
+    observations: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or "\n" in value
+            or "\r" in value
+            or any(quote in value for quote in "\"'“”‘’")
+            or any(mark in value for mark in "。！？!?")
+            or len(value) > 1000
+            or value in seen
+        ):
+            continue
+        observations.append(value)
+        seen.add(value)
+        if len(observations) >= 12:
+            break
+    return tuple(observations)
+
+
+def _submission_live_observations(source_reply: str) -> tuple[str, ...]:
+    observations: list[str] = []
+    for sentence, complete in _sentence_segments(localize_internal_text(source_reply)):
+        if not complete:
+            continue
+        frame = _SUBMISSION_PROVISIONAL_OBSERVATION_FRAME_ZH.fullmatch(
+            sentence.strip()
+        )
+        if frame is None or _sentence_violates_public_boundary(sentence.strip()):
+            continue
+        observation = frame.group("object")
+        if observation in observations:
+            raise EvidencePublicOutputMismatch(
+                "Evidence submission live observation is duplicated"
+            )
+        observations.append(observation)
+    return tuple(observations)
+
+
+def _submission_observation_frame(observation: str) -> str:
+    return f"本轮正在对材料所载“{observation}”进行核验。"
+
+
+def _guard_composed_reply(text: str) -> str:
+    guarded = guard_evidence_public_reply(text)
+    if len(guarded) > STREAM_MAX_VISIBLE_OUTPUT_CHARS:
+        raise EvidencePublicOutputPolicyError(
+            "Evidence composed public output exceeds the governed limit"
+        )
+    return guarded
+
+
 def _as_sentence(text: str) -> str:
     return text if text[-1] in "。！？!?" else text + "。"
 
@@ -461,7 +581,17 @@ def _guard_terminal_sentence(sentence: str) -> str:
 def _sentence_violates_public_boundary(sentence: str) -> bool:
     conclusion_scan = sentence
     framed_object = _PROVISIONAL_FACT_OBJECT_FRAME_ZH.fullmatch(sentence)
-    if framed_object is not None:
+    if framed_object is None:
+        framed_object = _ASSESSMENT_OBSERVATION_FRAME_ZH.fullmatch(sentence)
+    if framed_object is None:
+        framed_object = _SUBMISSION_PROVISIONAL_OBSERVATION_FRAME_ZH.fullmatch(
+            sentence
+        )
+    if (
+        framed_object is not None
+        and _UNSAFE_ASSERTION_OR_DIRECTIVE_ZH.search(framed_object.group("object"))
+        is None
+    ):
         conclusion_scan = sentence.replace(
             framed_object.group("object"),
             "待核验事实对象",
@@ -474,7 +604,8 @@ def _sentence_violates_public_boundary(sentence: str) -> bool:
 
 
 def _contains_non_public_language_or_machine_syntax(sentence: str) -> bool:
-    for character in sentence:
+    normalized = _ISO_CALENDAR_DATE.sub("日期", sentence)
+    for character in normalized:
         if (
             "\u4e00" <= character <= "\u9fff"
             or "0" <= character <= "9"

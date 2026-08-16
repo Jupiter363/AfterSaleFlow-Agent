@@ -106,6 +106,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     from copy import deepcopy
     from dataclasses import replace
     from pathlib import Path
+    from threading import Event as ThreadEvent
     from types import SimpleNamespace
 
     from langgraph.checkpoint.memory import InMemorySaver
@@ -120,14 +121,21 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     from app.agents.evidence_clerk.public_reply import (
         EVIDENCE_CANONICAL_OPENING,
         EvidencePublicOutputMismatch,
+        EvidencePublicOutputPolicyError,
+        compose_evidence_opening_public_reply,
         compose_evidence_submission_public_reply,
         guard_evidence_public_reply,
     )
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.harness.model_runner import (
+        HarnessGeneration,
+        HarnessStreamCompleted,
+        HarnessStreamDelta,
+    )
     from app.schemas import EvidenceTurnRequest, EvidenceTurnResult
     from app.security.graph_runtime import GraphSecurityRuntime
-    from app.streaming import current_stream_observer
+    from app.streaming import STREAM_MAX_VISIBLE_OUTPUT_CHARS, current_stream_observer
     from app.llm import LiteLlmProxyClient
 
     helper_module = runpy.run_path(
@@ -152,8 +160,11 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     dossier["case_fact_matrix"] = helper_module["_case_fact_matrix_v2"]()
 
     safe_prefix = EVIDENCE_CANONICAL_OPENING
+    arbitrary_safe_submission_sentence = "本轮正在核对材料形成时间。"
     risky_sentence = "不判断责任但实际由商家承担。"
-    raw_room_utterance = safe_prefix + risky_sentence
+    raw_room_utterance = (
+        safe_prefix + arbitrary_safe_submission_sentence + risky_sentence
+    )
     guarded_room_utterance = guard_evidence_public_reply(raw_room_utterance)
     submission_working_set = EvidenceContextAssembler().assemble(
         EvidenceTurnRequest.model_validate(request_document)
@@ -229,6 +240,11 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             observer.visible_delta(
                 "evidence_turn",
                 "room_utterance",
+                arbitrary_safe_submission_sentence,
+            )
+            observer.visible_delta(
+                "evidence_turn",
+                "room_utterance",
                 risky_sentence[:-2],
             )
             self.sensitive_prefix_submitted.set()
@@ -243,8 +259,12 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             self.completed.set()
             return result
 
+    provider_substantive = (
+        "本轮核验对象为“商家是否已退款20元”的关联性核对。"
+    )
+    provider_unsafe = "该记录真实有效，商家应当退款并承担责任。"
     generic_opening_room_utterance = (
-        EVIDENCE_CANONICAL_OPENING + "请补充关键证据材料。"
+        EVIDENCE_CANONICAL_OPENING + provider_substantive + provider_unsafe
     )
     opening_questions = (
         "请提供完整物流签收底单，并保留签收人和签收时间。",
@@ -255,19 +275,30 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     class MatrixSpecificOpeningRunner:
         def __init__(self) -> None:
             self.calls = 0
+            self.substantive_emitted = ThreadEvent()
+            self.release_completion = ThreadEvent()
+            self.completed = ThreadEvent()
 
-        async def ainvoke_structured(self, **kwargs):
+        def invoke_structured_stream(self, **kwargs):
             self.calls += 1
-            observer = current_stream_observer()
-            assert observer is not None
-            observer.visible_delta(
-                "evidence_turn",
-                "room_utterance",
-                generic_opening_room_utterance,
-            )
-            FakeFormalWorkflow.publish_usage(observer)
             output_type = kwargs["output_type"]
-            return SimpleNamespace(
+            visible_prefix = EVIDENCE_CANONICAL_OPENING + provider_substantive
+            for index, chunk in enumerate(visible_prefix):
+                if index == len(visible_prefix) - 1:
+                    self.substantive_emitted.set()
+                yield HarnessStreamDelta(
+                    kind="visible_delta",
+                    field="room_utterance",
+                    delta=chunk,
+                )
+            assert self.release_completion.wait(timeout=2.0)
+            for chunk in provider_unsafe:
+                yield HarnessStreamDelta(
+                    kind="visible_delta",
+                    field="room_utterance",
+                    delta=chunk,
+                )
+            generation = HarnessGeneration(
                 value=output_type(
                     room_utterance=generic_opening_room_utterance,
                     evidence_requests=[
@@ -293,8 +324,15 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                         "judge_attention_points": [],
                     },
                     confidence=0.8,
-                )
+                ),
+                model="formal-evidence-stream-test-model",
+                latency_ms=1,
+                token_usage={"input": 11, "output": 7, "total": 18},
+                context=SimpleNamespace(),
+                messages=(),
             )
+            self.completed.set()
+            yield HarnessStreamCompleted(kind="completed", generation=generation)
 
     class FencedMemorySaver(InMemorySaver):
         def __init__(self) -> None:
@@ -479,9 +517,15 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     store = ObjectStore(invocation_payload)
     room_exchange = RoomExchange()
     room_exchange.stores[command.domain_snapshot_ref.sha256] = store
+    unused_hearing_decoder = SimpleNamespace(
+        decode=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Evidence selector must not decode a Hearing invocation")
+        )
+    )
     provider_factory = TargetE2ESpecializedRoomProviderFactory(
         security_runtime=object.__new__(GraphSecurityRuntime),
         room_exchange=room_exchange,
+        hearing_decoder=unused_hearing_decoder,
     ).with_evidence_workflow(workflow)
     providers = tuple(
         provider_factory(
@@ -535,6 +579,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         if event.event_type == "visible_delta"
     ) == submission_room_utterance
     assert submission_room_utterance.count(EVIDENCE_CANONICAL_OPENING) == 1
+    assert arbitrary_safe_submission_sentence not in submission_room_utterance
     assert risky_sentence not in submission_room_utterance
     assert guarded_room_utterance != submission_room_utterance
     assert all(
@@ -830,6 +875,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             TargetE2ESpecializedRoomProviderFactory(
                 security_runtime=object.__new__(GraphSecurityRuntime),
                 room_exchange=room_exchange,
+                hearing_decoder=unused_hearing_decoder,
             )
             .with_evidence_workflow(failure_workflow)(
                 SimpleNamespace(saver=failure_saver, durable_bulkhead=object())
@@ -901,9 +947,16 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         tampered, "EVIDENCE_TURN_INVOCATION_BINDING_INVALID"
     )
 
+    opening_facts = (
+        ("FACT_SIGNATURE", "包裹是否由用户本人签收", "CORE"),
+        ("FACT_REFUND", "商家是否已退款20元", "CORE"),
+        ("FACT_COMMITMENT", "商家关于退款时间的承诺是否存在", "CORE"),
+        ("FACT_TICKET", "退款工单是否已经生成", "CORE"),
+        ("FACT_FLOW", "是否存在成功退款流水", "CORE"),
+    )
     opening_request_document = helper_module[
         "_freeze_bound_evidence_turn_payload"
-    ]()
+    ](*opening_facts)
     opening_request_document["context_envelope"]["current_event"] = deepcopy(
         helper_module["_java_evidence_opening_command_payload"]()[
             "context_envelope"
@@ -998,6 +1051,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         TargetE2ESpecializedRoomProviderFactory(
             security_runtime=object.__new__(GraphSecurityRuntime),
             room_exchange=room_exchange,
+            hearing_decoder=unused_hearing_decoder,
         )
         .with_evidence_workflow(opening_workflow)(
             SimpleNamespace(
@@ -1008,10 +1062,16 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     )[0]
     opening_calls_before = opening_runner.calls
 
-    opening_first = [
-        event
-        async for event in opening_provider.stream(opening_execution)
-    ]
+    opening_stream = opening_provider.stream(opening_execution).__aiter__()
+    opening_first = [await anext(opening_stream), await anext(opening_stream)]
+    substantive_event = await asyncio.wait_for(anext(opening_stream), timeout=1.0)
+    opening_first.append(substantive_event)
+    assert substantive_event.event_type == "visible_delta"
+    assert substantive_event.payload.delta == provider_substantive
+    assert opening_runner.substantive_emitted.is_set()
+    assert not opening_runner.completed.is_set()
+    opening_runner.release_completion.set()
+    opening_first.extend([event async for event in opening_stream])
     opening_replay = [
         event
         async for event in opening_provider.stream(opening_execution)
@@ -1030,9 +1090,32 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         for event in opening_first
         if event.event_type == "visible_delta"
     )
-    assert "包裹是否由用户本人签收" in opening_visible_text
+    for _fact_id, fact_target, _materiality in opening_facts:
+        assert fact_target in opening_visible_text
     for question in opening_questions:
         assert question in opening_visible_text
+    assert len(opening_visible_text) <= STREAM_MAX_VISIBLE_OUTPUT_CHARS
+    assert provider_unsafe not in opening_visible_text
+    assert "真实有效" not in opening_visible_text
+    assert "应当退款" not in opening_visible_text
+    assert "承担责任" not in opening_visible_text
+    assert opening_runner.completed.is_set()
+    with pytest.raises(
+        EvidencePublicOutputPolicyError,
+        match="fact authority exceeds the governed limit",
+    ):
+        compose_evidence_opening_public_reply(
+            EVIDENCE_CANONICAL_OPENING,
+            fact_targets=(
+                {
+                    "fact_id": f"FACT_BOUND_{index}",
+                    "fact": f"第{index}项冻结核心事实",
+                    "materiality": "CORE",
+                }
+                for index in range(101)
+            ),
+            evidence_requests=(),
+        )
     opening_proposal = json.loads(opening_store.puts[0]["payload"])
     assert opening_proposal["room_utterance"] == opening_visible_text
     assert (
