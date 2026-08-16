@@ -26,6 +26,8 @@ from app.agents.evidence_clerk.public_reply import (
     EVIDENCE_PUBLIC_NODE,
     EvidencePublicOutputPolicy,
     compose_evidence_opening_public_reply,
+    compose_evidence_submission_public_reply,
+    derive_submission_observation_authority,
 )
 from app.contracts.v1.models import (
     AgentStreamEvent,
@@ -198,6 +200,7 @@ class _EvidencePreviewBridge:
     loop: asyncio.AbstractEventLoop = field(default_factory=asyncio.get_running_loop)
     lock: Lock = field(default_factory=Lock)
     observer: AgentStreamObserver | None = None
+    observed_usage: list[Any] = field(default_factory=list)
     pending_chars: int = 0
     completed: bool = False
     wake_scheduled: bool = False
@@ -327,18 +330,44 @@ class CompiledEvidenceTurnExecutor:
         if logical_run_id in self._preview_bridges:
             raise GraphContractError("EVIDENCE_PUBLIC_OUTPUT_RUN_ALREADY_ACTIVE")
         current_event = provider_request.context_envelope.current_event
-        submission_observation_only = (
+        is_submission = (
             current_event.event_type == "PARTY_MESSAGE"
             and current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
             and bool(current_event.attachment_refs)
         )
+        submission_observation_authority = (
+            derive_submission_observation_authority(
+                visible_evidence=provider_request.context_envelope.visible_evidence,
+                attachment_refs=current_event.attachment_refs,
+            )
+            if is_submission
+            else None
+        )
         bridge = _EvidencePreviewBridge(
             provider_request=provider_request,
             policy=EvidencePublicOutputPolicy(
-                submission_observation_only=submission_observation_only
+                submission_observation_authority=submission_observation_authority
             ),
         )
         self._preview_bridges[logical_run_id] = bridge
+
+        def publish(event: PublicStreamEvent) -> None:
+            if isinstance(event, StreamVisibleDeltaEvent):
+                bridge.publish(event)
+            else:
+                bridge.observed_usage.append(event)
+
+        observer = AgentStreamObserver(
+            operation="evidence_turn",
+            run_id=provider_request.agent_context.agent_invocation_id,
+            publish=publish,
+            public_output_policy=bridge.policy,
+        )
+        bridge.bind(observer)
+        observer.begin_public_output(
+            EVIDENCE_PUBLIC_NODE,
+            EVIDENCE_PUBLIC_FIELD,
+        )
 
         async def run_checkpointed_turn() -> tuple[_EvidenceTurnState, Mapping[str, Any]]:
             try:
@@ -450,18 +479,26 @@ class CompiledEvidenceTurnExecutor:
         )
 
         if not bridge.policy.source_observed:
-            for offset in range(0, len(result.room_utterance), _MAX_VISIBLE_DELTA):
-                yield self._event(
-                    execution,
-                    sequence,
-                    "visible_delta",
-                    AgentStreamPayload(
-                        node=_NODE,
-                        field="room_utterance",
-                        delta=result.room_utterance[offset : offset + _MAX_VISIBLE_DELTA],
-                    ),
-                )
-                sequence += 1
+            replay_deltas = bridge.policy.finalize(
+                operation=EVIDENCE_PUBLIC_NODE,
+                node_name=EVIDENCE_PUBLIC_NODE,
+                field_name=EVIDENCE_PUBLIC_FIELD,
+                final_text=result.room_utterance,
+                allow_canonical_fallback=True,
+            )
+            for replay_delta in replay_deltas:
+                for offset in range(0, len(replay_delta), _MAX_VISIBLE_DELTA):
+                    yield self._event(
+                        execution,
+                        sequence,
+                        "visible_delta",
+                        AgentStreamPayload(
+                            node=_NODE,
+                            field="room_utterance",
+                            delta=replay_delta[offset : offset + _MAX_VISIBLE_DELTA],
+                        ),
+                    )
+                    sequence += 1
         yield self._event(
             execution,
             sequence,
@@ -774,25 +811,9 @@ class CompiledEvidenceTurnExecutor:
         if bridge is None:
             raise GraphContractError("EVIDENCE_PUBLIC_OUTPUT_BRIDGE_UNAVAILABLE")
         provider_request = bridge.provider_request
-        observed_usage: list[Any] = []
-
-        def publish(event: PublicStreamEvent) -> None:
-            if isinstance(event, StreamVisibleDeltaEvent):
-                bridge.publish(event)
-            else:
-                observed_usage.append(event)
-
-        observer = AgentStreamObserver(
-            operation="evidence_turn",
-            run_id=provider_request.agent_context.agent_invocation_id,
-            publish=publish,
-            public_output_policy=bridge.policy,
-        )
-        bridge.bind(observer)
-        observer.begin_public_output(
-            EVIDENCE_PUBLIC_NODE,
-            EVIDENCE_PUBLIC_FIELD,
-        )
+        observer = bridge.observer
+        if observer is None:
+            raise GraphContractError("EVIDENCE_PUBLIC_OUTPUT_OBSERVER_UNAVAILABLE")
         with bind_stream_observer(observer):
             result = EvidenceTurnResult.model_validate(
                 await self._workflow.arun(provider_request)
@@ -827,19 +848,28 @@ class CompiledEvidenceTurnExecutor:
             and provider_request.context_envelope.current_event.attachment_refs
             and bridge.policy.source_observed
         ):
-            from app.agents.evidence_clerk.public_reply import (
-                compose_evidence_submission_public_reply,
-            )
-
             guarded_source_reply = bridge.policy.guarded_source_reply
             working_set = EvidenceContextAssembler().assemble(
                 provider_request
             ).working_set
+            submission_observation_authority = (
+                derive_submission_observation_authority(
+                    visible_evidence=(
+                        provider_request.context_envelope.visible_evidence
+                    ),
+                    attachment_refs=(
+                        provider_request.context_envelope.current_event.attachment_refs
+                    ),
+                )
+            )
             expected_reply = compose_evidence_submission_public_reply(
                 fact_targets=working_set.allowed_fact_targets,
                 evidence_assessments=result.evidence_assessments,
                 human_review_tasks=result.human_review_tasks,
                 source_reply=guarded_source_reply,
+                submission_observation_authority=(
+                    submission_observation_authority
+                ),
             )
             if result.room_utterance != expected_reply:
                 raise GraphContractError(
@@ -860,7 +890,7 @@ class CompiledEvidenceTurnExecutor:
         input_tokens = 0
         output_tokens = 0
         total_tokens = 0
-        for event in observed_usage:
+        for event in bridge.observed_usage:
             if getattr(event, "type", None) != "usage":
                 continue
             token_usage = getattr(event, "token_usage", None)

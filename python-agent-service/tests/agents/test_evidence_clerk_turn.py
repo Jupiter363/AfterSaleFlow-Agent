@@ -698,6 +698,9 @@ class AuthorityBoundSubmissionRunner:
         "未发现成功退款流水",
     )
     safe_provider_sentence = "本轮正在核对材料形成时间。"
+    capability_observation = (
+        "当前多模态核验仅接收受控图片输入；该格式需要人工复核"
+    )
     unsafe_provider_sentence = (
         "这份截图真实有效，可以证明用户没有收到包裹，因此应当退款。"
     )
@@ -708,10 +711,11 @@ class AuthorityBoundSubmissionRunner:
         stream_observations: tuple[str, ...] | None = None,
     ) -> None:
         self.calls = 0
+        self.last_invocation = None
         self.stream_observations = (
             stream_observations
             if stream_observations is not None
-            else self.accepted_stream_observations
+            else (*self.accepted_stream_observations, self.capability_observation)
         )
         self.provisional_emitted = ThreadEvent()
         self.release_completion = ThreadEvent()
@@ -733,46 +737,41 @@ class AuthorityBoundSubmissionRunner:
             )
         )
 
-    def invoke_structured_stream(self, **kwargs):
-        from app.harness.model_runner import (
-            HarnessGeneration,
-            HarnessStreamCompleted,
-            HarnessStreamDelta,
-        )
+    async def ainvoke_structured(self, **kwargs):
+        from app.harness.model_runner import HarnessGeneration
+        from app.streaming import current_stream_observer
 
         self.calls += 1
         generated = self.invoke_structured(**kwargs)
+        observer = current_stream_observer()
+        assert observer is not None
         visible_prefix = generated.value.room_utterance.removesuffix(
             self.safe_provider_sentence + self.unsafe_provider_sentence
         )
         for chunk in visible_prefix:
-            yield HarnessStreamDelta(
-                kind="visible_delta",
-                field="room_utterance",
-                delta=chunk,
-            )
+            observer.visible_delta("evidence_turn", "room_utterance", chunk)
         self.provisional_emitted.set()
-        assert self.release_completion.wait(timeout=5.0)
+        assert await asyncio.to_thread(self.release_completion.wait, 5.0)
         for chunk in self.safe_provider_sentence + self.unsafe_provider_sentence:
-            yield HarnessStreamDelta(
-                kind="visible_delta",
-                field="room_utterance",
-                delta=chunk,
-            )
+            observer.visible_delta("evidence_turn", "room_utterance", chunk)
+        observer.usage(
+            node_name="evidence_turn",
+            model="submission-authority-stream-test-model",
+            latency_ms=1,
+            token_usage={"input": 13, "output": 8, "total": 21},
+        )
         self.completed.set()
-        yield HarnessStreamCompleted(
-            kind="completed",
-            generation=HarnessGeneration(
-                value=generated.value,
-                model="submission-authority-stream-test-model",
-                latency_ms=1,
-                token_usage={"input": 13, "output": 8, "total": 21},
-                context=SimpleNamespace(),
-                messages=(),
-            ),
+        return HarnessGeneration(
+            value=generated.value,
+            model="submission-authority-stream-test-model",
+            latency_ms=1,
+            token_usage={"input": 13, "output": 8, "total": 21},
+            context=SimpleNamespace(),
+            messages=(),
         )
 
     def invoke_structured(self, **kwargs):
+        self.last_invocation = kwargs
         output_type = kwargs["output_type"]
         return SimpleNamespace(
             value=output_type(
@@ -823,7 +822,8 @@ class AuthorityBoundSubmissionRunner:
                             },
                         ],
                         "limitations": [
-                            "仅核对已载入的页面文字，未连接平台账务系统"
+                            "仅核对已载入的页面文字，未连接平台账务系统",
+                            self.capability_observation,
                         ],
                         "recommendation": "NEEDS_HUMAN_REVIEW",
                         "human_review": {
@@ -1049,13 +1049,16 @@ async def test_async_evidence_workflow_does_not_inherit_outer_command_checkpoint
 @pytest.mark.asyncio
 async def test_submission_public_reply_is_derived_from_accepted_assessment_authority() -> None:
     from app.agents.evidence_clerk.public_reply import (
+        EVIDENCE_CANONICAL_OPENING,
         EVIDENCE_PUBLIC_FIELD,
         EVIDENCE_PUBLIC_NODE,
-        EvidencePublicOutputMismatch,
         EvidencePublicOutputPolicy,
+        compose_evidence_opening_public_reply,
+        derive_submission_observation_authority,
         guard_evidence_public_reply,
     )
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.harness.evidence_asset_loader import EvidenceAssetLoader
     from app.schemas import EvidenceTurnLlmOutput, EvidenceTurnRequest
     from app.streaming import (
         AgentStreamObserver,
@@ -1068,11 +1071,20 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     submitted.update(
         {
             "evidence_type": "DOCUMENT",
-            "content_type": "text/plain",
-            "original_filename": "refund-record.txt",
+            "content_type": "text/markdown",
+            "original_filename": "refund-record.md",
             "parsed_text": (
+                "# 退款记录核对摘录\n"
+                "- 页面日期显示2026-08-13，形成时间仍需与平台记录核对\n"
+                "- 承诺退款金额为20元\n"
+                "- 退款工单未生成\n"
+                "- 未发现成功退款流水\n"
                 "原始附件全文不得直接公开；其中还包含账户备注和内部流水上下文。"
             ),
+            "desensitized": True,
+            "metadata": {
+                "claimed_fact": "承诺退款金额为20元",
+            },
         }
     )
     payload["context_envelope"]["intake_dossier_snapshot"]["payload"][
@@ -1104,8 +1116,24 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     assert "JSON 对象的第一个属性仍必须是 room_utterance" in system_prompt
     assert "<required_output_contract>" in user_prompt
     runner = AuthorityBoundSubmissionRunner()
-    workflow = EvidenceTurnWorkflow(model_runner=runner)
+    download_attempts = []
 
+    def reject_unsupported_download(request):
+        download_attempts.append(request)
+        raise AssertionError("unsupported Markdown must not be fetched as pixels")
+
+    workflow = EvidenceTurnWorkflow(
+        model_runner=runner,
+        asset_loader=EvidenceAssetLoader(
+            java_api_service_url="http://java-api-service:8080",
+            java_service_secret="test-java-service-secret",
+            transport=httpx.MockTransport(reject_unsupported_download),
+        ),
+    )
+    submission_authority = derive_submission_observation_authority(
+        visible_evidence=request.context_envelope.visible_evidence,
+        attachment_refs=request.context_envelope.current_event.attachment_refs,
+    )
     async def invoke(
         run_id: str,
         *,
@@ -1114,7 +1142,9 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         assert_before_completion: bool = False,
     ):
         published = []
-        policy = EvidencePublicOutputPolicy(submission_observation_only=True)
+        policy = EvidencePublicOutputPolicy(
+            submission_observation_authority=submission_authority
+        )
         observer = AgentStreamObserver(
             operation=EVIDENCE_PUBLIC_NODE,
             run_id=run_id,
@@ -1174,7 +1204,18 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     assert replay_visible.encode("utf-8") == first_visible.encode("utf-8")
     assert runner.calls == 2
     assert runner.completed.is_set()
+    assert download_attempts == []
+    assert runner.last_invocation is not None
+    asset_manifest = runner.last_invocation["evidence_assets"].manifest
+    assert asset_manifest["items"][0]["visual_input_status"] == (
+        "UNSUPPORTED_MODALITY"
+    )
+    assert asset_manifest["items"][0]["limitation"] == (
+        "当前多模态核验仅接收受控图片输入；该格式需要人工复核。"
+    )
     assert "2026-08-13" in early_visible
+    assert AuthorityBoundSubmissionRunner.capability_observation not in early_visible
+    assert AuthorityBoundSubmissionRunner.capability_observation not in reply
     assert AuthorityBoundSubmissionRunner.safe_provider_sentence not in reply
     assert AuthorityBoundSubmissionRunner.unsafe_provider_sentence not in reply
     framed_fact = "本轮材料已纳入对“商家是否已退款20元以及退款记录是否真实"
@@ -1186,7 +1227,6 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     assert "退款工单未生成" in reply
     assert "未发现成功退款流水" in reply
     assert "平台导出的退款记录页面" in reply
-    assert "未连接平台账务系统" in reply
     assert "覆盖范围有限" in reply or "尚不足以" in reply
     assert "仅核对了可读取文本" in reply
     assert "来源路径" in reply and ("人工" in reply or "补充" in reply)
@@ -1213,6 +1253,31 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     assert unframed_conclusion not in guarded_conclusion
     assert "相关事项仍需后续程序核验" in guarded_conclusion
 
+    opening_reply = compose_evidence_opening_public_reply(
+        EVIDENCE_CANONICAL_OPENING,
+        fact_targets=(
+            {
+                "fact_id": "FACT_OPENING_REFUND",
+                "fact": "商家承诺退款20元但工单与退款流水仍待核验",
+                "materiality": "CORE",
+            },
+        ),
+        evidence_requests=(
+            {
+                "question": (
+                    "请补充2026-08-13页面、20元退款承诺、工单未生成和无退款流水记录"
+                )
+            },
+            {"question": "该证据真实有效，商家应当退款并承担责任"},
+        ),
+    )
+    assert "2026-08-13" in opening_reply
+    assert "20元退款承诺" in opening_reply
+    assert "工单未生成" in opening_reply
+    assert "无退款流水记录" in opening_reply
+    assert "该证据真实有效" not in opening_reply
+    assert "商家应当退款" not in opening_reply
+
     unbound_observation = "材料页面显示一笔额外赔付工单正在处理中"
     unbound_runner = AuthorityBoundSubmissionRunner(
         stream_observations=(
@@ -1222,16 +1287,15 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     )
     unbound_workflow = EvidenceTurnWorkflow(model_runner=unbound_runner)
     unbound_runner.release_completion.set()
-    with pytest.raises(
-        EvidencePublicOutputMismatch,
-        match="live observation is absent from accepted authority",
-    ):
-        await invoke(
-            "submission-authority-unbound",
-            active_workflow=unbound_workflow,
-            active_runner=unbound_runner,
-        )
+    unbound_result, unbound_visible, _ = await invoke(
+        "submission-authority-unbound",
+        active_workflow=unbound_workflow,
+        active_runner=unbound_runner,
+    )
     assert unbound_runner.calls == 1
+    assert unbound_observation not in unbound_visible
+    assert unbound_observation not in unbound_result.room_utterance
+    assert unbound_result.room_utterance == reply
 
 
 def test_evidence_turn_workflow_processes_one_complete_hearing_evidence_batch() -> None:

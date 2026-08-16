@@ -14,6 +14,7 @@ from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
 from app.agents.evidence_clerk.public_reply import (
     compose_evidence_opening_public_reply,
     compose_evidence_submission_public_reply,
+    derive_submission_observation_authority,
     guard_evidence_public_reply,
 )
 from app.harness.context_pack import build_context_pack
@@ -413,11 +414,24 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
             evidence_requests=evidence_requests,
         )
     else:
+        envelope = state["assembled_context"].raw_envelope
+        current_event = envelope.current_event
+        submission_observation_authority = (
+            derive_submission_observation_authority(
+                visible_evidence=envelope.visible_evidence,
+                attachment_refs=current_event.attachment_refs,
+            )
+            if current_event.event_type == "PARTY_MESSAGE"
+            and current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
+            and current_event.attachment_refs
+            else ()
+        )
         room_utterance = compose_evidence_submission_public_reply(
             fact_targets=request.allowed_fact_targets,
             evidence_assessments=evidence_assessments,
             human_review_tasks=human_review_tasks,
             source_reply=output.room_utterance,
+            submission_observation_authority=submission_observation_authority,
         )
     # 有逐证据评估时采用其平均值；没有评估才回退模型总置信度，最终再夹在 0..1 范围。
     assessment_confidence = (

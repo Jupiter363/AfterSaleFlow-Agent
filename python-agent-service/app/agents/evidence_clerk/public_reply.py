@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 import re
 
+from app.graph_runtime.errors import GraphRuntimeError
 from app.harness.localization_policy import localize_internal_text
 from app.streaming import STREAM_MAX_VISIBLE_OUTPUT_CHARS
 
@@ -52,6 +53,10 @@ _PROVISIONAL_FACT_OBJECT_FRAME_ZH = re.compile(
     r"“(?P<object>[^”]{1,1000})”"
     r"(?:的)?(?:关联性核对|核验|核对)(?:范围)?[。！？!?]$"
 )
+_PROVISIONAL_REQUEST_OBJECT_FRAME_ZH = re.compile(
+    r"^本轮待核验补充要求\d{1,2}为“(?P<object>[^”]{1,1000})”"
+    r"的材料核对[。！？!?]$"
+)
 _ASSESSMENT_OBSERVATION_FRAME_ZH = re.compile(
     r"^已验收评估记录的待复核观察为“(?P<object>[^”]{1,1000})”"
     r"的材料内容核对[。！？!?]$"
@@ -65,14 +70,25 @@ _UNSAFE_ASSERTION_OR_DIRECTIVE_ZH = re.compile(
     r".{0,24}(?:退(?:款|货|费)|返款|赔偿|补偿|承担|负责))"
 )
 _ISO_CALENDAR_DATE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
+_MARKDOWN_OBSERVATION_PREFIX = re.compile(
+    r"^(?:#{1,6}[ \t]+|[-*+][ \t]+|\d{1,3}[.)、][ \t]+)"
+)
+_MAX_SUBMISSION_SOURCE_OBSERVATIONS = 12
+_MAX_SUBMISSION_SOURCE_OBSERVATION_CHARS = 240
+_MAX_SUBMISSION_SOURCE_AUTHORITY_CHARS = 1200
 
 
 class EvidencePublicOutputPolicyError(RuntimeError):
     """The Evidence public stream violated its explicit output policy."""
 
 
-class EvidencePublicOutputMismatch(EvidencePublicOutputPolicyError):
+class EvidencePublicOutputMismatch(
+    GraphRuntimeError,
+    EvidencePublicOutputPolicyError,
+):
     """The live Evidence preview does not equal the guarded terminal reply."""
+
+    code = "EVIDENCE_PUBLIC_OUTPUT_MISMATCH"
 
 
 def sanitize_evidence_public_prefix(text: str) -> str:
@@ -152,7 +168,7 @@ def compose_evidence_opening_public_reply(
         f"待核验事项为“{fact}”的关联性核对。" for fact in facts
     )
     request_sentences = "".join(
-        f"具体补充要求{index}：{_as_sentence(question)}"
+        f"本轮待核验补充要求{index}为“{question}”的材料核对。"
         for index, question in enumerate(questions, start=1)
     )
     composed = (
@@ -170,6 +186,7 @@ def compose_evidence_submission_public_reply(
     evidence_assessments: Iterable[object],
     human_review_tasks: Iterable[Mapping[str, object]],
     source_reply: str | None = None,
+    submission_observation_authority: Iterable[str] = (),
 ) -> str:
     """Derive a submission reply only from accepted assessment authority."""
 
@@ -217,7 +234,12 @@ def compose_evidence_submission_public_reply(
         for assessment in assessments
     )
     observations = _assessment_observations(assessments)
-    live_observations = _submission_live_observations(source_reply or "")
+    source_authority = frozenset(submission_observation_authority)
+    live_observations = tuple(
+        observation
+        for observation in _submission_live_observations(source_reply or "")
+        if observation in source_authority
+    )
     observation_set = set(observations)
     if any(observation not in observation_set for observation in live_observations):
         raise EvidencePublicOutputMismatch(
@@ -270,14 +292,22 @@ def compose_evidence_submission_public_reply(
 class EvidencePublicOutputPolicy:
     """Release only complete guarded Evidence sentences from one JSON field."""
 
-    def __init__(self, *, submission_observation_only: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        submission_observation_authority: Iterable[str] | None = None,
+    ) -> None:
         self._source_text = ""
         self._visible_text = ""
         self._examined_sentence_count = 0
         self._live_release_blocked = False
         self._bootstrapped = False
         self._authorized_terminal_text: str | None = None
-        self._submission_observation_only = submission_observation_only
+        self._submission_observation_authority = (
+            None
+            if submission_observation_authority is None
+            else frozenset(submission_observation_authority)
+        )
 
     @property
     def source_observed(self) -> bool:
@@ -364,12 +394,17 @@ class EvidencePublicOutputPolicy:
                 and localized_sentence.strip() == EVIDENCE_CANONICAL_OPENING
             ):
                 continue
-            if self._submission_observation_only:
+            if self._submission_observation_authority is not None:
                 frame = _SUBMISSION_PROVISIONAL_OBSERVATION_FRAME_ZH.fullmatch(
                     localized_sentence.strip()
                 )
-                if frame is None or _sentence_violates_public_boundary(
-                    localized_sentence.strip()
+                if (
+                    frame is None
+                    or frame.group("object")
+                    not in self._submission_observation_authority
+                    or _sentence_violates_public_boundary(
+                        localized_sentence.strip()
+                    )
                 ):
                     continue
                 self._visible_text += localized_sentence
@@ -481,6 +516,81 @@ def _authority_items(value: object, field: str) -> tuple[object, ...]:
     return ()
 
 
+def derive_submission_observation_authority(
+    *,
+    visible_evidence: Iterable[object],
+    attachment_refs: Iterable[str],
+) -> tuple[str, ...]:
+    """Derive bounded public observation authority from exact current attachments."""
+
+    references = tuple(attachment_refs)
+    if not references or len(set(references)) != len(references):
+        raise EvidencePublicOutputPolicyError(
+            "Evidence submission attachment authority is invalid"
+        )
+    evidence_by_id: dict[str, object] = {}
+    for item in visible_evidence:
+        evidence_id = _authority_value(item, "evidence_id")
+        if not isinstance(evidence_id, str) or evidence_id in evidence_by_id:
+            raise EvidencePublicOutputPolicyError(
+                "Evidence submission visible authority is invalid"
+            )
+        evidence_by_id[evidence_id] = item
+    if any(reference not in evidence_by_id for reference in references):
+        raise EvidencePublicOutputPolicyError(
+            "Evidence submission attachment authority is incomplete"
+        )
+
+    candidates: list[object] = []
+    for reference in references:
+        evidence = evidence_by_id[reference]
+        metadata = _authority_value(evidence, "metadata")
+        if isinstance(metadata, Mapping):
+            candidates.append(
+                metadata.get("claimed_fact", metadata.get("claimedFact"))
+            )
+        parsed_text = _authority_value(evidence, "parsed_text")
+        if isinstance(parsed_text, str):
+            candidates.extend(parsed_text.splitlines())
+
+    observations: list[str] = []
+    seen: set[str] = set()
+    authority_chars = 0
+    for candidate in candidates:
+        observation = _normalize_submission_source_observation(candidate)
+        if observation is None or observation in seen:
+            continue
+        next_chars = authority_chars + len(observation)
+        if next_chars > _MAX_SUBMISSION_SOURCE_AUTHORITY_CHARS:
+            break
+        observations.append(observation)
+        seen.add(observation)
+        authority_chars = next_chars
+        if len(observations) >= _MAX_SUBMISSION_SOURCE_OBSERVATIONS:
+            break
+    return tuple(observations)
+
+
+def _normalize_submission_source_observation(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    localized = localize_internal_text(value).strip()
+    localized = _MARKDOWN_OBSERVATION_PREFIX.sub("", localized, count=1).strip()
+    localized = localized.rstrip("。！？!?").strip()
+    if (
+        not localized
+        or len(localized) > _MAX_SUBMISSION_SOURCE_OBSERVATION_CHARS
+        or any(quote in localized for quote in "\"'“”‘’")
+        or "\n" in localized
+        or "\r" in localized
+        or _sentence_violates_public_boundary(
+            _submission_observation_frame(localized)
+        )
+    ):
+        return None
+    return localized
+
+
 def _assessment_observations(assessments: tuple[object, ...]) -> tuple[str, ...]:
     values: list[object] = []
     for assessment in assessments:
@@ -490,7 +600,6 @@ def _assessment_observations(assessments: tuple[object, ...]) -> tuple[str, ...]
             for finding in _authority_items(assessment, "findings")
         )
         values.extend(_authority_items(assessment, "source_basis"))
-        values.extend(_authority_items(assessment, "limitations"))
         values.append(_authority_value(assessment, "summary"))
     observations: list[str] = []
     seen: set[str] = set()
@@ -505,6 +614,9 @@ def _assessment_observations(assessments: tuple[object, ...]) -> tuple[str, ...]
             or any(mark in value for mark in "。！？!?")
             or len(value) > 1000
             or value in seen
+            or _sentence_violates_public_boundary(
+                _submission_observation_frame(value)
+            )
         ):
             continue
         observations.append(value)
@@ -581,6 +693,8 @@ def _guard_terminal_sentence(sentence: str) -> str:
 def _sentence_violates_public_boundary(sentence: str) -> bool:
     conclusion_scan = sentence
     framed_object = _PROVISIONAL_FACT_OBJECT_FRAME_ZH.fullmatch(sentence)
+    if framed_object is None:
+        framed_object = _PROVISIONAL_REQUEST_OBJECT_FRAME_ZH.fullmatch(sentence)
     if framed_object is None:
         framed_object = _ASSESSMENT_OBSERVATION_FRAME_ZH.fullmatch(sentence)
     if framed_object is None:

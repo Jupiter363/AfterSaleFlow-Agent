@@ -123,6 +123,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         EvidencePublicOutputPolicyError,
         compose_evidence_opening_public_reply,
         compose_evidence_submission_public_reply,
+        derive_submission_observation_authority,
         guard_evidence_public_reply,
     )
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
@@ -152,6 +153,29 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     assert callable(getattr(production_workflow, "run", None))
     assert callable(getattr(production_workflow, "arun", None))
     request_document = helper_module["_java_evidence_turn_command_payload"]()
+    submission_observation = (
+        "页面日期显示2026-08-13，形成时间仍需与平台记录核对"
+    )
+    capability_observation = (
+        "当前多模态核验仅接收受控图片输入；该格式需要人工复核"
+    )
+    submitted_evidence = request_document["context_envelope"]["visible_evidence"][0]
+    submitted_evidence.update(
+        {
+            "evidence_type": "DOCUMENT",
+            "content_type": "text/markdown",
+            "original_filename": "refund-record.md",
+            "parsed_text": (
+                "# 退款记录核对摘录\n"
+                f"- {submission_observation}\n"
+                "- 承诺退款金额为20元\n"
+                "- 退款工单未生成\n"
+                "- 未发现成功退款流水"
+            ),
+            "desensitized": True,
+            "metadata": {"claimed_fact": "承诺退款金额为20元"},
+        }
+    )
     dossier = request_document["context_envelope"]["intake_dossier_snapshot"]["payload"]
     dossier.pop("unilateral_case_matrix", None)
     dossier["case_fact_matrix"] = helper_module["_case_fact_matrix_v2"]()
@@ -163,13 +187,49 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         safe_prefix + arbitrary_safe_submission_sentence + risky_sentence
     )
     guarded_room_utterance = guard_evidence_public_reply(raw_room_utterance)
+    submission_assessment = {
+        "evidence_id": "EVIDENCE_signature_photo",
+        "analysis_method": "TEXT_ONLY",
+        "inspected_modalities": ["PARSED_TEXT"],
+        "authenticity_score": 0.55,
+        "relevance_score": 0.48,
+        "completeness_score": 0.48,
+        "assessment_confidence": 0.72,
+        "source_basis": [submission_observation],
+        "fact_links": [],
+        "supported_fact_ids": [],
+        "unsupported_claims": ["当前材料不能单独还原完整事实"],
+        "formation_time_assessment": submission_observation,
+        "findings": [],
+        "limitations": [capability_observation],
+        "recommendation": "NEEDS_HUMAN_REVIEW",
+        "human_review": {
+            "required": True,
+            "reason_codes": ["SOURCE_RECONCILIATION_REQUIRED"],
+            "instructions": ["人工复核平台原始记录和形成时间"],
+        },
+        "summary": "页面日期与退款记录范围仍待交叉核对",
+    }
     submission_working_set = EvidenceContextAssembler().assemble(
         EvidenceTurnRequest.model_validate(request_document)
     ).working_set
+    submission_observation_authority = derive_submission_observation_authority(
+        visible_evidence=EvidenceTurnRequest.model_validate(
+            request_document
+        ).context_envelope.visible_evidence,
+        attachment_refs=request_document["context_envelope"]["current_event"][
+            "attachment_refs"
+        ],
+    )
+    source_observation_frame = (
+        f"本轮正在对材料所载“{submission_observation}”进行核验。"
+    )
     submission_room_utterance = compose_evidence_submission_public_reply(
         fact_targets=submission_working_set.allowed_fact_targets,
-        evidence_assessments=[],
+        evidence_assessments=[submission_assessment],
         human_review_tasks=[],
+        source_reply=EVIDENCE_CANONICAL_OPENING + source_observation_frame,
+        submission_observation_authority=submission_observation_authority,
     )
     burst_chunks = tuple(submission_room_utterance)
     timeline: list[str] = []
@@ -180,8 +240,8 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             self.provider_calls = 0
             self.invoke_started = asyncio.Event()
             self.release_after_bootstrap = asyncio.Event()
-            self.safe_prefix_submitted = asyncio.Event()
-            self.sensitive_prefix_submitted = asyncio.Event()
+            self.source_frame_submitted = asyncio.Event()
+            self.capability_frame_submitted = asyncio.Event()
             self.release_sensitive_tail = asyncio.Event()
             self.completed = asyncio.Event()
 
@@ -204,6 +264,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 memory_frame={"guarded": True},
                 canvas_operations=[],
                 referenced_evidence_ids=["EVIDENCE_signature_photo"],
+                evidence_assessments=[submission_assessment],
             )
 
         @staticmethod
@@ -233,7 +294,15 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             self.invoke_started.set()
             await self.release_after_bootstrap.wait()
             observer.visible_delta("evidence_turn", "room_utterance", safe_prefix)
-            self.safe_prefix_submitted.set()
+            for chunk in source_observation_frame:
+                observer.visible_delta("evidence_turn", "room_utterance", chunk)
+            self.source_frame_submitted.set()
+            observer.visible_delta(
+                "evidence_turn",
+                "room_utterance",
+                f"本轮正在对材料所载“{capability_observation}”进行核验。",
+            )
+            self.capability_frame_submitted.set()
             observer.visible_delta(
                 "evidence_turn",
                 "room_utterance",
@@ -244,7 +313,6 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 "room_utterance",
                 risky_sentence[:-2],
             )
-            self.sensitive_prefix_submitted.set()
             await self.release_sensitive_tail.wait()
             observer.visible_delta(
                 "evidence_turn",
@@ -264,9 +332,9 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         EVIDENCE_CANONICAL_OPENING + provider_substantive + provider_unsafe
     )
     opening_questions = (
-        "请提供完整物流签收底单，并保留签收人和签收时间。",
-        "请提供连续投递轨迹或快递柜、驿站交接记录。",
-        "请提供能够核对实际收件人身份的原始交接材料。",
+        "请补充2026-08-13页面记录和承诺退款20元的形成来源。",
+        "请补充退款工单未生成的页面记录。",
+        "请补充未发现成功退款流水的账户记录。",
     )
 
     class MatrixSpecificOpeningRunner:
@@ -543,29 +611,31 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     first = [await anext(first_stream)]
     timeline.append(f"yield:{first[0].event_type}")
     first_visible_task = asyncio.create_task(anext(first_stream))
-    await workflow.invoke_started.wait()
     first_visible = await asyncio.wait_for(first_visible_task, timeout=1.0)
     first.append(first_visible)
     timeline.append(f"yield:{first_visible.event_type}")
     assert first_visible.event_type == "visible_delta"
     assert first_visible.payload.field == "room_utterance"
     assert first_visible.payload.delta == EVIDENCE_CANONICAL_OPENING
+    assert not workflow.invoke_started.is_set()
+    await asyncio.wait_for(workflow.invoke_started.wait(), timeout=1.0)
     assert not workflow.release_after_bootstrap.is_set()
-    assert not workflow.safe_prefix_submitted.is_set()
+    assert not workflow.source_frame_submitted.is_set()
     assert not workflow.completed.is_set()
     assert store.puts == []
     assert saver.commits == []
 
     next_event_task = asyncio.create_task(anext(first_stream))
     workflow.release_after_bootstrap.set()
-    await workflow.safe_prefix_submitted.wait()
-    await workflow.sensitive_prefix_submitted.wait()
-    await asyncio.sleep(0)
-    assert not next_event_task.done()
+    await workflow.source_frame_submitted.wait()
+    await workflow.capability_frame_submitted.wait()
+    source_event = await asyncio.wait_for(next_event_task, timeout=1.0)
+    first.append(source_event)
+    timeline.append(f"yield:{source_event.event_type}")
+    assert source_event.event_type == "visible_delta"
+    assert submission_observation in (source_event.payload.delta or "")
+    assert capability_observation not in (source_event.payload.delta or "")
     workflow.release_sensitive_tail.set()
-    next_event = await asyncio.wait_for(next_event_task, timeout=1.0)
-    first.append(next_event)
-    timeline.append(f"yield:{next_event.event_type}")
     async for event in first_stream:
         first.append(event)
         timeline.append(f"yield:{event.event_type}")
@@ -585,6 +655,8 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     ) == submission_room_utterance
     assert submission_room_utterance.count(EVIDENCE_CANONICAL_OPENING) == 1
     assert arbitrary_safe_submission_sentence not in submission_room_utterance
+    assert submission_observation in submission_room_utterance
+    assert capability_observation not in submission_room_utterance
     assert risky_sentence not in submission_room_utterance
     assert guarded_room_utterance != submission_room_utterance
     assert all(
@@ -745,16 +817,19 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     replay = [await anext(replay_stream)]
     replay_commit_count = len(saver.commits)
     replay_visible = await anext(replay_stream)
-    assert len(saver.commits) == replay_commit_count + 1
+    assert len(saver.commits) == replay_commit_count
+    assert replay_visible.payload.delta == EVIDENCE_CANONICAL_OPENING
     replay.append(replay_visible)
     replay.extend([event async for event in replay_stream])
+    assert len(saver.commits) == replay_commit_count + 1
     assert [event.event_type for event in replay] == [
         "attempt_started",
+        "visible_delta",
         "visible_delta",
         "usage",
         "final",
     ]
-    assert sum(event.event_type == "visible_delta" for event in replay) == 1
+    assert sum(event.event_type == "visible_delta" for event in replay) == 2
     assert sum(event.event_type == "final" for event in replay) == 1
     assert "".join(
         event.payload.delta or ""
@@ -1098,7 +1173,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     for _fact_id, fact_target, _materiality in opening_facts:
         assert fact_target in opening_visible_text
     for question in opening_questions:
-        assert question in opening_visible_text
+        assert question.rstrip("。！？!?") in opening_visible_text
     assert len(opening_visible_text) <= STREAM_MAX_VISIBLE_OUTPUT_CHARS
     assert provider_unsafe not in opening_visible_text
     assert "真实有效" not in opening_visible_text
