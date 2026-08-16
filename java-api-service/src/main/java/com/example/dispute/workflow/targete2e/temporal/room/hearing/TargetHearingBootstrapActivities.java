@@ -35,7 +35,8 @@ public interface TargetHearingBootstrapActivities {
       String stageCode,
       int stageSequence,
       String initiatorParticipantId,
-      String respondentParticipantId) {
+      String respondentParticipantId,
+      long partyStageWindowSeconds) {
     public Binding {
       requireIdentifier(flowInstanceId, "flowInstanceId");
       requireIdentifier(epochId, "epochId");
@@ -46,6 +47,8 @@ public interface TargetHearingBootstrapActivities {
           || fencingToken < 1
           || processRevision < 0
           || roomRevision < 0
+          || (partyStageWindowSeconds != 0
+              && (partyStageWindowSeconds < 1 || partyStageWindowSeconds > 1_200))
           || stageSequence != 1
           || !"COURT_PREPARING".equals(stageCode)
           || "target-e2e-initiator".equals(initiatorParticipantId)

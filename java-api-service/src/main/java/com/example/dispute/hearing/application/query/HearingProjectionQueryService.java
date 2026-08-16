@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -52,6 +53,7 @@ public class HearingProjectionQueryService {
     private final ReviewTaskRepository reviewTaskRepository;
     private final HearingProjectionAdapter adapter;
     private final ObjectMapper objectMapper;
+    private final JdbcHearingPublicTranscriptWatermarkQuery transcriptWatermarks;
 
     public HearingProjectionQueryService(
             FulfillmentCaseRepository caseRepository,
@@ -64,6 +66,33 @@ public class HearingProjectionQueryService {
             ReviewTaskRepository reviewTaskRepository,
             HearingProjectionAdapter adapter,
             ObjectMapper objectMapper) {
+        this(
+                caseRepository,
+                instanceRepository,
+                stageRepository,
+                actionRepository,
+                artifactRepository,
+                trialDossierRepository,
+                remedyPlanRepository,
+                reviewTaskRepository,
+                adapter,
+                objectMapper,
+                null);
+    }
+
+    @Autowired
+    public HearingProjectionQueryService(
+            FulfillmentCaseRepository caseRepository,
+            HearingFlowInstanceRepository instanceRepository,
+            HearingFlowStageRepository stageRepository,
+            HearingFlowActionRepository actionRepository,
+            HearingFlowArtifactRepository artifactRepository,
+            HearingTrialDossierRepository trialDossierRepository,
+            RemedyPlanRepository remedyPlanRepository,
+            ReviewTaskRepository reviewTaskRepository,
+            HearingProjectionAdapter adapter,
+            ObjectMapper objectMapper,
+            JdbcHearingPublicTranscriptWatermarkQuery transcriptWatermarks) {
         this.caseRepository = Objects.requireNonNull(caseRepository, "caseRepository");
         this.instanceRepository = Objects.requireNonNull(instanceRepository, "instanceRepository");
         this.stageRepository = Objects.requireNonNull(stageRepository, "stageRepository");
@@ -77,6 +106,7 @@ public class HearingProjectionQueryService {
                 Objects.requireNonNull(reviewTaskRepository, "reviewTaskRepository");
         this.adapter = Objects.requireNonNull(adapter, "adapter");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.transcriptWatermarks = transcriptWatermarks;
     }
 
     public HearingFlowView get(String caseId, AuthenticatedActor actor) {
@@ -116,6 +146,17 @@ public class HearingProjectionQueryService {
                 readArtifacts(requiredCaseId);
         HearingFlowArtifactEntity draft = artifacts.get(HearingArtifactType.ADJUDICATION_DRAFT);
 
+        JsonNode questionSet =
+                systemAction(actions, HearingFlowActionType.QUESTION_SET)
+                        .map(
+                                item -> {
+                                    JsonNode payload = read(item.getPayloadJson());
+                                    return transcriptWatermarks == null
+                                            ? payload
+                                            : transcriptWatermarks.bindQuestionSet(
+                                                    instance, item, payload);
+                                })
+                        .orElse(null);
         HearingProjectionSnapshot snapshot =
                 new HearingProjectionSnapshot(
                         instance.getSchemaVersion(),
@@ -129,7 +170,7 @@ public class HearingProjectionQueryService {
                         parties.participants(),
                         reviewGateReady(instance, draft),
                         draft == null ? null : draft.getId(),
-                        systemPayload(actions, HearingFlowActionType.QUESTION_SET).orElse(null),
+                        questionSet,
                         systemPayload(actions, HearingFlowActionType.EVIDENCE_REQUEST_SET).orElse(null),
                         trialDossierRepository
                                 .findByCaseId(requiredCaseId)
@@ -203,12 +244,16 @@ public class HearingProjectionQueryService {
 
     private Optional<JsonNode> systemPayload(
             List<HearingFlowActionEntity> actions, HearingFlowActionType actionType) {
+        return systemAction(actions, actionType).map(item -> read(item.getPayloadJson()));
+    }
+
+    private static Optional<HearingFlowActionEntity> systemAction(
+            List<HearingFlowActionEntity> actions, HearingFlowActionType actionType) {
         return actions.stream()
                 .filter(item -> item.getActionType() == actionType)
                 .filter(item -> item.getParticipantId() == null)
                 .filter(item -> item.getParticipantRole() == null)
-                .findFirst()
-                .map(item -> read(item.getPayloadJson()));
+                .findFirst();
     }
 
     private EnumMap<HearingArtifactType, HearingFlowArtifactEntity> readArtifacts(String caseId) {

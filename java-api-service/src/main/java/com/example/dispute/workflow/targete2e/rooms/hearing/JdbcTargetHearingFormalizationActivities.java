@@ -10,6 +10,7 @@ import com.example.dispute.hearing.domain.HearingFormalFinalizer;
 import com.example.dispute.hearing.domain.HearingFormalRequestHash;
 import com.example.dispute.hearing.domain.HearingFormalTransition;
 import com.example.dispute.hearing.domain.HearingWriterMode;
+import com.example.dispute.hearing.application.HearingPublicTranscriptPolicy;
 import com.example.dispute.review.domain.ActionSnapshotHasher;
 import com.example.dispute.workflow.activity.hearing.HearingDomainReceiptAdapter;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
@@ -21,6 +22,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.temporal.room.hearing.HearingStageReceipt;
 import com.example.dispute.workflow.temporal.room.hearing.HearingPartyTerminalReceipt;
+import com.example.dispute.workflow.temporal.room.hearing.HearingCommittedReceipt;
 import com.example.dispute.workflow.temporal.room.hearing.HearingWorkflowStage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -54,6 +56,8 @@ public final class JdbcTargetHearingFormalizationActivities
   private static final String TARGET_REVIEW_PROFILE_VERSION = "hearing-judge-v2";
   private static final String TARGET_REVIEW_RULESET_VERSION = "ruleset-current";
   private static final String TARGET_REVIEW_SKILL_VERSION = "dispute-default-v1";
+  private static final HearingPublicTranscriptPolicy TRANSCRIPT_POLICY =
+      new HearingPublicTranscriptPolicy();
   static final String REVIEW_TASK_INSERT_SQL = """
       insert into review_task (id, case_id, plan_id, packet_id, policy_decision_id, task_status,
         priority, assigned_reviewer_id, required_role, due_at, decision_json, created_by, updated_by)
@@ -116,6 +120,7 @@ public final class JdbcTargetHearingFormalizationActivities
        for update of binding, epoch, handoff, task, policy
       """;
 
+  private final DataSource dataSource;
   private final JdbcTemplate jdbc;
   private final TransactionTemplate transactions;
   private final TargetHearingFormalCompletion completion;
@@ -123,6 +128,8 @@ public final class JdbcTargetHearingFormalizationActivities
   private final HearingAuthorityLedger ledger;
   private final ObjectMapper mapper;
   private final RoomEpochAllocator roomEpochAllocator;
+  private final JdbcTargetHearingPreludeAuthority preludeAuthority;
+  private final JdbcTargetHearingPublicTranscriptCommitter transcript;
 
   public JdbcTargetHearingFormalizationActivities(
       DataSource dataSource,
@@ -131,7 +138,7 @@ public final class JdbcTargetHearingFormalizationActivities
       TargetHearingInternalStageMaterializer materializer,
       HearingAuthorityLedger ledger,
       ObjectMapper mapper) {
-    this(dataSource, transactions, completion, materializer, ledger, mapper, null);
+    this(dataSource, transactions, completion, materializer, ledger, mapper, null, null);
   }
 
   /** The target registration must supply the allocator; the compatibility constructor cannot close. */
@@ -143,7 +150,29 @@ public final class JdbcTargetHearingFormalizationActivities
       HearingAuthorityLedger ledger,
       ObjectMapper mapper,
       RoomEpochAllocator roomEpochAllocator) {
-    this.jdbc = new JdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
+    this(
+        dataSource,
+        transactions,
+        completion,
+        materializer,
+        ledger,
+        mapper,
+        roomEpochAllocator,
+        null);
+  }
+
+  /** Runtime promotion supplies the strict transcript writer; compatibility tests remain isolated. */
+  public JdbcTargetHearingFormalizationActivities(
+      DataSource dataSource,
+      TransactionTemplate transactions,
+      TargetHearingFormalCompletion completion,
+      TargetHearingInternalStageMaterializer materializer,
+      HearingAuthorityLedger ledger,
+      ObjectMapper mapper,
+      RoomEpochAllocator roomEpochAllocator,
+      JdbcTargetHearingPublicTranscriptCommitter transcript) {
+    this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+    this.jdbc = new JdbcTemplate(this.dataSource);
     this.transactions = Objects.requireNonNull(transactions, "transactions");
     this.transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
     this.completion = Objects.requireNonNull(completion, "completion");
@@ -151,22 +180,54 @@ public final class JdbcTargetHearingFormalizationActivities
     this.ledger = Objects.requireNonNull(ledger, "ledger");
     this.mapper = Objects.requireNonNull(mapper, "mapper").copy();
     this.roomEpochAllocator = roomEpochAllocator;
+    this.preludeAuthority = new JdbcTargetHearingPreludeAuthority(this.dataSource, this.mapper);
+    this.transcript = transcript;
   }
 
   @Override
   public StageResult bootstrapNext(TransitionRequest request) {
     return required(() -> {
       HearingStageReceipt replay = replayStage(request, HearingAuthorityCommit.OperationType.STAGE);
-      if (replay != null) return new StageResult(replay);
+      if (replay != null) {
+        JdbcTargetHearingPreludeAuthority.Authority prelude =
+            preludeAuthority.loadCommitted(request.start());
+        commitTranscript(
+            JdbcTargetHearingPublicTranscriptCommitter.CommitMode.STRICT_REPLAY,
+            replay,
+            request.start(),
+            receiptCommittedAt(replay.committed()),
+            TRANSCRIPT_POLICY.deterministicStage(
+                HearingFlowStage.valueOf(request.expectedStage().name()),
+                prelude.caseFactMatrix(),
+                prelude.evidenceMatrix()));
+        return new StageResult(replay);
+      }
       Cursor cursor = lock(request);
       require(!request.expectedStage().requiresAgentRun() && !request.expectedStage().isPartyWait(),
           "bootstrap only admits deterministic stages");
-      HearingFormalTransition transition = advancing(request, cursor, canonical(cursor.sourceOutputJson()));
+      JdbcTargetHearingPreludeAuthority.Authority prelude =
+          request.expectedStage() == HearingWorkflowStage.COURT_PREPARING
+              ? preludeAuthority.freeze(request.start())
+              : preludeAuthority.loadCommitted(request.start());
+      String sourceOutput = request.expectedStage() == HearingWorkflowStage.COURT_PREPARING
+          ? ContractJson.canonicalString(prelude.payload())
+          : canonical(cursor.sourceOutputJson());
+      HearingFormalTransition transition = advancing(request, cursor, sourceOutput);
       HearingAuthorityCommit commit = stageCommit(cursor.authority(), request.operationKey(), transition,
-          canonical(cursor.sourceOutputJson()));
-      return new StageResult(completion.advanceStage(new HearingFormalFinalizer.StageCommand(
-          commit, transition, canonical(cursor.sourceOutputJson()),
-          hashJson(cursor.sourceOutputJson()), CONTROL_ACTOR)));
+          sourceOutput);
+      HearingStageReceipt receipt = completion.advanceStage(new HearingFormalFinalizer.StageCommand(
+          commit, transition, sourceOutput,
+          hashJson(sourceOutput), CONTROL_ACTOR));
+      commitTranscript(
+          JdbcTargetHearingPublicTranscriptCommitter.CommitMode.NEW_COMMIT,
+          receipt,
+          request.start(),
+          commit.committedAt(),
+          TRANSCRIPT_POLICY.deterministicStage(
+              HearingFlowStage.valueOf(request.expectedStage().name()),
+              prelude.caseFactMatrix(),
+              prelude.evidenceMatrix()));
+      return new StageResult(receipt);
     });
   }
 
@@ -174,7 +235,11 @@ public final class JdbcTargetHearingFormalizationActivities
   public PartyResult formalizeParty(PartyRequest request) {
     return required(() -> {
       HearingPartyTerminalReceipt replay = replayParty(request);
-      if (replay != null) return new PartyResult(replay);
+      if (replay != null) {
+        commitPartyAdvanceReplay(
+            replay, request.transition().start(), request.transition().expectedStage());
+        return new PartyResult(replay);
+      }
       Cursor cursor = lock(request.transition());
       var command = request.command();
       require(command.commandType() == CommandType.HEARING_STATEMENT
@@ -209,6 +274,12 @@ public final class JdbcTargetHearingFormalizationActivities
           action.id(), actionType, action.schemaVersion(), action.participantId(), action.participantRole(),
           HearingFlowSubmissionStatus.valueOf(action.submissionStatus()), action.payloadJson(), action.contentHash(),
           command.commandId(), command.actorRef().actorId()));
+      commitPartyAdvance(
+          JdbcTargetHearingPublicTranscriptCommitter.CommitMode.NEW_COMMIT,
+          receipt,
+          request.transition().start(),
+          request.transition().expectedStage(),
+          commit.committedAt());
       int updated = jdbc.update("""
           update case_command set command_status = 'APPLIED', status_reason_code = null,
               result_uri = ?, result_sha256 = ?, applied_at = now(), updated_at = now(), version = version + 1
@@ -227,7 +298,13 @@ public final class JdbcTargetHearingFormalizationActivities
   public TimeoutResult formalizeTimeout(TimeoutRequest request) {
     return required(() -> {
       HearingPartyTerminalReceipt replay = replayTimeout(request);
-      if (replay != null) return new TimeoutResult(replay, false);
+      if (replay != null) {
+        commitPartyAdvanceReplay(
+            replay,
+            request.transition().start(),
+            request.transition().expectedStage());
+        return new TimeoutResult(replay, false);
+      }
       Cursor cursor = lock(request.transition());
       require(cursor.authority().stage().hasSharedPartyDeadline(), "party timeout stage required");
       Instant deadline = expiredPartyDeadline(cursor);
@@ -252,6 +329,12 @@ public final class JdbcTargetHearingFormalizationActivities
           action.participantId(), action.participantRole(),
           HearingFlowSubmissionStatus.AUTO_TIMEOUT, action.payloadJson(), action.contentHash(),
           timeoutRequestId, CONTROL_ACTOR));
+      commitPartyAdvance(
+          JdbcTargetHearingPublicTranscriptCommitter.CommitMode.NEW_COMMIT,
+          receipt,
+          request.transition().start(),
+          request.transition().expectedStage(),
+          commit.committedAt());
       return new TimeoutResult(receipt, false);
     });
   }
@@ -392,7 +475,15 @@ public final class JdbcTargetHearingFormalizationActivities
   public StageResult freezeDossier(TransitionRequest request) {
     return required(() -> {
       HearingStageReceipt replay = replayStage(request, HearingAuthorityCommit.OperationType.FINALIZE);
-      if (replay != null) return new StageResult(replay);
+      if (replay != null) {
+        commitTranscript(
+            JdbcTargetHearingPublicTranscriptCommitter.CommitMode.STRICT_REPLAY,
+            replay,
+            request.start(),
+            receiptCommittedAt(replay.committed()),
+            TRANSCRIPT_POLICY.dossierFrozen());
+        return new StageResult(replay);
+      }
       Cursor cursor = lock(request);
       require(cursor.authority().stage() == HearingFlowStage.DOSSIER_FREEZING, "dossier stage required");
       JsonNode questions = actionPayload(cursor.flowId(), cursor.authority().caseId(), "QUESTION_SET");
@@ -413,9 +504,16 @@ public final class JdbcTargetHearingFormalizationActivities
           dossier.questionSetId(), dossier.requestSetId(), dossier.hash(), CONTROL_ACTOR);
       HearingAuthorityCommit commit = commit(cursor.authority(), HearingAuthorityCommit.OperationType.FINALIZE,
           request.operationKey(), requestHash, committedAt);
-      return new StageResult(completion.freezeDossier(new HearingFormalFinalizer.DossierCommand(commit, transition,
+      HearingStageReceipt receipt = completion.freezeDossier(new HearingFormalFinalizer.DossierCommand(commit, transition,
           dossierId, dossier.caseVersion(), dossier.caseHash(), dossier.evidenceVersion(), dossier.evidenceHash(),
-          dossier.questionSetId(), dossier.requestSetId(), dossier.json(), dossier.hash(), CONTROL_ACTOR)));
+          dossier.questionSetId(), dossier.requestSetId(), dossier.json(), dossier.hash(), CONTROL_ACTOR));
+      commitTranscript(
+          JdbcTargetHearingPublicTranscriptCommitter.CommitMode.NEW_COMMIT,
+          receipt,
+          request.start(),
+          commit.committedAt(),
+          TRANSCRIPT_POLICY.dossierFrozen());
+      return new StageResult(receipt);
     });
   }
 
@@ -481,6 +579,74 @@ public final class JdbcTargetHearingFormalizationActivities
           cursor, receipt, committedAt, parent.handoffId(), parent.reviewTaskId());
       return new StageResult(receipt);
     });
+  }
+
+  private void commitTranscript(
+      JdbcTargetHearingPublicTranscriptCommitter.CommitMode mode,
+      HearingStageReceipt receipt,
+      com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart start,
+      Instant committedAt,
+      List<HearingPublicTranscriptPolicy.Draft> drafts) {
+    if (transcript != null) {
+      transcript.commit(mode, receipt, start, committedAt, drafts);
+    }
+  }
+
+  private void commitPartyAdvanceReplay(
+      HearingPartyTerminalReceipt receipt,
+      com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart start,
+      HearingWorkflowStage sourceStage) {
+    commitPartyAdvance(
+        JdbcTargetHearingPublicTranscriptCommitter.CommitMode.STRICT_REPLAY,
+        receipt,
+        start,
+        sourceStage,
+        receiptCommittedAt(receipt.committed()));
+  }
+
+  private void commitPartyAdvance(
+      JdbcTargetHearingPublicTranscriptCommitter.CommitMode mode,
+      HearingPartyTerminalReceipt receipt,
+      com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart start,
+      HearingWorkflowStage sourceStage,
+      Instant committedAt) {
+    HearingCommittedReceipt committed = receipt.committed();
+    require(
+        committed.sourceStage().name().equals(sourceStage.name()),
+        "Hearing party transcript source stage drifted");
+    if (committed.stage() == committed.sourceStage()) {
+      return;
+    }
+    require(
+        committed.sourceStage().next() == committed.stage(),
+        "Hearing party transcript transition is not adjacent");
+    if (transcript != null) {
+      transcript.commit(
+          mode,
+          receipt,
+          start,
+          committedAt,
+          TRANSCRIPT_POLICY.partyStageAdvanced(
+              HearingFlowStage.valueOf(sourceStage.name())));
+    }
+  }
+
+  private Instant receiptCommittedAt(HearingCommittedReceipt receipt) {
+    return one(jdbc.query(
+        """
+        select committed_at
+          from hearing_domain_receipt
+         where receipt_id = ? and receipt_hash = ? and tenant_surrogate = ?
+           and case_id = ? and flow_instance_id = ? and operation_key = ?
+         for update
+        """,
+        (row, ignored) -> row.getObject(1, OffsetDateTime.class).toInstant(),
+        receipt.receiptId(),
+        receipt.receiptHash(),
+        receipt.tenantSurrogate(),
+        receipt.caseId(),
+        receipt.flowInstanceId(),
+        receipt.operationKey()));
   }
 
   private <T> T required(java.util.concurrent.Callable<T> action) {

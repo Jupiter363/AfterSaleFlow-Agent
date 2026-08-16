@@ -67,10 +67,11 @@ const hearing = {
     stage_code: "PARTY_ANSWERS_OPEN",
     stage_sequence: 1,
     stage_deadline_at: "2026-07-03T12:20:00+08:00",
+    transcript_watermark: { message_id: "MESSAGE_INTAKE_QUESTION_REAL" },
     party_statuses: { USER: "PENDING", MERCHANT: "PENDING" },
   },
   question_set: {
-    schema_version: "hearing_intake_questions.v1",
+    schema_version: "hearing_question_set.v1",
     question_set_id: "HEARING_QUESTION_SET_1",
     questions: [
       {
@@ -142,8 +143,16 @@ const courtMessages = [
     created_at: "2026-07-03T12:00:00+08:00",
   },
   {
-    id: "MESSAGE_USER_REAL",
+    id: "MESSAGE_INTAKE_QUESTION_REAL",
     sequence_no: 2,
+    sender_role: "INTAKE_OFFICER",
+    message_type: "AGENT_MESSAGE",
+    message_text: "请说明发现未收到商品的具体时间，以及当时核对了哪些位置。",
+    created_at: "2026-07-03T12:01:00+08:00",
+  },
+  {
+    id: "MESSAGE_USER_REAL",
+    sequence_no: 3,
     sender_role: "USER",
     message_text:
       "用户称门口监控未见快递员投递，并已提交截图用于核验包裹实际去向。",
@@ -151,7 +160,7 @@ const courtMessages = [
   },
   {
     id: "MESSAGE_MERCHANT_REAL",
-    sequence_no: 3,
+    sequence_no: 4,
     sender_role: "MERCHANT",
     message_text:
       "商家称已按订单发货，并需要平台核验物流交接、签收底单与异常工单处理记录。",
@@ -159,7 +168,7 @@ const courtMessages = [
   },
   {
     id: "MESSAGE_JURY_REAL",
-    sequence_no: 4,
+    sequence_no: 5,
     sender_role: "JURY",
     message_text:
       "中风险 · 当前可信分 75/100 · 建议核验物流轨迹定位与签收凭证。",
@@ -787,6 +796,189 @@ describe("HearingCourtView", () => {
     expect(bootstrapJudgeMessage.classes()).toContain(
       "court-message--judge-bench-card",
     );
+  });
+
+  it("keeps the baseline opening and case-specific intake question in the chat rail before party waiting controls", async () => {
+    const { wrapper } = await mountView({
+      initialMessages: [
+        {
+          id: "MESSAGE_OPENING_SYSTEM",
+          sequence_no: 1,
+          sender_role: "SYSTEM",
+          message_type: "SYSTEM_STAGE_EVENT",
+          message_text: "法庭正在装载冻结前案情矩阵和证据矩阵。",
+        },
+        {
+          id: "MESSAGE_OPENING_JUDGE",
+          sequence_no: 2,
+          sender_role: "PRESIDING_JUDGE",
+          message_type: "AGENT_MESSAGE",
+          message_text:
+            "现在开庭。庭前案情与证据材料将依次宣读；本席在庭审卷宗冻结后进入裁决审理。",
+        },
+        {
+          id: "MESSAGE_CASE_INTRODUCTION",
+          sequence_no: 3,
+          sender_role: "INTAKE_OFFICER",
+          message_type: "AGENT_MESSAGE",
+          message_text:
+            "现宣读庭前双方案情汇总：\n核心争议：30元加急费对应的送达承诺是否履行，以及270元替代购买是否必要。",
+        },
+        {
+          id: "MESSAGE_INTAKE_QUESTION",
+          sequence_no: 4,
+          sender_role: "INTAKE_OFFICER",
+          message_type: "AGENT_MESSAGE",
+          message_text:
+            "现就约定送达日期、30元加急费与270元替代购买争议向双方发问。",
+        },
+        {
+          id: "MESSAGE_PARTY_ANSWERS_OPEN",
+          sequence_no: 5,
+          sender_role: "SYSTEM",
+          message_type: "SYSTEM_STAGE_EVENT",
+          message_text: "案情澄清问题已生成，请双方在统一截止时间前完成回答。",
+        },
+      ],
+    });
+
+    const transcript = wrapper.get("[data-court-transcript]");
+    expect(transcript.find("[data-court-transcript-empty]").exists()).toBe(false);
+    expect(transcript.findAll("[data-court-message]")).toHaveLength(3);
+    expect(transcript.text()).toContain("现在开庭");
+    expect(transcript.text()).toContain("30元加急费对应的送达承诺是否履行");
+    expect(transcript.text()).toContain("约定送达日期、30元加急费与270元替代购买争议");
+    expect(transcript.text()).toContain("案情澄清问题已生成");
+    expect(transcript.text()).not.toContain("庭审状态机已自动进入双方回答阶段");
+    expect(wrapper.get('[data-court-message-id="MESSAGE_INTAKE_QUESTION"]').classes())
+      .toContain("court-message--court-staff-card");
+  });
+
+  it("gates party answers on the bound durable intake-officer question transcript without fabricating it", async () => {
+    const submitAnswersAction = vi.fn().mockResolvedValue({
+      participant_role: "USER",
+      submission_status: "SUBMITTED",
+    });
+    const synchronizedHearing = {
+      ...hearing,
+      status: {
+        ...hearing.status,
+        transcript_watermark: { message_id: "MESSAGE_BOUND_INTAKE_QUESTION" },
+      },
+    };
+    const opening = {
+      id: "MESSAGE_BOUND_OPENING",
+      sequence_no: 1,
+      sender_role: "PRESIDING_JUDGE",
+      message_type: "AGENT_MESSAGE",
+      message_text: "现在开庭，先宣读已冻结的庭前材料。",
+    };
+    const partyOpen = {
+      id: "MESSAGE_BOUND_PARTY_OPEN",
+      sequence_no: 3,
+      sender_role: "SYSTEM",
+      message_type: "SYSTEM_STAGE_EVENT",
+      message_text: "双方回答阶段已打开。",
+    };
+
+    const missing = await mountView({
+      submitAnswersAction,
+      initialHearing: synchronizedHearing,
+      initialMessages: [opening, partyOpen],
+    });
+    const missingTranscript = missing.wrapper.get("[data-court-transcript]");
+    expect(missingTranscript.get("[data-hearing-transcript-sync-error]").text())
+      .toContain("庭审记录同步异常");
+    expect(missingTranscript.findAll("[data-court-message]")).toHaveLength(1);
+    expect(missingTranscript.text()).toContain("现在开庭");
+    expect(missingTranscript.text()).not.toContain("请围绕正式问题逐项陈述");
+    const missingTextarea = missing.wrapper.get('[data-party-statement-form] textarea');
+    await missingTextarea.setValue("在正式问题记录同步前不得提交这段陈述。");
+    expect(missingTextarea.element.disabled).toBe(true);
+    expect(missing.wrapper.get("[data-submit-party-statement]").element.disabled).toBe(true);
+    await missing.wrapper.get("[data-submit-party-statement]").trigger("click");
+    expect(submitAnswersAction).not.toHaveBeenCalled();
+    missing.wrapper.unmount();
+
+    const question = {
+      id: "MESSAGE_BOUND_INTAKE_QUESTION",
+      sequence_no: 2,
+      sender_role: "INTAKE_OFFICER",
+      message_type: "AGENT_MESSAGE",
+      message_text: "请围绕正式问题逐项陈述本方事实与理由。",
+    };
+    const graphSourceSchema = await mountView({
+      initialHearing: {
+        ...synchronizedHearing,
+        question_set: {
+          ...synchronizedHearing.question_set,
+          schema_version: "hearing_intake_questions.v1",
+        },
+      },
+      initialMessages: [opening, question, partyOpen],
+    });
+    expect(graphSourceSchema.wrapper.find("[data-hearing-transcript-sync-error]").exists())
+      .toBe(true);
+    expect(graphSourceSchema.wrapper.get("[data-submit-party-statement]").element.disabled)
+      .toBe(true);
+    graphSourceSchema.wrapper.unmount();
+
+    const arrived = await mountView({
+      submitAnswersAction,
+      initialHearing: synchronizedHearing,
+      initialMessages: [partyOpen, question, opening],
+    });
+    const arrivedTranscript = arrived.wrapper.get("[data-court-transcript]");
+    expect(arrivedTranscript.find("[data-hearing-transcript-sync-error]").exists()).toBe(false);
+    expect(
+      arrivedTranscript
+        .findAll("[data-court-message-id]")
+        .map((item) => item.attributes("data-court-message-id")),
+    ).toEqual([
+      "MESSAGE_BOUND_OPENING",
+      "MESSAGE_BOUND_INTAKE_QUESTION",
+      "MESSAGE_BOUND_PARTY_OPEN",
+    ]);
+    expect(arrivedTranscript.findAll("[data-court-message]")).toHaveLength(2);
+    const arrivedTextarea = arrived.wrapper.get('[data-party-statement-form] textarea');
+    expect(arrivedTextarea.element.disabled).toBe(false);
+    await arrivedTextarea.setValue("我方围绕正式问题提交完整陈述。");
+    const submit = arrived.wrapper.get("[data-submit-party-statement]");
+    expect(submit.element.disabled).toBe(false);
+    await submit.trigger("click");
+    await flushPromises();
+    expect(submitAnswersAction).toHaveBeenCalledOnce();
+
+    const { transcript_watermark: ignoredWatermark, ...statusWithoutWatermark } =
+      synchronizedHearing.status;
+    expect(ignoredWatermark).toBeTruthy();
+    const setBound = await mountView({
+      initialHearing: {
+        ...synchronizedHearing,
+        status: statusWithoutWatermark,
+      },
+      initialMessages: [
+        opening,
+        {
+          ...question,
+          id: "MESSAGE_SET_BOUND_INTAKE_QUESTION",
+          question_set_id: "HEARING_QUESTION_SET_1",
+        },
+        partyOpen,
+      ],
+    });
+    expect(setBound.wrapper.find("[data-hearing-transcript-sync-error]").exists()).toBe(false);
+    expect(setBound.wrapper.get('[data-party-statement-form] textarea').element.disabled)
+      .toBe(false);
+    setBound.wrapper.unmount();
+
+    const history = await mountView({
+      historyMode: true,
+      initialHearing: synchronizedHearing,
+      initialMessages: [opening],
+    });
+    expect(history.wrapper.find("[data-hearing-transcript-sync-error]").exists()).toBe(false);
+    expect(history.wrapper.find("[data-party-statement-form]").exists()).toBe(false);
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -1625,7 +1817,7 @@ describe("HearingCourtView", () => {
       initialHearing: {
         ...hearing,
         question_set: {
-          schema_version: "hearing_intake_questions.v1",
+          schema_version: "hearing_question_set.v1",
           question_set_id: "HEARING_ISSUE_SET_ROLE_PROMPTS",
           questions: [
             {
@@ -1664,7 +1856,7 @@ describe("HearingCourtView", () => {
       initialHearing: {
         ...hearing,
         question_set: {
-          schema_version: "hearing_intake_questions.v1",
+          schema_version: "hearing_question_set.v1",
           question_set_id: "HEARING_QUESTION_SET_MERCHANT_ONLY",
           questions: [
             {
@@ -1963,6 +2155,107 @@ describe("HearingCourtView", () => {
     expect(router.currentRoute.value.path).toBe(
       "/disputes/CASE_HEARING_1/outcome",
     );
+  });
+
+  it("discovers a late hearing run once across durable event replay and active enumeration", async () => {
+    const descriptor = {
+      agent_run_id: "target-hearing-run:late-mounted-1",
+      operation: "HEARING_INTAKE_QUESTIONS",
+      status: "RUNNING",
+      stream_url: "/api/agent-runs/target-hearing-run%3Alate-mounted-1/events",
+      stage_code: "INTAKE_QUESTIONS_GENERATING",
+      stage_sequence: 4,
+    };
+    const activeRunsLoader = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([descriptor]);
+    const agentRunConsumer = vi.fn().mockResolvedValue(null);
+    let applyCaseEvent;
+    const eventStreamer = vi.fn(async (options) => {
+      options.state.connected = true;
+      applyCaseEvent = options.applyEvent;
+    });
+    const { wrapper } = await mountView({
+      activeRunsLoader,
+      agentRunConsumer,
+      eventStreamer,
+    });
+    await flushPromises();
+
+    expect(activeRunsLoader).toHaveBeenCalledOnce();
+    expect(agentRunConsumer).not.toHaveBeenCalled();
+    const startedEvent = {
+      id: 21,
+      event: "AGENT_RUN_STARTED",
+      data: {
+        event_type: "AGENT_RUN_STARTED",
+        payload_json: JSON.stringify(descriptor),
+      },
+    };
+    await applyCaseEvent(startedEvent);
+    await flushPromises();
+    expect(agentRunConsumer).toHaveBeenCalledOnce();
+    expect(agentRunConsumer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        caseId: "CASE_HEARING_1",
+        roomType: "HEARING",
+        descriptor: expect.objectContaining({
+          runId: "target-hearing-run:late-mounted-1",
+          operation: "HEARING_INTAKE_QUESTIONS",
+        }),
+      }),
+    );
+    expect(activeRunsLoader).toHaveBeenCalledTimes(2);
+
+    await applyCaseEvent(startedEvent);
+    await flushPromises();
+    expect(activeRunsLoader).toHaveBeenCalledTimes(3);
+    expect(agentRunConsumer).toHaveBeenCalledOnce();
+
+    await applyCaseEvent({
+      id: 22,
+      event: "AGENT_RUN_STARTED",
+      data: {
+        event_type: "AGENT_RUN_STARTED",
+        payload_json: JSON.stringify({
+          ...descriptor,
+          agent_run_id: "target-hearing-run:unknown-operation",
+          operation: "HEARING_UNKNOWN_OPERATION",
+        }),
+      },
+    });
+    await applyCaseEvent({
+      id: 23,
+      event: "AGENT_RUN_STARTED",
+      data: {
+        event_type: "AGENT_RUN_STARTED",
+        payload_json: JSON.stringify({
+          operation: "HEARING_INTAKE_QUESTIONS",
+          status: "RUNNING",
+          stream_url: "/api/agent-runs/missing/events",
+          stage_code: "INTAKE_QUESTIONS_GENERATING",
+          stage_sequence: 4,
+        }),
+      },
+    });
+    await flushPromises();
+    expect(agentRunConsumer).toHaveBeenCalledOnce();
+    wrapper.unmount();
+
+    const historyLoader = vi.fn().mockResolvedValue([descriptor]);
+    const historyConsumer = vi.fn().mockResolvedValue(null);
+    const historyEventStreamer = vi.fn();
+    await mountView({
+      historyMode: true,
+      activeRunsLoader: historyLoader,
+      agentRunConsumer: historyConsumer,
+      eventStreamer: historyEventStreamer,
+    });
+    await flushPromises();
+    expect(historyLoader).not.toHaveBeenCalled();
+    expect(historyEventStreamer).not.toHaveBeenCalled();
+    expect(historyConsumer).not.toHaveBeenCalled();
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。

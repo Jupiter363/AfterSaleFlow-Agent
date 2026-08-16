@@ -537,6 +537,40 @@ class HearingFlowWorkflows:
             operation=operation,
             request=request,
         )
+        invocation = self._invocation(operation, request, execute)
+        result = self._hearing_graphs[identity.identity].invoke(
+            state,
+            context=invocation,
+            config={"max_concurrency": 8, "recursion_limit": 64},
+        )
+        return result_type.model_validate(result["proposal"])
+
+    def target_e2e_invocation(
+        self,
+        operation: HearingOperation,
+        request: Any,
+    ) -> HearingGraphInvocation:
+        """Bind a frozen target-E2E request to the governed Hearing model operation."""
+
+        execute = {
+            HearingOperation.INTAKE_QUESTIONS: self._intake_questions_proposal,
+            HearingOperation.INTAKE_SYNTHESIS: self._intake_synthesis_proposal,
+            HearingOperation.EVIDENCE_REQUESTS: self._evidence_requests_proposal,
+            HearingOperation.EVIDENCE_SYNTHESIS: self._evidence_synthesis_proposal,
+            HearingOperation.JUDGE_V1: self._judge_v1_proposal,
+            HearingOperation.JURY_REVIEW: self._jury_review_proposal,
+            HearingOperation.JUDGE_V2: self._judge_v2_proposal,
+        }.get(operation)
+        if execute is None:
+            raise AgentOutputSchemaError("hearing_target_e2e", "unsupported Hearing operation")
+        return self._invocation(operation, request, execute)
+
+    def _invocation(
+        self,
+        operation: HearingOperation,
+        request: Any,
+        execute: Any,
+    ) -> HearingGraphInvocation:
         invocation = HearingGraphInvocation(request=request, execute=execute)
         if operation is HearingOperation.EVIDENCE_SYNTHESIS:
             invocation = HearingGraphInvocation(
@@ -554,12 +588,7 @@ class HearingFlowWorkflows:
                     )
                 ),
             )
-        result = self._hearing_graphs[identity.identity].invoke(
-            state,
-            context=invocation,
-            config={"max_concurrency": 8, "recursion_limit": 64},
-        )
-        return result_type.model_validate(result["proposal"])
+        return invocation
 
     def _invoke(self, node_name: str, request: Any, output_type: Any) -> Any:
         return self._invoke_payload(

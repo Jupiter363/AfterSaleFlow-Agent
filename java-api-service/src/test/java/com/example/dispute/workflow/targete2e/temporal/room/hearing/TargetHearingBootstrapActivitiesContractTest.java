@@ -21,7 +21,8 @@ class TargetHearingBootstrapActivitiesContractTest {
                 "COURT_PREPARING",
                 1,
                 "user-42",
-                "merchant-84"));
+                "merchant-84",
+                1_200));
 
     assertThrows(
         IllegalArgumentException.class,
@@ -36,7 +37,8 @@ class TargetHearingBootstrapActivitiesContractTest {
                 "CASE_INTRODUCTION",
                 2,
                 "user-42",
-                "merchant-84"));
+                "merchant-84",
+                1_200));
 
     assertThrows(
         IllegalArgumentException.class,
@@ -51,7 +53,24 @@ class TargetHearingBootstrapActivitiesContractTest {
                 "COURT_PREPARING",
                 1,
                 "target-e2e-initiator",
-                "target-e2e-respondent"));
+                "target-e2e-respondent",
+                1_200));
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new TargetHearingBootstrapActivities.Binding(
+                "hearing-room-1",
+                "epoch-1",
+                1,
+                9,
+                12,
+                7,
+                "COURT_PREPARING",
+                1,
+                "user-42",
+                "merchant-84",
+                1_201));
   }
 
   @Test

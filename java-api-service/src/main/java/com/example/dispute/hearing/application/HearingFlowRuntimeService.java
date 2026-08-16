@@ -107,6 +107,8 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
     private static final String SYSTEM_ACTOR = "hearing-flow-v2";
     private static final List<String> COURT_AUDIENCE =
             List.of("USER", "MERCHANT", "PLATFORM_REVIEWER", "ADMIN");
+    private static final HearingPublicTranscriptPolicy TRANSCRIPT_POLICY =
+            new HearingPublicTranscriptPolicy();
 
     private final FulfillmentCaseRepository caseRepository;
     private final HearingStateRepository hearingStateRepository;
@@ -730,80 +732,63 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                                 json(preparationInput),
                                 now,
                                 SYSTEM_ACTOR));
-        appendMessage(
+        List<HearingPublicTranscriptPolicy.Draft> preparationDrafts =
+                TRANSCRIPT_POLICY.deterministicStage(
+                        HearingFlowStage.COURT_PREPARING,
+                        caseMatrix,
+                        evidenceDossier.path("fact_evidence_matrix"));
+        appendTranscriptDraft(
                 room,
                 preparation,
-                MessageSenderType.SYSTEM,
-                "SYSTEM",
-                SYSTEM_ACTOR,
-                MessageSource.SYSTEM_STAGE_EVENT,
-                MessageType.SYSTEM_STAGE_EVENT,
-                "法庭正在装载冻结前案情矩阵和证据矩阵。",
-                null,
-                "prepare",
+                requiredTranscriptDraft(preparationDrafts, "prepare"),
                 now);
-        appendMessage(
+        appendTranscriptDraft(
                 room,
                 preparation,
-                MessageSenderType.AGENT,
-                "PRESIDING_JUDGE",
-                "presiding-judge-template",
-                MessageSource.ROLE_TEMPLATE,
-                MessageType.AGENT_MESSAGE,
-                "现在开庭。庭前案情与证据材料将依次宣读；本席在庭审卷宗冻结后进入裁决审理。",
-                null,
-                "judge-opening",
+                requiredTranscriptDraft(preparationDrafts, "judge-opening"),
                 now);
         preparation.complete(json(preparationInput), now, SYSTEM_ACTOR);
-        appendSystemStageMessage(
-                dispute,
+        appendTranscriptDraft(
+                room,
                 preparation,
-                "前序案情矩阵和证据矩阵已装载。",
-                "prepare-completed",
+                requiredTranscriptDraft(preparationDrafts, "prepare-completed"),
                 now);
 
         HearingFlowStageEntity caseIntroduction =
                 advance(instance, HearingFlowStage.CASE_INTRODUCTION, caseMatrix, now);
-        appendSystemStageMessage(
-                dispute,
-                caseIntroduction,
-                "下面请案情接待官介绍庭前案情。",
-                "case-introduction-next",
-                now);
-        appendMessage(
+        appendTranscriptDraft(
                 room,
                 caseIntroduction,
-                MessageSenderType.AGENT,
-                "INTAKE_OFFICER",
-                "intake-officer-template",
-                MessageSource.ROLE_TEMPLATE,
-                MessageType.AGENT_MESSAGE,
-                caseIntroductionText(caseMatrix),
-                null,
-                "case-introduction",
+                requiredTranscriptDraft(preparationDrafts, "case-introduction-next"),
+                now);
+        List<HearingPublicTranscriptPolicy.Draft> caseIntroductionDrafts =
+                TRANSCRIPT_POLICY.deterministicStage(
+                        HearingFlowStage.CASE_INTRODUCTION,
+                        caseMatrix,
+                        evidenceDossier.path("fact_evidence_matrix"));
+        appendTranscriptDraft(
+                room,
+                caseIntroduction,
+                requiredTranscriptDraft(caseIntroductionDrafts, "case-introduction"),
                 now);
         caseIntroduction.complete(json(caseMatrix), now, SYSTEM_ACTOR);
 
         HearingFlowStageEntity evidenceIntroduction =
                 advance(instance, HearingFlowStage.EVIDENCE_INTRODUCTION, evidenceDossier, now);
-        appendSystemStageMessage(
-                dispute,
-                evidenceIntroduction,
-                "下面请证据书记官介绍庭前证据覆盖情况。",
-                "evidence-introduction-next",
-                now);
-        appendMessage(
+        appendTranscriptDraft(
                 room,
                 evidenceIntroduction,
-                MessageSenderType.AGENT,
-                "EVIDENCE_CLERK",
-                "evidence-clerk-template",
-                MessageSource.ROLE_TEMPLATE,
-                MessageType.AGENT_MESSAGE,
-                evidenceIntroductionText(
-                        caseMatrix, evidenceDossier.path("fact_evidence_matrix")),
-                null,
-                "evidence-introduction",
+                requiredTranscriptDraft(caseIntroductionDrafts, "evidence-introduction-next"),
+                now);
+        List<HearingPublicTranscriptPolicy.Draft> evidenceIntroductionDrafts =
+                TRANSCRIPT_POLICY.deterministicStage(
+                        HearingFlowStage.EVIDENCE_INTRODUCTION,
+                        caseMatrix,
+                        evidenceDossier.path("fact_evidence_matrix"));
+        appendTranscriptDraft(
+                room,
+                evidenceIntroduction,
+                requiredTranscriptDraft(evidenceIntroductionDrafts, "evidence-introduction"),
                 now);
         evidenceIntroduction.complete(json(evidenceDossier), now, SYSTEM_ACTOR);
 
@@ -811,11 +796,10 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                 intakeQuestionsRequest(dispute, hearingState, instance, caseMatrix);
         HearingFlowStageEntity questionStage =
                 advance(instance, HearingFlowStage.INTAKE_QUESTIONS_GENERATING, questionRequest, now);
-        appendSystemStageMessage(
-                dispute,
+        appendTranscriptDraft(
+                room,
                 questionStage,
-                "案情接待官将根据庭前案情矩阵提出澄清问题。",
-                "intake-questions-next",
+                requiredTranscriptDraft(evidenceIntroductionDrafts, "intake-questions-next"),
                 now);
         startAgent(dispute, room, questionStage, "HEARING_INTAKE_QUESTIONS", questionRequest);
         return instance;
@@ -934,7 +918,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         finalization.runId(),
                         now,
                         SYSTEM_ACTOR));
-        appendAgentResultMessage(dispute, stage, result, finalization, "intake-questions", now);
+        appendAgentResultMessage(dispute, stage, result, finalization, now);
         stage.complete(json(result), now, SYSTEM_ACTOR);
         ObjectNode input = objectMapper.createObjectNode();
         input.put("question_set_id", payload.path("question_set_id").asText());
@@ -946,11 +930,12 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         input,
                         partyDeadline(dispute, now),
                         now);
-        appendSystemStageMessage(
+        appendAgentNextStageNotice(
                 dispute,
                 answersStage,
-                "案情澄清问题已生成，请双方在统一截止时间前完成回答。",
-                "party-answers-open",
+                HearingFlowStage.INTAKE_QUESTIONS_GENERATING,
+                result,
+                finalization.runId(),
                 now);
         expireIfDue(instance, dispute);
     }
@@ -968,17 +953,18 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         verifyEmbeddedHash(matrix, "content_hash");
         ObjectNode sourceMatrix = object(finalization.request().path("case_fact_matrix"));
         validateHearingClarifiedMatrix(matrix, sourceMatrix);
-        appendAgentResultMessage(dispute, stage, result, finalization, "intake-synthesis", clock.instant());
+        appendAgentResultMessage(dispute, stage, result, finalization, clock.instant());
         Instant now = clock.instant();
         stage.complete(json(result), now, SYSTEM_ACTOR);
         ObjectNode request = evidenceRequestsRequest(dispute, hearingState, instance, result);
         HearingFlowStageEntity next =
                 advance(instance, HearingFlowStage.EVIDENCE_REQUESTS_GENERATING, request, now);
-        appendSystemStageMessage(
+        appendAgentNextStageNotice(
                 dispute,
                 next,
-                "案情矩阵已更新，证据书记官正在生成针对性补证请求。",
-                "evidence-requests-next",
+                HearingFlowStage.INTAKE_SYNTHESIZING,
+                result,
+                finalization.runId(),
                 now);
         startAgent(
                 dispute,
@@ -1054,7 +1040,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         finalization.runId(),
                         now,
                         SYSTEM_ACTOR));
-        appendAgentResultMessage(dispute, stage, result, finalization, "evidence-requests", now);
+        appendAgentResultMessage(dispute, stage, result, finalization, now);
         stage.complete(json(result), now, SYSTEM_ACTOR);
         ObjectNode input = objectMapper.createObjectNode();
         input.put("request_set_id", payload.path("request_set_id").asText());
@@ -1066,11 +1052,12 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         input,
                         partyDeadline(dispute, now),
                         now);
-        appendSystemStageMessage(
+        appendAgentNextStageNotice(
                 dispute,
                 evidenceStage,
-                "补证请求已生成，请双方在统一截止时间前完成证据提交。",
-                "party-evidence-open",
+                HearingFlowStage.EVIDENCE_REQUESTS_GENERATING,
+                result,
+                finalization.runId(),
                 now);
         expireIfDue(instance, dispute);
     }
@@ -1087,7 +1074,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         requireSchema(workingMatrix, "fact_evidence_matrix.v2");
         verifyEmbeddedHash(workingMatrix, "content_hash");
         Instant now = clock.instant();
-        appendAgentResultMessage(dispute, stage, result, finalization, "evidence-synthesis", now);
+        appendAgentResultMessage(dispute, stage, result, finalization, now);
         stage.complete(json(result), now, SYSTEM_ACTOR);
 
         ObjectNode freezeInput = result.deepCopy();
@@ -1107,21 +1094,21 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         frozenRef.put("content_hash", dossier.getContentHash());
         frozenRef.put("frozen_at", dossier.getFrozenAt().toString());
         freezing.complete(json(frozenRef), now, SYSTEM_ACTOR);
-        appendSystemStageMessage(
-                dispute,
+        List<HearingPublicTranscriptPolicy.Draft> dossierDrafts =
+                TRANSCRIPT_POLICY.dossierFrozen();
+        appendTranscriptDraft(
+                requireHearingRoom(dispute.getId()),
                 freezing,
-                "庭审卷宗已冻结，后续法官与评审团只读取该不可变版本。",
-                "dossier-frozen",
+                requiredTranscriptDraft(dossierDrafts, "dossier-frozen"),
                 now);
 
         ObjectNode judgeRequest = judgeV1Request(dispute, hearingState, instance, dossier);
         HearingFlowStageEntity judgeStage =
                 advance(instance, HearingFlowStage.JUDGE_V1_GENERATING, judgeRequest, now);
-        appendSystemStageMessage(
-                dispute,
+        appendTranscriptDraft(
+                requireHearingRoom(dispute.getId()),
                 judgeStage,
-                "庭审卷宗已交付法官，现进入裁决审理。",
-                "judge-v1-next",
+                requiredTranscriptDraft(dossierDrafts, "judge-v1-next"),
                 now);
         startAgent(
                 dispute,
@@ -1154,16 +1141,17 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                 null,
                 finalization.runId(),
                 now);
-        appendAgentResultMessage(dispute, stage, result, finalization, "judge-v1", now);
+        appendAgentResultMessage(dispute, stage, result, finalization, now);
         stage.complete(json(result), now, SYSTEM_ACTOR);
         ObjectNode request = juryReviewRequest(dispute, hearingState, instance, dossier, result);
         HearingFlowStageEntity next =
                 advance(instance, HearingFlowStage.JURY_REVIEWING, request, now);
-        appendSystemStageMessage(
+        appendAgentNextStageNotice(
                 dispute,
                 next,
-                "法官初步裁决意见已形成，现交评审团复核。",
-                "jury-review-next",
+                HearingFlowStage.JUDGE_V1_GENERATING,
+                result,
+                finalization.runId(),
                 now);
         startAgent(
                 dispute,
@@ -1205,17 +1193,18 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                 parent.getId(),
                 finalization.runId(),
                 now);
-        appendAgentResultMessage(dispute, stage, result, finalization, "jury-review", now);
+        appendAgentResultMessage(dispute, stage, result, finalization, now);
         stage.complete(json(result), now, SYSTEM_ACTOR);
         ObjectNode request =
                 judgeV2Request(dispute, hearingState, instance, dossier, judgeV1, result);
         HearingFlowStageEntity next =
                 advance(instance, HearingFlowStage.JUDGE_V2_GENERATING, request, now);
-        appendSystemStageMessage(
+        appendAgentNextStageNotice(
                 dispute,
                 next,
-                "评审团复核完成，法官将据此形成最终裁决草案。",
-                "judge-v2-next",
+                HearingFlowStage.JURY_REVIEWING,
+                result,
+                finalization.runId(),
                 now);
         startAgent(
                 dispute,
@@ -1270,7 +1259,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                 now);
         persistAdjudicationDraftProjection(
                 dispute, hearingState, draft, finalization.runId());
-        appendAgentResultMessage(dispute, stage, result, finalization, "judge-v2", now);
+        appendAgentResultMessage(dispute, stage, result, finalization, now);
         stage.complete(json(result), now, SYSTEM_ACTOR);
         hearingState.complete(true, SYSTEM_ACTOR);
         hearingStateRepository.save(hearingState);
@@ -1281,11 +1270,12 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         handoff.put("handoff_status", "SCHEDULED");
         HearingFlowStageEntity humanReview =
                 advance(instance, HearingFlowStage.HUMAN_REVIEW_OPEN, handoff, now);
-        appendSystemStageMessage(
+        appendAgentNextStageNotice(
                 dispute,
                 humanReview,
-                "本庭休庭，裁决草案已原样移交人工审核。",
-                "human-review-open",
+                HearingFlowStage.JUDGE_V2_GENERATING,
+                result,
+                finalization.runId(),
                 now);
         String frozenDraftId = requiredText(draft, "draft_id");
         String frozenDraftHash = requiredText(draft, "content_hash");
@@ -1666,15 +1656,16 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         ? intakeSynthesisRequest(dispute, hearingState, instance)
                         : evidenceSynthesisRequest(dispute, hearingState, instance);
         HearingFlowStageEntity next = advance(instance, synthesisStage, request, now);
-        appendSystemStageMessage(
-                dispute,
+        List<HearingPublicTranscriptPolicy.Draft> partyDrafts =
+                TRANSCRIPT_POLICY.partyStageAdvanced(stage.getStageCode());
+        appendTranscriptDraft(
+                requireHearingRoom(dispute.getId()),
                 next,
-                synthesisStage == HearingFlowStage.INTAKE_SYNTHESIZING
-                        ? "双方回答已封存，案情接待官正在综合更新案情矩阵。"
-                        : "双方证据批次已封存，证据书记官正在核验并综合证据矩阵。",
-                synthesisStage == HearingFlowStage.INTAKE_SYNTHESIZING
-                        ? "intake-synthesis-next"
-                        : "evidence-synthesis-next",
+                requiredTranscriptDraft(
+                        partyDrafts,
+                        synthesisStage == HearingFlowStage.INTAKE_SYNTHESIZING
+                                ? "intake-synthesis-next"
+                                : "evidence-synthesis-next"),
                 now);
         startAgent(
                 dispute,
@@ -2202,144 +2193,6 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         return matrix.deepCopy();
     }
 
-    private static String caseIntroductionText(ObjectNode caseMatrix) {
-        List<String> lines = new ArrayList<>();
-        lines.add("现宣读庭前双方案情汇总：");
-
-        JsonNode overview = caseMatrix.path("case_overview");
-        appendSummaryLine(lines, "案情概览", overview.path("neutral_summary").asText(null));
-        appendSummaryLine(lines, "核心争议", overview.path("core_conflict").asText(null));
-
-        JsonNode claims = caseMatrix.path("claims");
-        JsonNode initiatorClaim = claims.path("initiator_claim");
-        appendSummaryLine(
-                lines,
-                roleDisplay(initiatorClaim.path("initiator_role").asText()),
-                initiatorClaim.path("position_summary").asText(null));
-        JsonNode respondentClaim = claims.path("respondent_direct");
-        if (respondentClaim.isObject()) {
-            appendSummaryLine(
-                    lines,
-                    roleDisplay(respondentClaim.path("respondent_role").asText()),
-                    respondentClaim.path("position_summary").asText(null));
-        }
-
-        ArrayNode factRows = array(caseMatrix.path("fact_rows"));
-        if (!factRows.isEmpty()) {
-            lines.add("争议事实：");
-            int limit = Math.min(factRows.size(), 8);
-            for (int index = 0; index < limit; index++) {
-                JsonNode row = factRows.get(index);
-                String target = nonBlank(row.path("fact_target").asText(null), "待确认事实");
-                JsonNode positions = row.path("positions");
-                String user = stanceDisplay(positions.path("USER").path("stance").asText());
-                String merchant =
-                        stanceDisplay(positions.path("MERCHANT").path("stance").asText());
-                String resolution =
-                        row.path("requires_resolution").asBoolean(false) ? "，待庭审核实" : "";
-                lines.add(
-                        (index + 1)
-                                + ". "
-                                + target
-                                + "（用户："
-                                + user
-                                + "；商家："
-                                + merchant
-                                + resolution
-                                + "）");
-            }
-            if (factRows.size() > limit) {
-                lines.add("另有 " + (factRows.size() - limit) + " 项事实已收入案情矩阵。");
-            }
-        }
-        return String.join("\n", lines);
-    }
-
-    private static String evidenceIntroductionText(
-            ObjectNode caseMatrix, JsonNode evidenceMatrix) {
-        Map<String, String> factTargets = new LinkedHashMap<>();
-        for (JsonNode row : array(caseMatrix.path("fact_rows"))) {
-            factTargets.put(
-                    row.path("fact_id").asText(),
-                    nonBlank(row.path("fact_target").asText(null), "待确认事实"));
-        }
-
-        ArrayNode coverage = array(evidenceMatrix.path("fact_coverage"));
-        long covered = 0;
-        long partial = 0;
-        long uncovered = 0;
-        long review = 0;
-        for (JsonNode row : coverage) {
-            switch (row.path("coverage_status").asText()) {
-                case "COVERED_BY_SUBMITTED_EVIDENCE", "COVERED_BY_FROZEN_DOSSIER" -> covered++;
-                case "PARTIALLY_COVERED_BY_FROZEN_DOSSIER" -> partial++;
-                case "REQUIRES_HUMAN_REVIEW" -> review++;
-                default -> uncovered++;
-            }
-        }
-
-        List<String> lines = new ArrayList<>();
-        lines.add("现宣读庭前证据覆盖汇总：");
-        lines.add(
-                "共核对 "
-                        + coverage.size()
-                        + " 项事实：已覆盖 "
-                        + covered
-                        + " 项，部分覆盖 "
-                        + partial
-                        + " 项，待补充 "
-                        + uncovered
-                        + " 项，需人工复核 "
-                        + review
-                        + " 项。");
-        int limit = Math.min(coverage.size(), 8);
-        for (int index = 0; index < limit; index++) {
-            JsonNode row = coverage.get(index);
-            String target =
-                    nonBlank(
-                            factTargets.get(row.path("fact_id").asText()),
-                            "第 " + (index + 1) + " 项待确认事实");
-            lines.add(
-                    (index + 1)
-                            + ". "
-                            + target
-                            + "："
-                            + coverageDisplay(row.path("coverage_status").asText()));
-        }
-        if (coverage.size() > limit) {
-            lines.add("另有 " + (coverage.size() - limit) + " 项覆盖情况已收入证据矩阵。");
-        }
-        return String.join("\n", lines);
-    }
-
-    private static void appendSummaryLine(List<String> lines, String label, String value) {
-        if (value != null && !value.isBlank()) {
-            lines.add(label + "：" + value);
-        }
-    }
-
-    private static String roleDisplay(String role) {
-        return "MERCHANT".equals(role) ? "商家主张" : "用户主张";
-    }
-
-    private static String stanceDisplay(String stance) {
-        return switch (stance) {
-            case "CONFIRM", "AGREE", "ACCEPT" -> "确认";
-            case "DENY", "DISAGREE", "REJECT" -> "否认";
-            case "PARTIAL", "PARTIALLY_AGREE" -> "部分认可";
-            default -> "未回应";
-        };
-    }
-
-    private static String coverageDisplay(String status) {
-        return switch (status) {
-            case "COVERED_BY_SUBMITTED_EVIDENCE", "COVERED_BY_FROZEN_DOSSIER" -> "已有证据覆盖";
-            case "PARTIALLY_COVERED_BY_FROZEN_DOSSIER" -> "部分证据覆盖";
-            case "REQUIRES_HUMAN_REVIEW" -> "需人工复核";
-            default -> "尚待补充证据";
-        };
-    }
-
     private ObjectNode initialEvidenceDossier(String caseId, ObjectNode caseMatrix) {
         EvidenceDossierEntity dossier =
                 evidenceDossierRepository
@@ -2600,54 +2453,77 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             HearingFlowStageEntity stage,
             ObjectNode result,
             AgentRunFinalizationContext finalization,
-            String suffix,
             Instant now) {
-        String role =
-                switch (finalization.operation()) {
-                    case "HEARING_INTAKE_QUESTIONS", "HEARING_INTAKE_SYNTHESIS" ->
-                            "INTAKE_OFFICER";
-                    case "HEARING_EVIDENCE_REQUESTS", "HEARING_EVIDENCE_SYNTHESIS" ->
-                            "EVIDENCE_CLERK";
-                    case "HEARING_JURY_REVIEW" -> "JURY_PANEL";
-                    case "HEARING_JUDGE_V1", "HEARING_JUDGE_V2" -> "PRESIDING_JUDGE";
-                    default -> throw new IllegalArgumentException("unknown hearing speaker");
-                };
-        MessageType type =
-                "HEARING_JURY_REVIEW".equals(finalization.operation())
-                        ? MessageType.JURY_REVIEW_REPORT
-                        : MessageType.AGENT_MESSAGE;
-        appendMessage(
+        HearingFlowStage sourceStage = stageForOperation(finalization.operation());
+        if (stage.getStageCode() != sourceStage) {
+            throw new IllegalStateException("Hearing public result stage is not its Agent operation");
+        }
+        List<HearingPublicTranscriptPolicy.Draft> drafts =
+                TRANSCRIPT_POLICY.agentFinalized(sourceStage, result, finalization.runId());
+        appendTranscriptDraft(
                 requireHearingRoom(dispute.getId()),
                 stage,
-                MessageSenderType.AGENT,
-                role,
-                role.toLowerCase(),
-                MessageSource.AGENT_LLM,
-                type,
-                requiredText(result, "public_message"),
-                finalization.runId(),
-                suffix,
+                requiredTranscriptDraftForStage(drafts, sourceStage),
                 now);
     }
 
-    private void appendSystemStageMessage(
+    private void appendAgentNextStageNotice(
             FulfillmentCaseEntity dispute,
-            HearingFlowStageEntity stage,
-            String text,
-            String suffix,
+            HearingFlowStageEntity nextStage,
+            HearingFlowStage sourceStage,
+            ObjectNode result,
+            String agentRunId,
             Instant now) {
-        appendMessage(
+        List<HearingPublicTranscriptPolicy.Draft> drafts =
+                TRANSCRIPT_POLICY.agentFinalized(sourceStage, result, agentRunId);
+        appendTranscriptDraft(
                 requireHearingRoom(dispute.getId()),
-                stage,
-                MessageSenderType.SYSTEM,
-                "SYSTEM",
-                SYSTEM_ACTOR,
-                MessageSource.SYSTEM_STAGE_EVENT,
-                MessageType.SYSTEM_STAGE_EVENT,
-                text,
-                null,
-                suffix,
+                nextStage,
+                requiredTranscriptDraftForStage(drafts, nextStage.getStageCode()),
                 now);
+    }
+
+    private void appendTranscriptDraft(
+            CaseRoomEntity room,
+            HearingFlowStageEntity stage,
+            HearingPublicTranscriptPolicy.Draft draft,
+            Instant now) {
+        if (stage.getStageCode() != draft.stage()
+                || stage.getStageSequence() != draft.stageSequence()) {
+            throw new IllegalStateException("Hearing public draft is not bound to its durable stage");
+        }
+        appendMessage(
+                room,
+                stage,
+                draft.senderType(),
+                draft.senderRole(),
+                draft.senderId(),
+                draft.messageSource(),
+                draft.messageType(),
+                draft.text(),
+                draft.agentRunId(),
+                draft.suffix(),
+                now);
+    }
+
+    private static HearingPublicTranscriptPolicy.Draft requiredTranscriptDraft(
+            List<HearingPublicTranscriptPolicy.Draft> drafts, String suffix) {
+        List<HearingPublicTranscriptPolicy.Draft> matches =
+                drafts.stream().filter(draft -> suffix.equals(draft.suffix())).toList();
+        if (matches.size() != 1) {
+            throw new IllegalStateException("Hearing public draft suffix is absent or ambiguous");
+        }
+        return matches.getFirst();
+    }
+
+    private static HearingPublicTranscriptPolicy.Draft requiredTranscriptDraftForStage(
+            List<HearingPublicTranscriptPolicy.Draft> drafts, HearingFlowStage stage) {
+        List<HearingPublicTranscriptPolicy.Draft> matches =
+                drafts.stream().filter(draft -> draft.stage() == stage).toList();
+        if (matches.size() != 1) {
+            throw new IllegalStateException("Hearing public draft stage is absent or ambiguous");
+        }
+        return matches.getFirst();
     }
 
     private RoomMessageEntity appendPartyMessage(

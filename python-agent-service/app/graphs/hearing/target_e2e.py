@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hmac
 import re
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
 
+from langchain_core.messages import AIMessageChunk
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
@@ -32,6 +33,7 @@ from app.graph_runtime.identity import RoomType, ThreadIdentity
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.result import CompletedDraft, ResultBindings
 from app.graph_runtime.target_e2e import TargetE2ERoomProposalSource
+from app.model_runtime.callbacks import governed_events_from_chunk
 from app.graphs.hearing.contracts import (
     EMPTY_HEARING_TOOL_POLICY,
     HEARING_GRAPH_IDENTITIES,
@@ -446,6 +448,45 @@ class HearingTargetE2ERuntimeBundle:
             return dict(values)
         return await self.astart() if values is None else await self.aresume()
 
+    async def astream(self) -> AsyncIterator[Any]:
+        values = await self._checkpoint_values()
+        if values is not None and values.get("status") == "PROPOSED":
+            self._validate_state(values)
+            return
+        if values is None:
+            graph_input: Mapping[str, Any] | None = new_hearing_graph_state(
+                identity=self.identity,
+                operation=self.operation,
+                request=self.request,
+                command_binding=self.command_binding,
+                scope_binding=self.scope_binding,
+            )
+        else:
+            self._validate_state(values)
+            graph_input = None
+        source = self.graph.astream(
+            graph_input,
+            self._config(),
+            context=self.invocation,
+            durability="sync",
+            stream_mode=["messages", "updates"],
+        )
+        close = getattr(source, "aclose", None)
+        if not callable(close):
+            raise HearingGraphContractError("HEARING_TARGET_GRAPH_STREAM_NOT_CLOSABLE")
+        try:
+            async for candidate in source:
+                yield candidate
+        finally:
+            await cast(Callable[[], Awaitable[None]], close)()
+
+    async def completed_state(self) -> dict[str, Any]:
+        values = await self._checkpoint_values()
+        if values is None or values.get("status") != "PROPOSED":
+            raise HearingGraphContractError("HEARING_TARGET_GRAPH_STREAM_INCOMPLETE")
+        self._validate_state(values)
+        return dict(values)
+
     async def terminal_checkpoint(self) -> tuple[str, str, int]:
         snapshot = await self.graph.aget_state(self._config())
         values = getattr(snapshot, "values", None)
@@ -656,6 +697,14 @@ class HearingTargetE2EProposalMaterial:
         return False
 
 
+@dataclass(frozen=True, slots=True)
+class _HearingTargetE2EExecutionPlan:
+    context: HearingTargetE2EExecutionContext
+    loaded: HearingTargetE2ELoadedInvocation
+    registration: HearingTargetE2EFamilyRegistration
+    bundle: HearingTargetE2ERuntimeBundle
+
+
 class HearingTargetE2ERuntimeAdapter:
     """Execute a verified candidate Hearing command and emit only a proposal source."""
 
@@ -684,13 +733,53 @@ class HearingTargetE2ERuntimeAdapter:
         self,
         execution: GatewayExecution,
     ) -> AsyncIterator[AgentStreamEvent]:
+        sequence = 0
         yield self._event(
             execution,
-            sequence_no=0,
+            sequence_no=sequence,
             event_type="attempt_started",
             payload=AgentStreamPayload(node="hearing_target_e2e"),
         )
-        material = await self.execute(execution)
+        sequence += 1
+        plan = await self._prepare_execution(execution)
+        operation_binding = plan.registration.operation_bindings[plan.loaded.operation]
+        visible_deltas: list[str] = []
+        source = plan.bundle.astream()
+        close = getattr(source, "aclose", None)
+        if not callable(close):
+            raise HearingGraphContractError("HEARING_TARGET_GRAPH_STREAM_NOT_CLOSABLE")
+        try:
+            async for candidate in source:
+                for payload in self._visible_payloads(candidate, operation_binding):
+                    visible_deltas.append(cast(str, payload.delta))
+                    yield self._event(
+                        execution,
+                        sequence_no=sequence,
+                        event_type="visible_delta",
+                        payload=payload,
+                    )
+                    sequence += 1
+        finally:
+            await cast(Callable[[], Awaitable[None]], close)()
+        state = await plan.bundle.completed_state()
+        self._require_visible_terminal(state, visible_deltas)
+        material = await self._proposal_material(execution, plan, state)
+        result = await self._commit_terminal(execution, material)
+        yield self._event(
+            execution,
+            sequence_no=sequence,
+            event_type="final",
+            payload=AgentStreamPayload(
+                final_result_ref=result.result_ref,
+                final_result_hash=result.result_hash,
+            ),
+        )
+
+    async def _commit_terminal(
+        self,
+        execution: GatewayExecution,
+        material: HearingTargetE2EProposalMaterial,
+    ) -> Any:
         command = execution.admission.command
         invocation = command.invocation_context
         materializer = TerminalResultMaterializer(
@@ -759,20 +848,20 @@ class HearingTargetE2ERuntimeAdapter:
                 cognitive_revision=material.cognitive_revision,
             ),
         )
-        yield self._event(
-            execution,
-            sequence_no=1,
-            event_type="final",
-            payload=AgentStreamPayload(
-                final_result_ref=result.result_ref,
-                final_result_hash=result.result_hash,
-            ),
-        )
+        return result
 
     async def execute(
         self,
         execution: GatewayExecution,
     ) -> HearingTargetE2EProposalMaterial:
+        plan = await self._prepare_execution(execution)
+        state = await plan.bundle.arun()
+        return await self._proposal_material(execution, plan, state)
+
+    async def _prepare_execution(
+        self,
+        execution: GatewayExecution,
+    ) -> _HearingTargetE2EExecutionPlan:
         context = HearingTargetE2EExecutionContext.from_gateway_execution(execution)
         loaded = await self._invocation_provider.load(execution)
         _require_loaded_invocation(context, loaded)
@@ -787,7 +876,24 @@ class HearingTargetE2ERuntimeAdapter:
             checkpointer=self._checkpointer,
             shared_barrier_receipt_hash=loaded.shared_barrier_receipt_hash,
         )
-        state = await bundle.arun()
+        return _HearingTargetE2EExecutionPlan(
+            context=context,
+            loaded=loaded,
+            registration=registration,
+            bundle=bundle,
+        )
+
+    async def _proposal_material(
+        self,
+        execution: GatewayExecution,
+        plan: _HearingTargetE2EExecutionPlan,
+        state: Mapping[str, Any],
+    ) -> HearingTargetE2EProposalMaterial:
+        context = plan.context
+        loaded = plan.loaded
+        registration = plan.registration
+        bundle = plan.bundle
+        operation = loaded.operation
         checkpoint_ns, checkpoint_id, checkpoint_revision = (
             await bundle.terminal_checkpoint()
         )
@@ -869,12 +975,69 @@ class HearingTargetE2ERuntimeAdapter:
             runtime_binding_sha256=bundle.runtime_binding_sha256,
         )
 
+    @staticmethod
+    def _visible_payloads(
+        candidate: Any,
+        operation_binding: HearingTargetE2EOperationBinding,
+    ) -> tuple[AgentStreamPayload, ...]:
+        if not isinstance(candidate, tuple) or len(candidate) != 2:
+            raise HearingGraphContractError("HEARING_TARGET_STREAM_EVENT_INVALID")
+        mode, value = candidate
+        if mode == "updates":
+            return ()
+        if mode != "messages" or not isinstance(value, tuple) or len(value) != 2:
+            raise HearingGraphContractError("HEARING_TARGET_STREAM_EVENT_INVALID")
+        chunk, metadata = value
+        if not isinstance(chunk, AIMessageChunk):
+            return ()
+        governed = governed_events_from_chunk(chunk)
+        if not governed:
+            return ()
+        if not isinstance(metadata, Mapping):
+            raise HearingGraphContractError("HEARING_TARGET_STREAM_METADATA_INVALID")
+        public_node = operation_binding.model_nodes[-1]
+        payloads: list[AgentStreamPayload] = []
+        for event in governed:
+            delta = event.get("delta")
+            if (
+                event.get("schema_version") != "governed-model-event.v1"
+                or event.get("event_type") != "visible_delta"
+                or event.get("node_name") != public_node
+                or metadata.get("langgraph_node") != public_node
+                or event.get("field") != "public_message"
+                or not isinstance(delta, str)
+                or not delta
+            ):
+                raise HearingGraphContractError("HEARING_TARGET_VISIBLE_DELTA_INVALID")
+            payloads.append(
+                AgentStreamPayload(
+                    node=public_node,
+                    field="public_message",
+                    delta=delta,
+                )
+            )
+        return tuple(payloads)
+
+    @staticmethod
+    def _require_visible_terminal(
+        state: Mapping[str, Any],
+        visible_deltas: list[str],
+    ) -> None:
+        if not visible_deltas:
+            return
+        proposal = state.get("proposal")
+        if (
+            not isinstance(proposal, Mapping)
+            or proposal.get("public_message") != "".join(visible_deltas)
+        ):
+            raise HearingGraphContractError("HEARING_TARGET_VISIBLE_TERMINAL_MISMATCH")
+
     def _event(
         self,
         execution: GatewayExecution,
         *,
         sequence_no: int,
-        event_type: Literal["attempt_started", "final"],
+        event_type: Literal["attempt_started", "visible_delta", "final"],
         payload: AgentStreamPayload,
     ) -> AgentStreamEvent:
         occurred_at = self._clock()

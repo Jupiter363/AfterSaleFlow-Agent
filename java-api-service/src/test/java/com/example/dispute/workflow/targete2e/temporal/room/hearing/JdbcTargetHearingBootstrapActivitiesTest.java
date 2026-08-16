@@ -2,6 +2,7 @@ package com.example.dispute.workflow.targete2e.temporal.room.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 
 import com.example.dispute.hearing.domain.HearingAuthorityCommit;
 import com.example.dispute.hearing.domain.HearingAuthorityExpectation;
@@ -12,19 +13,35 @@ import com.example.dispute.hearing.domain.HearingFormalFinalizer;
 import com.example.dispute.hearing.domain.HearingFormalRequestHash;
 import com.example.dispute.hearing.domain.HearingFormalTransition;
 import com.example.dispute.hearing.domain.HearingWriterMode;
+import com.example.dispute.hearing.application.finalization.HearingFormalReceiptService;
 import com.example.dispute.hearing.infrastructure.persistence.JdbcHearingAuthorityLedger;
 import com.example.dispute.hearing.infrastructure.persistence.JdbcHearingFormalFinalizer;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
+import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingAgentRunStartedPublisher;
+import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingFormalizationActivities;
+import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingPublicTranscriptCommitter;
+import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingAgentRunStartedPublisher;
+import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalCompletion;
+import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalizationActivities;
+import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingInternalStageMaterializer;
+import com.example.dispute.workflow.temporal.room.hearing.HearingOperationKeys;
+import com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart;
+import com.example.dispute.workflow.temporal.room.hearing.HearingWorkflowStage;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import io.temporal.failure.ApplicationFailure;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
@@ -210,7 +227,8 @@ class JdbcTargetHearingBootstrapActivitiesTest {
     ProvisionRoomEpoch provision = provision(CASE_ID, ROOM_ID, EPOCH_ID, 3);
     seedAuthority(provision);
     JdbcTargetHearingBootstrapActivities activities =
-        new JdbcTargetHearingBootstrapActivities(dataSource, transactions, "default");
+        new JdbcTargetHearingBootstrapActivities(
+            dataSource, transactions, "default", java.time.Duration.ofMinutes(20));
 
     TargetHearingBootstrapActivities.Binding first = activities.bootstrap(provision);
     TargetHearingBootstrapActivities.Binding replay = activities.bootstrap(provision);
@@ -220,6 +238,7 @@ class JdbcTargetHearingBootstrapActivitiesTest {
         .isEqualTo(DefaultDataConverter.STANDARD_INSTANCE.toPayload(replay).orElseThrow());
     assertThat(first.flowInstanceId()).isEqualTo(ROOM_ID);
     assertThat(first.epochId()).isEqualTo(EPOCH_ID);
+    assertThat(first.partyStageWindowSeconds()).isEqualTo(1_200);
     assertThat(first.processRevision()).isEqualTo(14);
     assertThat(first.roomRevision()).isZero();
     assertThat(first.fencingToken()).isEqualTo(3);
@@ -375,6 +394,204 @@ class JdbcTargetHearingBootstrapActivitiesTest {
                   drifted.caseId()))
           .isEqualTo("COURT_PREPARING");
     }
+  }
+
+  @Test
+  void targetOpeningProjectsBaselineChatMessagesInOrderAndReplayDoesNotDuplicate()
+      throws SQLException {
+    ProvisionRoomEpoch provision =
+        provision(
+            "CASE_TARGET_HEARING_CHAT",
+            "ROOM_TARGET_HEARING_CHAT",
+            "EPOCH_TARGET_HEARING_CHAT",
+            3);
+    seedAuthority(provision);
+    seedPreludeAuthority(provision.caseId());
+    JdbcTargetHearingBootstrapActivities bootstrap =
+        new JdbcTargetHearingBootstrapActivities(
+            dataSource, transactions, "default", java.time.Duration.ofMinutes(20));
+    TargetHearingBootstrapActivities.Binding binding = bootstrap.bootstrap(provision);
+    activate(provision);
+
+    NamedParameterJdbcTemplate named = new NamedParameterJdbcTemplate(dataSource);
+    JdbcHearingAuthorityLedger ledger = new JdbcHearingAuthorityLedger(named, transactions);
+    TargetHearingFormalCompletion completion =
+        new TargetHearingFormalCompletion(
+            new HearingFormalReceiptService(new JdbcHearingFormalFinalizer(named, ledger)));
+    ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+    JdbcTargetHearingFormalizationActivities formalization =
+        new JdbcTargetHearingFormalizationActivities(
+            dataSource,
+            transactions,
+            completion,
+            mock(TargetHearingInternalStageMaterializer.class),
+            ledger,
+            mapper,
+            null,
+            new JdbcTargetHearingPublicTranscriptCommitter(dataSource, mapper, ignored -> {}));
+    HearingRoomStart start =
+        new HearingRoomStart(
+            "hearing-room-start.v1",
+            provision.tenantSurrogate(),
+            provision.caseId(),
+            provision.roomId(),
+            binding.flowInstanceId(),
+            binding.epochId(),
+            HearingWriterMode.TEMPORAL,
+            binding.roomEpoch(),
+            binding.fencingToken(),
+            binding.initiatorParticipantId(),
+            binding.respondentParticipantId(),
+            provision.requestedAt(),
+            provision.projectedDeadlineAt(),
+            binding.partyStageWindowSeconds(),
+            binding.processRevision(),
+            binding.roomRevision(),
+            ROOM_BUILD);
+    String operationKey =
+        HearingOperationKeys.stageCompletion(
+            provision.tenantSurrogate(),
+            provision.caseId(),
+            provision.roomEpoch(),
+            HearingWorkflowStage.COURT_PREPARING,
+            HearingWorkflowStage.COURT_PREPARING.sequence());
+    TargetHearingFormalizationActivities.TransitionRequest transition =
+        new TargetHearingFormalizationActivities.TransitionRequest(
+            start,
+            HearingWorkflowStage.COURT_PREPARING,
+            HearingWorkflowStage.COURT_PREPARING.sequence(),
+            binding.processRevision(),
+            binding.roomRevision(),
+            binding.fencingToken(),
+            operationKey);
+
+    var first = formalization.bootstrapNext(transition);
+    var replay = formalization.bootstrapNext(transition);
+
+    assertThat(replay).isEqualTo(first);
+    List<Map<String, Object>> messages =
+        jdbc.queryForList(
+            """
+            select sender_type, sender_role, message_source, message_type,
+                   message_text, idempotency_key
+              from room_message
+             where case_id = ? and room_id = ?
+             order by sequence_no
+            """,
+            provision.caseId(),
+            provision.roomId());
+    assertThat(messages).hasSize(4);
+    assertThat(messages)
+        .extracting(row -> row.get("sender_role"))
+        .containsExactly("SYSTEM", "PRESIDING_JUDGE", "SYSTEM", "SYSTEM");
+    assertThat(messages)
+        .extracting(row -> row.get("message_source"))
+        .containsExactly(
+            "SYSTEM_STAGE_EVENT", "ROLE_TEMPLATE", "SYSTEM_STAGE_EVENT", "SYSTEM_STAGE_EVENT");
+    assertThat(messages)
+        .extracting(row -> row.get("message_text"))
+        .containsExactly(
+            "法庭正在装载冻结前案情矩阵和证据矩阵。",
+            "现在开庭。庭前案情与证据材料将依次宣读；本席在庭审卷宗冻结后进入裁决审理。",
+            "前序案情矩阵和证据矩阵已装载。",
+            "下面请案情接待官介绍庭前案情。");
+    assertThat(messages)
+        .extracting(row -> row.get("idempotency_key"))
+        .containsExactly(
+            "hearing-v2:1:prepare",
+            "hearing-v2:1:judge-opening",
+            "hearing-v2:1:prepare-completed",
+            "hearing-v2:2:case-introduction-next");
+  }
+
+  @Test
+  void automaticAgentRunStartPublishesOneDurableDiscoveryEventAndRejectsReplayDrift()
+      throws SQLException {
+    ProvisionRoomEpoch provision =
+        provision(
+            "CASE_TARGET_HEARING_RUN_DISCOVERY",
+            "ROOM_TARGET_HEARING_RUN_DISCOVERY",
+            "EPOCH_TARGET_HEARING_RUN_DISCOVERY",
+            7);
+    seedAuthority(provision);
+    AtomicInteger notifications = new AtomicInteger();
+    JdbcTargetHearingAgentRunStartedPublisher publisher =
+        new JdbcTargetHearingAgentRunStartedPublisher(
+            dataSource,
+            new ObjectMapper().findAndRegisterModules(),
+            ignored -> notifications.incrementAndGet());
+    Instant startedAt = Instant.parse("2026-08-17T02:45:00.123456Z");
+    TargetHearingAgentRunStartedPublisher.Event event =
+        new TargetHearingAgentRunStartedPublisher.Event(
+            provision.tenantSurrogate(),
+            provision.caseId(),
+            provision.roomId(),
+            provision.roomEpoch(),
+            provision.fencingToken(),
+            "FLOW_TARGET_HEARING_RUN_DISCOVERY",
+            "INTAKE_QUESTIONS_GENERATING",
+            4,
+            "HEARING_INTAKE_QUESTIONS",
+            "hearing-stage:4:run-discovery",
+            "target-hearing-run:run-discovery",
+            "target-hearing-run:run-discovery:1",
+            "PENDING",
+            startedAt);
+
+    transactions.executeWithoutResult(ignored -> publisher.publish(event));
+    transactions.executeWithoutResult(ignored -> publisher.publish(event));
+
+    assertThat(notifications).hasValue(1);
+    assertThat(
+            jdbc.queryForObject(
+                """
+                select count(*)
+                  from case_timeline_event
+                 where case_id = ? and event_type = 'AGENT_RUN_STARTED'
+                """,
+                Long.class,
+                provision.caseId()))
+        .isEqualTo(1L);
+    Map<String, Object> stored =
+        jdbc.queryForMap(
+            """
+            select event_json ->> 'agent_run_id' as agent_run_id,
+                   event_json ->> 'attempt_id' as attempt_id,
+                   event_json ->> 'stream_url' as stream_url,
+                   event_json ->> 'stage_code' as stage_code,
+                   (event_json ->> 'fencing_token')::bigint as fencing_token
+              from case_timeline_event
+             where case_id = ? and event_type = 'AGENT_RUN_STARTED'
+            """,
+            provision.caseId());
+    assertThat(stored)
+        .containsEntry("agent_run_id", event.agentRunId())
+        .containsEntry("attempt_id", event.attemptId())
+        .containsEntry("stream_url", "/api/agent-runs/" + event.agentRunId() + "/events")
+        .containsEntry("stage_code", event.stageCode())
+        .containsEntry("fencing_token", event.fencingToken());
+
+    TargetHearingAgentRunStartedPublisher.Event drifted =
+        new TargetHearingAgentRunStartedPublisher.Event(
+            event.tenantSurrogate(),
+            event.caseId(),
+            event.roomId(),
+            event.roomEpoch(),
+            event.fencingToken(),
+            event.flowInstanceId(),
+            "EVIDENCE_REQUESTS_GENERATING",
+            7,
+            "HEARING_EVIDENCE_REQUESTS",
+            event.commandId(),
+            event.agentRunId(),
+            event.attemptId(),
+            event.status(),
+            event.startedAt());
+    assertThatThrownBy(
+            () -> transactions.executeWithoutResult(ignored -> publisher.publish(drifted)))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("replay drifted");
+    assertThat(notifications).hasValue(1);
   }
 
   private static HearingFormalFinalizer formalFinalizer() {
@@ -572,6 +789,58 @@ class JdbcTargetHearingBootstrapActivitiesTest {
                   provision.temporalBuildId(),
                   provision.roomWorkflowBuildId()));
     }
+  }
+
+  private static void seedPreludeAuthority(String caseId) {
+    ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+    ObjectNode caseMatrix = mapper.createObjectNode();
+    caseMatrix.put("schema_version", "case_fact_matrix.v2");
+    caseMatrix.put("case_id", caseId);
+    caseMatrix.put("matrix_id", "MATRIX_" + caseId);
+    caseMatrix.put("matrix_version", 1);
+    caseMatrix.putArray("fact_rows");
+    caseMatrix.put("content_hash", ContractJson.sha256Hex(caseMatrix));
+    ObjectNode intakeDossier = mapper.createObjectNode();
+    intakeDossier.set("case_fact_matrix", caseMatrix);
+    jdbc.update(
+        """
+        insert into case_intake_dossier (
+            id, case_id, room_type, dossier_version, dossier_json,
+            quality_score, ready_for_next_step, admission_recommendation,
+            source_turn_no, created_by, updated_by)
+        values (?, ?, 'INTAKE', 1, cast(? as jsonb), 100, true, 'ACCEPTED',
+                1, 'target-hearing-bootstrap', 'target-hearing-bootstrap')
+        """,
+        "INTAKE_DOSSIER_" + caseId,
+        caseId,
+        ContractJson.canonicalString(intakeDossier));
+
+    ObjectNode evidenceMatrix = mapper.createObjectNode();
+    evidenceMatrix.put("schema_version", "fact_evidence_matrix.v2");
+    evidenceMatrix.put("case_id", caseId);
+    evidenceMatrix.put("matrix_id", "EVIDENCE_MATRIX_" + caseId);
+    evidenceMatrix.put("matrix_version", 1);
+    evidenceMatrix.put("matrix_status", "FROZEN");
+    evidenceMatrix.put("case_fact_matrix_id", caseMatrix.path("matrix_id").asText());
+    evidenceMatrix.put("case_fact_matrix_version", caseMatrix.path("matrix_version").asInt());
+    evidenceMatrix.put("case_fact_matrix_hash", caseMatrix.path("content_hash").asText());
+    evidenceMatrix.putArray("fact_coverage");
+    evidenceMatrix.putArray("links");
+    evidenceMatrix.putArray("source_refs");
+    evidenceMatrix.put("content_hash", ContractJson.sha256Hex(evidenceMatrix));
+    ObjectNode matrixSummary = mapper.createObjectNode();
+    matrixSummary.set("fact_evidence_matrix_v2", evidenceMatrix);
+    jdbc.update(
+        """
+        insert into evidence_dossier (
+            id, case_id, dossier_status, dossier_version, summary_json,
+            timeline_json, matrix_summary_json, built_at, created_by, updated_by)
+        values (?, ?, 'FROZEN', 1, '{}'::jsonb, '[]'::jsonb, cast(? as jsonb),
+                now(), 'target-hearing-bootstrap', 'target-hearing-bootstrap')
+        """,
+        "EVIDENCE_DOSSIER_" + caseId,
+        caseId,
+        ContractJson.canonicalString(matrixSummary));
   }
 
   private static void seedDriftedState(ProvisionRoomEpoch provision, String drift) {

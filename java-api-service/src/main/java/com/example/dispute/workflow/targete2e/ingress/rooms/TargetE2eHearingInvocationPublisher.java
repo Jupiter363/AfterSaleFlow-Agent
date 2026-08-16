@@ -30,23 +30,21 @@ public final class TargetE2eHearingInvocationPublisher {
    * so command-scoped index binding intentionally happens in the separate {@link #bind} step.
    */
   public InvocationInputs publish(String commandId, String operation, String sharedBarrierReceiptHash,
-      JsonNode request, JsonNode fixtureProposal, JsonNode fixtureWorkResults,
-      JsonNode eventDocument) {
+      JsonNode request, JsonNode eventDocument) {
     String expectedStage = OPERATION_STAGE.get(operation);
     if (expectedStage == null || commandId == null || commandId.isBlank()) throw new IllegalArgumentException("unsupported Hearing invocation operation");
     if (sharedBarrierReceiptHash == null
         || !sharedBarrierReceiptHash.matches("[a-f0-9]{64}")) {
       throw new IllegalArgumentException("Hearing shared barrier receipt hash is invalid");
     }
-    if (!request.isObject() || !fixtureProposal.isObject() || !eventDocument.isObject()
-        || (fixtureWorkResults != null && !fixtureWorkResults.isObject())) throw new IllegalArgumentException("Hearing invocation payload is invalid");
+    if (!request.isObject() || !eventDocument.isObject()) {
+      throw new IllegalArgumentException("Hearing invocation payload is invalid");
+    }
     ObjectNode invocation = mapper.createObjectNode();
-    invocation.put("schema_version", "target-e2e-hearing-invocation.v1");
+    invocation.put("schema_version", "target-e2e-hearing-invocation.v2");
     invocation.put("operation", operation);
     invocation.put("shared_barrier_receipt_hash", sharedBarrierReceiptHash);
     invocation.set("request", request.deepCopy());
-    invocation.set("fixture_proposal", fixtureProposal.deepCopy());
-    if (fixtureWorkResults != null) invocation.set("fixture_work_results", fixtureWorkResults.deepCopy());
     String artifact = "target-hearing-invocation:" + commandId + ":" + operation;
     var snapshot = publisher.publishCanonical(artifact, "HEARING", invocation);
     var event = publisher.publishCanonical("target-hearing-event:" + commandId + ":" + operation,

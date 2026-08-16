@@ -211,8 +211,6 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
             intakeQuestionsInput.operation(),
             intakeQuestionsInput.sharedBarrierReceiptHash(),
             intakeQuestionsInput.request(),
-            intakeQuestionsInput.fixtureProposal(),
-            intakeQuestionsInput.fixtureWorkResults(),
             event);
     JdbcTargetHearingAgentStageInputFactory.StageInput replayInput =
         factory.load(start, HearingWorkflowStage.INTAKE_QUESTIONS_GENERATING);
@@ -222,8 +220,6 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
             replayInput.operation(),
             replayInput.sharedBarrierReceiptHash(),
             replayInput.request(),
-            replayInput.fixtureProposal(),
-            replayInput.fixtureWorkResults(),
             event);
 
     assertThat(intakeQuestionsInput.sharedBarrierReceiptHash())
@@ -234,15 +230,15 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     JsonNode invocation = publishedDocuments.getAllValues().get(0);
     JsonNode replayInvocation = publishedDocuments.getAllValues().get(2);
     assertThat(invocation.path("schema_version").asText())
-        .isEqualTo("target-e2e-hearing-invocation.v1");
+        .isEqualTo("target-e2e-hearing-invocation.v2");
     assertThat(invocation.path("shared_barrier_receipt_hash").asText())
         .isEqualTo(terminalReceipt.path("receipt_hash").asText())
         .isEqualTo(SHARED_BARRIER_RECEIPT_HASH);
     assertThat(invocation.path("request")).isEqualTo(intakeQuestionsInput.request());
-    assertThat(invocation.path("fixture_proposal"))
-        .isEqualTo(intakeQuestionsInput.fixtureProposal());
-    assertThat(invocation.path("fixture_work_results"))
-        .isEqualTo(intakeQuestionsInput.fixtureWorkResults());
+    assertThat(invocation.has("fixture_proposal")).isFalse();
+    assertThat(invocation.has("fixture_work_results")).isFalse();
+    assertThat(invocation.path("request").path("case_fact_matrix").toString())
+        .contains("物流系统记录包裹已签收", "双方对实际交付有争议");
     assertThat(publishedDocuments.getAllValues().get(1)).isEqualTo(event);
     assertThat(replayInvocation).isEqualTo(invocation);
     assertThat(publishedDocuments.getAllValues().get(3)).isEqualTo(event);
@@ -295,8 +291,6 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
                     intakeQuestionsInput.operation(),
                     "A".repeat(64),
                     intakeQuestionsInput.request(),
-                    intakeQuestionsInput.fixtureProposal(),
-                    intakeQuestionsInput.fixtureWorkResults(),
                     event))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("shared barrier receipt hash");
@@ -380,10 +374,9 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
                     "requires_resolution_fact_ids":["FACT_DELIVERY"]}
                 }
                 """);
-    matrix.put(
-        "content_hash",
-        JdbcTargetHearingAgentStageInputFactory.pythonContentHash(
-            mapper, matrix, "content_hash"));
+    ObjectNode unsigned = matrix.deepCopy();
+    unsigned.remove("content_hash");
+    matrix.put("content_hash", ContractJson.sha256Hex(unsigned));
     return matrix;
   }
 
@@ -446,16 +439,25 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     when(dataSource.getConnection()).thenReturn(connection);
     when(connection.prepareStatement(anyString()))
         .thenAnswer(
-            invocation ->
-                statement(
+            invocation -> {
+              String sql = invocation.getArgument(0);
+              if (sql.contains("join hearing_domain_receipt receipt")) {
+                return preludeStatement(
                     connection,
-                    sqlPayloads(
-                        mapper,
-                        invocation.getArgument(0),
-                        preHearingMatrix,
-                        successorMatrix,
-                        frozen,
-                        terminalReceiptRows)));
+                    mapper,
+                    preHearingMatrix,
+                    frozen);
+              }
+              return statement(
+                  connection,
+                  sqlPayloads(
+                      mapper,
+                      sql,
+                      preHearingMatrix,
+                      successorMatrix,
+                      frozen,
+                      terminalReceiptRows));
+            });
     return dataSource;
   }
 
@@ -593,6 +595,49 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     when(statement.executeQuery()).thenReturn(rows);
     when(rows.next()).thenAnswer(ignored -> cursor.incrementAndGet() < payloads.size());
     when(rows.getString(1)).thenAnswer(ignored -> payloads.get(cursor.get()));
+    return statement;
+  }
+
+  private static PreparedStatement preludeStatement(
+      Connection connection,
+      ObjectMapper mapper,
+      ObjectNode preHearingMatrix,
+      EvidenceDossierEntity frozen)
+      throws Exception {
+    HearingRoomStart start = hearingStart();
+    ObjectNode evidenceDossier = mapper.createObjectNode();
+    JsonNode matrixSummary = mapper.readTree(frozen.getMatrixSummaryJson());
+    evidenceDossier.put("dossier_id", frozen.getId());
+    evidenceDossier.put("dossier_version", frozen.getDossierVersion());
+    evidenceDossier.put("dossier_status", frozen.getDossierStatus());
+    evidenceDossier.set(
+        "fact_evidence_matrix",
+        matrixSummary.path("fact_evidence_matrix_v2").deepCopy());
+    evidenceDossier.set("evidence_summary", mapper.readTree(frozen.getSummaryJson()));
+    ObjectNode prelude = mapper.createObjectNode();
+    prelude.put("schema_version", JdbcTargetHearingPreludeAuthority.SCHEMA_VERSION);
+    prelude.put("tenant_surrogate", start.tenantSurrogate());
+    prelude.put("case_id", start.caseId());
+    prelude.put("flow_instance_id", start.flowInstanceId());
+    prelude.put("epoch_id", start.epochId());
+    prelude.put("room_epoch", start.roomEpoch());
+    prelude.put("fencing_token", start.fencingToken());
+    prelude.set("case_fact_matrix", preHearingMatrix.deepCopy());
+    prelude.set("evidence_dossier", evidenceDossier);
+    List<String> columns =
+        List.of(
+            prelude.toString(),
+            ContractJson.sha256Hex(prelude),
+            "HDR_PRELUDE_AUTHORITY",
+            "4".repeat(64));
+    PreparedStatement statement = mock(PreparedStatement.class);
+    ResultSet rows = mock(ResultSet.class);
+    AtomicInteger cursor = new AtomicInteger(-1);
+    when(statement.getConnection()).thenReturn(connection);
+    when(statement.executeQuery()).thenReturn(rows);
+    when(rows.next()).thenAnswer(ignored -> cursor.incrementAndGet() == 0);
+    when(rows.getString(org.mockito.ArgumentMatchers.anyInt()))
+        .thenAnswer(invocation -> columns.get(((Integer) invocation.getArgument(0)) - 1));
     return statement;
   }
 

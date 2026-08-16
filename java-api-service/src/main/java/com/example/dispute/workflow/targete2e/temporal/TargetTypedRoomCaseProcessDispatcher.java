@@ -103,6 +103,8 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       "target-evidence-agent-run-terminal-no-commit-v1";
   public static final String TARGET_EVIDENCE_RETURNED_AGENT_RUN_TERMINAL_NO_COMMIT_CHANGE_ID =
       "target-evidence-returned-agent-run-terminal-no-commit-v1";
+  public static final String TARGET_HEARING_PARTY_STAGE_WINDOW_CHANGE_ID =
+      "target-hearing-party-stage-window-authority-v1";
   private static final int FROZEN_EVIDENCE_START = 1;
 
   private final TargetIntakeCommandBridgeActivities targetIntakeCommandBridge =
@@ -450,10 +452,38 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
   private TargetTypedRoomChildHandle startHearing(ProvisionRoomEpoch request) {
     requireNonNegativeEpoch(request);
     TargetHearingBootstrapActivities.Binding binding = targetHearingBootstrap.bootstrap(request);
-    requireExactHearingBinding(request, binding);
-    Instant openedAt = request.requestedAt();
+    int partyWindowVersion =
+        Workflow.getVersion(
+            TARGET_HEARING_PARTY_STAGE_WINDOW_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+    long partyStageWindowSeconds =
+        partyWindowVersion == Workflow.DEFAULT_VERSION ? 300 : binding.partyStageWindowSeconds();
     HearingRoomStart start =
-        new HearingRoomStart(
+        targetHearingStart(request, binding, partyStageWindowSeconds);
+    HearingRoomWorkflow child =
+        Workflow.newChildWorkflowStub(
+            HearingRoomWorkflow.class, childOptions(request.roomWorkflowId()));
+    observe(Async.function(child::run, start));
+    WorkflowExecution execution = Workflow.getWorkflowExecution(child).get();
+    return new HearingHandle(
+        child,
+        execution,
+        binding.roomEpoch(),
+        binding.fencingToken(),
+        binding.processRevision(),
+        binding.roomRevision());
+  }
+
+  static HearingRoomStart targetHearingStart(
+      ProvisionRoomEpoch request,
+      TargetHearingBootstrapActivities.Binding binding,
+      long partyStageWindowSeconds) {
+    Objects.requireNonNull(request, "request");
+    requireExactHearingBinding(request, binding);
+    if (partyStageWindowSeconds < 1 || partyStageWindowSeconds > 1_200) {
+      throw new IllegalStateException("target Hearing party-stage window authority is invalid");
+    }
+    Instant openedAt = request.requestedAt();
+    return new HearingRoomStart(
             "hearing-room-start.v1",
             request.tenantSurrogate(),
             request.caseId(),
@@ -467,22 +497,10 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
             binding.respondentParticipantId(),
             openedAt,
             deadlineAfter(openedAt, request.projectedDeadlineAt()),
-            300,
+            partyStageWindowSeconds,
             binding.processRevision(),
             binding.roomRevision(),
             request.roomWorkflowBuildId());
-    HearingRoomWorkflow child =
-        Workflow.newChildWorkflowStub(
-            HearingRoomWorkflow.class, childOptions(request.roomWorkflowId()));
-    observe(Async.function(child::run, start));
-    WorkflowExecution execution = Workflow.getWorkflowExecution(child).get();
-    return new HearingHandle(
-        child,
-        execution,
-        binding.roomEpoch(),
-        binding.fencingToken(),
-        binding.processRevision(),
-        binding.roomRevision());
   }
 
   private TargetTypedRoomChildHandle startOutcome(

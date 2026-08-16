@@ -35,7 +35,8 @@ public final class TargetE2eHearingArtifactRegistration {
       HttpTargetE2EGraphReconciliationClient reconciliation,
       TargetE2EGraphProposalPayloadSource proposalSource,
       GraphRegistryBindingPolicy registryBindings,
-      ObjectMapper objectMapper) {
+      ObjectMapper objectMapper,
+      JdbcTargetHearingPublicTranscriptCommitter transcript) {
     var evidence = new ReconciledTargetHearingFinalizationEvidenceResolver(dataSource, activationLedger,
         codec, signer, reconciliation, proposalSource, registryBindings, runtime, objectMapper);
     TargetE2eRoomFinalizationStrategy strategy = new TargetHearingRoomFinalizationStrategy(store,
@@ -44,7 +45,8 @@ public final class TargetE2eHearingArtifactRegistration {
     var resolver = new DurableTargetHearingFinalizationRequestResolver(
         store, formalCommandMapper, new JdbcTargetHearingFormalAuthorityLoader(dataSource));
     AgentRunDomainResultCommitter committer = new TargetHearingAgentRunDomainResultCommitter(dataSource,
-        resolver, new HearingFormalReceiptTargetCommitPort(completion));
+        resolver, new HearingFormalReceiptTargetCommitPort(
+            dataSource, completion, transcript, objectMapper));
     return new TargetHearingRegistrationBundle(new TargetHearingCommandBridgeActivitiesImpl(store),
         completion, strategy, committer);
   }

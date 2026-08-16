@@ -59,7 +59,9 @@ import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingCommand
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingCommandBridgeActivitiesImpl;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingAgentStageInputFactory;
+import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingAgentRunStartedPublisher;
 import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingFormalizationActivities;
+import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingPublicTranscriptCommitter;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalCompletion;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalizationActivities;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingInternalStageMaterializer;
@@ -363,9 +365,13 @@ public class TargetE2eControlConfiguration {
   TargetHearingBootstrapActivities targetHearingBootstrapActivities(
       DataSource dataSource,
       PlatformTransactionManager transactionManager,
-      AppProperties properties) {
+      AppProperties properties,
+      DisputeProperties disputeProperties) {
     return new JdbcTargetHearingBootstrapActivities(
-        dataSource, new TransactionTemplate(transactionManager), properties.temporal().namespace());
+        dataSource,
+        new TransactionTemplate(transactionManager),
+        properties.temporal().namespace(),
+        disputeProperties.hearingPartyStageWindow());
   }
 
   @Bean
@@ -397,7 +403,8 @@ public class TargetE2eControlConfiguration {
       AgentRunLedger agentRunLedger,
       TargetHearingCommandMaterialStore targetHearingCommandMaterialStore,
       MinioClient minioClient,
-      ObjectMapper objectMapper) {
+      ObjectMapper objectMapper,
+      CaseEventService caseEventService) {
     Clock clock = Clock.systemUTC();
     var objectIndex = new JdbcTargetE2eRoomObjectIndex(dataSource);
     var payloadPublisher = new MinioTargetE2eRoomCommandPayloadPublisher(
@@ -413,7 +420,18 @@ public class TargetE2eControlConfiguration {
         targetHearingCommandMaterialStore,
         new JdbcTargetHearingAgentStageInputFactory(dataSource, objectMapper),
         objectMapper,
-        clock);
+        clock,
+        new JdbcTargetHearingAgentRunStartedPublisher(
+            dataSource, objectMapper, caseEventService::wakeUp));
+  }
+
+  @Bean
+  JdbcTargetHearingPublicTranscriptCommitter targetHearingPublicTranscriptCommitter(
+      DataSource dataSource,
+      ObjectMapper objectMapper,
+      CaseEventService caseEventService) {
+    return new JdbcTargetHearingPublicTranscriptCommitter(
+        dataSource, objectMapper, caseEventService::wakeUp);
   }
 
   @Bean
@@ -424,7 +442,8 @@ public class TargetE2eControlConfiguration {
       TargetHearingInternalStageMaterializer targetHearingInternalStageMaterializer,
       HearingAuthorityLedger targetHearingAuthorityLedger,
       ObjectMapper objectMapper,
-      RoomEpochAllocator roomEpochAllocator) {
+      RoomEpochAllocator roomEpochAllocator,
+      JdbcTargetHearingPublicTranscriptCommitter targetHearingPublicTranscriptCommitter) {
     return new JdbcTargetHearingFormalizationActivities(
         dataSource,
         new TransactionTemplate(transactionManager),
@@ -432,7 +451,8 @@ public class TargetE2eControlConfiguration {
         targetHearingInternalStageMaterializer,
         targetHearingAuthorityLedger,
         objectMapper,
-        roomEpochAllocator);
+        roomEpochAllocator,
+        targetHearingPublicTranscriptCommitter);
   }
 
   @Bean

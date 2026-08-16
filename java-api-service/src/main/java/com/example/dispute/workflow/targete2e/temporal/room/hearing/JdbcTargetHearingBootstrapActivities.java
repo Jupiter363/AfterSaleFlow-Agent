@@ -3,6 +3,7 @@ package com.example.dispute.workflow.targete2e.temporal.room.hearing;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import io.temporal.failure.ApplicationFailure;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -22,9 +23,13 @@ public final class JdbcTargetHearingBootstrapActivities
   private final JdbcTemplate jdbc;
   private final TransactionTemplate transactions;
   private final String temporalNamespace;
+  private final long partyStageWindowSeconds;
 
   public JdbcTargetHearingBootstrapActivities(
-      DataSource dataSource, TransactionTemplate transactions, String temporalNamespace) {
+      DataSource dataSource,
+      TransactionTemplate transactions,
+      String temporalNamespace,
+      Duration partyStageWindow) {
     this.jdbc = new JdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
     this.transactions = Objects.requireNonNull(transactions, "transactions");
     this.transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
@@ -32,6 +37,7 @@ public final class JdbcTargetHearingBootstrapActivities
       throw new IllegalArgumentException("Temporal namespace is required for Hearing bootstrap");
     }
     this.temporalNamespace = temporalNamespace;
+    this.partyStageWindowSeconds = requireWholeSeconds(partyStageWindow);
   }
 
   @Override
@@ -153,7 +159,22 @@ public final class JdbcTargetHearingBootstrapActivities
         projection.stageCode(),
         projection.stageSequence(),
         participants.initiatorId(),
-        participants.respondentId());
+        participants.respondentId(),
+        partyStageWindowSeconds);
+  }
+
+  private static long requireWholeSeconds(Duration value) {
+    Objects.requireNonNull(value, "partyStageWindow");
+    long seconds = value.getSeconds();
+    if (value.isNegative()
+        || value.isZero()
+        || value.getNano() != 0
+        || seconds < 1
+        || seconds > 1_200) {
+      throw new IllegalArgumentException(
+          "partyStageWindow must be a whole-second duration between 1 and 1200 seconds");
+    }
+    return seconds;
   }
 
   private CaseRow lockCase(String caseId) {

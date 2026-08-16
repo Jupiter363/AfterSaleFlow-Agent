@@ -11,6 +11,12 @@ import pytest
 
 from app.agents.hearing_flow import HearingFlowWorkflows
 from app.config import Settings
+from app.contracts.v1.codec import canonicalize
+from app.graph_runtime.target_e2e_room_exchange import (
+    GovernedTargetE2EHearingInvocationDecoder,
+)
+from app.graphs.hearing.contracts import HearingOperation
+from app.graphs.hearing.errors import HearingGraphContractError
 from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
 from app.main import create_app
 from app.schemas import (
@@ -421,6 +427,98 @@ class ParallelEvidenceRunner(QueueRunner):
             if join_first_wave:
                 self.assessment_barrier.wait(timeout=2)
         return super().invoke_structured(**kwargs)
+
+
+def test_target_e2e_hearing_v2_invocation_uses_governed_case_specific_model_output() -> None:
+    matrix_payload = _prehearing_case_matrix().model_dump(mode="json")
+    matrix_payload["case_overview"] = {
+        "neutral_summary": "用户购买加急配送商品，双方对约定送达日期及延迟后替代购买有争议。",
+        "core_conflict": "30元加急费对应的送达承诺是否履行，以及270元替代购买是否必要。",
+        "summary_source_fact_ids": ["FACT_DELIVERY"],
+    }
+    matrix_payload["claims"]["initiator_claim"]["requested_amount"] = 270.0
+    matrix_payload["fact_rows"][0]["fact_target"] = (
+        "订单是否在约定送达日期前交付，以及延迟后用户是否支出270元替代购买费用"
+    )
+    matrix_payload["content_hash"] = "0" * 64
+    matrix_payload["content_hash"] = _hash_payload(matrix_payload)
+    matrix = CaseFactMatrixV2.model_validate(matrix_payload)
+    request = HearingIntakeQuestionsRequest.model_validate(
+        {
+            **_base("INTAKE_QUESTIONS", 1),
+            "case_fact_matrix": matrix,
+            "max_questions": 5,
+        }
+    )
+    runner = QueueRunner(
+        {
+            "hearing_intake_questions": {
+                "questions": [
+                    {
+                        "fact_ids": ["FACT_DELIVERY"],
+                        "issue_statement": (
+                            "请围绕约定送达日期、30元加急费与270元替代购买费用说明事实依据。"
+                        ),
+                        "party_prompts": {
+                            "USER": "请说明约定送达日期及270元替代购买的时间、金额和凭证。",
+                            "MERCHANT": "请说明30元加急费对应的送达承诺、实际轨迹及延迟原因。",
+                        },
+                    }
+                ],
+                "public_message": "现就本案加急送达与替代购买争议向双方发问。",
+            }
+        }
+    )
+    decoder = GovernedTargetE2EHearingInvocationDecoder(HearingFlowWorkflows(runner))
+    document = {
+        "schema_version": "target-e2e-hearing-invocation.v2",
+        "operation": "intake_questions",
+        "shared_barrier_receipt_hash": "3" * 64,
+        "request": request.model_dump(mode="json"),
+    }
+    command = SimpleNamespace(
+        case_id=request.case_id,
+        stage_sequence=request.stage_sequence,
+        domain_snapshot_ref=SimpleNamespace(uri="urn:target-e2e:hearing:v2", sha256="4" * 64),
+        event_ref=None,
+    )
+    execution = SimpleNamespace(admission=SimpleNamespace(command=command))
+
+    loaded = decoder.decode(
+        execution=execution,
+        snapshot_payload=canonicalize(document),
+        event_payload=None,
+    )
+    result = loaded.invocation.execute(loaded.request)
+    replay_loaded = decoder.decode(
+        execution=execution,
+        snapshot_payload=canonicalize(document),
+        event_payload=None,
+    )
+    replay = replay_loaded.invocation.execute(replay_loaded.request)
+
+    assert loaded.operation is HearingOperation.INTAKE_QUESTIONS
+    assert result == replay
+    assert "约定送达日期" in result.questions[0].question_text
+    assert "30元加急费" in result.questions[0].party_prompts.MERCHANT
+    assert "270元替代购买" in result.questions[0].party_prompts.USER
+    assert "Synthetic" not in result.model_dump_json()
+    assert "Provide your account" not in result.model_dump_json()
+    assert "270元替代购买" in json.dumps(
+        runner.calls[0]["case_data"], ensure_ascii=False
+    )
+
+    with pytest.raises(
+        HearingGraphContractError,
+        match="TARGET_E2E_HEARING_INVOCATION_REQUIRED",
+    ):
+        decoder.decode(
+            execution=execution,
+            snapshot_payload=canonicalize(
+                {**document, "fixture_proposal": result.model_dump(mode="json")}
+            ),
+            event_payload=None,
+        )
 
 
 def test_hearing_fact_delta_summary_refs_only_accept_existing_fact_ids() -> None:

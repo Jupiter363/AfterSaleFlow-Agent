@@ -57,6 +57,8 @@ const props = defineProps({
   serverNow: { type: String, default: "" },
   confirmSettlementAction: { type: Function, default: null },
   eventStreamer: { type: Function, default: null },
+  activeRunsLoader: { type: Function, default: null },
+  agentRunConsumer: { type: Function, default: null },
   initialEvents: { type: Array, default: null },
   initialMessages: { type: Array, default: null },
   messageAction: { type: Function, default: null },
@@ -119,6 +121,7 @@ const supplementDeclarationForm = reactive({
 const submittingAnswers = ref(false);
 const eventState = reactive(createRoomState());
 let eventAbortController = new AbortController();
+const subscribedHearingRunIds = new Set();
 const EVIDENCE_DRAWER_BREAKPOINT = 1220;
 const LONG_TRANSCRIPT_THRESHOLD = 1500;
 const LONG_TRANSCRIPT_PREVIEW_LENGTH = 900;
@@ -140,10 +143,11 @@ const caseId = computed(() => String(route.params.caseId || mountedCaseId));
 const historyMode = computed(() => route.query.view === "history");
 const shouldDiscoverActiveHearingRuns = computed(() =>
   !historyMode.value &&
-  props.initialMessages === null &&
-  props.initialHearing === null &&
-  props.initialEvidenceCatalog === null &&
-  !props.eventStreamer,
+  (Boolean(props.activeRunsLoader) ||
+    (props.initialMessages === null &&
+      props.initialHearing === null &&
+      props.initialEvidenceCatalog === null &&
+      !props.eventStreamer)),
 );
 const role = computed(() => props.viewerRole || actor.role);
 const demoActorIds = {
@@ -203,8 +207,8 @@ const emptyTranscriptCopy = computed(() => {
   const stageLabel = flowStageMeta.value?.label || "庭审处理";
   if (stageCode === "PARTY_ANSWERS_OPEN") {
     return {
-      title: "等待双方回答",
-      body: "庭审状态机已自动进入双方回答阶段；当前尚未写入可追溯陈述，无需手工开庭。",
+      title: "庭审记录同步异常",
+      body: "回答阶段已经打开，但正式问题记录尚未完成权威同步；提交已暂停，请刷新后重试。",
     };
   }
   if (stageCode === "PARTY_EVIDENCE_OPEN") {
@@ -237,6 +241,178 @@ const activeIssueSetId = computed(
     issueSet.value?.question_set_id ||
     issueSet.value?.questionSetId ||
     "",
+);
+
+function firstBoundText(sources, fields) {
+  for (const source of sources) {
+    if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+    for (const field of fields) {
+      const value = source[field];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  }
+  return "";
+}
+
+function firstBoundSequence(sources, fields) {
+  for (const source of sources) {
+    if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+    for (const field of fields) {
+      const value = Number(source[field]);
+      if (Number.isSafeInteger(value) && value > 0) return value;
+    }
+  }
+  return null;
+}
+
+function objectBinding(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim().startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function transcriptWatermark(source) {
+  return objectBinding(source?.transcript_watermark || source?.transcriptWatermark);
+}
+
+const formalQuestionSetReady = computed(() => {
+  const value = issueSet.value;
+  const schema = String(value?.schema_version || value?.schemaVersion || "");
+  const entries = value?.questions || value?.issues;
+  return (
+    Boolean(activeIssueSetId.value) &&
+    ["hearing_question_set.v1", "hearing_issue_set.v1"].includes(schema) &&
+    Array.isArray(entries) &&
+    entries.length > 0
+  );
+});
+
+const questionTranscriptAuthority = computed(() => {
+  const watermark = [
+    transcriptWatermark(issueSet.value),
+    transcriptWatermark(questionSet.value),
+    transcriptWatermark(hearingStatus.value),
+    transcriptWatermark(hearing.value),
+  ].find(Boolean) || null;
+  const sources = watermark ? [watermark] : [];
+  return {
+    setId: activeIssueSetId.value,
+    watermarkDeclared: Boolean(watermark),
+    messageId: firstBoundText(sources, [
+      "question_message_id",
+      "questionMessageId",
+      "question_room_message_id",
+      "questionRoomMessageId",
+      "transcript_message_id",
+      "transcriptMessageId",
+      "message_id",
+      "messageId",
+    ]),
+    sequence: firstBoundSequence(sources, [
+      "question_message_sequence",
+      "questionMessageSequence",
+      "question_message_sequence_no",
+      "questionMessageSequenceNo",
+      "transcript_sequence_no",
+      "transcriptSequenceNo",
+      "sequence_no",
+      "sequenceNo",
+    ]),
+    runId: firstBoundText(sources, [
+      "question_agent_run_id",
+      "questionAgentRunId",
+      "source_agent_run_id",
+      "sourceAgentRunId",
+      "agent_run_id",
+      "agentRunId",
+    ]),
+  };
+});
+
+function messageBindingSources(message) {
+  return [
+    message,
+    objectBinding(message?.metadata),
+    objectBinding(message?.metadata_json || message?.metadataJson),
+    messagePayload(message),
+  ].filter(Boolean);
+}
+
+function messageSequence(message) {
+  return firstBoundSequence([message], ["sequence_no", "sequenceNo"]);
+}
+
+function isBoundDurableQuestionMessage(message) {
+  if (messageSenderRole(message) !== "INTAKE_OFFICER") return false;
+  if (
+    !["AGENT_MESSAGE", "HEARING_INTAKE_QUESTIONS", "HEARING_QUESTION_SET"].includes(
+      messageType(message),
+    )
+  ) {
+    return false;
+  }
+  const messageId = firstBoundText([message], ["id", "message_id", "messageId"]);
+  const sequence = messageSequence(message);
+  if (!messageId || sequence === null || !rawMessageText(message).trim()) return false;
+
+  const authority = questionTranscriptAuthority.value;
+  const sources = messageBindingSources(message);
+  const messageSetId = firstBoundText(sources, [
+    "issue_set_id",
+    "issueSetId",
+    "question_set_id",
+    "questionSetId",
+  ]);
+  if (messageSetId && messageSetId !== authority.setId) return false;
+
+  let explicitBindings = 0;
+  if (authority.messageId) {
+    explicitBindings += 1;
+    if (messageId !== authority.messageId) return false;
+  }
+  if (authority.sequence !== null) {
+    explicitBindings += 1;
+    if (sequence !== authority.sequence) return false;
+  }
+  if (authority.runId) {
+    explicitBindings += 1;
+    const messageRunId = firstBoundText(sources, [
+      "agent_run_id",
+      "agentRunId",
+      "run_id",
+      "runId",
+    ]);
+    if (messageRunId !== authority.runId) return false;
+  }
+  if (authority.watermarkDeclared) return explicitBindings > 0;
+  return Boolean(messageSetId && messageSetId === authority.setId);
+}
+
+const boundQuestionTranscriptMessage = computed(() =>
+  formalQuestionSetReady.value
+    ? hearingTranscriptMessages.value.find(isBoundDurableQuestionMessage) || null
+    : null,
+);
+const partyAnswersTranscriptSynchronized = computed(
+  () => Boolean(formalQuestionSetReady.value && boundQuestionTranscriptMessage.value),
+);
+const partyAnswersTranscriptSyncError = computed(
+  () =>
+    !historyMode.value &&
+    flowStageCode.value === "PARTY_ANSWERS_OPEN" &&
+    !loadingState.hearing &&
+    !loadingState.messages &&
+    !partyAnswersTranscriptSynchronized.value,
+);
+const partyAnswersTranscriptSyncMessage = computed(() =>
+  formalQuestionSetReady.value
+    ? "正式问题集已生成，但绑定的争议接待官问题消息尚未进入可追溯聊天记录；回答提交已暂停。"
+    : "回答阶段已打开，但正式问题集尚未完成协议同步；回答提交已暂停。",
 );
 
 function targetValues(value, snakeKey, camelKey, singularSnakeKey, singularCamelKey) {
@@ -630,6 +806,7 @@ const canSubmitAnswers = computed(
     isCaseParty.value &&
     flowStageCode.value === "PARTY_ANSWERS_OPEN" &&
     Boolean(activeIssueSetId.value) &&
+    partyAnswersTranscriptSynchronized.value &&
     !currentActorSubmitted.value &&
     isActiveStageTimeOpen.value,
 );
@@ -842,7 +1019,12 @@ function streamCardBadge(card, senderRole) {
 }
 
 const liveTranscriptItems = computed(() =>
-  hearingTranscriptMessages.value
+  [...hearingTranscriptMessages.value]
+    .sort(
+      (left, right) =>
+        (messageSequence(left) || Number.MAX_SAFE_INTEGER) -
+        (messageSequence(right) || Number.MAX_SAFE_INTEGER),
+    )
     .filter(
       (message) =>
         !isSystemAuditOnlyMessage(message) &&
@@ -2156,7 +2338,8 @@ function upsertRoomMessage(message) {
 // 业务位置：【前端庭审】resumeActiveHearingRuns：执行 庭审轮次和法官发言 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function resumeActiveHearingRuns() {
   if (historyMode.value) return;
-  const activeRuns = await loadActiveAgentRuns(
+  const loader = props.activeRunsLoader || loadActiveAgentRuns;
+  const activeRuns = await loader(
     effectiveActor.value,
     caseId.value,
     "HEARING",
@@ -2199,9 +2382,15 @@ function hearingAgentPresentation(descriptor) {
 async function consumeHearingAgentRun(result, options = {}) {
   const descriptor = extractAgentRunDescriptor(result);
   if (!descriptor) return false;
+  const operation = String(descriptor.operation || "").toUpperCase();
+  const runId = String(descriptor.runId || "").trim();
+  if (!runId || !HEARING_FLOW_AGENT_OPERATIONS.has(operation)) return false;
+  if (subscribedHearingRunIds.has(runId)) return false;
+  subscribedHearingRunIds.add(runId);
   streamError.value = "";
   agentState.value = "STREAMING";
-  await consumeAgentRun({
+  const consumer = props.agentRunConsumer || consumeAgentRun;
+  await consumer({
     actor: { ...effectiveActor.value },
     caseId: caseId.value,
     roomType: "HEARING",
@@ -2531,6 +2720,7 @@ function startEventStream() {
             payload,
             hearingAgentPresentation(payload),
           ).catch(() => {});
+          void resumeActiveHearingRuns().catch(() => {});
         }
       }
       if (reviewGateEvents.has(eventType)) {
@@ -3035,6 +3225,16 @@ onBeforeUnmount(() => {
             </template>
 
             <div
+              v-if="partyAnswersTranscriptSyncError"
+              class="court-transcript__sync-warning"
+              data-hearing-transcript-sync-error
+              role="alert"
+            >
+              <strong>庭审记录同步异常</strong>
+              <small>{{ partyAnswersTranscriptSyncMessage }}</small>
+            </div>
+
+            <div
               v-if="loadingState.messages"
               class="court-transcript__empty court-transcript__empty--loading"
               data-court-transcript-loading
@@ -3043,7 +3243,7 @@ onBeforeUnmount(() => {
               <small>正在读取开庭消息和双方陈述，请稍候。</small>
             </div>
             <div
-              v-else-if="!courtTranscriptItems.length"
+              v-else-if="!courtTranscriptItems.length && !partyAnswersTranscriptSyncError"
               class="court-transcript__empty"
               data-court-transcript-empty
             >
@@ -3144,12 +3344,11 @@ onBeforeUnmount(() => {
               </div>
               <div class="stage-input-bar__submit-column">
                 <button
-                  v-if="canSubmitAnswers"
                   type="button"
                   class="stage-input-bar__submit"
                   data-submit-answer-bundle
                   data-submit-party-statement
-                  :disabled="submittingAnswers || !statementComplete"
+                  :disabled="submittingAnswers || !statementComplete || !canSubmitAnswers"
                   @click="submitPartyStatement()"
                 >
                   {{ submittingAnswers ? "正在提交…" : "提交本方陈述" }}
@@ -4630,6 +4829,18 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.6;
 }
+.court-transcript__sync-warning {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 12px 16px;
+  color: #7a4e12;
+  background: #fff8e7;
+  border: 1px solid #efd49b;
+  border-radius: 14px;
+}
+.court-transcript__sync-warning strong { font-size: 14px; }
+.court-transcript__sync-warning small { font-size: 12px; line-height: 1.5; }
 .court-message {
   position: relative;
   display: flex;

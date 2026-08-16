@@ -4,9 +4,11 @@ import asyncio
 import inspect
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
@@ -50,6 +52,7 @@ from app.graphs.hearing.contracts import (
 from app.graphs.hearing.errors import HearingGraphContractError
 from app.graphs.hearing.lcel import invoke_hearing_lcel
 from app.graphs.hearing.state import HearingGraphInvocation
+from app.graphs.hearing import target_e2e as hearing_target_e2e
 from app.graphs.hearing.target_e2e import (
     HearingTargetE2ELoadedInvocation,
     HearingTargetE2EProposalSource,
@@ -755,3 +758,203 @@ def test_target_stream_binds_frozen_execution_identity_before_external_terminal_
     assert envelope.execution_model == execution.fence.execution_model
     assert envelope.proposal_hash == result.proposal_hash
     assert envelope.result_envelope_hash == result.result_envelope_hash
+
+
+@pytest.mark.asyncio
+async def test_target_stream_forwards_governed_delta_before_completion_and_replays_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = HearingOperation.JUDGE_V2
+    execution, _ = _execution(operation)
+    binding = HEARING_TARGET_E2E_OPERATION_BINDINGS[operation]
+    node_name = binding.model_nodes[-1]
+    public_text = "裁判草案已生成，正在进行形式校验。"
+    fixed_time = datetime(2026, 8, 17, 1, 2, 3, tzinfo=timezone.utc)
+    original_bundle_builder = hearing_target_e2e.build_target_e2e_hearing_runtime_bundle
+
+    class _SlowStreamingBundle:
+        runtime_binding_sha256 = "d" * 64
+
+        def __init__(self, *, terminal_public_text: str = public_text) -> None:
+            self.native_delta_available = asyncio.Event()
+            self.release_completion = asyncio.Event()
+            self.execute_completed = False
+            self.stream_closed = False
+            self.state = {
+                "status": "PROPOSED",
+                "proposal": {
+                    "schema_version": binding.result_schema_version,
+                    "case_id": execution.admission.command.case_id,
+                    "public_message": terminal_public_text,
+                },
+                "cognitive_revision": 1,
+            }
+
+        async def arun(self) -> dict[str, Any]:
+            # This is the old buffered seam: native output exists, but arun does
+            # not return until the complete graph execution is released.
+            self.native_delta_available.set()
+            await self.release_completion.wait()
+            self.execute_completed = True
+            return self.state
+
+        async def astream(self) -> AsyncIterator[Any]:
+            try:
+                self.native_delta_available.set()
+                yield (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            additional_kwargs={
+                                "governed_events": [
+                                    {
+                                        "schema_version": "governed-model-event.v1",
+                                        "event_type": "visible_delta",
+                                        "node_name": node_name,
+                                        "field": "public_message",
+                                        "delta": public_text,
+                                    }
+                                ]
+                            },
+                        ),
+                        {"langgraph_node": node_name},
+                    ),
+                )
+                await self.release_completion.wait()
+                self.execute_completed = True
+            finally:
+                self.stream_closed = True
+
+        async def completed_state(self) -> dict[str, Any]:
+            assert self.execute_completed
+            return self.state
+
+        async def terminal_checkpoint(self) -> tuple[str, str, int]:
+            assert self.execute_completed
+            return "", "checkpoint-hearing-stream", 1
+
+    async def run_valid(bundle: _SlowStreamingBundle) -> tuple[list[Any], _MemoryFencedSaver, _PayloadStore]:
+        saver = _MemoryFencedSaver(execution.fence)
+        store = _PayloadStore()
+        adapter = HearingTargetE2ERuntimeAdapter(
+            checkpointer=saver,
+            invocation_provider=_InvocationProvider(),
+            payload_store=store,
+            clock=lambda: fixed_time,
+        )
+        monkeypatch.setattr(
+            hearing_target_e2e,
+            "build_target_e2e_hearing_runtime_bundle",
+            lambda **_: bundle,
+        )
+        source = adapter.stream(execution)
+        events = [await anext(source)]
+        pending_delta = asyncio.create_task(anext(source))
+        await bundle.native_delta_available.wait()
+        timed_out = False
+        try:
+            delta = await asyncio.wait_for(asyncio.shield(pending_delta), timeout=0.1)
+        except TimeoutError:
+            timed_out = True
+            bundle.release_completion.set()
+            await pending_delta
+            delta = None
+        assert not timed_out, "visible_delta was buffered behind complete arun"
+        assert delta is not None and delta.event_type == "visible_delta"
+        events.append(delta)
+        assert not bundle.execute_completed
+        assert store.calls == []
+        assert saver.external_terminal_commits == []
+        bundle.release_completion.set()
+        events.extend([event async for event in source])
+        return events, saver, store
+
+    first_events, first_saver, first_store = await run_valid(_SlowStreamingBundle())
+    second_events, second_saver, second_store = await run_valid(_SlowStreamingBundle())
+
+    assert [event.event_type for event in first_events] == [
+        "attempt_started",
+        "visible_delta",
+        "final",
+    ]
+    assert [event.sequence_no for event in first_events] == [0, 1, 2]
+    assert first_events[1].payload.field == "public_message"
+    assert first_events[1].payload.delta == public_text
+    assert all(event.attempt_id == execution.admission.command.attempt_id for event in first_events)
+    assert all(event.audience == execution.admission.command.actor_scope.audience for event in first_events)
+    assert len(first_store.calls) == len(second_store.calls) == 1
+    assert len(first_saver.external_terminal_commits) == len(second_saver.external_terminal_commits) == 1
+    assert [event.model_dump_json() for event in first_events] == [
+        event.model_dump_json() for event in second_events
+    ]
+
+    invalid_bundle = _SlowStreamingBundle(terminal_public_text="冲突的终态公开文本")
+    invalid_saver = _MemoryFencedSaver(execution.fence)
+    invalid_store = _PayloadStore()
+    invalid_adapter = HearingTargetE2ERuntimeAdapter(
+        checkpointer=invalid_saver,
+        invocation_provider=_InvocationProvider(),
+        payload_store=invalid_store,
+        clock=lambda: fixed_time,
+    )
+    monkeypatch.setattr(
+        hearing_target_e2e,
+        "build_target_e2e_hearing_runtime_bundle",
+        lambda **_: invalid_bundle,
+    )
+    invalid_bundle.release_completion.set()
+    invalid_events: list[Any] = []
+    with pytest.raises(
+        HearingGraphContractError,
+        match="HEARING_TARGET_VISIBLE_TERMINAL_MISMATCH",
+    ):
+        async for event in invalid_adapter.stream(execution):
+            invalid_events.append(event)
+    assert [event.event_type for event in invalid_events] == [
+        "attempt_started",
+        "visible_delta",
+    ]
+    assert invalid_store.calls == []
+    assert invalid_saver.external_terminal_commits == []
+
+    cancelled_bundle = _SlowStreamingBundle()
+    cancelled_saver = _MemoryFencedSaver(execution.fence)
+    cancelled_store = _PayloadStore()
+    cancelled_adapter = HearingTargetE2ERuntimeAdapter(
+        checkpointer=cancelled_saver,
+        invocation_provider=_InvocationProvider(),
+        payload_store=cancelled_store,
+        clock=lambda: fixed_time,
+    )
+    monkeypatch.setattr(
+        hearing_target_e2e,
+        "build_target_e2e_hearing_runtime_bundle",
+        lambda **_: cancelled_bundle,
+    )
+    cancelled_source = cancelled_adapter.stream(execution)
+    assert (await anext(cancelled_source)).event_type == "attempt_started"
+    assert (await anext(cancelled_source)).event_type == "visible_delta"
+    await cancelled_source.aclose()
+    assert cancelled_bundle.stream_closed
+    assert not cancelled_bundle.execute_completed
+    assert cancelled_store.calls == []
+    assert cancelled_saver.external_terminal_commits == []
+
+    # Keep the same selector on the real compiled Hearing bundle seam so the
+    # LangGraph multi-mode astream signature and terminal checkpoint path are covered.
+    monkeypatch.setattr(
+        hearing_target_e2e,
+        "build_target_e2e_hearing_runtime_bundle",
+        original_bundle_builder,
+    )
+    actual_saver = _MemoryFencedSaver(execution.fence)
+    actual_adapter = HearingTargetE2ERuntimeAdapter(
+        checkpointer=actual_saver,
+        invocation_provider=_InvocationProvider(),
+        payload_store=_PayloadStore(),
+        clock=lambda: fixed_time,
+    )
+    actual_events = [event async for event in actual_adapter.stream(execution)]
+    assert [event.event_type for event in actual_events] == ["attempt_started", "final"]
+    assert len(actual_saver.external_terminal_commits) == 1

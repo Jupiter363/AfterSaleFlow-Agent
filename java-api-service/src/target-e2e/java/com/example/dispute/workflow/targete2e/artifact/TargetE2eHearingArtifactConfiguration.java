@@ -24,6 +24,7 @@ import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingCommand
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFinalizationEvidenceResolver;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalCommandMapper;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingRegistrationBundle;
+import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingPublicTranscriptCommitter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.MinioClient;
 import javax.sql.DataSource;
@@ -124,7 +125,8 @@ public class TargetE2eHearingArtifactConfiguration {
       HttpTargetE2EGraphReconciliationClient reconciliation,
       HttpTargetE2EGraphProposalSourceClient proposalSource,
       GraphRegistryBindingPolicy registryBindings,
-      ObjectMapper objectMapper) {
+      ObjectMapper objectMapper,
+      JdbcTargetHearingPublicTranscriptCommitter targetHearingPublicTranscriptCommitter) {
     return TargetE2eHearingArtifactRegistration.create(
         dataSource,
         targetE2eHearingCommandMaterialStore,
@@ -138,7 +140,8 @@ public class TargetE2eHearingArtifactConfiguration {
         reconciliation,
         proposalSource,
         registryBindings,
-        objectMapper);
+        objectMapper,
+        targetHearingPublicTranscriptCommitter);
   }
 
   @Bean

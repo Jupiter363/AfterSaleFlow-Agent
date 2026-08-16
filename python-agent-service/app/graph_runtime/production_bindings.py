@@ -20,6 +20,7 @@ from app.agents.evidence_clerk.workflow import (
     EVIDENCE_TURN_MODEL_NODE_NAME,
     EvidenceTurnWorkflow,
 )
+from app.agents.hearing_flow import HearingFlowWorkflows
 from app.config import (
     GraphShadowBindingSettings,
     GraphShadowInputSettings,
@@ -55,6 +56,7 @@ from app.graph_runtime.intake_binding import require_exact_intake_binding
 from app.graph_runtime.intake_exchange import JavaIntakeExchangeClient
 from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
 from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
+from app.graphs.hearing.contracts import HEARING_MODEL_NODE_PROMPTS
 from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.registry import VersionBinding
 from app.graph_runtime.result import ResultBindings, TERMINAL_DRAFT_ADAPTER
@@ -260,6 +262,7 @@ def build_graph_runtime_bindings(
     intake_transport: Any = None
     intake_exchange: JavaIntakeExchangeClient | None = None
     evidence_workflow: EvidenceTurnWorkflow | None = None
+    hearing_workflow: HearingFlowWorkflows | None = None
     target_uses_default_providers = (
         settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE"
         and target_e2e_provider_factory is None
@@ -284,6 +287,7 @@ def build_graph_runtime_bindings(
                 settings=settings,
                 structured_client=structured_client,
             )
+            hearing_workflow = _build_target_e2e_hearing_workflow(structured_client)
 
     async def open_http_resources() -> None:
         if intake_exchange is not None:
@@ -321,6 +325,7 @@ def build_graph_runtime_bindings(
                         else None
                     ),
                     evidence_workflow=evidence_workflow,
+                    hearing_workflow=hearing_workflow,
                     specialized_provider_factory=target_e2e_specialized_provider_factory,
                 )
             )
@@ -346,6 +351,16 @@ def build_graph_runtime_bindings(
                             else None
                         ),
                         evidence_model=(
+                            structured_client.governed_model
+                            if structured_client is not None
+                            else None
+                        ),
+                        hearing_provider=(
+                            structured_client.governed_provider
+                            if structured_client is not None
+                            else None
+                        ),
+                        hearing_model=(
                             structured_client.governed_model
                             if structured_client is not None
                             else None
@@ -401,6 +416,8 @@ def _target_e2e_executor_registration(
     intake_model: str | None = None,
     evidence_provider: str | None = None,
     evidence_model: str | None = None,
+    hearing_provider: str | None = None,
+    hearing_model: str | None = None,
 ) -> ShadowExecutorRegistration:
     del kernel
     if (
@@ -417,6 +434,8 @@ def _target_e2e_executor_registration(
         raise GraphContractError("target-E2E Intake provider binding is incomplete")
     if (evidence_provider is None) != (evidence_model is None):
         raise GraphContractError("target-E2E Evidence provider binding is incomplete")
+    if (hearing_provider is None) != (hearing_model is None):
+        raise GraphContractError("target-E2E Hearing provider binding is incomplete")
     room_provider_bindings: list[tuple[str, ProviderRuntimeBinding]] = []
     if intake_provider is not None and intake_model is not None:
         room_provider_bindings.append(
@@ -442,6 +461,18 @@ def _target_e2e_executor_registration(
                 ),
             )
         )
+    if hearing_provider is not None and hearing_model is not None:
+        room_provider_bindings.append(
+            (
+                RoomType.HEARING.value,
+                ProviderRuntimeBinding(
+                    model_profile_id=binding.model_profile_id,
+                    provider=hearing_provider,
+                    model=hearing_model,
+                    allowed_nodes=frozenset(HEARING_MODEL_NODE_PROMPTS),
+                ),
+            )
+        )
     return ShadowExecutorRegistration(
         binding=binding,
         executor=TargetE2ECompositeExecutor(providers),
@@ -463,6 +494,7 @@ def _build_target_e2e_room_providers(
     intake_provider: str | None,
     intake_model: str | None,
     evidence_workflow: EvidenceTurnWorkflow | None,
+    hearing_workflow: HearingFlowWorkflows | None,
     specialized_provider_factory: (
         Callable[[GraphExecutorKernel], Iterable[TargetE2ERoomProvider]] | None
     ),
@@ -478,6 +510,8 @@ def _build_target_e2e_room_providers(
         raise GraphContractError("TARGET_E2E_SPECIALIZED_ROOM_RUNTIME_REQUIRED")
     if not callable(getattr(evidence_workflow, "run", None)):
         raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
+    if not callable(getattr(hearing_workflow, "target_e2e_invocation", None)):
+        raise GraphContractError("TARGET_E2E_FORMAL_HEARING_WORKFLOW_REQUIRED")
     bind_evidence_workflow = getattr(
         specialized_provider_factory,
         "with_evidence_workflow",
@@ -486,6 +520,14 @@ def _build_target_e2e_room_providers(
     if not callable(bind_evidence_workflow):
         raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_FACTORY_REQUIRED")
     specialized_provider_factory = bind_evidence_workflow(evidence_workflow)
+    bind_hearing_workflow = getattr(
+        specialized_provider_factory,
+        "with_hearing_workflow",
+        None,
+    )
+    if not callable(bind_hearing_workflow):
+        raise GraphContractError("TARGET_E2E_FORMAL_HEARING_FACTORY_REQUIRED")
+    specialized_provider_factory = bind_hearing_workflow(hearing_workflow)
     specialized = tuple(specialized_provider_factory(kernel))
     if {getattr(provider, "room_type", None) for provider in specialized} != {
         RoomType.EVIDENCE,
@@ -523,6 +565,21 @@ def _build_target_e2e_evidence_workflow(
             java_api_service_url=settings.java_api_service_url,
             java_service_secret=settings.java_service_secret,
         ),
+    )
+
+
+def _build_target_e2e_hearing_workflow(
+    structured_client: LiteLlmProxyClient,
+) -> HearingFlowWorkflows:
+    """Bind all seven formal Hearing operations to the lifecycle-owned model client."""
+
+    if not isinstance(structured_client, LiteLlmProxyClient):
+        raise GraphContractError("TARGET_E2E_FORMAL_HEARING_MODEL_REQUIRED")
+    return HearingFlowWorkflows(
+        HarnessModelRunner(
+            llm=structured_client,
+            prompts=PromptRepository(),
+        )
     )
 
 

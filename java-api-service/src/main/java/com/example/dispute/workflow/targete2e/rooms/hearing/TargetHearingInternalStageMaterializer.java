@@ -52,6 +52,7 @@ public final class TargetHearingInternalStageMaterializer {
   private final JdbcTargetHearingAgentStageInputFactory inputs;
   private final ObjectMapper mapper;
   private final Clock clock;
+  private final TargetHearingAgentRunStartedPublisher runStartedPublisher;
 
   public TargetHearingInternalStageMaterializer(
       JdbcTargetE2eApiAuthority authority, TargetIntakeRuntimePins pins, AgentRunLedger ledger,
@@ -61,11 +62,36 @@ public final class TargetHearingInternalStageMaterializer {
       TargetE2eHearingInvocationPublisher hearingPublisher,
       TargetHearingCommandMaterialStore materialStore,
       JdbcTargetHearingAgentStageInputFactory inputs, ObjectMapper mapper, Clock clock) {
+    this(
+        authority,
+        pins,
+        ledger,
+        bindings,
+        envelopes,
+        payloads,
+        hearingPublisher,
+        materialStore,
+        inputs,
+        mapper,
+        clock,
+        TargetHearingAgentRunStartedPublisher.NOOP);
+  }
+
+  public TargetHearingInternalStageMaterializer(
+      JdbcTargetE2eApiAuthority authority, TargetIntakeRuntimePins pins, AgentRunLedger ledger,
+      AgentRunCommandBindingFactory bindings,
+      com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec envelopes,
+      MinioTargetE2eRoomCommandPayloadPublisher payloads,
+      TargetE2eHearingInvocationPublisher hearingPublisher,
+      TargetHearingCommandMaterialStore materialStore,
+      JdbcTargetHearingAgentStageInputFactory inputs, ObjectMapper mapper, Clock clock,
+      TargetHearingAgentRunStartedPublisher runStartedPublisher) {
     this.authority = Objects.requireNonNull(authority); this.pins = Objects.requireNonNull(pins);
     this.ledger = Objects.requireNonNull(ledger); this.bindings = Objects.requireNonNull(bindings);
     this.envelopes = Objects.requireNonNull(envelopes); this.payloads = Objects.requireNonNull(payloads);
     this.hearingPublisher = Objects.requireNonNull(hearingPublisher); this.materialStore = Objects.requireNonNull(materialStore);
     this.inputs = Objects.requireNonNull(inputs); this.mapper = Objects.requireNonNull(mapper).copy(); this.clock = Objects.requireNonNull(clock);
+    this.runStartedPublisher = Objects.requireNonNull(runStartedPublisher);
   }
 
   public ExecuteAgentRunRequest materialize(TargetHearingFormalizationActivities.TransitionRequest transition) {
@@ -87,7 +113,7 @@ public final class TargetHearingInternalStageMaterializer {
     ObjectNode event = mapper.createObjectNode(); event.put("schema_version", "target-e2e-hearing-stage-event.v1");
     event.put("case_id", start.caseId()); event.put("stage_sequence", stage.sequence()); event.put("operation", input.operation());
     var published = hearingPublisher.publish(commandId, input.operation(), input.sharedBarrierReceiptHash(),
-        input.request(), input.fixtureProposal(), input.fixtureWorkResults(), event);
+        input.request(), event);
     AuthorityTimes authorityTimes = authorityTimes(clock.instant(), start.hearingDeadlineAt());
     Instant now = authorityTimes.startedAt();
     RoomGraphCommand command = graph(commandId, logicalRunId, attemptId, stageIdentity.threadId(), start, transition.expectedProcessRevision(),
@@ -115,6 +141,22 @@ public final class TargetHearingInternalStageMaterializer {
         envelope.commandHash(), envelope.commandEnvelopeHash(), start.roomEpoch(), start.fencingToken());
     materialStore.append(commandMaterial(start, admission, request,
         envelope.commandHash(), envelope.commandEnvelopeHash()));
+    runStartedPublisher.publish(
+        new TargetHearingAgentRunStartedPublisher.Event(
+            start.tenantSurrogate(),
+            start.caseId(),
+            start.roomId(),
+            start.roomEpoch(),
+            start.fencingToken(),
+            start.flowInstanceId(),
+            stage.name(),
+            stage.sequence(),
+            "HEARING_" + input.operation().toUpperCase(java.util.Locale.ROOT),
+            commandId,
+            logicalRunId,
+            attemptId,
+            logical.status(),
+            attempt.startedAt()));
     return request;
   }
 

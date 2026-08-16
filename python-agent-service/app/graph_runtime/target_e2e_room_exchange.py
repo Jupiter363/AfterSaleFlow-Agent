@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from app.agents.hearing_flow import HearingFlowWorkflows
 from app.contracts.v1.codec import canonicalize
 from app.contracts.v1.models import SnapshotRef
 from app.graph_runtime.errors import GraphContractError
@@ -259,6 +260,94 @@ class DeterministicTargetE2EHearingInvocationDecoder:
             shared_barrier_receipt_hash=barrier,
         )
 
+
+class GovernedTargetE2EHearingInvocationDecoder:
+    """Decode a v2 invocation and bind it to the governed Hearing model workflow."""
+
+    def __init__(self, workflows: HearingFlowWorkflows) -> None:
+        if not callable(getattr(workflows, "target_e2e_invocation", None)):
+            raise ValueError("governed Hearing workflow is required")
+        self._workflows = workflows
+
+    def decode(
+        self,
+        *,
+        execution: GatewayExecution,
+        snapshot_payload: bytes,
+        event_payload: bytes | None,
+    ) -> HearingTargetE2ELoadedInvocation:
+        document = _canonical_document(snapshot_payload, "TARGET_E2E_HEARING_INVOCATION_INVALID")
+        if document.get("schema_version") != "target-e2e-hearing-invocation.v2" or set(
+            document
+        ) != {
+            "schema_version",
+            "operation",
+            "shared_barrier_receipt_hash",
+            "request",
+        }:
+            raise HearingGraphContractError("TARGET_E2E_HEARING_INVOCATION_REQUIRED")
+        try:
+            operation = HearingOperation(document["operation"])
+            request_type, _ = _HEARING_TYPES[operation]
+            request = request_type.model_validate(document["request"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise HearingGraphContractError("TARGET_E2E_HEARING_INVOCATION_INVALID") from error
+        command = execution.admission.command
+        if request.case_id != command.case_id or request.stage_sequence != command.stage_sequence:
+            raise HearingGraphContractError("TARGET_E2E_HEARING_INVOCATION_BINDING_MISMATCH")
+        barrier = document["shared_barrier_receipt_hash"]
+        if (
+            not isinstance(barrier, str)
+            or len(barrier) != 64
+            or any(character not in "0123456789abcdef" for character in barrier)
+        ):
+            raise HearingGraphContractError("TARGET_E2E_HEARING_BARRIER_INVALID")
+        governed = self._workflows.target_e2e_invocation(operation, request)
+        if not isinstance(governed, HearingGraphInvocation) or governed.request is not request:
+            raise HearingGraphContractError("TARGET_E2E_HEARING_WORKFLOW_BINDING_INVALID")
+
+        def exact(value: Any) -> Any:
+            if value is not request:
+                raise HearingGraphContractError("TARGET_E2E_HEARING_REQUEST_IDENTITY_INVALID")
+            return value
+
+        invocation = HearingGraphInvocation(
+            request=request,
+            execute=lambda value: governed.execute(exact(value)),
+            plan_work_items=(
+                (lambda value: governed.plan_work_items(exact(value)))
+                if governed.plan_work_items is not None
+                else None
+            ),
+            execute_work_item=(
+                (lambda value, key: governed.execute_work_item(exact(value), key))
+                if governed.execute_work_item is not None
+                else None
+            ),
+            execute_with_work_results=(
+                (
+                    lambda value, results: governed.execute_with_work_results(
+                        exact(value), results
+                    )
+                )
+                if governed.execute_with_work_results is not None
+                else None
+            ),
+        )
+        event = command.event_ref
+        if event_payload is not None and event is None:
+            raise HearingGraphContractError("TARGET_E2E_HEARING_EVENT_BINDING_INVALID")
+        return HearingTargetE2ELoadedInvocation(
+            operation=operation,
+            request=request,
+            invocation=invocation,
+            snapshot_uri=command.domain_snapshot_ref.uri,
+            snapshot_hash=command.domain_snapshot_ref.sha256,
+            event_uri=event.uri if event is not None else None,
+            event_hash=event.sha256 if event is not None else None,
+            shared_barrier_receipt_hash=barrier,
+        )
+
 class _ScopedJavaTargetE2ERoomExchange:
     def __init__(self, exchange: JavaTargetE2ERoomExchange, authority: dict[str, Any]) -> None:
         self._exchange = exchange
@@ -464,6 +553,7 @@ def _canonical_document(payload: bytes, code: str) -> dict[str, Any]:
 
 __all__ = [
     "DeterministicTargetE2EHearingInvocationDecoder",
+    "GovernedTargetE2EHearingInvocationDecoder",
     "JavaTargetE2ERoomExchange",
     "TARGET_E2E_ROOM_OBJECT_LOAD_PATH",
     "TARGET_E2E_ROOM_PROPOSAL_PUT_PATH",
