@@ -39,6 +39,7 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
     private final RoomEpochSelector selector;
     private final TenantAuthority tenantAuthority;
     private final ObjectProvider<RoomEpochBootstrapEnqueuer> bootstrapEnqueuer;
+    private final ObjectProvider<RoomEpochBootstrapDeliveryTrigger> bootstrapDeliveryTrigger;
     private final ObjectProvider<TargetRoomEpochBindingWriter> targetBindingWriter;
 
     @Autowired
@@ -49,6 +50,7 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
             RoomEpochSelector selector,
             TenantAuthority tenantAuthority,
             ObjectProvider<RoomEpochBootstrapEnqueuer> bootstrapEnqueuer,
+            ObjectProvider<RoomEpochBootstrapDeliveryTrigger> bootstrapDeliveryTrigger,
             ObjectProvider<TargetRoomEpochBindingWriter> targetBindingWriter) {
         this.caseRepository = caseRepository;
         this.epochRepository = epochRepository;
@@ -56,7 +58,27 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
         this.selector = selector;
         this.tenantAuthority = tenantAuthority;
         this.bootstrapEnqueuer = bootstrapEnqueuer;
+        this.bootstrapDeliveryTrigger = bootstrapDeliveryTrigger;
         this.targetBindingWriter = targetBindingWriter;
+    }
+
+    public TransactionalRoomEpochAllocator(
+            FulfillmentCaseRepository caseRepository,
+            CaseRoomEpochRepository epochRepository,
+            CaseProcessProjectionRepository projectionRepository,
+            RoomEpochSelector selector,
+            TenantAuthority tenantAuthority,
+            ObjectProvider<RoomEpochBootstrapEnqueuer> bootstrapEnqueuer,
+            ObjectProvider<TargetRoomEpochBindingWriter> targetBindingWriter) {
+        this(
+                caseRepository,
+                epochRepository,
+                projectionRepository,
+                selector,
+                tenantAuthority,
+                bootstrapEnqueuer,
+                null,
+                targetBindingWriter);
     }
 
     public TransactionalRoomEpochAllocator(
@@ -73,6 +95,7 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                 selector,
                 tenantAuthority,
                 bootstrapEnqueuer,
+                null,
                 null);
     }
 
@@ -546,6 +569,9 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                     "ROOM_EPOCH_BOOTSTRAP_UNAVAILABLE",
                     "non-LEGACY epoch activation requires durable bootstrap infrastructure");
         }
+        if (selection.writerMode() != WriterMode.LEGACY) {
+            bootstrapDeliveryAuthority();
+        }
     }
 
     private void persistTargetBinding(
@@ -616,7 +642,23 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                     "ROOM_EPOCH_BOOTSTRAP_UNAVAILABLE",
                     "non-LEGACY epoch activation requires durable bootstrap infrastructure");
         }
-        enqueuer.enqueue(epoch, projection, availableAt);
+        String outboxId = enqueuer.enqueue(epoch, projection, availableAt);
+        bootstrapDeliveryAuthority().deliveryRequested(outboxId);
+    }
+
+    private RoomEpochBootstrapDeliveryTrigger bootstrapDeliveryAuthority() {
+        if (bootstrapDeliveryTrigger == null) {
+            throw failure(
+                    "ROOM_EPOCH_BOOTSTRAP_DELIVERY_UNAVAILABLE",
+                    "non-LEGACY epoch activation requires exact bootstrap delivery");
+        }
+        var triggers = bootstrapDeliveryTrigger.stream().toList();
+        if (triggers.size() != 1) {
+            throw failure(
+                    "ROOM_EPOCH_BOOTSTRAP_DELIVERY_UNAVAILABLE",
+                    "non-LEGACY epoch activation requires exactly one bootstrap delivery trigger");
+        }
+        return triggers.getFirst();
     }
 
     private static void requireReadyForStateChange(
