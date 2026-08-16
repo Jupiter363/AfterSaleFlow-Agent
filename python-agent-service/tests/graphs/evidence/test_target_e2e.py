@@ -23,7 +23,16 @@ from app.graphs.evidence.lcel import (
     TargetEvidenceAssetLoader,
     build_target_evidence_assessment_lcel,
 )
+from app.graphs.evidence.runtime import (
+    build_evidence_runtime_bundle,
+    recover_evidence_runtime_completed_at,
+)
+
+from .test_recovery import _MemoryFencedSaver, _MemoryPostgresBulkhead, _fence
+
 ACTIVATION_ID = "p9act.v1.0123456789abcdef0123456789abcdef"
+OPENING_COMPLETED_AT = "2026-07-22T12:05:00Z"
+SUBMIT_COMPLETED_AT = "2026-07-22T12:06:00Z"
 
 
 class _FixtureAssetLoader(TargetEvidenceAssetLoader):
@@ -77,6 +86,68 @@ def _work_item(admission_request_factory) -> dict[str, object]:
         "profile_versions": manifest["profile_versions"],
         "item": manifest["items"][0],
     }
+
+
+def _target_admission(
+    *,
+    command_id: str,
+    logical_run_id: str,
+    attempt_id: str,
+    thread_id: str,
+    service_security_runtime,
+    admission_request_factory,
+    admission_refresher,
+):
+    request = admission_request_factory(1)
+    command = deepcopy(dict(request.room_graph_command))
+    command.update(
+        command_id=command_id,
+        logical_run_id=logical_run_id,
+        attempt_id=attempt_id,
+        thread_id=thread_id,
+        graph_key=TARGET_E2E_GRAPH_KEY,
+        graph_version=TARGET_E2E_GRAPH_VERSION,
+        checkpoint_schema_version=TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
+    )
+    command["invocation_context"]["output_schema_version"] = (
+        TARGET_E2E_OUTPUT_SCHEMA_VERSION
+    )
+    manifest = json.loads(request.signed_manifest_payload)
+    manifest.update(
+        execution_scope="TARGET_E2E_CANDIDATE",
+        writer_mode="PROPOSAL_ONLY",
+        registration_id=ACTIVATION_ID,
+        thread_id=thread_id,
+    )
+    manifest["command_binding"].update(
+        command_id=command_id,
+        logical_run_id=logical_run_id,
+        attempt_id=attempt_id,
+    )
+    manifest["profile_versions"]["graph_version"] = TARGET_E2E_GRAPH_VERSION
+    manifest["profile_versions"]["checkpoint_schema_version"] = (
+        TARGET_E2E_CHECKPOINT_SCHEMA_VERSION
+    )
+    for item in manifest["items"]:
+        item["parse_ref"] = (
+            f"urn:target-e2e:object:{item['evidence_id']}:{item['parse_hash']}"
+        )
+        item["item_hash"] = canonical_sha256(
+            {key: value for key, value in item.items() if key != "item_hash"}
+        )
+    target_request = admission_refresher(
+        request,
+        command=command,
+        manifest=manifest,
+        refresh_internal_manifest_hash=True,
+        resign=True,
+    )
+    target_request = replace(
+        target_request,
+        registry_output_schema_version=TARGET_E2E_OUTPUT_SCHEMA_VERSION,
+    )
+    verifier = EvidenceAdmissionVerifier.from_security_runtime(service_security_runtime)
+    return verifier._verify_target_candidate(target_request)  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -205,3 +276,109 @@ def test_target_admission_rejects_shadow_relabel(
         match="EVIDENCE_TARGET_E2E_SCOPE_REQUIRED",
     ):
         verifier._verify_target_candidate(relabeled)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_target_commands_use_distinct_replay_stable_checkpoint_coordinates(
+    service_security_runtime,
+    admission_request_factory,
+    admission_refresher,
+) -> None:
+    opening = _target_admission(
+        command_id="evidence-opening:checkpoint-fixture",
+        logical_run_id="target-evidence-run:opening-checkpoint-fixture",
+        attempt_id="target-evidence-run:opening-checkpoint-fixture:1",
+        thread_id="grt.v1.11111111111111111111111111111111",
+        service_security_runtime=service_security_runtime,
+        admission_request_factory=admission_request_factory,
+        admission_refresher=admission_refresher,
+    )
+    submit = _target_admission(
+        command_id="evidence-submit:checkpoint-fixture",
+        logical_run_id="target-evidence-run:submit-checkpoint-fixture",
+        attempt_id="target-evidence-run:submit-checkpoint-fixture:1",
+        thread_id="grt.v1.22222222222222222222222222222222",
+        service_security_runtime=service_security_runtime,
+        admission_request_factory=admission_request_factory,
+        admission_refresher=admission_refresher,
+    )
+    opening_fence = _fence(opening, owner_id="worker-opening")
+    submit_fence = _fence(submit, owner_id="worker-submit")
+    saver = _MemoryFencedSaver(opening_fence)
+    model_calls: list[str] = []
+
+    def model(_):
+        model_calls.append("called")
+        return AIMessage(
+            content=json.dumps(_model_payload(), separators=(",", ":"))
+        )
+
+    assessor = build_target_evidence_assessment_lcel(
+        model=RunnableLambda(model),
+        asset_loader=_FixtureAssetLoader(),
+    ).runnable
+    opening_runtime = build_evidence_runtime_bundle(
+        item_assessor=assessor,
+        admission=opening,
+        completed_at=OPENING_COMPLETED_AT,
+        checkpointer=saver,
+        bulkhead=_MemoryPostgresBulkhead(),
+        fence=opening_fence,
+        runtime_mode="TARGET_E2E_CANDIDATE",
+    )
+
+    opening_state = await opening_runtime.arun()
+    opening_checkpoint = await saver.aget_tuple(opening_runtime._config())  # noqa: SLF001
+    assert opening_checkpoint is not None
+
+    saver.active_fence = submit_fence
+    recovered_submit_at = await recover_evidence_runtime_completed_at(
+        checkpointer=saver,
+        fence=submit_fence,
+    )
+    submit_runtime = build_evidence_runtime_bundle(
+        item_assessor=assessor,
+        admission=submit,
+        completed_at=recovered_submit_at or SUBMIT_COMPLETED_AT,
+        checkpointer=saver,
+        bulkhead=_MemoryPostgresBulkhead(),
+        fence=submit_fence,
+        runtime_mode="TARGET_E2E_CANDIDATE",
+    )
+    submit_state = await submit_runtime.arun()
+    calls_after_submit = len(model_calls)
+
+    replay_completed_at = await recover_evidence_runtime_completed_at(
+        checkpointer=saver,
+        fence=submit_fence,
+    )
+    replay_runtime = build_evidence_runtime_bundle(
+        item_assessor=assessor,
+        admission=submit,
+        completed_at=replay_completed_at or SUBMIT_COMPLETED_AT,
+        checkpointer=saver,
+        bulkhead=_MemoryPostgresBulkhead(),
+        fence=submit_fence,
+        runtime_mode="TARGET_E2E_CANDIDATE",
+    )
+    replay_state = await replay_runtime.arun()
+    submit_checkpoint = await saver.aget_tuple(submit_runtime._config())  # noqa: SLF001
+
+    assert opening.room_graph_command["thread_id"] != submit.room_graph_command["thread_id"]
+    assert replay_runtime.thread_id == submit_runtime.thread_id
+    assert recovered_submit_at is None
+    assert replay_completed_at == SUBMIT_COMPLETED_AT
+    assert calls_after_submit == 2
+    assert len(model_calls) == calls_after_submit
+    assert opening_state["terminal_draft"] is not None
+    assert submit_state["terminal_draft"] is not None
+    assert replay_state == submit_state
+    assert submit_checkpoint is not None
+    assert submit_checkpoint.config["configurable"]["thread_id"] == submit_runtime.thread_id
+    assert submit_checkpoint.config["configurable"].get("checkpoint_ns", "") == ""
+    assert submit_checkpoint.metadata["evidence_runtime_completed_at"] == (
+        SUBMIT_COMPLETED_AT
+    )
+    assert submit_checkpoint.metadata["evidence_runtime_binding_sha256"] == (
+        submit_runtime.runtime_binding_sha256
+    )

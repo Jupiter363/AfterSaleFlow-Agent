@@ -30,6 +30,7 @@ import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.targete2e.ingress.IntakeIngressSelection;
 import com.example.dispute.workflow.targete2e.ingress.IntakeMessageIngressRouter;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetEvidenceOpeningIngress;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
@@ -74,6 +75,7 @@ public class RoomMessageService {
     private final IntakeMessageIngressRouter intakeMessageIngressRouter;
     private final LegacyIntakeWriterGuard legacyIntakeWriterGuard;
     private final CaseRoomEpochRepository roomEpochRepository;
+    private TargetEvidenceOpeningIngress targetEvidenceOpeningIngress;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -144,6 +146,13 @@ public class RoomMessageService {
         this.legacyIntakeWriterGuard = legacyIntakeWriterGuard;
         this.clock = clock;
         this.roomEpochRepository = roomEpochRepository;
+    }
+
+    @Autowired
+    void bindTargetEvidenceOpeningIngress(
+            TargetEvidenceOpeningIngress targetEvidenceOpeningIngress) {
+        this.targetEvidenceOpeningIngress = Objects.requireNonNull(
+                targetEvidenceOpeningIngress, "targetEvidenceOpeningIngress");
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomMessageService.post(String,RoomType,RoomMessageCommand,AuthenticatedActor,String,String)」。
@@ -407,6 +416,14 @@ public class RoomMessageService {
                     caseRepository.findById(caseId)
                             .orElseThrow(() -> new IllegalArgumentException("case not found"));
             intakeProgressService.assertEvidenceAccess(dispute, actor);
+            if (isTargetEvidenceEpoch(caseId)) {
+                if (targetEvidenceOpeningIngress == null) {
+                    throw new IllegalStateException(
+                            "target Evidence opening ingress is unavailable");
+                }
+                return targetEvidenceOpeningIngress.open(
+                        caseId, actor, traceId, requestId);
+            }
             return evidenceAgentTurnService.ensureOpeningOrStart(
                     caseId, roomType, actor, traceId, requestId);
         }
@@ -491,12 +508,26 @@ public class RoomMessageService {
                         com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
                         EpochLifecycleStatus.ACTIVE)
                 .map(
-                        epoch ->
-                                epoch.getWriterMode() == WriterMode.TEMPORAL
-                                        && epoch.getProvisioningStatus()
-                                                == EpochProvisioningStatus.READY
-                                        && TargetTypedRoomProtocol.GRAPH_KEY.equals(
-                                                epoch.getGraphKey()))
+                        epoch -> {
+                            boolean claimsTargetAuthority =
+                                    epoch.getWriterMode() == WriterMode.TEMPORAL
+                                            || TargetTypedRoomProtocol.GRAPH_KEY.equals(
+                                                    epoch.getGraphKey());
+                            if (!claimsTargetAuthority) {
+                                return false;
+                            }
+                            boolean ready =
+                                    epoch.getWriterMode() == WriterMode.TEMPORAL
+                                            && epoch.getProvisioningStatus()
+                                                    == EpochProvisioningStatus.READY
+                                            && TargetTypedRoomProtocol.GRAPH_KEY.equals(
+                                                    epoch.getGraphKey());
+                            if (!ready) {
+                                throw new IllegalStateException(
+                                        "target Evidence epoch authority is incomplete");
+                            }
+                            return true;
+                        })
                 .orElse(false);
     }
 

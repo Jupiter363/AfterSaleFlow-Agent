@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 import re
 
 from app.harness.localization_policy import localize_internal_text
@@ -45,6 +46,11 @@ _SAFE_LIVE_SCOPE_END_ZH = re.compile(
     r"梳理|整理)[。！？!?](?:[”’」』）)]*)$"
 )
 _SENTENCE_END = re.compile(r"[。！？!?](?:[”’」』）)]*)")
+_PROVISIONAL_FACT_OBJECT_FRAME_ZH = re.compile(
+    r"^(?:本轮材料已纳入对|本轮正在对|本轮核验对象为|待核验事项(?:为|包括)?)"
+    r"“(?P<object>[^”]{1,1000})”"
+    r"(?:的)?(?:关联性核对|核验|核对)(?:范围)?[。！？!?]$"
+)
 
 
 class EvidencePublicOutputPolicyError(RuntimeError):
@@ -82,6 +88,142 @@ def guard_evidence_public_reply(text: str) -> str:
     return guarded
 
 
+def compose_evidence_opening_public_reply(
+    source_reply: str,
+    *,
+    fact_targets: Iterable[Mapping[str, object]],
+    evidence_requests: Iterable[object],
+) -> str:
+    """Bind an Evidence opening reply to frozen facts and accepted requests."""
+
+    guarded_source = guard_evidence_public_reply(source_reply)
+    source_body = guarded_source
+    if source_body.endswith(_RESPONSIBILITY_DISCLAIMER):
+        source_body = source_body[: -len(_RESPONSIBILITY_DISCLAIMER)]
+
+    facts = _opening_items(
+        (target.get("fact") for target in fact_targets),
+        limit=3,
+    )
+    questions = _opening_items(
+        (
+            item.get("question")
+            if isinstance(item, Mapping)
+            else getattr(item, "question", None)
+            for item in evidence_requests
+        ),
+        limit=3,
+    )
+    if not questions:
+        questions = tuple(
+            f"请提交可核对「{fact}」的原始材料，并说明形成时间和来源路径"
+            for fact in facts
+        )
+    if not questions:
+        questions = (
+            "请提交与本案待核验事实相关的原始材料，并说明形成时间和来源路径",
+        )
+
+    fact_sentences = "".join(
+        f"待核验事实{index}：{_as_sentence(fact)}"
+        for index, fact in enumerate(facts, start=1)
+    )
+    request_sentences = "".join(
+        f"具体补充要求{index}：{_as_sentence(question)}"
+        for index, question in enumerate(questions, start=1)
+    )
+    composed = (
+        source_body
+        + fact_sentences
+        + request_sentences
+        + _RESPONSIBILITY_DISCLAIMER
+    )
+    return guard_evidence_public_reply(composed)
+
+
+def compose_evidence_submission_public_reply(
+    *,
+    fact_targets: Iterable[Mapping[str, object]],
+    evidence_assessments: Iterable[object],
+    human_review_tasks: Iterable[Mapping[str, object]],
+) -> str:
+    """Derive a submission reply only from accepted assessment authority."""
+
+    targets = tuple(fact_targets)
+    assessments = tuple(evidence_assessments)
+    review_tasks = tuple(human_review_tasks)
+    fact_by_id = {
+        str(target.get("fact_id") or ""): target.get("fact")
+        or target.get("fact_target")
+        or target.get("match_text")
+        for target in targets
+        if isinstance(target, Mapping)
+    }
+    linked_fact_ids = tuple(
+        dict.fromkeys(
+            fact_id
+            for assessment in assessments
+            for link in _authority_items(assessment, "fact_links")
+            if (fact_id := str(_authority_value(link, "fact_id") or ""))
+        )
+    )
+    linked_facts = _opening_items(
+        (fact_by_id.get(fact_id) for fact_id in linked_fact_ids),
+        limit=2,
+    )
+    if not linked_facts:
+        linked_facts = _opening_items(fact_by_id.values(), limit=2)
+    subject = "、".join(linked_facts) or "本案待核验事项"
+
+    relations = {
+        str(_authority_value(link, "relation") or "")
+        for assessment in assessments
+        for link in _authority_items(assessment, "fact_links")
+    }
+    has_unsupported_scope = any(
+        _authority_items(assessment, "unsupported_claims")
+        for assessment in assessments
+    )
+    text_only = bool(assessments) and all(
+        str(_authority_value(assessment, "analysis_method") or "") == "TEXT_ONLY"
+        for assessment in assessments
+    )
+    review_required = bool(review_tasks) or any(
+        bool(_authority_value(_authority_value(assessment, "human_review"), "required"))
+        for assessment in assessments
+    )
+
+    coverage_sentence = (
+        "现有内容覆盖范围有限，尚不足以单独还原完整事实经过。"
+        if "INCONCLUSIVE" in relations or has_unsupported_scope or not relations
+        else "现有内容仅反映本轮可读取范围，仍需与其他来源交叉核对。"
+    )
+    capability_sentence = (
+        "本轮仅核对了可读取文本，未直接查看原始图像内容或完整文件信息。"
+        if text_only
+        else "本轮核对范围仅限已授权载入的材料内容，未覆盖平台外来源路径。"
+    )
+    action_sentence = (
+        "下一步需由人工结合清晰原件、完整上下文和形成时间继续复核。"
+        if review_required
+        else "请补充清晰原件、形成时间和来源路径，以便继续核对。"
+    )
+    return guard_evidence_public_reply(
+        "".join(
+            (
+                EVIDENCE_CANONICAL_OPENING,
+                f"本轮材料已纳入对“{subject}”的关联性核对。",
+                "当前材料可用于核对相关记录内容和时间信息。",
+                coverage_sentence,
+                "材料来源路径、形成时间和原始载体的一致性仍需按程序复核。",
+                capability_sentence,
+                action_sentence,
+                _RESPONSIBILITY_DISCLAIMER,
+            )
+        )
+    )
+
+
 class EvidencePublicOutputPolicy:
     """Release only complete guarded Evidence sentences from one JSON field."""
 
@@ -91,6 +233,7 @@ class EvidencePublicOutputPolicy:
         self._examined_sentence_count = 0
         self._live_release_blocked = False
         self._bootstrapped = False
+        self._authorized_terminal_text: str | None = None
 
     @property
     def source_observed(self) -> bool:
@@ -99,6 +242,36 @@ class EvidencePublicOutputPolicy:
     @property
     def visible_text(self) -> str:
         return self._visible_text
+
+    @property
+    def guarded_source_reply(self) -> str:
+        if not self.source_observed:
+            raise EvidencePublicOutputMismatch(
+                "Evidence live public output was not observed"
+            )
+        return guard_evidence_public_reply(self._source_text)
+
+    def authorize_terminal_extension(
+        self,
+        *,
+        guarded_source_reply: str,
+        final_text: str,
+    ) -> None:
+        """Authorize one executor-verified terminal suffix without changing live bytes."""
+
+        if self.guarded_source_reply != guarded_source_reply:
+            raise EvidencePublicOutputMismatch(
+                "Evidence terminal extension source is not the observed reply"
+            )
+        if guard_evidence_public_reply(final_text) != final_text:
+            raise EvidencePublicOutputMismatch(
+                "Evidence terminal extension is not guarded"
+            )
+        if not final_text.startswith(self._visible_text):
+            raise EvidencePublicOutputMismatch(
+                "Evidence terminal extension changed an emitted prefix"
+            )
+        self._authorized_terminal_text = final_text
 
     def allows_node(self, operation: str, node_name: str) -> bool:
         return operation == EVIDENCE_PUBLIC_NODE and node_name == EVIDENCE_PUBLIC_NODE
@@ -179,7 +352,10 @@ class EvidencePublicOutputPolicy:
                 raise EvidencePublicOutputMismatch(
                     "Evidence live public output bootstrap is unavailable"
                 )
-            if guard_evidence_public_reply(self._source_text) != final_text:
+            if (
+                guard_evidence_public_reply(self._source_text) != final_text
+                and self._authorized_terminal_text != final_text
+            ):
                 raise EvidencePublicOutputMismatch(
                     "Evidence live and terminal public output differ"
                 )
@@ -219,6 +395,41 @@ def _sentence_segments(text: str) -> tuple[tuple[str, bool], ...]:
     return tuple(segments)
 
 
+def _opening_items(values: Iterable[object], *, limit: int) -> tuple[str, ...]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        localized = localize_internal_text(value)
+        normalized = " ".join(localized.split()).strip("。！？!?；; ")[:500]
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            continue
+        result.append(normalized)
+        seen.add(key)
+        if len(result) >= limit:
+            break
+    return tuple(result)
+
+
+def _authority_value(value: object, field: str) -> object | None:
+    if isinstance(value, Mapping):
+        return value.get(field)
+    return getattr(value, field, None)
+
+
+def _authority_items(value: object, field: str) -> tuple[object, ...]:
+    items = _authority_value(value, field)
+    if isinstance(items, (list, tuple)):
+        return tuple(items)
+    return ()
+
+
+def _as_sentence(text: str) -> str:
+    return text if text[-1] in "。！？!?" else text + "。"
+
+
 def _is_independently_safe_sentence(sentence: str) -> bool:
     candidate = sentence.strip()
     if (
@@ -248,8 +459,16 @@ def _guard_terminal_sentence(sentence: str) -> str:
 
 
 def _sentence_violates_public_boundary(sentence: str) -> bool:
+    conclusion_scan = sentence
+    framed_object = _PROVISIONAL_FACT_OBJECT_FRAME_ZH.fullmatch(sentence)
+    if framed_object is not None:
+        conclusion_scan = sentence.replace(
+            framed_object.group("object"),
+            "待核验事实对象",
+            1,
+        )
     return bool(
-        _CONCLUSIVE_OR_REMEDY_ZH.search(sentence) is not None
+        _CONCLUSIVE_OR_REMEDY_ZH.search(conclusion_scan) is not None
         or _contains_non_public_language_or_machine_syntax(sentence)
     )
 

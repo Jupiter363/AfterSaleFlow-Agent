@@ -28,10 +28,32 @@ public interface TargetRoomCommandIngress {
                 "target Evidence submission materialization is unavailable");
     }
 
+    default EvidenceOpeningRunReceipt materializeEvidenceOpening(
+            String caseId,
+            String commandId,
+            AcceptCaseCommand command,
+            AuthenticatedActor actor,
+            String traceId,
+            EvidenceAgentTurnCommand evidenceAgentTurnCommand) {
+        throw new IllegalStateException(
+                "target Evidence opening materialization is unavailable");
+    }
+
     record EvidenceSubmissionRunReceipt(String logicalRunId) {
         public EvidenceSubmissionRunReceipt {
             if (logicalRunId == null || logicalRunId.isBlank()) {
                 throw new IllegalArgumentException("logicalRunId must not be blank");
+            }
+        }
+    }
+
+    record EvidenceOpeningRunReceipt(String logicalRunId, String rootAttemptId) {
+        public EvidenceOpeningRunReceipt {
+            if (logicalRunId == null || logicalRunId.isBlank()
+                    || rootAttemptId == null
+                    || !rootAttemptId.equals(logicalRunId + ":1")) {
+                throw new IllegalArgumentException(
+                        "target Evidence opening run receipt is invalid");
             }
         }
     }

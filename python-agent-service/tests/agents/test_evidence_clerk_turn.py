@@ -102,6 +102,7 @@ def _unilateral_case_matrix(
 def _case_fact_matrix_v2(
     case_id: str = "CASE_evidence_turn_llm",
 ) -> dict[str, object]:
+    from app.contracts.v1.codec import canonical_sha256_omitting
     from app.schemas import CaseFactMatrixV2
 
     source_user = "MESSAGE_USER_INTAKE"
@@ -200,29 +201,17 @@ def _case_fact_matrix_v2(
         },
     }
     provisional = CaseFactMatrixV2.model_validate(payload).model_dump(mode="json")
-    provisional.pop("content_hash")
-    payload["content_hash"] = hashlib.sha256(
-        json.dumps(
-            provisional,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    payload["content_hash"] = canonical_sha256_omitting(
+        provisional,
+        "content_hash",
+    )
     return CaseFactMatrixV2.model_validate(payload).model_dump(mode="json")
 
 
 def _rehash_case_fact_matrix(matrix: dict[str, object]) -> None:
-    material = dict(matrix)
-    material.pop("content_hash", None)
-    matrix["content_hash"] = hashlib.sha256(
-        json.dumps(
-            material,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    from app.contracts.v1.codec import canonical_sha256_omitting
+
+    matrix["content_hash"] = canonical_sha256_omitting(matrix, "content_hash")
 
 
 # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块私有业务函数。
@@ -699,6 +688,53 @@ class CapturingMultimodalRunner:
         )
 
 
+class AuthorityBoundSubmissionRunner:
+    def invoke_structured(self, **kwargs):
+        output_type = kwargs["output_type"]
+        return SimpleNamespace(
+            value=output_type(
+                room_utterance=(
+                    "这份截图真实有效，可以证明用户没有收到包裹，因此应当退款。"
+                ),
+                evidence_assessments=[
+                    {
+                        "evidence_id": "EVIDENCE_signature_photo",
+                        "analysis_method": "TEXT_ONLY",
+                        "inspected_modalities": ["PARSED_TEXT"],
+                        "authenticity_score": 0.55,
+                        "relevance_score": 0.82,
+                        "completeness_score": 0.48,
+                        "assessment_confidence": 0.72,
+                        "source_basis": ["当前可读取的截图文字。"],
+                        "fact_links": [
+                            {
+                                "fact_id": "FACT_SIGNATURE",
+                                "relation": "INCONCLUSIVE",
+                                "reason": "截图涉及签收记录，但签收人字段不清晰。",
+                                "confidence": 0.61,
+                            },
+                            {
+                                "fact_id": "FACT_RECIPIENT",
+                                "relation": "INCONCLUSIVE",
+                                "reason": "现有材料尚未覆盖实际收件人身份。",
+                                "confidence": 0.58,
+                            },
+                        ],
+                        "supported_fact_ids": [],
+                        "unsupported_claims": [
+                            "当前截图不足以单独还原实际签收人身份。"
+                        ],
+                        "formation_time_assessment": "截图形成时间仍需核对。",
+                        "recommendation": "NEEDS_HUMAN_REVIEW",
+                        "summary": "截图涉及签收争议，但覆盖范围有限。",
+                    }
+                ],
+                internal_handoff=_empty_internal_handoff(),
+                confidence=0.72,
+            )
+        )
+
+
 class GenericOpeningRunner:
     # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：类/闭包内部方法。
     # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`SimpleNamespace`、`output_type`。
@@ -830,6 +866,125 @@ def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_eviden
     assert result.evidence_requests[0].target_evidence_id == "EVIDENCE_signature_photo"
     assert result.verification_suggestions[0].evidence_id == "EVIDENCE_signature_photo"
     assert 0 <= result.verification_suggestions[0].confidence_score <= 1
+
+
+@pytest.mark.asyncio
+async def test_async_evidence_workflow_does_not_inherit_outer_command_checkpointer() -> None:
+    from typing_extensions import TypedDict
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.schemas import EvidenceTurnRequest
+
+    class AsyncEvidenceRunner(FakeEvidenceRunner):
+        async def ainvoke_structured(self, **kwargs):
+            return self.invoke_structured(**kwargs)
+
+    class OuterState(TypedDict):
+        request: dict[str, object]
+        room_utterance: str
+
+    class TrackingOuterSaver(InMemorySaver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.checkpoint_namespaces: list[str] = []
+
+        def _observe(self, config) -> None:
+            configurable = config.get("configurable") or {}
+            self.checkpoint_namespaces.append(
+                str(configurable.get("checkpoint_ns") or "")
+            )
+
+        async def aget_tuple(self, config):
+            self._observe(config)
+            return await super().aget_tuple(config)
+
+        async def aput(self, config, checkpoint, metadata, new_versions):
+            self._observe(config)
+            return await super().aput(config, checkpoint, metadata, new_versions)
+
+        async def aput_writes(self, config, writes, task_id, task_path=""):
+            self._observe(config)
+            return await super().aput_writes(
+                config,
+                writes,
+                task_id,
+                task_path,
+            )
+
+    workflow = EvidenceTurnWorkflow(model_runner=AsyncEvidenceRunner())
+
+    async def run_evidence(state: OuterState) -> dict[str, str]:
+        result = await workflow.arun(
+            EvidenceTurnRequest.model_validate(state["request"])
+        )
+        return {"room_utterance": result.room_utterance}
+
+    builder = StateGraph(OuterState)
+    builder.add_node("outer_evidence", run_evidence)
+    builder.add_edge(START, "outer_evidence")
+    builder.add_edge("outer_evidence", END)
+    saver = TrackingOuterSaver()
+    outer_graph = builder.compile(checkpointer=saver)
+
+    result = await outer_graph.ainvoke(
+        {"request": _evidence_turn_payload()},
+        {"configurable": {"thread_id": "outer-evidence-command"}},
+    )
+
+    assert result["room_utterance"]
+    assert saver.checkpoint_namespaces
+    assert set(saver.checkpoint_namespaces) == {""}
+
+
+def test_submission_public_reply_is_derived_from_accepted_assessment_authority() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.agents.evidence_clerk.public_reply import guard_evidence_public_reply
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _java_evidence_turn_command_payload()
+    payload["context_envelope"]["intake_dossier_snapshot"]["payload"][
+        "unilateral_case_matrix"
+    ] = _unilateral_case_matrix(
+        ("FACT_SIGNATURE", "商家是否已退款20元以及退款记录是否真实", "CORE"),
+        ("FACT_RECIPIENT", "收件人称本人及同住人员未收到包裹", "CORE"),
+    )
+    request = EvidenceTurnRequest.model_validate(payload)
+    workflow = EvidenceTurnWorkflow(model_runner=AuthorityBoundSubmissionRunner())
+
+    first = workflow.run(request)
+    replay = workflow.run(request)
+    reply = first.room_utterance
+
+    assert replay.room_utterance == reply
+    framed_fact = "本轮材料已纳入对“商家是否已退款20元以及退款记录是否真实"
+    assert framed_fact in reply
+    assert "收件人称本人及同住人员未收到包裹" in reply
+    assert reply.index(framed_fact) < reply.index("收件人称本人及同住人员未收到包裹")
+    assert "关联" in reply
+    assert "覆盖范围有限" in reply or "尚不足以" in reply
+    assert "仅核对了可读取文本" in reply
+    assert "来源路径" in reply and ("人工" in reply or "补充" in reply)
+    assert "本轮只做证据核验，不判断责任或最终方案" in reply
+    for forbidden in (
+        "这份截图真实有效",
+        "证明用户没有收到包裹",
+        "应当退款",
+        "赔偿",
+        "造假",
+        "evidence_assessments",
+        "authenticity_score",
+        "EVIDENCE_",
+        "FACT_",
+    ):
+        assert forbidden not in reply
+
+    unframed_conclusion = "该证据真实有效，因此商家应当退款并承担责任。"
+    guarded_conclusion = guard_evidence_public_reply(unframed_conclusion)
+    assert unframed_conclusion not in guarded_conclusion
+    assert "相关事项仍需后续程序核验" in guarded_conclusion
 
 
 def test_evidence_turn_workflow_processes_one_complete_hearing_evidence_batch() -> None:

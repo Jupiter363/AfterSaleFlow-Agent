@@ -312,6 +312,61 @@ async def test_signed_java_agent_session_round_trips_and_missing_or_tampered_cla
             transport_identity=transport,
         )
 
+
+@pytest.mark.asyncio
+async def test_non_intake_fallback_session_is_replay_stable_and_isolated_by_exact_thread() -> None:
+    key = ec.generate_private_key(ec.SECP256R1())
+    transport = TransportIdentity("java-api-service", True, "e" * 64)
+    verifier = TargetE2EInvocationVerifier(
+        key_resolver=_Resolver(key.public_key()),
+        authority=_authority(allowedRoomTypes=["INTAKE", "EVIDENCE"]),
+        now=lambda: NOW,
+    )
+
+    def evidence_command(command_id: str, logical_run_id: str, thread_id: str) -> RoomGraphCommand:
+        values = _command().model_dump(mode="json", exclude_none=True)
+        values.update(
+            command_id=command_id,
+            logical_run_id=logical_run_id,
+            attempt_id=f"{logical_run_id}:1",
+            room_type="EVIDENCE",
+            thread_id=thread_id,
+        )
+        values["request_hash"] = canonical_sha256_omitting(values, "request_hash")
+        return RoomGraphCommand.model_validate(values)
+
+    opening_command = evidence_command(
+        "evidence-opening-binding",
+        "target-evidence-run:opening-binding",
+        f"grt.v1.{'1' * 32}",
+    )
+    submission_command = evidence_command(
+        "evidence-submit-binding",
+        "target-evidence-run:submit-binding",
+        f"grt.v1.{'2' * 32}",
+    )
+
+    async def identity(command: RoomGraphCommand):
+        verified = verifier.verify_envelope(
+            token=_command_token(key, command),
+            envelope=_command_envelope(command),
+            transport_identity=transport,
+        )
+        return await TargetE2EThreadIdentityResolver().resolve(
+            command=command,
+            verified_invocation=verified,
+        )
+
+    opening = await identity(opening_command)
+    submission = await identity(submission_command)
+    replayed_submission = await identity(submission_command)
+
+    assert opening.actor_scope == submission.actor_scope
+    assert opening.thread_id != submission.thread_id
+    assert opening.agent_session_id != submission.agent_session_id
+    assert replayed_submission.agent_session_id == submission.agent_session_id
+
+
 def test_command_key_must_be_in_runtime_projection_allowlist() -> None:
     key = ec.generate_private_key(ec.SECP256R1())
     command = _command()

@@ -8,7 +8,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, model_serializer, model_validator
+from pydantic import ConfigDict, Field, model_serializer, model_validator
 
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
 from app.harness.invocation_context import AgentInvocationContext
@@ -688,6 +688,12 @@ class EvidenceRoomPolicyV1(StrictModel):
 
 class FrozenIntakeSubmissionAuthorityV1(StrictModel):
     """Exact Java FrozenIntakeSubmissionAuthority record carried without remapping."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_by_alias=True,
+        validate_by_name=True,
+    )
 
     schema_version: Literal["frozen-intake-submission-authority.v1"] = Field(
         alias="schemaVersion"

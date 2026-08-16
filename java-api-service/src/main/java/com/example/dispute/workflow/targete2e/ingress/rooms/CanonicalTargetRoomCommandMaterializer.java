@@ -151,6 +151,33 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         return new EvidenceSubmissionRunReceipt(logicalRunId);
     }
 
+    @Override
+    public EvidenceOpeningRunReceipt materializeEvidenceOpening(
+            String caseId,
+            String commandId,
+            AcceptCaseCommand command,
+            AuthenticatedActor actor,
+            String traceId,
+            EvidenceAgentTurnCommand evidenceAgentTurnCommand) {
+        if (command.commandType() != CommandType.EVIDENCE_OPENING
+                || command.roomType() != RoomType.EVIDENCE) {
+            throw new IllegalArgumentException(
+                    "target Evidence opening requires the explicit opening discriminator");
+        }
+        String logicalRunId = materialize(
+                caseId,
+                commandId,
+                command,
+                actor,
+                traceId,
+                Objects.requireNonNull(evidenceAgentTurnCommand, "evidenceAgentTurnCommand"));
+        if (logicalRunId == null || logicalRunId.isBlank()) {
+            throw new IllegalStateException(
+                    "target Evidence opening did not materialize a logical run");
+        }
+        return new EvidenceOpeningRunReceipt(logicalRunId, logicalRunId + ":1");
+    }
+
     private String materialize(
             String caseId,
             String commandId,
@@ -159,16 +186,18 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
             String traceId,
             EvidenceAgentTurnCommand evidenceAgentTurnCommand) {
         if (!isMaterializedCommand(command.commandType()) || command.roomType() == RoomType.HEARING) return null;
-        if (command.commandType() == CommandType.EVIDENCE_SUBMIT
+        if ((command.commandType() == CommandType.EVIDENCE_SUBMIT
+                        || command.commandType() == CommandType.EVIDENCE_OPENING)
                 && evidenceAgentTurnCommand == null) {
             throw new IllegalArgumentException(
-                    "target Evidence submission requires formal Evidence turn authority");
+                    "target Evidence graph command requires formal Evidence turn authority");
         }
         if (evidenceAgentTurnCommand != null
                 && (command.commandType() != CommandType.EVIDENCE_SUBMIT
+                        && command.commandType() != CommandType.EVIDENCE_OPENING
                         || command.roomType() != RoomType.EVIDENCE)) {
             throw new IllegalArgumentException(
-                    "formal Evidence turn authority is only valid for Evidence submission");
+                    "formal Evidence turn authority is only valid for an Evidence graph command");
         }
         CaseRoomEpochEntity epoch = epochs.findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
                 caseId, command.roomType(), command.roomEpoch()).orElse(null);
@@ -214,7 +243,10 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
                     eventRef,
                     now);
             evidencePublished = evidenceTurnInvocationPublisher.publish(
-                    provisional, epoch.getFencingToken(), evidenceAgentTurnCommand);
+                    provisional,
+                    epoch.getFencingToken(),
+                    command.commandType(),
+                    evidenceAgentTurnCommand);
             domain = evidencePublished.invocation();
         } else if (command.roomType() == RoomType.REVIEW) {
             loadedReview = reviewFacts.load(graph(commandId, logicalRunId, attemptId, epoch, command, actor, traceId,
@@ -333,10 +365,15 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         RoomGraphCommand provisional = new RoomGraphCommand("room-graph-command.v1", commandId, logicalRunId, attemptId,
                 epoch.getTenantSurrogate(), epoch.getCaseId(), command.roomType(), epoch.getRoomEpoch(),
                 epoch.getGraphKey(), epoch.getGraphVersion(), epoch.getCheckpointSchemaVersion(),
-                command.roomType() == RoomType.EVIDENCE ? evidenceThreadId(epoch, actor)
+                command.roomType() == RoomType.EVIDENCE
+                        ? evidenceThreadId(epoch, actor, commandId)
                     : "target-room-thread:" + stableToken(epoch.getCaseId() + "\n" + actor.actorId() + "\n" + command.roomType()),
                 new RoomGraphCommand.ActorScope(actor.actorId(), mapRole(actor.role()), audience(actor.role()),
-                        List.of("case:" + epoch.getCaseId() + ":command:" + command.commandType().name())),
+                        command.roomType() == RoomType.EVIDENCE
+                                ? List.of(
+                                        "case:" + epoch.getCaseId() + ":command:EVIDENCE_OPENING",
+                                        "case:" + epoch.getCaseId() + ":command:EVIDENCE_SUBMIT")
+                                : List.of("case:" + epoch.getCaseId() + ":command:" + command.commandType().name())),
                 epoch.getProcessRevision(), graphStageCode(command.roomType()), epoch.getProcessRevision(), domain, event,
                 invocation, new RoomGraphCommand.RetryBudget(2, 3, 1), command.deadlineAt(),
                 traceparent(expectedTraceId(traceId)),
@@ -369,7 +406,9 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
     }
 
     private static boolean isGraphCommand(CommandType type) {
-        return type == CommandType.EVIDENCE_SUBMIT || type == CommandType.HEARING_STATEMENT
+        return type == CommandType.EVIDENCE_OPENING
+                || type == CommandType.EVIDENCE_SUBMIT
+                || type == CommandType.HEARING_STATEMENT
                 || type == CommandType.HEARING_EVIDENCE_BATCH || type == CommandType.REVIEW_DECISION;
     }
     static boolean isMaterializedCommand(CommandType type) {
@@ -391,8 +430,22 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
                 graph.requestHash(), graph.graphKey(), graph.graphVersion(), graph.checkpointSchemaVersion(),
                 graph.processRevision(), graph.stageCode(), graph.stageSequence());
     }
-    private static String evidenceThreadId(CaseRoomEpochEntity epoch, AuthenticatedActor actor) {
-        return "grt.v1." + stableToken(epoch.getCaseId() + "\n" + actor.actorId() + "\nEVIDENCE");
+    private static String evidenceThreadId(
+            CaseRoomEpochEntity epoch, AuthenticatedActor actor, String commandId) {
+        return "grt.v1."
+                + stableToken(
+                        "target-evidence-command-thread.v1\n"
+                                + epoch.getTenantSurrogate()
+                                + "\n"
+                                + epoch.getCaseId()
+                                + "\n"
+                                + epoch.getRoomEpoch()
+                                + "\n"
+                                + actor.actorId()
+                                + "\n"
+                                + actor.role().name()
+                                + "\n"
+                                + commandId);
     }
     private static boolean isTargetEpoch(CaseRoomEpochEntity epoch) {
         return epoch.getWriterMode() == com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode.TEMPORAL

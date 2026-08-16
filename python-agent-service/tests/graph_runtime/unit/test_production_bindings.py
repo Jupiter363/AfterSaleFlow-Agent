@@ -41,6 +41,7 @@ from app.graph_runtime.compiled_executor import (
     CompiledGraphShadowExecutor,
     GraphPublicUpdate,
 )
+from app.graph_runtime.evidence_turn_executor import CompiledEvidenceTurnExecutor
 from app.graph_runtime.errors import (
     GraphContractError,
     GraphTerminalBindingError,
@@ -1288,6 +1289,185 @@ def test_target_e2e_composite_registers_the_exact_intake_provider_binding() -> N
                 evidence_model=evidence_model,
             )
 
+def test_target_evidence_invocation_binding_accepts_stable_capability_pair_for_opening_and_submission() -> None:
+    base = _command()
+    opening_capability = f"case:{base.case_id}:command:EVIDENCE_OPENING"
+    submission_capability = f"case:{base.case_id}:command:EVIDENCE_SUBMIT"
+    stable_capabilities = (opening_capability, submission_capability)
+
+    def command_with_capabilities(capabilities: tuple[str, ...]) -> RoomGraphCommand:
+        document = base.model_dump(mode="json")
+        document["room_type"] = "EVIDENCE"
+        document["actor_scope"]["capabilities"] = list(capabilities)
+        document["request_hash"] = canonical_sha256_omitting(document, "request_hash")
+        return RoomGraphCommand.model_validate(document)
+
+    def execution_for(command: RoomGraphCommand) -> GatewayExecution:
+        fence = GraphFenceContext(
+            thread_id=command.thread_id,
+            command_id=command.command_id,
+            owner_id="evidence-binding-test",
+            fencing_token=1,
+            request_hash=command.request_hash,
+            room_epoch=command.room_epoch,
+            graph_key=command.graph_key,
+            graph_version=command.graph_version,
+            checkpoint_schema_version=command.checkpoint_schema_version,
+            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            activation_id=f"p9act.v1.{'a' * 32}",
+            room_fencing_token=23,
+            command_hash="b" * 64,
+            command_envelope_hash="c" * 64,
+            environment_id="target-evidence-binding-test",
+            environment_generation=1,
+            tenant_surrogate=command.tenant_surrogate,
+            case_id=command.case_id,
+            room_type="EVIDENCE",
+            binding_hash="d" * 64,
+            code_build_id="target-evidence-binding-build",
+        )
+        return cast(
+            GatewayExecution,
+            SimpleNamespace(
+                admission=SimpleNamespace(
+                    command=command,
+                    binding=SimpleNamespace(room_fencing_token=23),
+                ),
+                fence=fence,
+            ),
+        )
+
+    def invocation_for(command: RoomGraphCommand) -> dict[str, Any]:
+        actor_scope = command.actor_scope.model_dump(mode="json")
+        return {
+            "logical_run_id": command.logical_run_id,
+            "tenant_surrogate": command.tenant_surrogate,
+            "case_id": command.case_id,
+            "room_epoch": command.room_epoch,
+            "fencing_token": 23,
+            "thread_id": command.thread_id,
+            "actor_id": actor_scope["actor_id"],
+            "actor_role": actor_scope["actor_role"],
+            "actor_scope_hash": canonical_sha256(actor_scope),
+        }
+
+    def request_for(
+        command: RoomGraphCommand,
+        *,
+        event_type: str,
+        message_type: str,
+        attachment_refs: tuple[str, ...],
+        opening: bool,
+    ) -> Any:
+        actor_scope = command.actor_scope.model_dump(mode="json")
+        frozen_submission = (
+            SimpleNamespace(
+                evidence_room_epoch=command.room_epoch,
+                evidence_fencing_token=23,
+                authority=SimpleNamespace(
+                    tenant_surrogate=command.tenant_surrogate,
+                    case_id=command.case_id,
+                ),
+            )
+            if opening
+            else None
+        )
+        return SimpleNamespace(
+            context_envelope=SimpleNamespace(
+                current_event=SimpleNamespace(
+                    event_type=event_type,
+                    message_type=message_type,
+                    attachment_refs=attachment_refs,
+                ),
+                frozen_submission=frozen_submission,
+                case_snapshot=SimpleNamespace(case_id=command.case_id),
+                room_policy=SimpleNamespace(room_type="EVIDENCE"),
+                actor_snapshot=SimpleNamespace(
+                    actor_id=actor_scope["actor_id"],
+                    actor_role=actor_scope["actor_role"],
+                ),
+            ),
+            agent_context=SimpleNamespace(
+                case_id=command.case_id,
+                room_type="EVIDENCE",
+                actor_id=actor_scope["actor_id"],
+                actor_role=actor_scope["actor_role"],
+            ),
+        )
+
+    stable = command_with_capabilities(stable_capabilities)
+    assert tuple(stable.actor_scope.capabilities) == stable_capabilities
+    CompiledEvidenceTurnExecutor._require_invocation_binding(
+        execution_for(stable),
+        invocation_for(stable),
+        request_for(
+            stable,
+            event_type="ROOM_OPENING",
+            message_type="AGENT_MESSAGE",
+            attachment_refs=(),
+            opening=True,
+        ),
+    )
+    CompiledEvidenceTurnExecutor._require_invocation_binding(
+        execution_for(stable),
+        invocation_for(stable),
+        request_for(
+            stable,
+            event_type="PARTY_MESSAGE",
+            message_type="PARTY_EVIDENCE_REFERENCE",
+            attachment_refs=("EVIDENCE_1",),
+            opening=False,
+        ),
+    )
+
+    invalid_capabilities = (
+        (),
+        (opening_capability,),
+        (submission_capability,),
+        (submission_capability, opening_capability),
+        (*stable_capabilities, f"case:{base.case_id}:command:PARTY_EVIDENCE_COMPLETE"),
+        (f"case:OTHER_CASE:command:EVIDENCE_OPENING", submission_capability),
+    )
+    for capabilities in invalid_capabilities:
+        invalid = command_with_capabilities(capabilities)
+        with pytest.raises(
+            GraphContractError,
+            match="^EVIDENCE_TURN_INVOCATION_BINDING_INVALID$",
+        ):
+            CompiledEvidenceTurnExecutor._require_invocation_binding(
+                execution_for(invalid),
+                invocation_for(invalid),
+                request_for(
+                    invalid,
+                    event_type="ROOM_OPENING",
+                    message_type="AGENT_MESSAGE",
+                    attachment_refs=(),
+                    opening=True,
+                ),
+            )
+
+    invalid_events = (
+        ("ROOM_OPENING", "AGENT_MESSAGE", ("EVIDENCE_1",), True),
+        ("ROOM_OPENING", "PARTY_EVIDENCE_REFERENCE", (), True),
+        ("PARTY_MESSAGE", "PARTY_EVIDENCE_REFERENCE", (), False),
+        ("PARTY_MESSAGE", "AGENT_MESSAGE", ("EVIDENCE_1",), False),
+    )
+    for event_type, message_type, attachment_refs, opening in invalid_events:
+        with pytest.raises(
+            GraphContractError,
+            match="^EVIDENCE_TURN_INVOCATION_BINDING_INVALID$",
+        ):
+            CompiledEvidenceTurnExecutor._require_invocation_binding(
+                execution_for(stable),
+                invocation_for(stable),
+                request_for(
+                    stable,
+                    event_type=event_type,
+                    message_type=message_type,
+                    attachment_refs=attachment_refs,
+                    opening=opening,
+                ),
+            )
 
 def test_target_e2e_explicit_provider_factory_bypasses_live_model_client(
     monkeypatch: pytest.MonkeyPatch,

@@ -12,11 +12,14 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.agentstream.application.AgentRunAcceptedView;
+import com.example.dispute.agentstream.application.AgentRunFinalizationContext;
 import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.AgentExecutionException;
 import com.example.dispute.common.exception.ForbiddenException;
@@ -43,7 +46,9 @@ import com.example.dispute.room.application.EvidenceContextEnvelopeFactory;
 import com.example.dispute.room.application.EvidenceContextEnvelopeV1;
 import com.example.dispute.room.application.IntakeRecentTurn;
 import com.example.dispute.room.application.RoomMessageCommand;
+import com.example.dispute.room.application.RoomMessageView;
 import com.example.dispute.room.application.SessionPermissionService;
+import com.example.dispute.room.domain.MessageSource;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.domain.RoomType;
@@ -61,13 +66,39 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseTimeli
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.CaseCommandRef;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.FrozenIntakeSubmissionAuthority;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.example.dispute.workflow.application.command.AcceptCaseCommand;
+import com.example.dispute.workflow.application.command.CaseCommandAcceptance;
+import com.example.dispute.workflow.application.command.CaseCommandReferenceMapper;
+import com.example.dispute.workflow.application.command.CaseCommandRequestHasher;
+import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.CommandStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseCommandRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetEvidenceOpeningIngress;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterial;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterialStore;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -76,9 +107,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -90,6 +123,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.test.util.ReflectionTestUtils;
 
 // 所属模块：【房间协作与权限 / 自动化测试层】类型「EvidenceAgentTurnServiceTest」。
@@ -1144,6 +1178,862 @@ class EvidenceAgentTurnServiceTest {
         verify(memoryRepository).save(memory.capture());
         assertThat(memory.getValue().getScrollSnapshotJson())
                 .isEqualTo(memory.getValue().getDossierPatchJson());
+    }
+
+    @Test
+    void targetEvidenceOpeningUsesFrozenEpochCommandWithoutLegacyRun() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        FrozenSubmissionFixture frozen =
+                frozenSubmissionFixture(dispute.getId(), new AtomicLong(0));
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(processProjectionRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(frozen.projection()));
+        when(timelineEventRepository.findByIdAndCaseId(
+                        frozen.authority().submitEventId(), dispute.getId()))
+                .thenReturn(Optional.of(frozen.event()));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of());
+
+        var prepared =
+                service.prepareTargetOpening(
+                        dispute.getId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        0,
+                        23,
+                        frozen.authority().projectionRef(),
+                        frozen.authority().matrixContentHash(),
+                        Instant.parse("2026-07-06T00:00:00Z"));
+
+        assertThat(prepared.existingMessage()).isNull();
+        assertThat(prepared.command()).isNotNull();
+        EvidenceContextEnvelopeV1 envelope = prepared.command().contextEnvelope();
+        assertThat(envelope.schemaVersion())
+                .isEqualTo(EvidenceContextEnvelopeV1.FROZEN_SUBMISSION_SCHEMA_VERSION);
+        assertThat(envelope.currentEvent().eventId()).isEqualTo(prepared.idempotencyKey());
+        assertThat(envelope.currentEvent().eventType()).isEqualTo("ROOM_OPENING");
+        assertThat(envelope.currentEvent().messageType()).isEqualTo(MessageType.AGENT_MESSAGE);
+        assertThat(envelope.currentEvent().attachmentRefs()).isEmpty();
+        assertThat(envelope.actorSnapshot().actorId()).isEqualTo("user-local");
+        assertThat(envelope.frozenSubmission().evidenceRoomEpoch()).isZero();
+        assertThat(envelope.frozenSubmission().evidenceFencingToken()).isEqualTo(23);
+        assertThat(envelope.frozenSubmission().projectionRef())
+                .isEqualTo(frozen.authority().projectionRef());
+        assertThat(envelope.frozenSubmission().projectionSha256())
+                .isEqualTo(frozen.authority().matrixContentHash());
+        verify(client, never()).run(any(), any(), any());
+        verify(messageRepository, never()).save(any());
+        verify(memoryRepository, never()).save(any());
+    }
+
+    @Test
+    void freezeBoundTargetFinalizationUsesExactFrozenSubmissionMatrixAndReplaysOnce()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        EvidenceItemEntity attached =
+                evidenceItem("EVIDENCE_FROZEN_FINALIZATION", "USER", "user-local", "PARTIES");
+        FrozenSubmissionFixture frozen =
+                frozenSubmissionFixture(dispute.getId(), new AtomicLong(0));
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(processProjectionRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(frozen.projection()));
+        when(timelineEventRepository.findByIdAndCaseId(
+                        frozen.authority().submitEventId(), dispute.getId()))
+                .thenReturn(Optional.of(frozen.event()));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of(attached));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        attached.getId()))
+                .thenReturn(Optional.empty());
+        when(memoryRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(verificationRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        AtomicReference<RoomMessageEntity> persistedMessage = new AtomicReference<>();
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenAnswer(ignored -> Optional.ofNullable(persistedMessage.get()));
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(1L);
+        when(messageRepository.save(any()))
+                .thenAnswer(
+                        invocation -> {
+                            RoomMessageEntity saved = invocation.getArgument(0);
+                            persistedMessage.set(saved);
+                            return saved;
+                        });
+
+        var opening =
+                service.prepareTargetOpening(
+                        dispute.getId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        0,
+                        23,
+                        frozen.authority().projectionRef(),
+                        frozen.authority().matrixContentHash(),
+                        Instant.parse("2026-07-06T00:00:00Z"));
+        EvidenceContextEnvelopeV1 openingEnvelope = opening.command().contextEnvelope();
+        EvidenceContextEnvelopeV1 submissionEnvelope =
+                new EvidenceContextEnvelopeV1(
+                        openingEnvelope.schemaVersion(),
+                        openingEnvelope.capturedAt(),
+                        openingEnvelope.caseSnapshot(),
+                        null,
+                        openingEnvelope.actorSnapshot(),
+                        new EvidenceContextEnvelopeV1.CurrentEvent(
+                                "MESSAGE_FROZEN_FINALIZATION",
+                                "PARTY_MESSAGE",
+                                MessageType.PARTY_EVIDENCE_REFERENCE,
+                                "user-local",
+                                ActorRole.USER.name(),
+                                "Please assess the submitted watch evidence.",
+                                List.of(attached.getId()),
+                                2,
+                                CLOCK.instant().toString()),
+                        openingEnvelope.visibleEvidence(),
+                        openingEnvelope.privateConversation(),
+                        openingEnvelope.roomPolicy(),
+                        openingEnvelope.frozenSubmission());
+        EvidenceAgentTurnCommand command =
+                new EvidenceAgentTurnCommand(
+                        submissionEnvelope, opening.command().agentContext());
+        AgentRunFinalizationContext finalization =
+                new AgentRunFinalizationContext(
+                        "target-evidence-run:frozen-finalization",
+                        dispute.getId(),
+                        room.getId(),
+                        "EVIDENCE_TURN",
+                        "TRACE_FROZEN_FINALIZATION",
+                        "evidence-submit:frozen-finalization",
+                        objectMapper.valueToTree(command));
+        EvidenceAgentTurnResult result =
+                new EvidenceAgentTurnResult(
+                        "The submitted evidence is bound to the frozen fact matrix.",
+                        objectMapper.readTree("{}"),
+                        objectMapper.readTree("[]"),
+                        List.of(attached.getId()),
+                        List.of(),
+                        List.of(),
+                        List.of(assessment(attached.getId(), false)),
+                        false,
+                        false,
+                        "NONE",
+                        0.86);
+        ObjectNode invalidResult = objectMapper.valueToTree(result);
+        ((ObjectNode)
+                        invalidResult
+                                .path("evidence_assessments")
+                                .get(0)
+                                .path("fact_links")
+                                .get(0))
+                .put("fact_id", "FACT_UNKNOWN");
+
+        assertThat(submissionEnvelope.intakeDossierSnapshot()).isNull();
+        assertThat(submissionEnvelope.frozenSubmission().matrix().path("fact_rows").get(0)
+                        .path("fact_id").asText())
+                .isEqualTo("FACT_GOODS_CONDITION");
+        assertThatThrownBy(
+                        () -> service.finalizeTargetResult(finalization, command, invalidResult))
+                .isInstanceOf(AgentExecutionException.class)
+                .hasMessageContaining("invalid or duplicate fact link");
+        verify(memoryRepository, never()).save(any());
+        verify(messageRepository, never()).save(any());
+        verify(verificationRepository, never()).save(any());
+
+        RoomMessageView first =
+                service.finalizeTargetResult(
+                        finalization, command, objectMapper.valueToTree(result));
+        RoomMessageView replay =
+                service.finalizeTargetResult(
+                        finalization, command, objectMapper.valueToTree(result));
+
+        assertThat(replay).isEqualTo(first);
+        assertThat(first.agentRunId()).isEqualTo(finalization.runId());
+        verify(memoryRepository, times(1)).save(any());
+        verify(messageRepository, times(1)).save(any());
+        verify(verificationRepository, times(1)).save(any());
+    }
+
+    @Test
+    void terminalNoCommitOpeningAdvancesDeterministicGenerationsAndRejectsDriftBeforeAllocation()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        FrozenSubmissionFixture frozen =
+                frozenSubmissionFixture(dispute.getId(), new AtomicLong(0));
+        String tenantSurrogate = "tenant-run001";
+        long processRevision = 31;
+        long roomRevision = 41;
+        long roomEpoch = 0;
+        long fencingToken = 23;
+        AtomicLong currentProcessRevision = new AtomicLong(processRevision);
+        AtomicLong currentRoomRevision = new AtomicLong(roomRevision);
+
+        CaseRoomEpochEntity epoch = mock(CaseRoomEpochEntity.class);
+        when(epoch.getTenantSurrogate()).thenReturn(tenantSurrogate);
+        when(epoch.getCaseId()).thenReturn(dispute.getId());
+        when(epoch.getRoomId()).thenReturn(room.getId());
+        when(epoch.getRoomType())
+                .thenReturn(
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType
+                                .EVIDENCE);
+        when(epoch.getRoomEpoch()).thenReturn(roomEpoch);
+        when(epoch.getFencingToken()).thenReturn(fencingToken);
+        when(epoch.getProcessRevision())
+                .thenAnswer(ignored -> currentProcessRevision.get());
+        when(epoch.getRoomRevision()).thenAnswer(ignored -> currentRoomRevision.get());
+        when(epoch.getWriterMode()).thenReturn(WriterMode.TEMPORAL);
+        when(epoch.getLifecycleStatus()).thenReturn(EpochLifecycleStatus.ACTIVE);
+        when(epoch.getProvisioningStatus()).thenReturn(EpochProvisioningStatus.READY);
+        when(epoch.getGraphKey()).thenReturn(TargetTypedRoomProtocol.GRAPH_KEY);
+
+        when(frozen.projection().getMacroPhase()).thenReturn("EVIDENCE_OPEN");
+        when(frozen.projection().getRoomPhase()).thenReturn("OPEN");
+        when(frozen.projection().getWriterMode()).thenReturn(WriterMode.TEMPORAL);
+        when(frozen.projection().getProcessRevision())
+                .thenAnswer(ignored -> currentProcessRevision.get());
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(processProjectionRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(frozen.projection()));
+        when(processProjectionRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(frozen.projection()));
+        when(timelineEventRepository.findByIdAndCaseId(
+                        frozen.authority().submitEventId(), dispute.getId()))
+                .thenReturn(Optional.of(frozen.event()));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of());
+
+        CaseRoomEpochRepository epochRepository = mock(CaseRoomEpochRepository.class);
+        when(epochRepository
+                        .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                                dispute.getId(),
+                                com.example.dispute.workflow.contract.v1.ContractTypes.RoomType
+                                        .EVIDENCE,
+                                EpochLifecycleStatus.ACTIVE))
+                .thenReturn(Optional.of(epoch));
+        when(epochRepository.findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
+                        dispute.getId(),
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType
+                                .EVIDENCE,
+                        roomEpoch))
+                .thenReturn(Optional.of(epoch));
+
+        Map<String, CaseCommandEntity> durableCommands = new HashMap<>();
+        Map<String, TargetEvidenceCommandMaterialStore.MaterialSnapshot> durableMaterials =
+                new HashMap<>();
+        Map<String, RoomMessageEntity> committedOpenings = new HashMap<>();
+        Map<String, String> openingIdempotencyKeys = new HashMap<>();
+        Map<String, String> logicalRuns = new HashMap<>();
+        Map<String, String> rootAttempts = new HashMap<>();
+        Map<String, Integer> commandAllocations = new HashMap<>();
+        Map<String, Integer> materialAllocations = new HashMap<>();
+        AtomicLong commandSequence = new AtomicLong();
+        AtomicLong commandAcceptCalls = new AtomicLong();
+        AtomicLong materializeCalls = new AtomicLong();
+
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenAnswer(
+                        invocation ->
+                                Optional.ofNullable(
+                                        committedOpenings.get(invocation.getArgument(1))));
+
+        CaseCommandRepository commandRepository = mock(CaseCommandRepository.class);
+        when(commandRepository.findByTenantSurrogateAndCommandIdForUpdate(any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                Optional.ofNullable(
+                                        durableCommands.get(invocation.getArgument(1))));
+
+        CaseCommandService caseCommands = mock(CaseCommandService.class);
+        when(caseCommands.accept(any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation -> {
+                            commandAcceptCalls.incrementAndGet();
+                            String acceptedCaseId = invocation.getArgument(0);
+                            String commandId = invocation.getArgument(1);
+                            AcceptCaseCommand command = invocation.getArgument(2);
+                            AuthenticatedActor acceptedActor = invocation.getArgument(3);
+                            CaseCommandEntity stored = durableCommands.get(commandId);
+                            boolean replay = stored != null;
+                            if (!replay) {
+                                long sequence = commandSequence.incrementAndGet();
+                                List<String> scopes =
+                                        List.of(
+                                                "case:"
+                                                        + acceptedCaseId
+                                                        + ":command:EVIDENCE_OPENING");
+                                ActorRef actorRef =
+                                        new ActorRef(
+                                                acceptedActor.actorId(),
+                                                com.example.dispute.workflow.contract.v1
+                                                        .ContractTypes.ActorRole.valueOf(
+                                                        acceptedActor.role().name()),
+                                                scopes);
+                                String requestHash =
+                                        CaseCommandRequestHasher.hash(
+                                                tenantSurrogate,
+                                                acceptedCaseId,
+                                                commandId,
+                                                command,
+                                                actorRef);
+                                OffsetDateTime acceptedAt =
+                                        OffsetDateTime.ofInstant(
+                                                CLOCK.instant().plusSeconds(sequence),
+                                                ZoneOffset.UTC);
+                                CaseCommandRef reference =
+                                        new CaseCommandRef(
+                                                "case-command-ref.v1",
+                                                commandId,
+                                                tenantSurrogate,
+                                                acceptedCaseId,
+                                                sequence,
+                                                command.commandType(),
+                                                command.roomType(),
+                                                command.roomEpoch(),
+                                                actorRef,
+                                                command.payloadRef(),
+                                                command.expectedProcessRevision(),
+                                                acceptedAt.toInstant(),
+                                                command.deadlineAt(),
+                                                "00-"
+                                                        + "1".repeat(32)
+                                                        + "-"
+                                                        + "2".repeat(16)
+                                                        + "-01",
+                                                requestHash);
+                                stored =
+                                        CaseCommandEntity.pending(
+                                                "CMD_OPENING_" + sequence,
+                                                reference,
+                                                objectMapper.writeValueAsString(scopes),
+                                                acceptedAt);
+                                durableCommands.put(commandId, stored);
+                                commandAllocations.merge(commandId, 1, Integer::sum);
+                            }
+                            return new CaseCommandAcceptance(
+                                    CaseCommandReferenceMapper.fromEntity(stored, objectMapper),
+                                    stored.getCommandStatus().name(),
+                                    stored.getAcceptedAt().toInstant(),
+                                    replay);
+                        });
+
+        TargetEvidenceCommandMaterialStore materialStore =
+                mock(TargetEvidenceCommandMaterialStore.class);
+        when(materialStore.readByRoute(any()))
+                .thenAnswer(
+                        invocation -> {
+                            TargetEvidenceCommandMaterialStore.CommandLookup lookup =
+                                    invocation.getArgument(0);
+                            return Optional.ofNullable(durableMaterials.get(lookup.commandId()));
+                        });
+
+        TargetRoomCommandIngress targetCommandIngress = mock(TargetRoomCommandIngress.class);
+        when(targetCommandIngress.materializeEvidenceOpening(
+                        any(), any(), any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation -> {
+                            materializeCalls.incrementAndGet();
+                            String materialCaseId = invocation.getArgument(0);
+                            String commandId = invocation.getArgument(1);
+                            AcceptCaseCommand command = invocation.getArgument(2);
+                            AuthenticatedActor materialActor = invocation.getArgument(3);
+                            EvidenceAgentTurnCommand turn = invocation.getArgument(5);
+                            String logicalRunId =
+                                    "target-evidence-run:" + stableOpeningToken(commandId);
+                            String rootAttemptId = logicalRunId + ":1";
+                            List<String> capabilities =
+                                    List.of(
+                                            "case:"
+                                                    + materialCaseId
+                                                    + ":command:EVIDENCE_OPENING");
+                            com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole
+                                    contractActorRole =
+                                            com.example.dispute.workflow.contract.v1.ContractTypes
+                                                    .ActorRole.valueOf(
+                                                    materialActor.role().name());
+                            ActorRef caseActorRef =
+                                    new ActorRef(
+                                            materialActor.actorId(),
+                                            contractActorRole,
+                                            capabilities);
+                            String caseCommandRequestHash =
+                                    CaseCommandRequestHasher.hash(
+                                            tenantSurrogate,
+                                            materialCaseId,
+                                            commandId,
+                                            command,
+                                            caseActorRef);
+                            RoomGraphCommand.ActorScope actorScope =
+                                    new RoomGraphCommand.ActorScope(
+                                            materialActor.actorId(),
+                                            contractActorRole,
+                                            Audience.valueOf(materialActor.role().name()),
+                                            capabilities);
+                            RoomGraphCommand.SnapshotRef domainSnapshot =
+                                    new RoomGraphCommand.SnapshotRef(
+                                            "case:" + materialCaseId,
+                                            "case-snapshot.v1",
+                                            "urn:test:case:" + materialCaseId,
+                                            "a".repeat(64),
+                                            1);
+                            RoomGraphCommand.SnapshotRef eventRef =
+                                    new RoomGraphCommand.SnapshotRef(
+                                            "opening:" + commandId,
+                                            command.payloadRef().schemaVersion(),
+                                            command.payloadRef().uri(),
+                                            command.payloadRef().sha256(),
+                                            command.payloadRef().sizeBytes());
+                            RoomGraphCommand graphCommand =
+                                    new RoomGraphCommand(
+                                            "room-graph-command.v1",
+                                            commandId,
+                                            logicalRunId,
+                                            rootAttemptId,
+                                            tenantSurrogate,
+                                            materialCaseId,
+                                            com.example.dispute.workflow.contract.v1.ContractTypes
+                                                    .RoomType.EVIDENCE,
+                                            command.roomEpoch(),
+                                            TargetTypedRoomProtocol.GRAPH_KEY,
+                                            "target-evidence-opening.v1",
+                                            "target-evidence-opening-checkpoint.v1",
+                                            "evidence-thread:" + materialActor.actorId(),
+                                            actorScope,
+                                            command.expectedProcessRevision(),
+                                            "EVIDENCE_OPENING",
+                                            1,
+                                            domainSnapshot,
+                                            eventRef,
+                                            new RoomGraphCommand.InvocationContext(
+                                                    "evidence-clerk",
+                                                    "evidence-opening",
+                                                    "model-test",
+                                                    "evidence-turn.v1",
+                                                    "policy-test",
+                                                    "guardrail-test",
+                                                    List.of(),
+                                                    "key-test",
+                                                    "nonce-test"),
+                                            new RoomGraphCommand.RetryBudget(1, 1, 0),
+                                            command.deadlineAt(),
+                                            "00-"
+                                                    + "3".repeat(32)
+                                                    + "-"
+                                                    + "4".repeat(16)
+                                                    + "-01",
+                                            "b".repeat(64));
+                            ExecuteAgentRunRequest request =
+                                    new ExecuteAgentRunRequest(
+                                            ExecuteAgentRunRequest.SCHEMA_VERSION,
+                                            logicalRunId,
+                                            1,
+                                            "agent-stream.v2",
+                                            "c".repeat(64),
+                                            null,
+                                            false,
+                                            0,
+                                            graphCommand);
+                            TargetEvidenceCommandMaterial material =
+                                    new TargetEvidenceCommandMaterial(
+                                            TargetEvidenceCommandMaterial.SCHEMA_VERSION,
+                                            TargetEvidenceCommandMaterial.TARGET_LANE,
+                                            "p9act.v1.test",
+                                            "d".repeat(64),
+                                            fencingToken,
+                                            command.expectedProcessRevision(),
+                                            roomRevision,
+                                            "e".repeat(64),
+                                            "f".repeat(64),
+                                            caseCommandRequestHash,
+                                            request,
+                                            turn);
+                            CommandAdmission admission =
+                                    new CommandAdmission(
+                                            "p9act.v1.test",
+                                            "d".repeat(64),
+                                            "domain-db-test",
+                                            tenantSurrogate,
+                                            materialCaseId,
+                                            commandId,
+                                            "e".repeat(64),
+                                            "f".repeat(64),
+                                            command.roomEpoch(),
+                                            fencingToken);
+                            durableMaterials.put(
+                                    commandId,
+                                    new TargetEvidenceCommandMaterialStore.MaterialSnapshot(
+                                            "ADMISSION_" + stableOpeningToken(commandId),
+                                            admission,
+                                            material,
+                                            "2".repeat(64),
+                                            CLOCK.instant()));
+                            openingIdempotencyKeys.put(
+                                    commandId,
+                                    turn.contextEnvelope().currentEvent().eventId());
+                            logicalRuns.put(commandId, logicalRunId);
+                            rootAttempts.put(commandId, rootAttemptId);
+                            materialAllocations.merge(commandId, 1, Integer::sum);
+                            return new TargetRoomCommandIngress.EvidenceOpeningRunReceipt(
+                                    logicalRunId, rootAttemptId);
+                        });
+
+        @SuppressWarnings("unchecked")
+        ObjectProvider<TargetRoomCommandIngress> targetIngressProvider =
+                mock(ObjectProvider.class);
+        when(targetIngressProvider.getIfUnique()).thenReturn(targetCommandIngress);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<TargetEvidenceCommandMaterialStore> targetMaterialProvider =
+                mock(ObjectProvider.class);
+        when(targetMaterialProvider.getIfUnique()).thenReturn(materialStore);
+
+        TargetEvidenceOpeningIngress opening =
+                new TargetEvidenceOpeningIngress(
+                        caseRepository,
+                        epochRepository,
+                        processProjectionRepository,
+                        service,
+                        caseCommands,
+                        commandRepository,
+                        targetIngressProvider,
+                        targetMaterialProvider,
+                        objectMapper,
+                        CLOCK);
+
+        AuthenticatedActor merchant =
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT);
+        String merchantBaseCommandId =
+                generationZeroOpeningCommandId(
+                        tenantSurrogate, dispute.getId(), roomEpoch, merchant);
+        AgentRunAcceptedView merchantPending =
+                (AgentRunAcceptedView)
+                        opening.open(
+                                dispute.getId(), merchant, "TRACE_MERCHANT_PENDING", "REQ_MERCHANT_PENDING");
+        AgentRunAcceptedView merchantPendingReplay =
+                (AgentRunAcceptedView)
+                        opening.open(
+                                dispute.getId(),
+                                merchant,
+                                "TRACE_MERCHANT_PENDING_REPLAY",
+                                "REQ_MERCHANT_PENDING_REPLAY");
+        assertThat(merchantPendingReplay).isEqualTo(merchantPending);
+        assertThat(durableCommands).containsKey(merchantBaseCommandId);
+        assertThat(materialAllocations).containsEntry(merchantBaseCommandId, 1);
+        assertThat(commandAllocations).containsEntry(merchantBaseCommandId, 1);
+
+        CaseCommandEntity merchantCommand = durableCommands.get(merchantBaseCommandId);
+        String merchantOpeningKey = openingIdempotencyKeys.get(merchantBaseCommandId);
+        RoomMessageEntity committedMerchantOpening =
+                RoomMessageEntity.create(
+                        "MESSAGE_TARGET_OPENING_COMMITTED",
+                        dispute.getId(),
+                        room.getId(),
+                        11,
+                        com.example.dispute.room.domain.MessageSenderType.AGENT,
+                        "EVIDENCE_CLERK",
+                        "evidence-clerk",
+                        "[\"MERCHANT\",\"CUSTOMER_SERVICE\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]",
+                        "[\"merchant-local\"]",
+                        MessageSource.AGENT_LLM,
+                        MessageType.AGENT_MESSAGE,
+                        "Committed Evidence opening.",
+                        "[]",
+                        merchantOpeningKey,
+                        CLOCK.instant(),
+                        "TRACE_MERCHANT_COMMITTED");
+        committedMerchantOpening.attachAgentRun(logicalRuns.get(merchantBaseCommandId));
+        merchantCommand.markApplied(
+                "urn:target-e2e:evidence-formal-message:"
+                        + committedMerchantOpening.getId(),
+                "3".repeat(64),
+                OffsetDateTime.ofInstant(CLOCK.instant().plusSeconds(20), ZoneOffset.UTC));
+        committedOpenings.put(merchantOpeningKey, committedMerchantOpening);
+        currentProcessRevision.set(processRevision + 1);
+        currentRoomRevision.set(roomRevision + 1);
+        long acceptCallsBeforeCommittedReplay = commandAcceptCalls.get();
+        long materializeCallsBeforeCommittedReplay = materializeCalls.get();
+        Object merchantSuccess =
+                opening.open(
+                        dispute.getId(), merchant, "TRACE_MERCHANT_SUCCESS", "REQ_MERCHANT_SUCCESS");
+        Object merchantSuccessReplay =
+                opening.open(
+                        dispute.getId(),
+                        merchant,
+                        "TRACE_MERCHANT_SUCCESS_REPLAY",
+                                "REQ_MERCHANT_SUCCESS_REPLAY");
+        assertThat(merchantSuccess).isEqualTo(merchantSuccessReplay);
+        assertThat(merchantSuccess).isInstanceOf(RoomMessageView.class);
+        assertThat(((RoomMessageView) merchantSuccess).id())
+                .isEqualTo(committedMerchantOpening.getId());
+        assertThat(commandAcceptCalls.get()).isEqualTo(acceptCallsBeforeCommittedReplay);
+        assertThat(materializeCalls.get()).isEqualTo(materializeCallsBeforeCommittedReplay);
+        assertThat(materialAllocations).containsEntry(merchantBaseCommandId, 1);
+        assertThat(commandAllocations).containsEntry(merchantBaseCommandId, 1);
+
+        TargetEvidenceCommandMaterialStore.MaterialSnapshot committedMaterial =
+                durableMaterials.remove(merchantBaseCommandId);
+        assertThatThrownBy(
+                        () ->
+                                opening.open(
+                                        dispute.getId(),
+                                        merchant,
+                                        "TRACE_MERCHANT_MISSING_MATERIAL",
+                                        "REQ_MERCHANT_MISSING_MATERIAL"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("missing its immutable material");
+        assertThat(commandAcceptCalls.get()).isEqualTo(acceptCallsBeforeCommittedReplay);
+        assertThat(materializeCalls.get()).isEqualTo(materializeCallsBeforeCommittedReplay);
+        durableMaterials.put(merchantBaseCommandId, committedMaterial);
+
+        currentProcessRevision.set(processRevision + 2);
+        currentRoomRevision.set(roomRevision + 2);
+        assertThatThrownBy(
+                        () ->
+                                opening.open(
+                                        dispute.getId(),
+                                        merchant,
+                                        "TRACE_MERCHANT_NON_UNIT_REVISION",
+                                        "REQ_MERCHANT_NON_UNIT_REVISION"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("exact formal-commit successor");
+        assertThat(commandAcceptCalls.get()).isEqualTo(acceptCallsBeforeCommittedReplay);
+        assertThat(materializeCalls.get()).isEqualTo(materializeCallsBeforeCommittedReplay);
+
+        currentProcessRevision.set(processRevision);
+        currentRoomRevision.set(roomRevision);
+
+        AuthenticatedActor user = new AuthenticatedActor("user-local", ActorRole.USER);
+        String generationZeroId =
+                generationZeroOpeningCommandId(
+                        tenantSurrogate, dispute.getId(), roomEpoch, user);
+        AgentRunAcceptedView generationZero =
+                (AgentRunAcceptedView)
+                        opening.open(
+                                dispute.getId(), user, "TRACE_GENERATION_0", "REQ_GENERATION_0");
+        AgentRunAcceptedView generationZeroReplay =
+                (AgentRunAcceptedView)
+                        opening.open(
+                                dispute.getId(),
+                                user,
+                                "TRACE_GENERATION_0_REPLAY",
+                                "REQ_GENERATION_0_REPLAY");
+        assertThat(generationZeroReplay).isEqualTo(generationZero);
+        assertThat(generationZero.runId()).isEqualTo(logicalRuns.get(generationZeroId));
+        assertThat(rootAttempts.get(generationZeroId))
+                .isEqualTo(generationZero.runId() + ":1");
+
+        CaseCommandEntity generationZeroCommand = durableCommands.get(generationZeroId);
+        String generationZeroReceiptHash = "4".repeat(64);
+        OffsetDateTime generationZeroExpiredAt =
+                markRecoveredExpiredTerminalNoCommit(
+                        generationZeroCommand, generationZeroReceiptHash);
+        assertThat(generationZeroCommand.getCommandStatus()).isEqualTo(CommandStatus.FAILED);
+        assertThat(generationZeroCommand.getStatusReasonCode())
+                .isEqualTo("TARGET_EVIDENCE_TERMINAL_NO_COMMIT");
+        assertThat(generationZeroCommand.getResultSha256())
+                .isEqualTo(generationZeroReceiptHash);
+        assertThat(generationZeroCommand.getUpdatedAt()).isEqualTo(generationZeroExpiredAt);
+        String generationOneId =
+                successorOpeningCommandId(
+                        generationZeroId,
+                        generationZeroCommand,
+                        generationZeroReceiptHash);
+        AgentRunAcceptedView generationOne =
+                (AgentRunAcceptedView)
+                        opening.open(
+                                dispute.getId(), user, "TRACE_GENERATION_1", "REQ_GENERATION_1");
+        AgentRunAcceptedView generationOneReplay =
+                (AgentRunAcceptedView)
+                        opening.open(
+                                dispute.getId(),
+                                user,
+                                "TRACE_GENERATION_1_REPLAY",
+                                "REQ_GENERATION_1_REPLAY");
+        assertThat(generationOneReplay).isEqualTo(generationOne);
+        assertThat(generationOne.runId()).isEqualTo(logicalRuns.get(generationOneId));
+        assertThat(rootAttempts.get(generationOneId))
+                .isEqualTo(generationOne.runId() + ":1");
+        assertThat(generationOne.runId()).isNotEqualTo(generationZero.runId());
+        assertThat(durableCommands.get(generationZeroId).getCommandStatus())
+                .isEqualTo(CommandStatus.FAILED);
+        assertThat(materialAllocations).containsEntry(generationZeroId, 1);
+        assertThat(commandAllocations).containsEntry(generationZeroId, 1);
+        assertThat(materialAllocations).containsEntry(generationOneId, 1);
+        assertThat(commandAllocations).containsEntry(generationOneId, 1);
+
+        CaseCommandEntity generationOneCommand = durableCommands.get(generationOneId);
+        String generationOneReceiptHash = "5".repeat(64);
+        markTerminalNoCommit(generationOneCommand, generationOneReceiptHash, 40);
+        String generationTwoId =
+                successorOpeningCommandId(
+                        generationZeroId,
+                        generationOneCommand,
+                        generationOneReceiptHash);
+        AgentRunAcceptedView generationTwo =
+                (AgentRunAcceptedView)
+                        opening.open(
+                                dispute.getId(), user, "TRACE_GENERATION_2", "REQ_GENERATION_2");
+        AgentRunAcceptedView generationTwoReplay =
+                (AgentRunAcceptedView)
+                        opening.open(
+                                dispute.getId(),
+                                user,
+                                "TRACE_GENERATION_2_REPLAY",
+                                "REQ_GENERATION_2_REPLAY");
+        assertThat(generationTwoReplay).isEqualTo(generationTwo);
+        assertThat(generationTwo.runId()).isEqualTo(logicalRuns.get(generationTwoId));
+        assertThat(rootAttempts.get(generationTwoId))
+                .isEqualTo(generationTwo.runId() + ":1");
+        assertThat(generationTwo.runId())
+                .isNotIn(generationZero.runId(), generationOne.runId());
+        assertThat(materialAllocations).containsEntry(generationZeroId, 1);
+        assertThat(commandAllocations).containsEntry(generationZeroId, 1);
+        assertThat(materialAllocations).containsEntry(generationOneId, 1);
+        assertThat(commandAllocations).containsEntry(generationOneId, 1);
+        assertThat(materialAllocations).containsEntry(generationTwoId, 1);
+        assertThat(commandAllocations).containsEntry(generationTwoId, 1);
+
+        record InvalidGeneration(
+                String label, Consumer<CaseCommandEntity> corruption) {}
+        List<InvalidGeneration> invalidGenerations =
+                List.of(
+                        new InvalidGeneration(
+                                "foreign tenant",
+                                command ->
+                                        ReflectionTestUtils.setField(
+                                                command, "tenantSurrogate", "tenant-foreign")),
+                        new InvalidGeneration(
+                                "foreign case",
+                                command ->
+                                        ReflectionTestUtils.setField(
+                                                command, "caseId", "CASE_FOREIGN")),
+                        new InvalidGeneration(
+                                "wrong command type",
+                                command ->
+                                        ReflectionTestUtils.setField(
+                                                command,
+                                                "commandType",
+                                                CommandType.EVIDENCE_SUBMIT)),
+                        new InvalidGeneration(
+                                "foreign actor",
+                                command ->
+                                        ReflectionTestUtils.setField(
+                                                command, "actorId", "user-foreign")),
+                        new InvalidGeneration(
+                                "foreign epoch",
+                                command ->
+                                        ReflectionTestUtils.setField(
+                                                command, "roomEpoch", roomEpoch + 1)),
+                        new InvalidGeneration(
+                                "frozen pair drift",
+                                command ->
+                                        ReflectionTestUtils.setField(
+                                                command, "payloadSha256", "6".repeat(64))),
+                        new InvalidGeneration(
+                                "malformed terminal receipt URI",
+                                command ->
+                                        ReflectionTestUtils.setField(
+                                                command,
+                                                "resultUri",
+                                                "urn:target-room-agent-run-terminal-no-commit:foreign")),
+                        new InvalidGeneration(
+                                "malformed terminal receipt hash",
+                                command -> {
+                                    ReflectionTestUtils.setField(
+                                            command, "resultSha256", "not-a-sha256");
+                                    ReflectionTestUtils.setField(
+                                            command,
+                                            "resultUri",
+                                            "urn:target-room-agent-run-terminal-no-commit:not-a-sha256");
+                                }),
+                        new InvalidGeneration(
+                                "missing terminal discriminator",
+                                command ->
+                                        ReflectionTestUtils.setField(
+                                                command, "statusReasonCode", null)),
+                        new InvalidGeneration(
+                                "unsupported nonterminal result",
+                                command ->
+                                        ReflectionTestUtils.setField(
+                                                command,
+                                                "commandStatus",
+                                                CommandStatus.SHADOW_COMPLETED)),
+                        new InvalidGeneration(
+                                "applied opening without committed message",
+                                command -> {
+                                    ReflectionTestUtils.setField(
+                                            command, "commandStatus", CommandStatus.APPLIED);
+                                    ReflectionTestUtils.setField(
+                                            command,
+                                            "appliedAt",
+                                            OffsetDateTime.ofInstant(
+                                                    CLOCK.instant().plusSeconds(50),
+                                                    ZoneOffset.UTC));
+                                }));
+
+        int allocationCountBeforeDrift =
+                commandAllocations.values().stream().mapToInt(Integer::intValue).sum();
+        int materialCountBeforeDrift =
+                materialAllocations.values().stream().mapToInt(Integer::intValue).sum();
+        for (InvalidGeneration invalidGeneration : invalidGenerations) {
+            CaseCommandEntity invalid =
+                    copyOpeningCommand(generationZeroCommand, invalidGeneration.label());
+            markTerminalNoCommit(invalid, "7".repeat(64), 60);
+            invalidGeneration.corruption().accept(invalid);
+            durableCommands.clear();
+            durableMaterials.clear();
+            durableCommands.put(generationZeroId, invalid);
+
+            assertThatThrownBy(
+                            () ->
+                                    opening.open(
+                                            dispute.getId(),
+                                            user,
+                                            "TRACE_INVALID_" + invalidGeneration.label(),
+                                            "REQ_INVALID_" + invalidGeneration.label()))
+                    .as(invalidGeneration.label())
+                    .isInstanceOf(IllegalStateException.class);
+            assertThat(
+                            commandAllocations.values().stream()
+                                    .mapToInt(Integer::intValue)
+                                    .sum())
+                    .as(invalidGeneration.label())
+                    .isEqualTo(allocationCountBeforeDrift);
+            assertThat(
+                            materialAllocations.values().stream()
+                                    .mapToInt(Integer::intValue)
+                                    .sum())
+                    .as(invalidGeneration.label())
+                    .isEqualTo(materialCountBeforeDrift);
+        }
+
+        verify(client, never()).run(any(), any(), any());
+        verify(messageRepository, never()).save(any());
+        verify(memoryRepository, never()).save(any());
     }
 
     @Test
@@ -2307,6 +3197,86 @@ class EvidenceAgentTurnServiceTest {
     // 上游调用：「EvidenceAgentTurnServiceTest.evidenceCase()」由本测试类中的 「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」、「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed」、「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification」、「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence」 调用。
     // 下游影响：「EvidenceAgentTurnServiceTest.evidenceCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
     // 系统意义：「EvidenceAgentTurnServiceTest.evidenceCase()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_EVIDENCE_AGENT」、「ORDER-EVIDENCE」、「AFTER-EVIDENCE」、「LOG-EVIDENCE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    private CaseCommandEntity copyOpeningCommand(
+            CaseCommandEntity source, String discriminator) {
+        CaseCommandRef reference =
+                CaseCommandReferenceMapper.fromEntity(source, objectMapper);
+        return CaseCommandEntity.pending(
+                "CMD_OPENING_COPY_" + stableOpeningToken(discriminator),
+                reference,
+                source.getActorScopesJson(),
+                source.getAcceptedAt());
+    }
+
+    private static void markTerminalNoCommit(
+            CaseCommandEntity command, String receiptSha256, long offsetSeconds) {
+        OffsetDateTime terminalAt =
+                OffsetDateTime.ofInstant(
+                        CLOCK.instant().plusSeconds(offsetSeconds), ZoneOffset.UTC);
+        command.markOrchestrationAccepted(terminalAt.minusSeconds(1));
+        command.markAcceptedOrchestrationTerminalNoCommit(
+                "TARGET_EVIDENCE_TERMINAL_NO_COMMIT",
+                "urn:target-room-agent-run-terminal-no-commit:" + receiptSha256,
+                receiptSha256,
+                terminalAt);
+    }
+
+    private static OffsetDateTime markRecoveredExpiredTerminalNoCommit(
+            CaseCommandEntity command, String receiptSha256) {
+        OffsetDateTime terminalAt = command.getDeadlineAt().minusSeconds(1);
+        OffsetDateTime expiredAt = command.getDeadlineAt().plusSeconds(1);
+        command.markOrchestrationAccepted(terminalAt.minusSeconds(1));
+        command.markExpired("COMMAND_DEADLINE_EXPIRED", expiredAt);
+        command.markExpiredOrchestrationTerminalNoCommit(
+                "COMMAND_DEADLINE_EXPIRED",
+                expiredAt,
+                "TARGET_EVIDENCE_TERMINAL_NO_COMMIT",
+                "urn:target-room-agent-run-terminal-no-commit:" + receiptSha256,
+                receiptSha256,
+                terminalAt);
+        return expiredAt;
+    }
+
+    private static String generationZeroOpeningCommandId(
+            String tenantSurrogate,
+            String caseId,
+            long roomEpoch,
+            AuthenticatedActor actor) {
+        return "evidence-opening:"
+                + stableOpeningToken(
+                        tenantSurrogate
+                                + "\n"
+                                + caseId
+                                + "\n"
+                                + roomEpoch
+                                + "\n"
+                                + actor.actorId()
+                                + "\n"
+                                + actor.role().name());
+    }
+
+    private static String successorOpeningCommandId(
+            String baseCommandId,
+            CaseCommandEntity prior,
+            String priorTerminalReceiptSha256) {
+        return "evidence-opening:"
+                + stableOpeningToken(
+                        "target-evidence-opening-retry-generation.v1\n"
+                                + baseCommandId
+                                + "\n"
+                                + prior.getCommandId()
+                                + "\n"
+                                + prior.getCaseCommandSequence()
+                                + "\n"
+                                + priorTerminalReceiptSha256);
+    }
+
+    private static String stableOpeningToken(String value) {
+        return UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8))
+                .toString()
+                .replace("-", "");
+    }
+
     private EvidenceAgentTurnResult safeOpeningResult(String roomUtterance) {
         return new EvidenceAgentTurnResult(
                 roomUtterance,
@@ -2329,6 +3299,10 @@ class EvidenceAgentTurnServiceTest {
         ObjectNode overview = matrix.putObject("case_overview");
         overview.put("neutral_summary", "Frozen bilateral watch dispute.");
         overview.put("core_conflict", "Whether the delivered watch was already scratched.");
+        matrix.putArray("fact_rows")
+                .addObject()
+                .put("fact_id", "FACT_GOODS_CONDITION")
+                .put("fact_target", "First-use product condition");
         String matrixId =
                 "CASE_MATRIX_"
                         + ContractJson.sha256Hex(matrix)

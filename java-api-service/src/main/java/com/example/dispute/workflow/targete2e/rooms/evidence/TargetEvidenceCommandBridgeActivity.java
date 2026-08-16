@@ -20,7 +20,10 @@ public final class TargetEvidenceCommandBridgeActivity implements TargetEvidence
     try {
       CaseCommandRef command = Objects.requireNonNull(input, "input").command();
       require(command.roomType() == RoomType.EVIDENCE, "room type");
-      require(command.commandType() == CommandType.EVIDENCE_SUBMIT, "command type");
+      require(
+          command.commandType() == CommandType.EVIDENCE_SUBMIT
+              || command.commandType() == CommandType.EVIDENCE_OPENING,
+          "command type");
       TargetEvidenceCommandMaterialStore.MaterialSnapshot snapshot = materialStore.readByRoute(
           new TargetEvidenceCommandMaterialStore.CommandLookup(command.tenantSurrogate(), command.caseId(),
               command.commandId(), command.roomEpoch(), input.roomFencingToken()))
@@ -45,6 +48,25 @@ public final class TargetEvidenceCommandBridgeActivity implements TargetEvidence
       require(graph.eventRef() != null, "graph event reference");
       require(graph.eventRef().uri().equals(command.payloadRef().uri()), "graph payload URI");
       require(graph.eventRef().sha256().equals(command.payloadRef().sha256()), "graph payload hash");
+      if (material.evidenceAgentTurnCommand() == null) {
+        require(
+            TargetEvidenceCommandMaterial.LEGACY_SCHEMA_VERSION.equals(material.schemaVersion())
+                && command.commandType() == CommandType.EVIDENCE_SUBMIT,
+            "legacy submission material");
+      } else {
+        var event = material.evidenceAgentTurnCommand().contextEnvelope().currentEvent();
+        if (command.commandType() == CommandType.EVIDENCE_OPENING) {
+          require("ROOM_OPENING".equals(event.eventType()), "opening event type");
+          require(event.messageType().name().equals("AGENT_MESSAGE"), "opening message type");
+          require(event.attachmentRefs().isEmpty(), "opening attachments");
+        } else {
+          require("PARTY_MESSAGE".equals(event.eventType()), "submission event type");
+          require(
+              event.messageType().name().equals("PARTY_EVIDENCE_REFERENCE"),
+              "submission message type");
+          require(!event.attachmentRefs().isEmpty(), "submission attachments");
+        }
+      }
       return new TargetEvidenceAgentRunTrigger("target-e2e-evidence-agent-run-trigger.v1", command.commandId(),
           command.roomEpoch(), input.roomFencingToken(), command.expectedProcessRevision(),
           input.expectedRoomRevision(), material.commandHash(), material.commandEnvelopeHash(), material.request());

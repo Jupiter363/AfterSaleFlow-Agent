@@ -24,6 +24,7 @@ from app.graph_runtime.target_e2e_fixture_transport import (
 from app.graphs.intake.contracts import IntakeCognitionDraft
 from app.llm import GovernedProviderRequest
 from app.model_runtime.transports import ModelTransportRequest
+from app.schemas import FrozenIntakeSubmissionAuthorityV1
 
 
 class _ObjectStore:
@@ -119,9 +120,12 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     from app.agents.evidence_clerk.public_reply import (
         EVIDENCE_CANONICAL_OPENING,
         EvidencePublicOutputMismatch,
+        compose_evidence_submission_public_reply,
         guard_evidence_public_reply,
     )
-    from app.schemas import EvidenceTurnResult
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceTurnRequest, EvidenceTurnResult
     from app.security.graph_runtime import GraphSecurityRuntime
     from app.streaming import current_stream_observer
     from app.llm import LiteLlmProxyClient
@@ -151,11 +155,15 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     risky_sentence = "不判断责任但实际由商家承担。"
     raw_room_utterance = safe_prefix + risky_sentence
     guarded_room_utterance = guard_evidence_public_reply(raw_room_utterance)
-    burst_sentences = ["我会先核验签收材料与冻结事实矩阵的关联。"] * 80
-    burst_raw_room_utterance = "".join(burst_sentences)
-    burst_guarded_room_utterance = guard_evidence_public_reply(
-        burst_raw_room_utterance
+    submission_working_set = EvidenceContextAssembler().assemble(
+        EvidenceTurnRequest.model_validate(request_document)
+    ).working_set
+    submission_room_utterance = compose_evidence_submission_public_reply(
+        fact_targets=submission_working_set.allowed_fact_targets,
+        evidence_assessments=[],
+        human_review_tasks=[],
     )
+    burst_chunks = tuple(submission_room_utterance)
     timeline: list[str] = []
 
     class FakeFormalWorkflow:
@@ -205,14 +213,14 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             observer = current_stream_observer()
             assert observer is not None
             if len(self.calls) > 1:
-                for sentence in burst_sentences:
+                for chunk in burst_chunks:
                     observer.visible_delta(
                         "evidence_turn",
                         "room_utterance",
-                        sentence,
+                        chunk,
                     )
                 self.publish_usage(observer)
-                return self.result(burst_guarded_room_utterance)
+                return self.result(submission_room_utterance)
 
             self.invoke_started.set()
             await self.release_after_bootstrap.wait()
@@ -231,9 +239,62 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 risky_sentence[-2:],
             )
             self.publish_usage(observer)
-            result = self.result(guarded_room_utterance)
+            result = self.result(submission_room_utterance)
             self.completed.set()
             return result
+
+    generic_opening_room_utterance = (
+        EVIDENCE_CANONICAL_OPENING + "请补充关键证据材料。"
+    )
+    opening_questions = (
+        "请提供完整物流签收底单，并保留签收人和签收时间。",
+        "请提供连续投递轨迹或快递柜、驿站交接记录。",
+        "请提供能够核对实际收件人身份的原始交接材料。",
+    )
+
+    class MatrixSpecificOpeningRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke_structured(self, **kwargs):
+            self.calls += 1
+            observer = current_stream_observer()
+            assert observer is not None
+            observer.visible_delta(
+                "evidence_turn",
+                "room_utterance",
+                generic_opening_room_utterance,
+            )
+            FakeFormalWorkflow.publish_usage(observer)
+            output_type = kwargs["output_type"]
+            return SimpleNamespace(
+                value=output_type(
+                    room_utterance=generic_opening_room_utterance,
+                    evidence_requests=[
+                        {
+                            "question_id": f"REQ_OPENING_{index}",
+                            "target_evidence_id": None,
+                            "question": question,
+                            "reason": "用于核验冻结矩阵中的签收事实。",
+                        }
+                        for index, question in enumerate(opening_questions, start=1)
+                    ],
+                    verification_suggestions=[],
+                    authenticity_flags=[],
+                    evidence_assessments=[],
+                    fact_matrix_patch=[],
+                    human_review_tasks=[],
+                    internal_handoff={
+                        "evidence_change_summary": "本轮为开场举证指引。",
+                        "matrix_change_summary": "冻结事实矩阵保持不变。",
+                        "remaining_conflicts": ["包裹签收事实仍待核验。"],
+                        "uncovered_fact_ids": ["FACT_SIGNATURE"],
+                        "human_review_evidence_ids": [],
+                        "judge_attention_points": [],
+                    },
+                    confidence=0.8,
+                )
+            )
 
     class FencedMemorySaver(InMemorySaver):
         def __init__(self) -> None:
@@ -280,7 +341,10 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         "actor_id": "USER_local_1",
         "actor_role": "USER",
         "audience": "USER",
-        "capabilities": ["EVIDENCE_SUBMIT"],
+        "capabilities": [
+            "case:CASE_evidence_turn_llm:command:EVIDENCE_OPENING",
+            "case:CASE_evidence_turn_llm:command:EVIDENCE_SUBMIT"
+        ],
     }
     identity = {
         "command_id": "evidence-submit:EVIDENCE_BATCH_TEST",
@@ -469,9 +533,10 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         event.payload.delta or ""
         for event in first
         if event.event_type == "visible_delta"
-    ) == guarded_room_utterance
-    assert guarded_room_utterance.count(EVIDENCE_CANONICAL_OPENING) == 1
-    assert risky_sentence not in guarded_room_utterance
+    ) == submission_room_utterance
+    assert submission_room_utterance.count(EVIDENCE_CANONICAL_OPENING) == 1
+    assert risky_sentence not in submission_room_utterance
+    assert guarded_room_utterance != submission_room_utterance
     assert all(
         event.payload.field == "room_utterance"
         for event in first
@@ -480,8 +545,28 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     assert timeline.index("object_put") < timeline.index("fenced_commit")
     assert timeline.index("fenced_commit") < timeline.index("yield:final")
     proposal = json.loads(store.puts[0]["payload"])
-    assert proposal["room_utterance"] == guarded_room_utterance
-    assert proposal["evidence_turn_result"]["room_utterance"] == guarded_room_utterance
+    assert proposal["room_utterance"] == submission_room_utterance
+    assert (
+        proposal["evidence_turn_result"]["room_utterance"]
+        == submission_room_utterance
+    )
+    assert set(proposal["evidence_turn_result"]) == {
+        "room_utterance",
+        "memory_patch",
+        "canvas_operations",
+        "referenced_evidence_ids",
+        "verification_suggestions",
+        "authenticity_flags",
+        "evidence_assessments",
+        "fact_matrix_patch",
+        "human_review_tasks",
+        "internal_handoff",
+        "liability_determined",
+        "remedy_recommended",
+        "knowledge_answer_mode",
+        "confidence",
+    }
+    assert proposal["evidence_turn_result"]["knowledge_answer_mode"] == "NONE"
     assert proposal["input_hash"] == command.domain_snapshot_ref.sha256
     assert proposal["usage"] == {
         "input_tokens": 11,
@@ -491,6 +576,20 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     assert proposal["proposal_hash"] == canonical_sha256_omitting(
         proposal, "proposal_hash"
     )
+    assert saver.commits[0].result.result_json["artifact_operations"] == [
+        {
+            "operation": "PROPOSE_PATCH",
+            "artifact": {
+                "artifact_id": store.puts[0]["proposal_id"],
+                "schema_version": store.puts[0]["schema_version"],
+                "uri": (
+                    "urn:target-e2e:proposal:evidence:"
+                    + str(store.puts[0]["payload_hash"])
+                ),
+                "sha256": store.puts[0]["payload_hash"],
+            },
+        }
+    ]
     governed_agent_context_fields = {
         "model_profile_id",
         "output_schema_version",
@@ -611,7 +710,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         event.payload.delta or ""
         for event in replay
         if event.event_type == "visible_delta"
-    ) == guarded_room_utterance
+    ) == submission_room_utterance
     assert len(workflow.calls) == 1
     assert governed_agent_context_fields.isdisjoint(
         request_document["agent_context"]
@@ -656,17 +755,17 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         event_type == "visible_delta"
         for event_type in later_types[1:later_usage_index]
     )
-    assert len(burst_sentences) > 64
+    assert len(burst_chunks) > 64
     assert "".join(
         event.payload.delta or ""
         for event in later
         if event.event_type == "visible_delta"
-    ) == burst_guarded_room_utterance
+    ) == submission_room_utterance
     assert all(event.attempt_id == later_command.attempt_id for event in later)
     assert later_command.domain_snapshot_ref == command.domain_snapshot_ref
     assert len(workflow.calls) == 2
     later_proposal = json.loads(store.puts[2]["payload"])
-    assert later_proposal["room_utterance"] == burst_guarded_room_utterance
+    assert later_proposal["room_utterance"] == submission_room_utterance
     assert later_proposal["command_id"] == later_command.command_id
     assert later_proposal["logical_run_id"] == later_command.logical_run_id
     assert later_proposal["attempt_id"] == later_command.attempt_id
@@ -801,6 +900,443 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     await assert_rejected(
         tampered, "EVIDENCE_TURN_INVOCATION_BINDING_INVALID"
     )
+
+    opening_request_document = helper_module[
+        "_freeze_bound_evidence_turn_payload"
+    ]()
+    opening_request_document["context_envelope"]["current_event"] = deepcopy(
+        helper_module["_java_evidence_opening_command_payload"]()[
+            "context_envelope"
+        ]["current_event"]
+    )
+    frozen_submission = opening_request_document["context_envelope"][
+        "frozen_submission"
+    ]
+    camel_authority = frozen_submission["authority"]
+    frozen_submission["authority"] = {
+        field_name: camel_authority[field.alias or field_name]
+        for field_name, field in FrozenIntakeSubmissionAuthorityV1.model_fields.items()
+    }
+    opening_tenant = frozen_submission["authority"]["tenant_surrogate"]
+    opening_room_epoch = frozen_submission["evidence_room_epoch"]
+    opening_fencing_token = frozen_submission["evidence_fencing_token"]
+    opening_capability = (
+        f"case:{identity['case_id']}:command:EVIDENCE_OPENING"
+    )
+    submission_capability = (
+        f"case:{identity['case_id']}:command:EVIDENCE_SUBMIT"
+    )
+    opening_actor_scope = command.actor_scope.model_copy(
+        update={"capabilities": (opening_capability, submission_capability)}
+    )
+    opening_logical_run_id = "target-evidence-run:formal-opening-test"
+    opening_invocation = deepcopy(invocation)
+    opening_invocation.update(
+        {
+            "logical_run_id": opening_logical_run_id,
+            "tenant_surrogate": opening_tenant,
+            "room_epoch": opening_room_epoch,
+            "fencing_token": opening_fencing_token,
+            "actor_scope_hash": canonical_sha256(
+                opening_actor_scope.model_dump(mode="json")
+            ),
+            "evidence_turn_request": opening_request_document,
+            "invocation_hash": "0" * 64,
+        }
+    )
+    opening_invocation["invocation_hash"] = canonical_sha256_omitting(
+        opening_invocation, "invocation_hash"
+    )
+    opening_payload = canonicalize(opening_invocation)
+    opening_command = command.model_copy(
+        update={
+            "command_id": "evidence-opening:EVIDENCE_OPENING_TEST",
+            "logical_run_id": opening_logical_run_id,
+            "attempt_id": opening_logical_run_id + ":1",
+            "tenant_surrogate": opening_tenant,
+            "room_epoch": opening_room_epoch,
+            "actor_scope": opening_actor_scope,
+            "domain_snapshot_ref": snapshot_ref(opening_payload),
+            "event_ref": command.event_ref.model_copy(
+                update={
+                    "artifact_id": "evidence-opening-event:COMMAND_TEST",
+                    "uri": "urn:target-e2e:object:evidence-opening-event:COMMAND_TEST:"
+                    + "8" * 64,
+                    "sha256": "8" * 64,
+                }
+            ),
+            "request_hash": "8" * 64,
+        }
+    )
+    opening_fence = replace(
+        fence,
+        command_id=opening_command.command_id,
+        request_hash=opening_command.request_hash,
+        room_epoch=opening_room_epoch,
+        room_fencing_token=opening_fencing_token,
+        command_hash=canonical_sha256(opening_command.model_dump(mode="json")),
+        command_envelope_hash="9" * 64,
+        tenant_surrogate=opening_tenant,
+    )
+    opening_execution = SimpleNamespace(
+        admission=SimpleNamespace(
+            command=opening_command,
+            binding=SimpleNamespace(
+                room_fencing_token=opening_fencing_token
+            ),
+        ),
+        fence=opening_fence,
+    )
+    opening_store = ObjectStore(opening_payload)
+    room_exchange.stores[opening_command.domain_snapshot_ref.sha256] = (
+        opening_store
+    )
+    opening_saver = FencedMemorySaver()
+    opening_runner = MatrixSpecificOpeningRunner()
+    opening_workflow = EvidenceTurnWorkflow(model_runner=opening_runner)
+    opening_provider = tuple(
+        TargetE2ESpecializedRoomProviderFactory(
+            security_runtime=object.__new__(GraphSecurityRuntime),
+            room_exchange=room_exchange,
+        )
+        .with_evidence_workflow(opening_workflow)(
+            SimpleNamespace(
+                saver=opening_saver,
+                durable_bulkhead=object(),
+            )
+        )
+    )[0]
+    opening_calls_before = opening_runner.calls
+
+    opening_first = [
+        event
+        async for event in opening_provider.stream(opening_execution)
+    ]
+    opening_replay = [
+        event
+        async for event in opening_provider.stream(opening_execution)
+    ]
+
+    assert opening_first[0].event_type == "attempt_started"
+    assert opening_first[-1].event_type == "final"
+    assert opening_replay[0].event_type == "attempt_started"
+    assert opening_replay[-1].event_type == "final"
+    assert (
+        opening_replay[-1].payload.final_result_hash
+        == opening_first[-1].payload.final_result_hash
+    )
+    opening_visible_text = "".join(
+        event.payload.delta or ""
+        for event in opening_first
+        if event.event_type == "visible_delta"
+    )
+    assert "包裹是否由用户本人签收" in opening_visible_text
+    for question in opening_questions:
+        assert question in opening_visible_text
+    opening_proposal = json.loads(opening_store.puts[0]["payload"])
+    assert opening_proposal["room_utterance"] == opening_visible_text
+    assert (
+        opening_proposal["evidence_turn_result"]["room_utterance"]
+        == opening_visible_text
+    )
+    assert "evidence_requests" not in opening_proposal["evidence_turn_result"]
+    assert opening_runner.calls == opening_calls_before + 1
+    assert len(opening_store.puts) == 2
+    assert opening_store.puts[1]["payload"] == opening_store.puts[0]["payload"]
+    assert opening_saver.commits[1].result == opening_saver.commits[0].result
+
+    async def assert_opening_binding_rejected(
+        case_index: int,
+        *,
+        capabilities: tuple[str, ...],
+        request_document: dict[str, object],
+    ) -> None:
+        rejected_logical_run_id = (
+            f"target-evidence-run:opening-binding-negative-{case_index}"
+        )
+        rejected_actor_scope = opening_actor_scope.model_copy(
+            update={"capabilities": capabilities}
+        )
+        rejected_invocation = deepcopy(opening_invocation)
+        rejected_invocation.update(
+            {
+                "logical_run_id": rejected_logical_run_id,
+                "actor_scope_hash": canonical_sha256(
+                    rejected_actor_scope.model_dump(mode="json")
+                ),
+                "evidence_turn_request": deepcopy(request_document),
+                "invocation_hash": "0" * 64,
+            }
+        )
+        rejected_invocation["invocation_hash"] = canonical_sha256_omitting(
+            rejected_invocation, "invocation_hash"
+        )
+        rejected_payload = canonicalize(rejected_invocation)
+        request_hash = format(case_index, "x") * 64
+        rejected_command = opening_command.model_copy(
+            update={
+                "command_id": f"evidence-opening:binding-negative-{case_index}",
+                "logical_run_id": rejected_logical_run_id,
+                "attempt_id": rejected_logical_run_id + ":1",
+                "actor_scope": rejected_actor_scope,
+                "domain_snapshot_ref": snapshot_ref(rejected_payload),
+                "request_hash": request_hash,
+            }
+        )
+        rejected_fence = replace(
+            opening_fence,
+            command_id=rejected_command.command_id,
+            request_hash=request_hash,
+            command_hash=canonical_sha256(
+                rejected_command.model_dump(mode="json")
+            ),
+            command_envelope_hash=format(case_index + 8, "x") * 64,
+        )
+        rejected_execution = SimpleNamespace(
+            admission=SimpleNamespace(
+                command=rejected_command,
+                binding=opening_execution.admission.binding,
+            ),
+            fence=rejected_fence,
+        )
+        rejected_store = ObjectStore(rejected_payload)
+        room_exchange.stores[rejected_command.domain_snapshot_ref.sha256] = (
+            rejected_store
+        )
+        rejected_saver = FencedMemorySaver()
+        rejected_provider = tuple(
+            provider_factory(
+                SimpleNamespace(
+                    saver=rejected_saver,
+                    durable_bulkhead=object(),
+                )
+            )
+        )[0]
+        calls_before = len(workflow.calls)
+        provider_calls_before = workflow.provider_calls
+        rejected_events = []
+
+        with pytest.raises(
+            GraphContractError,
+            match="^EVIDENCE_TURN_INVOCATION_BINDING_INVALID$",
+        ):
+            async for event in rejected_provider.stream(rejected_execution):
+                rejected_events.append(event)
+
+        assert [event.event_type for event in rejected_events] == [
+            "attempt_started"
+        ]
+        assert len(workflow.calls) == calls_before
+        assert workflow.provider_calls == provider_calls_before
+        assert rejected_store.puts == []
+        assert rejected_saver.commits == []
+
+    empty_attachment_submission = deepcopy(request_document)
+    empty_attachment_submission["context_envelope"]["current_event"][
+        "attachment_refs"
+    ] = []
+    empty_attachment_submission["context_envelope"]["current_event"][
+        "text"
+    ] = "Evidence reference without a bound attachment"
+    rejection_cases = (
+        ((opening_capability,), request_document),
+        ((submission_capability,), opening_request_document),
+        ((), opening_request_document),
+        (
+            (submission_capability, opening_capability),
+            opening_request_document,
+        ),
+        (
+            ("case:CASE_foreign:command:EVIDENCE_OPENING",),
+            opening_request_document,
+        ),
+        (
+            (opening_capability, submission_capability),
+            empty_attachment_submission,
+        ),
+    )
+    for case_index, (capabilities, rejected_request) in enumerate(
+        rejection_cases,
+        start=1,
+    ):
+        await assert_opening_binding_rejected(
+            case_index,
+            capabilities=capabilities,
+            request_document=rejected_request,
+        )
+
+
+@pytest.mark.asyncio
+async def test_target_evidence_submission_authorizes_deterministic_terminal_reply_after_live_preview() -> None:
+    import runpy
+    from pathlib import Path
+
+    from app.agents.evidence_clerk.public_reply import (
+        EVIDENCE_CANONICAL_OPENING,
+        EVIDENCE_PUBLIC_FIELD,
+        EVIDENCE_PUBLIC_NODE,
+        compose_evidence_submission_public_reply,
+        guard_evidence_public_reply,
+    )
+    from app.graph_runtime.errors import GraphContractError
+    from app.graph_runtime.evidence_turn_executor import (
+        CompiledEvidenceTurnExecutor,
+        _EvidencePreviewBridge,
+    )
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceTurnRequest, EvidenceTurnResult
+    from app.streaming import current_stream_observer
+
+    helper_module = runpy.run_path(
+        str(Path(__file__).parents[1] / "agents" / "test_evidence_clerk_turn.py")
+    )
+    request = EvidenceTurnRequest.model_validate(
+        helper_module["_java_evidence_turn_command_payload"]()
+    )
+    current_event = request.context_envelope.current_event
+    assert current_event.event_type == "PARTY_MESSAGE"
+    assert current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
+    assert current_event.attachment_refs
+
+    assessment = {
+        "evidence_id": "EVIDENCE_signature_photo",
+        "analysis_method": "TEXT_ONLY",
+        "inspected_modalities": ["PARSED_TEXT"],
+        "authenticity_score": 0.55,
+        "relevance_score": 0.82,
+        "completeness_score": 0.48,
+        "assessment_confidence": 0.72,
+        "source_basis": ["当前可读取的截图文字。"],
+        "fact_links": [
+            {
+                "fact_id": "FACT_SIGNATURE",
+                "relation": "INCONCLUSIVE",
+                "reason": "截图涉及签收记录，但签收人字段不清晰。",
+                "confidence": 0.61,
+            }
+        ],
+        "supported_fact_ids": [],
+        "unsupported_claims": ["当前截图不足以单独还原实际签收人身份。"],
+        "formation_time_assessment": "截图形成时间仍需核对。",
+        "recommendation": "PLAUSIBLE",
+        "summary": "截图涉及签收争议，但覆盖范围有限。",
+    }
+    working_set = EvidenceContextAssembler().assemble(request).working_set
+    expected_reply = compose_evidence_submission_public_reply(
+        fact_targets=working_set.allowed_fact_targets,
+        evidence_assessments=[assessment],
+        human_review_tasks=[],
+    )
+    accepted_result = EvidenceTurnResult(
+        room_utterance=expected_reply,
+        evidence_assessments=[assessment],
+        internal_handoff={
+            "evidence_change_summary": "已读取本轮证据。",
+            "matrix_change_summary": "冻结事实坐标保持不变。",
+            "remaining_conflicts": ["签收人身份仍待核验。"],
+            "uncovered_fact_ids": ["FACT_SIGNATURE"],
+            "human_review_evidence_ids": [],
+            "judge_attention_points": ["核对原始签收记录。"],
+        },
+        referenced_evidence_ids=["EVIDENCE_signature_photo"],
+        confidence=0.72,
+    )
+    raw_provider_reply = "该证据真实有效，因此商家应当退款。"
+
+    class SubmissionWorkflow:
+        def __init__(self, result: EvidenceTurnResult, bridge: _EvidencePreviewBridge) -> None:
+            self.result = result
+            self.bridge = bridge
+            self.calls = 0
+            self.live_visible_text = ""
+            self.guarded_source_reply = ""
+
+        async def arun(self, provider_request: EvidenceTurnRequest) -> EvidenceTurnResult:
+            self.calls += 1
+            assert provider_request == request
+            observer = current_stream_observer()
+            assert observer is not None
+            observer.visible_delta(
+                EVIDENCE_PUBLIC_NODE,
+                EVIDENCE_PUBLIC_FIELD,
+                raw_provider_reply,
+            )
+            self.live_visible_text = self.bridge.policy.visible_text
+            self.guarded_source_reply = self.bridge.policy.guarded_source_reply
+            observer.usage(
+                node_name=EVIDENCE_PUBLIC_NODE,
+                model="evidence-submission-test-model",
+                latency_ms=1,
+                token_usage={"input": 5, "output": 3, "total": 8},
+            )
+            return self.result
+
+    async def invoke(
+        candidate: EvidenceTurnResult,
+        *,
+        run_id: str,
+    ) -> tuple[EvidenceTurnResult, object, _EvidencePreviewBridge, SubmissionWorkflow]:
+        bridge = _EvidencePreviewBridge(provider_request=request)
+        workflow = SubmissionWorkflow(candidate, bridge)
+        executor = object.__new__(CompiledEvidenceTurnExecutor)
+        executor._workflow = workflow
+        executor._preview_bridges = {run_id: bridge}
+        result, usage = await executor._invoke_workflow(
+            request,
+            logical_run_id=run_id,
+        )
+        return result, usage, bridge, workflow
+
+    result, usage, bridge, workflow = await invoke(
+        accepted_result,
+        run_id="target-evidence-run:submission-terminal-authority",
+    )
+
+    assert workflow.calls == 1
+    assert workflow.live_visible_text == EVIDENCE_CANONICAL_OPENING
+    assert workflow.guarded_source_reply == guard_evidence_public_reply(
+        raw_provider_reply
+    )
+    assert result.room_utterance == expected_reply
+    assert bridge.policy.visible_text == expected_reply
+    assert expected_reply.startswith(workflow.live_visible_text)
+    assert usage.model_dump(mode="json") == {
+        "input_tokens": 5,
+        "output_tokens": 3,
+        "total_tokens": 8,
+    }
+
+    replayed_reply = compose_evidence_submission_public_reply(
+        fact_targets=working_set.allowed_fact_targets,
+        evidence_assessments=result.evidence_assessments,
+        human_review_tasks=result.human_review_tasks,
+    )
+    assert replayed_reply.encode("utf-8") == expected_reply.encode("utf-8")
+    assert (
+        bridge.policy.finalize(
+            operation=EVIDENCE_PUBLIC_NODE,
+            node_name=EVIDENCE_PUBLIC_NODE,
+            field_name=EVIDENCE_PUBLIC_FIELD,
+            final_text=replayed_reply,
+        )
+        == ()
+    )
+    assert bridge.policy.visible_text == expected_reply
+
+    unauthorized_reply = guard_evidence_public_reply(
+        "本轮仅记录一段与权威评估无关的任意终态说明。"
+    )
+    assert unauthorized_reply != expected_reply
+    with pytest.raises(
+        GraphContractError,
+        match="^EVIDENCE_SUBMISSION_PUBLIC_REPLY_BINDING_INVALID$",
+    ):
+        await invoke(
+            accepted_result.model_copy(
+                update={"room_utterance": unauthorized_reply}
+            ),
+            run_id="target-evidence-run:submission-terminal-unauthorized",
+        )
 
 
 @pytest.mark.asyncio

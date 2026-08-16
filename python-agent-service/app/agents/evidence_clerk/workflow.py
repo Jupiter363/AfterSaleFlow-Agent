@@ -11,7 +11,11 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
 from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
-from app.agents.evidence_clerk.public_reply import guard_evidence_public_reply
+from app.agents.evidence_clerk.public_reply import (
+    compose_evidence_opening_public_reply,
+    compose_evidence_submission_public_reply,
+    guard_evidence_public_reply,
+)
 from app.harness.context_pack import build_context_pack
 from app.harness.evidence_context_assembler import (
     AssembledEvidenceContext,
@@ -129,7 +133,10 @@ def _compile_evidence_turn_graph(reason_node: Any):
     builder.add_edge("load_context", "reason_with_llm")
     builder.add_edge("reason_with_llm", "apply_authenticity_guardrails")
     builder.add_edge("apply_authenticity_guardrails", END)
-    return builder.compile()
+    # This graph is an in-memory formal computation nested inside the durable
+    # Evidence command graph.  Refuse LangGraph's contextual checkpointer
+    # inheritance so only the outer fenced executor owns command checkpoints.
+    return builder.compile(checkpointer=False)
 
 
 def _initial_graph_state(request: EvidenceTurnRequest) -> EvidenceTurnGraphState:
@@ -400,6 +407,19 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         evidence_assessments,
         human_review_tasks,
     )
+    room_utterance = guard_evidence_public_reply(output.room_utterance)
+    if request.turn_source == "ROOM_OPENING":
+        room_utterance = compose_evidence_opening_public_reply(
+            room_utterance,
+            fact_targets=request.allowed_fact_targets,
+            evidence_requests=evidence_requests,
+        )
+    else:
+        room_utterance = compose_evidence_submission_public_reply(
+            fact_targets=request.allowed_fact_targets,
+            evidence_assessments=evidence_assessments,
+            human_review_tasks=human_review_tasks,
+        )
     # 有逐证据评估时采用其平均值；没有评估才回退模型总置信度，最终再夹在 0..1 范围。
     assessment_confidence = (
         sum(item.assessment_confidence for item in evidence_assessments)
@@ -408,7 +428,7 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         else float(output.confidence)
     )
     return {
-        "room_utterance": guard_evidence_public_reply(output.room_utterance),
+        "room_utterance": room_utterance,
         "evidence_requests": [
             item.model_dump(mode="json") for item in evidence_requests[:10]
         ],

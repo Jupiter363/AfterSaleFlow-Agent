@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.agentstream.application.AgentRunFinalizationFailure;
 import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter.CommitCommand;
 import com.example.dispute.room.application.AgentInvocationContext;
 import com.example.dispute.room.application.EvidenceAgentTurnCommand;
@@ -27,6 +28,7 @@ import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnP
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnProposalLoader.Usage;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,6 +48,9 @@ class JdbcTargetEvidenceFormalCommitPortTest {
   private static final String ROOM_ID = "ROOM_EVIDENCE_1";
   private static final String EPOCH_ID = "EPOCH_EVIDENCE_1";
   private static final String COMMAND_ID = "evidence-submit:EVIDENCE_BATCH_1";
+  private static final String OPENING_COMMAND_ID = "evidence-opening:OPENING_1";
+  private static final String OPENING_IDEMPOTENCY_KEY =
+      "agent-evidence-opening:freeze-v1:CASE_EVIDENCE_1:USER_1:2";
   private static final String COMMAND_ROW_ID = "CASE_COMMAND_EVIDENCE_1";
   private static final String ADMISSION_ID = "p9cmd.v1." + "1".repeat(32);
   private static final String ACTIVATION_ID = "p9act.v1." + "2".repeat(32);
@@ -104,6 +109,9 @@ class JdbcTargetEvidenceFormalCommitPortTest {
     jdbc.execute("drop table if exists target_e2e_command_admission");
     jdbc.execute("drop table if exists agent_run_attempt");
     jdbc.execute("drop table if exists agent_run");
+    jdbc.execute("drop table if exists evidence_party_completion");
+    jdbc.execute("drop table if exists evidence_submission_batch");
+    jdbc.execute("drop table if exists evidence_item");
     createSchema();
     seedAuthority();
     port = new JdbcTargetEvidenceFormalCommitPort(JsonMapper.builder().build());
@@ -124,6 +132,53 @@ class JdbcTargetEvidenceFormalCommitPortTest {
         .isEqualTo(GUARDED_ROOM_UTTERANCE)
         .doesNotContain("Evidence analysis completed");
     assertThat(number("select count(*) from room_message where case_id = ?", CASE_ID)).isEqualTo(1);
+  }
+
+  @Test
+  void openingFormalCommitCreatesOnlyClerkMessageAndResultWithoutSubmissionOrCompletion()
+      throws Exception {
+    jdbc.update(
+        "update agent_run_attempt set command_id = ? where agent_run_id = ?",
+        OPENING_COMMAND_ID,
+        "target-evidence-run:RUN_1");
+    jdbc.update(
+        "update target_e2e_command_admission set command_id = ? where admission_id = ?",
+        OPENING_COMMAND_ID,
+        ADMISSION_ID);
+    jdbc.update(
+        """
+        update case_command
+           set command_id = ?,
+               command_type = 'EVIDENCE_OPENING',
+               actor_scopes_json = ?::jsonb,
+               payload_schema_version = 'target-e2e-evidence-opening.v1',
+               payload_uri = 'urn:target-e2e:evidence-opening:OPENING_1'
+         where id = ?
+        """,
+        OPENING_COMMAND_ID,
+        "[\"case:" + CASE_ID + ":command:EVIDENCE_OPENING\"]",
+        COMMAND_ROW_ID);
+    TargetEvidenceFinalizationRequest request = openingRequest();
+    RoomMessageView message = clerkMessage();
+    seedClerkMessage(message, OPENING_IDEMPOTENCY_KEY);
+
+    TargetEvidenceFormalCommitPort.CommitResult first = commit(request, message);
+    TargetEvidenceFormalCommitPort.CommitResult replay = commit(request, message);
+
+    assertThat(replay).isEqualTo(first);
+    assertThat(first.formalObjectId()).isEqualTo(CLERK_MESSAGE_ID);
+    assertThat(text("select command_type from case_command where id = ?", COMMAND_ROW_ID))
+        .isEqualTo("EVIDENCE_OPENING");
+    assertThat(text("select command_status from case_command where id = ?", COMMAND_ROW_ID))
+        .isEqualTo("APPLIED");
+    assertThat(text("select result_sha256 from case_command where id = ?", COMMAND_ROW_ID))
+        .isEqualTo(first.formalCommitHash());
+    assertThat(number("select count(*) from room_message where case_id = ?", CASE_ID)).isEqualTo(1);
+    assertThat(number("select count(*) from evidence_item where case_id = ?", CASE_ID)).isZero();
+    assertThat(number("select count(*) from evidence_submission_batch where case_id = ?", CASE_ID))
+        .isZero();
+    assertThat(number("select count(*) from evidence_party_completion where case_id = ?", CASE_ID))
+        .isZero();
   }
 
   @Test
@@ -339,6 +394,17 @@ class JdbcTargetEvidenceFormalCommitPortTest {
   }
 
   private void seedClerkMessage(RoomMessageView message) {
+    seedClerkMessage(
+        message,
+        "agent-evidence-turn:"
+            + CASE_ID
+            + ":"
+            + AGENT_SESSION_ID
+            + ":USER:"
+            + TURN_NO);
+  }
+
+  private void seedClerkMessage(RoomMessageView message, String idempotencyKey) {
     jdbc.update(
         """
         insert into room_message (
@@ -359,12 +425,7 @@ class JdbcTargetEvidenceFormalCommitPortTest {
         message.messageType().name(),
         message.messageText(),
         message.agentRunId(),
-        "agent-evidence-turn:"
-            + CASE_ID
-            + ":"
-            + AGENT_SESSION_ID
-            + ":USER:"
-            + TURN_NO,
+        idempotencyKey,
         java.sql.Timestamp.from(message.createdAt()),
         message.senderId());
   }
@@ -391,6 +452,17 @@ class JdbcTargetEvidenceFormalCommitPortTest {
         1);
   }
 
+  private TargetEvidenceFinalizationRequest openingRequest() {
+    return request(
+        ACTIVATION_ID,
+        ADMISSION_ID,
+        OPENING_COMMAND_ID,
+        COMMAND_HASH,
+        ENVELOPE_HASH,
+        1,
+        true);
+  }
+
   private TargetEvidenceFinalizationRequest request(
       String activationId,
       String admissionId,
@@ -398,6 +470,25 @@ class JdbcTargetEvidenceFormalCommitPortTest {
       String commandHash,
       String envelopeHash,
       long attemptNo) {
+    return request(
+        activationId,
+        admissionId,
+        graphCommandId,
+        commandHash,
+        envelopeHash,
+        attemptNo,
+        false);
+  }
+
+  private TargetEvidenceFinalizationRequest request(
+      String activationId,
+      String admissionId,
+      String graphCommandId,
+      String commandHash,
+      String envelopeHash,
+      long attemptNo,
+      boolean opening) {
+    String commandType = opening ? "EVIDENCE_OPENING" : "EVIDENCE_SUBMIT";
     RoomGraphCommand graph = mock(RoomGraphCommand.class);
     when(graph.tenantSurrogate()).thenReturn(TENANT);
     when(graph.caseId()).thenReturn(CASE_ID);
@@ -408,14 +499,23 @@ class JdbcTargetEvidenceFormalCommitPortTest {
     when(graph.roomType()).thenReturn(RoomType.EVIDENCE);
     when(graph.roomEpoch()).thenReturn(ROOM_EPOCH);
     when(graph.actorScope())
-        .thenReturn(new ActorScope("USER_1", ActorRole.USER, Audience.USER, java.util.List.of(ACTOR_SCOPE)));
+        .thenReturn(
+            new ActorScope(
+                "USER_1",
+                ActorRole.USER,
+                Audience.USER,
+                java.util.List.of("case:" + CASE_ID + ":command:" + commandType)));
     when(graph.deadlineAt()).thenReturn(DEADLINE);
     when(graph.eventRef())
         .thenReturn(
             new SnapshotRef(
                 "EVENT_EVIDENCE_1",
-                "target-e2e-evidence-submission.v1",
-                "urn:target-e2e:timeline-event:EVENT_EVIDENCE_1",
+                opening
+                    ? "target-e2e-evidence-opening.v1"
+                    : "target-e2e-evidence-submission.v1",
+                opening
+                    ? "urn:target-e2e:evidence-opening:OPENING_1"
+                    : "urn:target-e2e:timeline-event:EVENT_EVIDENCE_1",
                 PAYLOAD_HASH,
                 321));
     when(graph.domainSnapshotRef())
@@ -436,17 +536,65 @@ class JdbcTargetEvidenceFormalCommitPortTest {
         new CommitCommand(execution, result, mock(AgentExecutionManifest.class));
     TargetEvidenceCommandMaterial material = mock(TargetEvidenceCommandMaterial.class);
     when(material.schemaVersion()).thenReturn(TargetEvidenceCommandMaterial.SCHEMA_VERSION);
-    EvidenceAgentTurnCommand turnCommand = mock(EvidenceAgentTurnCommand.class);
     AgentInvocationContext agentContext = mock(AgentInvocationContext.class);
-    EvidenceContextEnvelopeV1 envelope = mock(EvidenceContextEnvelopeV1.class);
-    EvidenceContextEnvelopeV1.CurrentEvent currentEvent =
-        mock(EvidenceContextEnvelopeV1.CurrentEvent.class);
     when(agentContext.agentSessionId()).thenReturn(AGENT_SESSION_ID);
-    when(currentEvent.eventType()).thenReturn("PARTY_MESSAGE");
-    when(currentEvent.turnNo()).thenReturn(TURN_NO);
-    when(envelope.currentEvent()).thenReturn(currentEvent);
-    when(turnCommand.agentContext()).thenReturn(agentContext);
-    when(turnCommand.contextEnvelope()).thenReturn(envelope);
+    EvidenceContextEnvelopeV1.CurrentEvent currentEvent =
+        new EvidenceContextEnvelopeV1.CurrentEvent(
+            opening ? OPENING_IDEMPOTENCY_KEY : "MESSAGE_EVIDENCE_PARTY_1",
+            opening ? "ROOM_OPENING" : "PARTY_MESSAGE",
+            opening ? MessageType.AGENT_MESSAGE : MessageType.PARTY_EVIDENCE_REFERENCE,
+            "USER_1",
+            "USER",
+            null,
+            opening ? java.util.List.of() : java.util.List.of("EVIDENCE_ITEM_1"),
+            TURN_NO,
+            Instant.parse("2030-01-01T00:00:00Z").toString());
+    EvidenceContextEnvelopeV1 envelope =
+        new EvidenceContextEnvelopeV1(
+            EvidenceContextEnvelopeV1.SCHEMA_VERSION,
+            Instant.parse("2030-01-01T00:00:00Z").toString(),
+            new EvidenceContextEnvelopeV1.CaseSnapshot(
+                CASE_ID,
+                1,
+                "EVIDENCE_OPEN",
+                "FULFILLMENT_DISPUTE",
+                "SIGNED_NOT_RECEIVED",
+                "USER",
+                "Evidence dispute",
+                "Evidence dispute",
+                "HIGH",
+                "FORMAL",
+                "ORDER_1",
+                "AFTER_1",
+                "LOGISTICS_1",
+                "OMS",
+                "OMS",
+                "EXT_1",
+                "EVIDENCE",
+                DEADLINE.toString()),
+            null,
+            new EvidenceContextEnvelopeV1.ActorSnapshot(
+                "USER_1",
+                "USER",
+                "USER",
+                "ACCESS_SESSION_1",
+                AGENT_SESSION_ID,
+                "PARTY_PRIVATE",
+                "evidence-clerk",
+                "memory-v1"),
+            currentEvent,
+            java.util.List.of(),
+            new EvidenceContextEnvelopeV1.PrivateConversation(
+                AGENT_SESSION_ID, "PARTY_PRIVATE", 0, false, java.util.List.of()),
+            new EvidenceContextEnvelopeV1.RoomPolicy(
+                ROOM_ID,
+                com.example.dispute.room.domain.RoomType.EVIDENCE,
+                "OPEN",
+                DEADLINE.toString(),
+                "USER",
+                true));
+    EvidenceAgentTurnCommand turnCommand =
+        new EvidenceAgentTurnCommand(envelope, agentContext);
     when(material.evidenceAgentTurnCommand()).thenReturn(turnCommand);
     when(material.request()).thenReturn(execution);
     MaterialSnapshot snapshot =
@@ -510,6 +658,11 @@ class JdbcTargetEvidenceFormalCommitPortTest {
   }
 
   private void createSchema() {
+    jdbc.execute("create table evidence_item (id varchar(64) primary key, case_id varchar(64) not null)");
+    jdbc.execute(
+        "create table evidence_submission_batch (id varchar(64) primary key, case_id varchar(64) not null)");
+    jdbc.execute(
+        "create table evidence_party_completion (id varchar(64) primary key, case_id varchar(64) not null)");
     jdbc.execute("""
         create table agent_run (
           id varchar(128) primary key,
@@ -725,5 +878,64 @@ class JdbcTargetEvidenceFormalCommitPortTest {
 
   private String text(String sql, Object... parameters) {
     return jdbc.queryForObject(sql, String.class, parameters);
+  }
+}
+
+class TargetEvidenceFinalizationPersistenceExceptionTest {
+
+  @Test
+  void serializationFailureIsTypedRetryableAndSameCommitReplaysExactlyOnce() throws Exception {
+    RuntimeException serialization = commitFailure("40001");
+    RuntimeException deadlock = commitFailure("40P01");
+    RuntimeException identicalRetry = commitFailure("40001");
+
+    for (RuntimeException failure : java.util.List.of(serialization, deadlock, identicalRetry)) {
+      assertThat(failure)
+          .isInstanceOf(AgentRunFinalizationFailure.class)
+          .hasMessage("target Evidence formal commit was interrupted by a transient transaction conflict");
+      AgentRunFinalizationFailure typed = (AgentRunFinalizationFailure) failure;
+      assertThat(typed.retryable()).isTrue();
+      assertThat(typed.code())
+          .isEqualTo("TargetEvidenceFinalizationPersistenceRetryable");
+    }
+    assertThat(serialization.getCause()).isInstanceOf(SQLException.class);
+    assertThat(((SQLException) serialization.getCause()).getSQLState()).isEqualTo("40001");
+    assertThat(identicalRetry.getCause()).isInstanceOf(SQLException.class);
+    assertThat(((SQLException) identicalRetry.getCause()).getSQLState()).isEqualTo("40001");
+
+    RuntimeException deterministic = commitFailure("23505");
+    assertThat(deterministic)
+        .isInstanceOf(IllegalStateException.class)
+        .isNotInstanceOf(AgentRunFinalizationFailure.class)
+        .hasMessage("target Evidence formal commit failed")
+        .hasCauseInstanceOf(SQLException.class);
+  }
+
+  private static RuntimeException commitFailure(String sqlState) throws Exception {
+    Connection transaction = mock(Connection.class);
+    when(transaction.getAutoCommit()).thenReturn(false);
+    when(transaction.getTransactionIsolation())
+        .thenReturn(Connection.TRANSACTION_REPEATABLE_READ);
+    when(transaction.prepareStatement(org.mockito.ArgumentMatchers.anyString()))
+        .thenThrow(new SQLException("synthetic transaction failure", sqlState));
+
+    RoomGraphCommand graph = mock(RoomGraphCommand.class);
+    when(graph.roomType()).thenReturn(RoomType.EVIDENCE);
+    ExecuteAgentRunRequest execution = mock(ExecuteAgentRunRequest.class);
+    when(execution.command()).thenReturn(graph);
+    CommitCommand command = mock(CommitCommand.class);
+    when(command.request()).thenReturn(execution);
+    TargetEvidenceFinalizationRequest request = mock(TargetEvidenceFinalizationRequest.class);
+    when(request.command()).thenReturn(command);
+
+    try {
+      new JdbcTargetEvidenceFormalCommitPort(JsonMapper.builder().build())
+          .commit(transaction, request, mock(RoomMessageView.class));
+      throw new AssertionError("synthetic SQL failure was not propagated");
+    } catch (RuntimeException failure) {
+      org.mockito.Mockito.verify(transaction, org.mockito.Mockito.times(1))
+          .prepareStatement(org.mockito.ArgumentMatchers.anyString());
+      return failure;
+    }
   }
 }

@@ -62,7 +62,7 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       requireFormalMessage(request, formalMessage, existing, roomId);
       String formalObjectId = existing.id();
       String resultUri = "urn:target-e2e:evidence-formal-message:" + formalObjectId;
-      String formalCommitHash = formalHash(request, existing, command.sequence());
+      String formalCommitHash = formalHash(request, existing, command);
 
       if ("APPLIED".equals(command.status())) {
         requireReplayState(
@@ -83,6 +83,11 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       applyCommand(transaction, command, request, graph, resultUri, formalCommitHash);
       return new CommitResult(formalObjectId, formalCommitHash);
     } catch (SQLException failure) {
+      if (TargetEvidenceFinalizationPersistenceException.isRetryableTransactionConflict(failure)) {
+        throw new TargetEvidenceFinalizationPersistenceException(
+            "target Evidence formal commit was interrupted by a transient transaction conflict",
+            failure);
+      }
       throw new IllegalStateException("target Evidence formal commit failed", failure);
     }
   }
@@ -231,7 +236,8 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
     require(graph.caseId().equals(command.caseId()), "case command case drifted");
     require(command.commandId() != null && !command.commandId().isBlank(), "case command id drifted");
     require(command.sequence() > 0, "case command sequence is invalid");
-    require("EVIDENCE_SUBMIT".equals(command.commandType()), "case command type drifted");
+    String expectedCommandType = expectedCommandType(request);
+    require(expectedCommandType.equals(command.commandType()), "case command type drifted");
     require("EVIDENCE".equals(command.roomType()), "case command room type drifted");
     require(graph.roomEpoch() == command.roomEpoch(), "case command room epoch drifted");
     require(request.actorId().equals(command.actorId()), "case command actor id drifted");
@@ -488,8 +494,18 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
     var turn = request.material().material().evidenceAgentTurnCommand();
     var context = turn.agentContext();
     var event = turn.contextEnvelope().currentEvent();
-    require("PARTY_MESSAGE".equals(event.eventType()),
-        "Evidence formal event type drifted");
+    if ("ROOM_OPENING".equals(event.eventType())) {
+      require(event.messageType().name().equals("AGENT_MESSAGE"),
+          "Evidence opening message type drifted");
+      require(event.attachmentRefs().isEmpty(),
+          "Evidence opening unexpectedly carries attachments");
+      require(event.eventId() != null && !event.eventId().isBlank(),
+          "Evidence opening idempotency authority is absent");
+      return event.eventId();
+    }
+    require("PARTY_MESSAGE".equals(event.eventType()), "Evidence formal event type drifted");
+    require(event.messageType().name().equals("PARTY_EVIDENCE_REFERENCE"),
+        "Evidence submission message type drifted");
     require(context.agentSessionId() != null && !context.agentSessionId().isBlank(),
         "Evidence formal agent session is invalid");
     require(event.turnNo() > 0, "Evidence formal turn number is invalid");
@@ -553,7 +569,7 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
                result_uri = ?, result_sha256 = ?, applied_at = now(),
                updated_at = now(), version = version + 1
          where id = ? and tenant_surrogate = ? and case_id = ? and command_id = ?
-           and case_command_sequence = ? and command_type = 'EVIDENCE_SUBMIT'
+           and case_command_sequence = ? and command_type = ?
            and room_type = 'EVIDENCE' and room_epoch = ?
            and actor_id = ? and actor_role = ? and actor_scopes_json = ?::jsonb
            and payload_schema_version = ? and payload_uri = ? and payload_sha256 = ?
@@ -568,17 +584,18 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       statement.setString(5, graph.caseId());
       statement.setString(6, command.commandId());
       statement.setLong(7, command.sequence());
-      statement.setLong(8, graph.roomEpoch());
-      statement.setString(9, request.actorId());
-      statement.setString(10, request.actorRole().name());
-      statement.setString(11, command.actorScopesJson());
-      statement.setString(12, command.payloadSchemaVersion());
-      statement.setString(13, command.payloadUri());
-      statement.setString(14, command.payloadHash());
-      statement.setLong(15, command.payloadSize());
-      statement.setLong(16, request.expectedProcessRevision());
-      statement.setString(17, request.caseCommandRequestHash());
-      statement.setTimestamp(18, java.sql.Timestamp.from(command.deadline()));
+      statement.setString(8, expectedCommandType(request));
+      statement.setLong(9, graph.roomEpoch());
+      statement.setString(10, request.actorId());
+      statement.setString(11, request.actorRole().name());
+      statement.setString(12, command.actorScopesJson());
+      statement.setString(13, command.payloadSchemaVersion());
+      statement.setString(14, command.payloadUri());
+      statement.setString(15, command.payloadHash());
+      statement.setLong(16, command.payloadSize());
+      statement.setLong(17, request.expectedProcessRevision());
+      statement.setString(18, request.caseCommandRequestHash());
+      statement.setTimestamp(19, java.sql.Timestamp.from(command.deadline()));
       require(statement.executeUpdate() == 1, "target Evidence command APPLIED CAS failed");
     }
   }
@@ -592,12 +609,15 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
   }
 
   private String formalHash(
-      TargetEvidenceFinalizationRequest request, Existing message, long commandSequence) {
+      TargetEvidenceFinalizationRequest request, Existing message, Command command) {
     var proposal = request.proposal();
+    String hashSchema = "EVIDENCE_OPENING".equals(command.commandType())
+        ? "target-e2e-evidence-opening-formal-commit.v1"
+        : "target-e2e-evidence-formal-commit.v3";
     return ContractJson.sha256Hex(
         objectMapper.valueToTree(
             List.of(
-                "target-e2e-evidence-formal-commit.v3",
+                hashSchema,
                 message.id(),
                 message.caseId(),
                 message.roomId(),
@@ -618,7 +638,7 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
                 request.commandEnvelopeHash(),
                 request.caseCommandRequestHash(),
                 request.formalOperationId(),
-                commandSequence,
+                command.sequence(),
                 request.roomFencingToken(),
                 request.expectedProcessRevision(),
                 request.expectedRoomRevision(),
@@ -633,6 +653,25 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
                 proposal.usage().outputTokens(),
                 proposal.usage().totalTokens(),
                 request.command().result().resultHash())));
+  }
+
+  private static String expectedCommandType(TargetEvidenceFinalizationRequest request) {
+    var event = request.material().material().evidenceAgentTurnCommand()
+        .contextEnvelope().currentEvent();
+    if ("ROOM_OPENING".equals(event.eventType())) {
+      require(event.messageType().name().equals("AGENT_MESSAGE"),
+          "Evidence opening command event drifted");
+      require(event.attachmentRefs().isEmpty(),
+          "Evidence opening command attachments drifted");
+      return "EVIDENCE_OPENING";
+    }
+    require("PARTY_MESSAGE".equals(event.eventType()),
+        "Evidence submission command event drifted");
+    require(event.messageType().name().equals("PARTY_EVIDENCE_REFERENCE"),
+        "Evidence submission command message drifted");
+    require(!event.attachmentRefs().isEmpty(),
+        "Evidence submission command attachments drifted");
+    return "EVIDENCE_SUBMIT";
   }
 
   private static void require(boolean condition, String message) {

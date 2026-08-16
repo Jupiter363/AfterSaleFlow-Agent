@@ -1,7 +1,9 @@
 package com.example.dispute.workflow.targete2e.ingress.rooms;
 
 import com.example.dispute.room.application.EvidenceAgentTurnCommand;
+import com.example.dispute.room.application.EvidenceContextEnvelopeV1;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.targete2e.exchange.rooms.TargetE2eRoomExchangeContract.Authority;
 import com.example.dispute.workflow.targete2e.exchange.rooms.TargetE2eRoomObjectIndex;
@@ -30,8 +32,9 @@ public final class TargetE2eEvidenceTurnInvocationPublisher {
     public Published publish(
             RoomGraphCommand outerCommand,
             long fencingToken,
+            CommandType commandType,
             EvidenceAgentTurnCommand evidenceTurnCommand) {
-        requireAuthority(outerCommand, fencingToken, evidenceTurnCommand);
+        requireAuthority(outerCommand, fencingToken, commandType, evidenceTurnCommand);
         JsonNode actorScope = mapper.valueToTree(outerCommand.actorScope());
         String actorScopeHash = ContractJson.sha256Hex(actorScope);
         ObjectNode invocation = mapper.createObjectNode();
@@ -76,15 +79,33 @@ public final class TargetE2eEvidenceTurnInvocationPublisher {
     private static void requireAuthority(
             RoomGraphCommand outer,
             long fencingToken,
+            CommandType commandType,
             EvidenceAgentTurnCommand turn) {
         Objects.requireNonNull(outer, "outerCommand");
+        Objects.requireNonNull(commandType, "commandType");
         Objects.requireNonNull(turn, "evidenceTurnCommand");
         var context = turn.agentContext();
         var envelope = turn.contextEnvelope();
         var actor = envelope.actorSnapshot();
         var event = envelope.currentEvent();
+        boolean opening = commandType == CommandType.EVIDENCE_OPENING;
+        boolean submission = commandType == CommandType.EVIDENCE_SUBMIT;
+        boolean exactEvent = opening
+                ? "ROOM_OPENING".equals(event.eventType())
+                        && event.messageType().name().equals("AGENT_MESSAGE")
+                        && event.attachmentRefs() != null
+                        && event.attachmentRefs().isEmpty()
+                        && exactOpeningFrozenAuthority(
+                                outer, fencingToken, envelope.frozenSubmission())
+                : submission
+                        && "PARTY_MESSAGE".equals(event.eventType())
+                        && event.messageType().name().equals("PARTY_EVIDENCE_REFERENCE")
+                        && event.attachmentRefs() != null
+                        && !event.attachmentRefs().isEmpty();
         boolean exact = outer.roomType().name().equals("EVIDENCE")
                 && fencingToken > 0
+                && outer.actorScope().capabilities().contains(
+                        "case:" + outer.caseId() + ":command:" + commandType.name())
                 && outer.caseId().equals(context.caseId())
                 && context.roomType().name().equals("EVIDENCE")
                 && outer.actorScope().actorId().equals(context.actorId())
@@ -95,15 +116,38 @@ public final class TargetE2eEvidenceTurnInvocationPublisher {
                 && outer.actorScope().actorRole().name().equals(actor.actorRole())
                 && Objects.equals(context.accessSessionId(), actor.accessSessionId())
                 && Objects.equals(context.agentSessionId(), actor.agentSessionId())
-                && "PARTY_MESSAGE".equals(event.eventType())
-                && event.messageType().name().equals("PARTY_EVIDENCE_REFERENCE")
                 && outer.actorScope().actorId().equals(event.actorId())
                 && outer.actorScope().actorRole().name().equals(event.actorRole())
-                && event.attachmentRefs() != null
-                && !event.attachmentRefs().isEmpty();
+                && exactEvent;
         if (!exact) {
             throw new IllegalArgumentException(
                     "formal Evidence turn authority does not bind its outer command");
+        }
+    }
+
+    private static boolean exactOpeningFrozenAuthority(
+            RoomGraphCommand outer,
+            long fencingToken,
+            EvidenceContextEnvelopeV1.FrozenSubmission frozen) {
+        if (frozen == null
+                || frozen.evidenceRoomEpoch() != outer.roomEpoch()
+                || frozen.evidenceFencingToken() != fencingToken
+                || frozen.projectionRef() == null
+                || frozen.projectionRef().isBlank()
+                || frozen.projectionSha256() == null
+                || !frozen.projectionSha256().matches("[0-9a-f]{64}")
+                || frozen.authority() == null
+                || frozen.matrix() == null
+                || !outer.caseId().equals(frozen.authority().caseId())) {
+            return false;
+        }
+        try {
+            frozen.authority().requireProjectionPair(
+                    frozen.projectionRef(), frozen.projectionSha256());
+            frozen.authority().requireMatchesMatrix(frozen.matrix());
+            return true;
+        } catch (IllegalArgumentException | IllegalStateException failure) {
+            return false;
         }
     }
 

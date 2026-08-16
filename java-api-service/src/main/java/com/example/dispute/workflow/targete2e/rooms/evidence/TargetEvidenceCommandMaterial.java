@@ -71,6 +71,15 @@ public record TargetEvidenceCommandMaterial(
       RoomGraphCommand command, EvidenceAgentTurnCommand turn) {
     var context = turn.agentContext();
     var envelope = turn.contextEnvelope();
+    var event = envelope.currentEvent();
+    boolean supportedEvent =
+        "ROOM_OPENING".equals(event.eventType())
+            ? event.messageType().name().equals("AGENT_MESSAGE")
+                && event.attachmentRefs().isEmpty()
+                && envelope.frozenSubmission() != null
+            : "PARTY_MESSAGE".equals(event.eventType())
+                && event.messageType().name().equals("PARTY_EVIDENCE_REFERENCE")
+                && !event.attachmentRefs().isEmpty();
     boolean exact = command.caseId().equals(context.caseId())
         && context.roomType().name().equals("EVIDENCE")
         && command.actorScope().actorId().equals(context.actorId())
@@ -80,7 +89,8 @@ public record TargetEvidenceCommandMaterial(
         && command.actorScope().actorId().equals(envelope.actorSnapshot().actorId())
         && command.actorScope().actorRole().name().equals(envelope.actorSnapshot().actorRole())
         && Objects.equals(context.accessSessionId(), envelope.actorSnapshot().accessSessionId())
-        && Objects.equals(context.agentSessionId(), envelope.actorSnapshot().agentSessionId());
+        && Objects.equals(context.agentSessionId(), envelope.actorSnapshot().agentSessionId())
+        && supportedEvent;
     require(exact, "evidenceAgentTurnCommand");
   }
 

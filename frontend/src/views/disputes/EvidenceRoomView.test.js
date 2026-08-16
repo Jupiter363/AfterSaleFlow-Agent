@@ -1257,7 +1257,7 @@ describe("EvidenceRoomView", () => {
   });
 
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-  it("does not append another opening when the private thread already has a current clerk turn", async () => {
+  it("rehydratesCommittedEvidenceClerkOpeningWithoutReplayAfterLostStream", async () => {
     roomApi.messages.mockResolvedValueOnce([
       {
         id: "USER_EXISTING_EVIDENCE_TURN",
@@ -1269,9 +1269,10 @@ describe("EvidenceRoomView", () => {
       {
         id: "CLERK_EXISTING_EVIDENCE_TURN",
         sequence_no: 5,
-        sender_role: "CUSTOMER_SERVICE",
-        message_type: "AGENT_MESSAGE",
-        message_text: "Please provide the original photo and its capture time.",
+          sender_role: "EVIDENCE_CLERK",
+          message_type: "AGENT_MESSAGE",
+          message_text: "Please provide the original photo and its capture time.",
+          agent_run_id: "target-evidence-run:committed-opening",
       },
     ]);
 
@@ -1280,6 +1281,8 @@ describe("EvidenceRoomView", () => {
 
     expect(roomApi.ensureOpening).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("I already started this evidence conversation.");
+    expect(wrapper.text()).toContain("Please provide the original photo and its capture time.");
+    expect(wrapper.get("[data-evidence-work-status]").text()).not.toContain("LIVE GENERATION");
   });
 
   it("repairs a party-only private thread by requesting the missing clerk opening", async () => {

@@ -902,6 +902,7 @@ class TargetE2EThreadIdentityResolver:
                     "tenant_surrogate": command.tenant_surrogate,
                     "case_id": command.case_id,
                     "room_type": command.room_type,
+                    "thread_id": command.thread_id,
                     "actor_scope": command.actor_scope.model_dump(mode="json"),
                 }
             )

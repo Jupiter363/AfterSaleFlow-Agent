@@ -268,6 +268,79 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 .command();
     }
 
+    @Transactional
+    public TargetOpeningPreparation prepareTargetOpening(
+            String caseId,
+            AuthenticatedActor actor,
+            long roomEpoch,
+            long fencingToken,
+            String projectionRef,
+            String projectionSha256,
+            Instant authorityTime) {
+        Objects.requireNonNull(authorityTime, "authorityTime");
+        if (!isParty(actor.role()) || roomEpoch < 0 || fencingToken < 1) {
+            throw new IllegalArgumentException(
+                    "target Evidence opening requires exact party and epoch authority");
+        }
+        TurnContext context = prepare(caseId, RoomType.EVIDENCE);
+        SessionContext session = resolveSession(caseId, actor, RoomType.EVIDENCE);
+        EvidenceContextEnvelopeV1.FrozenSubmission frozenSubmission =
+                contextEnvelopeFactory.resolveFrozenSubmission(
+                        context.dispute(), context.room());
+        boolean exactFrozenAuthority = frozenSubmission != null
+                && frozenSubmission.evidenceRoomEpoch() == roomEpoch
+                && frozenSubmission.evidenceFencingToken() == fencingToken
+                && Objects.equals(frozenSubmission.projectionRef(), projectionRef)
+                && Objects.equals(frozenSubmission.projectionSha256(), projectionSha256);
+        if (!exactFrozenAuthority) {
+            throw new IllegalStateException(
+                    "target Evidence opening differs from the frozen projection authority");
+        }
+        String idempotencyKey =
+                openingIdempotencyKey(caseId, session.agentSession(), frozenSubmission);
+        Optional<RoomMessageEntity> existing =
+                messageRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey);
+        if (existing.isPresent()) {
+            return new TargetOpeningPreparation(
+                    idempotencyKey, view(existing.orElseThrow()), null);
+        }
+        int turnNo =
+                memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
+        EvidenceContextEnvelopeV1 generated =
+                contextEnvelopeFactory.create(
+                        context.dispute(),
+                        context.room(),
+                        actor,
+                        session.accessSession(),
+                        session.agentSession(),
+                        "ROOM_OPENING",
+                        idempotencyKey,
+                        MessageType.AGENT_MESSAGE,
+                        null,
+                        List.of(),
+                        turnNo,
+                        authorityTime,
+                        frozenSubmission);
+        EvidenceContextEnvelopeV1 envelope =
+                new EvidenceContextEnvelopeV1(
+                        generated.schemaVersion(),
+                        authorityTime.toString(),
+                        generated.caseSnapshot(),
+                        generated.intakeDossierSnapshot(),
+                        generated.actorSnapshot(),
+                        generated.currentEvent(),
+                        generated.visibleEvidence(),
+                        generated.privateConversation(),
+                        generated.roomPolicy(),
+                        generated.frozenSubmission());
+        contextEnvelopeFactory.requireCurrentFrozenSubmission(
+                context.dispute(), context.room(), envelope);
+        return new TargetOpeningPreparation(
+                idempotencyKey,
+                null,
+                new EvidenceAgentTurnCommand(envelope, session.agentContext()));
+    }
+
     private PreparedParticipantTurn prepareParticipantTurn(
             String caseId,
             RoomType roomType,
@@ -425,7 +498,9 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                             result,
                             finalization.runId(),
                             finalization.traceId(),
-                            finalization.idempotencyKey(),
+                            targetFormalAuthority
+                                    ? envelope.currentEvent().eventId()
+                                    : finalization.idempotencyKey(),
                             targetFormalAuthority));
         }
         // 普通回合会继续校验 assessment 只能覆盖当前可见和本轮附件，
@@ -441,6 +516,20 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 allowedFactIds(envelope),
                 finalization.traceId(),
                 targetFormalAuthority);
+    }
+
+    public record TargetOpeningPreparation(
+            String idempotencyKey,
+            RoomMessageView existingMessage,
+            EvidenceAgentTurnCommand command) {
+        public TargetOpeningPreparation {
+            if (idempotencyKey == null
+                    || idempotencyKey.isBlank()
+                    || ((existingMessage == null) == (command == null))) {
+                throw new IllegalArgumentException(
+                        "target Evidence opening preparation is invalid");
+            }
+        }
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnService.ensureOpening(String,RoomType,AuthenticatedActor,String,String)」。
@@ -1010,15 +1099,21 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
      * unrelated dossier while finalizing.
      */
     private Set<String> allowedFactIds(EvidenceContextEnvelopeV1 envelope) {
-        EvidenceContextEnvelopeV1.IntakeDossierSnapshot snapshot =
-                envelope.intakeDossierSnapshot();
-        JsonNode payload =
-                snapshot == null || snapshot.payload() == null
-                        ? objectMapper.createObjectNode()
-                        : snapshot.payload();
-        JsonNode matrix = payload.path("case_fact_matrix");
-        if (!"case_fact_matrix.v2".equals(matrix.path("schema_version").asText())) {
-            matrix = payload.path("unilateral_case_matrix");
+        JsonNode matrix;
+        if (envelope.freezeBound()) {
+            matrix = envelope.frozenSubmission().matrix();
+        } else {
+            EvidenceContextEnvelopeV1.IntakeDossierSnapshot snapshot =
+                    envelope.intakeDossierSnapshot();
+            JsonNode payload =
+                    snapshot == null || snapshot.payload() == null
+                            ? objectMapper.createObjectNode()
+                            : snapshot.payload();
+            matrix = payload.path("case_fact_matrix");
+            if (!"case_fact_matrix.v2"
+                    .equals(matrix.path("schema_version").asText())) {
+                matrix = payload.path("unilateral_case_matrix");
+            }
         }
         JsonNode rows = matrix.path("fact_rows");
         boolean supported =

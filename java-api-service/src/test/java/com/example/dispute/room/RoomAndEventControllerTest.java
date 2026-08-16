@@ -17,6 +17,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.example.dispute.common.exception.GlobalExceptionHandler;
 import com.example.dispute.common.trace.TraceIdFilter;
+import com.example.dispute.agentstream.application.AgentRunAcceptedView;
 import com.example.dispute.config.CommonConfiguration;
 import com.example.dispute.config.HeaderAuthenticationFilter;
 import com.example.dispute.config.JsonAccessDeniedHandler;
@@ -140,6 +141,34 @@ class RoomAndEventControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.id").value("MESSAGE_OPENING"))
                 .andExpect(jsonPath("$.data.sender_role").value("CUSTOMER_SERVICE"));
+    }
+
+    @Test
+    void acceptsTargetEvidenceOpeningRunOnTheExistingAuthenticatedEndpoint() throws Exception {
+        when(messageService.ensureOpening(
+                        eq("CASE_test"),
+                        eq(RoomType.EVIDENCE),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(
+                        new AgentRunAcceptedView(
+                                "target-evidence-run:opening1",
+                                "PENDING",
+                                "/api/agent-runs/target-evidence-run:opening1/events",
+                                OffsetDateTime.parse("2026-07-03T00:01:00Z")));
+
+        mockMvc.perform(
+                        post("/api/disputes/CASE_test/rooms/EVIDENCE/messages/opening")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER")
+                                .header("Idempotency-Key", "room-opening-target-1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.run_id").value("target-evidence-run:opening1"))
+                .andExpect(jsonPath("$.data.status").value("PENDING"))
+                .andExpect(
+                        jsonPath("$.data.stream_url")
+                                .value("/api/agent-runs/target-evidence-run:opening1/events"));
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomAndEventControllerTest.startsAnSseSubscriptionAfterTheLastEventIdCursor()」。

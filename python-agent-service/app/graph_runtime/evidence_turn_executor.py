@@ -25,10 +25,13 @@ from app.agents.evidence_clerk.public_reply import (
     EVIDENCE_PUBLIC_FIELD,
     EVIDENCE_PUBLIC_NODE,
     EvidencePublicOutputPolicy,
+    compose_evidence_opening_public_reply,
 )
 from app.contracts.v1.models import (
     AgentStreamEvent,
     AgentStreamPayload,
+    ArtifactOperation,
+    ArtifactPointer,
     ExecutionMetadata,
     SnapshotRef,
     Usage,
@@ -47,6 +50,7 @@ from app.graph_runtime.target_e2e import (
     TargetE2ERoomProposal,
     TargetE2ERoomProposalSource,
 )
+from app.harness.evidence_context_assembler import EvidenceContextAssembler
 from app.schemas import EvidenceTurnRequest, EvidenceTurnResult
 from app.streaming import (
     STREAM_EVENT_MAX_DELTA_CHARS,
@@ -65,6 +69,25 @@ _PROPOSAL_SOURCE_SCHEMA = "target-e2e-room-proposal-source.v1"
 _STATE_SCHEMA = "target-e2e-evidence-turn-state.v1"
 _NODE = "evidence_turn"
 _MAX_VISIBLE_DELTA = 4096
+_FORMAL_EVIDENCE_RESULT_FIELDS = frozenset(
+    {
+        "room_utterance",
+        "memory_patch",
+        "canvas_operations",
+        "referenced_evidence_ids",
+        "verification_suggestions",
+        "authenticity_flags",
+        "evidence_assessments",
+        "fact_matrix_patch",
+        "human_review_tasks",
+        "internal_handoff",
+        "liability_determined",
+        "remedy_recommended",
+        "knowledge_answer_mode",
+        "confidence",
+    }
+)
+_INTERNAL_EVIDENCE_RESULT_FIELDS = frozenset({"evidence_requests", "non_final"})
 _PROVIDER_GOVERNED_AGENT_CONTEXT_FIELDS = (
     "model_profile_id",
     "output_schema_version",
@@ -396,6 +419,12 @@ class CompiledEvidenceTurnExecutor:
         terminal = self._materialize_result(
             execution,
             source=source,
+            artifact=ArtifactPointer(
+                artifact_id=f"proposal.evidence-turn.{proposal_object_hash[:32]}",
+                schema_version=_PROPOSAL_PAYLOAD_SCHEMA,
+                uri=payload_ref,
+                sha256=proposal_object_hash,
+            ),
             usage=usage,
             checkpoint_ns=checkpoint_ns,
             checkpoint_id=checkpoint_id,
@@ -537,6 +566,30 @@ class CompiledEvidenceTurnExecutor:
         envelope = request.context_envelope
         context = request.agent_context
         current_event = envelope.current_event
+        capabilities = tuple(actor_scope["capabilities"])
+        opening_capability = f"case:{command.case_id}:command:EVIDENCE_OPENING"
+        submission_capability = f"case:{command.case_id}:command:EVIDENCE_SUBMIT"
+        evidence_capabilities = (opening_capability, submission_capability)
+        frozen_submission = envelope.frozen_submission
+        exact_turn = capabilities == evidence_capabilities and (
+            (
+                current_event.event_type == "ROOM_OPENING"
+                and current_event.message_type == "AGENT_MESSAGE"
+                and not current_event.attachment_refs
+                and frozen_submission is not None
+                and frozen_submission.evidence_room_epoch == command.room_epoch
+                and frozen_submission.evidence_fencing_token
+                == getattr(binding, "room_fencing_token", None)
+                and frozen_submission.authority.tenant_surrogate
+                == command.tenant_surrogate
+                and frozen_submission.authority.case_id == command.case_id
+            )
+            or (
+                current_event.event_type == "PARTY_MESSAGE"
+                and current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
+                and bool(current_event.attachment_refs)
+            )
+        )
         if (
             actual != expected
             or fence.thread_id != command.thread_id
@@ -555,9 +608,7 @@ class CompiledEvidenceTurnExecutor:
             or envelope.room_policy.room_type != "EVIDENCE"
             or envelope.actor_snapshot.actor_id != actor_scope["actor_id"]
             or envelope.actor_snapshot.actor_role != actor_scope["actor_role"]
-            or current_event.event_type != "PARTY_MESSAGE"
-            or current_event.message_type != "PARTY_EVIDENCE_REFERENCE"
-            or not current_event.attachment_refs
+            or not exact_turn
         ):
             raise GraphContractError("EVIDENCE_TURN_INVOCATION_BINDING_INVALID")
 
@@ -577,7 +628,7 @@ class CompiledEvidenceTurnExecutor:
             "command_id": command.command_id,
             "logical_run_id": command.logical_run_id,
             "attempt_id": command.attempt_id,
-            "evidence_turn_request": request.model_dump(mode="json"),
+            "evidence_turn_request": request.model_dump(mode="json", by_alias=True),
             "cognitive_revision": 1,
         }
 
@@ -735,6 +786,57 @@ class CompiledEvidenceTurnExecutor:
             result = EvidenceTurnResult.model_validate(
                 await self._workflow.arun(provider_request)
             )
+        if (
+            provider_request.context_envelope.current_event.event_type
+            == "ROOM_OPENING"
+            and bridge.policy.source_observed
+        ):
+            guarded_source_reply = bridge.policy.guarded_source_reply
+            working_set = EvidenceContextAssembler().assemble(
+                provider_request
+            ).working_set
+            expected_reply = compose_evidence_opening_public_reply(
+                guarded_source_reply,
+                fact_targets=working_set.allowed_fact_targets,
+                evidence_requests=result.evidence_requests,
+            )
+            if result.room_utterance != expected_reply:
+                raise GraphContractError(
+                    "EVIDENCE_OPENING_PUBLIC_REPLY_BINDING_INVALID"
+                )
+            bridge.policy.authorize_terminal_extension(
+                guarded_source_reply=guarded_source_reply,
+                final_text=expected_reply,
+            )
+        elif (
+            provider_request.context_envelope.current_event.event_type
+            == "PARTY_MESSAGE"
+            and provider_request.context_envelope.current_event.message_type
+            == "PARTY_EVIDENCE_REFERENCE"
+            and provider_request.context_envelope.current_event.attachment_refs
+            and bridge.policy.source_observed
+        ):
+            from app.agents.evidence_clerk.public_reply import (
+                compose_evidence_submission_public_reply,
+            )
+
+            guarded_source_reply = bridge.policy.guarded_source_reply
+            working_set = EvidenceContextAssembler().assemble(
+                provider_request
+            ).working_set
+            expected_reply = compose_evidence_submission_public_reply(
+                fact_targets=working_set.allowed_fact_targets,
+                evidence_assessments=result.evidence_assessments,
+                human_review_tasks=result.human_review_tasks,
+            )
+            if result.room_utterance != expected_reply:
+                raise GraphContractError(
+                    "EVIDENCE_SUBMISSION_PUBLIC_REPLY_BINDING_INVALID"
+                )
+            bridge.policy.authorize_terminal_extension(
+                guarded_source_reply=guarded_source_reply,
+                final_text=expected_reply,
+            )
         observer.finalize_public_output(
             EVIDENCE_PUBLIC_NODE,
             EVIDENCE_PUBLIC_FIELD,
@@ -801,6 +903,14 @@ class CompiledEvidenceTurnExecutor:
     ) -> dict[str, Any]:
         command = execution.admission.command
         result_document = result.model_dump(mode="json", by_alias=True)
+        expected_internal_fields = (
+            _FORMAL_EVIDENCE_RESULT_FIELDS - {"knowledge_answer_mode"}
+        ) | _INTERNAL_EVIDENCE_RESULT_FIELDS
+        if set(result_document) != expected_internal_fields:
+            raise GraphContractError("EVIDENCE_TURN_RESULT_PROJECTION_INVALID")
+        for field_name in _INTERNAL_EVIDENCE_RESULT_FIELDS:
+            result_document.pop(field_name)
+        result_document["knowledge_answer_mode"] = "NONE"
         room_utterance = result.room_utterance
         proposal = {
             "schema_version": _PROPOSAL_PAYLOAD_SCHEMA,
@@ -838,6 +948,7 @@ class CompiledEvidenceTurnExecutor:
         execution: GatewayExecution,
         *,
         source: TargetE2ERoomProposalSource,
+        artifact: ArtifactPointer,
         usage: Usage,
         checkpoint_ns: str,
         checkpoint_id: str,
@@ -858,7 +969,9 @@ class CompiledEvidenceTurnExecutor:
                 checkpoint_id=checkpoint_id,
                 cognitive_revision=cognitive_revision,
                 public_event_proposals=(),
-                artifact_operations=(),
+                artifact_operations=(
+                    ArtifactOperation(operation="PROPOSE_PATCH", artifact=artifact),
+                ),
                 usage=usage,
                 execution_metadata=ExecutionMetadata(
                     prompt_version=invocation.prompt_profile_id,

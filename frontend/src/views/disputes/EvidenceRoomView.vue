@@ -1335,12 +1335,20 @@ function shouldRequestEvidenceOpening(ensureOpening, firstMessages) {
   return !firstMessages.some((message) => isCurrentEvidenceClerkMessage(message));
 }
 
+const evidenceAgentSenderRoles = new Set(["CUSTOMER_SERVICE", "EVIDENCE_CLERK"]);
+
+function isEvidenceAgentMessage(message) {
+  return (
+    evidenceAgentSenderRoles.has(message?.sender_role) &&
+    message?.message_type === "AGENT_MESSAGE"
+  );
+}
+
 // 业务位置：【前端证据室】isSupersededOpeningMessage：判断 房间消息和对话记录 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function isSupersededOpeningMessage(message) {
   const text = message?.message_text || "";
   return (
-    message?.sender_role === "CUSTOMER_SERVICE" &&
-    message?.message_type === "AGENT_MESSAGE" &&
+    isEvidenceAgentMessage(message) &&
     (text.includes("您好！我是您的证据书记官") ||
       text.includes("请上传与本案相关的证据材料") ||
       text.includes("争议焦点待确认") ||
@@ -1352,8 +1360,7 @@ function isSupersededOpeningMessage(message) {
 function isDossierSpecificOpeningMessage(message) {
   const text = message?.message_text || "";
   return (
-    message?.sender_role === "CUSTOMER_SERVICE" &&
-    message?.message_type === "AGENT_MESSAGE" &&
+    isEvidenceAgentMessage(message) &&
     text.includes("接待室收敛的案情") &&
     !isSupersededOpeningMessage(message)
   );
@@ -1362,8 +1369,7 @@ function isDossierSpecificOpeningMessage(message) {
 // 业务位置：【前端证据室】isCurrentEvidenceClerkMessage：判断 当前可见证据和附件 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function isCurrentEvidenceClerkMessage(message) {
   return (
-    message?.sender_role === "CUSTOMER_SERVICE" &&
-    message?.message_type === "AGENT_MESSAGE" &&
+    isEvidenceAgentMessage(message) &&
     !isSupersededOpeningMessage(message)
   );
 }
