@@ -2,6 +2,10 @@ package com.example.dispute.workflow.targete2e.ingress.rooms;
 
 import com.example.dispute.room.application.EvidenceAgentTurnCommand;
 import com.example.dispute.room.application.EvidenceContextEnvelopeV1;
+import com.example.dispute.evidence.application.EvidenceContentAuthorityLookup;
+import com.example.dispute.evidence.application.EvidenceContentAuthorityUnavailableException;
+import com.example.dispute.evidence.application.EvidenceContentAuthorityV1;
+import com.example.dispute.evidence.application.EvidenceParseOutboxService;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -10,23 +14,46 @@ import com.example.dispute.workflow.targete2e.exchange.rooms.TargetE2eRoomObject
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 
 /** Publishes the Java-authoritative formal Evidence Clerk turn for one target graph command. */
 public final class TargetE2eEvidenceTurnInvocationPublisher {
     public static final String SCHEMA_VERSION = "target-e2e-evidence-turn-invocation.v2";
+    private static final EvidenceContentAuthorityLookup MISSING_AUTHORITY_LOOKUP =
+            (caseId, evidenceId, fileSha256, contentType, fileSize, parserVersion) -> Optional.empty();
 
     private final MinioTargetE2eRoomCommandPayloadPublisher publisher;
     private final TargetE2eRoomObjectIndex objectIndex;
     private final ObjectMapper mapper;
+    private final EvidenceContentAuthorityLookup contentAuthorityLookup;
 
     public TargetE2eEvidenceTurnInvocationPublisher(
             MinioTargetE2eRoomCommandPayloadPublisher publisher,
             TargetE2eRoomObjectIndex objectIndex,
             ObjectMapper mapper) {
+        this(publisher, objectIndex, mapper, MISSING_AUTHORITY_LOOKUP);
+    }
+
+    /**
+     * Production construction supplies the persisted lookup. The three-argument constructor is
+     * retained only for existing non-text fixtures; supported text still fails closed when no
+     * lookup is present.
+     */
+    public TargetE2eEvidenceTurnInvocationPublisher(
+            MinioTargetE2eRoomCommandPayloadPublisher publisher,
+            TargetE2eRoomObjectIndex objectIndex,
+            ObjectMapper mapper,
+            EvidenceContentAuthorityLookup contentAuthorityLookup) {
         this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.objectIndex = Objects.requireNonNull(objectIndex, "objectIndex");
         this.mapper = Objects.requireNonNull(mapper, "mapper").copy();
+        this.contentAuthorityLookup = Objects.requireNonNull(contentAuthorityLookup, "contentAuthorityLookup");
     }
 
     public Published publish(
@@ -35,6 +62,7 @@ public final class TargetE2eEvidenceTurnInvocationPublisher {
             CommandType commandType,
             EvidenceAgentTurnCommand evidenceTurnCommand) {
         requireAuthority(outerCommand, fencingToken, commandType, evidenceTurnCommand);
+        requireCurrentSupportedTextAuthorities(outerCommand, commandType, evidenceTurnCommand);
         JsonNode actorScope = mapper.valueToTree(outerCommand.actorScope());
         String actorScopeHash = ContractJson.sha256Hex(actorScope);
         ObjectNode invocation = mapper.createObjectNode();
@@ -123,6 +151,92 @@ public final class TargetE2eEvidenceTurnInvocationPublisher {
             throw new IllegalArgumentException(
                     "formal Evidence turn authority does not bind its outer command");
         }
+    }
+
+    /**
+     * The only source for supported text content is the exact immutable parser result. Visible
+     * metadata and the item projection are independently rechecked, but neither can stand in for
+     * a missing authority row.
+     */
+    private void requireCurrentSupportedTextAuthorities(
+            RoomGraphCommand outer, CommandType commandType, EvidenceAgentTurnCommand turn) {
+        if (commandType != CommandType.EVIDENCE_SUBMIT) {
+            return;
+        }
+        EvidenceContextEnvelopeV1 envelope = turn.contextEnvelope();
+        Map<String, List<EvidenceContextEnvelopeV1.VisibleEvidence>> visibleById = new HashMap<>();
+        for (EvidenceContextEnvelopeV1.VisibleEvidence evidence : envelope.visibleEvidence()) {
+            visibleById
+                    .computeIfAbsent(evidence.evidenceId(), ignored -> new java.util.ArrayList<>())
+                    .add(evidence);
+        }
+        Map<String, List<EvidenceContentAuthorityV1>> authoritiesByEvidenceId = new HashMap<>();
+        for (EvidenceContentAuthorityV1 authority : envelope.evidenceContentAuthorities()) {
+            authoritiesByEvidenceId
+                    .computeIfAbsent(authority.evidenceId(), ignored -> new java.util.ArrayList<>())
+                    .add(authority);
+        }
+        Set<String> seenSupportedReferences = new HashSet<>();
+        for (String evidenceId : envelope.currentEvent().attachmentRefs()) {
+            List<EvidenceContextEnvelopeV1.VisibleEvidence> candidates =
+                    visibleById.getOrDefault(evidenceId, List.of());
+            if (candidates.size() != 1) {
+                throw unavailable();
+            }
+            EvidenceContextEnvelopeV1.VisibleEvidence visible = candidates.getFirst();
+            if (!EvidenceContentAuthorityV1.isSupportedTextContentType(visible.contentType())) {
+                continue;
+            }
+            if (!seenSupportedReferences.add(evidenceId)
+                    || !exactVisibleCoordinate(outer, envelope, visible)) {
+                throw unavailable();
+            }
+            List<EvidenceContentAuthorityV1> frozen =
+                    authoritiesByEvidenceId.getOrDefault(evidenceId, List.of());
+            if (frozen.size() != 1) {
+                throw unavailable();
+            }
+            EvidenceContentAuthorityV1 envelopeAuthority = frozen.getFirst();
+            EvidenceContentAuthorityLookup.StoredAuthority persisted =
+                    contentAuthorityLookup
+                            .findExact(
+                                    outer.caseId(),
+                                    evidenceId,
+                                    visible.fileHash(),
+                                    visible.contentType(),
+                                    visible.fileSize(),
+                                    EvidenceParseOutboxService.PARSER_VERSION)
+                            .orElseThrow(this::unavailable);
+            if (!envelopeAuthority.equals(persisted.authority())
+                    || persisted.fileSize() != visible.fileSize()
+                    || !envelopeAuthority.parsedText().equals(visible.parsedText())) {
+                throw unavailable();
+            }
+        }
+    }
+
+    private static boolean exactVisibleCoordinate(
+            RoomGraphCommand outer,
+            EvidenceContextEnvelopeV1 envelope,
+            EvidenceContextEnvelopeV1.VisibleEvidence visible) {
+        return outer.caseId().equals(envelope.caseSnapshot().caseId())
+                && visible.evidenceId() != null
+                && visible.fileHash() != null
+                && visible.fileHash().matches("[0-9a-f]{64}")
+                && visible.fileSize() != null
+                && visible.fileSize() >= 1
+                && visible.fileSize() <= 25L * 1024 * 1024
+                && visible.contentType() != null
+                && EvidenceContentAuthorityV1.isSupportedTextContentType(visible.contentType())
+                && "SUCCEEDED".equals(visible.parseStatus())
+                && visible.parsedText() != null
+                && !visible.parsedText().isBlank()
+                && envelope.currentEvent().actorId().equals(visible.submittedById())
+                && envelope.currentEvent().actorRole().equals(visible.submittedByRole());
+    }
+
+    private EvidenceContentAuthorityUnavailableException unavailable() {
+        return new EvidenceContentAuthorityUnavailableException();
     }
 
     private static boolean exactOpeningFrozenAuthority(

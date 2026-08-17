@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+import hashlib
 from typing import Annotated, Any, Literal
 
 from pydantic import ConfigDict, Field, model_serializer, model_validator
@@ -624,6 +625,33 @@ class EvidenceCurrentEventV1(StrictModel):
         return self
 
 
+class EvidenceContentAuthorityV1(StrictModel):
+    """Frozen parsed-content authority for one current text attachment."""
+
+    schema_version: Literal["evidence_content_authority.v1"]
+    case_id: Annotated[str, Field(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")]
+    evidence_id: Identifier
+    file_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    content_type: Literal["text/plain", "text/markdown"]
+    parser_version: Identifier
+    parsed_content_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    parsed_text: RawTransportText
+    parsed_byte_length: Annotated[int, Field(ge=1)]
+    completed_at: ShortText
+    status: Literal["SUCCEEDED"]
+
+    @model_validator(mode="after")
+    def validate_frozen_parsed_content(self) -> "EvidenceContentAuthorityV1":
+        if not self.parsed_text.strip():
+            raise ValueError("parsed_text must contain nonblank frozen content")
+        encoded = self.parsed_text.encode("utf-8")
+        if len(encoded) != self.parsed_byte_length:
+            raise ValueError("parsed_byte_length is not canonical UTF-8 length")
+        if hashlib.sha256(encoded).hexdigest() != self.parsed_content_sha256:
+            raise ValueError("parsed_content_sha256 is not canonical UTF-8 SHA-256")
+        return self
+
+
 class EvidenceVisibleEvidenceItemV1(StrictModel):
     evidence_id: Identifier
     dossier_id: Identifier
@@ -862,6 +890,9 @@ class EvidenceContextEnvelopeV1(StrictModel):
     actor_snapshot: EvidenceActorSnapshotV1
     current_event: EvidenceCurrentEventV1
     visible_evidence: list[EvidenceVisibleEvidenceItemV1]
+    evidence_content_authorities: Annotated[
+        list[EvidenceContentAuthorityV1], Field(max_length=50)
+    ] = Field(default_factory=list)
     private_conversation: EvidencePrivateConversationV1
     room_policy: EvidenceRoomPolicyV1
     frozen_submission: EvidenceFrozenSubmissionV1 | None = None
@@ -908,6 +939,61 @@ class EvidenceContextEnvelopeV1(StrictModel):
         if unknown_attachments:
             raise ValueError(
                 "current_event.attachment_refs must reference visible_evidence"
+            )
+        visible_by_id = {item.evidence_id: item for item in self.visible_evidence}
+        attachment_positions = {
+            evidence_id: index
+            for index, evidence_id in enumerate(self.current_event.attachment_refs)
+        }
+        authority_evidence_ids: set[str] = set()
+        previous_attachment_position = -1
+        for authority in self.evidence_content_authorities:
+            if authority.case_id != self.case_snapshot.case_id:
+                raise ValueError(
+                    "evidence_content_authority.case_id must match case_snapshot.case_id"
+                )
+            evidence_id = authority.evidence_id
+            if (
+                evidence_id not in attachment_positions
+                or evidence_id not in visible_by_id
+                or evidence_id in authority_evidence_ids
+            ):
+                raise ValueError(
+                    "evidence_content_authorities must bind unique current attachments"
+                )
+            attachment_position = attachment_positions[evidence_id]
+            if attachment_position <= previous_attachment_position:
+                raise ValueError(
+                    "evidence_content_authorities must follow attachment_refs order"
+                )
+            previous_attachment_position = attachment_position
+            authority_evidence_ids.add(evidence_id)
+            visible = visible_by_id[evidence_id]
+            if (
+                visible.file_hash is None
+                or visible.file_hash != authority.file_sha256
+                or visible.content_type != authority.content_type
+            ):
+                raise ValueError(
+                    "evidence_content_authority must match frozen visible attachment"
+                )
+            if (
+                visible.parsed_text is not None
+                and visible.parsed_text != authority.parsed_text
+            ):
+                raise ValueError(
+                    "evidence_content_authority parsed_text must match visible attachment"
+                )
+        supported_text_attachment_ids = {
+            evidence_id
+            for evidence_id in self.current_event.attachment_refs
+            if visible_by_id[evidence_id].content_type
+            in {"text/plain", "text/markdown"}
+        }
+        if authority_evidence_ids != supported_text_attachment_ids:
+            raise ValueError(
+                "evidence_content_authorities must cover exactly every current "
+                "supported text attachment"
             )
         return self
 
@@ -984,6 +1070,58 @@ class EvidenceFactLink(StrictModel):
     confidence: Confidence
 
 
+class PublicEvidenceObservationKind(StrEnum):
+    """Closed descriptive categories for parsed Evidence material."""
+
+    PARSED_RECORD = "PARSED_RECORD"
+    PARSED_PARTY_STATEMENT = "PARSED_PARTY_STATEMENT"
+    PARSED_TRANSACTION_STATUS = "PARSED_TRANSACTION_STATUS"
+
+
+class PublicEvidenceEpistemicStatus(StrEnum):
+    """Every public observation remains non-final and source-bound."""
+
+    PENDING_VERIFICATION = "PENDING_VERIFICATION"
+    PROVISIONAL = "PROVISIONAL"
+
+
+class PublicEvidenceObservationProposalV1(StrictModel):
+    """Provider-supplied proposal before frozen-source canonicalization."""
+
+    schema_version: Literal["public_evidence_observation.v1"]
+    provider_slot_id: Identifier
+    evidence_id: Identifier
+    fact_id: Identifier
+    observation_kind: PublicEvidenceObservationKind
+    epistemic_status: PublicEvidenceEpistemicStatus
+    parsed_content_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    source_quote: Annotated[ShortText, Field(max_length=200)]
+
+
+class PublicEvidenceObservationV1(StrictModel):
+    """Canonical accepted public observation derived from one provider proposal."""
+
+    schema_version: Literal["public_evidence_observation.v1"]
+    provider_slot_id: Identifier
+    observation_id: Identifier
+    evidence_id: Identifier
+    fact_id: Identifier
+    observation_kind: PublicEvidenceObservationKind
+    epistemic_status: PublicEvidenceEpistemicStatus
+    parsed_content_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    source_quote: Annotated[ShortText, Field(max_length=200)]
+    public_text: Annotated[ShortText, Field(max_length=240)]
+    source_start_byte: Annotated[int, Field(ge=0)]
+    source_end_byte: Annotated[int, Field(ge=1)]
+    quote_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+    @model_validator(mode="after")
+    def validate_canonical_source_span(self) -> "PublicEvidenceObservationV1":
+        if self.source_end_byte <= self.source_start_byte:
+            raise ValueError("canonical public observation source span is invalid")
+        return self
+
+
 class EvidenceVisualFinding(StrictModel):
     finding_type: Identifier
     description: ShortText
@@ -1010,6 +1148,14 @@ class EvidenceItemAssessment(StrictModel):
     """针对单份证据的可审计模型评估，不构成真实性保证。"""
 
     evidence_id: Identifier
+    # Provider assessment uses slots; accepted assessment replaces those with
+    # canonical derived IDs after source-authority reconciliation.
+    public_observation_slots: Annotated[list[Identifier], Field(max_length=12)] = Field(
+        default_factory=list
+    )
+    public_observation_ids: Annotated[list[Identifier], Field(max_length=12)] = Field(
+        default_factory=list
+    )
     analysis_method: Literal["TEXT_ONLY", "MULTIMODAL", "HYBRID"]
     inspected_modalities: Annotated[list[Identifier], Field(max_length=10)] = Field(
         default_factory=list
@@ -1089,6 +1235,11 @@ class EvidenceInternalHandoff(StrictModel):
 
 
 class EvidenceTurnLlmOutput(StrictModel):
+    # Keep this physically first: stream consumers receive only completed typed
+    # objects, while terminal public wording is composed after authority checks.
+    public_observations: Annotated[
+        list[PublicEvidenceObservationProposalV1], Field(max_length=12)
+    ] = Field(default_factory=list)
     room_utterance: LongText
     evidence_requests: Annotated[
         list[EvidenceTurnQuestion],
@@ -1304,6 +1455,9 @@ class EvidenceTurnRequest(StrictModel):
 
 
 class EvidenceTurnResult(EvidenceTurnLlmOutput):
+    public_observations: Annotated[
+        list[PublicEvidenceObservationV1], Field(max_length=12)
+    ] = Field(default_factory=list)
     # Python 内部仍以 memory_frame 表示本轮工作记忆；跨服务 JSON 使用
     # Java AgentRun 正式合同名 memory_patch，避免流式 final 在别名反序列化前失败。
     memory_frame: dict[str, object] = Field(

@@ -709,9 +709,13 @@ class AuthorityBoundSubmissionRunner:
         self,
         *,
         stream_observations: tuple[str, ...] | None = None,
+        assessment_payload: dict[str, object] | None = None,
+        public_observations: list[dict[str, object]] | None = None,
     ) -> None:
         self.calls = 0
         self.last_invocation = None
+        self.assessment_payload = assessment_payload
+        self.public_observations = public_observations or []
         self.stream_observations = (
             stream_observations
             if stream_observations is not None
@@ -745,6 +749,24 @@ class AuthorityBoundSubmissionRunner:
         generated = self.invoke_structured(**kwargs)
         observer = current_stream_observer()
         assert observer is not None
+        if self.public_observations:
+            self.provisional_emitted.set()
+            assert await asyncio.to_thread(self.release_completion.wait, 5.0)
+            observer.usage(
+                node_name="evidence_turn",
+                model="submission-authority-stream-test-model",
+                latency_ms=1,
+                token_usage={"input": 13, "output": 8, "total": 21},
+            )
+            self.completed.set()
+            return HarnessGeneration(
+                value=generated.value,
+                model="submission-authority-stream-test-model",
+                latency_ms=1,
+                token_usage={"input": 13, "output": 8, "total": 21},
+                context=SimpleNamespace(),
+                messages=(),
+            )
         visible_prefix = generated.value.room_utterance.removesuffix(
             self.safe_provider_sentence + self.unsafe_provider_sentence
         )
@@ -775,10 +797,16 @@ class AuthorityBoundSubmissionRunner:
         output_type = kwargs["output_type"]
         return SimpleNamespace(
             value=output_type(
+                public_observations=deepcopy(self.public_observations),
                 room_utterance=self._source_reply(),
                 evidence_assessments=[
-                    {
+                    self.assessment_payload
+                    or {
                         "evidence_id": "EVIDENCE_signature_photo",
+                        "public_observation_slots": [
+                            item["provider_slot_id"]
+                            for item in self.public_observations
+                        ],
                         "analysis_method": "TEXT_ONLY",
                         "inspected_modalities": ["PARSED_TEXT"],
                         "authenticity_score": 0.55,
@@ -1052,14 +1080,23 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         EVIDENCE_CANONICAL_OPENING,
         EVIDENCE_PUBLIC_FIELD,
         EVIDENCE_PUBLIC_NODE,
+        EvidencePublicObservationAuthorityError,
         EvidencePublicOutputPolicy,
         compose_evidence_opening_public_reply,
         derive_submission_observation_authority,
         guard_evidence_public_reply,
+        reconcile_accepted_public_observations,
+        validate_public_observation_prefix,
     )
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.harness.evidence_asset_loader import EvidenceAssetLoader
-    from app.schemas import EvidenceTurnLlmOutput, EvidenceTurnRequest
+    from app.schemas import (
+        EvidenceTurnLlmOutput,
+        EvidenceTurnRequest,
+        EvidenceTurnResult,
+        PublicEvidenceObservationProposalV1,
+        PublicEvidenceObservationV1,
+    )
     from app.streaming import (
         AgentStreamObserver,
         StreamVisibleDeltaEvent,
@@ -1073,9 +1110,11 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
             "evidence_type": "DOCUMENT",
             "content_type": "text/markdown",
             "original_filename": "refund-record.md",
+            "file_hash": hashlib.sha256(b"refund-record-content").hexdigest(),
             "parsed_text": (
                 "# 退款记录核对摘录\n"
                 "- 页面日期显示2026-08-13，形成时间仍需与平台记录核对\n"
+                "- 2026-08-13，平台客服在会话中承诺退款20元\n"
                 "- 承诺退款金额为20元\n"
                 "- 退款工单未生成\n"
                 "- 未发现成功退款流水\n"
@@ -1083,7 +1122,9 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
             ),
             "desensitized": True,
             "metadata": {
-                "claimed_fact": "承诺退款金额为20元",
+                "claimed_fact": (
+                    "2026-08-13平台客服承诺退款20元且无成功退款记录"
+                ),
             },
         }
     )
@@ -1093,6 +1134,56 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         ("FACT_SIGNATURE", "商家是否已退款20元以及退款记录是否真实", "CORE"),
         ("FACT_RECIPIENT", "收件人称本人及同住人员未收到包裹", "CORE"),
     )
+    parsed_text = submitted["parsed_text"]
+    assert isinstance(parsed_text, str)
+    parsed_content_sha256 = hashlib.sha256(parsed_text.encode("utf-8")).hexdigest()
+    payload["context_envelope"]["evidence_content_authorities"] = [
+        {
+            "schema_version": "evidence_content_authority.v1",
+            "case_id": payload["context_envelope"]["case_snapshot"]["case_id"],
+            "evidence_id": "EVIDENCE_signature_photo",
+            "file_sha256": submitted["file_hash"],
+            "content_type": "text/markdown",
+            "parser_version": "PARSER_TEST_V1",
+            "parsed_content_sha256": parsed_content_sha256,
+            "parsed_text": parsed_text,
+            "parsed_byte_length": len(parsed_text.encode("utf-8")),
+            "completed_at": "2026-08-17T10:00:00+08:00",
+            "status": "SUCCEEDED",
+        }
+    ]
+    typed_public_observations = [
+        {
+            "schema_version": "public_evidence_observation.v1",
+            "provider_slot_id": "OBS_01",
+            "evidence_id": "EVIDENCE_signature_photo",
+            "fact_id": "FACT_SIGNATURE",
+            "observation_kind": "PARSED_RECORD",
+            "epistemic_status": "PENDING_VERIFICATION",
+            "parsed_content_sha256": parsed_content_sha256,
+            "source_quote": "页面日期显示2026-08-13，形成时间仍需与平台记录核对",
+        },
+        {
+            "schema_version": "public_evidence_observation.v1",
+            "provider_slot_id": "OBS_02",
+            "evidence_id": "EVIDENCE_signature_photo",
+            "fact_id": "FACT_SIGNATURE",
+            "observation_kind": "PARSED_PARTY_STATEMENT",
+            "epistemic_status": "PENDING_VERIFICATION",
+            "parsed_content_sha256": parsed_content_sha256,
+            "source_quote": "2026-08-13，平台客服在会话中承诺退款20元",
+        },
+        {
+            "schema_version": "public_evidence_observation.v1",
+            "provider_slot_id": "OBS_03",
+            "evidence_id": "EVIDENCE_signature_photo",
+            "fact_id": "FACT_SIGNATURE",
+            "observation_kind": "PARSED_TRANSACTION_STATUS",
+            "epistemic_status": "PROVISIONAL",
+            "parsed_content_sha256": parsed_content_sha256,
+            "source_quote": "未发现成功退款流水",
+        },
+    ]
     request = EvidenceTurnRequest.model_validate(payload)
     system_prompt, user_prompt = PromptRepository().render(
         "evidence_turn",
@@ -1100,22 +1191,51 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         EvidenceTurnLlmOutput.model_json_schema(),
     )
     composed_prompt = system_prompt + "\n" + user_prompt
-    required_frame = "本轮正在对材料所载“<observation>”进行核验。"
-    assert required_frame in composed_prompt
-    assert "必须逐字符复制" in composed_prompt
+    assert "public_observations" in composed_prompt
+    assert "provider_slot_id" in composed_prompt
+    assert "source_quote" in composed_prompt
+    assert "evidence_content_authorities" in composed_prompt
     assert all(
         field in composed_prompt
         for field in (
-            "formation_time_assessment",
-            "findings[].description",
-            "source_basis[]",
-            "limitations[]",
-            "summary",
+            "parsed_content_sha256",
+            "public_observation_slots",
+            "PENDING_VERIFICATION",
+            "PROVISIONAL",
         )
     )
-    assert "JSON 对象的第一个属性仍必须是 room_utterance" in system_prompt
+    assert next(iter(EvidenceTurnLlmOutput.model_json_schema()["properties"])) == (
+        "public_observations"
+    )
+    provider_schema = EvidenceTurnLlmOutput.model_json_schema()
+    proposal_ref = provider_schema["properties"]["public_observations"]["items"][
+        "$ref"
+    ]
+    assert proposal_ref == "#/$defs/PublicEvidenceObservationProposalV1"
+    proposal_schema = provider_schema["$defs"]["PublicEvidenceObservationProposalV1"]
+    assert set(proposal_schema["properties"]) == {
+        "schema_version",
+        "provider_slot_id",
+        "evidence_id",
+        "fact_id",
+        "observation_kind",
+        "epistemic_status",
+        "parsed_content_sha256",
+        "source_quote",
+    }
+    assert set(proposal_schema["required"]) == set(proposal_schema["properties"])
+    assert (
+        EvidenceTurnResult.model_json_schema()["properties"]["public_observations"][
+            "items"
+        ]["$ref"]
+        == "#/$defs/PublicEvidenceObservationV1"
+    )
     assert "<required_output_contract>" in user_prompt
-    runner = AuthorityBoundSubmissionRunner()
+    runner = AuthorityBoundSubmissionRunner(
+        public_observations=typed_public_observations,
+    )
+    provider_proposals_before = deepcopy(typed_public_observations)
+    request_before = request.model_dump(mode="json")
     download_attempts = []
 
     def reject_unsupported_download(request):
@@ -1130,20 +1250,87 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
             transport=httpx.MockTransport(reject_unsupported_download),
         ),
     )
-    submission_authority = derive_submission_observation_authority(
-        visible_evidence=request.context_envelope.visible_evidence,
-        attachment_refs=request.context_envelope.current_event.attachment_refs,
+    accepted_prefix = ()
+    for raw_observation in typed_public_observations:
+        accepted_prefix = (
+            *accepted_prefix,
+            validate_public_observation_prefix(
+                prior_accepted=accepted_prefix,
+                candidate=PublicEvidenceObservationProposalV1.model_validate(
+                    raw_observation
+                ),
+                evidence_content_authorities=request.context_envelope.evidence_content_authorities,
+                visible_evidence=request.context_envelope.visible_evidence,
+                attachment_refs=request.context_envelope.current_event.attachment_refs,
+                allowed_fact_targets=(
+                    {"fact_id": "FACT_SIGNATURE"},
+                    {"fact_id": "FACT_RECIPIENT"},
+                ),
+                case_id=request.context_envelope.case_snapshot.case_id,
+                actor_id=request.context_envelope.actor_snapshot.actor_id,
+                actor_role=request.context_envelope.actor_snapshot.actor_role,
+            ),
+        )
+    expected_typed_prefix = EVIDENCE_CANONICAL_OPENING + "".join(
+        item.public_text for item in accepted_prefix
     )
+
+    def validate_prefix_for(
+        candidate: dict[str, object],
+        *,
+        prior=(),
+        active_request=request,
+    ):
+        return validate_public_observation_prefix(
+            prior_accepted=prior,
+            candidate=PublicEvidenceObservationProposalV1.model_validate(candidate),
+            evidence_content_authorities=(
+                active_request.context_envelope.evidence_content_authorities
+            ),
+            visible_evidence=active_request.context_envelope.visible_evidence,
+            attachment_refs=active_request.context_envelope.current_event.attachment_refs,
+            allowed_fact_targets=(
+                {"fact_id": "FACT_SIGNATURE"},
+                {"fact_id": "FACT_RECIPIENT"},
+            ),
+            case_id=active_request.context_envelope.case_snapshot.case_id,
+            actor_id=active_request.context_envelope.actor_snapshot.actor_id,
+            actor_role=active_request.context_envelope.actor_snapshot.actor_role,
+        )
+
+    def request_with_frozen_text(
+        frozen_text: str,
+        *,
+        status: str = "SUCCEEDED",
+    ) -> EvidenceTurnRequest:
+        authority_payload = deepcopy(request.model_dump(mode="json"))
+        authority_payload["context_envelope"]["visible_evidence"][0][
+            "parsed_text"
+        ] = frozen_text
+        authority = authority_payload["context_envelope"]["evidence_content_authorities"][
+            0
+        ]
+        authority["parsed_text"] = frozen_text
+        authority["parsed_byte_length"] = len(frozen_text.encode("utf-8"))
+        authority["parsed_content_sha256"] = hashlib.sha256(
+            frozen_text.encode("utf-8")
+        ).hexdigest()
+        authority["status"] = status
+        return EvidenceTurnRequest.model_validate(authority_payload)
     async def invoke(
         run_id: str,
         *,
         active_workflow=workflow,
         active_runner=runner,
+        active_request=request,
         assert_before_completion: bool = False,
     ):
         published = []
         policy = EvidencePublicOutputPolicy(
-            submission_observation_authority=submission_authority
+            submission_observation_authority=derive_submission_observation_authority(
+                visible_evidence=active_request.context_envelope.visible_evidence,
+                attachment_refs=active_request.context_envelope.current_event.attachment_refs,
+            )
         )
         observer = AgentStreamObserver(
             operation=EVIDENCE_PUBLIC_NODE,
@@ -1153,7 +1340,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         )
         observer.begin_public_output(EVIDENCE_PUBLIC_NODE, EVIDENCE_PUBLIC_FIELD)
         with bind_stream_observer(observer):
-            run_task = asyncio.create_task(active_workflow.arun(request))
+            run_task = asyncio.create_task(active_workflow.arun(active_request))
             early_visible = ""
             if assert_before_completion:
                 assert await asyncio.to_thread(
@@ -1166,25 +1353,18 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
                     for event in published
                     if isinstance(event, StreamVisibleDeltaEvent)
                 )
-                assert any(
-                    AuthorityBoundSubmissionRunner._frame(observation)
-                    in early_visible
-                    for observation in active_runner.stream_observations
-                )
+                if active_runner.public_observations:
+                    assert early_visible == EVIDENCE_CANONICAL_OPENING
+                else:
+                    assert any(
+                        AuthorityBoundSubmissionRunner._frame(observation)
+                        in early_visible
+                        for observation in active_runner.stream_observations
+                    )
                 assert not active_runner.completed.is_set()
                 assert not run_task.done()
             active_runner.release_completion.set()
             result = await run_task
-        guarded_source = policy.guarded_source_reply
-        policy.authorize_terminal_extension(
-            guarded_source_reply=guarded_source,
-            final_text=result.room_utterance,
-        )
-        observer.finalize_public_output(
-            EVIDENCE_PUBLIC_NODE,
-            EVIDENCE_PUBLIC_FIELD,
-            result.room_utterance,
-        )
         visible = "".join(
             event.delta
             for event in published
@@ -1200,8 +1380,18 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     reply = first.room_utterance
 
     assert replay.room_utterance == reply
-    assert first_visible == reply
-    assert replay_visible.encode("utf-8") == first_visible.encode("utf-8")
+    assert reply.startswith(expected_typed_prefix)
+    assert first.public_observations == list(accepted_prefix)
+    assert replay.public_observations == list(accepted_prefix)
+    assert all(
+        isinstance(item, PublicEvidenceObservationV1)
+        for item in first.public_observations
+    )
+    assert typed_public_observations == provider_proposals_before
+    assert request.model_dump(mode="json") == request_before
+    assert early_visible == EVIDENCE_CANONICAL_OPENING
+    assert first_visible == EVIDENCE_CANONICAL_OPENING
+    assert replay_visible == EVIDENCE_CANONICAL_OPENING
     assert runner.calls == 2
     assert runner.completed.is_set()
     assert download_attempts == []
@@ -1213,20 +1403,19 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     assert asset_manifest["items"][0]["limitation"] == (
         "当前多模态核验仅接收受控图片输入；该格式需要人工复核。"
     )
-    assert "2026-08-13" in early_visible
+    assert "2026-08-13" not in early_visible
     assert AuthorityBoundSubmissionRunner.capability_observation not in early_visible
     assert AuthorityBoundSubmissionRunner.capability_observation not in reply
     assert AuthorityBoundSubmissionRunner.safe_provider_sentence not in reply
     assert AuthorityBoundSubmissionRunner.unsafe_provider_sentence not in reply
     framed_fact = "本轮材料已纳入对“商家是否已退款20元以及退款记录是否真实"
     assert framed_fact in reply
-    assert "收件人称本人及同住人员未收到包裹" in reply
-    assert reply.index(framed_fact) < reply.index("收件人称本人及同住人员未收到包裹")
     assert "关联" in reply
     assert "2026-08-13" in reply
-    assert "退款工单未生成" in reply
+    assert "平台客服" in reply
+    assert "20元" in reply
     assert "未发现成功退款流水" in reply
-    assert "平台导出的退款记录页面" in reply
+    assert "平台导出的退款记录页面" not in reply
     assert "覆盖范围有限" in reply or "尚不足以" in reply
     assert "仅核对了可读取文本" in reply
     assert "来源路径" in reply and ("人工" in reply or "补充" in reply)
@@ -1247,6 +1436,236 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         "FACT_",
     ):
         assert forbidden not in reply
+    assert first.evidence_assessments[0].public_observation_slots == []
+    assert first.evidence_assessments[0].public_observation_ids == [
+        item.observation_id for item in accepted_prefix
+    ]
+    wrong_fact_assessment = first.evidence_assessments[0].model_copy(
+        update={
+            "public_observation_slots": ["OBS_01"],
+            "public_observation_ids": [],
+            "fact_links": [
+                link
+                for link in first.evidence_assessments[0].fact_links
+                if link.fact_id == "FACT_RECIPIENT"
+            ],
+        }
+    )
+    with pytest.raises(EvidencePublicObservationAuthorityError):
+        reconcile_accepted_public_observations(
+            canonical_observations=accepted_prefix,
+            evidence_assessments=(wrong_fact_assessment,),
+        )
+
+    with pytest.raises(ValidationError):
+        PublicEvidenceObservationProposalV1.model_validate(
+            {
+                **typed_public_observations[0],
+                "source_quote": "甲" * 201,
+            }
+        )
+    with pytest.raises(ValidationError):
+        PublicEvidenceObservationProposalV1.model_validate(
+            {
+                **typed_public_observations[0],
+                "observation_id": "PUBOBS_PROVIDER_AUTHORED",
+            }
+        )
+    with pytest.raises(ValidationError):
+        EvidenceTurnLlmOutput.model_validate(
+            {
+                "public_observations": [typed_public_observations[0]] * 13,
+                "room_utterance": EVIDENCE_CANONICAL_OPENING,
+                "internal_handoff": _empty_internal_handoff(),
+                "confidence": 0.5,
+            }
+        )
+
+    for field, value in (
+        ("evidence_id", "EVIDENCE_foreign_attachment"),
+        ("fact_id", "FACT_foreign_fact"),
+    ):
+        foreign_candidate = deepcopy(typed_public_observations[0])
+        foreign_candidate[field] = value
+        with pytest.raises(EvidencePublicObservationAuthorityError):
+            validate_prefix_for(foreign_candidate)
+
+    spoof_request_payload = deepcopy(request.model_dump(mode="json"))
+    spoof_request_payload["context_envelope"]["visible_evidence"][0]["metadata"][
+        "claimed_fact"
+    ] = "平台已经实际完成退款"
+    spoof_request = EvidenceTurnRequest.model_validate(spoof_request_payload)
+    spoof_candidate = deepcopy(typed_public_observations[0])
+    spoof_candidate["source_quote"] = "平台已经实际完成退款"
+    with pytest.raises(EvidencePublicObservationAuthorityError):
+        validate_prefix_for(spoof_candidate, active_request=spoof_request)
+
+    ambiguous_text = "重复材料内容\n重复材料内容"
+    ambiguous_request = request_with_frozen_text(ambiguous_text)
+    ambiguous_candidate = deepcopy(typed_public_observations[0])
+    ambiguous_candidate["source_quote"] = "重复材料内容"
+    ambiguous_candidate["parsed_content_sha256"] = (
+        ambiguous_request.context_envelope.evidence_content_authorities[
+            0
+        ].parsed_content_sha256
+    )
+    with pytest.raises(EvidencePublicObservationAuthorityError):
+        validate_prefix_for(ambiguous_candidate, active_request=ambiguous_request)
+
+    conclusion_request = request_with_frozen_text("商家应当退款")
+    conclusion_candidate = deepcopy(typed_public_observations[0])
+    conclusion_candidate["source_quote"] = "商家应当退款"
+    conclusion_candidate["parsed_content_sha256"] = (
+        conclusion_request.context_envelope.evidence_content_authorities[
+            0
+        ].parsed_content_sha256
+    )
+    with pytest.raises(EvidencePublicObservationAuthorityError):
+        validate_prefix_for(conclusion_candidate, active_request=conclusion_request)
+
+    budget_quotes = tuple(f"材料记录{index}" + "甲" * 190 for index in range(6))
+    budget_request = request_with_frozen_text("\n".join(budget_quotes))
+    budget_hash = budget_request.context_envelope.evidence_content_authorities[
+        0
+    ].parsed_content_sha256
+    budget_prefix = ()
+    for index, quote in enumerate(budget_quotes, start=1):
+        budget_candidate = {
+            "schema_version": "public_evidence_observation.v1",
+            "provider_slot_id": f"OBS_{index:02d}",
+            "evidence_id": "EVIDENCE_signature_photo",
+            "fact_id": "FACT_SIGNATURE",
+            "observation_kind": "PARSED_RECORD",
+            "epistemic_status": "PROVISIONAL",
+            "parsed_content_sha256": budget_hash,
+            "source_quote": quote,
+        }
+        if index == len(budget_quotes):
+            with pytest.raises(EvidencePublicObservationAuthorityError):
+                validate_prefix_for(
+                    budget_candidate,
+                    prior=budget_prefix,
+                    active_request=budget_request,
+                )
+        else:
+            budget_prefix = (
+                *budget_prefix,
+                validate_prefix_for(
+                    budget_candidate,
+                    prior=budget_prefix,
+                    active_request=budget_request,
+                ),
+            )
+
+    for invalid_authority in ("missing", "null", "pending"):
+        invalid_request_payload = deepcopy(request.model_dump(mode="json"))
+        if invalid_authority == "missing":
+            invalid_request_payload["context_envelope"][
+                "evidence_content_authorities"
+            ] = []
+        else:
+            authority = invalid_request_payload["context_envelope"][
+                "evidence_content_authorities"
+            ][0]
+            if invalid_authority == "null":
+                authority["parsed_text"] = None
+                authority["parsed_byte_length"] = 0
+            else:
+                authority["status"] = "PENDING"
+        with pytest.raises(ValidationError):
+            EvidenceTurnRequest.model_validate(invalid_request_payload)
+
+    unsupported_payload = deepcopy(request.model_dump(mode="json"))
+    unsupported_visible = unsupported_payload["context_envelope"]["visible_evidence"][0]
+    unsupported_visible["content_type"] = "image/png"
+    unsupported_payload["context_envelope"]["evidence_content_authorities"] = []
+    assert EvidenceTurnRequest.model_validate(unsupported_payload).context_envelope
+    faithful_assessment = {
+        "evidence_id": "EVIDENCE_signature_photo",
+        "analysis_method": "TEXT_ONLY",
+        "inspected_modalities": ["PARSED_TEXT"],
+        "authenticity_score": 0.55,
+        "relevance_score": 0.82,
+        "completeness_score": 0.48,
+        "assessment_confidence": 0.72,
+        "source_basis": ["用户提交的Markdown解析文本"],
+        "fact_links": [
+            {
+                "fact_id": "FACT_SIGNATURE",
+                "relation": "INCONCLUSIVE",
+                "reason": "材料与退款诉求事实相关但记录仍待核验。",
+                "confidence": 0.61,
+            }
+        ],
+        "supported_fact_ids": [],
+        "unsupported_claims": ["平台已经实际完成退款"],
+        "formation_time_assessment": (
+            "提交时间为2026-08-17，文件声称证明2026-08-13的客服会话，"
+            "但缺乏内部时间戳验证。"
+        ),
+        "findings": [
+            {
+                "finding_type": "REFUND_PROMISE_CLAIM",
+                "description": (
+                    "用户声称该材料证明客服承诺退款20元，但当前仅能读取文件元数据，"
+                    "无法解析具体对话内容。"
+                ),
+                "visual_region": None,
+            }
+        ],
+        "limitations": [
+            AuthorityBoundSubmissionRunner.capability_observation,
+            "无法仅凭解析文本确认平台已经实际完成退款",
+        ],
+        "recommendation": "NEEDS_HUMAN_REVIEW",
+        "human_review": {
+            "required": True,
+            "reason_codes": ["SOURCE_RECONCILIATION_REQUIRED"],
+            "instructions": ["人工复核平台原始记录和形成时间。"],
+        },
+        "summary": "该Markdown文件声称证明客服承诺退款20元，但核验范围有限。",
+    }
+    faithful_runner = AuthorityBoundSubmissionRunner(
+        stream_observations=(),
+        assessment_payload=faithful_assessment,
+    )
+    faithful_workflow = EvidenceTurnWorkflow(model_runner=faithful_runner)
+    faithful_runner.release_completion.set()
+    faithful_first, faithful_visible, _ = await invoke(
+        "submission-authority-faithful-first",
+        active_workflow=faithful_workflow,
+        active_runner=faithful_runner,
+        active_request=request,
+    )
+    faithful_replay, faithful_replay_visible, _ = await invoke(
+        "submission-authority-faithful-replay",
+        active_workflow=faithful_workflow,
+        active_runner=faithful_runner,
+        active_request=request,
+    )
+    faithful_reply = faithful_first.room_utterance
+    assert "2026-08-13" not in faithful_reply
+    assert "客服" not in faithful_reply
+    assert "20元" not in faithful_reply
+    assert "缺乏内部时间戳验证" not in faithful_reply
+    assert "无法解析具体对话内容" not in faithful_reply
+    assert "无成功退款流水" not in faithful_reply
+    assert "未经评估的额外付款完成描述" not in faithful_reply
+    assert faithful_first.public_observations == []
+    assert faithful_visible == EVIDENCE_CANONICAL_OPENING
+    assert faithful_replay.room_utterance == faithful_reply
+    assert faithful_replay_visible == EVIDENCE_CANONICAL_OPENING
+    assert faithful_runner.calls == 2
+    for unsupported in (
+        "平台已经实际完成退款",
+        AuthorityBoundSubmissionRunner.capability_observation,
+        AuthorityBoundSubmissionRunner.safe_provider_sentence,
+        AuthorityBoundSubmissionRunner.unsafe_provider_sentence,
+        "fact_links",
+        "FACT_SIGNATURE",
+        "authenticity_score",
+    ):
+        assert unsupported not in faithful_reply
 
     unframed_conclusion = "该证据真实有效，因此商家应当退款并承担责任。"
     guarded_conclusion = guard_evidence_public_reply(unframed_conclusion)
@@ -1295,7 +1714,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     assert unbound_runner.calls == 1
     assert unbound_observation not in unbound_visible
     assert unbound_observation not in unbound_result.room_utterance
-    assert unbound_result.room_utterance == reply
+    assert unbound_result.public_observations == []
 
 
 def test_evidence_turn_workflow_processes_one_complete_hearing_evidence_batch() -> None:

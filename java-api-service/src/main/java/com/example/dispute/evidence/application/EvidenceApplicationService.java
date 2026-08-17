@@ -35,6 +35,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -74,6 +75,8 @@ public class EvidenceApplicationService {
     private final EvidenceSearchIndexer searchIndexer;
     private final ObjectMapper objectMapper;
     private final AuditRecorder auditRecorder;
+    private final EvidenceParseOutboxService parseOutboxService;
+    private final EvidenceParseDeliveryTrigger parseDeliveryTrigger;
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceApplicationService.EvidenceApplicationService(FulfillmentCaseRepository,EvidenceItemRepository,EvidenceDossierRepository,EvidenceStorage,OcrTaskClient,EvidenceSearchIndexer,ObjectMapper,AuditRecorder)」。
     // 具体功能：「EvidenceApplicationService.EvidenceApplicationService(FulfillmentCaseRepository,EvidenceItemRepository,EvidenceDossierRepository,EvidenceStorage,OcrTaskClient,EvidenceSearchIndexer,ObjectMapper,AuditRecorder)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「evidenceRepository」(EvidenceItemRepository)、「dossierRepository」(EvidenceDossierRepository)、「storage」(EvidenceStorage)、「ocrTaskClient」(OcrTaskClient)、「searchIndexer」(EvidenceSearchIndexer)、「objectMapper」(ObjectMapper)、「auditRecorder」(AuditRecorder) 并保存为「EvidenceApplicationService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
@@ -90,6 +93,31 @@ public class EvidenceApplicationService {
             EvidenceSearchIndexer searchIndexer,
             ObjectMapper objectMapper,
             AuditRecorder auditRecorder) {
+        this(
+                caseRepository,
+                evidenceRepository,
+                dossierRepository,
+                storage,
+                ocrTaskClient,
+                searchIndexer,
+                objectMapper,
+                auditRecorder,
+                null,
+                null);
+    }
+
+    @Autowired
+    public EvidenceApplicationService(
+            FulfillmentCaseRepository caseRepository,
+            EvidenceItemRepository evidenceRepository,
+            EvidenceDossierRepository dossierRepository,
+            EvidenceStorage storage,
+            OcrTaskClient ocrTaskClient,
+            EvidenceSearchIndexer searchIndexer,
+            ObjectMapper objectMapper,
+            AuditRecorder auditRecorder,
+            EvidenceParseOutboxService parseOutboxService,
+            EvidenceParseDeliveryTrigger parseDeliveryTrigger) {
         this.caseRepository = caseRepository;
         this.evidenceRepository = evidenceRepository;
         this.dossierRepository = dossierRepository;
@@ -98,6 +126,8 @@ public class EvidenceApplicationService {
         this.searchIndexer = searchIndexer;
         this.objectMapper = objectMapper;
         this.auditRecorder = auditRecorder;
+        this.parseOutboxService = parseOutboxService;
+        this.parseDeliveryTrigger = parseDeliveryTrigger;
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceApplicationService.upload(String,MultipartFile,String,String,String,OffsetDateTime,AuthenticatedActor)」。
@@ -197,6 +227,9 @@ public class EvidenceApplicationService {
                             "claimed_fact", normalizedClaimedFact,
                             "truth_attested", true,
                             "party_capacity", attestation.partyCapacity()));
+            if (EvidenceContentAuthorityV1.isSupportedTextContentType(view.contentType())) {
+                requestDurableTextParse(existing, view);
+            }
             return view;
         }
 
@@ -247,7 +280,8 @@ public class EvidenceApplicationService {
                     modelProcessingAuthorization(entity.getMetadataJson(), actor),
                     actor.actorId());
         }
-        EvidenceView view = toView(evidenceRepository.save(entity));
+        EvidenceItemEntity saved = evidenceRepository.save(entity);
+        EvidenceView view = toView(saved);
         auditRecorder.record(
                 actor,
                 "EVIDENCE_UPLOADED",
@@ -260,7 +294,8 @@ public class EvidenceApplicationService {
                         "source_type", view.sourceType(),
                         "visibility", view.visibility(),
                         "model_processing_authorized", modelProcessingAuthorized));
-        triggerNonBlockingIntegrations(view);
+        triggerSearchIndex(view);
+        requestDurableTextParse(saved, view);
         return view;
     }
 
@@ -473,7 +508,7 @@ public class EvidenceApplicationService {
     // 上游调用：「EvidenceApplicationService.triggerNonBlockingIntegrations(EvidenceView)」的上游调用点包括 「EvidenceApplicationService.upload」。
     // 下游影响：「EvidenceApplicationService.triggerNonBlockingIntegrations(EvidenceView)」向下依次触达 「searchIndexer.indexMetadata」、「ocrTaskClient.createParseTask」、「LOGGER.warn」、「view.id」。
     // 系统意义：「EvidenceApplicationService.triggerNonBlockingIntegrations(EvidenceView)」负责主链路中的“非阻塞外部集成”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private void triggerNonBlockingIntegrations(EvidenceView view) {
+    private void triggerSearchIndex(EvidenceView view) {
         try {
             searchIndexer.indexMetadata(view);
         } catch (RuntimeException failure) {
@@ -482,6 +517,29 @@ public class EvidenceApplicationService {
                     view.id(),
                     failure.getClass().getSimpleName());
         }
+    }
+
+    /**
+     * Supported text is never sent through the callback-based OCR path. The production constructor
+     * requires both durable outbox collaborators; the null branch exists only for legacy direct
+     * unit fixtures that use the retained eight-argument constructor.
+     */
+    private void requestDurableTextParse(EvidenceItemEntity evidence, EvidenceView view) {
+        if (!EvidenceContentAuthorityV1.isSupportedTextContentType(view.contentType())) {
+            triggerOcr(view);
+            return;
+        }
+        if (parseOutboxService != null && parseDeliveryTrigger != null) {
+            EvidenceParseOutboxService.Enqueued parseJob = parseOutboxService.enqueue(evidence);
+            parseDeliveryTrigger.deliveryRequested(parseJob.outboxId());
+            return;
+        }
+        // Direct legacy constructors are retained for isolated pre-existing unit fixtures only.
+        // Spring production construction requires the durable text outbox collaborators above.
+        triggerOcr(view);
+    }
+
+    private void triggerOcr(EvidenceView view) {
         try {
             ocrTaskClient.createParseTask(
                     new OcrTaskClient.ParseTask(

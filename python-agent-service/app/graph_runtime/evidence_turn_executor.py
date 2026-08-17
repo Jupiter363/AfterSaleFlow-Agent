@@ -22,12 +22,12 @@ from app.contracts.v1.codec import (
     canonicalize,
 )
 from app.agents.evidence_clerk.public_reply import (
+    EVIDENCE_CANONICAL_OPENING,
     EVIDENCE_PUBLIC_FIELD,
     EVIDENCE_PUBLIC_NODE,
     EvidencePublicOutputPolicy,
     compose_evidence_opening_public_reply,
-    compose_evidence_submission_public_reply,
-    derive_submission_observation_authority,
+    validate_public_observation_prefix,
 )
 from app.contracts.v1.models import (
     AgentStreamEvent,
@@ -53,7 +53,12 @@ from app.graph_runtime.target_e2e import (
     TargetE2ERoomProposalSource,
 )
 from app.harness.evidence_context_assembler import EvidenceContextAssembler
-from app.schemas import EvidenceTurnRequest, EvidenceTurnResult
+from app.schemas import (
+    EvidenceTurnRequest,
+    EvidenceTurnResult,
+    PublicEvidenceObservationProposalV1,
+    PublicEvidenceObservationV1,
+)
 from app.streaming import (
     STREAM_EVENT_MAX_DELTA_CHARS,
     STREAM_MAX_VISIBLE_OUTPUT_CHARS,
@@ -71,6 +76,7 @@ _PROPOSAL_SOURCE_SCHEMA = "target-e2e-room-proposal-source.v1"
 _STATE_SCHEMA = "target-e2e-evidence-turn-state.v1"
 _NODE = "evidence_turn"
 _MAX_VISIBLE_DELTA = 4096
+_SUBMISSION_OBSERVATIONS_FIELD = "public_observations"
 _FORMAL_EVIDENCE_RESULT_FIELDS = frozenset(
     {
         "room_utterance",
@@ -79,6 +85,7 @@ _FORMAL_EVIDENCE_RESULT_FIELDS = frozenset(
         "referenced_evidence_ids",
         "verification_suggestions",
         "authenticity_flags",
+        "public_observations",
         "evidence_assessments",
         "fact_matrix_patch",
         "human_review_tasks",
@@ -191,10 +198,195 @@ class _EvidenceTurnState(TypedDict, total=False):
     completed_at: str
 
 
+class _SubmissionObservationPublicOutputPolicy:
+    """Release only complete, request-bound typed Evidence observations."""
+
+    def __init__(self, request: EvidenceTurnRequest) -> None:
+        envelope = request.context_envelope
+        current_event = envelope.current_event
+        if not current_event.attachment_refs:
+            raise GraphContractError(
+                "EVIDENCE_PUBLIC_OBSERVATION_ATTACHMENT_SCOPE_INVALID"
+            )
+        self._evidence_content_authorities = tuple(
+            envelope.evidence_content_authorities
+        )
+        self._visible_evidence = tuple(envelope.visible_evidence)
+        self._attachment_refs = tuple(current_event.attachment_refs)
+        self._allowed_fact_targets = tuple(
+            EvidenceContextAssembler().assemble(request).working_set.allowed_fact_targets
+        )
+        self._case_id = envelope.case_snapshot.case_id
+        self._actor_id = envelope.actor_snapshot.actor_id
+        self._actor_role = envelope.actor_snapshot.actor_role
+        self._accepted: list[PublicEvidenceObservationV1] = []
+        self._visible_text = ""
+        self._bootstrapped = False
+
+    @property
+    def source_observed(self) -> bool:
+        return bool(self._accepted)
+
+    @property
+    def visible_text(self) -> str:
+        return self._visible_text
+
+    @property
+    def accepted_observations(self) -> tuple[PublicEvidenceObservationV1, ...]:
+        return tuple(self._accepted)
+
+    def allows_node(self, operation: str, node_name: str) -> bool:
+        return operation == EVIDENCE_PUBLIC_NODE and node_name == EVIDENCE_PUBLIC_NODE
+
+    def begin(
+        self,
+        *,
+        operation: str,
+        node_name: str,
+        field_name: str,
+    ) -> tuple[str, ...]:
+        self._require_terminal_field(operation, node_name, field_name)
+        if self._bootstrapped:
+            return ()
+        self._bootstrapped = True
+        self._visible_text = EVIDENCE_CANONICAL_OPENING
+        return (EVIDENCE_CANONICAL_OPENING,)
+
+    def accept(
+        self,
+        *,
+        operation: str,
+        node_name: str,
+        field_name: str,
+        delta: str,
+    ) -> tuple[str, ...]:
+        self._require_node(operation, node_name)
+        if field_name == EVIDENCE_PUBLIC_FIELD:
+            # Submission terminal prose is a whole-result artifact. It cannot
+            # authorize a live delta, even if a provider emits it early.
+            return ()
+        if field_name != _SUBMISSION_OBSERVATIONS_FIELD:
+            raise GraphContractError("EVIDENCE_PUBLIC_OBSERVATION_STREAM_FIELD_INVALID")
+        if not isinstance(delta, str) or not delta:
+            raise GraphContractError("EVIDENCE_PUBLIC_OBSERVATION_STREAM_ITEM_INVALID")
+        try:
+            candidate = json.loads(delta)
+        except (TypeError, ValueError) as error:
+            raise GraphContractError(
+                "EVIDENCE_PUBLIC_OBSERVATION_STREAM_ITEM_INVALID"
+            ) from error
+        if not isinstance(candidate, Mapping):
+            raise GraphContractError("EVIDENCE_PUBLIC_OBSERVATION_STREAM_ITEM_INVALID")
+        try:
+            proposal = PublicEvidenceObservationProposalV1.model_validate(candidate)
+            canonical = validate_public_observation_prefix(
+                prior_accepted=self._accepted,
+                candidate=proposal,
+                evidence_content_authorities=self._evidence_content_authorities,
+                visible_evidence=self._visible_evidence,
+                attachment_refs=self._attachment_refs,
+                allowed_fact_targets=self._allowed_fact_targets,
+                case_id=self._case_id,
+                actor_id=self._actor_id,
+                actor_role=self._actor_role,
+            )
+        except ValueError as error:
+            raise GraphContractError(
+                "EVIDENCE_PUBLIC_OBSERVATION_STREAM_ITEM_INVALID"
+            ) from error
+        public_text = canonical.public_text
+        if (
+            not isinstance(public_text, str)
+            or not public_text
+            or public_text != public_text.strip()
+        ):
+            raise GraphContractError(
+                "EVIDENCE_PUBLIC_OBSERVATION_CANONICAL_TEXT_INVALID"
+            )
+        self._accepted.append(canonical)
+        self._visible_text += public_text
+        return (public_text,)
+
+    def finalize(
+        self,
+        *,
+        operation: str,
+        node_name: str,
+        field_name: str,
+        final_text: str,
+        allow_canonical_fallback: bool = False,
+    ) -> tuple[str, ...]:
+        self._require_terminal_field(operation, node_name, field_name)
+        if not self._bootstrapped or not isinstance(final_text, str) or not final_text:
+            raise GraphContractError("EVIDENCE_PUBLIC_OUTPUT_TERMINAL_MISMATCH")
+        if not final_text.startswith(self._visible_text):
+            raise GraphContractError("EVIDENCE_PUBLIC_OUTPUT_TERMINAL_MISMATCH")
+        suffix = final_text[len(self._visible_text) :]
+        self._visible_text = final_text
+        return (suffix,) if suffix else ()
+
+    def require_terminal_reconciliation(self, result: EvidenceTurnResult) -> None:
+        """Require the terminal result to retain exactly the streamed authority."""
+
+        observations = self.accepted_observations
+        if tuple(result.public_observations) != observations:
+            raise GraphContractError(
+                "EVIDENCE_PUBLIC_OBSERVATION_TERMINAL_RECONCILIATION_INVALID"
+            )
+        by_id: dict[str, PublicEvidenceObservationV1] = {}
+        for observation in observations:
+            if observation.observation_id is None or observation.observation_id in by_id:
+                raise GraphContractError(
+                    "EVIDENCE_PUBLIC_OBSERVATION_TERMINAL_RECONCILIATION_INVALID"
+                )
+            by_id[observation.observation_id] = observation
+        seen_ids: set[str] = set()
+        for assessment in result.evidence_assessments:
+            if assessment.public_observation_slots:
+                raise GraphContractError(
+                    "EVIDENCE_PUBLIC_OBSERVATION_TERMINAL_RECONCILIATION_INVALID"
+                )
+            fact_ids = {link.fact_id for link in assessment.fact_links}
+            for observation_id in assessment.public_observation_ids:
+                observation = by_id.get(observation_id)
+                if (
+                    observation is None
+                    or observation_id in seen_ids
+                    or observation.evidence_id != assessment.evidence_id
+                    or observation.fact_id not in fact_ids
+                ):
+                    raise GraphContractError(
+                        "EVIDENCE_PUBLIC_OBSERVATION_TERMINAL_RECONCILIATION_INVALID"
+                    )
+                seen_ids.add(observation_id)
+        if seen_ids != set(by_id):
+            raise GraphContractError(
+                "EVIDENCE_PUBLIC_OBSERVATION_TERMINAL_RECONCILIATION_INVALID"
+            )
+
+    @staticmethod
+    def _require_node(operation: str, node_name: str) -> None:
+        if operation != EVIDENCE_PUBLIC_NODE or node_name != EVIDENCE_PUBLIC_NODE:
+            raise GraphContractError("EVIDENCE_PUBLIC_OBSERVATION_STREAM_NODE_INVALID")
+
+    @classmethod
+    def _require_terminal_field(
+        cls,
+        operation: str,
+        node_name: str,
+        field_name: str,
+    ) -> None:
+        cls._require_node(operation, node_name)
+        if field_name != EVIDENCE_PUBLIC_FIELD:
+            raise GraphContractError("EVIDENCE_PUBLIC_OUTPUT_FIELD_INVALID")
+
+
 @dataclass
 class _EvidencePreviewBridge:
     provider_request: EvidenceTurnRequest
-    policy: EvidencePublicOutputPolicy = field(default_factory=EvidencePublicOutputPolicy)
+    policy: EvidencePublicOutputPolicy | _SubmissionObservationPublicOutputPolicy = field(
+        default_factory=EvidencePublicOutputPolicy
+    )
     pending: deque[StreamVisibleDeltaEvent] = field(default_factory=deque)
     available: asyncio.Event = field(default_factory=asyncio.Event)
     loop: asyncio.AbstractEventLoop = field(default_factory=asyncio.get_running_loop)
@@ -213,6 +405,11 @@ class _EvidencePreviewBridge:
     def publish(self, event: PublicStreamEvent) -> None:
         if not isinstance(event, StreamVisibleDeltaEvent):
             return
+        if (
+            isinstance(self.policy, _SubmissionObservationPublicOutputPolicy)
+            and event.field == _SUBMISSION_OBSERVATIONS_FIELD
+        ):
+            event = event.model_copy(update={"field": EVIDENCE_PUBLIC_FIELD})
         with self.lock:
             next_pending_chars = self.pending_chars + len(event.delta)
             if next_pending_chars > STREAM_MAX_VISIBLE_OUTPUT_CHARS:
@@ -335,18 +532,12 @@ class CompiledEvidenceTurnExecutor:
             and current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
             and bool(current_event.attachment_refs)
         )
-        submission_observation_authority = (
-            derive_submission_observation_authority(
-                visible_evidence=provider_request.context_envelope.visible_evidence,
-                attachment_refs=current_event.attachment_refs,
-            )
-            if is_submission
-            else None
-        )
         bridge = _EvidencePreviewBridge(
             provider_request=provider_request,
-            policy=EvidencePublicOutputPolicy(
-                submission_observation_authority=submission_observation_authority
+            policy=(
+                _SubmissionObservationPublicOutputPolicy(provider_request)
+                if is_submission
+                else EvidencePublicOutputPolicy()
             ),
         )
         self._preview_bridges[logical_run_id] = bridge
@@ -404,9 +595,7 @@ class CompiledEvidenceTurnExecutor:
         result = EvidenceTurnResult.model_validate(state["evidence_turn_result"])
         usage = self._usage(state["usage"])
         completed_at = cast(str, state["completed_at"])
-        if bridge.policy.source_observed and (
-            bridge.policy.visible_text != result.room_utterance
-        ):
+        if bridge.policy.source_observed and bridge.policy.visible_text != result.room_utterance:
             raise GraphContractError("EVIDENCE_PUBLIC_OUTPUT_TERMINAL_MISMATCH")
         proposal = self._proposal(
             execution=execution,
@@ -818,7 +1007,9 @@ class CompiledEvidenceTurnExecutor:
             result = EvidenceTurnResult.model_validate(
                 await self._workflow.arun(provider_request)
             )
-        if (
+        if isinstance(bridge.policy, _SubmissionObservationPublicOutputPolicy):
+            bridge.policy.require_terminal_reconciliation(result)
+        elif (
             provider_request.context_envelope.current_event.event_type
             == "ROOM_OPENING"
             and bridge.policy.source_observed
@@ -835,45 +1026,6 @@ class CompiledEvidenceTurnExecutor:
             if result.room_utterance != expected_reply:
                 raise GraphContractError(
                     "EVIDENCE_OPENING_PUBLIC_REPLY_BINDING_INVALID"
-                )
-            bridge.policy.authorize_terminal_extension(
-                guarded_source_reply=guarded_source_reply,
-                final_text=expected_reply,
-            )
-        elif (
-            provider_request.context_envelope.current_event.event_type
-            == "PARTY_MESSAGE"
-            and provider_request.context_envelope.current_event.message_type
-            == "PARTY_EVIDENCE_REFERENCE"
-            and provider_request.context_envelope.current_event.attachment_refs
-            and bridge.policy.source_observed
-        ):
-            guarded_source_reply = bridge.policy.guarded_source_reply
-            working_set = EvidenceContextAssembler().assemble(
-                provider_request
-            ).working_set
-            submission_observation_authority = (
-                derive_submission_observation_authority(
-                    visible_evidence=(
-                        provider_request.context_envelope.visible_evidence
-                    ),
-                    attachment_refs=(
-                        provider_request.context_envelope.current_event.attachment_refs
-                    ),
-                )
-            )
-            expected_reply = compose_evidence_submission_public_reply(
-                fact_targets=working_set.allowed_fact_targets,
-                evidence_assessments=result.evidence_assessments,
-                human_review_tasks=result.human_review_tasks,
-                source_reply=guarded_source_reply,
-                submission_observation_authority=(
-                    submission_observation_authority
-                ),
-            )
-            if result.room_utterance != expected_reply:
-                raise GraphContractError(
-                    "EVIDENCE_SUBMISSION_PUBLIC_REPLY_BINDING_INVALID"
                 )
             bridge.policy.authorize_terminal_extension(
                 guarded_source_reply=guarded_source_reply,

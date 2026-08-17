@@ -106,23 +106,25 @@
 
 ## 六、输出合同
 
-只返回符合输出结构约束的 JSON，不输出 Markdown，不解释思考过程。JSON 对象的第一个属性必须是 `room_utterance`，其余属性随后按结构约束给出。
+只返回符合输出结构约束的 JSON，不输出 Markdown，不解释思考过程。JSON 对象的第一个属性必须是 `public_observations`；它是本轮唯一可供公开合成的材料特定语义。
+
+### public_observations
+
+- `ROOM_OPENING`、无附件的 `PARTY_MESSAGE` 必须输出空数组。
+- 有本轮附件的 `EVIDENCE_REVIEW` 只可从 `evidence_content_authorities` 中当前附件、`status="SUCCEEDED"` 的冻结非空 `parsed_text` 选择观察；`claimed_fact`、metadata、extraction、文件名、模型推断和未解析原件都不能建立公开观察。
+- 每项依次输出：`schema_version="public_evidence_observation.v1"`、有序 slot `provider_slot_id`（严格为 `OBS_01`、`OBS_02`……）、`evidence_id`、允许的 `fact_id`、`observation_kind`、`epistemic_status`、`parsed_content_sha256` 与 `source_quote`。
+- `source_quote` 必须逐字符摘自对应 frozen `parsed_text`，在该文本中恰好出现一次；单行、不含引号或句末标点、最多 200 个字符。不得改写、拼接、翻译、补充或用当事人/模型的文字替代。
+- `parsed_content_sha256` 必须逐字符等于对应 authority 的值。`public_text`（包含系统固定的“材料记载/材料所载”临时性句框）、byte offset、quote hash 和最终 observation ID 由系统从已验证 quote 确定性生成；不要输出或猜测这些派生字段。
+- `observation_kind` 只能为 `PARSED_RECORD`、`PARSED_PARTY_STATEMENT` 或 `PARSED_TRANSACTION_STATUS`；`epistemic_status` 只能为 `PENDING_VERIFICATION` 或 `PROVISIONAL`。它们都不是真实性、责任、救济或执行结论。
+- 每个观察都必须在同一附件的 `evidence_assessments[].public_observation_slots` 中用相同 slot 引用，并且该 assessment 的 `fact_links` 必须包含同一 `fact_id`。验收后系统才会写入派生的 `public_observation_ids`。最多 12 项，总 quote 长度最多 1200 个字符。
+- 观察和 source quote 不得含真实性/伪造、责任/过错、退款/赔付指令、最终方案、执行指令或内部 ID/字段/评分。若无可安全且有 frozen source 的观察，输出空数组并把缺口交由人工复核。
 
 ### room_utterance
 
-- 只用简体中文，建议 120 至 320 个中文字符。
-- JSON 对象的第一个属性仍必须是 `room_utterance`，以便首包只流式解析这个公开字段。
+- `public_observations` 之后才输出 `room_utterance`。对有附件的 `EVIDENCE_REVIEW`，只输出规范开场“我会先核验本轮材料与案情的关联。”；终态公开文字由系统根据已验收的 `public_observations`、能力边界、来源链和人工复核状态确定性生成。
 - `ROOM_OPENING / PARTY_MESSAGE` 的第一句必须简短、可独立安全展示，并以 `。`、`！` 或 `？` 结束；只陈述已收到材料或将进行核验、核对、检查、比对、梳理等中性进展。
-- `ROOM_OPENING / PARTY_MESSAGE` 的第一句必须是单一短句，不得包含逗号、分号或冒号；可采用“我会先核验本轮材料与案情的关联。”这类中性进展表达。
-- `EVIDENCE_REVIEW` 且本轮包含附件时，`room_utterance` 必须以“我会先核验本轮材料与案情的关联。”开头，并立即输出一条或多条格式完全相同的句子：`本轮正在对材料所载“<observation>”进行核验。`
-- 每个 `<observation>` 必须逐字符复制自同一个 JSON 输出中该附件对应的 `evidence_assessments[].formation_time_assessment`、`findings[].description`、`source_basis[]`、`limitations[]` 或 `summary` 之一；不得发明、改写、缩写或拼接观察对象。
-- 被选作 `<observation>` 的结构化字段值必须是单行、长度不超过 1000 个字符，且自身不含引号或句末标点；句末标点只由外层固定观察句提供。
-- 解析材料中存在可用的文件特定观察时，至少输出一条上述观察句；不存在可用观察时，`room_utterance` 只输出规范开场，并在结构化 `limitations` 中说明原因。
-- `EVIDENCE_REVIEW` 的观察句不得包含真实性定论、责任或处理方案，不得倾倒原始文件全文，也不得出现内部 ID、字段名或评分；除规范开场和上述观察句外，不得追加任意模型自由句。
 - 第一句不得以肯定或否定方式涉及责任、过错、承担、退款退货、赔付补偿、支持驳回、判定认定、裁决胜败、欺诈造假或最终结论；不要用“不判断”“尚未认定”等否定表达绕过该限制。
 - 禁止英文翻译、双语复述、英文摘要或中文后追加英文段落。
-- 订单号、文件名、证据编号和必要的原始短引用可以保留原文。
-- 先反馈本轮核验结果，再说明限制和下一步；不要重复整段案情。
 - 本轮只做证据核验，不判断责任或最终处理方案。
 
 ### evidence_requests

@@ -12,10 +12,12 @@ from typing_extensions import NotRequired, TypedDict
 
 from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
 from app.agents.evidence_clerk.public_reply import (
+    EvidencePublicObservationAuthorityError,
     compose_evidence_opening_public_reply,
     compose_evidence_submission_public_reply,
-    derive_submission_observation_authority,
     guard_evidence_public_reply,
+    reconcile_accepted_public_observations,
+    validate_submission_public_observations,
 )
 from app.harness.context_pack import build_context_pack
 from app.harness.evidence_context_assembler import (
@@ -56,6 +58,7 @@ class EvidenceTurnGraphState(TypedDict):
     evidence_requests: NotRequired[list[dict[str, Any]]]
     verification_suggestions: NotRequired[list[dict[str, Any]]]
     authenticity_flags: NotRequired[list[dict[str, Any]]]
+    public_observations: NotRequired[list[dict[str, Any]]]
     evidence_assessments: NotRequired[list[dict[str, Any]]]
     fact_matrix_patch: NotRequired[list[dict[str, Any]]]
     human_review_tasks: NotRequired[list[dict[str, Any]]]
@@ -168,6 +171,7 @@ def _project_evidence_turn_result(
         evidence_requests=result["evidence_requests"],
         verification_suggestions=result["verification_suggestions"],
         authenticity_flags=result["authenticity_flags"],
+        public_observations=result["public_observations"],
         evidence_assessments=result["evidence_assessments"],
         fact_matrix_patch=result["fact_matrix_patch"],
         human_review_tasks=result["human_review_tasks"],
@@ -385,10 +389,41 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         output.authenticity_flags,
         ("flag_type", "description"),
     )
+    envelope = state["assembled_context"].raw_envelope
+    current_event = envelope.current_event
+    if request.turn_source == "ROOM_OPENING":
+        if output.public_observations:
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence opening cannot author public observations"
+            )
+        public_observations = ()
+    elif current_event.attachment_refs:
+        public_observations = validate_submission_public_observations(
+            observations=output.public_observations,
+            evidence_content_authorities=envelope.evidence_content_authorities,
+            visible_evidence=envelope.visible_evidence,
+            attachment_refs=current_event.attachment_refs,
+            allowed_fact_targets=request.allowed_fact_targets,
+            case_id=envelope.case_snapshot.case_id,
+            actor_id=envelope.actor_snapshot.actor_id,
+            actor_role=envelope.actor_snapshot.actor_role,
+        )
+    else:
+        if output.public_observations:
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence message without attachments cannot author observations"
+            )
+        public_observations = ()
     evidence_assessments = EvidenceAssessmentPolicy().apply(
         output.evidence_assessments,
         request,
         state.get("asset_manifest", {"items": []}),
+    )
+    public_observations, evidence_assessments = (
+        reconcile_accepted_public_observations(
+            canonical_observations=public_observations,
+            evidence_assessments=evidence_assessments,
+        )
     )
     fact_matrix_patch = _validated_matrix_patch(
         output.fact_matrix_patch,
@@ -406,32 +441,19 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         evidence_assessments,
         human_review_tasks,
     )
-    room_utterance = guard_evidence_public_reply(output.room_utterance)
     if request.turn_source == "ROOM_OPENING":
+        room_utterance = guard_evidence_public_reply(output.room_utterance)
         room_utterance = compose_evidence_opening_public_reply(
             room_utterance,
             fact_targets=request.allowed_fact_targets,
             evidence_requests=evidence_requests,
         )
     else:
-        envelope = state["assembled_context"].raw_envelope
-        current_event = envelope.current_event
-        submission_observation_authority = (
-            derive_submission_observation_authority(
-                visible_evidence=envelope.visible_evidence,
-                attachment_refs=current_event.attachment_refs,
-            )
-            if current_event.event_type == "PARTY_MESSAGE"
-            and current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
-            and current_event.attachment_refs
-            else ()
-        )
         room_utterance = compose_evidence_submission_public_reply(
             fact_targets=request.allowed_fact_targets,
+            public_observations=public_observations,
             evidence_assessments=evidence_assessments,
             human_review_tasks=human_review_tasks,
-            source_reply=output.room_utterance,
-            submission_observation_authority=submission_observation_authority,
         )
     # 有逐证据评估时采用其平均值；没有评估才回退模型总置信度，最终再夹在 0..1 范围。
     assessment_confidence = (
@@ -450,6 +472,9 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         ],
         "authenticity_flags": [
             item.model_dump(mode="json") for item in authenticity_flags[:20]
+        ],
+        "public_observations": [
+            item.model_dump(mode="json") for item in public_observations
         ],
         "evidence_assessments": [
             item.model_dump(mode="json") for item in evidence_assessments[:50]

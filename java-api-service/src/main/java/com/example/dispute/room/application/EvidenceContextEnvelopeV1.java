@@ -8,12 +8,17 @@ package com.example.dispute.room.application;
 
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.evidence.application.EvidenceContentAuthorityV1;
 import com.example.dispute.workflow.contract.v1.FrozenIntakeSubmissionAuthority;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Versioned, authorization-filtered evidence context supplied by the Java business boundary.
@@ -34,6 +39,8 @@ public record EvidenceContextEnvelopeV1(
         @JsonProperty("actor_snapshot") ActorSnapshot actorSnapshot,
         @JsonProperty("current_event") CurrentEvent currentEvent,
         @JsonProperty("visible_evidence") List<VisibleEvidence> visibleEvidence,
+        @JsonProperty("evidence_content_authorities")
+                List<EvidenceContentAuthorityV1> evidenceContentAuthorities,
         @JsonProperty("private_conversation") PrivateConversation privateConversation,
         @JsonProperty("room_policy") RoomPolicy roomPolicy,
         @JsonProperty("frozen_submission")
@@ -63,9 +70,36 @@ public record EvidenceContextEnvelopeV1(
                 actorSnapshot,
                 currentEvent,
                 visibleEvidence,
+                List.of(),
                 privateConversation,
                 roomPolicy,
                 null);
+    }
+
+    /** Source-compatible constructor for callers which already carry frozen Submit authority. */
+    public EvidenceContextEnvelopeV1(
+            String schemaVersion,
+            String capturedAt,
+            CaseSnapshot caseSnapshot,
+            IntakeDossierSnapshot intakeDossierSnapshot,
+            ActorSnapshot actorSnapshot,
+            CurrentEvent currentEvent,
+            List<VisibleEvidence> visibleEvidence,
+            PrivateConversation privateConversation,
+            RoomPolicy roomPolicy,
+            FrozenSubmission frozenSubmission) {
+        this(
+                schemaVersion,
+                capturedAt,
+                caseSnapshot,
+                intakeDossierSnapshot,
+                actorSnapshot,
+                currentEvent,
+                visibleEvidence,
+                List.of(),
+                privateConversation,
+                roomPolicy,
+                frozenSubmission);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceContextEnvelopeV1.EvidenceContextEnvelopeV1(String,String,String,CaseSnapshot,IntakeDossierSnapshot,ActorSnapshot,CurrentEvent,List,PrivateConversation,RoomPolicy)」。
@@ -86,6 +120,10 @@ public record EvidenceContextEnvelopeV1(
         Objects.requireNonNull(privateConversation, "privateConversation must not be null");
         Objects.requireNonNull(roomPolicy, "roomPolicy must not be null");
         visibleEvidence = visibleEvidence == null ? List.of() : List.copyOf(visibleEvidence);
+        evidenceContentAuthorities =
+                evidenceContentAuthorities == null ? List.of() : List.copyOf(evidenceContentAuthorities);
+        validateEvidenceContentAuthorities(
+                caseSnapshot, currentEvent, visibleEvidence, evidenceContentAuthorities);
         if (freezeBound != (frozenSubmission != null)) {
             throw new IllegalArgumentException(
                     "evidence context schema does not match frozen Submit authority");
@@ -101,6 +139,52 @@ public record EvidenceContextEnvelopeV1(
 
     public boolean freezeBound() {
         return FROZEN_SUBMISSION_SCHEMA_VERSION.equals(schemaVersion);
+    }
+
+    private static void validateEvidenceContentAuthorities(
+            CaseSnapshot caseSnapshot,
+            CurrentEvent currentEvent,
+            List<VisibleEvidence> visibleEvidence,
+            List<EvidenceContentAuthorityV1> authorities) {
+        if (authorities.isEmpty()) {
+            return;
+        }
+        Map<String, VisibleEvidence> visibleById = new LinkedHashMap<>();
+        for (VisibleEvidence evidence : visibleEvidence) {
+            if (visibleById.put(evidence.evidenceId(), evidence) != null) {
+                throw new IllegalArgumentException("visible evidence IDs must be unique");
+            }
+        }
+        Map<String, Integer> attachmentPositions = new LinkedHashMap<>();
+        for (int index = 0; index < currentEvent.attachmentRefs().size(); index++) {
+            String evidenceId = currentEvent.attachmentRefs().get(index);
+            if (attachmentPositions.put(evidenceId, index) != null) {
+                throw new IllegalArgumentException("current evidence attachment references must be unique");
+            }
+        }
+        Set<String> boundEvidenceIds = new HashSet<>();
+        int previousAttachmentPosition = -1;
+        for (EvidenceContentAuthorityV1 authority : authorities) {
+            if (!caseSnapshot.caseId().equals(authority.caseId())
+                    || !boundEvidenceIds.add(authority.evidenceId())) {
+                throw new IllegalArgumentException("evidence content authority case or identity is invalid");
+            }
+            Integer attachmentPosition = attachmentPositions.get(authority.evidenceId());
+            VisibleEvidence visible = visibleById.get(authority.evidenceId());
+            if (attachmentPosition == null
+                    || attachmentPosition <= previousAttachmentPosition
+                    || visible == null
+                    || !authority.fileSha256().equals(visible.fileHash())
+                    || !authority.contentType().equals(visible.contentType())
+                    || visible.fileSize() == null
+                    || visible.fileSize() < 1
+                    || !"SUCCEEDED".equals(visible.parseStatus())
+                    || !authority.parsedText().equals(visible.parsedText())) {
+                throw new IllegalArgumentException(
+                        "evidence content authority does not match its current visible attachment");
+            }
+            previousAttachmentPosition = attachmentPosition;
+        }
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】类型「CaseSnapshot」。

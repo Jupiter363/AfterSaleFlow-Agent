@@ -29,6 +29,7 @@ public record EvidenceAgentTurnResult(
         @JsonProperty("verification_suggestions")
                 List<EvidenceVerificationSuggestion> verificationSuggestions,
         @JsonProperty("authenticity_flags") List<EvidenceAuthenticityFlag> authenticityFlags,
+        @JsonProperty("public_observations") List<Map<String, Object>> publicObservations,
         @JsonProperty("evidence_assessments") List<EvidenceAssessment> evidenceAssessments,
         @JsonProperty("fact_matrix_patch") List<Map<String, Object>> factMatrixPatch,
         @JsonProperty("human_review_tasks") List<Map<String, Object>> humanReviewTasks,
@@ -67,6 +68,8 @@ public record EvidenceAgentTurnResult(
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EvidenceAssessment(
             @JsonProperty("evidence_id") String evidenceId,
+            @JsonProperty("public_observation_slots") List<String> publicObservationSlots,
+            @JsonProperty("public_observation_ids") List<String> publicObservationIds,
             @JsonProperty("analysis_method") String analysisMethod,
             @JsonProperty("inspected_modalities") List<String> inspectedModalities,
             @JsonProperty("fact_links") List<Map<String, Object>> factLinks,
@@ -110,6 +113,8 @@ public record EvidenceAgentTurnResult(
                 String summary) {
             this(
                     evidenceId,
+                    List.of(),
+                    List.of(),
                     analysisMethod,
                     inspectedModalities,
                     factLinks,
@@ -130,6 +135,50 @@ public record EvidenceAgentTurnResult(
                     summary);
         }
 
+        public EvidenceAssessment(
+                String evidenceId,
+                String analysisMethod,
+                List<String> inspectedModalities,
+                List<Map<String, Object>> factLinks,
+                double authenticityScore,
+                double relevanceScore,
+                double completenessScore,
+                double assessmentConfidence,
+                List<String> sourceBasis,
+                List<String> supportedFactIds,
+                List<String> unsupportedClaims,
+                String formationTimeAssessment,
+                List<Map<String, Object>> findings,
+                List<String> limitations,
+                List<Map<String, Object>> riskFlags,
+                String recommendation,
+                HumanReview humanReview,
+                Map<String, Object> assetAudit,
+                String summary) {
+            this(
+                    evidenceId,
+                    List.of(),
+                    List.of(),
+                    analysisMethod,
+                    inspectedModalities,
+                    factLinks,
+                    authenticityScore,
+                    relevanceScore,
+                    completenessScore,
+                    assessmentConfidence,
+                    sourceBasis,
+                    supportedFactIds,
+                    unsupportedClaims,
+                    formationTimeAssessment,
+                    findings,
+                    limitations,
+                    riskFlags,
+                    recommendation,
+                    humanReview,
+                    assetAudit,
+                    summary);
+        }
+
         // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnResult.EvidenceAssessment.EvidenceAssessment(String,String,List,List,double,double,double,double,List,List,List,String,List,List,List,String,HumanReview,Map,String)」。
         // 具体功能：「EvidenceAgentTurnResult.EvidenceAssessment.EvidenceAssessment(String,String,List,List,double,double,double,double,List,List,List,String,List,List,List,String,HumanReview,Map,String)」：在不可变「EvidenceAssessment」写入组件前校验 「evidenceId」(String)、「analysisMethod」(String)、「inspectedModalities」(List)、「factLinks」(List)、「authenticityScore」(double)、「relevanceScore」(double)、「completenessScore」(double)、「assessmentConfidence」(double)、「sourceBasis」(List)、「supportedFactIds」(List)、「unsupportedClaims」(List)、「formationTimeAssessment」(String)、「findings」(List)、「limitations」(List)、「riskFlags」(List)、「recommendation」(String)、「humanReview」(HumanReview)、「assetAudit」(Map)、「summary」(String)，非法输入会抛出 「IllegalArgumentException」；并通过 「HumanReview.notRequired」、「immutableList」、「validateScore」 做标准化或防御性复制。
         // 上游调用：「EvidenceAgentTurnResult.EvidenceAssessment.EvidenceAssessment(String,String,List,List,double,double,double,double,List,List,List,String,List,List,List,String,HumanReview,Map,String)」的上游创建点包括 「EvidenceAgentTurnServiceTest.assessment」。
@@ -137,6 +186,8 @@ public record EvidenceAgentTurnResult(
         // 系统意义：「EvidenceAgentTurnResult.EvidenceAssessment.EvidenceAssessment(String,String,List,List,double,double,double,double,List,List,List,String,List,List,List,String,HumanReview,Map,String)」在对象进入事务、消息或 Temporal history 前拒绝非法值，可避免错误数据在异步链路中延迟爆炸。
         // Java 语法：record 紧凑构造器省略参数列表；构造体结束后，参数会自动赋给同名不可变组件。
         public EvidenceAssessment {
+            publicObservationSlots = immutableList(publicObservationSlots);
+            publicObservationIds = immutableList(publicObservationIds);
             inspectedModalities = immutableList(inspectedModalities);
             factLinks = immutableList(factLinks);
             sourceBasis = immutableList(sourceBasis);
@@ -221,6 +272,7 @@ public record EvidenceAgentTurnResult(
                 List.of(),
                 List.of(),
                 List.of(),
+                List.of(),
                 Map.of(),
                 liabilityDetermined,
                 remedyRecommended,
@@ -253,6 +305,7 @@ public record EvidenceAgentTurnResult(
                 referencedEvidenceIds,
                 verificationSuggestions,
                 authenticityFlags,
+                List.of(),
                 evidenceAssessments,
                 List.of(),
                 List.of(),
@@ -278,6 +331,8 @@ public record EvidenceAgentTurnResult(
         verificationSuggestions =
                 verificationSuggestions == null ? List.of() : List.copyOf(verificationSuggestions);
         authenticityFlags = authenticityFlags == null ? List.of() : List.copyOf(authenticityFlags);
+        publicObservations =
+                publicObservations == null ? List.of() : List.copyOf(publicObservations);
         evidenceAssessments =
                 evidenceAssessments == null ? List.of() : List.copyOf(evidenceAssessments);
         factMatrixPatch = factMatrixPatch == null ? List.of() : List.copyOf(factMatrixPatch);
@@ -310,6 +365,7 @@ public record EvidenceAgentTurnResult(
                 referencedEvidenceIds,
                 verificationSuggestions,
                 authenticityFlags,
+                List.of(),
                 List.of(),
                 List.of(),
                 List.of(),

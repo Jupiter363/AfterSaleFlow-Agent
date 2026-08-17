@@ -36,6 +36,9 @@ STREAM_QUEUE_WAIT_POLL_SECONDS = 0.05
 STREAM_EVENT_MAX_DELTA_CHARS = 16 * 1024
 STREAM_MAX_VISIBLE_OUTPUT_CHARS = 512 * 1024
 STREAM_MAX_MODEL_DOCUMENT_CHARS = 2 * 1024 * 1024
+STREAM_MAX_VISIBLE_ARRAY_ITEMS = 64
+STREAM_MAX_VISIBLE_ARRAY_ITEM_BYTES = 16 * 1024
+STREAM_MAX_VISIBLE_ARRAY_BYTES = 64 * 1024
 V2_IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
 
 
@@ -341,13 +344,19 @@ class VisibleFieldSpec:
     """允许从模型 JSON 投影到公开流的一个属性。
 
     string_prefix 会逐字符投影字符串；json_value 只在整个 JSON 值闭合后投影一次，
-    适合把右侧展板的独立结构分区按生成顺序安全送到前端。
+    适合把右侧展板的独立结构分区按生成顺序安全送到前端；json_array_items
+    则只在数组中一个对象完整闭合后逐项投影，不等待整个数组或模型文档结束。
     """
 
     property_name: str
     field: str
-    value_mode: Literal["string_prefix", "json_value"] = "string_prefix"
+    value_mode: Literal["string_prefix", "json_value", "json_array_items"] = (
+        "string_prefix"
+    )
     requires_completed_root_property: str | None = None
+    max_array_items: int = STREAM_MAX_VISIBLE_ARRAY_ITEMS
+    max_array_item_bytes: int = STREAM_MAX_VISIBLE_ARRAY_ITEM_BYTES
+    max_array_bytes: int = STREAM_MAX_VISIBLE_ARRAY_BYTES
 
 
 @dataclass(frozen=True)
@@ -629,6 +638,12 @@ VISIBLE_FIELD_REGISTRY: dict[str, dict[str, tuple[VisibleFieldSpec, ...]]] = {
     },
     "evidence_turn": {
         "evidence_turn": (
+            VisibleFieldSpec(
+                "public_observations",
+                "public_observations",
+                "json_array_items",
+                max_array_items=12,
+            ),
             VisibleFieldSpec("room_utterance", "room_utterance"),
         ),
     },
@@ -694,11 +709,29 @@ class IncrementalVisibleJsonProjector:
     # 上下游：上游是 LLM generate_stream 根据 operation/node 查出的白名单；下游是 `feed` 对连续 delta 只返回尚未发送的后缀。
     # 系统意义：没有 spec 就不会投影任何字段；已发送长度防止每次扫描累计缓冲时重复向前端发送旧文本。
     def __init__(self, specs: tuple[VisibleFieldSpec, ...]) -> None:
+        for spec in specs:
+            if spec.value_mode != "json_array_items":
+                continue
+            if (
+                isinstance(spec.max_array_items, bool)
+                or spec.max_array_items < 1
+                or spec.max_array_items > STREAM_MAX_VISIBLE_ARRAY_ITEMS
+                or isinstance(spec.max_array_item_bytes, bool)
+                or spec.max_array_item_bytes < 1
+                or spec.max_array_item_bytes > STREAM_MAX_VISIBLE_ARRAY_ITEM_BYTES
+                or isinstance(spec.max_array_bytes, bool)
+                or spec.max_array_bytes < 1
+                or spec.max_array_bytes > STREAM_MAX_VISIBLE_ARRAY_BYTES
+            ):
+                raise AgentStreamProjectionError(
+                    "visible stream array-item budget is invalid"
+                )
         self._specs = specs
         self._root_projection_gate = _root_projection_gate_for(specs)
         self._buffer = ""
         self._emitted_lengths = {spec.field: 0 for spec in specs}
         self._emitted_json_fields: set[str] = set()
+        self._emitted_array_item_counts = {spec.field: 0 for spec in specs}
 
     # 所属模块：Agent 流式协议 > JSON 可见投影 > 增量消费入口。
     # 具体功能：`feed` 在追加 content_delta 前检查完整模型文档上限，对每个精确属性扫描当前可解码字符串前缀，仅返回相对 emitted_length 新增长的 `(field, delta)`。
@@ -753,6 +786,22 @@ class IncrementalVisibleJsonProjector:
                         ),
                     )
                 )
+                continue
+            if spec.value_mode == "json_array_items":
+                values = _find_complete_json_array_object_items(
+                    self._buffer,
+                    spec.field,
+                    max_items=spec.max_array_items,
+                    max_item_bytes=spec.max_array_item_bytes,
+                    max_array_bytes=spec.max_array_bytes,
+                )
+                emitted_count = self._emitted_array_item_counts[spec.field]
+                if emitted_count > len(values):
+                    raise AgentStreamProjectionError(
+                        "visible stream array-item projection regressed"
+                )
+                deltas.extend((spec.field, value) for value in values[emitted_count:])
+                self._emitted_array_item_counts[spec.field] = len(values)
                 continue
             prefix = _find_json_string_path_prefix(self._buffer, spec.field)
             if prefix is None:
@@ -1417,6 +1466,82 @@ def _find_complete_json_path_value(document: str, field: str) -> Any | None:
     except ValueError:
         return None
     return value
+
+
+def _find_complete_json_array_object_items(
+    document: str,
+    field: str,
+    *,
+    max_items: int,
+    max_item_bytes: int,
+    max_array_bytes: int,
+) -> tuple[str, ...]:
+    """Return canonical complete object items from one append-only JSON array path."""
+
+    start = _find_json_path_value_start(document, field)
+    if start is None:
+        return ()
+    if start >= len(document):
+        return ()
+    if document[start] != "[":
+        raise AgentStreamProjectionError(
+            "visible stream array-item field is not an array"
+        )
+
+    decoder = json.JSONDecoder()
+    cursor = _skip_whitespace(document, start + 1)
+    values: list[str] = []
+    array_bytes = 0
+    if cursor >= len(document):
+        return ()
+    if document[cursor] == "]":
+        return ()
+    while True:
+        if len(values) >= max_items:
+            raise AgentStreamLimitExceeded(
+                "visible stream array-item count exceeds its limit"
+            )
+        try:
+            value, end = decoder.raw_decode(document, cursor)
+        except ValueError:
+            # The current item is not complete yet and remains private until a
+            # later provider chunk closes it.
+            return tuple(values)
+        if not isinstance(value, dict):
+            raise AgentStreamProjectionError(
+                "visible stream array item must be an object"
+            )
+        raw_item = document[cursor:end]
+        try:
+            raw_item_bytes = len(raw_item.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise AgentStreamProjectionError(
+                "visible stream array item has invalid Unicode"
+            ) from error
+        if raw_item_bytes > max_item_bytes:
+            raise AgentStreamLimitExceeded(
+                "visible stream array item exceeds its limit"
+            )
+        array_bytes += raw_item_bytes
+        if array_bytes > max_array_bytes:
+            raise AgentStreamLimitExceeded(
+                "visible stream array exceeds its limit"
+            )
+        values.append(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        )
+        cursor = _skip_whitespace(document, end)
+        if cursor >= len(document):
+            return tuple(values)
+        if document[cursor] == "]":
+            return tuple(values)
+        if document[cursor] != ",":
+            raise AgentStreamProjectionError(
+                "visible stream array item is not comma-delimited"
+            )
+        cursor = _skip_whitespace(document, cursor + 1)
+        if cursor >= len(document):
+            return tuple(values)
 
 
 def _find_json_path_value_start(document: str, field: str) -> int | None:

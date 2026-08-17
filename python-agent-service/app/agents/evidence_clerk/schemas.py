@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from app.schemas import (
     EvidenceAuthenticityFlag,
+    EvidenceContentAuthorityV1,
     EvidenceContextEnvelopeV1,
     EvidenceFactMatrixPatch,
     EvidenceHumanReviewSignal,
@@ -19,10 +20,15 @@ from app.schemas import (
     EvidenceTurnRequest,
     EvidenceTurnResult,
     EvidenceVerificationSuggestion,
+    PublicEvidenceEpistemicStatus,
+    PublicEvidenceObservationKind,
+    PublicEvidenceObservationProposalV1,
+    PublicEvidenceObservationV1,
 )
 
 __all__ = [
     "EvidenceAuthenticityFlag",
+    "EvidenceContentAuthorityV1",
     "EvidenceContextEnvelopeV1",
     "EvidenceFactMatrixPatch",
     "EvidenceHumanReviewSignal",
@@ -36,4 +42,8 @@ __all__ = [
     "EvidenceTurnRequest",
     "EvidenceTurnResult",
     "EvidenceVerificationSuggestion",
+    "PublicEvidenceEpistemicStatus",
+    "PublicEvidenceObservationKind",
+    "PublicEvidenceObservationProposalV1",
+    "PublicEvidenceObservationV1",
 ]

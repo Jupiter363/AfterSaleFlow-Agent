@@ -695,6 +695,52 @@ def test_incremental_projector_streams_completed_case_detail_sections() -> None:
     assert projector.feed(',"risk_assessment":{}}}') == []
 
 
+def test_incremental_projector_streams_only_complete_array_objects_in_source_order() -> None:
+    spec = VisibleFieldSpec(
+        "public_observations",
+        "public_observations",
+        "json_array_items",
+        max_array_items=2,
+        max_array_item_bytes=128,
+    )
+    chunks = (
+        '{"public_observations":[{"evidence_id":"EVIDENCE_1","source_quote":"退款',
+        '20元"}',
+        ',{"evidence_id":"EVIDENCE_2","source_quote":"工单未生成"}',
+        ']}',
+    )
+
+    projector = IncrementalVisibleJsonProjector((spec,))
+    replay = IncrementalVisibleJsonProjector((spec,))
+    emitted = [projector.feed(chunk) for chunk in chunks]
+    replayed = [replay.feed(chunk) for chunk in chunks]
+
+    assert emitted == replayed
+    assert emitted[0] == []
+    assert emitted[1] == [
+        (
+            "public_observations",
+            '{"evidence_id":"EVIDENCE_1","source_quote":"退款20元"}',
+        )
+    ]
+    assert emitted[2] == [
+        (
+            "public_observations",
+            '{"evidence_id":"EVIDENCE_2","source_quote":"工单未生成"}',
+        )
+    ]
+    assert emitted[3] == []
+
+    over_limit = IncrementalVisibleJsonProjector((spec,))
+    with pytest.raises(AgentStreamLimitExceeded):
+        over_limit.feed(
+            '{"public_observations":[{"item":1},{"item":2},{"item":3}]}'
+        )
+    non_object = IncrementalVisibleJsonProjector((spec,))
+    with pytest.raises(AgentStreamProjectionError):
+        non_object.feed('{"public_observations":["not-an-object"]}')
+
+
 def test_target_intake_projector_streams_room_utterance_before_case_detail() -> None:
     projector = IncrementalVisibleJsonProjector(
         TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS

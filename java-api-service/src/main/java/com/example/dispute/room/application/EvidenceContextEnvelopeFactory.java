@@ -9,6 +9,9 @@ package com.example.dispute.room.application;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.common.exception.ForbiddenException;
+import com.example.dispute.evidence.application.EvidenceContentAuthorityLookup;
+import com.example.dispute.evidence.application.EvidenceContentAuthorityV1;
+import com.example.dispute.evidence.application.EvidenceParseOutboxService;
 import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
@@ -56,6 +59,7 @@ public class EvidenceContextEnvelopeFactory {
     private final CaseProcessProjectionRepository processProjectionRepository;
     private final CaseTimelineEventRepository timelineEventRepository;
     private final EvidenceItemRepository evidenceItemRepository;
+    private final EvidenceContentAuthorityLookup contentAuthorityLookup;
     private final RoomTurnMemoryRepository memoryRepository;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -77,6 +81,27 @@ public class EvidenceContextEnvelopeFactory {
                 null,
                 null,
                 evidenceItemRepository,
+                null,
+                memoryRepository,
+                objectMapper,
+                clock);
+    }
+
+    /** Source-compatible constructor for existing direct fixtures with frozen-submission readers. */
+    public EvidenceContextEnvelopeFactory(
+            CaseIntakeDossierRepository intakeDossierRepository,
+            CaseProcessProjectionRepository processProjectionRepository,
+            CaseTimelineEventRepository timelineEventRepository,
+            EvidenceItemRepository evidenceItemRepository,
+            RoomTurnMemoryRepository memoryRepository,
+            ObjectMapper objectMapper,
+            Clock clock) {
+        this(
+                intakeDossierRepository,
+                processProjectionRepository,
+                timelineEventRepository,
+                evidenceItemRepository,
+                null,
                 memoryRepository,
                 objectMapper,
                 clock);
@@ -88,6 +113,7 @@ public class EvidenceContextEnvelopeFactory {
             CaseProcessProjectionRepository processProjectionRepository,
             CaseTimelineEventRepository timelineEventRepository,
             EvidenceItemRepository evidenceItemRepository,
+            EvidenceContentAuthorityLookup contentAuthorityLookup,
             RoomTurnMemoryRepository memoryRepository,
             ObjectMapper objectMapper,
             Clock clock) {
@@ -95,6 +121,7 @@ public class EvidenceContextEnvelopeFactory {
         this.processProjectionRepository = processProjectionRepository;
         this.timelineEventRepository = timelineEventRepository;
         this.evidenceItemRepository = evidenceItemRepository;
+        this.contentAuthorityLookup = contentAuthorityLookup;
         this.memoryRepository = memoryRepository;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -165,6 +192,8 @@ public class EvidenceContextEnvelopeFactory {
         List<EvidenceContextEnvelopeV1.VisibleEvidence> visibleEvidence =
                 visibleEvidence(dispute.getId(), actor);
         validateEvidenceReferences(attachmentRefs, visibleEvidence);
+        List<EvidenceContentAuthorityV1> evidenceContentAuthorities =
+                evidenceContentAuthorities(dispute.getId(), attachmentRefs, visibleEvidence);
 
         return new EvidenceContextEnvelopeV1(
                 frozenSubmission == null
@@ -187,6 +216,7 @@ public class EvidenceContextEnvelopeFactory {
                         turnNo,
                         occurredAt.toString()),
                 visibleEvidence,
+                evidenceContentAuthorities,
                 new EvidenceContextEnvelopeV1.PrivateConversation(
                         agentSession.getId(),
                         agentSession.getConversationScope(),
@@ -201,6 +231,54 @@ public class EvidenceContextEnvelopeFactory {
                         dispute.getInitiatorRole().name(),
                         true),
                 frozenSubmission);
+    }
+
+    /**
+     * A missing durable row is deliberately not inferred from {@code parsed_text}; the target
+     * invocation publisher turns that absence into a fail-closed pre-run rejection. This method
+     * only freezes exact rows that already exist and preserves the participant's attachment order.
+     */
+    private List<EvidenceContentAuthorityV1> evidenceContentAuthorities(
+            String caseId,
+            List<String> attachmentRefs,
+            List<EvidenceContextEnvelopeV1.VisibleEvidence> visibleEvidence) {
+        if (contentAuthorityLookup == null || attachmentRefs == null || attachmentRefs.isEmpty()) {
+            return List.of();
+        }
+        var visibleById =
+                visibleEvidence.stream()
+                        .collect(
+                                Collectors.toMap(
+                                        EvidenceContextEnvelopeV1.VisibleEvidence::evidenceId,
+                                        item -> item,
+                                        (left, right) -> {
+                                            throw new IllegalStateException(
+                                                    "visible evidence contains duplicate identity");
+                                        },
+                                        java.util.LinkedHashMap::new));
+        return attachmentRefs.stream()
+                .map(visibleById::get)
+                .filter(Objects::nonNull)
+                .filter(
+                        evidence ->
+                                EvidenceContentAuthorityV1.isSupportedTextContentType(
+                                        evidence.contentType()))
+                .map(
+                        evidence ->
+                                contentAuthorityLookup
+                                        .findExact(
+                                                caseId,
+                                                evidence.evidenceId(),
+                                                evidence.fileHash(),
+                                                evidence.contentType(),
+                                                evidence.fileSize() == null
+                                                        ? 0L
+                                                        : evidence.fileSize(),
+                                                EvidenceParseOutboxService.PARSER_VERSION)
+                                        .map(EvidenceContentAuthorityLookup.StoredAuthority::authority)
+                                        .orElse(null))
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceContextEnvelopeFactory.caseSnapshot(FulfillmentCaseEntity)」。

@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+import hashlib
 import re
 
+from app.contracts.v1.codec import canonical_sha256
 from app.graph_runtime.errors import GraphRuntimeError
 from app.harness.localization_policy import localize_internal_text
+from app.schemas import (
+    EvidenceContentAuthorityV1,
+    EvidenceItemAssessment,
+    PublicEvidenceEpistemicStatus,
+    PublicEvidenceObservationProposalV1,
+    PublicEvidenceObservationV1,
+)
 from app.streaming import STREAM_MAX_VISIBLE_OUTPUT_CHARS
 
 
@@ -64,6 +73,10 @@ _ASSESSMENT_OBSERVATION_FRAME_ZH = re.compile(
 _SUBMISSION_PROVISIONAL_OBSERVATION_FRAME_ZH = re.compile(
     r"^本轮正在对材料所载“(?P<object>[^”]{1,1000})”进行核验。$"
 )
+_TYPED_PUBLIC_OBSERVATION_FRAME_ZH = re.compile(
+    r"^材料(?:记载“(?P<recorded>[^”]{1,240})”，仍待后续核验|"
+    r"所载“(?P<provisional>[^”]{1,240})”，可供后续核对)。$"
+)
 _UNSAFE_ASSERTION_OR_DIRECTIVE_ZH = re.compile(
     r"(?:责任|担责|过错|归责|造假|伪造|属实|真实有效|证据充分|"
     r"(?:应当|应该|必须|需要|建议|要求|责令|决定|支持|同意|拒绝)"
@@ -76,6 +89,7 @@ _MARKDOWN_OBSERVATION_PREFIX = re.compile(
 _MAX_SUBMISSION_SOURCE_OBSERVATIONS = 12
 _MAX_SUBMISSION_SOURCE_OBSERVATION_CHARS = 240
 _MAX_SUBMISSION_SOURCE_AUTHORITY_CHARS = 1200
+_MAX_TYPED_PUBLIC_SOURCE_QUOTE_CHARS = 200
 
 
 class EvidencePublicOutputPolicyError(RuntimeError):
@@ -89,6 +103,15 @@ class EvidencePublicOutputMismatch(
     """The live Evidence preview does not equal the guarded terminal reply."""
 
     code = "EVIDENCE_PUBLIC_OUTPUT_MISMATCH"
+
+
+class EvidencePublicObservationAuthorityError(
+    GraphRuntimeError,
+    EvidencePublicOutputPolicyError,
+):
+    """A typed public observation lacks exact current parsed authority."""
+
+    code = "EVIDENCE_PUBLIC_OBSERVATION_AUTHORITY_INVALID"
 
 
 def sanitize_evidence_public_prefix(text: str) -> str:
@@ -183,16 +206,20 @@ def compose_evidence_opening_public_reply(
 def compose_evidence_submission_public_reply(
     *,
     fact_targets: Iterable[Mapping[str, object]],
+    public_observations: Iterable[PublicEvidenceObservationV1],
     evidence_assessments: Iterable[object],
     human_review_tasks: Iterable[Mapping[str, object]],
-    source_reply: str | None = None,
-    submission_observation_authority: Iterable[str] = (),
 ) -> str:
-    """Derive a submission reply only from accepted assessment authority."""
+    """Compose one submission reply from canonical accepted observations only."""
 
     targets = tuple(fact_targets)
+    observations = tuple(public_observations)
     assessments = tuple(evidence_assessments)
     review_tasks = tuple(human_review_tasks)
+    if any(not isinstance(item, PublicEvidenceObservationV1) for item in observations):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence submission observations are not canonical"
+        )
     fact_by_id = {
         str(target.get("fact_id") or ""): target.get("fact")
         or target.get("fact_target")
@@ -200,21 +227,14 @@ def compose_evidence_submission_public_reply(
         for target in targets
         if isinstance(target, Mapping)
     }
-    linked_fact_ids = tuple(
-        dict.fromkeys(
-            fact_id
-            for assessment in assessments
-            for link in _authority_items(assessment, "fact_links")
-            if (fact_id := str(_authority_value(link, "fact_id") or ""))
-        )
+    observation_fact_ids = tuple(
+        dict.fromkeys(observation.fact_id for observation in observations)
     )
     linked_facts = _opening_items(
-        (fact_by_id.get(fact_id) for fact_id in linked_fact_ids),
+        (fact_by_id.get(fact_id) for fact_id in observation_fact_ids),
         limit=2,
     )
-    if not linked_facts:
-        linked_facts = _opening_items(fact_by_id.values(), limit=2)
-    subject = "、".join(linked_facts) or "本案待核验事项"
+    subject = "、".join(linked_facts) or "本轮材料"
 
     relations = {
         str(_authority_value(link, "relation") or "")
@@ -233,27 +253,9 @@ def compose_evidence_submission_public_reply(
         bool(_authority_value(_authority_value(assessment, "human_review"), "required"))
         for assessment in assessments
     )
-    observations = _assessment_observations(assessments)
-    source_authority = frozenset(submission_observation_authority)
-    live_observations = tuple(
-        observation
-        for observation in _submission_live_observations(source_reply or "")
-        if observation in source_authority
-    )
-    observation_set = set(observations)
-    if any(observation not in observation_set for observation in live_observations):
-        raise EvidencePublicOutputMismatch(
-            "Evidence submission live observation is absent from accepted authority"
-        )
-    live_set = set(live_observations)
-    live_observation_sentences = "".join(
-        _submission_observation_frame(observation)
-        for observation in live_observations
-    )
-    missing_observation_sentences = "".join(
-        f"已验收评估记录的待复核观察为“{observation}”的材料内容核对。"
+    observation_sentences = "".join(
+        _canonical_public_observation_text(observation)
         for observation in observations
-        if observation not in live_set
     )
 
     coverage_sentence = (
@@ -275,9 +277,8 @@ def compose_evidence_submission_public_reply(
         "".join(
             (
                 EVIDENCE_CANONICAL_OPENING,
-                live_observation_sentences,
+                observation_sentences,
                 f"本轮材料已纳入对“{subject}”的关联性核对。",
-                missing_observation_sentences,
                 "当前材料可用于核对相关记录内容和时间信息。",
                 coverage_sentence,
                 "材料来源路径、形成时间和原始载体的一致性仍需按程序复核。",
@@ -287,6 +288,448 @@ def compose_evidence_submission_public_reply(
             )
         )
     )
+
+
+def validate_public_observation_prefix(
+    *,
+    prior_accepted: Iterable[PublicEvidenceObservationV1],
+    candidate: PublicEvidenceObservationProposalV1 | Mapping[str, object],
+    evidence_content_authorities: Iterable[EvidenceContentAuthorityV1],
+    visible_evidence: Iterable[object],
+    attachment_refs: Iterable[str],
+    allowed_fact_targets: Iterable[Mapping[str, object]],
+    case_id: str,
+    actor_id: str,
+    actor_role: str,
+) -> PublicEvidenceObservationV1:
+    """Accept one complete provider item against its request-bound prefix."""
+
+    if isinstance(candidate, PublicEvidenceObservationV1):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation candidate must be a provider proposal"
+        )
+    raw_candidate = (
+        candidate
+        if isinstance(candidate, PublicEvidenceObservationProposalV1)
+        else PublicEvidenceObservationProposalV1.model_validate(candidate)
+    )
+    accepted = tuple(prior_accepted)
+    if any(not isinstance(item, PublicEvidenceObservationV1) for item in accepted):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation prefix is not canonical"
+        )
+    context = _public_observation_context(
+        evidence_content_authorities=evidence_content_authorities,
+        visible_evidence=visible_evidence,
+        attachment_refs=attachment_refs,
+        allowed_fact_targets=allowed_fact_targets,
+        case_id=case_id,
+        actor_id=actor_id,
+        actor_role=actor_role,
+    )
+    canonical: list[PublicEvidenceObservationV1] = []
+    seen_spans: set[tuple[str, int, int]] = set()
+    last_order: tuple[int, int, int] | None = None
+    total_chars = 0
+    for index, item in enumerate(accepted, start=1):
+        normalized, order_key = _validate_canonical_public_observation(
+            item,
+            expected_slot_id=f"OBS_{index:02d}",
+            context=context,
+        )
+        span_key = (
+            normalized.evidence_id,
+            normalized.source_start_byte,
+            normalized.source_end_byte,
+        )
+        if span_key in seen_spans or (last_order is not None and order_key <= last_order):
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence public observation order or source span is invalid"
+            )
+        seen_spans.add(span_key)
+        last_order = order_key
+        total_chars += len(normalized.public_text)
+        if index > _MAX_SUBMISSION_SOURCE_OBSERVATIONS or total_chars > _MAX_SUBMISSION_SOURCE_AUTHORITY_CHARS:
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence public observation budget is exceeded"
+            )
+        canonical.append(normalized)
+    normalized, order_key = _derive_canonical_public_observation(
+        raw_candidate,
+        expected_slot_id=f"OBS_{len(canonical) + 1:02d}",
+        context=context,
+    )
+    span_key = (
+        normalized.evidence_id,
+        normalized.source_start_byte,
+        normalized.source_end_byte,
+    )
+    if span_key in seen_spans or (last_order is not None and order_key <= last_order):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation order or source span is invalid"
+        )
+    if (
+        len(canonical) + 1 > _MAX_SUBMISSION_SOURCE_OBSERVATIONS
+        or total_chars + len(normalized.public_text)
+        > _MAX_SUBMISSION_SOURCE_AUTHORITY_CHARS
+    ):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation budget is exceeded"
+        )
+    return normalized
+
+
+def validate_submission_public_observations(
+    *,
+    observations: Iterable[PublicEvidenceObservationProposalV1],
+    evidence_content_authorities: Iterable[EvidenceContentAuthorityV1],
+    visible_evidence: Iterable[object],
+    attachment_refs: Iterable[str],
+    allowed_fact_targets: Iterable[Mapping[str, object]],
+    case_id: str,
+    actor_id: str,
+    actor_role: str,
+) -> tuple[PublicEvidenceObservationV1, ...]:
+    """Atomically fold the same prefix validator over one completed array."""
+
+    accepted: tuple[PublicEvidenceObservationV1, ...] = ()
+    for candidate in observations:
+        accepted = (
+            *accepted,
+            validate_public_observation_prefix(
+                prior_accepted=accepted,
+                candidate=candidate,
+                evidence_content_authorities=evidence_content_authorities,
+                visible_evidence=visible_evidence,
+                attachment_refs=attachment_refs,
+                allowed_fact_targets=allowed_fact_targets,
+                case_id=case_id,
+                actor_id=actor_id,
+                actor_role=actor_role,
+            ),
+        )
+    return accepted
+
+
+def reconcile_accepted_public_observations(
+    *,
+    canonical_observations: Iterable[PublicEvidenceObservationV1],
+    evidence_assessments: Iterable[EvidenceItemAssessment],
+) -> tuple[
+    tuple[PublicEvidenceObservationV1, ...],
+    tuple[EvidenceItemAssessment, ...],
+]:
+    """Bind accepted assessment slots to canonical public observation IDs."""
+
+    observations = tuple(canonical_observations)
+    assessments = tuple(evidence_assessments)
+    if any(not isinstance(item, PublicEvidenceObservationV1) for item in observations):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observations are not canonical"
+        )
+    if any(not isinstance(item, EvidenceItemAssessment) for item in assessments):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence assessments are not accepted models"
+        )
+    by_slot = {item.provider_slot_id: item for item in observations}
+    if len(by_slot) != len(observations):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation slots are duplicated"
+        )
+    seen_slots: set[str] = set()
+    reconciled: list[EvidenceItemAssessment] = []
+    for assessment in assessments:
+        if assessment.public_observation_ids:
+            raise EvidencePublicObservationAuthorityError(
+                "Provider cannot author canonical public observation IDs"
+            )
+        slots = tuple(assessment.public_observation_slots)
+        if len(slots) != len(set(slots)):
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence assessment public observation slots are duplicated"
+            )
+        fact_ids = {link.fact_id for link in assessment.fact_links}
+        derived_ids: list[str] = []
+        for slot in slots:
+            observation = by_slot.get(slot)
+            if (
+                observation is None
+                or slot in seen_slots
+                or observation.evidence_id != assessment.evidence_id
+                or observation.fact_id not in fact_ids
+                or observation.observation_id is None
+            ):
+                raise EvidencePublicObservationAuthorityError(
+                    "Evidence assessment public observation reconciliation is invalid"
+                )
+            seen_slots.add(slot)
+            derived_ids.append(observation.observation_id)
+        reconciled.append(
+            assessment.model_copy(
+                update={
+                    "public_observation_slots": [],
+                    "public_observation_ids": derived_ids,
+                }
+            )
+        )
+    if seen_slots != set(by_slot):
+        raise EvidencePublicObservationAuthorityError(
+            "Every public observation must be accepted by one assessment"
+        )
+    return observations, tuple(reconciled)
+
+
+def _public_observation_context(
+    *,
+    evidence_content_authorities: Iterable[EvidenceContentAuthorityV1],
+    visible_evidence: Iterable[object],
+    attachment_refs: Iterable[str],
+    allowed_fact_targets: Iterable[Mapping[str, object]],
+    case_id: str,
+    actor_id: str,
+    actor_role: str,
+) -> tuple[
+    dict[str, EvidenceContentAuthorityV1],
+    dict[str, object],
+    dict[str, int],
+    set[str],
+]:
+    references = tuple(attachment_refs)
+    if not references or len(references) != len(set(references)):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation attachment authority is invalid"
+        )
+    attachment_positions = {
+        evidence_id: index for index, evidence_id in enumerate(references)
+    }
+    visible_by_id: dict[str, object] = {}
+    for item in visible_evidence:
+        evidence_id = _authority_value(item, "evidence_id")
+        if (
+            not isinstance(evidence_id, str)
+            or evidence_id in visible_by_id
+        ):
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence public observation visible scope is invalid"
+            )
+        visible_by_id[evidence_id] = item
+    if any(reference not in visible_by_id for reference in references):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation visible attachments are incomplete"
+        )
+    if any(
+        _authority_value(visible_by_id[reference], "submitted_by_id") != actor_id
+        or _authority_value(visible_by_id[reference], "submitted_by_role") != actor_role
+        for reference in references
+    ):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation actor scope is invalid"
+        )
+    authority_by_id: dict[str, EvidenceContentAuthorityV1] = {}
+    previous_position = -1
+    for authority in evidence_content_authorities:
+        if not isinstance(authority, EvidenceContentAuthorityV1):
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence content authority type is invalid"
+            )
+        evidence_id = authority.evidence_id
+        position = attachment_positions.get(evidence_id)
+        visible = visible_by_id.get(evidence_id)
+        if (
+            authority.case_id != case_id
+            or position is None
+            or position <= previous_position
+            or evidence_id in authority_by_id
+            or visible is None
+            or _authority_value(visible, "file_hash") != authority.file_sha256
+            or _authority_value(visible, "content_type") != authority.content_type
+            or authority.status != "SUCCEEDED"
+            or not authority.parsed_text.strip()
+        ):
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence content authority scope is invalid"
+            )
+        previous_position = position
+        authority_by_id[evidence_id] = authority
+    supported_text_attachment_ids = {
+        evidence_id
+        for evidence_id in references
+        if _authority_value(visible_by_id[evidence_id], "content_type")
+        in {"text/plain", "text/markdown"}
+    }
+    if set(authority_by_id) != supported_text_attachment_ids:
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation supported text authority is incomplete"
+        )
+    allowed_fact_ids = {
+        str(target.get("fact_id") or "")
+        for target in allowed_fact_targets
+        if isinstance(target, Mapping) and str(target.get("fact_id") or "")
+    }
+    if not allowed_fact_ids:
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation fact authority is empty"
+        )
+    return authority_by_id, visible_by_id, attachment_positions, allowed_fact_ids
+
+
+def _derive_canonical_public_observation(
+    observation: PublicEvidenceObservationProposalV1,
+    *,
+    expected_slot_id: str,
+    context: tuple[
+        dict[str, EvidenceContentAuthorityV1],
+        dict[str, object],
+        dict[str, int],
+        set[str],
+    ],
+) -> tuple[PublicEvidenceObservationV1, tuple[int, int, int]]:
+    authority_by_id, _visible_by_id, attachment_positions, allowed_fact_ids = context
+    if observation.provider_slot_id != expected_slot_id:
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation slot order is invalid"
+        )
+    authority = authority_by_id.get(observation.evidence_id)
+    if authority is None or observation.fact_id not in allowed_fact_ids:
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation evidence or fact is unauthorized"
+        )
+    parsed_text = authority.parsed_text
+    if (
+        observation.parsed_content_sha256 != authority.parsed_content_sha256
+        or hashlib.sha256(parsed_text.encode("utf-8")).hexdigest()
+        != authority.parsed_content_sha256
+    ):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation parsed authority is unavailable"
+        )
+    quote = observation.source_quote
+    if (
+        quote != quote.strip()
+        or "\n" in quote
+        or "\r" in quote
+        or any(mark in quote for mark in "。！？!?")
+        or any(character in quote for character in "\"'“”‘’")
+        or len(quote) > _MAX_TYPED_PUBLIC_SOURCE_QUOTE_CHARS
+        or parsed_text.count(quote) != 1
+        or _sentence_violates_public_boundary(
+            _typed_public_observation_sentence(
+                epistemic_status=observation.epistemic_status,
+                text=quote,
+            )
+        )
+    ):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation source quote is invalid"
+        )
+    start_character = parsed_text.index(quote)
+    start_byte = len(parsed_text[:start_character].encode("utf-8"))
+    end_byte = start_byte + len(quote.encode("utf-8"))
+    quote_sha256 = hashlib.sha256(quote.encode("utf-8")).hexdigest()
+    public_text = _typed_public_observation_sentence(
+        epistemic_status=observation.epistemic_status,
+        text=quote,
+    )
+    observation_id = "PUBOBS_" + canonical_sha256(
+        {
+            "schema_version": observation.schema_version,
+            "evidence_id": observation.evidence_id,
+            "fact_id": observation.fact_id,
+            "observation_kind": observation.observation_kind.value,
+            "epistemic_status": observation.epistemic_status.value,
+            "file_sha256": authority.file_sha256,
+            "parsed_content_sha256": authority.parsed_content_sha256,
+            "source_start_byte": start_byte,
+            "source_end_byte": end_byte,
+            "quote_sha256": quote_sha256,
+        }
+    )[:24].upper()
+    return (
+        PublicEvidenceObservationV1(
+            schema_version=observation.schema_version,
+            provider_slot_id=observation.provider_slot_id,
+            observation_id=observation_id,
+            evidence_id=observation.evidence_id,
+            fact_id=observation.fact_id,
+            observation_kind=observation.observation_kind,
+            epistemic_status=observation.epistemic_status,
+            parsed_content_sha256=observation.parsed_content_sha256,
+            source_quote=quote,
+            public_text=public_text,
+            source_start_byte=start_byte,
+            source_end_byte=end_byte,
+            quote_sha256=quote_sha256,
+        ),
+        (attachment_positions[observation.evidence_id], start_byte, end_byte),
+    )
+
+
+def _validate_canonical_public_observation(
+    observation: PublicEvidenceObservationV1,
+    *,
+    expected_slot_id: str,
+    context: tuple[
+        dict[str, EvidenceContentAuthorityV1],
+        dict[str, object],
+        dict[str, int],
+        set[str],
+    ],
+) -> tuple[PublicEvidenceObservationV1, tuple[int, int, int]]:
+    expected, order_key = _derive_canonical_public_observation(
+        PublicEvidenceObservationProposalV1(
+            schema_version=observation.schema_version,
+            provider_slot_id=observation.provider_slot_id,
+            evidence_id=observation.evidence_id,
+            fact_id=observation.fact_id,
+            observation_kind=observation.observation_kind,
+            epistemic_status=observation.epistemic_status,
+            parsed_content_sha256=observation.parsed_content_sha256,
+            source_quote=observation.source_quote,
+        ),
+        expected_slot_id=expected_slot_id,
+        context=context,
+    )
+    if observation.model_dump(mode="json") != expected.model_dump(mode="json"):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation derived fields are not canonical"
+        )
+    return expected, order_key
+
+
+def _typed_public_observation_sentence(
+    *,
+    epistemic_status: PublicEvidenceEpistemicStatus,
+    text: str,
+) -> str:
+    if not text:
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation text is unavailable"
+        )
+    if epistemic_status is PublicEvidenceEpistemicStatus.PENDING_VERIFICATION:
+        return f"材料记载“{text}”，仍待后续核验。"
+    if epistemic_status is PublicEvidenceEpistemicStatus.PROVISIONAL:
+        return f"材料所载“{text}”，可供后续核对。"
+    raise EvidencePublicObservationAuthorityError(
+        "Evidence public observation status is invalid"
+    )
+
+
+def _canonical_public_observation_text(
+    observation: PublicEvidenceObservationV1,
+) -> str:
+    public_text = observation.public_text
+    if (
+        len(public_text) > _MAX_SUBMISSION_SOURCE_OBSERVATION_CHARS
+        or public_text
+        != _typed_public_observation_sentence(
+            epistemic_status=observation.epistemic_status,
+            text=observation.source_quote,
+        )
+    ):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation text is not canonical"
+        )
+    return public_text
 
 
 class EvidencePublicOutputPolicy:
@@ -701,13 +1144,26 @@ def _sentence_violates_public_boundary(sentence: str) -> bool:
         framed_object = _SUBMISSION_PROVISIONAL_OBSERVATION_FRAME_ZH.fullmatch(
             sentence
         )
+    typed_match = (
+        _TYPED_PUBLIC_OBSERVATION_FRAME_ZH.fullmatch(sentence)
+        if framed_object is None
+        else None
+    )
+    framed_text = (
+        framed_object.group("object")
+        if framed_object is not None
+        else (
+            typed_match.group("recorded") or typed_match.group("provisional")
+            if typed_match is not None
+            else None
+        )
+    )
     if (
-        framed_object is not None
-        and _UNSAFE_ASSERTION_OR_DIRECTIVE_ZH.search(framed_object.group("object"))
-        is None
+        framed_text is not None
+        and _UNSAFE_ASSERTION_OR_DIRECTIVE_ZH.search(framed_text) is None
     ):
         conclusion_scan = sentence.replace(
-            framed_object.group("object"),
+            framed_text,
             "待核验事实对象",
             1,
         )

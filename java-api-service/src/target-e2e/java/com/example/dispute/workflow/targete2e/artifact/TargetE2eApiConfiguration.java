@@ -48,6 +48,7 @@ import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewCommandMa
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.agentstream.application.AgentRunV2RetryPreparation;
+import com.example.dispute.evidence.application.EvidenceContentAuthorityLookup;
 import com.example.dispute.workflow.targete2e.artifact.recovery.TargetE2eAgentRunV2RetryPreparation;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
@@ -286,8 +287,10 @@ public class TargetE2eApiConfiguration {
   TargetE2eEvidenceTurnInvocationPublisher targetE2eEvidenceTurnInvocationPublisher(
       MinioTargetE2eRoomCommandPayloadPublisher payloadPublisher,
       TargetE2eRoomObjectIndex objectIndex,
-      ObjectMapper objectMapper) {
-    return new TargetE2eEvidenceTurnInvocationPublisher(payloadPublisher, objectIndex, objectMapper);
+      ObjectMapper objectMapper,
+      EvidenceContentAuthorityLookup contentAuthorityLookup) {
+    return new TargetE2eEvidenceTurnInvocationPublisher(
+        payloadPublisher, objectIndex, objectMapper, contentAuthorityLookup);
   }
 
   @Bean

@@ -119,12 +119,11 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     from app.graph_runtime.production_bindings import _build_target_e2e_evidence_workflow
     from app.agents.evidence_clerk.public_reply import (
         EVIDENCE_CANONICAL_OPENING,
-        EvidencePublicOutputMismatch,
+        EvidencePublicObservationAuthorityError,
         EvidencePublicOutputPolicyError,
         compose_evidence_opening_public_reply,
         compose_evidence_submission_public_reply,
-        derive_submission_observation_authority,
-        guard_evidence_public_reply,
+        validate_public_observation_prefix,
     )
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
@@ -133,7 +132,12 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     )
     from app.schemas import EvidenceTurnRequest, EvidenceTurnResult
     from app.security.graph_runtime import GraphSecurityRuntime
-    from app.streaming import STREAM_MAX_VISIBLE_OUTPUT_CHARS, current_stream_observer
+    from app.streaming import (
+        STREAM_MAX_VISIBLE_OUTPUT_CHARS,
+        IncrementalVisibleJsonProjector,
+        VisibleFieldSpec,
+        current_stream_observer,
+    )
     from app.llm import LiteLlmProxyClient
 
     helper_module = runpy.run_path(
@@ -165,6 +169,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             "evidence_type": "DOCUMENT",
             "content_type": "text/markdown",
             "original_filename": "refund-record.md",
+            "file_hash": hashlib.sha256(b"refund-record-content").hexdigest(),
             "parsed_text": (
                 "# 退款记录核对摘录\n"
                 f"- {submission_observation}\n"
@@ -180,15 +185,58 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     dossier.pop("unilateral_case_matrix", None)
     dossier["case_fact_matrix"] = helper_module["_case_fact_matrix_v2"]()
 
-    safe_prefix = EVIDENCE_CANONICAL_OPENING
     arbitrary_safe_submission_sentence = "本轮正在核对材料形成时间。"
     risky_sentence = "不判断责任但实际由商家承担。"
     raw_room_utterance = (
-        safe_prefix + arbitrary_safe_submission_sentence + risky_sentence
+        arbitrary_safe_submission_sentence + risky_sentence
     )
-    guarded_room_utterance = guard_evidence_public_reply(raw_room_utterance)
+    parsed_text = submitted_evidence["parsed_text"]
+    assert isinstance(parsed_text, str)
+    parsed_content_sha256 = hashlib.sha256(parsed_text.encode("utf-8")).hexdigest()
+    request_document["context_envelope"]["evidence_content_authorities"] = [
+        {
+            "schema_version": "evidence_content_authority.v1",
+            "case_id": request_document["context_envelope"]["case_snapshot"][
+                "case_id"
+            ],
+            "evidence_id": "EVIDENCE_signature_photo",
+            "file_sha256": submitted_evidence["file_hash"],
+            "content_type": "text/markdown",
+            "parser_version": "PARSER_TEST_V1",
+            "parsed_content_sha256": parsed_content_sha256,
+            "parsed_text": parsed_text,
+            "parsed_byte_length": len(parsed_text.encode("utf-8")),
+            "completed_at": "2026-08-17T10:00:00+08:00",
+            "status": "SUCCEEDED",
+        }
+    ]
+    request = EvidenceTurnRequest.model_validate(request_document)
+    submission_working_set = EvidenceContextAssembler().assemble(request).working_set
+    raw_public_observation = {
+        "schema_version": "public_evidence_observation.v1",
+        "provider_slot_id": "OBS_01",
+        "evidence_id": "EVIDENCE_signature_photo",
+        "fact_id": "FACT_SIGNATURE",
+        "observation_kind": "PARSED_RECORD",
+        "epistemic_status": "PENDING_VERIFICATION",
+        "parsed_content_sha256": parsed_content_sha256,
+        "source_quote": submission_observation,
+    }
+    canonical_public_observation = validate_public_observation_prefix(
+        prior_accepted=(),
+        candidate=raw_public_observation,
+        evidence_content_authorities=request.context_envelope.evidence_content_authorities,
+        visible_evidence=request.context_envelope.visible_evidence,
+        attachment_refs=request.context_envelope.current_event.attachment_refs,
+        allowed_fact_targets=submission_working_set.allowed_fact_targets,
+        case_id=request.context_envelope.case_snapshot.case_id,
+        actor_id=request.context_envelope.actor_snapshot.actor_id,
+        actor_role=request.context_envelope.actor_snapshot.actor_role,
+    )
+    assert canonical_public_observation.observation_id is not None
     submission_assessment = {
         "evidence_id": "EVIDENCE_signature_photo",
+        "public_observation_ids": [canonical_public_observation.observation_id],
         "analysis_method": "TEXT_ONLY",
         "inspected_modalities": ["PARSED_TEXT"],
         "authenticity_score": 0.55,
@@ -196,7 +244,14 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         "completeness_score": 0.48,
         "assessment_confidence": 0.72,
         "source_basis": [submission_observation],
-        "fact_links": [],
+        "fact_links": [
+            {
+                "fact_id": "FACT_SIGNATURE",
+                "relation": "INCONCLUSIVE",
+                "reason": "材料所载退款记录仍需与平台原始记录核对。",
+                "confidence": 0.61,
+            }
+        ],
         "supported_fact_ids": [],
         "unsupported_claims": ["当前材料不能单独还原完整事实"],
         "formation_time_assessment": submission_observation,
@@ -210,28 +265,17 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         },
         "summary": "页面日期与退款记录范围仍待交叉核对",
     }
-    submission_working_set = EvidenceContextAssembler().assemble(
-        EvidenceTurnRequest.model_validate(request_document)
-    ).working_set
-    submission_observation_authority = derive_submission_observation_authority(
-        visible_evidence=EvidenceTurnRequest.model_validate(
-            request_document
-        ).context_envelope.visible_evidence,
-        attachment_refs=request_document["context_envelope"]["current_event"][
-            "attachment_refs"
-        ],
-    )
-    source_observation_frame = (
-        f"本轮正在对材料所载“{submission_observation}”进行核验。"
-    )
     submission_room_utterance = compose_evidence_submission_public_reply(
         fact_targets=submission_working_set.allowed_fact_targets,
+        public_observations=[canonical_public_observation],
         evidence_assessments=[submission_assessment],
         human_review_tasks=[],
-        source_reply=EVIDENCE_CANONICAL_OPENING + source_observation_frame,
-        submission_observation_authority=submission_observation_authority,
     )
-    burst_chunks = tuple(submission_room_utterance)
+    serialized_public_observation = json.dumps(
+        raw_public_observation,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     timeline: list[str] = []
 
     class FakeFormalWorkflow:
@@ -240,9 +284,11 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             self.provider_calls = 0
             self.invoke_started = asyncio.Event()
             self.release_after_bootstrap = asyncio.Event()
-            self.source_frame_submitted = asyncio.Event()
-            self.capability_frame_submitted = asyncio.Event()
-            self.release_sensitive_tail = asyncio.Event()
+            self.partial_item_submitted = asyncio.Event()
+            self.release_complete_item = asyncio.Event()
+            self.complete_item_submitted = asyncio.Event()
+            self.raw_terminal_submitted = asyncio.Event()
+            self.release_terminal = asyncio.Event()
             self.completed = asyncio.Event()
 
         def run(self, request):
@@ -264,6 +310,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 memory_frame={"guarded": True},
                 canvas_operations=[],
                 referenced_evidence_ids=["EVIDENCE_signature_photo"],
+                public_observations=[canonical_public_observation],
                 evidence_assessments=[submission_assessment],
             )
 
@@ -282,43 +329,51 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             observer = current_stream_observer()
             assert observer is not None
             if len(self.calls) > 1:
-                for chunk in burst_chunks:
-                    observer.visible_delta(
-                        "evidence_turn",
-                        "room_utterance",
-                        chunk,
-                    )
+                observer.visible_delta(
+                    "evidence_turn",
+                    "public_observations",
+                    serialized_public_observation,
+                )
+                observer.visible_delta(
+                    "evidence_turn",
+                    "room_utterance",
+                    raw_room_utterance,
+                )
                 self.publish_usage(observer)
                 return self.result(submission_room_utterance)
 
             self.invoke_started.set()
             await self.release_after_bootstrap.wait()
-            observer.visible_delta("evidence_turn", "room_utterance", safe_prefix)
-            for chunk in source_observation_frame:
-                observer.visible_delta("evidence_turn", "room_utterance", chunk)
-            self.source_frame_submitted.set()
+            projector = IncrementalVisibleJsonProjector(
+                (
+                    VisibleFieldSpec(
+                        "public_observations",
+                        "public_observations",
+                        "json_array_items",
+                        max_array_items=12,
+                    ),
+                )
+            )
+            partial_document = (
+                '{"public_observations":[' + serialized_public_observation[:-1]
+            )
+            assert projector.feed(partial_document) == []
+            self.partial_item_submitted.set()
+            await self.release_complete_item.wait()
+            completed_items = projector.feed(serialized_public_observation[-1:])
+            assert completed_items == [
+                ("public_observations", serialized_public_observation)
+            ]
+            for field_name, item_json in completed_items:
+                observer.visible_delta("evidence_turn", field_name, item_json)
+            self.complete_item_submitted.set()
             observer.visible_delta(
                 "evidence_turn",
                 "room_utterance",
-                f"本轮正在对材料所载“{capability_observation}”进行核验。",
+                raw_room_utterance,
             )
-            self.capability_frame_submitted.set()
-            observer.visible_delta(
-                "evidence_turn",
-                "room_utterance",
-                arbitrary_safe_submission_sentence,
-            )
-            observer.visible_delta(
-                "evidence_turn",
-                "room_utterance",
-                risky_sentence[:-2],
-            )
-            await self.release_sensitive_tail.wait()
-            observer.visible_delta(
-                "evidence_turn",
-                "room_utterance",
-                risky_sentence[-2:],
-            )
+            self.raw_terminal_submitted.set()
+            await self.release_terminal.wait()
             self.publish_usage(observer)
             result = self.result(submission_room_utterance)
             self.completed.set()
@@ -620,22 +675,42 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     assert not workflow.invoke_started.is_set()
     await asyncio.wait_for(workflow.invoke_started.wait(), timeout=1.0)
     assert not workflow.release_after_bootstrap.is_set()
-    assert not workflow.source_frame_submitted.is_set()
+    assert not workflow.partial_item_submitted.is_set()
     assert not workflow.completed.is_set()
     assert store.puts == []
     assert saver.commits == []
 
-    next_event_task = asyncio.create_task(anext(first_stream))
     workflow.release_after_bootstrap.set()
-    await workflow.source_frame_submitted.wait()
-    await workflow.capability_frame_submitted.wait()
-    source_event = await asyncio.wait_for(next_event_task, timeout=1.0)
-    first.append(source_event)
-    timeline.append(f"yield:{source_event.event_type}")
-    assert source_event.event_type == "visible_delta"
-    assert submission_observation in (source_event.payload.delta or "")
-    assert capability_observation not in (source_event.payload.delta or "")
-    workflow.release_sensitive_tail.set()
+    await asyncio.wait_for(workflow.partial_item_submitted.wait(), timeout=1.0)
+    next_item_task = asyncio.create_task(anext(first_stream))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(next_item_task), timeout=0.05)
+    assert not workflow.complete_item_submitted.is_set()
+    assert not workflow.completed.is_set()
+    assert store.puts == []
+    assert saver.commits == []
+
+    workflow.release_complete_item.set()
+    await asyncio.wait_for(workflow.complete_item_submitted.wait(), timeout=1.0)
+    material_event = await asyncio.wait_for(next_item_task, timeout=1.0)
+    first.append(material_event)
+    timeline.append(f"yield:{material_event.event_type}")
+    assert material_event.event_type == "visible_delta"
+    assert material_event.payload.field == "room_utterance"
+    assert material_event.payload.delta == canonical_public_observation.public_text
+    assert submission_observation in (material_event.payload.delta or "")
+    assert serialized_public_observation not in (material_event.payload.delta or "")
+    assert not workflow.completed.is_set()
+    assert store.puts == []
+    assert saver.commits == []
+
+    await asyncio.wait_for(workflow.raw_terminal_submitted.wait(), timeout=1.0)
+    terminal_task = asyncio.create_task(anext(first_stream))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(terminal_task), timeout=0.05)
+    workflow.release_terminal.set()
+    first.append(await asyncio.wait_for(terminal_task, timeout=1.0))
+    timeline.append(f"yield:{first[-1].event_type}")
     async for event in first_stream:
         first.append(event)
         timeline.append(f"yield:{event.event_type}")
@@ -656,9 +731,8 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     assert submission_room_utterance.count(EVIDENCE_CANONICAL_OPENING) == 1
     assert arbitrary_safe_submission_sentence not in submission_room_utterance
     assert submission_observation in submission_room_utterance
-    assert capability_observation not in submission_room_utterance
     assert risky_sentence not in submission_room_utterance
-    assert guarded_room_utterance != submission_room_utterance
+    assert raw_room_utterance not in submission_room_utterance
     assert all(
         event.payload.field == "room_utterance"
         for event in first
@@ -679,6 +753,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         "referenced_evidence_ids",
         "verification_suggestions",
         "authenticity_flags",
+        "public_observations",
         "evidence_assessments",
         "fact_matrix_patch",
         "human_review_tasks",
@@ -880,7 +955,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         event_type == "visible_delta"
         for event_type in later_types[1:later_usage_index]
     )
-    assert len(burst_chunks) > 64
+    assert len(serialized_public_observation) > 64
     assert "".join(
         event.payload.delta or ""
         for event in later
@@ -897,10 +972,8 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     assert store.puts[2]["execution"] is later_execution
     assert later_saver.commits[0].result.result_hash == later[-1].payload.final_result_hash
 
-    class UnprovenSourceWorkflow:
-        def __init__(self, source_text: str | None, raw_final: str) -> None:
-            self.source_text = source_text
-            self.raw_final = raw_final
+    class InvalidObservationWorkflow:
+        def __init__(self) -> None:
             self.calls = 0
 
         def run(self, request):
@@ -910,71 +983,66 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             self.calls += 1
             observer = current_stream_observer()
             assert observer is not None
-            if self.source_text is not None:
-                observer.visible_delta(
-                    "evidence_turn",
-                    "room_utterance",
-                    self.source_text,
-                )
-            FakeFormalWorkflow.publish_usage(observer)
-            return FakeFormalWorkflow.result(
-                guard_evidence_public_reply(self.raw_final)
-            )
-
-    unproven_cases = (("no-source", None, safe_prefix),)
-    for case_index, (case_name, source_text, raw_final) in enumerate(
-        unproven_cases,
-        start=3,
-    ):
-        failure_command = command.model_copy(
-            update={
-                "command_id": f"evidence-submit:EVIDENCE_BATCH_TEST:{case_name}",
-                "attempt_id": f"target-evidence-run:formal-test:{case_index}",
-                "request_hash": str(case_index) * 64,
+            invalid_item = {
+                **raw_public_observation,
+                "provider_slot_id": "OBS_02",
             }
-        )
-        failure_fence = replace(
-            fence,
-            command_id=failure_command.command_id,
-            request_hash=failure_command.request_hash,
-            command_hash=canonical_sha256(
-                failure_command.model_dump(mode="json")
-            ),
-            command_envelope_hash=str(case_index + 3) * 64,
-        )
-        failure_execution = SimpleNamespace(
-            admission=SimpleNamespace(
-                command=failure_command,
-                binding=execution.admission.binding,
-            ),
-            fence=failure_fence,
-        )
-        failure_saver = FencedMemorySaver()
-        failure_workflow = UnprovenSourceWorkflow(source_text, raw_final)
-        failure_provider = tuple(
-            TargetE2ESpecializedRoomProviderFactory(
-                security_runtime=object.__new__(GraphSecurityRuntime),
-                room_exchange=room_exchange,
-                hearing_decoder=unused_hearing_decoder,
+            observer.visible_delta(
+                "evidence_turn",
+                "public_observations",
+                json.dumps(invalid_item, ensure_ascii=False, separators=(",", ":")),
             )
-            .with_evidence_workflow(failure_workflow)(
-                SimpleNamespace(saver=failure_saver, durable_bulkhead=object())
-            )
-        )[0]
-        puts_before_failure = len(store.puts)
-        failure_events = []
-        with pytest.raises(EvidencePublicOutputMismatch):
-            async for event in failure_provider.stream(failure_execution):
-                failure_events.append(event)
 
-        assert [event.event_type for event in failure_events] == [
-            "attempt_started",
-            "visible_delta",
-        ]
-        assert failure_events[1].payload.delta == EVIDENCE_CANONICAL_OPENING
-        assert len(store.puts) == puts_before_failure
-        assert failure_saver.commits == []
-        assert failure_workflow.calls == 1
+    failure_command = command.model_copy(
+        update={
+            "command_id": "evidence-submit:EVIDENCE_BATCH_TEST:invalid-observation",
+            "attempt_id": "target-evidence-run:formal-test:3",
+            "request_hash": "3" * 64,
+        }
+    )
+    failure_fence = replace(
+        fence,
+        command_id=failure_command.command_id,
+        request_hash=failure_command.request_hash,
+        command_hash=canonical_sha256(failure_command.model_dump(mode="json")),
+        command_envelope_hash="6" * 64,
+    )
+    failure_execution = SimpleNamespace(
+        admission=SimpleNamespace(
+            command=failure_command,
+            binding=execution.admission.binding,
+        ),
+        fence=failure_fence,
+    )
+    failure_saver = FencedMemorySaver()
+    failure_workflow = InvalidObservationWorkflow()
+    failure_provider = tuple(
+        TargetE2ESpecializedRoomProviderFactory(
+            security_runtime=object.__new__(GraphSecurityRuntime),
+            room_exchange=room_exchange,
+            hearing_decoder=unused_hearing_decoder,
+        )
+        .with_evidence_workflow(failure_workflow)(
+            SimpleNamespace(saver=failure_saver, durable_bulkhead=object())
+        )
+    )[0]
+    puts_before_failure = len(store.puts)
+    failure_events = []
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="slot order is invalid",
+    ):
+        async for event in failure_provider.stream(failure_execution):
+            failure_events.append(event)
+
+    assert [event.event_type for event in failure_events] == [
+        "attempt_started",
+        "visible_delta",
+    ]
+    assert failure_events[1].payload.delta == EVIDENCE_CANONICAL_OPENING
+    assert len(store.puts) == puts_before_failure
+    assert failure_saver.commits == []
+    assert failure_workflow.calls == 1
 
     async def assert_rejected(document, code: str) -> None:
         payload = canonicalize(document)
@@ -1301,6 +1369,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     empty_attachment_submission["context_envelope"]["current_event"][
         "text"
     ] = "Evidence reference without a bound attachment"
+    empty_attachment_submission["context_envelope"]["evidence_content_authorities"] = []
     rejection_cases = (
         ((opening_capability,), request_document),
         ((submission_capability,), opening_request_document),
@@ -1331,6 +1400,8 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
 
 @pytest.mark.asyncio
 async def test_target_evidence_submission_authorizes_deterministic_terminal_reply_after_live_preview() -> None:
+    import hashlib
+    import json
     import runpy
     from pathlib import Path
 
@@ -1340,29 +1411,85 @@ async def test_target_evidence_submission_authorizes_deterministic_terminal_repl
         EVIDENCE_PUBLIC_NODE,
         compose_evidence_submission_public_reply,
         guard_evidence_public_reply,
+        validate_public_observation_prefix,
     )
     from app.graph_runtime.errors import GraphContractError
     from app.graph_runtime.evidence_turn_executor import (
         CompiledEvidenceTurnExecutor,
         _EvidencePreviewBridge,
+        _SubmissionObservationPublicOutputPolicy,
     )
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
     from app.schemas import EvidenceTurnRequest, EvidenceTurnResult
-    from app.streaming import current_stream_observer
+    from app.streaming import (
+        AgentStreamObserver,
+        StreamVisibleDeltaEvent,
+        current_stream_observer,
+    )
 
     helper_module = runpy.run_path(
         str(Path(__file__).parents[1] / "agents" / "test_evidence_clerk_turn.py")
     )
-    request = EvidenceTurnRequest.model_validate(
-        helper_module["_java_evidence_turn_command_payload"]()
+    request_document = helper_module["_java_evidence_turn_command_payload"]()
+    source_quote = "退款工单未生成"
+    parsed_text = f"退款记录摘要\n{source_quote}\n仍需与平台记录核对"
+    submitted = request_document["context_envelope"]["visible_evidence"][0]
+    submitted.update(
+        {
+            "content_type": "text/markdown",
+            "file_hash": hashlib.sha256(b"submission-preview").hexdigest(),
+            "parsed_text": parsed_text,
+        }
     )
+    parsed_content_sha256 = hashlib.sha256(parsed_text.encode("utf-8")).hexdigest()
+    request_document["context_envelope"]["evidence_content_authorities"] = [
+        {
+            "schema_version": "evidence_content_authority.v1",
+            "case_id": request_document["context_envelope"]["case_snapshot"][
+                "case_id"
+            ],
+            "evidence_id": "EVIDENCE_signature_photo",
+            "file_sha256": submitted["file_hash"],
+            "content_type": "text/markdown",
+            "parser_version": "PARSER_TEST_V1",
+            "parsed_content_sha256": parsed_content_sha256,
+            "parsed_text": parsed_text,
+            "parsed_byte_length": len(parsed_text.encode("utf-8")),
+            "completed_at": "2026-08-17T10:00:00+08:00",
+            "status": "SUCCEEDED",
+        }
+    ]
+    request = EvidenceTurnRequest.model_validate(request_document)
     current_event = request.context_envelope.current_event
     assert current_event.event_type == "PARTY_MESSAGE"
     assert current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
     assert current_event.attachment_refs
 
+    working_set = EvidenceContextAssembler().assemble(request).working_set
+    proposal = {
+        "schema_version": "public_evidence_observation.v1",
+        "provider_slot_id": "OBS_01",
+        "evidence_id": "EVIDENCE_signature_photo",
+        "fact_id": "FACT_SIGNATURE",
+        "observation_kind": "PARSED_TRANSACTION_STATUS",
+        "epistemic_status": "PROVISIONAL",
+        "parsed_content_sha256": parsed_content_sha256,
+        "source_quote": source_quote,
+    }
+    canonical_observation = validate_public_observation_prefix(
+        prior_accepted=(),
+        candidate=proposal,
+        evidence_content_authorities=request.context_envelope.evidence_content_authorities,
+        visible_evidence=request.context_envelope.visible_evidence,
+        attachment_refs=current_event.attachment_refs,
+        allowed_fact_targets=working_set.allowed_fact_targets,
+        case_id=request.context_envelope.case_snapshot.case_id,
+        actor_id=request.context_envelope.actor_snapshot.actor_id,
+        actor_role=request.context_envelope.actor_snapshot.actor_role,
+    )
     assessment = {
         "evidence_id": "EVIDENCE_signature_photo",
+        "public_observation_ids": [canonical_observation.observation_id],
         "analysis_method": "TEXT_ONLY",
         "inspected_modalities": ["PARSED_TEXT"],
         "authenticity_score": 0.55,
@@ -1384,14 +1511,15 @@ async def test_target_evidence_submission_authorizes_deterministic_terminal_repl
         "recommendation": "PLAUSIBLE",
         "summary": "截图涉及签收争议，但覆盖范围有限。",
     }
-    working_set = EvidenceContextAssembler().assemble(request).working_set
     expected_reply = compose_evidence_submission_public_reply(
         fact_targets=working_set.allowed_fact_targets,
+        public_observations=[canonical_observation],
         evidence_assessments=[assessment],
         human_review_tasks=[],
     )
     accepted_result = EvidenceTurnResult(
         room_utterance=expected_reply,
+        public_observations=[canonical_observation],
         evidence_assessments=[assessment],
         internal_handoff={
             "evidence_change_summary": "已读取本轮证据。",
@@ -1412,7 +1540,6 @@ async def test_target_evidence_submission_authorizes_deterministic_terminal_repl
             self.bridge = bridge
             self.calls = 0
             self.live_visible_text = ""
-            self.guarded_source_reply = ""
 
         async def arun(self, provider_request: EvidenceTurnRequest) -> EvidenceTurnResult:
             self.calls += 1
@@ -1421,11 +1548,15 @@ async def test_target_evidence_submission_authorizes_deterministic_terminal_repl
             assert observer is not None
             observer.visible_delta(
                 EVIDENCE_PUBLIC_NODE,
+                "public_observations",
+                json.dumps(proposal, ensure_ascii=False, separators=(",", ":")),
+            )
+            observer.visible_delta(
+                EVIDENCE_PUBLIC_NODE,
                 EVIDENCE_PUBLIC_FIELD,
                 raw_provider_reply,
             )
             self.live_visible_text = self.bridge.policy.visible_text
-            self.guarded_source_reply = self.bridge.policy.guarded_source_reply
             observer.usage(
                 node_name=EVIDENCE_PUBLIC_NODE,
                 model="evidence-submission-test-model",
@@ -1439,11 +1570,24 @@ async def test_target_evidence_submission_authorizes_deterministic_terminal_repl
         *,
         run_id: str,
     ) -> tuple[EvidenceTurnResult, object, _EvidencePreviewBridge, SubmissionWorkflow]:
-        bridge = _EvidencePreviewBridge(provider_request=request)
+        policy = _SubmissionObservationPublicOutputPolicy(request)
+        bridge = _EvidencePreviewBridge(provider_request=request, policy=policy)
         workflow = SubmissionWorkflow(candidate, bridge)
         executor = object.__new__(CompiledEvidenceTurnExecutor)
         executor._workflow = workflow
         executor._preview_bridges = {run_id: bridge}
+        observer = AgentStreamObserver(
+            operation="evidence_turn",
+            run_id=run_id,
+            publish=lambda event: (
+                bridge.publish(event)
+                if isinstance(event, StreamVisibleDeltaEvent)
+                else bridge.observed_usage.append(event)
+            ),
+            public_output_policy=policy,
+        )
+        bridge.bind(observer)
+        observer.begin_public_output(EVIDENCE_PUBLIC_NODE, EVIDENCE_PUBLIC_FIELD)
         result, usage = await executor._invoke_workflow(
             request,
             logical_run_id=run_id,
@@ -1456,9 +1600,8 @@ async def test_target_evidence_submission_authorizes_deterministic_terminal_repl
     )
 
     assert workflow.calls == 1
-    assert workflow.live_visible_text == EVIDENCE_CANONICAL_OPENING
-    assert workflow.guarded_source_reply == guard_evidence_public_reply(
-        raw_provider_reply
+    assert workflow.live_visible_text == (
+        EVIDENCE_CANONICAL_OPENING + canonical_observation.public_text
     )
     assert result.room_utterance == expected_reply
     assert bridge.policy.visible_text == expected_reply
@@ -1471,6 +1614,7 @@ async def test_target_evidence_submission_authorizes_deterministic_terminal_repl
 
     replayed_reply = compose_evidence_submission_public_reply(
         fact_targets=working_set.allowed_fact_targets,
+        public_observations=result.public_observations,
         evidence_assessments=result.evidence_assessments,
         human_review_tasks=result.human_review_tasks,
     )
@@ -1485,6 +1629,9 @@ async def test_target_evidence_submission_authorizes_deterministic_terminal_repl
         == ()
     )
     assert bridge.policy.visible_text == expected_reply
+    assert raw_provider_reply not in "".join(
+        event.delta for event in bridge.pending
+    )
 
     unauthorized_reply = guard_evidence_public_reply(
         "本轮仅记录一段与权威评估无关的任意终态说明。"
@@ -1492,7 +1639,7 @@ async def test_target_evidence_submission_authorizes_deterministic_terminal_repl
     assert unauthorized_reply != expected_reply
     with pytest.raises(
         GraphContractError,
-        match="^EVIDENCE_SUBMISSION_PUBLIC_REPLY_BINDING_INVALID$",
+        match="^EVIDENCE_PUBLIC_OUTPUT_TERMINAL_MISMATCH$",
     ):
         await invoke(
             accepted_result.model_copy(
@@ -1577,7 +1724,14 @@ async def test_target_evidence_preview_close_cancels_without_terminal_side_effec
     request = SimpleNamespace(
         agent_context=SimpleNamespace(
             agent_invocation_id="AGENT_INVOCATION_PREVIEW_CANCELLATION"
-        )
+        ),
+        context_envelope=SimpleNamespace(
+            current_event=SimpleNamespace(
+                event_type="ROOM_OPENING",
+                message_type="AGENT_MESSAGE",
+                attachment_refs=(),
+            )
+        ),
     )
     execution = SimpleNamespace(
         admission=SimpleNamespace(
@@ -1598,6 +1752,11 @@ async def test_target_evidence_preview_close_cancels_without_terminal_side_effec
         assert received_execution is execution
         assert kwargs["request"] is request
         return {}
+
+    def provider_governed_request(received_execution, received_request):
+        assert received_execution is execution
+        assert received_request is request
+        return request
 
     async def run_or_replay(received_execution, initial):
         assert received_execution is execution
@@ -1620,6 +1779,7 @@ async def test_target_evidence_preview_close_cancels_without_terminal_side_effec
 
     executor._load_invocation = load_invocation
     executor._initial_state = initial_state
+    executor._provider_governed_request = provider_governed_request
     executor._run_or_replay = run_or_replay
 
     stream = executor.stream(execution, store=store).__aiter__()
