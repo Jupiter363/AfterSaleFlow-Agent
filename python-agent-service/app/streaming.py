@@ -339,6 +339,11 @@ class V2DeltaCoalescer:
         return [pending]
 
 
+VISIBLE_FIELD_VALUE_MODES = frozenset(
+    {"string_prefix", "json_value", "json_array_items"}
+)
+
+
 @dataclass(frozen=True)
 class VisibleFieldSpec:
     """允许从模型 JSON 投影到公开流的一个属性。

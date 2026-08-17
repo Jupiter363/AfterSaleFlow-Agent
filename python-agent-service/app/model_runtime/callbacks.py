@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from threading import Lock
 from typing import Any
 
@@ -9,6 +12,37 @@ from langchain_core.outputs import ChatGenerationChunk, LLMResult
 
 
 GOVERNED_EVENTS_KEY = "governed_events"
+
+GovernedVisibleDeltaSink = Callable[[str, str, str], None]
+_ACTIVE_GOVERNED_VISIBLE_DELTA_SINK: ContextVar[
+    GovernedVisibleDeltaSink | None
+] = ContextVar("active_governed_visible_delta_sink", default=None)
+
+
+@contextmanager
+def bind_governed_visible_delta_sink(
+    sink: GovernedVisibleDeltaSink,
+) -> Iterator[None]:
+    """Bind one execution-local consumer for already-governed live deltas."""
+
+    token = _ACTIVE_GOVERNED_VISIBLE_DELTA_SINK.set(sink)
+    try:
+        yield
+    finally:
+        _ACTIVE_GOVERNED_VISIBLE_DELTA_SINK.reset(token)
+
+
+def publish_governed_visible_delta(
+    *,
+    node_name: str,
+    field: str,
+    delta: str,
+) -> None:
+    """Mirror a validated provider delta without changing its callback payload."""
+
+    sink = _ACTIVE_GOVERNED_VISIBLE_DELTA_SINK.get()
+    if sink is not None:
+        sink(node_name, field, delta)
 
 
 def visible_delta_event(*, node_name: str, field: str, delta: str) -> dict[str, str]:

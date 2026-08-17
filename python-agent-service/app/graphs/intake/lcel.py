@@ -10,7 +10,7 @@ from inspect import getattr_static
 from typing import Any, Literal, cast
 from weakref import WeakKeyDictionary
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, message_chunk_to_message
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import (
@@ -630,7 +630,15 @@ class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
         output: Any | None = None
         async for chunk in self._pipeline.astream(input, config=config, **kwargs):
             _VettedIntakeModelRunnable._require_sealed(self)
-            output = chunk
+            if output is None:
+                output = chunk
+                continue
+            try:
+                output = output + chunk
+            except TypeError as error:
+                raise IntakeGraphContractError(
+                    "INTAKE_LCEL_STREAM_ACCUMULATION_INVALID"
+                ) from error
         if output is None:
             raise IntakeGraphContractError("INTAKE_LCEL_STREAM_EMPTY")
         _VettedIntakeModelRunnable._after_execution(self)
@@ -2220,6 +2228,19 @@ def _generation_parts(
     return state, message, draft
 
 
+def _completed_generation_message(value: object) -> AIMessage:
+    """Normalize only LangChain's explicit terminal chunk to an AIMessage."""
+
+    if isinstance(value, AIMessage):
+        return value
+    if not isinstance(value, AIMessageChunk) or value.chunk_position != "last":
+        raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
+    converted = message_chunk_to_message(value)
+    if not isinstance(converted, AIMessage):
+        raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
+    return converted
+
+
 def _generation_parts_with_baseline_context(
     value: Mapping[str, Any],
     *,
@@ -2324,10 +2345,8 @@ def _adapt_and_normalize_generation_parts(
     generation = value.get("generation")
     if not isinstance(state, dict) or not isinstance(generation, Mapping):
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
-    message = generation.get("message")
+    message = _completed_generation_message(generation.get("message"))
     draft = generation.get("draft")
-    if not isinstance(message, AIMessage):
-        raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     typed_state = cast(IntakeGraphStateV2, state)
     fresh_form_request: IntakeTurnRequest | None = None
     handoff_request: IntakeTurnRequest | None = None

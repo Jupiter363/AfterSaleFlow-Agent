@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import aclosing
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol, cast
 
@@ -69,7 +71,10 @@ from app.graphs.intake.contracts import IntakeTurnProposal, RESPONDENT_OPENING_M
 from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
 from app.graphs.intake.validators import validate_state
-from app.model_runtime.callbacks import governed_events_from_chunk
+from app.model_runtime.callbacks import (
+    bind_governed_visible_delta_sink,
+    governed_events_from_chunk,
+)
 from app.model_runtime.transports import ModelTransport
 from app.streaming import (
     IncrementalVisibleJsonProjector,
@@ -102,6 +107,123 @@ _AGENT_STREAM_DELTA_MAX_LENGTH = 4096
 # multi-byte UTF-8 character can never be split for a downstream consumer.
 _TARGET_INTAKE_CANONICAL_REPLAY_SOURCE_CHUNK_LENGTH = 64
 _SHA256_HEX_LENGTH = 64
+_INTAKE_LIVE_STREAM_QUEUE_LIMIT = 64
+
+
+@dataclass(frozen=True)
+class _IntakeLiveVisibleDelta:
+    node_name: str
+    field: str
+    delta: str
+
+
+@dataclass(frozen=True)
+class _IntakeGraphCandidate:
+    value: Any
+    consumed: asyncio.Event
+
+
+@dataclass(frozen=True)
+class _IntakeGraphFailure:
+    error: BaseException
+
+
+_INTAKE_GRAPH_DONE = object()
+
+
+def _governed_candidate_signatures(
+    candidate: Any,
+) -> tuple[tuple[str, str, str], ...]:
+    if not isinstance(candidate, tuple) or len(candidate) != 2:
+        return ()
+    mode, payload = candidate
+    if mode != "messages" or not isinstance(payload, tuple) or len(payload) != 2:
+        return ()
+    chunk, _ = payload
+    if not isinstance(chunk, AIMessageChunk):
+        return ()
+    return tuple(
+        (event["node_name"], event["field"], event["delta"])
+        for event in governed_events_from_chunk(chunk)
+    )
+
+
+async def _live_target_intake_graph_stream(
+    source: AsyncIterator[Any],
+) -> AsyncIterator[Any]:
+    """Expose governed provider deltas before LangGraph's terminal callback flush."""
+
+    queue: asyncio.Queue[object] = asyncio.Queue(
+        maxsize=_INTAKE_LIVE_STREAM_QUEUE_LIMIT
+    )
+    pending_echoes: deque[tuple[str, str, str]] = deque()
+
+    def publish(node_name: str, field: str, delta: str) -> None:
+        signature = (node_name, field, delta)
+        try:
+            queue.put_nowait(_IntakeLiveVisibleDelta(*signature))
+        except asyncio.QueueFull as error:
+            raise GraphContractError(
+                "INTAKE_LIVE_STREAM_BACKPRESSURE_EXCEEDED"
+            ) from error
+        pending_echoes.append(signature)
+
+    async def pump() -> None:
+        cancelled = False
+        try:
+            with bind_governed_visible_delta_sink(publish):
+                async with aclosing(source):
+                    async for candidate in source:
+                        signatures = _governed_candidate_signatures(candidate)
+                        if signatures and pending_echoes:
+                            mirrored = tuple(
+                                pending_echoes[index]
+                                for index in range(min(len(signatures), len(pending_echoes)))
+                            )
+                            if len(mirrored) != len(signatures) or mirrored != signatures:
+                                raise GraphContractError(
+                                    "INTAKE_LIVE_STREAM_ECHO_DIVERGED"
+                                )
+                            for _ in signatures:
+                                pending_echoes.popleft()
+                            continue
+                        consumed = asyncio.Event()
+                        await queue.put(_IntakeGraphCandidate(candidate, consumed))
+                        await consumed.wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except BaseException as error:
+            await queue.put(_IntakeGraphFailure(error))
+        finally:
+            if not cancelled:
+                await queue.put(_INTAKE_GRAPH_DONE)
+
+    pump_task = asyncio.create_task(pump())
+    try:
+        while True:
+            item = await queue.get()
+            if item is _INTAKE_GRAPH_DONE:
+                break
+            if isinstance(item, _IntakeGraphFailure):
+                raise item.error
+            if isinstance(item, _IntakeLiveVisibleDelta):
+                yield item
+                continue
+            if not isinstance(item, _IntakeGraphCandidate):
+                raise GraphContractError("INTAKE_LIVE_STREAM_ITEM_INVALID")
+            try:
+                yield item.value
+            finally:
+                item.consumed.set()
+        await pump_task
+    finally:
+        if not pump_task.done():
+            pump_task.cancel()
+        try:
+            await pump_task
+        except asyncio.CancelledError:
+            pass
 
 
 def _intake_executor_diagnostic_error(
@@ -221,7 +343,7 @@ class CompiledIntakeGraphShadowExecutor:
         emitted_usage: list[Usage] = []
         pending_usage_update: GraphPublicUpdate | None = None
         streamed_room_utterance_parts: list[str] = []
-        target_visible_updates: list[GraphPublicUpdate] = []
+        target_terminal_visible_updates: list[GraphPublicUpdate] = []
         target_action_gate: Mapping[str, Any] | None = None
         target_gate_update_observed = False
         target_room_synthesized_from_gate = False
@@ -248,12 +370,17 @@ class CompiledIntakeGraphShadowExecutor:
             context=context,
             stream_mode=stream_modes,
         )
+        if target_reply_then_board:
+            source = _live_target_intake_graph_stream(source)
         close = getattr(source, "aclose", None)
         if not callable(close):
             raise GraphContractError("compiled Intake Graph stream is not closable")
         try:
             async for candidate in source:
-                if target_reply_then_board:
+                live_visible_delta = (
+                    candidate if isinstance(candidate, _IntakeLiveVisibleDelta) else None
+                )
+                if target_reply_then_board and live_visible_delta is None:
                     (
                         is_update,
                         observed_gate,
@@ -301,7 +428,18 @@ class CompiledIntakeGraphShadowExecutor:
                             target_room_released = True
                             target_room_synthesized_from_gate = True
                         continue
-                for update in self._public_updates(candidate):
+                updates = (
+                    (
+                        GraphPublicUpdate.visible_delta(
+                            node=live_visible_delta.node_name,
+                            field=live_visible_delta.field,
+                            delta=live_visible_delta.delta,
+                        ),
+                    )
+                    if live_visible_delta is not None
+                    else self._public_updates(candidate)
+                )
+                for update in updates:
                     self._validate_public_update(update)
                     if update.event_type == "usage":
                         if pending_usage_update is not None:
@@ -383,7 +521,9 @@ class CompiledIntakeGraphShadowExecutor:
                             streamed_room_utterance_parts.append(projected_room_utterance)
                         room_utterance_received = True
                         continue
-                    if not field.startswith("case_detail."):
+                    if field != "ordered_sections" and not field.startswith(
+                        "case_detail."
+                    ):
                         raise GraphContractError(
                             "compiled Intake Graph emitted an unsupported visible field"
                         )
@@ -416,9 +556,17 @@ class CompiledIntakeGraphShadowExecutor:
                     # and terminal proposal finish.  String leaves arrive as real
                     # prefixes; structured sections arrive once their JSON value closes.
                     # The durable proposal and formal dossier remain authoritative only
-                    # after the fenced terminal commit below succeeds.
+                    # after the fenced terminal commit below succeeds. These updates are
+                    # provisional UI state and are cleared by the attempt lifecycle if a
+                    # later terminal check fails.
                     if target_reply_then_board:
-                        target_visible_updates.append(update)
+                        yield self._event(
+                            execution,
+                            sequence,
+                            update.event_type,
+                            update.payload,
+                        )
+                        sequence += 1
                     else:
                         yield self._event(
                             execution,
@@ -511,15 +659,14 @@ class CompiledIntakeGraphShadowExecutor:
                     streamed=canonical_room,
                     terminal=streamed_room_utterance,
                 )
-                target_visible_updates.extend(
+                target_terminal_visible_updates.extend(
                     update
                     for update in canonical_updates
                     if update.payload.field != _INTAKE_ROOM_UTTERANCE_FIELD
                 )
-            # The action-gated room is already public. Board updates remain
-            # private until terminal equality succeeds, then release in their
-            # original governed order.
-            for update in target_visible_updates:
+            # A gate-synthesized reply had no provider preview, so only that
+            # compatibility path has terminal board updates left to publish.
+            for update in target_terminal_visible_updates:
                 self._validate_public_update(update)
                 yield self._event(
                     execution,

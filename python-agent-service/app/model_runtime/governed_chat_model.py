@@ -26,7 +26,11 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from app.llm import GovernedProviderRequest
-from app.model_runtime.callbacks import GOVERNED_EVENTS_KEY, visible_delta_event
+from app.model_runtime.callbacks import (
+    GOVERNED_EVENTS_KEY,
+    publish_governed_visible_delta,
+    visible_delta_event,
+)
 from app.model_runtime.profiles import ModelInvocationPolicy, ModelProfile, system_prompt_sha256
 from app.model_runtime.transports import (
     ModelTransport,
@@ -39,6 +43,7 @@ from app.model_runtime.transports import (
 )
 from app.streaming import (
     AgentStreamObserver,
+    VISIBLE_FIELD_VALUE_MODES,
     VisibleFieldSpec,
     bind_stream_observer,
     current_stream_observer,
@@ -260,6 +265,11 @@ class GovernedChatModel(BaseChatModel):
                     if isinstance(update, ModelTransportVisibleDelta):
                         update = self._validated_visible_delta(update)
                         visible = True
+                        publish_governed_visible_delta(
+                            node_name=self.policy.node_name,
+                            field=update.field,
+                            delta=update.delta,
+                        )
                         yield self._visible_chunk(update)
                         continue
                     if not isinstance(update, ModelTransportCompleted):
@@ -323,6 +333,11 @@ class GovernedChatModel(BaseChatModel):
                         if isinstance(update, ModelTransportVisibleDelta):
                             update = self._validated_visible_delta(update)
                             visible = True
+                            publish_governed_visible_delta(
+                                node_name=self.policy.node_name,
+                                field=update.field,
+                                delta=update.delta,
+                            )
                             yield self._visible_chunk(update)
                             continue
                         if not isinstance(update, ModelTransportCompleted):
@@ -749,7 +764,7 @@ def _validated_visible_fields(
             or not spec.property_name
             or not isinstance(spec.field, str)
             or not spec.field
-            or spec.value_mode not in {"string_prefix", "json_value"}
+            or spec.value_mode not in VISIBLE_FIELD_VALUE_MODES
         ):
             raise ModelPolicyViolation("visible field policy contains an invalid entry")
         if spec.property_name in property_names or spec.field in public_fields:

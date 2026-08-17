@@ -19,7 +19,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
-from app.agents.dispute_intake_officer.schemas import IntakeFreshFormOpeningLlmOutput
+from app.agents.dispute_intake_officer.schemas import IntakeInitiatorRoomLlmOutputV3
 from app.agents.evidence_clerk.workflow import EVIDENCE_TURN_MODEL_NODE_NAME
 import app.graph_runtime.intake_executor as intake_executor
 import app.graph_runtime.production_bindings as production_bindings
@@ -113,6 +113,7 @@ from app.model_runtime.transports import (
     StructuredClientTransport,
 )
 from app.streaming import IncrementalVisibleJsonProjector
+from tests.agents.intake_v3_fixture import intake_initiator_v3_payload
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -490,39 +491,39 @@ def _intake_version(command: RoomGraphCommand) -> VersionBinding:
 
 
 def _strict_baseline_opening_output() -> dict[str, Any]:
-    """A valid retained-baseline response for a snapshot-only opening turn."""
+    """A valid ordered V3 response for a snapshot-only opening turn."""
 
-    return IntakeFreshFormOpeningLlmOutput.model_validate(
+    payload = intake_initiator_v3_payload(
+        room_utterance="What resolution would you like for the damaged order?",
+        total_score=64,
+        blocking_gaps=("requested_resolution_detail",),
+        nice_to_have_gaps=(),
+        next_questions=("What resolution would you like for the damaged order?",),
+        improvement_reason="The requested resolution still needs to be provided.",
+        confidence=0.82,
+    )
+    matrix = payload["ordered_sections"][0]["value"]
+    matrix["fact_rows"] = [
         {
-            "conversation_action": "ASK_SUBSTANTIVE",
-            "room_utterance": "What resolution would you like for the damaged order?",
-                "case_detail": {
-                    "case_story": {
-                        "one_sentence_summary": (
-                            "The imported case concerns the reported damaged order."
-                        )
-                    }
-                },
-                "case_matrix_delta": {
-                    "schema_version": "case_fact_matrix.delta.v2",
-                    "fact_rows": [
-                        {
-                            "fact_key": "NEW_CASE_SUMMARY",
-                            "category": "OTHER",
-                            "fact_target": "The order was reported damaged.",
-                            "materiality": "CORE",
-                            "stance": "CONFIRM",
-                            "position_summary": "The user reports a damaged order.",
-                            "asserted_value": "The order was reported damaged.",
-                            "source_scope": "CURRENT_SOURCE",
-                        }
-                    ],
-                    "summary_source_fact_keys": ["NEW_CASE_SUMMARY"],
-                },
-                "missing_fields": ["requested_resolution_detail"],
-                "confidence": 0.82,
-            }
-        ).model_dump(mode="json", exclude_none=True)
+            "fact_key": "NEW_CASE_SUMMARY",
+            "category": "OTHER",
+            "fact_target": "The order was reported damaged.",
+            "materiality": "CORE",
+            "stance": "CONFIRM",
+            "position_summary": "The user reports a damaged order.",
+            "asserted_value": "The order was reported damaged.",
+            "source_scope": "CURRENT_SOURCE",
+        }
+    ]
+    matrix["summary_source_fact_keys"] = ["NEW_CASE_SUMMARY"]
+    story = payload["ordered_sections"][1]["value"]
+    story["title"] = "Reported damaged order"
+    story["one_sentence_summary"] = (
+        "The imported case concerns the reported damaged order."
+    )
+    return IntakeInitiatorRoomLlmOutputV3.model_validate(payload).model_dump(
+        mode="json",
+    )
 
 
 class _StrictBaselineIntakeTransport:
@@ -569,7 +570,12 @@ class _StrictBaselineIntakeTransport:
 
     def _assert_baseline_opening_request(self, request: ModelTransportRequest) -> None:
         assert request.node_name == BASELINE_INTAKE_NODE_NAME
-        assert request.output_type is IntakeFreshFormOpeningLlmOutput
+        assert request.output_type is IntakeInitiatorRoomLlmOutputV3
+        assert any(
+            field.field == "ordered_sections"
+            and field.value_mode == "json_array_items"
+            for field in request.visible_fields
+        )
         assert len(request.messages) == 2
         system_prompt = str(request.messages[0].content)
         human_prompt = str(request.messages[1].content)
@@ -599,6 +605,8 @@ def _strict_baseline_opening_transport(
 class _StrictStreamingBaselineIntakeTransport(_StrictBaselineIntakeTransport):
     """Expose controlled governed deltas while retaining the exact opening request checks."""
 
+    stream_completed = False
+
     async def astream(self, request: ModelTransportRequest):
         self.generate_calls += 1
         self.requests.append(request)
@@ -612,6 +620,7 @@ class _StrictStreamingBaselineIntakeTransport(_StrictBaselineIntakeTransport):
         for offset in range(0, len(document), 19):
             for field, delta in projector.feed(document[offset : offset + 19]):
                 yield ModelTransportVisibleDelta(field=field, delta=delta)
+        self.stream_completed = True
         yield ModelTransportCompleted(
             result=ModelTransportResult(
                 json_document=document,
@@ -2145,15 +2154,28 @@ async def test_target_intake_executor_runs_real_fresh_opening_preview_to_termina
     )
     assert isinstance(registration.executor, CompiledIntakeGraphShadowExecutor)
 
+    events = []
     await exchange.aopen()
     try:
-        events = [event async for event in registration.executor.stream(execution)]
+        async for event in registration.executor.stream(execution):
+            if (
+                event.event_type == "visible_delta"
+                and event.payload.field == "ordered_sections"
+            ):
+                assert transport.stream_completed is False
+            events.append(event)
     finally:
         await exchange.aclose()
     room_events = [
         event
         for event in events
         if event.event_type == "visible_delta" and event.payload.field == "room_utterance"
+    ]
+    ordered_section_events = [
+        event
+        for event in events
+        if event.event_type == "visible_delta"
+        and event.payload.field == "ordered_sections"
     ]
 
     assert events[0].event_type == "attempt_started"
@@ -2164,6 +2186,13 @@ async def test_target_intake_executor_runs_real_fresh_opening_preview_to_termina
         "room_utterance"
     ]
     assert max(event.sequence_no for event in room_events) < events[-1].sequence_no
+    assert [json.loads(event.payload.delta or "")["sequence"] for event in ordered_section_events] == list(
+        range(1, 11)
+    )
+    assert max(event.sequence_no for event in room_events) < min(
+        event.sequence_no for event in ordered_section_events
+    )
+    assert max(event.sequence_no for event in ordered_section_events) < events[-1].sequence_no
     assert transport.generate_calls == 1
     assert len(transport.requests) == 1
     assert response_counts == {"load": 1, "put": 1}
@@ -3618,9 +3647,9 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
             ("case_detail.references", raw_dossier_delta),
         ]
         assert visible_commit_states == [False, False, False]
-        # Room text is public while the source is open. The board is retained
-        # until the graph has produced the matching terminal proposal.
-        assert visible_source_completion_states == [False, False, True]
+        # Reply and provisional board both stream while the source is open.
+        # A later terminal failure still produces no formal result.
+        assert visible_source_completion_states == [False, False, False]
         assert saver.preflights == 1
         assert store.calls == 1
         assert saver.commits == (1 if failure_stage == "commit" else 0)
@@ -3658,9 +3687,9 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
         event.payload.delta or "" for event in room_events
     ) == terminal_room_utterance
     assert visible_commit_states == [False, False, False]
-    # Room text is emitted while the source is open; the board remains
-    # terminal-bound and is released only after streamed/terminal equality.
-    assert visible_source_completion_states == [False, False, True]
+    # Reply and provisional board both arrive before provider/graph completion;
+    # terminal validation remains the separate durable commit boundary.
+    assert visible_source_completion_states == [False, False, False]
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
@@ -4809,7 +4838,10 @@ async def test_target_intake_executor_streams_three_full_width_questions_before_
         for field, source_completed in visible_source_completion_states
         if field == "room_utterance"
     )
-    assert visible_source_completion_states[-1] == ("case_detail.references", True)
+    assert visible_source_completion_states[-1] == (
+        "case_detail.references",
+        False,
+    )
     assert events[-2].event_type == "usage"
     assert events[-1].event_type == "final"
     assert saver.preflights == 1
