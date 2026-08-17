@@ -876,6 +876,77 @@ def test_invalid_first_event_is_rejected_before_stream_headers_are_sent() -> Non
     assert service.closed is True
 
 
+def test_target_stream_exposes_only_registered_intake_contract_error_codes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    command, _ = _command()
+    envelope = _target_envelope(command)
+    stable_code = "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+
+    before_service = FakeStreamService(
+        (),
+        failure_before=IntakeGraphContractError(stable_code),
+    )
+    before = _target_client(envelope=envelope, service=before_service).post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+        },
+    )
+    assert before.status_code == 502
+    assert before.json() == {"code": stable_code, "retryable": False}
+    assert before_service.closed is True
+
+    after_service = FakeStreamService(
+        (_event(command, "attempt_started", 0),),
+        failure_after=IntakeGraphContractError(stable_code),
+    )
+    after = _target_client(envelope=envelope, service=after_service).post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+        },
+    )
+    assert after.status_code == 200
+    after_events = [json.loads(line) for line in after.text.splitlines()]
+    assert [event["event_type"] for event in after_events] == ["attempt_started", "error"]
+    assert after_events[-1]["payload"] == {
+        "error_code": stable_code,
+        "retryable": False,
+    }
+    assert after_service.closed is True
+
+    private_code = "INTAKE_API_TOKEN_SECRET"
+    private_detail = "provider payload api_token=private-value"
+    private_error = IntakeGraphContractError(private_code)
+    private_error.__cause__ = RuntimeError(private_detail)
+    private_service = FakeStreamService(
+        (_event(command, "attempt_started", 0),),
+        failure_after=private_error,
+    )
+    private = _target_client(envelope=envelope, service=private_service).post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+        },
+    )
+    private_events = [json.loads(line) for line in private.text.splitlines()]
+    assert private_events[-1]["payload"] == {
+        "error_code": "GRAPH_STREAM_PROTOCOL_REJECTED",
+        "retryable": False,
+    }
+    assert private_code not in private.text
+    assert private_detail not in private.text
+    assert private_detail not in caplog.text
+    assert private_service.closed is True
+
+
 def test_gateway_contract_error_before_first_event_keeps_public_runtime_mapping() -> None:
     command, instance = _command()
     private_key = ec.generate_private_key(ec.SECP256R1())

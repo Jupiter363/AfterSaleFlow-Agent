@@ -93,6 +93,19 @@ LOGGER = logging.getLogger(__name__)
 _FORBIDDEN_BOOTSTRAP_HEADER = "x-aftersaleflow-target-e2e-activation"
 _TARGET_RESULT_REF_HEADER = "x-graph-result-ref"
 _TARGET_PROPOSAL_HASH_HEADER = "x-graph-proposal-hash"
+
+
+def _public_intake_contract_error_code(error: BaseException) -> str | None:
+    """Return only a reviewed Intake contract code from the exact domain error."""
+
+    if type(error) is not IntakeGraphContractError:
+        return None
+    code = error.code
+    if not isinstance(code, str) or code not in STABLE_INTAKE_GRAPH_CONTRACT_ERROR_CODES:
+        return None
+    return code
+
+
 _TARGET_RESULT_REF = re.compile(r"^(?:s3|minio|urn):[!-~]{1,507}$")
 _TARGET_PROPOSAL_HASH = re.compile(r"^[0-9a-f]{64}$")
 _STREAM_CLOSE_TIMEOUT_SECONDS = 3.0
@@ -339,10 +352,16 @@ def create_graph_commands_router(
             if iterator is not None:
                 await _close_iterator_safely(iterator)
             return _graph_runtime_error(error)
-        except (AgentStreamProtocolError, TypeError, ValueError):
+        except (AgentStreamProtocolError, TypeError, ValueError) as error:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
-            return _error_response(502, "GRAPH_STREAM_PROTOCOL_REJECTED", False)
+            _log_safe_failure("graph stream startup protocol", error)
+            return _error_response(
+                502,
+                _public_intake_contract_error_code(error)
+                or "GRAPH_STREAM_PROTOCOL_REJECTED",
+                False,
+            )
         except Exception as error:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
@@ -460,10 +479,16 @@ def create_graph_commands_router(
             if iterator is not None:
                 await _close_iterator_safely(iterator)
             return _graph_runtime_error(error)
-        except (AgentStreamProtocolError, TypeError, ValueError):
+        except (AgentStreamProtocolError, TypeError, ValueError) as error:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
-            return _error_response(502, "GRAPH_STREAM_PROTOCOL_REJECTED", False)
+            _log_safe_failure("target-E2E graph stream startup protocol", error)
+            return _error_response(
+                502,
+                _public_intake_contract_error_code(error)
+                or "GRAPH_STREAM_PROTOCOL_REJECTED",
+                False,
+            )
         except Exception as error:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
@@ -908,7 +933,8 @@ async def _stream_ndjson(
         yield _encode_terminal_error(
             codec,
             validator,
-            error_code="GRAPH_STREAM_PROTOCOL_REJECTED",
+            error_code=_public_intake_contract_error_code(error)
+            or "GRAPH_STREAM_PROTOCOL_REJECTED",
         )
     except (ModelTransportOutputError, AgentOutputSchemaError) as error:
         _log_safe_failure("graph stream model output", error)
