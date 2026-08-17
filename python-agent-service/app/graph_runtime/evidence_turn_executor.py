@@ -27,6 +27,7 @@ from app.agents.evidence_clerk.public_reply import (
     EVIDENCE_PUBLIC_NODE,
     EvidencePublicOutputPolicy,
     compose_evidence_opening_public_reply,
+    require_relevant_parsed_observation_coverage,
     validate_public_observation_prefix,
 )
 from app.contracts.v1.models import (
@@ -333,6 +334,12 @@ class _SubmissionObservationPublicOutputPolicy:
             raise GraphContractError(
                 "EVIDENCE_PUBLIC_OBSERVATION_TERMINAL_RECONCILIATION_INVALID"
             )
+        require_relevant_parsed_observation_coverage(
+            canonical_observations=observations,
+            evidence_assessments=result.evidence_assessments,
+            evidence_content_authorities=self._evidence_content_authorities,
+            allowed_fact_targets=self._allowed_fact_targets,
+        )
         by_id: dict[str, PublicEvidenceObservationV1] = {}
         for observation in observations:
             if observation.observation_id is None or observation.observation_id in by_id:

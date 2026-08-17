@@ -17,6 +17,7 @@ from app.agents.evidence_clerk.public_reply import (
     compose_evidence_submission_public_reply,
     guard_evidence_public_reply,
     reconcile_accepted_public_observations,
+    require_relevant_parsed_observation_coverage,
     validate_submission_public_observations,
 )
 from app.harness.context_pack import build_context_pack
@@ -34,6 +35,7 @@ from app.schemas import (
     EvidenceTurnRequest,
     EvidenceTurnResult,
 )
+from app.schemas.final_agents import EvidenceParsedTextSubmissionLlmOutput
 
 
 LOGGER = logging.getLogger(__name__)
@@ -348,10 +350,21 @@ def _evidence_model_invocation(
         context_sources,
         actor_role=working_set.actor_role,
     )
+    current_event = assembled.raw_envelope.current_event
+    output_type = (
+        EvidenceParsedTextSubmissionLlmOutput
+        if (
+            current_event.event_type == "PARTY_MESSAGE"
+            and current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
+            and bool(current_event.attachment_refs)
+            and bool(assembled.raw_envelope.evidence_content_authorities)
+        )
+        else EvidenceTurnLlmOutput
+    )
     invocation: dict[str, Any] = {
         "node_name": EVIDENCE_TURN_MODEL_NODE_NAME,
         "case_data": assembled.case_data,
-        "output_type": EvidenceTurnLlmOutput,
+        "output_type": output_type,
         "agent_context": agent_context,
         "prompt_profile_id": agent_context.prompt_profile_id,
         "context_pack": context_pack,
@@ -419,6 +432,13 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         request,
         state.get("asset_manifest", {"items": []}),
     )
+    if current_event.attachment_refs:
+        require_relevant_parsed_observation_coverage(
+            canonical_observations=public_observations,
+            evidence_assessments=evidence_assessments,
+            evidence_content_authorities=envelope.evidence_content_authorities,
+            allowed_fact_targets=request.allowed_fact_targets,
+        )
     public_observations, evidence_assessments = (
         reconcile_accepted_public_observations(
             canonical_observations=public_observations,

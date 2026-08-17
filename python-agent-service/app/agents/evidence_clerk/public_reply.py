@@ -6,6 +6,9 @@ from collections.abc import Iterable, Mapping
 import hashlib
 import re
 
+from app.agents.evidence_clerk.assessment_policy import (
+    recover_parsed_text_fact_coordinates,
+)
 from app.contracts.v1.codec import canonical_sha256
 from app.graph_runtime.errors import GraphRuntimeError
 from app.harness.localization_policy import localize_internal_text
@@ -409,6 +412,62 @@ def validate_submission_public_observations(
             ),
         )
     return accepted
+
+
+def require_relevant_parsed_observation_coverage(
+    *,
+    canonical_observations: Iterable[PublicEvidenceObservationV1],
+    evidence_assessments: Iterable[EvidenceItemAssessment],
+    evidence_content_authorities: Iterable[EvidenceContentAuthorityV1],
+    allowed_fact_targets: Iterable[Mapping[str, object]],
+) -> None:
+    """Require exact coverage for each parsed authority with a server coordinate."""
+
+    observations = tuple(canonical_observations)
+    assessments = tuple(evidence_assessments)
+    fact_targets = tuple(allowed_fact_targets)
+    required_coordinates = {
+        authority.evidence_id: fact_ids
+        for authority in evidence_content_authorities
+        if isinstance(authority, EvidenceContentAuthorityV1)
+        and authority.status == "SUCCEEDED"
+        and authority.content_type in {"text/plain", "text/markdown"}
+        and (
+            fact_ids := recover_parsed_text_fact_coordinates(
+                authority.parsed_text,
+                fact_targets,
+            )
+        )
+    }
+    for evidence_id, fact_ids in required_coordinates.items():
+        validated_fact_ids = frozenset(fact_ids)
+        candidates = tuple(
+            observation
+            for observation in observations
+            if isinstance(observation, PublicEvidenceObservationV1)
+            and observation.evidence_id == evidence_id
+            and observation.fact_id in validated_fact_ids
+        )
+        assessment_bound = any(
+            isinstance(assessment, EvidenceItemAssessment)
+            and assessment.evidence_id == evidence_id
+            and any(
+                observation.fact_id
+                in {link.fact_id for link in assessment.fact_links}
+                and (
+                    observation.provider_slot_id
+                    in set(assessment.public_observation_slots)
+                    or observation.observation_id
+                    in set(assessment.public_observation_ids)
+                )
+                for observation in candidates
+            )
+            for assessment in assessments
+        )
+        if not candidates or not assessment_bound:
+            raise EvidencePublicObservationAuthorityError(
+                "relevant parsed evidence requires public observation authority"
+            )
 
 
 def reconcile_accepted_public_observations(

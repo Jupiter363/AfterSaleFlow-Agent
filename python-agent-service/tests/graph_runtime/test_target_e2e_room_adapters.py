@@ -125,6 +125,9 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         compose_evidence_submission_public_reply,
         validate_public_observation_prefix,
     )
+    from app.agents.evidence_clerk.assessment_policy import (
+        recover_parsed_text_fact_coordinate,
+    )
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
     from app.harness.model_runner import (
@@ -160,6 +163,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     submission_observation = (
         "页面日期显示2026-08-13，形成时间仍需与平台记录核对"
     )
+    second_submission_observation = "退款工单未生成"
     capability_observation = (
         "当前多模态核验仅接收受控图片输入；该格式需要人工复核"
     )
@@ -174,7 +178,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 "# 退款记录核对摘录\n"
                 f"- {submission_observation}\n"
                 "- 承诺退款金额为20元\n"
-                "- 退款工单未生成\n"
+                f"- {second_submission_observation}\n"
                 "- 未发现成功退款流水"
             ),
             "desensitized": True,
@@ -183,7 +187,12 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     )
     dossier = request_document["context_envelope"]["intake_dossier_snapshot"]["payload"]
     dossier.pop("unilateral_case_matrix", None)
-    dossier["case_fact_matrix"] = helper_module["_case_fact_matrix_v2"]()
+    case_fact_matrix = helper_module["_case_fact_matrix_v2"]()
+    case_fact_matrix["fact_rows"][0]["fact_target"] = (
+        "退款工单未生成，且未发现成功退款流水"
+    )
+    helper_module["_rehash_case_fact_matrix"](case_fact_matrix)
+    dossier["case_fact_matrix"] = case_fact_matrix
 
     arbitrary_safe_submission_sentence = "本轮正在核对材料形成时间。"
     risky_sentence = "不判断责任但实际由商家承担。"
@@ -212,6 +221,13 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     ]
     request = EvidenceTurnRequest.model_validate(request_document)
     submission_working_set = EvidenceContextAssembler().assemble(request).working_set
+    assert (
+        recover_parsed_text_fact_coordinate(
+            parsed_text,
+            submission_working_set.allowed_fact_targets,
+        )
+        == "FACT_SIGNATURE"
+    )
     raw_public_observation = {
         "schema_version": "public_evidence_observation.v1",
         "provider_slot_id": "OBS_01",
@@ -234,13 +250,42 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         actor_role=request.context_envelope.actor_snapshot.actor_role,
     )
     assert canonical_public_observation.observation_id is not None
+    second_raw_public_observation = {
+        "schema_version": "public_evidence_observation.v1",
+        "provider_slot_id": "OBS_02",
+        "evidence_id": "EVIDENCE_signature_photo",
+        "fact_id": "FACT_SIGNATURE",
+        "observation_kind": "PARSED_TRANSACTION_STATUS",
+        "epistemic_status": "PROVISIONAL",
+        "parsed_content_sha256": parsed_content_sha256,
+        "source_quote": second_submission_observation,
+    }
+    second_canonical_public_observation = validate_public_observation_prefix(
+        prior_accepted=(canonical_public_observation,),
+        candidate=second_raw_public_observation,
+        evidence_content_authorities=request.context_envelope.evidence_content_authorities,
+        visible_evidence=request.context_envelope.visible_evidence,
+        attachment_refs=request.context_envelope.current_event.attachment_refs,
+        allowed_fact_targets=submission_working_set.allowed_fact_targets,
+        case_id=request.context_envelope.case_snapshot.case_id,
+        actor_id=request.context_envelope.actor_snapshot.actor_id,
+        actor_role=request.context_envelope.actor_snapshot.actor_role,
+    )
+    assert second_canonical_public_observation.observation_id is not None
+    canonical_public_observations = (
+        canonical_public_observation,
+        second_canonical_public_observation,
+    )
     submission_assessment = {
         "evidence_id": "EVIDENCE_signature_photo",
-        "public_observation_ids": [canonical_public_observation.observation_id],
+        "public_observation_ids": [
+            observation.observation_id
+            for observation in canonical_public_observations
+        ],
         "analysis_method": "TEXT_ONLY",
         "inspected_modalities": ["PARSED_TEXT"],
         "authenticity_score": 0.55,
-        "relevance_score": 0.48,
+        "relevance_score": 0.82,
         "completeness_score": 0.48,
         "assessment_confidence": 0.72,
         "source_basis": [submission_observation],
@@ -267,14 +312,20 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     }
     submission_room_utterance = compose_evidence_submission_public_reply(
         fact_targets=submission_working_set.allowed_fact_targets,
-        public_observations=[canonical_public_observation],
+        public_observations=canonical_public_observations,
         evidence_assessments=[submission_assessment],
         human_review_tasks=[],
     )
-    serialized_public_observation = json.dumps(
-        raw_public_observation,
-        ensure_ascii=False,
-        separators=(",", ":"),
+    serialized_public_observations = tuple(
+        json.dumps(
+            observation,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        for observation in (
+            raw_public_observation,
+            second_raw_public_observation,
+        )
     )
     timeline: list[str] = []
 
@@ -284,9 +335,15 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             self.provider_calls = 0
             self.invoke_started = asyncio.Event()
             self.release_after_bootstrap = asyncio.Event()
-            self.partial_item_submitted = asyncio.Event()
-            self.release_complete_item = asyncio.Event()
-            self.complete_item_submitted = asyncio.Event()
+            self.first_partial_submitted = asyncio.Event()
+            self.release_first_complete = asyncio.Event()
+            self.first_complete_submitted = asyncio.Event()
+            self.release_second_partial = asyncio.Event()
+            self.second_partial_submitted = asyncio.Event()
+            self.release_second_complete = asyncio.Event()
+            self.second_complete_submitted = asyncio.Event()
+            self.release_array_close = asyncio.Event()
+            self.array_closed = asyncio.Event()
             self.raw_terminal_submitted = asyncio.Event()
             self.release_terminal = asyncio.Event()
             self.completed = asyncio.Event()
@@ -295,7 +352,15 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             raise AssertionError("formal Target Evidence must not use the sync workflow")
 
         @staticmethod
-        def result(room_utterance: str) -> EvidenceTurnResult:
+        def result(room_utterance: str | None = None) -> EvidenceTurnResult:
+            if room_utterance is None:
+                room_utterance = compose_evidence_submission_public_reply(
+                    fact_targets=submission_working_set.allowed_fact_targets,
+                    public_observations=canonical_public_observations,
+                    evidence_assessments=[submission_assessment],
+                    human_review_tasks=[],
+                )
+                timeline.append("terminal:composed")
             return EvidenceTurnResult(
                 room_utterance=room_utterance,
                 internal_handoff={
@@ -310,7 +375,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 memory_frame={"guarded": True},
                 canvas_operations=[],
                 referenced_evidence_ids=["EVIDENCE_signature_photo"],
-                public_observations=[canonical_public_observation],
+                public_observations=list(canonical_public_observations),
                 evidence_assessments=[submission_assessment],
             )
 
@@ -329,18 +394,19 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             observer = current_stream_observer()
             assert observer is not None
             if len(self.calls) > 1:
-                observer.visible_delta(
-                    "evidence_turn",
-                    "public_observations",
-                    serialized_public_observation,
-                )
+                for serialized_observation in serialized_public_observations:
+                    observer.visible_delta(
+                        "evidence_turn",
+                        "public_observations",
+                        serialized_observation,
+                    )
                 observer.visible_delta(
                     "evidence_turn",
                     "room_utterance",
                     raw_room_utterance,
                 )
                 self.publish_usage(observer)
-                return self.result(submission_room_utterance)
+                return self.result()
 
             self.invoke_started.set()
             await self.release_after_bootstrap.wait()
@@ -355,18 +421,34 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 )
             )
             partial_document = (
-                '{"public_observations":[' + serialized_public_observation[:-1]
+                '{"public_observations":[' + serialized_public_observations[0][:-1]
             )
             assert projector.feed(partial_document) == []
-            self.partial_item_submitted.set()
-            await self.release_complete_item.wait()
-            completed_items = projector.feed(serialized_public_observation[-1:])
+            self.first_partial_submitted.set()
+            await self.release_first_complete.wait()
+            completed_items = projector.feed(serialized_public_observations[0][-1:])
             assert completed_items == [
-                ("public_observations", serialized_public_observation)
+                ("public_observations", serialized_public_observations[0])
             ]
             for field_name, item_json in completed_items:
                 observer.visible_delta("evidence_turn", field_name, item_json)
-            self.complete_item_submitted.set()
+            self.first_complete_submitted.set()
+            await self.release_second_partial.wait()
+            assert projector.feed("," + serialized_public_observations[1][:-1]) == []
+            self.second_partial_submitted.set()
+            await self.release_second_complete.wait()
+            completed_items = projector.feed(serialized_public_observations[1][-1:])
+            assert completed_items == [
+                ("public_observations", serialized_public_observations[1])
+            ]
+            for field_name, item_json in completed_items:
+                observer.visible_delta("evidence_turn", field_name, item_json)
+            self.second_complete_submitted.set()
+            await self.release_array_close.wait()
+            assert projector.feed("]") == []
+            timeline.append("provider:array_closed")
+            self.array_closed.set()
+            timeline.append("provider:terminal_fields_submitted")
             observer.visible_delta(
                 "evidence_turn",
                 "room_utterance",
@@ -375,7 +457,8 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             self.raw_terminal_submitted.set()
             await self.release_terminal.wait()
             self.publish_usage(observer)
-            result = self.result(submission_room_utterance)
+            result = self.result()
+            timeline.append("provider:completed")
             self.completed.set()
             return result
 
@@ -675,35 +758,73 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     assert not workflow.invoke_started.is_set()
     await asyncio.wait_for(workflow.invoke_started.wait(), timeout=1.0)
     assert not workflow.release_after_bootstrap.is_set()
-    assert not workflow.partial_item_submitted.is_set()
+    assert not workflow.first_partial_submitted.is_set()
     assert not workflow.completed.is_set()
     assert store.puts == []
     assert saver.commits == []
 
     workflow.release_after_bootstrap.set()
-    await asyncio.wait_for(workflow.partial_item_submitted.wait(), timeout=1.0)
-    next_item_task = asyncio.create_task(anext(first_stream))
+    await asyncio.wait_for(workflow.first_partial_submitted.wait(), timeout=1.0)
+    first_item_task = asyncio.create_task(anext(first_stream))
     with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(asyncio.shield(next_item_task), timeout=0.05)
-    assert not workflow.complete_item_submitted.is_set()
+        await asyncio.wait_for(asyncio.shield(first_item_task), timeout=0.05)
+    assert not workflow.first_complete_submitted.is_set()
     assert not workflow.completed.is_set()
     assert store.puts == []
     assert saver.commits == []
 
-    workflow.release_complete_item.set()
-    await asyncio.wait_for(workflow.complete_item_submitted.wait(), timeout=1.0)
-    material_event = await asyncio.wait_for(next_item_task, timeout=1.0)
-    first.append(material_event)
-    timeline.append(f"yield:{material_event.event_type}")
-    assert material_event.event_type == "visible_delta"
-    assert material_event.payload.field == "room_utterance"
-    assert material_event.payload.delta == canonical_public_observation.public_text
-    assert submission_observation in (material_event.payload.delta or "")
-    assert serialized_public_observation not in (material_event.payload.delta or "")
+    workflow.release_first_complete.set()
+    await asyncio.wait_for(workflow.first_complete_submitted.wait(), timeout=1.0)
+    first_material_event = await asyncio.wait_for(first_item_task, timeout=1.0)
+    first.append(first_material_event)
+    timeline.append(f"yield:{first_material_event.event_type}:OBS_01")
+    assert first_material_event.event_type == "visible_delta"
+    assert first_material_event.payload.field == "room_utterance"
+    assert (
+        first_material_event.payload.delta
+        == canonical_public_observation.public_text
+    )
+    assert submission_observation in (first_material_event.payload.delta or "")
+    assert all(
+        serialized not in (first_material_event.payload.delta or "")
+        for serialized in serialized_public_observations
+    )
+    assert not workflow.second_partial_submitted.is_set()
+    assert not workflow.array_closed.is_set()
     assert not workflow.completed.is_set()
     assert store.puts == []
     assert saver.commits == []
 
+    workflow.release_second_partial.set()
+    await asyncio.wait_for(workflow.second_partial_submitted.wait(), timeout=1.0)
+    second_item_task = asyncio.create_task(anext(first_stream))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(second_item_task), timeout=0.05)
+    assert not workflow.second_complete_submitted.is_set()
+    assert not workflow.array_closed.is_set()
+    assert not workflow.completed.is_set()
+
+    workflow.release_second_complete.set()
+    await asyncio.wait_for(workflow.second_complete_submitted.wait(), timeout=1.0)
+    second_material_event = await asyncio.wait_for(second_item_task, timeout=1.0)
+    first.append(second_material_event)
+    timeline.append(f"yield:{second_material_event.event_type}:OBS_02")
+    assert second_material_event.event_type == "visible_delta"
+    assert second_material_event.payload.field == "room_utterance"
+    assert (
+        second_material_event.payload.delta
+        == second_canonical_public_observation.public_text
+    )
+    assert second_submission_observation in (
+        second_material_event.payload.delta or ""
+    )
+    assert not workflow.array_closed.is_set()
+    assert not workflow.completed.is_set()
+    assert store.puts == []
+    assert saver.commits == []
+
+    workflow.release_array_close.set()
+    await asyncio.wait_for(workflow.array_closed.wait(), timeout=1.0)
     await asyncio.wait_for(workflow.raw_terminal_submitted.wait(), timeout=1.0)
     terminal_task = asyncio.create_task(anext(first_stream))
     with pytest.raises(asyncio.TimeoutError):
@@ -737,6 +858,21 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         event.payload.field == "room_utterance"
         for event in first
         if event.event_type == "visible_delta"
+    )
+    assert timeline.index("yield:visible_delta:OBS_01") < timeline.index(
+        "yield:visible_delta:OBS_02"
+    )
+    assert timeline.index("yield:visible_delta:OBS_02") < timeline.index(
+        "provider:array_closed"
+    )
+    assert timeline.index("provider:array_closed") < timeline.index(
+        "provider:terminal_fields_submitted"
+    )
+    assert timeline.index("provider:terminal_fields_submitted") < timeline.index(
+        "terminal:composed"
+    )
+    assert timeline.index("terminal:composed") < timeline.index(
+        "provider:completed"
     )
     assert timeline.index("object_put") < timeline.index("fenced_commit")
     assert timeline.index("fenced_commit") < timeline.index("yield:final")
@@ -955,7 +1091,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         event_type == "visible_delta"
         for event_type in later_types[1:later_usage_index]
     )
-    assert len(serialized_public_observation) > 64
+    assert all(len(serialized) > 64 for serialized in serialized_public_observations)
     assert "".join(
         event.payload.delta or ""
         for event in later
@@ -971,6 +1107,92 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     assert later_proposal["attempt_id"] == later_command.attempt_id
     assert store.puts[2]["execution"] is later_execution
     assert later_saver.commits[0].result.result_hash == later[-1].payload.final_result_hash
+
+    empty_relevant_assessment = {
+        **submission_assessment,
+        "public_observation_ids": [],
+        "relevance_score": 0.49,
+        "fact_links": [],
+    }
+    empty_relevant_room_utterance = compose_evidence_submission_public_reply(
+        fact_targets=submission_working_set.allowed_fact_targets,
+        public_observations=(),
+        evidence_assessments=[empty_relevant_assessment],
+        human_review_tasks=[],
+    )
+
+    class EmptyRelevantObservationWorkflow:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, request):
+            raise AssertionError("formal Target Evidence must not use the sync workflow")
+
+        async def arun(self, request):
+            self.calls += 1
+            observer = current_stream_observer()
+            assert observer is not None
+            FakeFormalWorkflow.publish_usage(observer)
+            terminal_payload = FakeFormalWorkflow.result(
+                empty_relevant_room_utterance
+            ).model_dump(mode="json")
+            terminal_payload.update(
+                {
+                    "public_observations": [],
+                    "evidence_assessments": [empty_relevant_assessment],
+                }
+            )
+            return EvidenceTurnResult.model_validate(terminal_payload)
+
+    empty_command = command.model_copy(
+        update={
+            "command_id": "evidence-submit:EVIDENCE_BATCH_TEST:empty-relevant",
+            "attempt_id": "target-evidence-run:formal-test:empty-relevant",
+            "request_hash": "2" * 64,
+        }
+    )
+    empty_fence = replace(
+        fence,
+        command_id=empty_command.command_id,
+        request_hash=empty_command.request_hash,
+        command_hash=canonical_sha256(empty_command.model_dump(mode="json")),
+        command_envelope_hash="5" * 64,
+    )
+    empty_execution = SimpleNamespace(
+        admission=SimpleNamespace(
+            command=empty_command,
+            binding=execution.admission.binding,
+        ),
+        fence=empty_fence,
+    )
+    empty_saver = FencedMemorySaver()
+    empty_workflow = EmptyRelevantObservationWorkflow()
+    empty_provider = tuple(
+        TargetE2ESpecializedRoomProviderFactory(
+            security_runtime=object.__new__(GraphSecurityRuntime),
+            room_exchange=room_exchange,
+            hearing_decoder=unused_hearing_decoder,
+        )
+        .with_evidence_workflow(empty_workflow)(
+            SimpleNamespace(saver=empty_saver, durable_bulkhead=object())
+        )
+    )[0]
+    puts_before_empty = len(store.puts)
+    empty_events = []
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="relevant parsed evidence requires public observation authority",
+    ):
+        async for event in empty_provider.stream(empty_execution):
+            empty_events.append(event)
+    assert [event.event_type for event in empty_events] == [
+        "attempt_started",
+        "visible_delta",
+    ]
+    assert empty_events[1].payload.delta == EVIDENCE_CANONICAL_OPENING
+    assert len(store.puts) == puts_before_empty
+    assert empty_saver.commits == []
+    assert empty_workflow.calls == 1
 
     class InvalidObservationWorkflow:
         def __init__(self) -> None:

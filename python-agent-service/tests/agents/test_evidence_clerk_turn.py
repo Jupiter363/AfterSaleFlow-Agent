@@ -710,11 +710,13 @@ class AuthorityBoundSubmissionRunner:
         *,
         stream_observations: tuple[str, ...] | None = None,
         assessment_payload: dict[str, object] | None = None,
+        assessment_payloads: list[dict[str, object]] | None = None,
         public_observations: list[dict[str, object]] | None = None,
     ) -> None:
         self.calls = 0
         self.last_invocation = None
         self.assessment_payload = assessment_payload
+        self.assessment_payloads = assessment_payloads
         self.public_observations = public_observations or []
         self.stream_observations = (
             stream_observations
@@ -799,9 +801,12 @@ class AuthorityBoundSubmissionRunner:
             value=output_type(
                 public_observations=deepcopy(self.public_observations),
                 room_utterance=self._source_reply(),
-                evidence_assessments=[
-                    self.assessment_payload
-                    or {
+                evidence_assessments=(
+                    deepcopy(self.assessment_payloads)
+                    if self.assessment_payloads is not None
+                    else [
+                        self.assessment_payload
+                        or {
                         "evidence_id": "EVIDENCE_signature_photo",
                         "public_observation_slots": [
                             item["provider_slot_id"]
@@ -862,8 +867,9 @@ class AuthorityBoundSubmissionRunner:
                         "summary": (
                             "该页面真实有效，商家应当退款并承担责任。"
                         ),
-                    }
-                ],
+                        }
+                    ]
+                ),
                 internal_handoff=_empty_internal_handoff(),
                 confidence=0.72,
             )
@@ -1088,8 +1094,13 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         reconcile_accepted_public_observations,
         validate_public_observation_prefix,
     )
+    from app.agents.evidence_clerk.assessment_policy import (
+        recover_parsed_text_fact_coordinate,
+        recover_parsed_text_fact_coordinates,
+    )
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.harness.evidence_asset_loader import EvidenceAssetLoader
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
     from app.schemas import (
         EvidenceTurnLlmOutput,
         EvidenceTurnRequest,
@@ -1097,6 +1108,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         PublicEvidenceObservationProposalV1,
         PublicEvidenceObservationV1,
     )
+    from app.schemas.final_agents import EvidenceParsedTextSubmissionLlmOutput
     from app.streaming import (
         AgentStreamObserver,
         StreamVisibleDeltaEvent,
@@ -1188,7 +1200,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     system_prompt, user_prompt = PromptRepository().render(
         "evidence_turn",
         request.model_dump(mode="json"),
-        EvidenceTurnLlmOutput.model_json_schema(),
+        EvidenceParsedTextSubmissionLlmOutput.model_json_schema(),
     )
     composed_prompt = system_prompt + "\n" + user_prompt
     assert "public_observations" in composed_prompt
@@ -1207,7 +1219,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     assert next(iter(EvidenceTurnLlmOutput.model_json_schema()["properties"])) == (
         "public_observations"
     )
-    provider_schema = EvidenceTurnLlmOutput.model_json_schema()
+    provider_schema = EvidenceParsedTextSubmissionLlmOutput.model_json_schema()
     proposal_ref = provider_schema["properties"]["public_observations"]["items"][
         "$ref"
     ]
@@ -1231,6 +1243,8 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         == "#/$defs/PublicEvidenceObservationV1"
     )
     assert "<required_output_contract>" in user_prompt
+    assert "不得在已识别具体材料内容时返回空数组" in composed_prompt
+    assert "不得等待后续观察、assessment 或终态文案" in composed_prompt
     runner = AuthorityBoundSubmissionRunner(
         public_observations=typed_public_observations,
     )
@@ -1396,6 +1410,10 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     assert runner.completed.is_set()
     assert download_attempts == []
     assert runner.last_invocation is not None
+    assert (
+        runner.last_invocation["output_type"]
+        is EvidenceParsedTextSubmissionLlmOutput
+    )
     asset_manifest = runner.last_invocation["evidence_assets"].manifest
     assert asset_manifest["items"][0]["visual_input_status"] == (
         "UNSUPPORTED_MODALITY"
@@ -1579,7 +1597,8 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     unsupported_visible = unsupported_payload["context_envelope"]["visible_evidence"][0]
     unsupported_visible["content_type"] = "image/png"
     unsupported_payload["context_envelope"]["evidence_content_authorities"] = []
-    assert EvidenceTurnRequest.model_validate(unsupported_payload).context_envelope
+    unsupported_request = EvidenceTurnRequest.model_validate(unsupported_payload)
+    assert unsupported_request.context_envelope
     faithful_assessment = {
         "evidence_id": "EVIDENCE_signature_photo",
         "analysis_method": "TEXT_ONLY",
@@ -1631,41 +1650,319 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     )
     faithful_workflow = EvidenceTurnWorkflow(model_runner=faithful_runner)
     faithful_runner.release_completion.set()
-    faithful_first, faithful_visible, _ = await invoke(
-        "submission-authority-faithful-first",
-        active_workflow=faithful_workflow,
-        active_runner=faithful_runner,
-        active_request=request,
-    )
-    faithful_replay, faithful_replay_visible, _ = await invoke(
-        "submission-authority-faithful-replay",
-        active_workflow=faithful_workflow,
-        active_runner=faithful_runner,
-        active_request=request,
-    )
-    faithful_reply = faithful_first.room_utterance
-    assert "2026-08-13" not in faithful_reply
-    assert "客服" not in faithful_reply
-    assert "20元" not in faithful_reply
-    assert "缺乏内部时间戳验证" not in faithful_reply
-    assert "无法解析具体对话内容" not in faithful_reply
-    assert "无成功退款流水" not in faithful_reply
-    assert "未经评估的额外付款完成描述" not in faithful_reply
-    assert faithful_first.public_observations == []
-    assert faithful_visible == EVIDENCE_CANONICAL_OPENING
-    assert faithful_replay.room_utterance == faithful_reply
-    assert faithful_replay_visible == EVIDENCE_CANONICAL_OPENING
-    assert faithful_runner.calls == 2
-    for unsupported in (
-        "平台已经实际完成退款",
-        AuthorityBoundSubmissionRunner.capability_observation,
-        AuthorityBoundSubmissionRunner.safe_provider_sentence,
-        AuthorityBoundSubmissionRunner.unsafe_provider_sentence,
-        "fact_links",
-        "FACT_SIGNATURE",
-        "authenticity_score",
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="relevant parsed evidence requires public observation authority",
     ):
-        assert unsupported not in faithful_reply
+        await invoke(
+            "submission-authority-faithful-first",
+            active_workflow=faithful_workflow,
+            active_runner=faithful_runner,
+            active_request=request,
+        )
+    assert faithful_runner.calls == 1
+
+    recovered_relevant_assessment = deepcopy(faithful_assessment)
+    recovered_relevant_assessment["fact_links"] = []
+    recovered_relevant_runner = AuthorityBoundSubmissionRunner(
+        stream_observations=(),
+        assessment_payload=recovered_relevant_assessment,
+    )
+    recovered_relevant_workflow = EvidenceTurnWorkflow(
+        model_runner=recovered_relevant_runner
+    )
+    recovered_relevant_runner.release_completion.set()
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="relevant parsed evidence requires public observation authority",
+    ):
+        await invoke(
+            "submission-authority-recovered-relevant",
+            active_workflow=recovered_relevant_workflow,
+            active_runner=recovered_relevant_runner,
+            active_request=request,
+        )
+    assert recovered_relevant_runner.calls == 1
+
+    low_relevance_assessment = deepcopy(faithful_assessment)
+    low_relevance_assessment["relevance_score"] = 0.49
+    low_relevance_assessment["fact_links"] = []
+    low_relevance_runner = AuthorityBoundSubmissionRunner(
+        stream_observations=(),
+        assessment_payload=low_relevance_assessment,
+    )
+    low_relevance_workflow = EvidenceTurnWorkflow(
+        model_runner=low_relevance_runner
+    )
+    low_relevance_runner.release_completion.set()
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="relevant parsed evidence requires public observation authority",
+    ):
+        await invoke(
+            "submission-authority-provider-low-score-evasion",
+            active_workflow=low_relevance_workflow,
+            active_runner=low_relevance_runner,
+            active_request=request,
+        )
+    assert low_relevance_runner.calls == 1
+
+    multi_coordinate_request = request_with_frozen_text(
+        parsed_text + "\n- 收件人称本人及同住人员未收到包裹"
+    )
+    multi_allowed_fact_targets = EvidenceContextAssembler().assemble(
+        multi_coordinate_request
+    ).working_set.allowed_fact_targets
+    strongest_fact_id = recover_parsed_text_fact_coordinate(
+        multi_coordinate_request.context_envelope.evidence_content_authorities[
+            0
+        ].parsed_text,
+        multi_allowed_fact_targets,
+    )
+    assert strongest_fact_id in {"FACT_SIGNATURE", "FACT_RECIPIENT"}
+    assert recover_parsed_text_fact_coordinates(
+        multi_coordinate_request.context_envelope.evidence_content_authorities[
+            0
+        ].parsed_text,
+        multi_allowed_fact_targets,
+    ) == (
+        strongest_fact_id,
+        *(
+            fact_id
+            for fact_id in ("FACT_SIGNATURE", "FACT_RECIPIENT")
+            if fact_id != strongest_fact_id
+        ),
+    )
+    non_strong_fact_id = (
+        "FACT_RECIPIENT"
+        if strongest_fact_id == "FACT_SIGNATURE"
+        else "FACT_SIGNATURE"
+    )
+    multi_source_quote = {
+        "FACT_SIGNATURE": "未发现成功退款流水",
+        "FACT_RECIPIENT": "收件人称本人及同住人员未收到包裹",
+    }[non_strong_fact_id]
+    multi_observation = {
+        **typed_public_observations[0],
+        "provider_slot_id": "OBS_01",
+        "fact_id": non_strong_fact_id,
+        "parsed_content_sha256": (
+            multi_coordinate_request.context_envelope.evidence_content_authorities[
+                0
+            ].parsed_content_sha256
+        ),
+        "source_quote": multi_source_quote,
+    }
+    multi_assessment = deepcopy(faithful_assessment)
+    multi_assessment.update(
+        {
+            "public_observation_slots": ["OBS_01"],
+            "fact_links": [
+                {
+                    "fact_id": non_strong_fact_id,
+                    "relation": "INCONCLUSIVE",
+                    "reason": "材料正文与该待证事实存在共享文本，仍需人工核验。",
+                    "confidence": 0.61,
+                }
+            ],
+        }
+    )
+    multi_runner = AuthorityBoundSubmissionRunner(
+        public_observations=[multi_observation],
+        assessment_payload=multi_assessment,
+    )
+    multi_workflow = EvidenceTurnWorkflow(model_runner=multi_runner)
+    multi_result, _, _ = await invoke(
+        "submission-authority-non-strong-validated-coordinate",
+        active_workflow=multi_workflow,
+        active_runner=multi_runner,
+        active_request=multi_coordinate_request,
+    )
+    assert [
+        observation.fact_id for observation in multi_result.public_observations
+    ] == [non_strong_fact_id]
+    assert multi_runner.calls == 1
+
+    zero_overlap_observation = {
+        **typed_public_observations[0],
+        "provider_slot_id": "OBS_01",
+        "fact_id": "FACT_RECIPIENT",
+    }
+    zero_overlap_assessment = deepcopy(faithful_assessment)
+    zero_overlap_assessment.update(
+        {
+            "public_observation_slots": ["OBS_01"],
+            "fact_links": [
+                {
+                    "fact_id": "FACT_RECIPIENT",
+                    "relation": "INCONCLUSIVE",
+                    "reason": "模型将材料关联到允许但正文无共享文本的事实。",
+                    "confidence": 0.61,
+                }
+            ],
+        }
+    )
+    assert recover_parsed_text_fact_coordinates(
+        parsed_text,
+        EvidenceContextAssembler().assemble(request).working_set.allowed_fact_targets,
+    ) == ("FACT_SIGNATURE",)
+    zero_overlap_runner = AuthorityBoundSubmissionRunner(
+        public_observations=[zero_overlap_observation],
+        assessment_payload=zero_overlap_assessment,
+    )
+    zero_overlap_workflow = EvidenceTurnWorkflow(model_runner=zero_overlap_runner)
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="relevant parsed evidence requires public observation authority",
+    ):
+        await invoke(
+            "submission-authority-allowed-zero-overlap-coordinate",
+            active_workflow=zero_overlap_workflow,
+            active_runner=zero_overlap_runner,
+            active_request=request,
+        )
+    assert zero_overlap_runner.calls == 1
+
+    unrelated_request = request_with_frozen_text(
+        "园艺观察记录：银杏叶片颜色逐渐转黄，花盆土壤保持湿润"
+    )
+    allowed_fact_targets = EvidenceContextAssembler().assemble(
+        request
+    ).working_set.allowed_fact_targets
+    assert (
+        recover_parsed_text_fact_coordinate(parsed_text, allowed_fact_targets)
+        == "FACT_SIGNATURE"
+    )
+    assert (
+        recover_parsed_text_fact_coordinate(
+            unrelated_request.context_envelope.evidence_content_authorities[
+                0
+            ].parsed_text,
+            allowed_fact_targets,
+        )
+        is None
+    )
+    unrelated_assessment = deepcopy(low_relevance_assessment)
+    unrelated_assessment.update(
+        {
+            "source_basis": ["当前冻结园艺观察文本"],
+            "unsupported_claims": ["该材料未涉及本案待证事实"],
+            "formation_time_assessment": "文本未提供与本案时间线相关的形成时间",
+            "findings": [
+                {
+                    "finding_type": "UNRELATED_CONTENT",
+                    "description": "材料只记录银杏叶片与花盆土壤情况",
+                    "visual_region": None,
+                }
+            ],
+            "limitations": ["材料内容与当前待证事实没有可验证的共享语义坐标"],
+            "summary": "当前解析文本与本案待证事实无关",
+        }
+    )
+    unrelated_runner = AuthorityBoundSubmissionRunner(
+        stream_observations=(),
+        assessment_payload=unrelated_assessment,
+    )
+    unrelated_workflow = EvidenceTurnWorkflow(model_runner=unrelated_runner)
+    unrelated_runner.release_completion.set()
+    unrelated_result, unrelated_visible, _ = await invoke(
+        "submission-authority-unrelated-text",
+        active_workflow=unrelated_workflow,
+        active_runner=unrelated_runner,
+        active_request=unrelated_request,
+    )
+    assert unrelated_result.public_observations == []
+    assert "本轮材料" in unrelated_result.room_utterance
+    assert unrelated_visible == EVIDENCE_CANONICAL_OPENING
+    assert unrelated_runner.calls == 1
+    assert (
+        unrelated_runner.last_invocation["output_type"]
+        is EvidenceParsedTextSubmissionLlmOutput
+    )
+
+    unsupported_runner = AuthorityBoundSubmissionRunner(
+        stream_observations=(),
+        assessment_payload=faithful_assessment,
+    )
+    unsupported_workflow = EvidenceTurnWorkflow(model_runner=unsupported_runner)
+    unsupported_runner.release_completion.set()
+    unsupported_result, unsupported_visible_text, _ = await invoke(
+        "submission-authority-unsupported-image",
+        active_workflow=unsupported_workflow,
+        active_runner=unsupported_runner,
+        active_request=unsupported_request,
+    )
+    assert unsupported_result.public_observations == []
+    assert unsupported_visible_text == EVIDENCE_CANONICAL_OPENING
+    assert unsupported_runner.calls == 1
+    assert unsupported_runner.last_invocation["output_type"] is EvidenceTurnLlmOutput
+
+    def with_relevant_unsupported_image(
+        base_request: EvidenceTurnRequest,
+    ) -> EvidenceTurnRequest:
+        mixed_payload = deepcopy(base_request.model_dump(mode="json"))
+        image = deepcopy(mixed_payload["context_envelope"]["visible_evidence"][0])
+        image.update(
+            {
+                "evidence_id": "EVIDENCE_relevant_unsupported_image",
+                "evidence_type": "IMAGE",
+                "content_type": "image/png",
+                "original_filename": "relevant-record.png",
+                "file_hash": hashlib.sha256(b"relevant-image").hexdigest(),
+                "parsed_text": None,
+                "parse_status": "PENDING",
+                "metadata": {"claimed_fact": "退款记录页面需要人工查看原图"},
+            }
+        )
+        mixed_payload["context_envelope"]["visible_evidence"].append(image)
+        mixed_payload["context_envelope"]["current_event"]["attachment_refs"].append(
+            image["evidence_id"]
+        )
+        return EvidenceTurnRequest.model_validate(mixed_payload)
+
+    relevant_image_assessment = deepcopy(faithful_assessment)
+    relevant_image_assessment["evidence_id"] = (
+        "EVIDENCE_relevant_unsupported_image"
+    )
+    mixed_unrelated_request = with_relevant_unsupported_image(unrelated_request)
+    mixed_unrelated_runner = AuthorityBoundSubmissionRunner(
+        stream_observations=(),
+        assessment_payloads=[unrelated_assessment, relevant_image_assessment],
+    )
+    mixed_unrelated_workflow = EvidenceTurnWorkflow(
+        model_runner=mixed_unrelated_runner
+    )
+    mixed_unrelated_runner.release_completion.set()
+    mixed_unrelated_result, mixed_unrelated_visible, _ = await invoke(
+        "submission-authority-mixed-unrelated-text-relevant-image",
+        active_workflow=mixed_unrelated_workflow,
+        active_runner=mixed_unrelated_runner,
+        active_request=mixed_unrelated_request,
+    )
+    assert mixed_unrelated_result.public_observations == []
+    assert mixed_unrelated_visible == EVIDENCE_CANONICAL_OPENING
+    assert mixed_unrelated_runner.calls == 1
+
+    mixed_material_request = with_relevant_unsupported_image(request)
+    mixed_material_runner = AuthorityBoundSubmissionRunner(
+        stream_observations=(),
+        assessment_payloads=[low_relevance_assessment, relevant_image_assessment],
+    )
+    mixed_material_workflow = EvidenceTurnWorkflow(
+        model_runner=mixed_material_runner
+    )
+    mixed_material_runner.release_completion.set()
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="relevant parsed evidence requires public observation authority",
+    ):
+        await invoke(
+            "submission-authority-mixed-material-text-relevant-image",
+            active_workflow=mixed_material_workflow,
+            active_runner=mixed_material_runner,
+            active_request=mixed_material_request,
+        )
+    assert mixed_material_runner.calls == 1
 
     unframed_conclusion = "该证据真实有效，因此商家应当退款并承担责任。"
     guarded_conclusion = guard_evidence_public_reply(unframed_conclusion)
@@ -1702,7 +1999,8 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         stream_observations=(
             *AuthorityBoundSubmissionRunner.accepted_stream_observations,
             unbound_observation,
-        )
+        ),
+        assessment_payload=unrelated_assessment,
     )
     unbound_workflow = EvidenceTurnWorkflow(model_runner=unbound_runner)
     unbound_runner.release_completion.set()
@@ -1710,6 +2008,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         "submission-authority-unbound",
         active_workflow=unbound_workflow,
         active_runner=unbound_runner,
+        active_request=unrelated_request,
     )
     assert unbound_runner.calls == 1
     assert unbound_observation not in unbound_visible

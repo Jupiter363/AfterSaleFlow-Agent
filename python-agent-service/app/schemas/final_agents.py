@@ -1275,6 +1275,10 @@ class EvidenceTurnLlmOutput(StrictModel):
     confidence: Confidence
 
 
+class EvidenceParsedTextSubmissionLlmOutput(EvidenceTurnLlmOutput):
+    """Request marker; authority-aware coverage is enforced after server validation."""
+
+
 class EvidenceTurnRequest(StrictModel):
     context_envelope: EvidenceContextEnvelopeV1
     agent_context: AgentInvocationContext

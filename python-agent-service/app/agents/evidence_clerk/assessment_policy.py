@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 import math
 import re
 from typing import Any
@@ -310,6 +311,89 @@ def _finalize_fact_links(
     return result[:50]
 
 
+_SHARED_TEXT_COORDINATE_THRESHOLD = 0.08
+
+
+def _ranked_shared_text_coordinates(
+    source_text: str,
+    allowed_fact_targets: Iterable[Mapping[str, object]],
+) -> tuple[tuple[str, float], ...]:
+    source_grams = _text_bigrams(source_text)
+    if not source_grams:
+        return ()
+    scores_by_fact_id: dict[str, float] = {}
+    for target in allowed_fact_targets:
+        fact_id = str(target.get("fact_id") or "")
+        target_text = " ".join(
+            value
+            for value in (
+                str(target.get("fact") or ""),
+                str(target.get("category") or ""),
+                str(target.get("match_text") or ""),
+            )
+            if value
+        )
+        target_grams = _text_bigrams(target_text)
+        if not fact_id or not target_grams:
+            continue
+        overlap = len(source_grams & target_grams)
+        score = overlap / math.sqrt(len(target_grams) * len(source_grams))
+        if score < _SHARED_TEXT_COORDINATE_THRESHOLD:
+            continue
+        scores_by_fact_id[fact_id] = max(
+            score,
+            scores_by_fact_id.get(fact_id, 0.0),
+        )
+
+    return tuple(
+        (fact_id, score)
+        for fact_id, score in sorted(
+            scores_by_fact_id.items(),
+            key=lambda item: (item[1], item[0]),
+            reverse=True,
+        )
+    )
+
+
+def _strongest_shared_text_coordinate(
+    source_text: str,
+    allowed_fact_targets: Iterable[Mapping[str, object]],
+) -> tuple[str, float] | None:
+    candidates = _ranked_shared_text_coordinates(
+        source_text,
+        allowed_fact_targets,
+    )
+    return candidates[0] if candidates else None
+
+
+def recover_parsed_text_fact_coordinates(
+    parsed_text: str,
+    allowed_fact_targets: Iterable[Mapping[str, object]],
+) -> tuple[str, ...]:
+    """Return every threshold-qualified coordinate in stable strongest-first order."""
+
+    return tuple(
+        fact_id
+        for fact_id, _score in _ranked_shared_text_coordinates(
+            parsed_text,
+            allowed_fact_targets,
+        )
+    )
+
+
+def recover_parsed_text_fact_coordinate(
+    parsed_text: str,
+    allowed_fact_targets: Iterable[Mapping[str, object]],
+) -> str | None:
+    """Return the strongest server-validated fact coordinate for frozen parsed text."""
+
+    recovered = recover_parsed_text_fact_coordinates(
+        parsed_text,
+        allowed_fact_targets,
+    )
+    return recovered[0] if recovered else None
+
+
 def _recover_fact_coordinate(
     evidence: Any,
     allowed_fact_targets: tuple[dict[str, str], ...],
@@ -332,34 +416,13 @@ def _recover_fact_coordinate(
         )
         if value
     )
-    evidence_grams = _text_bigrams(evidence_text)
-    if not evidence_grams:
+    recovered = _strongest_shared_text_coordinate(
+        evidence_text,
+        allowed_fact_targets,
+    )
+    if recovered is None:
         return None
-
-    candidates: list[tuple[float, str]] = []
-    for target in allowed_fact_targets:
-        fact_id = str(target.get("fact_id") or "")
-        target_text = " ".join(
-            value
-            for value in (
-                str(target.get("fact") or ""),
-                str(target.get("category") or ""),
-                str(target.get("match_text") or ""),
-            )
-            if value
-        )
-        target_grams = _text_bigrams(target_text)
-        if not fact_id or not target_grams:
-            continue
-        overlap = len(evidence_grams & target_grams)
-        score = overlap / math.sqrt(len(target_grams) * len(evidence_grams))
-        candidates.append((score, fact_id))
-
-    if not candidates:
-        return None
-    best_score, best_fact_id = max(candidates, key=lambda item: (item[0], item[1]))
-    if best_score < 0.08:
-        return None
+    best_fact_id, best_score = recovered
     return EvidenceFactLink(
         fact_id=best_fact_id,
         relation="INCONCLUSIVE",
