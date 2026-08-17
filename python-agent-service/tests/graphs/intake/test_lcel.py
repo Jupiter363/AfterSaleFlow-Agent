@@ -7186,6 +7186,7 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         *,
         role: str = "USER",
         source: str = "ROOM_MESSAGE",
+        previous_override: dict[str, Any] | None = None,
     ) -> IntakeTurnRequest:
         return IntakeTurnRequest.model_validate(
             {
@@ -7199,7 +7200,11 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
                     "source": source,
                     "text": text,
                 },
-                "previous_case_detail": copy.deepcopy(previous_detail),
+                    "previous_case_detail": copy.deepcopy(
+                        previous_detail
+                        if previous_override is None
+                        else previous_override
+                    ),
                 "agent_context": user_context,
             }
         )
@@ -7266,6 +7271,23 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         "nice_to_have_gaps": [],
         "next_questions": [],
     }
+    uat_model_output = IntakeCaseDetailLlmOutput.model_validate(
+        {
+            "conversation_action": "INVITE_OPTIONAL_REMARK",
+            "room_utterance": (
+                "当前信息已达到提交条件。您可以直接提交确认；"
+                "如有备注可选择补充，没有备注也可以直接确认提交。"
+            ),
+            "case_detail": copy.deepcopy(llm_case_detail),
+            "case_matrix_delta": delta_for(
+                include_claim=False
+            ).model_dump(mode="json"),
+            "admission_recommendation": "ACCEPTED",
+            "confidence": 0.86,
+        }
+    )
+    assert uat_model_output.case_matrix_delta is not None
+    assert uat_model_output.case_matrix_delta.respondent_claim is None
 
     def render(
         request: IntakeTurnRequest,
@@ -7291,8 +7313,17 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         )
 
     current_request = request_for(exact_user_text)
-    first = render(current_request, delta_for())
-    replay = render(current_request, delta_for())
+    first = render(
+        current_request,
+        uat_model_output.case_matrix_delta,
+        detail=uat_model_output.case_detail,
+    )
+    replay = render(
+        current_request,
+        uat_model_output.case_matrix_delta,
+        detail=uat_model_output.case_detail,
+    )
+    both_model_fields = render(current_request, delta_for())
     expected_attitude = {
         "respondent_role": "USER",
         "attitude": "DISAGREE",
@@ -7347,14 +7378,92 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     }
     assert replay_terminal == terminal
     assert canonical_sha256(replay_terminal) == canonical_sha256(terminal)
+    both_model_detail = both_model_fields.dossier_patch["case_detail"]
+    assert both_model_detail["respondent_attitude"] == expected_attitude
+    assert both_model_detail["case_fact_matrix"]["claims"][
+        "respondent_direct"
+    ]["attitude"] == "DISAGREE"
+    assert both_model_detail["intake_quality"]["ready_for_next_step"] is True
 
-    with pytest.raises(AgentOutputSchemaError) as missing_claim_error:
-        render(current_request, delta_for(include_claim=False))
-    assert missing_claim_error.value.safe_code == (
+    prior_grounded_detail = copy.deepcopy(previous_detail)
+    prior_grounded_detail["respondent_attitude"] = {
+        "respondent_role": "USER",
+        "attitude": "DISAGREE",
+        "position": claim_position,
+        "source": "被发起方接待室直接陈述",
+        "confidence": 0.65,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_USER_MODEL_RESPONDENT_PRIOR",
+        },
+    }
+    prior_request = request_for(
+        exact_user_text,
+        previous_override=prior_grounded_detail,
+    )
+    loose_repeated_detail = copy.deepcopy(llm_case_detail)
+    loose_repeated_detail["respondent_attitude"].pop("respondent_role")
+    with pytest.raises(AgentOutputSchemaError) as inherited_fallback_error:
+        render(
+            prior_request,
+            delta_for(include_claim=False),
+            detail=loose_repeated_detail,
+        )
+    assert inherited_fallback_error.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+
+    explicit_reaffirmation = render(
+        prior_request,
+        delta_for(),
+        detail=loose_repeated_detail,
+    )
+    reaffirmed_detail = explicit_reaffirmation.dossier_patch["case_detail"]
+    assert reaffirmed_detail["respondent_attitude"]["grounding"] == {
+        "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+        "message_id": message_id,
+    }
+    assert reaffirmed_detail["case_fact_matrix"]["claims"][
+        "respondent_direct"
+    ]["source_refs"][-1] == message_id
+
+    provenance_candidate_detail = copy.deepcopy(llm_case_detail)
+    provenance_candidate_detail["respondent_attitude"].update(
+        {
+            "source": "被发起方接待室直接陈述",
+            "grounding": {
+                "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+                "message_id": "MESSAGE_MODEL_INVENTED_AUTHORITY",
+            },
+            "confidence_note": "model supplied",
+        }
+    )
+    with pytest.raises(AgentOutputSchemaError) as provenance_error:
+        render(
+            current_request,
+            delta_for(include_claim=False),
+            detail=provenance_candidate_detail,
+        )
+    assert provenance_error.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+
+    detail_without_model_attitude = copy.deepcopy(llm_case_detail)
+    detail_without_model_attitude.pop("respondent_attitude")
+    with pytest.raises(AgentOutputSchemaError) as missing_candidate_error:
+        render(
+            current_request,
+            delta_for(include_claim=False),
+            detail=detail_without_model_attitude,
+        )
+    assert missing_candidate_error.value.safe_code == (
         "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT"
     )
     with pytest.raises(AgentOutputSchemaError) as missing_source_error:
-        render(current_request, delta_for(current_source=False))
+        render(
+            current_request,
+            delta_for(include_claim=False, current_source=False),
+        )
     assert missing_source_error.value.safe_code == (
         "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT"
     )
@@ -7371,6 +7480,30 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     with pytest.raises(AgentOutputSchemaError) as unresolved_error:
         render(request_for(contradictory), delta_for())
     assert unresolved_error.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+
+    conflicting_model_detail = copy.deepcopy(llm_case_detail)
+    conflicting_model_detail["respondent_attitude"]["attitude"] = "AGREE"
+    with pytest.raises(AgentOutputSchemaError) as model_field_conflict:
+        render(
+            current_request,
+            delta_for(),
+            detail=conflicting_model_detail,
+        )
+    assert model_field_conflict.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+
+    foreign_model_detail = copy.deepcopy(llm_case_detail)
+    foreign_model_detail["respondent_attitude"]["respondent_role"] = "MERCHANT"
+    with pytest.raises(AgentOutputSchemaError) as foreign_model_role:
+        render(
+            current_request,
+            delta_for(include_claim=False),
+            detail=foreign_model_detail,
+        )
+    assert foreign_model_role.value.safe_code == (
         "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
     )
 
@@ -7392,6 +7525,8 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     )
     agreement_detail = copy.deepcopy(llm_case_detail)
     agreement_detail["respondent_attitude"]["attitude"] = "AGREE"
+    agreement_detail["respondent_attitude"]["position"] = detector_agreement
+    agreement_detail["party_positions"]["user_claim"] = detector_agreement
     matching_clear = render(
         request_for(detector_agreement),
         delta_for(attitude="AGREE", position=detector_agreement),

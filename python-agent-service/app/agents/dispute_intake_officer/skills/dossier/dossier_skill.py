@@ -2786,10 +2786,12 @@ def _enforce_respondent_attitude_source(
         expected_respondent_role=_opposite_party(initiator_role),
     )
     if current is not None and actor_role == _opposite_party(initiator_role):
-        model_claim = _current_respondent_matrix_claim(
+        model_claim = _current_respondent_model_claim(
             request,
             initiator_role=initiator_role,
             matrix_delta=matrix_delta,
+            llm_case_detail=llm_case_detail,
+            has_prior_grounded_attitude=carried_previous_attitude is not None,
         )
         detection = detect_direct_respondent_attitude(
             current.text,
@@ -2932,13 +2934,15 @@ def _enforce_respondent_attitude_source(
     }
 
 
-def _current_respondent_matrix_claim(
+def _current_respondent_model_claim(
     request: IntakeTurnRequest,
     *,
     initiator_role: str,
     matrix_delta: CaseFactMatrixDeltaV2 | UnilateralCaseMatrixDraftV1 | None,
+    llm_case_detail: dict[str, Any] | None,
+    has_prior_grounded_attitude: bool,
 ) -> dict[str, Any] | None:
-    """Return only a current, authenticated respondent claim from delta v2."""
+    """Bind one model stance to the authenticated current respondent source."""
 
     if not isinstance(matrix_delta, CaseFactMatrixDeltaV2):
         return None
@@ -2952,12 +2956,6 @@ def _current_respondent_matrix_claim(
         or actor_role != _opposite_party(initiator_role)
     ):
         return None
-    claim = matrix_delta.respondent_claim
-    if (
-        claim is None
-        or claim.attitude.value not in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES
-    ):
-        return None
     if not any(
         row.source_scope.value
         in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
@@ -2965,7 +2963,87 @@ def _current_respondent_matrix_claim(
         for row in matrix_delta.fact_rows
     ):
         return None
-    return claim.model_dump(mode="json")
+
+    matrix_claim = None
+    if matrix_delta.respondent_claim is not None:
+        matrix_claim = matrix_delta.respondent_claim.model_dump(mode="json")
+        if (
+            matrix_claim["attitude"]
+            not in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES
+        ):
+            raise _party_intake_state_error(
+                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+                "matrix respondent claim is not a substantive stance",
+            )
+
+    dossier_claim = _current_case_detail_respondent_claim(
+        llm_case_detail,
+        actor_role=actor_role,
+    )
+    if matrix_claim is not None and dossier_claim is not None:
+        if matrix_claim != dossier_claim:
+            raise _party_intake_state_error(
+                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+                "model respondent attitude conflicts with matrix claim",
+            )
+        return matrix_claim
+    if matrix_claim is not None:
+        return matrix_claim
+    if dossier_claim is not None and has_prior_grounded_attitude:
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "a prior respondent attitude requires an explicit current matrix claim",
+        )
+    return dossier_claim
+
+
+def _current_case_detail_respondent_claim(
+    llm_case_detail: dict[str, Any] | None,
+    *,
+    actor_role: str,
+) -> dict[str, Any] | None:
+    candidate = _nested_attitude(llm_case_detail)
+    if not candidate:
+        return None
+    forbidden_authority_fields = {
+        "source",
+        "grounding",
+        "confidence_note",
+        "status",
+    }
+    proposed_role = candidate.get("respondent_role")
+    attitude = candidate.get("attitude")
+    position = candidate.get("position")
+    alternative = candidate.get("alternative_proposal")
+    if (
+        bool(forbidden_authority_fields.intersection(candidate))
+        or (
+            proposed_role is not None
+            and (
+                not isinstance(proposed_role, str)
+                or proposed_role.upper() != actor_role
+            )
+        )
+        or not isinstance(attitude, str)
+        or attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES
+        or not isinstance(position, str)
+        or not position.strip()
+        or (
+            alternative is not None
+            and (not isinstance(alternative, str) or not alternative.strip())
+        )
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "model respondent attitude is structurally invalid",
+        )
+    return {
+        "attitude": attitude,
+        "position_summary": position.strip(),
+        "alternative_proposal": (
+            alternative.strip() if isinstance(alternative, str) else None
+        ),
+    }
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
