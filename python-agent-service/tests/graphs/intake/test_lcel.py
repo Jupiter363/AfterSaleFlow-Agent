@@ -32,6 +32,7 @@ from app.agents.dispute_intake_officer.schemas import (
     IntakeRespondentOpeningLlmOutput,
 )
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
+    CaseDetailDossierSkill,
     RESPONDENT_AUTHORED_CURRENT_MESSAGE,
     SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
     SUBJECTIVE_RESPONDENT_SOURCE,
@@ -92,7 +93,11 @@ from app.graphs.intake.validators import (
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.model_runner import prepare_baseline_prompt_authority
 from app.harness.prompt_composer import PromptRepository
-from app.llm import LiteLlmProxyClient, governed_max_output_tokens
+from app.llm import (
+    AgentOutputSchemaError,
+    LiteLlmProxyClient,
+    governed_max_output_tokens,
+)
 from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2
 from app.schemas.final_agents import IntakeTurnRequest
 from app.model_runtime.governed_chat_model import GovernedChatModel
@@ -7069,6 +7074,339 @@ def test_exact_uat_merchant_current_remedy_stance_is_direct_authority(
         match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
     ):
         normalize(contradictory)
+
+
+def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
+    bindings,
+    version_pins,
+) -> None:
+    del bindings, version_pins
+    case_id = "CASE_MODEL_RESPONDENT_AUTHORITY"
+    message_id = "MESSAGE_USER_MODEL_RESPONDENT_CURRENT"
+    exact_user_text = (
+        "用户侧说明：我本人和同住人员均未签收，也未授权他人代收；"
+        "物流页面只有“已签收”，没有签收人姓名、照片或具体位置。"
+        "2026-08-13，平台在线客服在会话中明确承诺退款20元，"
+        "但我至今未收到退款，订单、退款工单和原支付渠道均无成功退款流水。"
+        "我目前明确要求退还20元，并请平台核验客服原始会话和物流签收记录。"
+    )
+    assert (
+        detect_direct_respondent_attitude(
+            exact_user_text,
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role="USER",
+        ).state
+        == "NONE"
+    )
+
+    initiator_context = _agent_context(
+        role="MERCHANT",
+        case_id=case_id,
+        invocation_id="ATTEMPT_MODEL_RESPONDENT_INITIATOR_1",
+    )
+    initiator_request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "EXTERNAL_IMPORT",
+            "initial_case_facts": {
+                "form_source": "EXTERNAL_IMPORT",
+                "form_description": "商家提交订单履约争议并请求平台处理。",
+                "order_reference": "ORDER_MODEL_AUTHORITY_1",
+                "after_sales_reference": "AS_MODEL_AUTHORITY_1",
+                "logistics_reference": "SF1001001001",
+                "initiator_role": "MERCHANT",
+                "requested_outcome_hint": "REFUND",
+            },
+            "agent_context": initiator_context,
+        }
+    )
+    initiator_detail = {
+        "schema_version": "intake_case_detail.v1",
+        "case_story": {
+            "one_sentence_summary": "商家与用户对签收和退款状态存在争议。"
+        },
+        "references": {
+            "order_reference": "ORDER_MODEL_AUTHORITY_1",
+            "after_sales_reference": "AS_MODEL_AUTHORITY_1",
+            "logistics_reference": "SF1001001001",
+        },
+        "party_positions": {
+            "merchant_claim": "商家请求平台核验订单履约记录。",
+            "user_claim": "",
+            "platform_observation": "双方陈述仍需核对。",
+        },
+        "claim_resolution": {
+            "initiator_role": "MERCHANT",
+            "requested_resolution": "REFUND",
+            "normalized_statement": "商家请求平台处理退款争议。",
+            "request_reason": "双方对签收和退款状态存在争议。",
+        },
+        "dispute_core_state": {
+            "conflict_type": "CLAIM_UNANSWERED",
+            "core_conflict": "用户尚未直接回应商家处理诉求。",
+            "facts_in_dispute": ["签收状态", "退款状态"],
+            "next_verification_focus": ["物流记录", "退款记录"],
+        },
+    }
+    initiator_delta = CaseFactMatrixDeltaV2.model_validate(
+        {
+            "schema_version": "case_fact_matrix.delta.v2",
+            "fact_rows": [
+                {
+                    "fact_key": "NEW_DELIVERY_REFUND_STATE",
+                    "category": "LOGISTICS",
+                    "fact_target": "物流签收状态与退款状态是否一致。",
+                    "materiality": "CORE",
+                    "stance": "CONFIRM",
+                    "position_summary": "商家请求平台核验履约及退款记录。",
+                    "asserted_value": "待平台核验",
+                    "source_scope": "CURRENT_SOURCE",
+                }
+            ],
+            "summary_source_fact_keys": ["NEW_DELIVERY_REFUND_STATE"],
+        }
+    )
+    previous_detail = copy.deepcopy(initiator_detail)
+    previous_detail["case_fact_matrix"] = finalize_case_fact_matrix(
+        request=initiator_request,
+        case_detail=initiator_detail,
+        delta=initiator_delta,
+    ).model_dump(mode="json")
+    previous_fact = previous_detail["case_fact_matrix"]["fact_rows"][0]
+
+    user_context = _agent_context(
+        role="USER",
+        case_id=case_id,
+        invocation_id="ATTEMPT_MODEL_RESPONDENT_USER_1",
+    )
+
+    def request_for(
+        text: str,
+        *,
+        role: str = "USER",
+        source: str = "ROOM_MESSAGE",
+    ) -> IntakeTurnRequest:
+        return IntakeTurnRequest.model_validate(
+            {
+                "case_id": case_id,
+                "room_type": "INTAKE",
+                "turn_source": "ROOM_MESSAGE",
+                "current_user_message": {
+                    "message_id": message_id,
+                    "sequence_no": 2,
+                    "role": role,
+                    "source": source,
+                    "text": text,
+                },
+                "previous_case_detail": copy.deepcopy(previous_detail),
+                "agent_context": user_context,
+            }
+        )
+
+    claim_position = (
+        "用户不接受商家现有处理说明，并要求核验退款与物流签收记录。"
+    )
+
+    def delta_for(
+        *,
+        attitude: str = "DISAGREE",
+        position: str = claim_position,
+        include_claim: bool = True,
+        current_source: bool = True,
+    ) -> CaseFactMatrixDeltaV2:
+        row = {
+            "fact_key": previous_fact["fact_id"],
+            "category": previous_fact["category"],
+            "fact_target": previous_fact["fact_target"],
+            "materiality": previous_fact["materiality"],
+            "stance": "DENY" if current_source else "NOT_ADDRESSED",
+            "position_summary": (
+                position
+                if current_source
+                else previous_fact["positions"]["MERCHANT"]["position_summary"]
+            ),
+            "source_scope": (
+                "CURRENT_SOURCE" if current_source else "PREVIOUS_MATRIX"
+            ),
+        }
+        if current_source:
+            row["asserted_value"] = "未签收且未收到退款"
+            row["conflict_summary"] = "双方对签收及退款状态存在分歧。"
+        document = {
+            "schema_version": "case_fact_matrix.delta.v2",
+            "fact_rows": [row],
+            "summary_source_fact_keys": [previous_fact["fact_id"]],
+        }
+        if include_claim:
+            document["respondent_claim"] = {
+                "attitude": attitude,
+                "position_summary": position,
+            }
+        return CaseFactMatrixDeltaV2.model_validate(document)
+
+    llm_case_detail = copy.deepcopy(initiator_detail)
+    llm_case_detail["case_story"]["one_sentence_summary"] = (
+        "用户否认签收并称退款承诺尚未履行。"
+    )
+    llm_case_detail["party_positions"]["user_claim"] = claim_position
+    llm_case_detail["respondent_attitude"] = {
+        "respondent_role": "USER",
+        "attitude": "DISAGREE",
+        "position": claim_position,
+    }
+    llm_case_detail["dispute_core_state"] = {
+        "conflict_type": "CLAIM_REJECTED_WITH_FACT_DISPUTE",
+        "core_conflict": "双方对签收状态和退款履行情况存在分歧。",
+        "facts_in_dispute": ["签收状态", "退款状态"],
+        "next_verification_focus": ["客服原始会话", "物流签收记录"],
+    }
+    llm_case_detail["missing_information"] = {
+        "blocking_gaps": [],
+        "nice_to_have_gaps": [],
+        "next_questions": [],
+    }
+
+    def render(
+        request: IntakeTurnRequest,
+        delta: CaseFactMatrixDeltaV2,
+        *,
+        detail: dict[str, Any] | None = None,
+    ):
+        return CaseDetailDossierSkill().render(
+            request=request,
+            conversation_action="INVITE_OPTIONAL_REMARK",
+            room_utterance=(
+                "当前信息已达到提交条件。您可以直接提交确认；"
+                "如有备注可选择补充，没有备注也可以直接确认提交。"
+            ),
+            llm_case_detail=copy.deepcopy(detail or llm_case_detail),
+            llm_dossier_patch=None,
+            llm_scroll_snapshot=None,
+            llm_canvas_operations=[],
+            llm_admission_recommendation="ACCEPTED",
+            llm_missing_fields=[],
+            llm_confidence=0.86,
+            llm_case_matrix_delta=delta,
+        )
+
+    current_request = request_for(exact_user_text)
+    first = render(current_request, delta_for())
+    replay = render(current_request, delta_for())
+    expected_attitude = {
+        "respondent_role": "USER",
+        "attitude": "DISAGREE",
+        "position": claim_position,
+        "source": "被发起方接待室直接陈述",
+        "confidence": 0.65,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": message_id,
+        },
+    }
+    first_detail = first.dossier_patch["case_detail"]
+    assert first_detail["respondent_attitude"] == expected_attitude
+    assert first_detail["missing_information"]["blocking_gaps"] == []
+    assert first_detail["intake_quality"]["ready_for_next_step"] is True
+    assert first_detail["party_intake_state"]["USER"][
+        "intake_quality"
+    ]["ready_for_next_step"] is True
+    assert first_detail["handoff_notes"]["remark_status"] == (
+        "WAITING_FOR_REMARK"
+    )
+    assert first.admission_recommendation == "ACCEPTED"
+    direct_claim = first_detail["case_fact_matrix"]["claims"][
+        "respondent_direct"
+    ]
+    assert {
+        key: direct_claim[key]
+        for key in ("respondent_role", "attitude", "position_summary")
+    } == {
+        "respondent_role": "USER",
+        "attitude": "DISAGREE",
+        "position_summary": claim_position,
+    }
+    assert direct_claim["source_refs"][-1] == message_id
+    terminal = {
+        "conversation_action": "INVITE_OPTIONAL_REMARK",
+        "dossier_patch": first.dossier_patch,
+        "scroll_snapshot": first.scroll_snapshot,
+        "canvas_operations": first.canvas_operations,
+        "admission_recommendation": first.admission_recommendation,
+        "missing_fields": first.missing_fields,
+        "confidence": first.confidence,
+    }
+    replay_terminal = {
+        **terminal,
+        "dossier_patch": replay.dossier_patch,
+        "scroll_snapshot": replay.scroll_snapshot,
+        "canvas_operations": replay.canvas_operations,
+        "admission_recommendation": replay.admission_recommendation,
+        "missing_fields": replay.missing_fields,
+        "confidence": replay.confidence,
+    }
+    assert replay_terminal == terminal
+    assert canonical_sha256(replay_terminal) == canonical_sha256(terminal)
+
+    with pytest.raises(AgentOutputSchemaError) as missing_claim_error:
+        render(current_request, delta_for(include_claim=False))
+    assert missing_claim_error.value.safe_code == (
+        "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT"
+    )
+    with pytest.raises(AgentOutputSchemaError) as missing_source_error:
+        render(current_request, delta_for(current_source=False))
+    assert missing_source_error.value.safe_code == (
+        "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT"
+    )
+
+    contradictory = "我明确同意退款20元，同时明确拒绝退款20元"
+    assert (
+        detect_direct_respondent_attitude(
+            contradictory,
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role="USER",
+        ).state
+        == "UNRESOLVED"
+    )
+    with pytest.raises(AgentOutputSchemaError) as unresolved_error:
+        render(request_for(contradictory), delta_for())
+    assert unresolved_error.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+
+    detector_agreement = (
+        "我方明确同意退款20元，并同意平台核验客服会话和物流签收记录。"
+    )
+    assert (
+        detect_direct_respondent_attitude(
+            detector_agreement,
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role="USER",
+        ).state
+        == "SUBSTANTIVE"
+    )
+    with pytest.raises(AgentOutputSchemaError) as conflict_error:
+        render(request_for(detector_agreement), delta_for(attitude="DISAGREE"))
+    assert conflict_error.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+    agreement_detail = copy.deepcopy(llm_case_detail)
+    agreement_detail["respondent_attitude"]["attitude"] = "AGREE"
+    matching_clear = render(
+        request_for(detector_agreement),
+        delta_for(attitude="AGREE", position=detector_agreement),
+        detail=agreement_detail,
+    )
+    assert matching_clear.dossier_patch["case_detail"]["respondent_attitude"][
+        "attitude"
+    ] == (
+        "AGREE"
+    )
+
+    with pytest.raises(ValueError, match="current_user_message.role"):
+        request_for(exact_user_text, role="MERCHANT")
+    with pytest.raises(ValueError, match="current_user_message.source"):
+        request_for(exact_user_text, source="FORM_SUBMISSION")
 
 
 def test_direct_respondent_detector_confidence_survives_merge_and_next_turn(

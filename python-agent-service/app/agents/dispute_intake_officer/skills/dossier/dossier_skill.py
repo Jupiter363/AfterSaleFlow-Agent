@@ -570,6 +570,7 @@ class CaseDetailDossierSkill:
             request,
             previous,
             bounded_llm_case_detail,
+            effective_matrix_delta,
         )
         _enforce_dispute_core_state(detail)
         _enforce_case_story_summary(
@@ -2743,6 +2744,7 @@ def _enforce_respondent_attitude_source(
     request: IntakeTurnRequest,
     previous: dict[str, Any],
     llm_case_detail: dict[str, Any] | None,
+    matrix_delta: CaseFactMatrixDeltaV2 | UnilateralCaseMatrixDraftV1 | None,
 ) -> None:
     """Persist only attitudes reported by the initiator in this private room.
 
@@ -2784,6 +2786,11 @@ def _enforce_respondent_attitude_source(
         expected_respondent_role=_opposite_party(initiator_role),
     )
     if current is not None and actor_role == _opposite_party(initiator_role):
+        model_claim = _current_respondent_matrix_claim(
+            request,
+            initiator_role=initiator_role,
+            matrix_delta=matrix_delta,
+        )
         detection = detect_direct_respondent_attitude(
             current.text,
             source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
@@ -2795,6 +2802,37 @@ def _enforce_respondent_attitude_source(
                 "respondent attitude signal unresolved",
                 safe_code="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
             )
+        if model_claim is not None:
+            candidate = detection.candidate
+            if (
+                detection.state == "SUBSTANTIVE"
+                and (
+                    candidate is None
+                    or candidate.get("attitude") != model_claim["attitude"]
+                )
+            ):
+                raise AgentOutputSchemaError(
+                    "intake_turn_case_detail",
+                    "respondent attitude detector conflicts with matrix claim",
+                    safe_code="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+                )
+            direct_attitude = {
+                "respondent_role": actor_role,
+                "attitude": model_claim["attitude"],
+                "position": model_claim["position_summary"],
+                "source": DIRECT_RESPONDENT_SOURCE,
+                "confidence": DIRECT_RESPONDENT_CONFIDENCE,
+                "grounding": {
+                    "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+                    "message_id": current.message_id,
+                },
+            }
+            if model_claim.get("alternative_proposal"):
+                direct_attitude["alternative_proposal"] = model_claim[
+                    "alternative_proposal"
+                ]
+            detail["respondent_attitude"] = direct_attitude
+            return
         if detection.state == "NONE":
             detail["respondent_attitude"] = (
                 copy.deepcopy(carried_previous_attitude)
@@ -2892,6 +2930,42 @@ def _enforce_respondent_attitude_source(
             "message_id": grounding_message_id,
         },
     }
+
+
+def _current_respondent_matrix_claim(
+    request: IntakeTurnRequest,
+    *,
+    initiator_role: str,
+    matrix_delta: CaseFactMatrixDeltaV2 | UnilateralCaseMatrixDraftV1 | None,
+) -> dict[str, Any] | None:
+    """Return only a current, authenticated respondent claim from delta v2."""
+
+    if not isinstance(matrix_delta, CaseFactMatrixDeltaV2):
+        return None
+    current = request.current_user_message
+    actor_role = str(request.agent_context.actor_role or "").upper()
+    if (
+        current is None
+        or request.turn_source != "ROOM_MESSAGE"
+        or current.source != "ROOM_MESSAGE"
+        or str(current.role or "").upper() != actor_role
+        or actor_role != _opposite_party(initiator_role)
+    ):
+        return None
+    claim = matrix_delta.respondent_claim
+    if (
+        claim is None
+        or claim.attitude.value not in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES
+    ):
+        return None
+    if not any(
+        row.source_scope.value
+        in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
+        and row.stance.value != "NOT_ADDRESSED"
+        for row in matrix_delta.fact_rows
+    ):
+        return None
+    return claim.model_dump(mode="json")
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
