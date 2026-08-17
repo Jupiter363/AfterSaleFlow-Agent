@@ -2976,25 +2976,64 @@ def _current_respondent_model_claim(
                 "matrix respondent claim is not a substantive stance",
             )
 
-    dossier_claim = _current_case_detail_respondent_claim(
-        llm_case_detail,
-        actor_role=actor_role,
-    )
-    if matrix_claim is not None and dossier_claim is not None:
-        if matrix_claim != dossier_claim:
+    if matrix_claim is not None:
+        dossier_attitude = _current_case_detail_respondent_comparison(
+            llm_case_detail,
+            actor_role=actor_role,
+        )
+        if (
+            dossier_attitude is not None
+            and matrix_claim["attitude"] != dossier_attitude
+        ):
             raise _party_intake_state_error(
                 "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
                 "model respondent attitude conflicts with matrix claim",
             )
         return matrix_claim
-    if matrix_claim is not None:
-        return matrix_claim
+
+    dossier_claim = _current_case_detail_respondent_claim(
+        llm_case_detail,
+        actor_role=actor_role,
+    )
     if dossier_claim is not None and has_prior_grounded_attitude:
         raise _party_intake_state_error(
             "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
             "a prior respondent attitude requires an explicit current matrix claim",
         )
     return dossier_claim
+
+
+def _current_case_detail_respondent_comparison(
+    llm_case_detail: dict[str, Any] | None,
+    *,
+    actor_role: str,
+) -> str | None:
+    """Read only role and attitude when matrix authority is canonical."""
+
+    candidate = _nested_attitude(llm_case_detail)
+    if not candidate:
+        return None
+    proposed_role = candidate.get("respondent_role")
+    if proposed_role is not None and (
+        not isinstance(proposed_role, str)
+        or proposed_role.upper() != actor_role
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "model respondent role conflicts with the current actor",
+        )
+    attitude = candidate.get("attitude")
+    if attitude is None:
+        return None
+    if (
+        not isinstance(attitude, str)
+        or attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "model respondent attitude conflicts with matrix authority",
+        )
+    return attitude
 
 
 def _current_case_detail_respondent_claim(
@@ -3005,19 +3044,12 @@ def _current_case_detail_respondent_claim(
     candidate = _nested_attitude(llm_case_detail)
     if not candidate:
         return None
-    forbidden_authority_fields = {
-        "source",
-        "grounding",
-        "confidence_note",
-        "status",
-    }
     proposed_role = candidate.get("respondent_role")
     attitude = candidate.get("attitude")
     position = candidate.get("position")
     alternative = candidate.get("alternative_proposal")
     if (
-        bool(forbidden_authority_fields.intersection(candidate))
-        or (
+        (
             proposed_role is not None
             and (
                 not isinstance(proposed_role, str)

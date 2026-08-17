@@ -7200,11 +7200,11 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
                     "source": source,
                     "text": text,
                 },
-                    "previous_case_detail": copy.deepcopy(
-                        previous_detail
-                        if previous_override is None
-                        else previous_override
-                    ),
+                "previous_case_detail": copy.deepcopy(
+                    previous_detail
+                    if previous_override is None
+                    else previous_override
+                ),
                 "agent_context": user_context,
             }
         )
@@ -7323,7 +7323,28 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         uat_model_output.case_matrix_delta,
         detail=uat_model_output.case_detail,
     )
-    both_model_fields = render(current_request, delta_for())
+    real_dual_field_detail = copy.deepcopy(llm_case_detail)
+    real_dual_field_detail["respondent_attitude"].update(
+        {
+            "position": "用户要求核验客服会话、签收记录和退款履行情况。",
+            "source": "MODEL_PRESENTATIONAL_SOURCE",
+            "grounding": {
+                "source": "MODEL_PRESENTATIONAL_GROUNDING",
+                "message_id": "MESSAGE_MODEL_PRESENTATIONAL",
+            },
+            "confidence_note": "model presentational metadata",
+        }
+    )
+    both_model_fields = render(
+        current_request,
+        delta_for(),
+        detail=real_dual_field_detail,
+    )
+    both_model_replay = render(
+        current_request,
+        delta_for(),
+        detail=real_dual_field_detail,
+    )
     expected_attitude = {
         "respondent_role": "USER",
         "attitude": "DISAGREE",
@@ -7384,6 +7405,46 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         "respondent_direct"
     ]["attitude"] == "DISAGREE"
     assert both_model_detail["intake_quality"]["ready_for_next_step"] is True
+    assert both_model_detail["respondent_attitude"]["position"] == claim_position
+    assert "MODEL_PRESENTATIONAL" not in json.dumps(
+        both_model_detail,
+        ensure_ascii=False,
+    )
+    assert both_model_replay.dossier_patch == both_model_fields.dossier_patch
+    assert canonical_sha256(
+        both_model_replay.dossier_patch
+    ) == canonical_sha256(both_model_fields.dossier_patch)
+
+    noncanonical_dossier_detail = copy.deepcopy(llm_case_detail)
+    noncanonical_dossier_detail["respondent_attitude"].pop("position")
+    noncanonical_dossier_detail["respondent_attitude"].update(
+        {
+            "alternative_proposal": {"model": "noncanonical garbage"},
+            "source": "MODEL_NONCANONICAL_SOURCE",
+            "grounding": {"message_id": "MESSAGE_MODEL_NONCANONICAL"},
+            "status": "MODEL_PRESENTATIONAL_STATUS",
+        }
+    )
+    matrix_canonical_result = render(
+        current_request,
+        delta_for(),
+        detail=noncanonical_dossier_detail,
+    )
+    matrix_canonical_detail = matrix_canonical_result.dossier_patch["case_detail"]
+    assert matrix_canonical_detail["respondent_attitude"] == expected_attitude
+    assert "MODEL_NONCANONICAL" not in json.dumps(
+        matrix_canonical_detail,
+        ensure_ascii=False,
+    )
+    with pytest.raises(AgentOutputSchemaError) as malformed_fallback_error:
+        render(
+            current_request,
+            delta_for(include_claim=False),
+            detail=noncanonical_dossier_detail,
+        )
+    assert malformed_fallback_error.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
 
     prior_grounded_detail = copy.deepcopy(previous_detail)
     prior_grounded_detail["respondent_attitude"] = {
@@ -7436,15 +7497,27 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
                 "message_id": "MESSAGE_MODEL_INVENTED_AUTHORITY",
             },
             "confidence_note": "model supplied",
+            "status": "NOT_RESPONDED",
         }
     )
-    with pytest.raises(AgentOutputSchemaError) as provenance_error:
+    dossier_fallback_with_metadata = render(
+        current_request,
+        delta_for(include_claim=False),
+        detail=provenance_candidate_detail,
+    )
+    metadata_detail = dossier_fallback_with_metadata.dossier_patch["case_detail"]
+    assert metadata_detail["respondent_attitude"] == expected_attitude
+    assert "MESSAGE_MODEL_INVENTED_AUTHORITY" not in json.dumps(
+        metadata_detail,
+        ensure_ascii=False,
+    )
+
+    with pytest.raises(AgentOutputSchemaError) as non_substantive_matrix_error:
         render(
             current_request,
-            delta_for(include_claim=False),
-            detail=provenance_candidate_detail,
+            delta_for(attitude="NOT_ADDRESSED"),
         )
-    assert provenance_error.value.safe_code == (
+    assert non_substantive_matrix_error.value.safe_code == (
         "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
     )
 
