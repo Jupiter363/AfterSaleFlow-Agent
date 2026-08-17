@@ -26,7 +26,7 @@ function scheduleVisualFrame(callback) {
       timeoutHandle: null,
       completed: false,
     };
-    const deliver = () => {
+    const deliver = (watchdog = false) => {
       if (token.completed) return;
       token.completed = true;
       if (token.animationHandle !== null) {
@@ -35,17 +35,25 @@ function scheduleVisualFrame(callback) {
       if (token.timeoutHandle !== null) {
         globalThis.clearTimeout(token.timeoutHandle);
       }
-      callback();
+      callback({ watchdog });
     };
-    token.animationHandle = globalThis.requestAnimationFrame(deliver);
+    token.animationHandle = globalThis.requestAnimationFrame(
+      () => deliver(false),
+    );
     // requestAnimationFrame can be suspended when the tab becomes hidden.
-    // The watchdog keeps finalization and cleanup from waiting indefinitely.
-    token.timeoutHandle = globalThis.setTimeout(deliver, 100);
+    // The watchdog must also catch up every byte already received. Advancing
+    // only one cosmetic character per throttled timer would keep the stream
+    // reader behind this display queue and prevent it from observing terminal
+    // protocol events in an unfocused embedded browser.
+    token.timeoutHandle = globalThis.setTimeout(() => deliver(true), 100);
     return token;
   }
   return {
     kind: "timeout",
-    handle: globalThis.setTimeout(callback, FRAME_DURATION_MS),
+    handle: globalThis.setTimeout(
+      () => callback({ watchdog: true }),
+      FRAME_DURATION_MS,
+    ),
   };
 }
 
@@ -151,14 +159,14 @@ export function createStreamTextPacer({
     });
   }
 
-  function revealFrame() {
+  function revealFrame(frame = {}) {
     frameToken = null;
     if (stopped || pendingCharacters <= 0) {
       scheduleSettledFrame();
       return;
     }
 
-    const charactersThisFrame = shouldRevealImmediately()
+    const charactersThisFrame = frame.watchdog || shouldRevealImmediately()
       ? pendingCharacters
       : Math.min(pendingCharacters, charactersPerFrame);
     let remainingBudget = charactersThisFrame;
