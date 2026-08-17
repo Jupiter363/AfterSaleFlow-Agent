@@ -27,6 +27,7 @@ from app.graph_runtime.ledger import (
 )
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.registry import CommandProfileBinding
+from app.security.invocation_envelope import INVOCATION_CLOCK_SKEW_SECONDS
 
 
 NOW = datetime(2026, 7, 19, 8, 0, tzinfo=timezone.utc)
@@ -398,8 +399,14 @@ async def test_candidate_reconcile_uses_historical_admission_for_fresh_credentia
 
     query = connection.calls[0][0]
     assert "exists ( select 1 from agent_graph_invocation_nonce nonce" in query
-    assert "nonce.issued_at <= command.registered_at" in query
-    assert "nonce.token_expires_at >= command.registered_at" in query
+    assert (
+        "nonce.issued_at <= command.registered_at "
+        f"+ make_interval(secs => {INVOCATION_CLOCK_SKEW_SECONDS})"
+    ) in query
+    assert (
+        "nonce.token_expires_at >= command.registered_at "
+        f"- make_interval(secs => {INVOCATION_CLOCK_SKEW_SECONDS})"
+    ) in query
     assert "nonce.jti =" not in query
     assert "nonce.issued_at =" not in query
     assert "nonce.token_expires_at =" not in query

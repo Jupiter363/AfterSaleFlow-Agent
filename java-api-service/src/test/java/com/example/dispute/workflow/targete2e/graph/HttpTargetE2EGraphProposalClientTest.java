@@ -128,6 +128,105 @@ class HttpTargetE2EGraphProposalClientTest {
   }
 
   @Test
+  void reconciliationClientPreservesDeterministic409AndRejectsIncompatibleErrorEnvelopes() {
+    var codec = TargetE2EGraphTestFixtures.codec();
+    TargetE2ESealedGraphCommand sealed =
+        codec.sealCommand(
+            ACTIVATION_ID,
+            7L,
+            TargetE2EGraphTestFixtures.command(),
+            REGISTRY_BINDING,
+            (envelope, binding) -> credential());
+    GraphTransportSecurityProof proof = mutualTlsProof();
+    record ErrorScenario(
+        int status,
+        String body,
+        String expectedCode,
+        TargetE2EGraphClientException.RecoveryAction expectedAction) {}
+    List<ErrorScenario> scenarios =
+        List.of(
+            new ErrorScenario(
+                409,
+                "{\"code\":\"GRAPH_TERMINAL_BINDING_CONFLICT\",\"retryable\":false}",
+                "GRAPH_TERMINAL_BINDING_CONFLICT",
+                TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN),
+            new ErrorScenario(
+                409,
+                "{\"code\":\"GRAPH_LEASE_UNAVAILABLE\",\"retryable\":true}",
+                "GRAPH_LEASE_UNAVAILABLE",
+                TargetE2EGraphClientException.RecoveryAction.RETRY_SAME_SEALED_COMMAND),
+            new ErrorScenario(
+                400,
+                "{\"code\":\"INVOCATION_AUTHORIZATION_REJECTED\",\"retryable\":false}",
+                "INVOCATION_AUTHORIZATION_REJECTED",
+                TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN),
+            new ErrorScenario(
+                502,
+                "{\"code\":\"TARGET_E2E_RESULT_ENVELOPE_REJECTED\",\"retryable\":false}",
+                "TARGET_E2E_RESULT_ENVELOPE_REJECTED",
+                TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN),
+            new ErrorScenario(
+                429,
+                "{\"code\":\"GRAPH_LEASE_UNAVAILABLE\",\"retryable\":false}",
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN),
+            new ErrorScenario(
+                503,
+                "{\"code\":\"GRAPH_LEASE_UNAVAILABLE\",\"retryable\":false}",
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN),
+            new ErrorScenario(
+                409,
+                "{\"code\":\"GRAPH_TERMINAL_BINDING_CONFLICT\",\"retryable\":false,\"detail\":\"forbidden\"}",
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN),
+            new ErrorScenario(
+                409,
+                "{\"code\":7,\"retryable\":false}",
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN),
+            new ErrorScenario(
+                409,
+                "{\"code\":\"GRAPH_TERMINAL_BINDING_CONFLICT\",\"retryable\":false} {}",
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN),
+            new ErrorScenario(
+                409,
+                "{\"code\":\"GRAPH_TERMINAL_BINDING_CONFLICT\",\"code\":\"OTHER\",\"retryable\":false}",
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN));
+
+    for (ErrorScenario scenario : scenarios) {
+      AtomicInteger exchanges = new AtomicInteger();
+      AtomicInteger proposalLoads = new AtomicInteger();
+      GraphReconciliationHttpTransport reconciliation =
+          errorReconciliationTransport(proof, scenario.status(), scenario.body(), exchanges);
+      var client =
+          new HttpTargetE2EGraphReconciliationClient(
+              bundle(new FakeCommandTransport("0".repeat(64), proof), reconciliation, proof),
+              codec,
+              (ignoredSealed, resultRef, proposalHash, cancellationToken) -> {
+                proposalLoads.incrementAndGet();
+                return TargetE2EGraphTestFixtures.proposalSourceBytes();
+              },
+              MAPPER,
+              URI.create("https://python-agent.internal/base/"),
+              Duration.ofSeconds(8));
+
+      assertThatThrownBy(
+              () -> client.reconcileAvailable(sealed, new AgentRunCancellationToken()))
+          .isInstanceOfSatisfying(
+              TargetE2EGraphClientException.class,
+              failure -> {
+                assertThat(failure.errorCode()).isEqualTo(scenario.expectedCode());
+                assertThat(failure.recoveryAction()).isEqualTo(scenario.expectedAction());
+              });
+      assertThat(exchanges).hasValue(1);
+      assertThat(proposalLoads).hasValue(0);
+    }
+  }
+
+  @Test
   void publishesAttemptAbortedTerminalBeforeRequiringTheNextAgentAttempt() {
     var codec = TargetE2EGraphTestFixtures.codec();
     TargetE2ESealedGraphCommand sealed =
@@ -875,6 +974,27 @@ class HttpTargetE2EGraphProposalClientTest {
         MAPPER,
         URI.create("https://python-agent.internal/base/"),
         Duration.ofSeconds(8));
+  }
+
+  private static GraphReconciliationHttpTransport errorReconciliationTransport(
+      GraphTransportSecurityProof proof, int status, String body, AtomicInteger exchanges) {
+    return new GraphReconciliationHttpTransport() {
+      @Override
+      public GraphTransportSecurityProof transportProof() {
+        return proof;
+      }
+
+      @Override
+      public Response exchange(Request request, AgentRunCancellationToken cancellationToken) {
+        exchanges.incrementAndGet();
+        return new Response(
+            status,
+            Map.of(
+                "Content-Type", List.of("application/json; charset=utf-8"),
+                "Cache-Control", List.of("no-store")),
+            body.getBytes(StandardCharsets.UTF_8));
+      }
+    };
   }
 
   private static GraphTransportSecurityProof mutualTlsProof() {

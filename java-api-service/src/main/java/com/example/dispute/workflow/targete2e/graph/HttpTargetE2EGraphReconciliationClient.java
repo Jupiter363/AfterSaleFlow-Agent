@@ -33,7 +33,7 @@ public final class HttpTargetE2EGraphReconciliationClient
   private static final int MAXIMUM_RESPONSE_BYTES = 131_072;
   private static final Pattern ERROR_CODE = Pattern.compile("[A-Za-z0-9_.-]{1,128}");
   private static final Set<String> ERROR_FIELDS = Set.of("code", "retryable");
-  private static final Set<Integer> RETRYABLE_STATUSES = Set.of(409, 429, 503);
+  private static final Set<Integer> RETRY_REQUIRED_STATUSES = Set.of(429, 503);
 
   private final GraphTransportBundle transportBundle;
   private final GraphReconciliationHttpTransport transport;
@@ -194,7 +194,7 @@ public final class HttpTargetE2EGraphReconciliationClient
       }
       String code = node.required("code").asText();
       boolean retryable = node.required("retryable").asBoolean();
-      if (!ERROR_CODE.matcher(code).matches() || retryable != RETRYABLE_STATUSES.contains(status)) {
+      if (!ERROR_CODE.matcher(code).matches() || !retryIdentityMatchesStatus(status, retryable)) {
         throw new IllegalArgumentException(
             "remote error retry identity conflicts with HTTP status");
       }
@@ -204,6 +204,10 @@ public final class HttpTargetE2EGraphReconciliationClient
       return TargetE2EGraphClientException.protocol(
           "target Graph reconciliation error body is invalid", exception);
     }
+  }
+
+  private static boolean retryIdentityMatchesStatus(int status, boolean retryable) {
+    return status == 409 || retryable == RETRY_REQUIRED_STATUSES.contains(status);
   }
 
   private ObjectNode readObject(byte[] body) {

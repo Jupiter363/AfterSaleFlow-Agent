@@ -35,6 +35,7 @@ from app.graph_runtime.errors import (
     GraphNonceReplayError,
     GraphPermitBindingError,
     GraphPermitLostError,
+    GraphTerminalBindingError,
 )
 from app.graph_runtime.gateway import GatewayExecution, GraphCommandGateway
 from app.graph_runtime.ledger import CommandBinding, InvocationNonce, PostgresCommandLedger
@@ -63,6 +64,8 @@ from app.graph_runtime.recovery import PostgresRecoveryCoordinator
 from app.graph_runtime.registry import CommandProfileBinding
 from app.graph_runtime.result import CompletedDraft, ResultBindings
 from app.graph_runtime.restore_validation import GraphRestoreValidationRunner
+from app.graph_runtime.target_e2e import TargetE2ERoomProposal, TargetE2ERoomProposalSource
+from app.security.invocation_envelope import INVOCATION_CLOCK_SKEW_SECONDS
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
@@ -2719,6 +2722,411 @@ async def test_real_command_ledger_is_hash_idempotent_and_nonce_replay_safe(
 
     assert referenced_keys == frozenset({"key-1", "key-integration-old"})
     assert nonce_count == 2
+
+
+@pytest.mark.asyncio
+async def test_candidate_reconciliation_proof_uses_verified_admission_clock_window(
+    graph_database: _Database,
+) -> None:
+    """Historical admission uses the verifier's bounded clock window, read-only."""
+
+    await _migration_runner(graph_database).run()
+    ledger = PostgresCommandLedger()
+    activation_id = f"p9act.v1.{uuid4().hex}"
+    thread_id = f"grt.v1.{uuid4().hex}"
+    issuer = "java-api-service"
+    key_id = "local-target-graph"
+    assert INVOCATION_CLOCK_SKEW_SECONDS == 5
+    within_skew_seconds = INVOCATION_CLOCK_SKEW_SECONDS - 3
+    beyond_skew_seconds = INVOCATION_CLOCK_SKEW_SECONDS + 1
+
+    def binding_for(command_id: str, *, variant: str) -> CommandBinding:
+        base = _command_binding(command_id, variant=variant)
+        return replace(
+            base,
+            thread_id=thread_id,
+            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            activation_id=activation_id,
+            room_fencing_token=11,
+            command_hash="a" * 64,
+            command_envelope_hash="b" * 64,
+        )
+
+    def candidate_result(binding: CommandBinding):
+        logical_run_id = str(binding.request_json["logical_run_id"])
+        attempt_id = str(binding.request_json["attempt_id"])
+        source = TargetE2ERoomProposalSource(
+            schema_version="target-e2e-room-proposal-source.v1",
+            room_type="HEARING",
+            proposal=TargetE2ERoomProposal(
+                schema_version="target-e2e-hearing-proposal.v1",
+                proposal_id=f"proposal-{binding.command_id}",
+                command_id=binding.command_id,
+                logical_run_id=logical_run_id,
+                attempt_id=attempt_id,
+                payload_schema_version="hearing-proposal.v1",
+                payload_ref=f"urn:target-e2e:proposal:{binding.command_id}",
+                payload_hash="f" * 64,
+                terminal_class="COMPLETED",
+                formal_authority=False,
+            ),
+        )
+        fence = GraphFenceContext(
+            thread_id=binding.thread_id,
+            command_id=binding.command_id,
+            owner_id="worker-candidate-proof",
+            fencing_token=1,
+            request_hash=binding.request_hash,
+            room_epoch=binding.room_epoch,
+            graph_key=binding.graph_key,
+            graph_version=binding.graph_version,
+            checkpoint_schema_version=binding.checkpoint_schema_version,
+            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            activation_id=activation_id,
+            room_fencing_token=11,
+            command_hash="a" * 64,
+            command_envelope_hash="b" * 64,
+            execution_provider="target-e2e-test",
+            execution_model="candidate-proof-model",
+            environment_id="candidate-proof-env",
+            environment_generation=1,
+            tenant_surrogate="tenant-candidate-proof",
+            case_id="case-candidate-proof",
+            room_type="HEARING",
+            binding_hash="c" * 64,
+            code_build_id="candidate-proof-build",
+        )
+        return TerminalResultMaterializer(
+            thread_id=binding.thread_id,
+            request_hash=binding.request_hash,
+            draft=CompletedDraft(status="COMPLETED"),
+            bindings=ResultBindings(
+                command_id=binding.command_id,
+                logical_run_id=logical_run_id,
+                attempt_id=attempt_id,
+                graph_key=binding.graph_key,
+                graph_version=binding.graph_version,
+                checkpoint_id="candidate-proof-checkpoint",
+                cognitive_revision=1,
+                public_event_proposals=(),
+                artifact_operations=(),
+                usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0),
+                execution_metadata=ExecutionMetadata(
+                    prompt_version=binding.profile.prompt_version,
+                    model_profile_id=binding.profile.model_profile_id,
+                    schema_version=binding.profile.output_schema_version,
+                    policy_version=binding.profile.policy_version,
+                    guardrail_version=binding.profile.guardrail_version,
+                ),
+            ),
+            target_proposal_source=source,
+        ).materialize("candidate-proof", "candidate-proof-checkpoint", fence=fence)
+
+    async def insert_candidate(
+        connection: AsyncConnection[Any],
+        binding: CommandBinding,
+        *,
+        jti: str,
+        issued_offset_seconds: int,
+        expires_offset_seconds: int,
+        insert_result: bool,
+    ) -> tuple[datetime, Any | None]:
+        result = candidate_result(binding) if insert_result else None
+        row = await (
+            await connection.execute(
+                """
+                insert into agent_graph_command (
+                    thread_id, command_id, request_schema_version, request_json, request_hash,
+                    execution_mode, activation_id, room_fencing_token,
+                    command_hash, command_envelope_hash,
+                    room_epoch, graph_key, graph_version, checkpoint_schema_version,
+                    prompt_version, model_profile_id, output_schema_version,
+                    policy_version, guardrail_version, tool_policy_version,
+                    deadline_at, status, attempt_count, fencing_token,
+                    committed_checkpoint_ns, committed_checkpoint_id,
+                    result_ref, result_hash, result_checkpointed_at, registered_at
+                ) values (
+                    %s, %s, %s, %s::jsonb, %s,
+                    'TARGET_E2E_CANDIDATE', %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s,
+                    %s, 'RESULT_CHECKPOINTED', 1, 1,
+                    %s, %s, %s, %s, clock_timestamp(), clock_timestamp()
+                )
+                returning registered_at
+                """,
+                (
+                    binding.thread_id,
+                    binding.command_id,
+                    binding.request_schema_version,
+                    json.dumps(binding.request_json, separators=(",", ":")),
+                    binding.request_hash,
+                    binding.activation_id,
+                    binding.room_fencing_token,
+                    binding.command_hash,
+                    binding.command_envelope_hash,
+                    binding.room_epoch,
+                    binding.graph_key,
+                    binding.graph_version,
+                    binding.checkpoint_schema_version,
+                    binding.profile.prompt_version,
+                    binding.profile.model_profile_id,
+                    binding.profile.output_schema_version,
+                    binding.profile.policy_version,
+                    binding.profile.guardrail_version,
+                    binding.profile.tool_policy_version,
+                    binding.deadline_at,
+                    result.checkpoint_ns if result is not None else "candidate-proof",
+                    result.checkpoint_id if result is not None else "candidate-proof-checkpoint",
+                    result.result_ref if result is not None else "urn:after-sale-flow:graph-result:" + "d" * 64,
+                    result.result_hash if result is not None else "d" * 64,
+                ),
+            )
+        ).fetchone()
+        assert row is not None
+        registered_at = row["registered_at"]
+        await connection.execute(
+            """
+            insert into agent_graph_invocation_nonce (
+                issuer, key_id, jti, thread_id, command_id, request_hash,
+                issued_at, token_expires_at, retained_until
+            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                issuer,
+                key_id,
+                jti,
+                binding.thread_id,
+                binding.command_id,
+                binding.request_hash,
+                registered_at + timedelta(seconds=issued_offset_seconds),
+                registered_at + timedelta(seconds=expires_offset_seconds),
+                registered_at + timedelta(days=1, seconds=issued_offset_seconds),
+            ),
+        )
+        if result is not None:
+            await connection.execute(
+                """
+                insert into agent_graph_result (
+                    result_id, thread_id, command_id, request_hash, execution_mode, activation_id,
+                    room_fencing_token,
+                    command_hash, command_envelope_hash, proposal_hash, result_envelope_hash,
+                    proposal_source_json, result_envelope_json,
+                    result_schema_version, checkpoint_ns, checkpoint_id, cognitive_revision,
+                    terminal_status, result_json, result_ref, result_hash, usage_json
+                ) values (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s::jsonb, %s::jsonb,
+                    %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb
+                )
+                """,
+                (
+                    result.result_id,
+                    result.thread_id,
+                    result.command_id,
+                    result.request_hash,
+                    result.execution_lane.value,
+                    result.activation_id,
+                    result.room_fencing_token,
+                    result.command_hash,
+                    result.command_envelope_hash,
+                    result.proposal_hash,
+                    result.result_envelope_hash,
+                    json.dumps(dict(result.proposal_source_json or {}), separators=(",", ":")),
+                    json.dumps(dict(result.result_envelope_json or {}), separators=(",", ":")),
+                    result.result_schema_version,
+                    result.checkpoint_ns,
+                    result.checkpoint_id,
+                    result.cognitive_revision,
+                    result.terminal_status,
+                    json.dumps(dict(result.result_json), separators=(",", ":")),
+                    result.result_ref,
+                    result.result_hash,
+                    json.dumps(dict(result.usage_json), separators=(",", ":")),
+                ),
+            )
+        return registered_at, result
+
+    accepted = binding_for("candidate-proof-accepted", variant="candidate-proof-accepted")
+    within_expiry = binding_for(
+        "candidate-proof-within-expiry",
+        variant="candidate-proof-within-expiry",
+    )
+    too_future = binding_for("candidate-proof-too-future", variant="candidate-proof-too-future")
+    expired = binding_for("candidate-proof-expired", variant="candidate-proof-expired")
+
+    async with await AsyncConnection.connect(
+        graph_database.migration_dsn,
+        autocommit=True,
+        prepare_threshold=0,
+        row_factory=dict_row,
+    ) as connection:
+        await connection.execute(sql.SQL("set role {}").format(sql.Identifier(OWNER)))
+        await connection.execute(
+            sql.SQL("set search_path to {}, pg_catalog, pg_temp").format(
+                sql.Identifier(SCHEMA)
+            )
+        )
+        await connection.execute(
+            """
+            insert into agent_graph_version_registry (
+                graph_key, graph_version, checkpoint_schema_version,
+                registry_state, state_schema_version, state_schema_hash,
+                command_schema_version, result_schema_version,
+                prompt_version, model_profile_id, output_schema_version,
+                policy_version, guardrail_version, tool_policy_version,
+                binding_hash, code_build_id, loadable, activated_at
+            ) values (
+                'hearing_flow', 'hearing_flow.v2', 'hearing_checkpoint.v2',
+                'ACTIVE_CANDIDATE', 'hearing_state.v2', %s,
+                'room-graph-command.v1', 'room-graph-result.v1',
+                'prompt.v1', 'model.v1', 'output.v1',
+                'policy.v1', 'guardrail.v1', 'tools.v1',
+                %s, 'candidate-proof-build', true, clock_timestamp()
+            )
+            """,
+            (STATE_SCHEMA_HASH, BINDING_HASH),
+        )
+        await connection.execute(
+            """
+            insert into graph_thread_registry (
+                thread_id, tenant_surrogate, case_id, room_type, room_epoch,
+                actor_scope_json, actor_scope_hash, agent_session_id,
+                shared_session, graph_key, graph_version, checkpoint_schema_version
+            ) values (
+                %s, 'tenant-candidate-proof', 'case-candidate-proof', 'HEARING', 3,
+                '{"audience":"PUBLIC"}'::jsonb, %s, 'session-candidate-proof',
+                true, 'hearing_flow', 'hearing_flow.v2', 'hearing_checkpoint.v2'
+            )
+            """,
+            (thread_id, "e" * 64),
+        )
+        await connection.execute(
+            """
+            insert into agent_graph_target_e2e_activation (
+                activation_id, run_nonce, context_hash, environment_id,
+                environment_generation, candidate_sha, tenant_surrogate, case_scope,
+                allowed_room_types, temporal_namespace, context_json, issued_at, expires_at
+            ) values (
+                %s, 'candidate-proof-run', %s, 'candidate-proof-env',
+                1, %s, 'tenant-candidate-proof', '{}'::jsonb,
+                '["HEARING"]'::jsonb, 'candidate-proof-namespace', '{}'::jsonb,
+                clock_timestamp() - interval '1 minute', clock_timestamp() + interval '5 minutes'
+            )
+            """,
+            (activation_id, "c" * 64, "d" * 40),
+        )
+        async with connection.transaction():
+            registered_at, expected_result = await insert_candidate(
+                connection,
+                accepted,
+                jti="candidate-proof-accepted-jti",
+                issued_offset_seconds=within_skew_seconds,
+                expires_offset_seconds=within_skew_seconds + 30,
+                insert_result=True,
+            )
+        assert expected_result is not None
+        _, expected_within_expiry_result = await insert_candidate(
+            connection,
+            within_expiry,
+            jti="candidate-proof-within-expiry-jti",
+            issued_offset_seconds=-(within_skew_seconds + 30),
+            expires_offset_seconds=-within_skew_seconds,
+            insert_result=True,
+        )
+        assert expected_within_expiry_result is not None
+        await insert_candidate(
+            connection,
+            too_future,
+            jti="candidate-proof-too-future-jti",
+            issued_offset_seconds=beyond_skew_seconds,
+            expires_offset_seconds=beyond_skew_seconds + 30,
+            insert_result=False,
+        )
+        await insert_candidate(
+            connection,
+            expired,
+            jti="candidate-proof-expired-jti",
+            issued_offset_seconds=-(beyond_skew_seconds + 30),
+            expires_offset_seconds=-beyond_skew_seconds,
+            insert_result=False,
+        )
+
+    pool = _runtime_pool(graph_database)
+    await pool.open(wait=True, timeout=10)
+    try:
+        async with pool.connection(timeout=5) as connection:
+            async def counts() -> dict[str, int]:
+                row = await (
+                    await connection.execute(
+                        """
+                        select
+                            (select count(*) from agent_graph_command where thread_id = %s) as commands,
+                            (select count(*) from agent_graph_result where thread_id = %s) as results,
+                            (select count(*) from agent_graph_invocation_nonce where thread_id = %s) as nonces
+                        """,
+                        (thread_id, thread_id, thread_id),
+                    )
+                ).fetchone()
+                assert row is not None
+                return {name: int(value) for name, value in row.items()}
+
+            before = await counts()
+            first_command, first_result = await ledger.load_candidate_reconciliation_proof(
+                connection,
+                binding=accepted,
+                issuer=issuer,
+                key_id=key_id,
+            )
+            second_command, second_result = await ledger.load_candidate_reconciliation_proof(
+                connection,
+                binding=accepted,
+                issuer=issuer,
+                key_id=key_id,
+            )
+            within_expiry_command, within_expiry_result = (
+                await ledger.load_candidate_reconciliation_proof(
+                    connection,
+                    binding=within_expiry,
+                    issuer=issuer,
+                    key_id=key_id,
+                )
+            )
+            after = await counts()
+            assert (first_command, first_result) == (second_command, second_result)
+            assert first_result == expected_result
+            assert within_expiry_result == expected_within_expiry_result
+            assert within_expiry_command.binding == within_expiry
+            assert before == after == {"commands": 4, "results": 2, "nonces": 4}
+
+            terminal_command, terminal_result = await ledger.load_candidate_terminal_proof(
+                connection,
+                binding=accepted,
+                issuer=issuer,
+                key_id=key_id,
+                jti="candidate-proof-accepted-jti",
+                issued_at=registered_at + timedelta(seconds=within_skew_seconds),
+                token_expires_at=registered_at
+                + timedelta(seconds=within_skew_seconds + 30),
+            )
+            assert (terminal_command, terminal_result) == (first_command, first_result)
+
+            for binding, rejected_issuer, rejected_key in (
+                (too_future, issuer, key_id),
+                (expired, issuer, key_id),
+                (accepted, "other-issuer", key_id),
+                (accepted, issuer, "other-key"),
+                (replace(accepted, command_hash="0" * 64), issuer, key_id),
+            ):
+                with pytest.raises(GraphTerminalBindingError, match="pre-cutoff"):
+                    await ledger.load_candidate_reconciliation_proof(
+                        connection,
+                        binding=binding,
+                        issuer=rejected_issuer,
+                        key_id=rejected_key,
+                    )
+    finally:
+        await pool.close(timeout=10)
 
 
 async def _set_fanout_config(

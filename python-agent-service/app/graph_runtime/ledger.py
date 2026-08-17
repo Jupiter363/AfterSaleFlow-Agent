@@ -30,6 +30,7 @@ from app.graph_runtime.target_e2e import (
     TargetE2EGraphResultEnvelope,
     TargetE2ERoomProposalSource,
 )
+from app.security.invocation_envelope import INVOCATION_CLOCK_SKEW_SECONDS
 
 
 NONCE_RETENTION: Final = timedelta(hours=24)
@@ -560,8 +561,11 @@ select {', '.join(f'command.{column.strip()}' for column in COMMAND_COLUMNS.spli
 # worker restart unrecoverable because the original admission nonce is the one
 # that was consumed when the command was registered.  The query below instead
 # proves that the immutable command was admitted by a nonce that was valid at
-# registration time.  The fresh credential is still verified by the envelope
-# verifier and binds the same command/envelope hashes before this query runs.
+# registration time.  It uses the same bounded verifier clock window as the
+# original JWS validation, so cross-process wall-clock ordering cannot turn an
+# already accepted admission into an unreconcilable terminal command.  The
+# fresh credential is still verified by the envelope verifier and binds the
+# same command/envelope hashes before this query runs.
 LOAD_CANDIDATE_RECONCILIATION_PROOF_SQL: Final[str] = f"""
 select {', '.join(f'command.{column.strip()}' for column in COMMAND_COLUMNS.split(','))}
   from agent_graph_command command
@@ -585,8 +589,10 @@ select {', '.join(f'command.{column.strip()}' for column in COMMAND_COLUMNS.spli
           and nonce.request_hash = command.request_hash
           and nonce.issuer = %s
           and nonce.key_id = %s
-          and nonce.issued_at <= command.registered_at
-          and nonce.token_expires_at >= command.registered_at
+           and nonce.issued_at <= command.registered_at
+               + make_interval(secs => {INVOCATION_CLOCK_SKEW_SECONDS})
+           and nonce.token_expires_at >= command.registered_at
+               - make_interval(secs => {INVOCATION_CLOCK_SKEW_SECONDS})
    )
 """
 

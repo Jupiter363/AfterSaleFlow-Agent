@@ -5,7 +5,7 @@ import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
 
 import jwt
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,7 +21,7 @@ _CERTIFICATE_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _EXPECTED_HEADER_KEYS = frozenset({"alg", "kid", "typ"})
 _MAX_JWS_BYTES = 8192
 _MAX_TOKEN_LIFETIME_SECONDS = 60
-_MAX_CLOCK_SKEW_SECONDS = 5
+INVOCATION_CLOCK_SKEW_SECONDS: Final[int] = 5
 
 
 class InvocationEnvelopeError(ValueError):
@@ -240,11 +240,11 @@ class InvocationEnvelopeVerifier:
             raise InvocationEnvelopeError("INVOCATION_JWS_LIFETIME_REJECTED")
         if claims.nbf < claims.iat or claims.nbf > claims.exp:
             raise InvocationEnvelopeError("INVOCATION_JWS_TIME_ORDER_REJECTED")
-        if claims.iat > now + _MAX_CLOCK_SKEW_SECONDS:
+        if claims.iat > now + INVOCATION_CLOCK_SKEW_SECONDS:
             raise InvocationEnvelopeError("INVOCATION_JWS_NOT_YET_VALID")
-        if claims.nbf > now + _MAX_CLOCK_SKEW_SECONDS:
+        if claims.nbf > now + INVOCATION_CLOCK_SKEW_SECONDS:
             raise InvocationEnvelopeError("INVOCATION_JWS_NOT_YET_VALID")
-        if claims.exp < now - _MAX_CLOCK_SKEW_SECONDS:
+        if claims.exp < now - INVOCATION_CLOCK_SKEW_SECONDS:
             raise InvocationEnvelopeError("INVOCATION_JWS_EXPIRED")
 
     @staticmethod
