@@ -27,6 +27,7 @@ from app.agents.evidence_clerk.public_reply import (
     EvidencePublicOutputPolicyError,
     guard_evidence_public_reply,
 )
+from app.agents.dispute_intake_officer.schemas import INTAKE_ROOM_SECTION_KINDS
 from app.llm import (
     AgentOutputSchemaError,
     GovernedProviderRequest,
@@ -764,6 +765,39 @@ def test_target_intake_projector_streams_room_utterance_before_case_detail() -> 
         "case_detail.case_story.title",
         "case_detail.case_story",
     ]
+
+
+def test_target_intake_v3_streams_each_ordered_card_before_terminal_json() -> None:
+    projector = IncrementalVisibleJsonProjector(
+        TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
+    )
+
+    events = projector.feed('{"room_utterance":"已记录本轮')
+    assert events == [("room_utterance", "已记录本轮")]
+    events += projector.feed('补充。","ordered_sections":[')
+    assert events[-1] == ("room_utterance", "补充。")
+
+    projected_sections: list[dict[str, object]] = []
+    for sequence, kind in enumerate(INTAKE_ROOM_SECTION_KINDS, start=1):
+        prefix = "" if sequence == 1 else ","
+        item = {
+            "sequence": sequence,
+            "kind": kind,
+            "value": {"marker": f"SECTION_{sequence}"},
+        }
+        section_events = projector.feed(
+            prefix
+            + json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        )
+        assert len(section_events) == 1
+        assert section_events[0][0] == "ordered_sections"
+        projected_sections.append(json.loads(section_events[0][1]))
+
+    assert projector.feed("]}") == []
+    assert [section["kind"] for section in projected_sections] == list(
+        INTAKE_ROOM_SECTION_KINDS
+    )
+    assert projected_sections[-1]["kind"] == "TURN_EVALUATION"
 
 
 def test_target_intake_projector_preserves_unicode_before_opening_case_detail() -> None:

@@ -448,6 +448,8 @@ class CaseDetailDossierSkill:
             CaseFactMatrixDeltaV2 | UnilateralCaseMatrixDraftV1 | None
         ) = None,
         llm_unilateral_case_matrix: UnilateralCaseMatrixDraftV1 | None = None,
+        model_semantics_authoritative: bool = False,
+        llm_respondent_source_binding: Mapping[str, Any] | None = None,
     ) -> DossierRenderResult:
         if conversation_action not in _INTAKE_CONVERSATION_ACTIONS:
             raise _party_intake_state_error(
@@ -487,6 +489,10 @@ class CaseDetailDossierSkill:
             current_message_id=current_message_id,
         )
         bounded_llm_case_detail = _case_detail_fields_only(llm_case_detail or {})
+        model_handoff = _quality_mapping(
+            bounded_llm_case_detail.get("handoff_notes")
+        )
+        model_handoff_instruction = str(model_handoff.get("instruction") or "")
         proposed_party_state = bounded_llm_case_detail.pop("party_intake_state", None)
         proposed_remark_partition = bounded_llm_case_detail.pop(
             "handoff_remark_partition",
@@ -587,22 +593,37 @@ class CaseDetailDossierSkill:
         detail = _deep_merge(detail, bounded_llm_case_detail)
         _restore_party_handoff_authority(detail, previous_actor_entry)
         detail["schema_version"] = self.schema_version
-        _enforce_claim_resolution(detail, request, previous)
-        _enforce_party_position_voice(detail)
-        _enforce_respondent_attitude_source(
-            detail,
-            request,
-            previous,
-            bounded_llm_case_detail,
-            effective_matrix_delta,
-        )
-        _enforce_dispute_core_state(detail)
-        _enforce_case_story_summary(
-            detail,
-            request,
-            previous,
-            bounded_llm_case_detail,
-        )
+        if model_semantics_authoritative:
+            _bind_model_trusted_claim_authority(
+                detail,
+                request,
+                previous,
+            )
+            _bind_model_trusted_respondent_attitude(
+                detail,
+                request,
+                previous,
+                bounded_llm_case_detail,
+                effective_matrix_delta,
+                llm_respondent_source_binding,
+            )
+        else:
+            _enforce_claim_resolution(detail, request, previous)
+            _enforce_party_position_voice(detail)
+            _enforce_respondent_attitude_source(
+                detail,
+                request,
+                previous,
+                bounded_llm_case_detail,
+                effective_matrix_delta,
+            )
+            _enforce_dispute_core_state(detail)
+            _enforce_case_story_summary(
+                detail,
+                request,
+                previous,
+                bounded_llm_case_detail,
+            )
 
         trusted_refs = self._trusted_references(request)
         detail["references"] = {
@@ -611,110 +632,131 @@ class CaseDetailDossierSkill:
             "logistics_reference": trusted_refs.get("logistics_reference") or "",
         }
 
-        actor_source_records = _authoritative_intake_source_records(
-            request,
-            initiator_role=initiator_role,
-        )
-        claim = _quality_mapping(detail.get("claim_resolution"))
-        actor_is_initiator = (
-            initiator_role is not None and actor_role == initiator_role
-        )
-        if actor_is_initiator:
-            resolution_authorized = (
-                _known_resolution_code(claim.get("requested_resolution")) is not None
-            )
+        missing_info = _ensure_dict(detail, "missing_information")
+        quality = _ensure_dict(detail, "intake_quality")
+        if model_semantics_authoritative:
+            missing = [
+                str(field)
+                for field in missing_info.get("blocking_gaps", [])
+                if isinstance(field, str)
+            ]
+            score_breakdown = _quality_mapping(quality.get("score_breakdown"))
+            score = quality.get("score")
+            if type(score) is not int:
+                raise _party_intake_state_error(
+                    "INTAKE_PARTY_STATE_QUALITY_INVALID",
+                    "the ordered Intake model output must carry its typed total score",
+                )
         else:
-            resolution_authorized = _respondent_resolution_authorized(
-                detail,
-                actor_role=actor_role,
+            actor_source_records = _authoritative_intake_source_records(
+                request,
                 initiator_role=initiator_role,
             )
-
-        missing_info = _ensure_dict(detail, "missing_information")
-        for field_name in ("blocking_gaps", "nice_to_have_gaps", "next_questions"):
-            values = [
-                value
-                for value in _list_values(missing_info.get(field_name))
-                if not _is_evidence_material_request(value)
-                and not _missing_field_is_resolved_by_current_authority(
-                    value,
+            claim = _quality_mapping(detail.get("claim_resolution"))
+            actor_is_initiator = (
+                initiator_role is not None and actor_role == initiator_role
+            )
+            if actor_is_initiator:
+                resolution_authorized = (
+                    _known_resolution_code(claim.get("requested_resolution")) is not None
+                )
+            else:
+                resolution_authorized = _respondent_resolution_authorized(
                     detail,
                     actor_role=actor_role,
-                    actor_source_records=actor_source_records,
-                    resolution_authorized=resolution_authorized,
-                    trusted_references=trusted_refs,
+                    initiator_role=initiator_role,
                 )
-            ]
-            missing_info[field_name] = values[:2] if field_name == "next_questions" else values
-        utterance_questions = _follow_up_questions_from_utterance(room_utterance)
-        if utterance_questions and not _is_evidence_material_request(room_utterance):
-            missing_info["next_questions"] = [
-                question
-                for question in utterance_questions
-                if not _missing_field_is_resolved_by_current_authority(
-                    question,
-                    detail,
-                    actor_role=actor_role,
-                    actor_source_records=actor_source_records,
-                    resolution_authorized=resolution_authorized,
-                    trusted_references=trusted_refs,
-                )
-            ][:2]
-        llm_missing_from_detail = [
-            _canonical_missing_field_identity(field)
-            for field in _list_values(missing_info.get("blocking_gaps"))
-        ]
-        missing = self._hard_missing_fields(trusted_refs)
-        for field in llm_missing_fields:
-            canonical_field = _canonical_missing_field_identity(field)
-            if (
-                canonical_field not in missing
-                and not _is_evidence_material_request(field)
-                and not _missing_field_is_resolved_by_current_authority(
-                    field,
-                    detail,
-                    actor_role=actor_role,
-                    actor_source_records=actor_source_records,
-                    resolution_authorized=resolution_authorized,
-                    trusted_references=trusted_refs,
-                )
+            for field_name in (
+                "blocking_gaps",
+                "nice_to_have_gaps",
+                "next_questions",
             ):
-                missing.append(canonical_field)
-        missing.extend(field for field in llm_missing_from_detail if field not in missing)
-        if not actor_source_records and "CURRENT_PARTY_STATEMENT" not in missing:
-            missing.append("CURRENT_PARTY_STATEMENT")
-        if not resolution_authorized and "REQUESTED_RESOLUTION" not in missing:
-            missing.append("REQUESTED_RESOLUTION")
-        missing_info["blocking_gaps"] = _human_missing_fields(missing)
-        _normalize_next_verification_focus(detail)
-        score_breakdown = _derive_intake_quality_breakdown(
-            detail,
-            request=request,
-            missing=missing,
-            initiator_role=initiator_role,
-            actor_source_records=actor_source_records,
-        )
-        score = sum(score_breakdown.values())
-        quality = _ensure_dict(detail, "intake_quality")
-        quality["score_breakdown"] = score_breakdown
-        quality["score"] = score
-        quality["threshold"] = self.readiness_threshold
-        threshold_reached = score >= self.readiness_threshold and not missing
-        phase_has_authority = (
-            previous_remark_status != "NOT_READY" or has_current_actor_answer
-        )
-        quality["ready_for_next_step"] = threshold_reached and phase_has_authority
-        if quality["ready_for_next_step"]:
-            missing = []
-            quality["improvement_reason"] = "信息完整度已达到提交阈值。"
-        elif missing:
-            quality["improvement_reason"] = "仍缺少可信的" + "、".join(
-                _human_missing_fields(missing)
+                values = [
+                    value
+                    for value in _list_values(missing_info.get(field_name))
+                    if not _is_evidence_material_request(value)
+                    and not _missing_field_is_resolved_by_current_authority(
+                        value,
+                        detail,
+                        actor_role=actor_role,
+                        actor_source_records=actor_source_records,
+                        resolution_authorized=resolution_authorized,
+                        trusted_references=trusted_refs,
+                    )
+                ]
+                missing_info[field_name] = (
+                    values[:2] if field_name == "next_questions" else values
+                )
+            utterance_questions = _follow_up_questions_from_utterance(room_utterance)
+            if utterance_questions and not _is_evidence_material_request(room_utterance):
+                missing_info["next_questions"] = [
+                    question
+                    for question in utterance_questions
+                    if not _missing_field_is_resolved_by_current_authority(
+                        question,
+                        detail,
+                        actor_role=actor_role,
+                        actor_source_records=actor_source_records,
+                        resolution_authorized=resolution_authorized,
+                        trusted_references=trusted_refs,
+                    )
+                ][:2]
+            llm_missing_from_detail = [
+                _canonical_missing_field_identity(field)
+                for field in _list_values(missing_info.get("blocking_gaps"))
+            ]
+            missing = self._hard_missing_fields(trusted_refs)
+            for field in llm_missing_fields:
+                canonical_field = _canonical_missing_field_identity(field)
+                if (
+                    canonical_field not in missing
+                    and not _is_evidence_material_request(field)
+                    and not _missing_field_is_resolved_by_current_authority(
+                        field,
+                        detail,
+                        actor_role=actor_role,
+                        actor_source_records=actor_source_records,
+                        resolution_authorized=resolution_authorized,
+                        trusted_references=trusted_refs,
+                    )
+                ):
+                    missing.append(canonical_field)
+            missing.extend(
+                field for field in llm_missing_from_detail if field not in missing
             )
-        else:
-            quality["improvement_reason"] = _humanize_internal_tokens(
-                str(quality.get("improvement_reason") or "")
+            if not actor_source_records and "CURRENT_PARTY_STATEMENT" not in missing:
+                missing.append("CURRENT_PARTY_STATEMENT")
+            if not resolution_authorized and "REQUESTED_RESOLUTION" not in missing:
+                missing.append("REQUESTED_RESOLUTION")
+            missing_info["blocking_gaps"] = _human_missing_fields(missing)
+            _normalize_next_verification_focus(detail)
+            score_breakdown = _derive_intake_quality_breakdown(
+                detail,
+                request=request,
+                missing=missing,
+                initiator_role=initiator_role,
+                actor_source_records=actor_source_records,
             )
+            score = sum(score_breakdown.values())
+            quality["score_breakdown"] = score_breakdown
+            quality["score"] = score
+            quality["threshold"] = self.readiness_threshold
+            threshold_reached = score >= self.readiness_threshold and not missing
+            phase_has_authority = (
+                previous_remark_status != "NOT_READY" or has_current_actor_answer
+            )
+            quality["ready_for_next_step"] = threshold_reached and phase_has_authority
+            if quality["ready_for_next_step"]:
+                missing = []
+                quality["improvement_reason"] = "信息完整度已达到提交阈值。"
+            elif missing:
+                quality["improvement_reason"] = "仍缺少可信的" + "、".join(
+                    _human_missing_fields(missing)
+                )
+            else:
+                quality["improvement_reason"] = _humanize_internal_tokens(
+                    str(quality.get("improvement_reason") or "")
+                )
 
         actor_remark_status = "NOT_READY"
         if quality["ready_for_next_step"]:
@@ -731,7 +773,8 @@ class CaseDetailDossierSkill:
                     "INTAKE_HANDOFF_REMARK_SOURCE_REQUIRED",
                     "the first ready turn requires an authenticated participant message",
                 )
-            missing_info["next_questions"] = []
+            if not model_semantics_authoritative:
+                missing_info["next_questions"] = []
             actor_remark_status = (
                 "NO_EXTRA_REMARKS"
                 if combined_no_remark
@@ -762,22 +805,28 @@ class CaseDetailDossierSkill:
             )
             notes["latest_remark"] = ""
             notes["remarks"] = []
-            if not missing_info.get("next_questions"):
+            if (
+                not model_semantics_authoritative
+                and not missing_info.get("next_questions")
+            ):
                 question = _question_for_missing(missing) or _question_for_quality_gap(
                     score_breakdown
                 )
                 missing_info["next_questions"] = [question]
+        if model_semantics_authoritative and model_handoff_instruction:
+            notes["instruction"] = model_handoff_instruction
         admission = _ensure_dict(detail, "admission")
-        if quality["ready_for_next_step"]:
-            admission["recommendation"] = "ACCEPTED"
-        elif llm_admission_recommendation == "NOT_ADMISSIBLE":
-            admission["recommendation"] = "NOT_ADMISSIBLE"
-        else:
-            admission["recommendation"] = "NEED_MORE_INFO"
-        admission["confidence"] = _clamp_confidence(
-            admission.get("confidence", llm_confidence)
-        )
-        admission["reasoning"] = str(admission.get("reasoning") or "")
+        if not model_semantics_authoritative:
+            if quality["ready_for_next_step"]:
+                admission["recommendation"] = "ACCEPTED"
+            elif llm_admission_recommendation == "NOT_ADMISSIBLE":
+                admission["recommendation"] = "NOT_ADMISSIBLE"
+            else:
+                admission["recommendation"] = "NEED_MORE_INFO"
+            admission["confidence"] = _clamp_confidence(
+                admission.get("confidence", llm_confidence)
+            )
+            admission["reasoning"] = str(admission.get("reasoning") or "")
 
         current_actor_entry = _canonical_party_intake_entry(
             detail,
@@ -2777,6 +2826,242 @@ def _non_negative_int(value: Any) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _bind_model_trusted_claim_authority(
+    detail: dict[str, Any],
+    request: IntakeTurnRequest,
+    previous: dict[str, Any],
+) -> None:
+    """Keep V3 claim semantics while binding role and verbatim source authority."""
+
+    initiator_role = _proven_initiator_role(request, previous)
+    if initiator_role is None:
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_ROLE_AUTHORITY_INVALID",
+            "ordered Intake claim requires a proven initiator role",
+        )
+    actor_role = _require_party_actor_role(request.agent_context.actor_role)
+    claim = _ensure_dict(detail, "claim_resolution")
+    if str(claim.get("initiator_role") or "").upper() != initiator_role:
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_ROLE_AUTHORITY_DRIFT",
+            "model claim initiator role conflicts with formal party authority",
+        )
+    previous_claim = _quality_mapping(previous.get("claim_resolution"))
+    semantic_fields = (
+        "initiator_role",
+        "requested_resolution",
+        "requested_amount",
+        "requested_items",
+        "request_reason",
+        "normalized_statement",
+    )
+    if actor_role != initiator_role and previous_claim:
+        if any(
+            claim.get(field) != previous_claim.get(field)
+            for field in semantic_fields
+            if field in previous_claim
+        ):
+            raise _party_intake_state_error(
+                "INTAKE_PARTY_STATE_ROLE_AUTHORITY_DRIFT",
+                "respondent output cannot rewrite the initiator claim",
+            )
+        for field in semantic_fields:
+            if field in previous_claim:
+                claim[field] = copy.deepcopy(previous_claim[field])
+    requested = _ensure_dict(detail, "requested_resolution")
+    requested["requested_outcome"] = claim["requested_resolution"]
+    requested["expected_resolution_text"] = claim["normalized_statement"]
+
+    if actor_role != initiator_role:
+        if "original_statement" in previous_claim:
+            claim["original_statement"] = copy.deepcopy(
+                previous_claim["original_statement"]
+            )
+        if "original_statement_provenance" in previous_claim:
+            claim["original_statement_provenance"] = copy.deepcopy(
+                previous_claim["original_statement_provenance"]
+            )
+        return
+
+    initial = request.initial_case_facts
+    form_description = str(getattr(initial, "form_description", None) or "")
+    (
+        original_statement,
+        original_source,
+        submission_count,
+        last_message_id,
+    ) = _ordered_original_statement(
+        request=request,
+        previous_claim=previous_claim,
+        form_description=form_description,
+    )
+    claim["original_statement"] = original_statement
+    claim["original_statement_provenance"] = {
+        "policy": ORIGINAL_STATEMENT_POLICY,
+        "last_message_id": last_message_id,
+        "submission_count": submission_count,
+        "separator": "BLANK_LINE",
+        "source": original_source,
+    }
+
+
+def _bind_model_trusted_respondent_attitude(
+    detail: dict[str, Any],
+    request: IntakeTurnRequest,
+    previous: dict[str, Any],
+    llm_case_detail: dict[str, Any] | None,
+    matrix_delta: CaseFactMatrixDeltaV2 | UnilateralCaseMatrixDraftV1 | None,
+    source_binding: Mapping[str, Any] | None,
+) -> None:
+    """Attach server-owned provenance to V3 model semantics without reclassifying it."""
+
+    actor_role = _require_party_actor_role(request.agent_context.actor_role)
+    initiator_role = _proven_initiator_role(request, previous)
+    if initiator_role is None:
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_ROLE_AUTHORITY_INVALID",
+            "ordered Intake output requires a proven initiator role",
+        )
+    respondent_role = _opposite_party(initiator_role)
+    attitude = _quality_mapping(detail.get("respondent_attitude"))
+    if str(attitude.get("respondent_role") or "").upper() != respondent_role:
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "model respondent role conflicts with formal party authority",
+        )
+
+    if actor_role == initiator_role:
+        if source_binding is not None:
+            raise _party_intake_state_error(
+                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+                "an initiator turn cannot create a direct respondent source binding",
+            )
+        attitude_code = str(attitude.get("attitude") or "")
+        if attitude_code in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES:
+            current = request.current_user_message
+            attitude["source"] = SUBJECTIVE_RESPONDENT_SOURCE
+            attitude["confidence"] = DIRECT_RESPONDENT_CONFIDENCE
+            attitude["confidence_note"] = SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE
+            attitude["grounding"] = {
+                "source": "PARTICIPANT_MESSAGE" if current is not None else "INITIAL_FORM",
+                "message_id": current.message_id if current is not None else "",
+            }
+        else:
+            attitude["source"] = "尚未回应"
+            attitude["confidence"] = 0.5
+            attitude.pop("confidence_note", None)
+            attitude.pop("grounding", None)
+        detail["respondent_attitude"] = attitude
+        return
+
+    current = request.current_user_message
+    if (
+        actor_role != respondent_role
+        or current is None
+        or request.turn_source != "ROOM_MESSAGE"
+        or current.source != "ROOM_MESSAGE"
+        or str(current.role or "").upper() != actor_role
+        or not str(current.message_id or "").strip()
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "direct respondent semantics require the authenticated current room message",
+        )
+    if not isinstance(matrix_delta, CaseFactMatrixDeltaV2):
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "direct respondent semantics require the typed case matrix delta",
+        )
+    claim = matrix_delta.respondent_claim
+    if claim is None or source_binding is None:
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "respondent output is missing its typed source binding",
+        )
+    if set(source_binding) != {
+        "schema_version",
+        "binding_kind",
+        "subject_role",
+        "source_quote",
+        "linked_fact_keys",
+    } or source_binding.get("schema_version") != "respondent-claim-binding.v1":
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "respondent source binding is malformed",
+        )
+
+    claim_payload = claim.model_dump(mode="json")
+    if claim_payload["attitude"] == "NOT_ADDRESSED":
+        if (
+            source_binding.get("binding_kind") != "NO_DIRECT_POSITION"
+            or source_binding.get("subject_role") is not None
+            or source_binding.get("source_quote") is not None
+            or source_binding.get("linked_fact_keys") != []
+        ):
+            raise _party_intake_state_error(
+                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+                "NOT_ADDRESSED cannot carry direct current-message authority",
+            )
+        return
+
+    quote = source_binding.get("source_quote")
+    linked_keys = source_binding.get("linked_fact_keys")
+    if (
+        source_binding.get("binding_kind") != "CURRENT_ACTOR_DIRECT"
+        or source_binding.get("subject_role") != actor_role
+        or not isinstance(quote, str)
+        or not quote.strip()
+        or quote not in current.text
+        or not isinstance(linked_keys, list)
+        or not linked_keys
+        or any(not isinstance(key, str) for key in linked_keys)
+        or len(set(linked_keys)) != len(linked_keys)
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "direct respondent source binding does not match the current actor message",
+        )
+    rows_by_key = {row.fact_key: row for row in matrix_delta.fact_rows}
+    if any(
+        key not in rows_by_key
+        or rows_by_key[key].source_scope.value
+        not in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
+        or rows_by_key[key].stance.value == "NOT_ADDRESSED"
+        for key in linked_keys
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "direct respondent binding must reference current-source matrix facts",
+        )
+    model_claim = _current_respondent_model_claim(
+        request,
+        initiator_role=initiator_role,
+        matrix_delta=matrix_delta,
+        llm_case_detail=llm_case_detail,
+    )
+    if model_claim is None:
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "typed respondent claim did not produce direct current authority",
+        )
+    direct_attitude = {
+        "respondent_role": actor_role,
+        "attitude": model_claim["attitude"],
+        "position": model_claim["position_summary"],
+        "source": DIRECT_RESPONDENT_SOURCE,
+        "confidence": DIRECT_RESPONDENT_CONFIDENCE,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": current.message_id,
+        },
+    }
+    if model_claim.get("alternative_proposal"):
+        direct_attitude["alternative_proposal"] = model_claim[
+            "alternative_proposal"
+        ]
+    detail["respondent_attitude"] = direct_attitude
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。

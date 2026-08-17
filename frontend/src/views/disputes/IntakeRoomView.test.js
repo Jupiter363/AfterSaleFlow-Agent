@@ -1916,6 +1916,56 @@ describe("IntakeRoomView", () => {
     wrapper.unmount();
   });
 
+  it("projects ordered Intake V3 sections into the existing right-side cards", async () => {
+    const persistedSummary = "已持久化的旧案情摘要";
+    const streamedSummary = "模型基于本轮完整上下文生成的新案情摘要";
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        ...readyTurnMemory,
+        case_intake_dossier: {
+          ...readyTurnMemory.case_intake_dossier,
+          dossier: {
+            ...readyTurnMemory.case_intake_dossier.dossier,
+            case_story: {
+              ...readyTurnMemory.case_intake_dossier.dossier.case_story,
+              one_sentence_summary: persistedSummary,
+            },
+          },
+        },
+      },
+      eventStreamer: vi.fn(async () => {}),
+    });
+    const applyEvent = wrapper.vm.$.setupState.applyStreamedCaseDetailEvent;
+
+    applyEvent({
+      event: "visible_delta",
+      fieldPath: "ordered_sections",
+      delta: JSON.stringify({
+        sequence: 2,
+        kind: "CASE_STORY",
+        value: {
+          title: "订单履约争议",
+          one_sentence_summary: streamedSummary,
+        },
+      }),
+    });
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).toContain(
+      streamedSummary,
+    );
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).not.toContain(
+      persistedSummary,
+    );
+
+    applyEvent({ event: "attempt_aborted" });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).toContain(
+      persistedSummary,
+    );
+    wrapper.unmount();
+  });
+
   it("replaces the streamed right-side board after a V2 attempt reset", async () => {
     const runId = "run-v2-attempt-reset-board";
     const streamUrl = `/api/private-agent-streams/${runId}/events`;

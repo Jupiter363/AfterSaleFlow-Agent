@@ -430,6 +430,13 @@ TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS: tuple[VisibleFieldSpec, ...] = (
                 "room_utterance",
                 "room_utterance",
             ),
+            VisibleFieldSpec(
+                "ordered_sections",
+                "ordered_sections",
+                "json_array_items",
+                requires_completed_root_property="room_utterance",
+                max_array_items=10,
+            ),
             _intake_case_detail_field("title", "case_detail.case_story.title"),
             _intake_case_detail_field(
                 "one_sentence_summary",

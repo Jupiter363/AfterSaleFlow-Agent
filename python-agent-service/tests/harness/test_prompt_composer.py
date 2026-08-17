@@ -47,18 +47,25 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     assert "上下文包" in system_prompt
     assert "current_user_message" in system_prompt
     assert "initial_case_facts" in system_prompt
-    assert "previous_case_detail" in system_prompt
+    assert "frozen_case_matrix" in system_prompt
+    assert "previous_dispute_outline" in system_prompt
     assert "recent_dialogue_messages" in system_prompt
     assert "turn_reconciliation" not in system_prompt
     assert "turn_audit" not in system_prompt
     assert "forbidden_repeat_topics" not in system_prompt
-    assert "最多追问 2 个" in system_prompt
+    assert "最多 2 个新问题" in system_prompt
     assert "当前方是被发起方时" in system_prompt
     assert "不得引用或猜测发起方私聊原文" in system_prompt
     assert "不得索要截图、照片、视频" in system_prompt
     assert "只进行一次模型调用" in system_prompt
-    assert "只输出本轮发生变化的分支" in system_prompt
-    assert "达到 85 且没有阻塞缺口" in system_prompt
+    assert "不输出增量补丁" in system_prompt
+    assert "total_score >= 85" in system_prompt
+    assert system_prompt.index("room_utterance") < system_prompt.index(
+        "ordered_sections"
+    )
+    assert system_prompt.index("CASE_MATRIX") < system_prompt.index(
+        "TURN_EVALUATION"
+    )
     assert "WAITING_FOR_REMARK" in system_prompt
     assert "HAS_REMARKS" in system_prompt
     assert "claim_resolution" in system_prompt

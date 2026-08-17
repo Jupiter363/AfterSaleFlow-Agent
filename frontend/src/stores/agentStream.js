@@ -60,6 +60,7 @@ function isVisibleField(fieldPath) {
 function isStructuredVisibleField(fieldPath) {
   const value = String(fieldPath || "");
   return value.startsWith("case_detail.") || [
+    "ordered_sections",
     "final_proposed_resolution",
     "reviewed_proposal",
   ].includes(value);

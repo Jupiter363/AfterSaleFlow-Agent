@@ -14,6 +14,7 @@ class ContextSectionSpec:
     required: bool = False
     trust_level: str = "untrusted"
     prompt_included: bool = True
+    prompt_order: int | None = None
 
 
 @dataclass(frozen=True)
@@ -40,15 +41,50 @@ _COMMON_DISPLAY_ONLY = (
 _CONTRACTS: dict[str, AgentContextContract] = {
     "intake_turn_case_detail": AgentContextContract(
         node_name="intake_turn_case_detail",
-        configuration_profile_key="DISPUTE_INTAKE_CONTEXT_PACK_V2",
+        configuration_profile_key="DISPUTE_INTAKE_CONTEXT_PACK_V3",
         sections=(
-            ContextSectionSpec("current_user_message", 100, False, "room_message"),
-            ContextSectionSpec("previous_case_detail", 98, False, "dossier_snapshot"),
             ContextSectionSpec(
-                "recent_dialogue_messages", 96, False, "room_message_history"
+                "case_identity",
+                100,
+                True,
+                "java_filtered",
+                prompt_order=10,
             ),
-            ContextSectionSpec("initial_case_facts", 94, False, "java_filtered"),
-            ContextSectionSpec("case_identity", 92, True, "java_filtered"),
+            ContextSectionSpec(
+                "initial_case_facts",
+                97,
+                False,
+                "java_filtered",
+                prompt_order=20,
+            ),
+            ContextSectionSpec(
+                "frozen_case_matrix",
+                99,
+                False,
+                "dossier_matrix_snapshot",
+                prompt_order=30,
+            ),
+            ContextSectionSpec(
+                "previous_dispute_outline",
+                96,
+                False,
+                "dossier_outline_snapshot",
+                prompt_order=40,
+            ),
+            ContextSectionSpec(
+                "recent_dialogue_messages",
+                98,
+                False,
+                "room_message_history",
+                prompt_order=50,
+            ),
+            ContextSectionSpec(
+                "current_user_message",
+                100,
+                False,
+                "room_message",
+                prompt_order=60,
+            ),
             *_COMMON_DISPLAY_ONLY,
         ),
     ),

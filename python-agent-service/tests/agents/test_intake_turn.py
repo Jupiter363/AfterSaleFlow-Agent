@@ -17,9 +17,13 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
 )
 from app.intake_turn import IntakeTurnWorkflow
 from app.harness.invocation_context import AgentInvocationContext
-from app.agents.dispute_intake_officer.workflow import _subjective_only_snapshot
+from app.agents.dispute_intake_officer.workflow import (
+    INTAKE_CONTEXT_SECTION_TOKEN_BUDGET,
+    _subjective_only_snapshot,
+)
 from app.main import create_app
 from app.schemas import IntakeTurnRequest
+from tests.agents.intake_v3_fixture import intake_initiator_v3_payload
 
 
 # 所属模块：Agent 角色能力 > test_intake_turn；函数角色：模块私有业务函数。
@@ -379,6 +383,7 @@ class FakeCaseDetailRunner:
         context_pack=None,
         agent_context=None,
         prompt_profile_id=None,
+        max_input_tokens=None,
     ):
         resolved_sections = (
             context_pack.prompt_sections() if context_pack is not None else context_sections
@@ -391,8 +396,24 @@ class FakeCaseDetailRunner:
                 "context_pack": context_pack,
                 "agent_context": agent_context,
                 "prompt_profile_id": prompt_profile_id,
+                "max_input_tokens": max_input_tokens,
             }
         )
+        if output_type.__name__ == "IntakeInitiatorRoomLlmOutputV3":
+            has_current_message = any(
+                section.name == "current_user_message"
+                for section in (resolved_sections or ())
+            )
+            return SimpleNamespace(
+                value=output_type.model_validate(
+                    intake_initiator_v3_payload(
+                        room_utterance=(
+                            "我已了解本案情况，右侧案件详情已达到可进入下一步的标准。"
+                        ),
+                        total_score=88 if has_current_message else 50,
+                    )
+                )
+            )
         return SimpleNamespace(
             value=output_type(
                 room_utterance="我已了解本案情况，右侧案件详情已达到可进入下一步的标准。",
@@ -550,8 +571,12 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
         "SESSION_CASE_intake_turn_llm_user_intake"
     )
     assert runner.calls[0]["prompt_profile_id"] == "DISPUTE_INTAKE_OFFICER:USER:v1"
+    assert (
+        runner.calls[0]["max_input_tokens"]
+        == INTAKE_CONTEXT_SECTION_TOKEN_BUDGET
+    )
     context_pack = runner.calls[0]["context_pack"]
-    assert context_pack.configuration_profile_key == "DISPUTE_INTAKE_CONTEXT_PACK_V2"
+    assert context_pack.configuration_profile_key == "DISPUTE_INTAKE_CONTEXT_PACK_V3"
     section_by_name = {
         section.name: section
         for section in runner.calls[0]["context_sections"]  # type: ignore[index]
@@ -561,7 +586,7 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
         "case_identity",
         "recent_dialogue_messages",
         "current_user_message",
-        "previous_case_detail",
+        "previous_dispute_outline",
     } <= section_names
     assert "initial_case_facts" not in section_names
     assert "initiator_statement_transcript" not in section_names
@@ -630,14 +655,19 @@ def test_intake_prompt_excludes_formal_respondent_attitude_sources() -> None:
     IntakeTurnWorkflow(model_runner=runner).run(request)
 
     call = runner.calls[0]
-    assert call["case_data"] == {"context_contract": "intake_turn_context.v2"}
+    assert call["case_data"] == {"context_contract": "intake_turn_context.v3"}
     section_by_name = {
         section.name: section
         for section in call["context_sections"]  # type: ignore[index]
     }
     initial_form = json.loads(section_by_name["initial_case_facts"].content)
     assert "respondent_attitude_seed" not in initial_form
-    assert "previous_case_detail" not in section_by_name
+    previous_outline = json.loads(
+        section_by_name["previous_dispute_outline"].content
+    )
+    assert "respondent_attitude" not in previous_outline
+    assert "历史卷宗记录商家正式拒绝补发" not in repr(previous_outline)
+    assert "frozen_case_matrix" not in section_by_name
 
 
 # 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
@@ -1232,8 +1262,8 @@ def test_intake_turn_response_exposes_structured_dialogue_window_metadata() -> N
 
     assert response.status_code == 200
     memory_frame = response.json()["memory_frame"]
-    assert memory_frame["context_contract"] == "intake_turn_context.v2"
-    assert memory_frame["dialogue_window"] == "3_ROUNDS_6_MESSAGES"
+    assert memory_frame["context_contract"] == "intake_turn_context.v3"
+    assert memory_frame["dialogue_window"] == "LAST_5_MESSAGES"
     assert 0 < memory_frame["recent_dialogue_count"] <= 6
 
 

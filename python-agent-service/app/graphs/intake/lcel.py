@@ -32,9 +32,10 @@ from app.graph_runtime.state_lens import StateLens
 from app.agents.dispute_intake_officer.schemas import (
     IntakeCaseDetailLlmOutput,
     IntakeFreshFormOpeningLlmOutput,
+    IntakeInitiatorRoomLlmOutputV3,
+    IntakeRespondentRoomLlmOutputV3,
     IntakeRemarkAcknowledgementLlmOutput,
     IntakeRespondentOpeningLlmOutput,
-    IntakeRespondentSubstantiveLlmOutput,
     intake_case_detail_output_type,
     materialize_intake_case_detail_output,
 )
@@ -113,6 +114,7 @@ _FRESH_FORM_OPENING_VISIBLE_FIELDS = tuple(
     if spec.field
     in {
         "room_utterance",
+        "ordered_sections",
         "case_detail.case_story.one_sentence_summary",
         "case_detail.case_story",
     }
@@ -350,7 +352,9 @@ class IntakeRouteModelRunnable(
             )
             if (
                 intake_case_detail_output_type(request)
-                is IntakeFreshFormOpeningLlmOutput
+                is IntakeInitiatorRoomLlmOutputV3
+                and request.initial_case_facts is not None
+                and request.current_user_message is None
             ):
                 return self._fresh_form_opening_flow
             if (
@@ -360,7 +364,7 @@ class IntakeRouteModelRunnable(
                 return self._remark_acknowledgement_flow
             if (
                 intake_case_detail_output_type(request)
-                is IntakeRespondentSubstantiveLlmOutput
+                is IntakeRespondentRoomLlmOutputV3
             ):
                 return self._respondent_substantive_flow
             return self._default_flow
@@ -848,10 +852,10 @@ class BuiltIntakeModelNode:
     lens: StateLens[IntakeGraphStateV2, IntakePromptInput]
     prompt: ChatPromptTemplate
     model: GovernedChatModel
-    parser: PydanticOutputParser[IntakeCaseDetailLlmOutput]
+    parser: PydanticOutputParser[IntakeInitiatorRoomLlmOutputV3]
     fresh_form_opening_model: GovernedChatModel
     fresh_form_opening_parser: PydanticOutputParser[
-        IntakeFreshFormOpeningLlmOutput
+        IntakeInitiatorRoomLlmOutputV3
     ]
     remark_acknowledgement_model: GovernedChatModel
     remark_acknowledgement_parser: PydanticOutputParser[
@@ -859,7 +863,7 @@ class BuiltIntakeModelNode:
     ]
     respondent_substantive_model: GovernedChatModel
     respondent_substantive_parser: PydanticOutputParser[
-        IntakeRespondentSubstantiveLlmOutput
+        IntakeRespondentRoomLlmOutputV3
     ]
     respondent_opening_model: GovernedChatModel
     respondent_opening_parser: PydanticOutputParser[IntakeRespondentOpeningLlmOutput]
@@ -1256,21 +1260,21 @@ class _IntakeComponentSeal:
     model: GovernedChatModel
     model_profile: ModelProfile
     model_policy: ModelInvocationPolicy
-    model_output_type: type[IntakeCaseDetailLlmOutput]
-    parser: PydanticOutputParser[IntakeCaseDetailLlmOutput]
-    parser_pydantic_object: type[IntakeCaseDetailLlmOutput]
+    model_output_type: type[IntakeInitiatorRoomLlmOutputV3]
+    parser: PydanticOutputParser[IntakeInitiatorRoomLlmOutputV3]
+    parser_pydantic_object: type[IntakeInitiatorRoomLlmOutputV3]
     parser_diff: bool
     fresh_form_opening_model: GovernedChatModel
     fresh_form_opening_model_profile: ModelProfile
     fresh_form_opening_model_policy: ModelInvocationPolicy
     fresh_form_opening_model_profile_snapshot: ModelProfile
     fresh_form_opening_model_policy_snapshot: ModelInvocationPolicy
-    fresh_form_opening_model_output_type: type[IntakeFreshFormOpeningLlmOutput]
+    fresh_form_opening_model_output_type: type[IntakeInitiatorRoomLlmOutputV3]
     fresh_form_opening_parser: PydanticOutputParser[
-        IntakeFreshFormOpeningLlmOutput
+        IntakeInitiatorRoomLlmOutputV3
     ]
     fresh_form_opening_parser_pydantic_object: type[
-        IntakeFreshFormOpeningLlmOutput
+        IntakeInitiatorRoomLlmOutputV3
     ]
     fresh_form_opening_parser_diff: bool
     remark_acknowledgement_model: GovernedChatModel
@@ -1294,13 +1298,13 @@ class _IntakeComponentSeal:
     respondent_substantive_model_profile_snapshot: ModelProfile
     respondent_substantive_model_policy_snapshot: ModelInvocationPolicy
     respondent_substantive_model_output_type: type[
-        IntakeRespondentSubstantiveLlmOutput
+        IntakeRespondentRoomLlmOutputV3
     ]
     respondent_substantive_parser: PydanticOutputParser[
-        IntakeRespondentSubstantiveLlmOutput
+        IntakeRespondentRoomLlmOutputV3
     ]
     respondent_substantive_parser_pydantic_object: type[
-        IntakeRespondentSubstantiveLlmOutput
+        IntakeRespondentRoomLlmOutputV3
     ]
     respondent_substantive_parser_diff: bool
     respondent_opening_model: GovernedChatModel
@@ -1384,10 +1388,10 @@ def _seal_intake_components(
     lens: StateLens[IntakeGraphStateV2, IntakePromptInput],
     prompt: ChatPromptTemplate,
     model: GovernedChatModel,
-    parser: PydanticOutputParser[IntakeCaseDetailLlmOutput],
+    parser: PydanticOutputParser[IntakeInitiatorRoomLlmOutputV3],
     fresh_form_opening_model: GovernedChatModel,
     fresh_form_opening_parser: PydanticOutputParser[
-        IntakeFreshFormOpeningLlmOutput
+        IntakeInitiatorRoomLlmOutputV3
     ],
     remark_acknowledgement_model: GovernedChatModel,
     remark_acknowledgement_parser: PydanticOutputParser[
@@ -1395,7 +1399,7 @@ def _seal_intake_components(
     ],
     respondent_substantive_model: GovernedChatModel,
     respondent_substantive_parser: PydanticOutputParser[
-        IntakeRespondentSubstantiveLlmOutput
+        IntakeRespondentRoomLlmOutputV3
     ],
     respondent_opening_model: GovernedChatModel,
     respondent_opening_parser: PydanticOutputParser[
@@ -1979,23 +1983,23 @@ def build_intake_model_node(
     )
     model = GovernedChatModel(
         transport=transport,
-        output_type=IntakeCaseDetailLlmOutput,
+        output_type=IntakeInitiatorRoomLlmOutputV3,
         profile=profile,
         policy=policy,
         visible_fields=_TARGET_INTAKE_VISIBLE_FIELDS,
     )
-    parser = PydanticOutputParser(pydantic_object=IntakeCaseDetailLlmOutput)
+    parser = PydanticOutputParser(pydantic_object=IntakeInitiatorRoomLlmOutputV3)
     fresh_form_opening_profile = deepcopy(profile)
     fresh_form_opening_policy = deepcopy(policy)
     fresh_form_opening_model = GovernedChatModel(
         transport=transport,
-        output_type=IntakeFreshFormOpeningLlmOutput,
+        output_type=IntakeInitiatorRoomLlmOutputV3,
         profile=fresh_form_opening_profile,
         policy=fresh_form_opening_policy,
         visible_fields=_FRESH_FORM_OPENING_VISIBLE_FIELDS,
     )
     fresh_form_opening_parser = PydanticOutputParser(
-        pydantic_object=IntakeFreshFormOpeningLlmOutput
+        pydantic_object=IntakeInitiatorRoomLlmOutputV3
     )
     remark_acknowledgement_profile = deepcopy(profile)
     remark_acknowledgement_policy = deepcopy(policy)
@@ -2013,13 +2017,13 @@ def build_intake_model_node(
     respondent_substantive_policy = deepcopy(policy)
     respondent_substantive_model = GovernedChatModel(
         transport=transport,
-        output_type=IntakeRespondentSubstantiveLlmOutput,
+        output_type=IntakeRespondentRoomLlmOutputV3,
         profile=respondent_substantive_profile,
         policy=respondent_substantive_policy,
         visible_fields=_TARGET_INTAKE_VISIBLE_FIELDS,
     )
     respondent_substantive_parser = PydanticOutputParser(
-        pydantic_object=IntakeRespondentSubstantiveLlmOutput
+        pydantic_object=IntakeRespondentRoomLlmOutputV3
     )
     if (
         len(_RESPONDENT_OPENING_VISIBLE_FIELDS) != 1
@@ -2327,6 +2331,7 @@ def _adapt_and_normalize_generation_parts(
     typed_state = cast(IntakeGraphStateV2, state)
     fresh_form_request: IntakeTurnRequest | None = None
     handoff_request: IntakeTurnRequest | None = None
+    ordered_room_v3 = False
     if typed_state.get("route") == "respondent_opening":
         if not isinstance(draft, IntakeRespondentOpeningLlmOutput):
             raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
@@ -2336,6 +2341,23 @@ def _adapt_and_normalize_generation_parts(
             draft=draft,
         )
         return typed_state, message, adapted, adapted
+    if isinstance(
+        draft,
+        (IntakeInitiatorRoomLlmOutputV3, IntakeRespondentRoomLlmOutputV3),
+    ):
+        request = build_intake_baseline_request(
+            typed_state,
+            agent_context=agent_context,
+        )
+        ordered_room_v3 = True
+        if request.initial_case_facts is not None and request.current_user_message is None:
+            fresh_form_request = request
+        try:
+            draft = materialize_intake_case_detail_output(request, draft)
+        except (TypeError, ValueError) as error:
+            raise IntakeGraphContractError(
+                "INTAKE_ORDERED_ROOM_OUTPUT_INVALID"
+            ) from error
     if isinstance(draft, IntakeFreshFormOpeningLlmOutput):
         request = build_intake_baseline_request(
             typed_state,
@@ -2376,17 +2398,19 @@ def _adapt_and_normalize_generation_parts(
     except AgentOutputSchemaError as error:
         raise IntakeGraphContractError(error.safe_code) from None
     normalized = _normalize_model_matrix_fact_keys(typed_state, adapted)
-    normalized = _normalize_model_respondent_attitude(
-        typed_state,
-        normalized,
-        fresh_form_request=fresh_form_request,
-        handoff_request=handoff_request,
-    )
+    if not ordered_room_v3:
+        normalized = _normalize_model_respondent_attitude(
+            typed_state,
+            normalized,
+            fresh_form_request=fresh_form_request,
+            handoff_request=handoff_request,
+        )
+        normalized = _normalize_model_dispute_core_state(typed_state, normalized)
     return (
         typed_state,
         message,
         adapted,
-        _normalize_model_dispute_core_state(typed_state, normalized),
+        normalized,
     )
 
 

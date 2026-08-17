@@ -364,6 +364,7 @@ const analysis = ref(props.initialAnalysis);
 const turnMemory = ref(props.initialTurnMemory);
 const intakeStatus = ref(props.initialIntakeStatus);
 const streamedCaseDetailSections = ref({});
+const streamedOrderedSectionSequence = ref(0);
 const pendingOriginalStatement = ref("");
 const messages = ref([...(props.initialMessages || [])]);
 const agentState = ref("LISTENING");
@@ -994,6 +995,20 @@ const intakeDossierSubmissionDisabled = computed(() =>
   !currentActorMatrixReady.value,
 );
 const caseDetailQuality = computed(() => {
+  const streamedQuality = streamedCaseDetailSections.value?.intake_quality;
+  if (
+    intakeStreamingRuns.value.length > 0 &&
+    validPartyIntakeQuality(streamedQuality)
+  ) {
+    return {
+      score: streamedQuality.score,
+      threshold: streamedQuality.threshold,
+      ready: streamedQuality.ready_for_next_step,
+      reason: humanizeDossierText(streamedQuality.improvement_reason, {
+        fallback: "",
+      }),
+    };
+  }
   const role = exactAuthenticatedPartyRole();
   if (!role) return emptyCaseDetailQuality();
   const partyState = exactPartyIntakeState(caseDetailDossier.value, role);
@@ -1050,10 +1065,13 @@ const caseCover = computed(() => {
       kind: "title",
       fallback: "争议事件待梳理",
     }),
-    summary: humanizeDossierText(detail?.case_story?.one_sentence_summary || "", {
+    summary: humanizeDossierText(
+      detail?.case_story?.one_sentence_summary || caseNoteDescription.value,
+      {
       kind: "summary",
       fallback: "",
-    }),
+      },
+    ),
     coreIssue: humanizeDossierText(detail?.dispute_focus?.core_issue || "UNKNOWN"),
   };
 });
@@ -1569,6 +1587,7 @@ function resetWorkspaceForActorChange() {
   turnMemory.value = null;
   intakeStatus.value = null;
   streamedCaseDetailSections.value = {};
+  streamedOrderedSectionSequence.value = 0;
   pendingOriginalStatement.value = "";
   admitted.value = false;
   resolved.value = false;
@@ -2553,6 +2572,107 @@ async function verifyEvidenceReady(snapshot = currentWorkspaceSnapshot()) {
 
 function resetStreamedCaseDetail() {
   streamedCaseDetailSections.value = {};
+  streamedOrderedSectionSequence.value = 0;
+}
+
+const INTAKE_ORDERED_SECTION_KINDS = [
+  "CASE_MATRIX",
+  "CASE_STORY",
+  "PARTY_POSITIONS",
+  "CLAIM_AND_RESPONSE",
+  "DISPUTE_FOCUS",
+  "VERIFICATION_FOCUS",
+  "RISK_ASSESSMENT",
+  "MISSING_INFORMATION",
+  "HANDOFF_SUMMARY",
+  "TURN_EVALUATION",
+];
+
+function orderedSectionCaseDetailPatch(section) {
+  const value = section?.value;
+  if (!isCaseDetailObject(value)) return null;
+  switch (section.kind) {
+    case "CASE_MATRIX":
+      // Matrix IDs, hashes and cross-party authority are materialized only at
+      // the server commit boundary; the provisional UI does not invent them.
+      return {};
+    case "CASE_STORY":
+      return { case_story: value };
+    case "PARTY_POSITIONS":
+      return { party_positions: value };
+    case "CLAIM_AND_RESPONSE":
+      return {
+        claim_resolution: value.claim_resolution,
+        respondent_attitude: value.respondent_attitude,
+      };
+    case "DISPUTE_FOCUS":
+      return {
+        dispute_core_state: value.dispute_core_state,
+        dispute_focus: value.dispute_focus,
+      };
+    case "VERIFICATION_FOCUS":
+      return {
+        dispute_core_state: {
+          next_verification_focus: Array.isArray(value.items) ? value.items : [],
+        },
+      };
+    case "RISK_ASSESSMENT":
+      return {
+        risk_assessment: {
+          case_grade: value.case_grade,
+          risk_signals: Array.isArray(value.risk_points) ? value.risk_points : [],
+          reasoning: value.summary,
+        },
+      };
+    case "MISSING_INFORMATION":
+      return { missing_information: value };
+    case "HANDOFF_SUMMARY":
+      return {
+        handoff_notes: {
+          remark_status: value.remark_status,
+          latest_remark: value.latest_remark,
+          instruction: value.instruction,
+        },
+      };
+    case "TURN_EVALUATION":
+      return {
+        intake_quality: {
+          score: value.total_score,
+          threshold: value.threshold,
+          ready_for_next_step: value.ready_for_next_step,
+          score_breakdown: value.score_breakdown,
+          improvement_reason: value.improvement_reason,
+        },
+        admission: {
+          recommendation: value.admission_recommendation,
+          reasoning: value.admission_reasoning,
+          confidence: value.confidence,
+        },
+      };
+    default:
+      return null;
+  }
+}
+
+function applyOrderedIntakeSection(delta) {
+  const section = JSON.parse(delta);
+  const sequence = section?.sequence;
+  if (
+    !Number.isInteger(sequence) ||
+    sequence < 1 ||
+    sequence > INTAKE_ORDERED_SECTION_KINDS.length ||
+    section.kind !== INTAKE_ORDERED_SECTION_KINDS[sequence - 1] ||
+    sequence <= streamedOrderedSectionSequence.value
+  ) {
+    return;
+  }
+  const patch = orderedSectionCaseDetailPatch(section);
+  if (patch === null) return;
+  streamedOrderedSectionSequence.value = sequence;
+  streamedCaseDetailSections.value = deepMergeCaseDetail(
+    streamedCaseDetailSections.value,
+    patch,
+  );
 }
 
 function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot()) {
@@ -2567,8 +2687,17 @@ function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot
     return;
   }
   if (event?.event !== "visible_delta") return;
-  const prefix = "case_detail.";
   const fieldPath = String(event.fieldPath || "");
+  if (fieldPath === "ordered_sections" && event.delta) {
+    try {
+      applyOrderedIntakeSection(event.delta);
+    } catch (_failure) {
+      // An incomplete/invalid provisional card is ignored; terminal refresh is
+      // the durable source and will replace the overlay after commit.
+    }
+    return;
+  }
+  const prefix = "case_detail.";
   if (!fieldPath.startsWith(prefix) || !event.delta) return;
   const [section, ...propertyPath] = fieldPath.slice(prefix.length).split(".");
   if (!section) return;

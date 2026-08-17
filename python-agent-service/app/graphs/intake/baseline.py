@@ -17,8 +17,10 @@ from app.agents.dispute_intake_officer.schemas import (
     IntakeCaseDetailLlmOutput,
     intake_case_detail_output_type,
     is_exact_fresh_form_opening,
+    revalidate_materialized_intake_output,
 )
 from app.agents.dispute_intake_officer.workflow import (
+    INTAKE_CONTEXT_SECTION_TOKEN_BUDGET,
     build_intake_turn_context_pack,
     finalize_intake_projected_output,
     project_intake_case_detail_output,
@@ -324,9 +326,10 @@ def prepare_intake_baseline_invocation(
         prompts=prompts or PromptRepository(),
         context_window=context_window or ContextWindowManager(),
         node_name=BASELINE_INTAKE_NODE_NAME,
-        case_data={"context_contract": "intake_turn_context.v2"},
+        case_data={"context_contract": "intake_turn_context.v3"},
         output_type=output_type,
         context_pack=context_pack,
+        max_input_tokens=INTAKE_CONTEXT_SECTION_TOKEN_BUDGET,
         agent_context=agent_context,
         prompt_profile_id=agent_context.prompt_profile_id,
     )
@@ -408,7 +411,7 @@ def _demote_intake_baseline_initiator_respondent_claim(
         raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_PATCH_INVALID")
     matrix_payload.pop("respondent_claim", None)
     try:
-        return IntakeCaseDetailLlmOutput.model_validate(normalized_output)
+        return revalidate_materialized_intake_output(output, normalized_output)
     except ValueError as error:
         raise IntakeGraphContractError(
             "INTAKE_BASELINE_MATRIX_PATCH_INVALID"
@@ -683,7 +686,7 @@ def _normalize_intake_baseline_matrix_fact_keys(
     normalized_output = output.model_dump(mode="json", exclude_none=True)
     normalized_output[matrix_field] = normalized_matrix
     try:
-        return IntakeCaseDetailLlmOutput.model_validate(normalized_output)
+        return revalidate_materialized_intake_output(output, normalized_output)
     except ValueError as error:
         raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_PATCH_INVALID") from error
 
@@ -820,7 +823,7 @@ def _canonicalize_intake_baseline_historical_matrix_carry(
     normalized_output = output.model_dump(mode="json", exclude_none=True)
     normalized_output["case_matrix_delta"] = matrix_payload
     try:
-        return IntakeCaseDetailLlmOutput.model_validate(normalized_output)
+        return revalidate_materialized_intake_output(output, normalized_output)
     except ValueError as error:
         raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_PATCH_INVALID") from error
 

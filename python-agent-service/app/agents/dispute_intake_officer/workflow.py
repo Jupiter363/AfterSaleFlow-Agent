@@ -13,6 +13,7 @@ from typing_extensions import NotRequired, TypedDict
 from app.agents.dispute_intake_officer.schemas import (
     IntakeCaseDetailLlmOutput,
     IntakeConversationAction,
+    MaterializedIntakeRoomLlmOutputV3,
     intake_case_detail_output_type,
     materialize_intake_case_detail_output,
 )
@@ -29,6 +30,7 @@ from app.streaming import current_stream_observer
 
 
 LOGGER = logging.getLogger(__name__)
+INTAKE_CONTEXT_SECTION_TOKEN_BUDGET = 20_000
 
 
 class IntakeTurnGraphState(TypedDict):
@@ -155,8 +157,8 @@ def _load_context(state: IntakeTurnGraphState) -> dict[str, Any]:
         )
     recent_messages = request.get("recent_dialogue_messages") or []
     memory_frame = {
-        "context_contract": "intake_turn_context.v2",
-        "dialogue_window": "3_ROUNDS_6_MESSAGES",
+        "context_contract": "intake_turn_context.v3",
+        "dialogue_window": "LAST_5_MESSAGES",
         "dialogue_order": "AGENT_THEN_PARTY",
         "recent_dialogue_count": len(recent_messages),
         "dialogue_message_count": len(recent_messages) + (1 if current else 0),
@@ -202,12 +204,13 @@ def _reason_with_llm_node(model_runner: Any | None):
             generation = model_runner.invoke_structured(
                 node_name="intake_turn_case_detail",
                 case_data={
-                    "context_contract": "intake_turn_context.v2",
+                    "context_contract": "intake_turn_context.v3",
                 },
                 output_type=output_type,
                 agent_context=agent_context,
                 prompt_profile_id=agent_context.prompt_profile_id,
                 context_pack=context_pack,
+                max_input_tokens=INTAKE_CONTEXT_SECTION_TOKEN_BUDGET,
             )
             return {
                 "llm_output": materialize_intake_case_detail_output(
@@ -255,26 +258,45 @@ def build_intake_turn_context_pack(
     prompt_initial_facts = _subjective_only_initial_case_facts(
         request_json.get("initial_case_facts") or {}
     )
+    previous_detail = request_json.get("previous_case_detail") or {}
     prompt_previous_detail = _subjective_only_snapshot(
-        request_json.get("previous_case_detail") or {},
+        previous_detail,
         actor_role=resolved_actor_role,
     )
+    frozen_case_matrix = _respondent_matrix_prompt_projection(
+        previous_detail.get("case_fact_matrix")
+        if isinstance(previous_detail, dict)
+        else None
+    )
+    previous_dispute_outline = copy.deepcopy(prompt_previous_detail)
+    previous_dispute_outline.pop("case_fact_matrix", None)
     context_sources = {
         "case_identity": _case_identity_context(request_json, state),
         "recent_dialogue_messages": _compact_dialogue_window(
             request_json.get("recent_dialogue_messages") or []
         ),
     }
+    required_sections = {"case_identity"}
     if request_json.get("current_user_message") is not None:
         context_sources["current_user_message"] = request_json["current_user_message"]
-    if prompt_previous_detail:
-        context_sources["previous_case_detail"] = prompt_previous_detail
+        required_sections.add("current_user_message")
+    if frozen_case_matrix:
+        context_sources["frozen_case_matrix"] = frozen_case_matrix
+        if _is_respondent_matrix_view(
+            previous_detail.get("case_fact_matrix"),
+            actor_role=resolved_actor_role,
+        ):
+            required_sections.add("frozen_case_matrix")
+    if previous_dispute_outline:
+        context_sources["previous_dispute_outline"] = previous_dispute_outline
     if request_json.get("initial_case_facts") is not None:
         context_sources["initial_case_facts"] = prompt_initial_facts
+        required_sections.add("initial_case_facts")
     return build_context_pack(
         "intake_turn_case_detail",
         context_sources,
         actor_role=resolved_actor_role,
+        required_section_names=frozenset(required_sections),
     )
 
 
@@ -758,7 +780,12 @@ def project_intake_case_detail_output(
     """Apply the baseline deterministic Intake business adapter after model output."""
 
     request = IntakeTurnRequest.model_validate(request)
-    output = IntakeCaseDetailLlmOutput.model_validate(output)
+    materialized_v3 = (
+        output if isinstance(output, MaterializedIntakeRoomLlmOutputV3) else None
+    )
+    model_semantics_authoritative = materialized_v3 is not None
+    if materialized_v3 is None:
+        output = IntakeCaseDetailLlmOutput.model_validate(output)
     rendered = CaseDetailDossierSkill().render(
         request=request,
         conversation_action=output.conversation_action,
@@ -772,6 +799,13 @@ def project_intake_case_detail_output(
         llm_confidence=output.confidence,
         llm_case_matrix_delta=(
             output.case_matrix_delta or output.unilateral_case_matrix
+        ),
+        model_semantics_authoritative=model_semantics_authoritative,
+        llm_respondent_source_binding=(
+            materialized_v3.respondent_source_binding.model_dump(mode="json")
+            if materialized_v3 is not None
+            and materialized_v3.respondent_source_binding is not None
+            else None
         ),
     )
     dossier_patch = copy.deepcopy(rendered.dossier_patch)

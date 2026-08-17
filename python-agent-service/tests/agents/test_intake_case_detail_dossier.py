@@ -36,6 +36,7 @@ from app.streaming import (
     bind_stream_observer,
     current_stream_observer,
 )
+from tests.agents.intake_v3_fixture import intake_initiator_v3_payload
 
 
 # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：模块私有业务函数。
@@ -73,7 +74,7 @@ def _agent_context(case_id: str) -> dict[str, object]:
 
 # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：模块私有业务函数。
 # 具体功能：`_request` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`payload.update`、`payload.pop`、`current.setdefault`。
-# 上下游：上游为 本文件的 `test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail`、`test_intake_case_detail_readiness_is_gated_by_score_and_required_references`、`test_intake_case_detail_translates_llm_missing_field_codes_before_persisting`、`test_ready_intake_turn_asks_for_handoff_remark_before_next_room`；下游为 本文件的 `_agent_context`。
+# 上下游：上游为 本文件的 `test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail`、`test_intake_case_detail_readiness_is_gated_by_score_and_required_references`、`test_intake_case_detail_preserves_model_human_missing_fields_without_rewriting`、`test_ready_intake_turn_asks_for_handoff_remark_before_next_room`；下游为 本文件的 `_agent_context`。
 # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _request(**overrides):
     payload = {
@@ -1190,8 +1191,8 @@ def test_intake_turn_preserves_model_room_utterance_verbatim(
         "物流显示签收但用户称未收到商品"
     )
     quality = result.scroll_snapshot["intake_quality"]
-    assert quality["score"] == sum(quality["score_breakdown"].values()) == 100
-    assert quality["ready_for_next_step"] is True
+    assert quality["score"] == sum(quality["score_breakdown"].values()) == score
+    assert quality["ready_for_next_step"] is (score >= 85)
 
 
 def test_respondent_message_keeps_initiator_claim_but_isolates_original_statement() -> None:
@@ -1405,10 +1406,12 @@ class CaseDetailRunner:
         score: int = 86,
         *,
         room_utterance: str | None = None,
-        conversation_action: str = "INVITE_OPTIONAL_REMARK",
+        conversation_action: str | None = None,
     ) -> None:
         self.score = score
-        self.conversation_action = conversation_action
+        self.conversation_action = conversation_action or (
+            "INVITE_OPTIONAL_REMARK" if score >= 85 else "ASK_SUBSTANTIVE"
+        )
         self.room_utterance = room_utterance or (
             "我已经了解本案的基本情况：物流显示签收但你主张未收到，"
             "商家暂未提供签收底单。右侧案件详情已整理到可进入下一步。"
@@ -1417,7 +1420,7 @@ class CaseDetailRunner:
 
     # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：类/闭包内部方法。
     # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`self.calls.append`、`SimpleNamespace`、`output_type`。
-    # 上下游：上游为 本文件的 `test_intake_case_detail_translates_llm_missing_field_codes_before_persisting`；下游为 协作调用 `self.calls.append`、`SimpleNamespace`、`output_type`、`context_pack.prompt_sections`。
+    # 上下游：上游为 本文件的 `test_intake_case_detail_preserves_model_human_missing_fields_without_rewriting`；下游为 协作调用 `self.calls.append`、`SimpleNamespace`、`output_type`、`context_pack.prompt_sections`。
     # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def invoke_structured(
         self,
@@ -1429,6 +1432,7 @@ class CaseDetailRunner:
         context_pack=None,
         agent_context=None,
         prompt_profile_id=None,
+        max_input_tokens=None,
     ):
         self.calls.append(
             {
@@ -1442,8 +1446,19 @@ class CaseDetailRunner:
                 "context_pack": context_pack,
                 "agent_context": agent_context,
                 "prompt_profile_id": prompt_profile_id,
+                "max_input_tokens": max_input_tokens,
             }
         )
+        if output_type.__name__ == "IntakeInitiatorRoomLlmOutputV3":
+            return SimpleNamespace(
+                value=output_type.model_validate(
+                    intake_initiator_v3_payload(
+                        room_utterance=self.room_utterance,
+                        total_score=self.score,
+                        conversation_action=self.conversation_action,
+                    )
+                )
+            )
         return SimpleNamespace(
             value=output_type(
                 conversation_action=self.conversation_action,
@@ -2060,7 +2075,7 @@ def test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail(
 
     assert runner.calls[0]["node_name"] == "intake_turn_case_detail"
     assert result.scroll_snapshot["schema_version"] == "intake_case_detail.v1"
-    assert result.scroll_snapshot["intake_quality"]["score"] == 100
+    assert result.scroll_snapshot["intake_quality"]["score"] == 86
     assert result.scroll_snapshot["intake_quality"]["ready_for_next_step"] is True
     assert result.admission_recommendation == "ACCEPTED"
     assert result.scroll_snapshot["claim_resolution"]["requested_resolution"] == "REFUND"
@@ -2071,7 +2086,7 @@ def test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail(
     assert "我已经了解本案的基本情况" in result.room_utterance
     assert (
         result.scroll_snapshot["handoff_notes"]["remark_status"]
-        == "READY_PENDING_REMARK_INVITE"
+        == "WAITING_FOR_REMARK"
     )
 
 
@@ -2108,16 +2123,16 @@ def test_intake_case_detail_readiness_is_gated_by_score_and_required_references(
 
 
 # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
-# 具体功能：`test_intake_case_detail_translates_llm_missing_field_codes_before_persisting` 把结构化模型调用写入或合并到可追溯的阶段状态；关键协作调用：`run`、`IntakeTurnWorkflow`、`RunnerWithFieldCodes`。
+# 具体功能：`test_intake_case_detail_preserves_model_human_missing_fields_without_rewriting` 验证 V3 模型生成的人类化案情缺口原样进入正式卷宗；关键协作调用：`run`、`IntakeTurnWorkflow`、`RunnerWithHumanFields`。
 # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`、`invoke_structured`。
 # 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
-def test_intake_case_detail_translates_llm_missing_field_codes_before_persisting() -> None:
+def test_intake_case_detail_preserves_model_human_missing_fields_without_rewriting() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
-    class RunnerWithFieldCodes(CaseDetailRunner):
+    class RunnerWithHumanFields(CaseDetailRunner):
         # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：类/闭包内部方法。
         # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`invoke_structured`。
-        # 上下游：上游为 本文件的 `test_intake_case_detail_translates_llm_missing_field_codes_before_persisting`；下游为 协作调用 `invoke_structured`。
+        # 上下游：上游为 本文件的 `test_intake_case_detail_preserves_model_human_missing_fields_without_rewriting`；下游为 协作调用 `invoke_structured`。
         # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
         def invoke_structured(
             self,
@@ -2129,6 +2144,7 @@ def test_intake_case_detail_translates_llm_missing_field_codes_before_persisting
             context_pack=None,
             agent_context=None,
             prompt_profile_id=None,
+            max_input_tokens=None,
         ):
             generation = super().invoke_structured(
                 node_name=node_name,
@@ -2138,30 +2154,54 @@ def test_intake_case_detail_translates_llm_missing_field_codes_before_persisting
                 context_pack=context_pack,
                 agent_context=agent_context,
                 prompt_profile_id=prompt_profile_id,
+                max_input_tokens=max_input_tokens,
             )
-            generation.value.case_detail["intake_quality"]["score"] = 70
-            generation.value.case_detail["intake_quality"][
-                "improvement_reason"
-            ] = "仍缺少可信的buyer_evidence、merchant_outbound_photos"
-            generation.value.case_detail["missing_information"]["blocking_gaps"] = [
-                "buyer_evidence",
-                "merchant_outbound_photos",
-            ]
-            generation.value.missing_fields = [
-                "buyer_evidence",
-                "merchant_outbound_photos",
-            ]
+            payload = generation.value.model_dump(mode="json")
+            payload["ordered_sections"][7]["value"].update(
+                {
+                    "blocking_gaps": [
+                        "订单发生时间",
+                        "商家对退款诉求的直接回应",
+                    ],
+                    "next_questions": ["请补充订单发生时间。"],
+                }
+            )
+            payload["ordered_sections"][8]["value"].update(
+                {
+                    "remark_status": "NOT_READY",
+                    "instruction": "补充阻塞信息后继续整理。",
+                }
+            )
+            payload["ordered_sections"][9]["value"] = {
+                "score_breakdown": {
+                    "references": 15,
+                    "event_story": 20,
+                    "party_positions": 20,
+                    "requested_resolution": 15,
+                    "risk_and_conflicts": 0,
+                    "next_action_clarity": 0,
+                },
+                "total_score": 70,
+                "threshold": 85,
+                "ready_for_next_step": False,
+                "improvement_reason": (
+                    "仍缺少订单发生时间和商家对退款诉求的直接回应。"
+                ),
+                "admission_recommendation": "NEED_MORE_INFO",
+                "admission_reasoning": "仍有阻塞案情信息需要补充。",
+                "confidence": 0.86,
+                "conversation_action": "ASK_SUBSTANTIVE",
+                "knowledge_answer_mode": "NONE",
+            }
+            generation.value = type(generation.value).model_validate(payload)
             return generation
 
-    result = IntakeTurnWorkflow(model_runner=RunnerWithFieldCodes()).run(_request())
+    result = IntakeTurnWorkflow(model_runner=RunnerWithHumanFields()).run(_request())
 
     quality_reason = result.scroll_snapshot["intake_quality"]["improvement_reason"]
     blocking_gaps = result.scroll_snapshot["missing_information"]["blocking_gaps"]
-    assert "买家证据材料" in quality_reason
-    assert "商家发货前照片" in quality_reason
-    assert "buyer_evidence" not in quality_reason
-    assert "merchant_outbound_photos" not in quality_reason
-    assert blocking_gaps == ["买家证据材料", "商家发货前照片"]
+    assert quality_reason == "仍缺少订单发生时间和商家对退款诉求的直接回应。"
+    assert blocking_gaps == ["订单发生时间", "商家对退款诉求的直接回应"]
 
 
 def test_not_ready_asks_all_bounded_substantive_questions_without_rewriting_reply() -> None:

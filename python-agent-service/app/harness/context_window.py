@@ -20,6 +20,7 @@ class PromptSection:
     required: bool = False
     trust_level: str = "untrusted"
     prompt_included: bool = True
+    prompt_order: int | None = None
 
     # 所属模块：Agent Harness > Token 窗口 > PromptSection 成本估算。
     # 具体功能：`estimated_tokens` 把段名和正文长度按约 4 字符/Token 向上估算；display-only 或空段计为 0，因为它们不会发给模型。
@@ -144,6 +145,16 @@ class ContextWindowManager:
                     f"required context section {section.name} exceeds token budget"
                 )
             omitted.append(section.name)
+
+        if any(section.prompt_order is not None for section in selected):
+            selected.sort(
+                key=lambda section: (
+                    section.prompt_order
+                    if section.prompt_order is not None
+                    else 2**31 - 1,
+                    section.name,
+                )
+            )
 
         return AssembledPromptContext(
             sections=tuple(selected),

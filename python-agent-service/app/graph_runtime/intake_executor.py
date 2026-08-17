@@ -737,6 +737,15 @@ class CompiledIntakeGraphShadowExecutor:
             ):
                 continue
             if (
+                field == "ordered_sections"
+                and isinstance(delta, str)
+                and len(delta) > _AGENT_STREAM_DELTA_MAX_LENGTH
+            ):
+                # Each array item is an atomic JSON card projection.  A very large
+                # optional card cannot be split into invalid JSON; the terminal
+                # dossier refresh remains authoritative for that one section.
+                continue
+            if (
                 _INTAKE_MODEL_VISIBLE_FIELD_MODES[field] == "string_prefix"
                 and isinstance(delta, str)
                 and delta

@@ -23,6 +23,7 @@ public final class TargetE2EGraphStreamVisibility {
           INTAKE_BASELINE_WIRE_NODE,
           Set.of(
               "room_utterance",
+              "ordered_sections",
               "case_detail.case_story.title",
               "case_detail.case_story.one_sentence_summary",
               "case_detail.references.order_reference",

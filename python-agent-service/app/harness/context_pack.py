@@ -87,6 +87,7 @@ def build_context_pack(
             required=effective_required,
             trust_level=spec.trust_level,
             prompt_included=spec.prompt_included,
+            prompt_order=spec.prompt_order,
         )
         sections.append(section)
         if not spec.prompt_included:
@@ -135,9 +136,10 @@ def _normalize_section_value(
     if name in {
         "case_identity",
         "initial_case_facts",
+        "frozen_case_matrix",
+        "previous_dispute_outline",
         "recent_dialogue_messages",
         "current_user_message",
-        "previous_case_detail",
         "party_visible_evidence_catalog",
         "submission_observation_authority_catalog",
         "private_conversation_window",

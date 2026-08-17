@@ -18,12 +18,373 @@ from app.schemas.intake_case_matrix import UnilateralCaseMatrixDraftV1
 
 AdmissionRecommendation = Literal["ACCEPTED", "NEED_MORE_INFO", "NOT_ADMISSIBLE"]
 KnowledgeAnswerMode = Literal["NONE", "STUB"]
+PartyRole = Literal["USER", "MERCHANT"]
 IntakeConversationAction = Literal[
     "ASK_SUBSTANTIVE",
     "INVITE_OPTIONAL_REMARK",
     "ACK_REMARK",
     "ACK_NO_REMARK",
 ]
+
+INTAKE_ROOM_SECTION_KINDS = (
+    "CASE_MATRIX",
+    "CASE_STORY",
+    "PARTY_POSITIONS",
+    "CLAIM_AND_RESPONSE",
+    "DISPUTE_FOCUS",
+    "VERIFICATION_FOCUS",
+    "RISK_ASSESSMENT",
+    "MISSING_INFORMATION",
+    "HANDOFF_SUMMARY",
+    "TURN_EVALUATION",
+)
+
+
+class StrictIntakeRoomModel(BaseModel):
+    """Strict provider-facing model for the ordered Intake room stream."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class IntakeRoomSourceBindingV1(StrictIntakeRoomModel):
+    schema_version: Literal["respondent-claim-binding.v1"]
+    binding_kind: Literal["CURRENT_ACTOR_DIRECT", "NO_DIRECT_POSITION"]
+    subject_role: PartyRole | None
+    source_quote: Annotated[str, Field(min_length=1, max_length=8_192)] | None
+    linked_fact_keys: list[
+        Annotated[
+            str,
+            Field(
+                pattern=r"^(?:FACT_[A-Za-z0-9_:-]{1,123}|NEW_[A-Za-z0-9_:-]{1,123})$"
+            ),
+        ]
+    ] = Field(max_length=32)
+
+    @model_validator(mode="after")
+    def require_complete_binding_shape(self) -> "IntakeRoomSourceBindingV1":
+        if self.binding_kind == "CURRENT_ACTOR_DIRECT":
+            if self.subject_role is None or self.source_quote is None or not self.linked_fact_keys:
+                raise ValueError("a direct respondent binding requires role, quote, and fact keys")
+        elif self.subject_role is not None or self.source_quote is not None or self.linked_fact_keys:
+            raise ValueError("NO_DIRECT_POSITION cannot carry a direct source binding")
+        return self
+
+
+class IntakeRoomBoundRespondentClaim(RespondentClaimDeltaV2):
+    source_binding: IntakeRoomSourceBindingV1
+
+    @model_validator(mode="after")
+    def bind_attitude_to_source_kind(self) -> "IntakeRoomBoundRespondentClaim":
+        if self.attitude == "NOT_ADDRESSED":
+            if self.source_binding.binding_kind != "NO_DIRECT_POSITION":
+                raise ValueError("NOT_ADDRESSED requires NO_DIRECT_POSITION")
+        elif self.source_binding.binding_kind != "CURRENT_ACTOR_DIRECT":
+            raise ValueError("a substantive respondent claim requires a direct binding")
+        return self
+
+
+class IntakeInitiatorRoomMatrixDelta(CaseFactMatrixDeltaV2):
+    respondent_claim: None = None
+
+
+class IntakeRespondentRoomMatrixDelta(CaseFactMatrixDeltaV2):
+    respondent_claim: IntakeRoomBoundRespondentClaim
+
+
+class IntakeRoomCaseStoryValue(StrictIntakeRoomModel):
+    title: str = Field(min_length=1, max_length=512)
+    one_sentence_summary: str = Field(min_length=1, max_length=20_000)
+
+
+class IntakeRoomPartyPositionsValue(StrictIntakeRoomModel):
+    user_claim: str = Field(max_length=20_000)
+    merchant_claim: str = Field(max_length=20_000)
+    initiator_position: str = Field(max_length=20_000)
+    respondent_position: str = Field(max_length=20_000)
+    platform_observation: str = Field(max_length=20_000)
+
+
+class IntakeRoomClaimResolutionValue(StrictIntakeRoomModel):
+    initiator_role: PartyRole
+    requested_resolution: Literal[
+        "REFUND",
+        "RETURN_REFUND",
+        "RESHIP",
+        "REPLACE_OR_REPAIR",
+        "COMPENSATION",
+        "CANCEL_ORDER",
+        "VERIFY_OR_EXPLAIN_ONLY",
+        "OTHER",
+        "UNKNOWN",
+    ]
+    requested_amount: float | None
+    requested_items: str | None = Field(max_length=2_000)
+    request_reason: str = Field(max_length=20_000)
+    normalized_statement: str = Field(min_length=1, max_length=20_000)
+
+
+class IntakeRoomRespondentAttitudeValue(StrictIntakeRoomModel):
+    respondent_role: PartyRole
+    attitude: Literal[
+        "NOT_RESPONDED",
+        "AGREE",
+        "PARTIALLY_AGREE",
+        "DISAGREE",
+        "ALTERNATIVE_PROPOSED",
+        "NEED_MORE_INFO",
+        "PLATFORM_UNKNOWN",
+    ]
+    position: str = Field(max_length=20_000)
+    alternative_proposal: str | None = Field(max_length=20_000)
+
+
+class IntakeRoomClaimAndResponseValue(StrictIntakeRoomModel):
+    claim_resolution: IntakeRoomClaimResolutionValue
+    respondent_attitude: IntakeRoomRespondentAttitudeValue
+
+
+class IntakeRoomDisputeCoreValue(StrictIntakeRoomModel):
+    conflict_type: str = Field(min_length=1, max_length=128)
+    core_conflict: str = Field(min_length=1, max_length=20_000)
+    facts_in_dispute: list[Annotated[str, Field(min_length=1, max_length=2_000)]] = (
+        Field(max_length=12)
+    )
+
+
+class IntakeRoomDisputeFocusValue(StrictIntakeRoomModel):
+    core_issue: str = Field(min_length=1, max_length=20_000)
+    focus_points: list[Annotated[str, Field(min_length=1, max_length=2_000)]] = (
+        Field(max_length=12)
+    )
+
+
+class IntakeRoomDisputeSectionValue(StrictIntakeRoomModel):
+    dispute_core_state: IntakeRoomDisputeCoreValue
+    dispute_focus: IntakeRoomDisputeFocusValue
+
+
+class IntakeRoomVerificationFocusValue(StrictIntakeRoomModel):
+    items: list[Annotated[str, Field(min_length=1, max_length=2_000)]] = Field(
+        max_length=12
+    )
+
+
+class IntakeRoomRiskAssessmentValue(StrictIntakeRoomModel):
+    case_grade: Literal["LOW", "MEDIUM", "HIGH", "UNKNOWN"]
+    risk_points: list[Annotated[str, Field(min_length=1, max_length=2_000)]] = Field(
+        max_length=12
+    )
+    summary: str = Field(max_length=20_000)
+
+
+class IntakeRoomMissingInformationValue(StrictIntakeRoomModel):
+    blocking_gaps: list[Annotated[str, Field(min_length=1, max_length=2_000)]] = (
+        Field(max_length=30)
+    )
+    nice_to_have_gaps: list[
+        Annotated[str, Field(min_length=1, max_length=2_000)]
+    ] = Field(max_length=30)
+    next_questions: list[Annotated[str, Field(min_length=1, max_length=2_000)]] = (
+        Field(max_length=2)
+    )
+
+
+class IntakeRoomHandoffSummaryValue(StrictIntakeRoomModel):
+    remark_status: Literal[
+        "NOT_READY",
+        "WAITING_FOR_REMARK",
+        "HAS_REMARKS",
+        "NO_EXTRA_REMARKS",
+    ]
+    latest_remark: str = Field(max_length=8_192)
+    instruction: str = Field(max_length=20_000)
+
+
+class IntakeRoomScoreBreakdown(StrictIntakeRoomModel):
+    references: int = Field(ge=0, le=15)
+    event_story: int = Field(ge=0, le=20)
+    party_positions: int = Field(ge=0, le=20)
+    requested_resolution: int = Field(ge=0, le=15)
+    risk_and_conflicts: int = Field(ge=0, le=15)
+    next_action_clarity: int = Field(ge=0, le=15)
+
+
+class IntakeRoomTurnEvaluationValue(StrictIntakeRoomModel):
+    score_breakdown: IntakeRoomScoreBreakdown
+    total_score: int = Field(ge=0, le=100)
+    threshold: Literal[85]
+    ready_for_next_step: bool
+    improvement_reason: str = Field(max_length=20_000)
+    admission_recommendation: AdmissionRecommendation
+    admission_reasoning: str = Field(max_length=20_000)
+    confidence: float = Field(ge=0, le=1)
+    conversation_action: IntakeConversationAction
+    knowledge_answer_mode: KnowledgeAnswerMode
+
+    @model_validator(mode="after")
+    def score_breakdown_matches_total(self) -> "IntakeRoomTurnEvaluationValue":
+        if sum(self.score_breakdown.model_dump().values()) != self.total_score:
+            raise ValueError("turn evaluation score components must equal total_score")
+        return self
+
+
+class IntakeRoomCaseMatrixSection(StrictIntakeRoomModel):
+    sequence: Literal[1]
+    kind: Literal["CASE_MATRIX"]
+    value: IntakeInitiatorRoomMatrixDelta
+
+
+class IntakeRespondentRoomCaseMatrixSection(StrictIntakeRoomModel):
+    sequence: Literal[1]
+    kind: Literal["CASE_MATRIX"]
+    value: IntakeRespondentRoomMatrixDelta
+
+
+class IntakeRoomCaseStorySection(StrictIntakeRoomModel):
+    sequence: Literal[2]
+    kind: Literal["CASE_STORY"]
+    value: IntakeRoomCaseStoryValue
+
+
+class IntakeRoomPartyPositionsSection(StrictIntakeRoomModel):
+    sequence: Literal[3]
+    kind: Literal["PARTY_POSITIONS"]
+    value: IntakeRoomPartyPositionsValue
+
+
+class IntakeRoomClaimAndResponseSection(StrictIntakeRoomModel):
+    sequence: Literal[4]
+    kind: Literal["CLAIM_AND_RESPONSE"]
+    value: IntakeRoomClaimAndResponseValue
+
+
+class IntakeRoomDisputeFocusSection(StrictIntakeRoomModel):
+    sequence: Literal[5]
+    kind: Literal["DISPUTE_FOCUS"]
+    value: IntakeRoomDisputeSectionValue
+
+
+class IntakeRoomVerificationFocusSection(StrictIntakeRoomModel):
+    sequence: Literal[6]
+    kind: Literal["VERIFICATION_FOCUS"]
+    value: IntakeRoomVerificationFocusValue
+
+
+class IntakeRoomRiskAssessmentSection(StrictIntakeRoomModel):
+    sequence: Literal[7]
+    kind: Literal["RISK_ASSESSMENT"]
+    value: IntakeRoomRiskAssessmentValue
+
+
+class IntakeRoomMissingInformationSection(StrictIntakeRoomModel):
+    sequence: Literal[8]
+    kind: Literal["MISSING_INFORMATION"]
+    value: IntakeRoomMissingInformationValue
+
+
+class IntakeRoomHandoffSummarySection(StrictIntakeRoomModel):
+    sequence: Literal[9]
+    kind: Literal["HANDOFF_SUMMARY"]
+    value: IntakeRoomHandoffSummaryValue
+
+
+class IntakeRoomTurnEvaluationSection(StrictIntakeRoomModel):
+    sequence: Literal[10]
+    kind: Literal["TURN_EVALUATION"]
+    value: IntakeRoomTurnEvaluationValue
+
+
+IntakeInitiatorRoomSections = tuple[
+    IntakeRoomCaseMatrixSection,
+    IntakeRoomCaseStorySection,
+    IntakeRoomPartyPositionsSection,
+    IntakeRoomClaimAndResponseSection,
+    IntakeRoomDisputeFocusSection,
+    IntakeRoomVerificationFocusSection,
+    IntakeRoomRiskAssessmentSection,
+    IntakeRoomMissingInformationSection,
+    IntakeRoomHandoffSummarySection,
+    IntakeRoomTurnEvaluationSection,
+]
+IntakeRespondentRoomSections = tuple[
+    IntakeRespondentRoomCaseMatrixSection,
+    IntakeRoomCaseStorySection,
+    IntakeRoomPartyPositionsSection,
+    IntakeRoomClaimAndResponseSection,
+    IntakeRoomDisputeFocusSection,
+    IntakeRoomVerificationFocusSection,
+    IntakeRoomRiskAssessmentSection,
+    IntakeRoomMissingInformationSection,
+    IntakeRoomHandoffSummarySection,
+    IntakeRoomTurnEvaluationSection,
+]
+
+
+def _validate_ordered_room_outcome(
+    sections: IntakeInitiatorRoomSections | IntakeRespondentRoomSections,
+) -> None:
+    missing = sections[7].value
+    handoff = sections[8].value
+    evaluation = sections[9].value
+    derived_ready = (
+        evaluation.total_score >= evaluation.threshold
+        and not missing.blocking_gaps
+    )
+    if evaluation.ready_for_next_step != derived_ready:
+        raise ValueError(
+            "ready_for_next_step must follow the rubric score and blocking gaps"
+        )
+    if evaluation.ready_for_next_step:
+        if evaluation.admission_recommendation != "ACCEPTED":
+            raise ValueError("a ready turn requires ACCEPTED admission")
+        expected_status = {
+            "INVITE_OPTIONAL_REMARK": "WAITING_FOR_REMARK",
+            "ACK_NO_REMARK": "NO_EXTRA_REMARKS",
+        }.get(evaluation.conversation_action)
+        if expected_status is None or handoff.remark_status != expected_status:
+            raise ValueError("ready turn action and handoff status disagree")
+        if missing.next_questions:
+            raise ValueError("a ready turn cannot carry another substantive question")
+        return
+    if (
+        evaluation.conversation_action != "ASK_SUBSTANTIVE"
+        or handoff.remark_status != "NOT_READY"
+        or evaluation.admission_recommendation == "ACCEPTED"
+    ):
+        raise ValueError("an incomplete turn must remain in substantive Intake")
+
+
+class IntakeInitiatorRoomLlmOutputV3(StrictIntakeRoomModel):
+    """Ordered provider contract for initiator substantive/opening turns."""
+
+    room_utterance: str = Field(min_length=1, max_length=20_000)
+    ordered_sections: IntakeInitiatorRoomSections
+
+    @model_validator(mode="after")
+    def validate_turn_outcome(self) -> "IntakeInitiatorRoomLlmOutputV3":
+        _validate_ordered_room_outcome(self.ordered_sections)
+        return self
+
+
+class IntakeRespondentRoomLlmOutputV3(StrictIntakeRoomModel):
+    """Ordered provider contract for an authenticated respondent turn."""
+
+    room_utterance: str = Field(min_length=1, max_length=20_000)
+    ordered_sections: IntakeRespondentRoomSections
+
+    @model_validator(mode="after")
+    def bind_display_attitude_to_matrix_claim(
+        self,
+    ) -> "IntakeRespondentRoomLlmOutputV3":
+        _validate_ordered_room_outcome(self.ordered_sections)
+        claim = self.ordered_sections[0].value.respondent_claim
+        display = self.ordered_sections[3].value.respondent_attitude
+        binding = claim.source_binding
+        if binding.subject_role is not None and display.respondent_role != binding.subject_role:
+            raise ValueError("respondent display role must match the bound claim role")
+        if claim.attitude != "NOT_ADDRESSED" and display.attitude != claim.attitude:
+            raise ValueError("respondent display attitude must match the bound matrix claim")
+        return self
 
 
 class IntakeCaseStoryPatch(TypedDict, total=False):
@@ -144,6 +505,22 @@ class IntakeCaseDetailLlmOutput(BaseModel):
         if self.case_matrix_delta is not None and self.unilateral_case_matrix is not None:
             raise ValueError("provide only case_matrix_delta")
         return self
+
+
+class MaterializedIntakeRoomLlmOutputV3(IntakeCaseDetailLlmOutput):
+    """Internal legacy-shaped projection of the ordered provider contract.
+
+    The two excluded fields are carried only long enough for the Target/baseline
+    adapter to select the model-trusted V3 projection path. They never enter the
+    durable model-authored dossier or the public terminal proposal.
+    """
+
+    source_contract_version: Literal["intake-room-output.v3"] = Field(exclude=True)
+    ordered_sections_payload: tuple[dict[str, Any], ...] = Field(exclude=True)
+    respondent_source_binding: IntakeRoomSourceBindingV1 | None = Field(
+        default=None,
+        exclude=True,
+    )
 
 
 class IntakeRespondentSubstantiveMatrixDelta(CaseFactMatrixDeltaV2):
@@ -291,6 +668,11 @@ def materialize_intake_case_detail_output(
 
     if not isinstance(request, IntakeTurnRequest):
         raise TypeError("request must be a validated IntakeTurnRequest")
+    if isinstance(
+        output,
+        (IntakeInitiatorRoomLlmOutputV3, IntakeRespondentRoomLlmOutputV3),
+    ):
+        return _materialize_ordered_intake_room_output(request, output)
     if isinstance(output, IntakeFreshFormOpeningLlmOutput):
         if not is_exact_fresh_form_opening(request):
             raise ValueError("fresh form opening output lacks phase authority")
@@ -348,9 +730,155 @@ def intake_case_detail_output_type(
     """Return the provider contract authorized for this exact Intake phase."""
 
     if is_exact_fresh_form_opening(request):
-        return IntakeFreshFormOpeningLlmOutput
+        return IntakeInitiatorRoomLlmOutputV3
     if is_exact_handoff_remark_turn(request):
         return IntakeRemarkAcknowledgementLlmOutput
     if is_exact_respondent_substantive_turn(request):
-        return IntakeRespondentSubstantiveLlmOutput
-    return IntakeCaseDetailLlmOutput
+        return IntakeRespondentRoomLlmOutputV3
+    return IntakeInitiatorRoomLlmOutputV3
+
+
+def _materialize_ordered_intake_room_output(
+    request: IntakeTurnRequest,
+    output: IntakeInitiatorRoomLlmOutputV3 | IntakeRespondentRoomLlmOutputV3,
+) -> MaterializedIntakeRoomLlmOutputV3:
+    """Mechanically project ordered sections into the established terminal shape."""
+
+    if isinstance(output, IntakeRespondentRoomLlmOutputV3):
+        if not is_exact_respondent_substantive_turn(request):
+            raise ValueError("respondent room output lacks respondent phase authority")
+    elif is_exact_respondent_substantive_turn(request):
+        raise ValueError("respondent turn requires the respondent room output contract")
+
+    sections = output.ordered_sections
+    matrix_payload = sections[0].value.model_dump(mode="json", exclude_none=True)
+    respondent_claim = matrix_payload.get("respondent_claim")
+    respondent_source_binding: IntakeRoomSourceBindingV1 | None = None
+    if isinstance(respondent_claim, dict):
+        if isinstance(output, IntakeRespondentRoomLlmOutputV3):
+            respondent_source_binding = (
+                output.ordered_sections[0].value.respondent_claim.source_binding
+            )
+        respondent_claim.pop("source_binding", None)
+
+    case_story = sections[1].value.model_dump(mode="json")
+    party_positions = sections[2].value.model_dump(mode="json")
+    claim_and_response = sections[3].value
+    dispute = sections[4].value
+    verification_focus = sections[5].value
+    risk_section = sections[6].value
+    risk_assessment = {
+        "case_grade": risk_section.case_grade,
+        "risk_signals": list(risk_section.risk_points),
+        "reasoning": risk_section.summary,
+    }
+    missing_information = sections[7].value.model_dump(mode="json")
+    handoff_summary = sections[8].value.model_dump(mode="json")
+    evaluation = sections[9].value
+
+    dispute_core_state = dispute.dispute_core_state.model_dump(mode="json")
+    dispute_core_state["next_verification_focus"] = list(verification_focus.items)
+    case_detail = {
+        "case_story": case_story,
+        "party_positions": party_positions,
+        "claim_resolution": claim_and_response.claim_resolution.model_dump(
+            mode="json"
+        ),
+        "respondent_attitude": claim_and_response.respondent_attitude.model_dump(
+            mode="json",
+            exclude_none=True,
+        ),
+        "dispute_core_state": dispute_core_state,
+        "dispute_focus": dispute.dispute_focus.model_dump(mode="json"),
+        "risk_assessment": risk_assessment,
+        "missing_information": missing_information,
+        "intake_quality": {
+            "score": evaluation.total_score,
+            "threshold": evaluation.threshold,
+            "ready_for_next_step": evaluation.ready_for_next_step,
+            "score_breakdown": evaluation.score_breakdown.model_dump(mode="json"),
+            "improvement_reason": evaluation.improvement_reason,
+        },
+        "admission": {
+            "recommendation": evaluation.admission_recommendation,
+            "reasoning": evaluation.admission_reasoning,
+            "confidence": evaluation.confidence,
+        },
+        "handoff_notes": handoff_summary,
+    }
+    return MaterializedIntakeRoomLlmOutputV3.model_validate(
+        {
+            "source_contract_version": "intake-room-output.v3",
+            "ordered_sections_payload": tuple(
+                section.model_dump(mode="json", exclude_none=True)
+                for section in sections
+            ),
+            "respondent_source_binding": respondent_source_binding,
+            "room_utterance": output.room_utterance,
+            "conversation_action": evaluation.conversation_action,
+            "case_detail": case_detail,
+            "case_matrix_delta": matrix_payload,
+            "unilateral_case_matrix": None,
+            "dossier_patch": None,
+            "scroll_snapshot": None,
+            "canvas_operations": [],
+            "admission_recommendation": evaluation.admission_recommendation,
+            "missing_fields": missing_information["blocking_gaps"],
+            "knowledge_query_intent": evaluation.knowledge_answer_mode == "STUB",
+            "knowledge_answer_mode": evaluation.knowledge_answer_mode,
+            "confidence": evaluation.confidence,
+        }
+    )
+
+
+def revalidate_materialized_intake_output(
+    original: IntakeCaseDetailLlmOutput,
+    payload: Mapping[str, Any],
+) -> IntakeCaseDetailLlmOutput:
+    """Revalidate a legacy-shaped mutation without losing V3 private authority.
+
+    Fact-key canonicalization is server-owned and may rebuild the public matrix
+    payload.  The ordered provider contract marker and its private source binding
+    must survive that mechanical rebuild so the downstream dossier adapter cannot
+    accidentally fall back to legacy regex semantics.
+    """
+
+    if not isinstance(original, MaterializedIntakeRoomLlmOutputV3):
+        return IntakeCaseDetailLlmOutput.model_validate(payload)
+    materialized_payload = dict(payload)
+    source_binding = original.respondent_source_binding
+    source_binding_payload = (
+        source_binding.model_dump(mode="json")
+        if source_binding is not None
+        else None
+    )
+    previous_matrix = original.case_matrix_delta
+    next_matrix = materialized_payload.get("case_matrix_delta")
+    if (
+        source_binding_payload is not None
+        and previous_matrix is not None
+        and isinstance(next_matrix, Mapping)
+        and isinstance(next_matrix.get("fact_rows"), list)
+    ):
+        previous_keys = [row.fact_key for row in previous_matrix.fact_rows]
+        next_keys = [
+            row.get("fact_key")
+            for row in next_matrix["fact_rows"][: len(previous_keys)]
+            if isinstance(row, Mapping)
+        ]
+        if len(previous_keys) == len(next_keys) and all(
+            isinstance(key, str) for key in next_keys
+        ):
+            normalized_by_previous = dict(zip(previous_keys, next_keys, strict=True))
+            source_binding_payload["linked_fact_keys"] = [
+                normalized_by_previous.get(key, key)
+                for key in source_binding_payload["linked_fact_keys"]
+            ]
+    materialized_payload.update(
+        {
+            "source_contract_version": original.source_contract_version,
+            "ordered_sections_payload": original.ordered_sections_payload,
+            "respondent_source_binding": source_binding_payload,
+        }
+    )
+    return MaterializedIntakeRoomLlmOutputV3.model_validate(materialized_payload)

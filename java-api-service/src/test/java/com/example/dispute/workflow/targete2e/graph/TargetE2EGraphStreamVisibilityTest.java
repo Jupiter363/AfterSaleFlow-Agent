@@ -27,6 +27,7 @@ class TargetE2EGraphStreamVisibilityTest {
                 "intake_turn_case_detail",
                 Set.of(
                     "room_utterance",
+                    "ordered_sections",
                     "case_detail.case_story.title",
                     "case_detail.case_story.one_sentence_summary",
                     "case_detail.references.order_reference",
@@ -70,7 +71,7 @@ class TargetE2EGraphStreamVisibilityTest {
   }
 
   @Test
-  void permitsOnlyTheFrozenIntakeV2VisibleFields() {
+  void permitsTheOrderedV3SectionAlongsideDurableLegacyReplayFields() {
     var allowed = state();
     parse(allowed, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
 
@@ -103,6 +104,17 @@ class TargetE2EGraphStreamVisibilityTest {
                         "visible_delta",
                         "{\"node\":\"intake_turn_case_detail\",\"field\":\"room_utterance\","
                             + "\"delta\":\"hello\"}"))
+                .eventType())
+        .isEqualTo(StreamEventType.VISIBLE_DELTA);
+    assertThat(
+            parse(
+                    allowed,
+                    event(
+                        4,
+                        "visible_delta",
+                        "{\"node\":\"intake_turn_case_detail\","
+                            + "\"field\":\"ordered_sections\","
+                            + "\"delta\":\"{\\\"sequence\\\":2,\\\"kind\\\":\\\"CASE_STORY\\\",\\\"value\\\":{}}\"}"))
                 .eventType())
         .isEqualTo(StreamEventType.VISIBLE_DELTA);
 
