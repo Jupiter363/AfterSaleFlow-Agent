@@ -30,6 +30,7 @@ from app.agents.dispute_intake_officer.schemas import (
     IntakeCaseDetailLlmOutput,
     IntakeFreshFormOpeningLlmOutput,
     IntakeRespondentOpeningLlmOutput,
+    IntakeRespondentSubstantiveLlmOutput,
     intake_case_detail_output_type,
     materialize_intake_case_detail_output,
 )
@@ -50,7 +51,11 @@ from app.graph_runtime.state_lens import StateLens
 from app.graph_runtime.state import VersionPinsState
 from app.graphs.intake.baseline import (
     BASELINE_INTAKE_NODE_NAME,
+    _demote_intake_baseline_initiator_respondent_claim,
     _previous_case_detail,
+    adapt_intake_baseline_output,
+    adapt_intake_baseline_output_with_scroll_snapshot,
+    build_intake_baseline_request,
     intake_baseline_authorized_fact_ids,
     normalize_model_matrix_fact_key_payload,
     read_intake_baseline_memory_summary,
@@ -1906,6 +1911,62 @@ def test_exact_fresh_form_opening_provider_contract_cannot_author_respondent_att
     assert set(case_story_schema["properties"]) == {"one_sentence_summary"}
     assert "respondent_attitude" not in json.dumps(wire_schema, sort_keys=True)
 
+    fresh_matrix_schema = wire_schema["properties"]["case_matrix_delta"]
+    fresh_matrix_ref = fresh_matrix_schema.get("$ref")
+    if fresh_matrix_ref is None:
+        fresh_matrix_ref = fresh_matrix_schema["allOf"][0]["$ref"]
+    fresh_matrix_definition = wire_schema["$defs"][
+        fresh_matrix_ref.rsplit("/", 1)[-1]
+    ]
+    fresh_claim_schema = fresh_matrix_definition["properties"]["respondent_claim"]
+
+    unauthorized_fresh_document = copy.deepcopy(provider_document)
+    unauthorized_fresh_document["case_matrix_delta"]["respondent_claim"] = {
+        "attitude": "DISAGREE",
+        "position_summary": "The merchant rejects the refund request.",
+    }
+    unauthorized_fresh_output = IntakeCaseDetailLlmOutput.model_validate(
+        unauthorized_fresh_document
+    )
+    fresh_state = _event_state(
+        bindings,
+        version_pins,
+        imported,
+        initial_form,
+    )
+    fresh_context = _agent_context(
+        role=imported["initial_case_facts"]["initiator_role"],
+        case_id=imported["case_id"],
+        agent_session_id=imported["agent_session_id"],
+    )
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_MATRIX_INITIATOR_CLAIM_UNAUTHORIZED",
+    ):
+        validate_matrix_patch(
+            fresh_state,
+            unauthorized_fresh_output.case_matrix_delta.model_dump(mode="json"),
+        )
+    unauthorized_fresh_draft = adapt_intake_baseline_output(
+        fresh_state,
+        agent_context=fresh_context,
+        output=unauthorized_fresh_output,
+    )
+    assert unauthorized_fresh_draft.matrix_patch is not None
+    assert unauthorized_fresh_draft.matrix_patch.respondent_claim is None
+    assert fresh_claim_schema.get("type") == "null"
+    assert "respondent_claim" not in fresh_matrix_definition.get("required", [])
+    with pytest.raises(ValueError):
+        request.output_type.model_validate(unauthorized_fresh_document)
+    request.output_type.model_validate(provider_document)
+    request.output_type.model_validate(
+        provider_document
+        | {
+            "case_matrix_delta": provider_document["case_matrix_delta"]
+            | {"respondent_claim": None}
+        }
+    )
+
     for forbidden_document in (
         provider_document
         | {
@@ -1950,6 +2011,185 @@ def test_exact_fresh_form_opening_provider_contract_cannot_author_respondent_att
     assert pending["formal_matrix"]["content_hash"]
     assert "respondent_attitude" not in projected["dossier_draft"]
     assert transport.generate_calls == 1
+
+    prior_snapshot = copy.deepcopy(pending["snapshot"])
+    prior_matrix = prior_snapshot["case_fact_matrix"]
+    assert prior_matrix["party_map"] == {
+        "initiator_role": "USER",
+        "respondent_role": "MERCHANT",
+    }
+    prior_row = prior_matrix["fact_rows"][0]
+    regular_message_text = (
+        "The delivered order was damaged, so I continue to request a refund."
+    )
+    regular_event_hash = "c" * 64
+    regular_state = copy.deepcopy(fresh_state)
+    regular_state.update(
+        {
+            "dossier_draft": copy.deepcopy(prior_snapshot),
+            "baseline_previous_case_detail": copy.deepcopy(prior_snapshot),
+            "messages": {
+                "MESSAGE_INITIATOR_REGULAR_2": {
+                    "message_id": "MESSAGE_INITIATOR_REGULAR_2",
+                    "role": "HUMAN",
+                    "audience": "USER",
+                    "content": regular_message_text,
+                    "sequence": 2,
+                    "source_hash": regular_event_hash,
+                }
+            },
+            "last_event_hash": regular_event_hash,
+            "last_event_ref": "EVENT_INITIATOR_REGULAR_2",
+            "route": "model",
+        }
+    )
+    regular_context = _agent_context(
+        role="USER",
+        case_id=imported["case_id"],
+        agent_session_id=imported["agent_session_id"],
+        invocation_id="ATTEMPT_INITIATOR_REGULAR_2_1",
+    )
+    regular_request = build_intake_baseline_request(
+        regular_state,
+        agent_context=regular_context,
+    )
+    assert intake_case_detail_output_type(regular_request) is IntakeCaseDetailLlmOutput
+    regular_matrix_payload = {
+        "schema_version": "case_fact_matrix.delta.v2",
+        "fact_rows": [
+            {
+                "fact_key": prior_row["fact_id"],
+                "category": prior_row["category"],
+                "fact_target": prior_row["fact_target"],
+                "materiality": prior_row["materiality"],
+                "stance": "CONFIRM",
+                "position_summary": "The initiator reports delivery damage.",
+                "asserted_value": "damaged",
+                "source_scope": "CURRENT_SOURCE",
+            }
+        ],
+        "summary_source_fact_keys": [prior_row["fact_id"]],
+        "respondent_claim": {
+            "attitude": "DISAGREE",
+            "position_summary": "The merchant rejects the refund request.",
+        },
+    }
+    regular_output_payload = {
+        "conversation_action": "ASK_SUBSTANTIVE",
+        "room_utterance": "I recorded that detail. Please provide the order reference.",
+        "case_detail": {
+            "case_story": {
+                "one_sentence_summary": "The initiator reports delivery damage."
+            }
+        },
+        "case_matrix_delta": regular_matrix_payload,
+        "missing_fields": ["ORDER_REFERENCE"],
+        "confidence": 0.84,
+    }
+    regular_output_payload_before = copy.deepcopy(regular_output_payload)
+    regular_output = IntakeCaseDetailLlmOutput.model_validate(regular_output_payload)
+    regular_output_before = regular_output.model_dump(mode="json", exclude_none=True)
+    demoted_regular_output = _demote_intake_baseline_initiator_respondent_claim(
+        request=regular_request,
+        output=regular_output,
+    )
+    expected_demoted_output = copy.deepcopy(regular_output_before)
+    expected_demoted_output["case_matrix_delta"].pop("respondent_claim")
+    assert demoted_regular_output.model_dump(
+        mode="json",
+        exclude_none=True,
+    ) == expected_demoted_output
+    regular_first, regular_first_snapshot = (
+        adapt_intake_baseline_output_with_scroll_snapshot(
+            regular_state,
+            agent_context=regular_context,
+            output=regular_output,
+        )
+    )
+    regular_replay, regular_replay_snapshot = (
+        adapt_intake_baseline_output_with_scroll_snapshot(
+            regular_state,
+            agent_context=regular_context,
+            output=regular_output,
+        )
+    )
+    regular_first_payload = regular_first.model_dump(mode="json")
+    regular_replay_payload = regular_replay.model_dump(mode="json")
+    assert regular_output_payload == regular_output_payload_before
+    assert regular_output.model_dump(
+        mode="json",
+        exclude_none=True,
+    ) == regular_output_before
+    assert regular_output.case_matrix_delta.respondent_claim is not None
+    assert regular_first.conversation_action == regular_output.conversation_action
+    assert regular_first.room_utterance == regular_output.room_utterance
+    assert regular_first.matrix_patch is not None
+    regular_projected_matrix = regular_first.matrix_patch.model_dump(
+        mode="json",
+        exclude_none=True,
+    )
+    assert "respondent_claim" not in regular_projected_matrix
+    assert regular_projected_matrix["fact_rows"] == regular_matrix_payload["fact_rows"]
+    assert regular_projected_matrix["summary_source_fact_keys"] == (
+        regular_matrix_payload["summary_source_fact_keys"]
+    )
+    assert regular_first_snapshot["case_fact_matrix"]["claims"][
+        "respondent_direct"
+    ] is None
+    assert regular_replay_payload == regular_first_payload
+    assert canonical_sha256(regular_replay_payload) == canonical_sha256(
+        regular_first_payload
+    )
+    assert regular_replay_snapshot == regular_first_snapshot
+    assert canonical_sha256(regular_replay_snapshot) == canonical_sha256(
+        regular_first_snapshot
+    )
+
+    respondent_state = copy.deepcopy(regular_state)
+    respondent_state["bindings"]["private"]["audience"] = "MERCHANT"
+    respondent_state["messages"]["MESSAGE_INITIATOR_REGULAR_2"][
+        "audience"
+    ] = "MERCHANT"
+    respondent_context = _agent_context(
+        role="MERCHANT",
+        case_id=imported["case_id"],
+        agent_session_id=imported["agent_session_id"],
+        invocation_id="ATTEMPT_RESPONDENT_REGULAR_2_1",
+    )
+    respondent_request = build_intake_baseline_request(
+        respondent_state,
+        agent_context=respondent_context,
+    )
+    assert (
+        intake_case_detail_output_type(respondent_request)
+        is IntakeRespondentSubstantiveLlmOutput
+    )
+    respondent_payload_without_claim = copy.deepcopy(regular_output_payload)
+    respondent_payload_without_claim["case_matrix_delta"].pop("respondent_claim")
+    with pytest.raises(ValueError):
+        IntakeRespondentSubstantiveLlmOutput.model_validate(
+            respondent_payload_without_claim
+        )
+
+    missing_authority_payload = regular_request.model_dump(mode="json")
+    missing_authority_payload["previous_case_detail"] = {
+        "case_story": {"one_sentence_summary": "Authority is missing."}
+    }
+    ambiguous_authority_payload = regular_request.model_dump(mode="json")
+    ambiguous_authority_payload["previous_case_detail"][
+        "unilateral_case_matrix"
+    ] = copy.deepcopy(prior_matrix)
+    for unauthorized_request in (
+        IntakeTurnRequest.model_validate(missing_authority_payload),
+        IntakeTurnRequest.model_validate(ambiguous_authority_payload),
+        respondent_request,
+    ):
+        unchanged = _demote_intake_baseline_initiator_respondent_claim(
+            request=unauthorized_request,
+            output=regular_output,
+        )
+        assert unchanged is regular_output
+        assert unchanged.case_matrix_delta.respondent_claim is not None
 
     ordinary_state = _state_with_matrix_roles(
         bindings,

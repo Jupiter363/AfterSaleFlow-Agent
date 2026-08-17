@@ -34,6 +34,7 @@ from app.harness.model_runner import (
 )
 from app.harness.prompt_composer import PromptRepository
 from app.schemas import IntakeInitialCaseFacts, IntakeTurnRequest
+from app.schemas.case_fact_matrix import CaseFactMatrixV2
 from app.schemas.final_agents import IntakeTurnMessage
 
 
@@ -371,6 +372,10 @@ def adapt_intake_baseline_output_with_scroll_snapshot(
         request=request,
         output=output,
     )
+    output = _demote_intake_baseline_initiator_respondent_claim(
+        request=request,
+        output=output,
+    )
     source_text = _baseline_source_text(request)
     projected = finalize_intake_projected_output(
         project_intake_case_detail_output(
@@ -380,6 +385,71 @@ def adapt_intake_baseline_output_with_scroll_snapshot(
         )
     )
     return _target_draft_and_scroll_snapshot(projected, output, request=request)
+
+
+def _demote_intake_baseline_initiator_respondent_claim(
+    *,
+    request: IntakeTurnRequest,
+    output: IntakeCaseDetailLlmOutput,
+) -> IntakeCaseDetailLlmOutput:
+    """Remove respondent semantics that an exact initiator cannot own."""
+
+    matrix = output.case_matrix_delta
+    if (
+        matrix is None
+        or matrix.respondent_claim is None
+        or not _intake_request_actor_has_exact_initiator_authority(request)
+    ):
+        return output
+
+    normalized_output = output.model_dump(mode="json", exclude_none=True)
+    matrix_payload = normalized_output.get("case_matrix_delta")
+    if not isinstance(matrix_payload, dict):
+        raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_PATCH_INVALID")
+    matrix_payload.pop("respondent_claim", None)
+    try:
+        return IntakeCaseDetailLlmOutput.model_validate(normalized_output)
+    except ValueError as error:
+        raise IntakeGraphContractError(
+            "INTAKE_BASELINE_MATRIX_PATCH_INVALID"
+        ) from error
+
+
+def _intake_request_actor_has_exact_initiator_authority(
+    request: IntakeTurnRequest,
+) -> bool:
+    """Require validated fresh or persisted-v2 party authority for demotion."""
+
+    actor = request.agent_context.actor_role
+    if actor not in {"USER", "MERCHANT"}:
+        return False
+    if is_exact_fresh_form_opening(request):
+        initial = request.initial_case_facts
+        return initial is not None and initial.initiator_role == actor
+
+    current = request.current_user_message
+    previous = request.previous_case_detail
+    if (
+        request.turn_source != "ROOM_MESSAGE"
+        or current is None
+        or current.source != "ROOM_MESSAGE"
+        or current.role != actor
+        or not isinstance(previous, Mapping)
+        or previous.get("unilateral_case_matrix") is not None
+    ):
+        return False
+    raw_matrix = previous.get("case_fact_matrix")
+    if not isinstance(raw_matrix, Mapping):
+        return False
+    try:
+        matrix = CaseFactMatrixV2.model_validate(deepcopy(dict(raw_matrix)))
+    except (TypeError, ValueError):
+        return False
+    return (
+        matrix.party_map.initiator_role == actor
+        and matrix.party_map.respondent_role in {"USER", "MERCHANT"}
+        and matrix.party_map.respondent_role != actor
+    )
 
 
 def _target_draft_and_scroll_snapshot(

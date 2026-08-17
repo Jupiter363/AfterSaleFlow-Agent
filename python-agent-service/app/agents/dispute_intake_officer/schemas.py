@@ -169,6 +169,12 @@ class IntakeRespondentSubstantiveLlmOutput(IntakeCaseDetailLlmOutput):
         return self
 
 
+class IntakeFreshFormMatrixDelta(CaseFactMatrixDeltaV2):
+    """Fresh initiator matrix without authority to classify the respondent."""
+
+    respondent_claim: None = None
+
+
 class IntakeFreshFormOpeningLlmOutput(BaseModel):
     """Provider fields allowed before any authenticated participant room turn."""
 
@@ -177,7 +183,7 @@ class IntakeFreshFormOpeningLlmOutput(BaseModel):
     conversation_action: Literal["ASK_SUBSTANTIVE"]
     room_utterance: str = Field(min_length=1, max_length=20_000)
     case_detail: IntakeFreshFormCaseDetail
-    case_matrix_delta: CaseFactMatrixDeltaV2
+    case_matrix_delta: IntakeFreshFormMatrixDelta
     missing_fields: list[
         Annotated[str, Field(min_length=1, max_length=128)]
     ] = Field(min_length=1, max_length=30)
