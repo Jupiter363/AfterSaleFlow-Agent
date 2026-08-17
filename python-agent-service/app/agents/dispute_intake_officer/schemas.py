@@ -8,7 +8,10 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import NotRequired, Required, TypedDict
 
-from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2
+from app.schemas.case_fact_matrix import (
+    CaseFactMatrixDeltaV2,
+    RespondentClaimDeltaV2,
+)
 from app.schemas.final_agents import IntakeTurnRequest
 from app.schemas.intake_case_matrix import UnilateralCaseMatrixDraftV1
 
@@ -143,6 +146,29 @@ class IntakeCaseDetailLlmOutput(BaseModel):
         return self
 
 
+class IntakeRespondentSubstantiveMatrixDelta(CaseFactMatrixDeltaV2):
+    """Matrix delta whose provider wire schema requires an explicit claim."""
+
+    respondent_claim: RespondentClaimDeltaV2
+
+
+class IntakeRespondentSubstantiveLlmOutput(IntakeCaseDetailLlmOutput):
+    """Provider contract for one authenticated respondent substantive turn."""
+
+    case_matrix_delta: IntakeRespondentSubstantiveMatrixDelta
+    unilateral_case_matrix: None = None
+
+    @model_validator(mode="after")
+    def require_explicit_respondent_claim(
+        self,
+    ) -> "IntakeRespondentSubstantiveLlmOutput":
+        if self.case_matrix_delta.respondent_claim is None:
+            raise ValueError(
+                "authenticated respondent substantive output requires respondent_claim"
+            )
+        return self
+
+
 class IntakeFreshFormOpeningLlmOutput(BaseModel):
     """Provider fields allowed before any authenticated participant room turn."""
 
@@ -221,6 +247,36 @@ def is_exact_handoff_remark_turn(request: IntakeTurnRequest) -> bool:
     )
 
 
+def is_exact_respondent_substantive_turn(request: IntakeTurnRequest) -> bool:
+    """Select a current respondent message backed by frozen matrix party authority."""
+
+    if not isinstance(request, IntakeTurnRequest):
+        raise TypeError("request must be a validated IntakeTurnRequest")
+    current = request.current_user_message
+    previous = request.previous_case_detail
+    actor = request.agent_context.actor_role
+    if (
+        request.turn_source != "ROOM_MESSAGE"
+        or current is None
+        or current.source != "ROOM_MESSAGE"
+        or current.role != actor
+        or actor not in {"USER", "MERCHANT"}
+        or not isinstance(previous, Mapping)
+        or is_exact_handoff_remark_turn(request)
+    ):
+        return False
+    matrix = previous.get("case_fact_matrix")
+    party_map = matrix.get("party_map") if isinstance(matrix, Mapping) else None
+    return (
+        isinstance(matrix, Mapping)
+        and matrix.get("schema_version") == "case_fact_matrix.v2"
+        and isinstance(party_map, Mapping)
+        and party_map.get("respondent_role") == actor
+        and party_map.get("initiator_role") in {"USER", "MERCHANT"}
+        and party_map.get("initiator_role") != actor
+    )
+
+
 def materialize_intake_case_detail_output(
     request: IntakeTurnRequest,
     output: BaseModel,
@@ -289,4 +345,6 @@ def intake_case_detail_output_type(
         return IntakeFreshFormOpeningLlmOutput
     if is_exact_handoff_remark_turn(request):
         return IntakeRemarkAcknowledgementLlmOutput
+    if is_exact_respondent_substantive_turn(request):
+        return IntakeRespondentSubstantiveLlmOutput
     return IntakeCaseDetailLlmOutput

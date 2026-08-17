@@ -33,6 +33,7 @@ from app.agents.dispute_intake_officer.schemas import (
     IntakeFreshFormOpeningLlmOutput,
     IntakeRemarkAcknowledgementLlmOutput,
     IntakeRespondentOpeningLlmOutput,
+    IntakeRespondentSubstantiveLlmOutput,
     intake_case_detail_output_type,
     materialize_intake_case_detail_output,
 )
@@ -276,6 +277,9 @@ class IntakeRouteModelRunnable(
         remark_acknowledgement_flow: Runnable[
             IntakeGraphStateV2, Mapping[str, Any]
         ],
+        respondent_substantive_flow: Runnable[
+            IntakeGraphStateV2, Mapping[str, Any]
+        ],
         respondent_opening_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]],
     ) -> None:
         self.name = "intake_lcel.route_model"
@@ -283,6 +287,7 @@ class IntakeRouteModelRunnable(
         self._default_flow = default_flow
         self._fresh_form_opening_flow = fresh_form_opening_flow
         self._remark_acknowledgement_flow = remark_acknowledgement_flow
+        self._respondent_substantive_flow = respondent_substantive_flow
         self._respondent_opening_flow = respondent_opening_flow
 
     def invoke(
@@ -349,6 +354,11 @@ class IntakeRouteModelRunnable(
                 is IntakeRemarkAcknowledgementLlmOutput
             ):
                 return self._remark_acknowledgement_flow
+            if (
+                intake_case_detail_output_type(request)
+                is IntakeRespondentSubstantiveLlmOutput
+            ):
+                return self._respondent_substantive_flow
             return self._default_flow
         raise IntakeGraphContractError("INTAKE_LCEL_ROUTE_INVALID")
 
@@ -370,6 +380,7 @@ def _iter_runnable_nodes(runnable: Runnable) -> Iterator[Runnable]:
         yield from _iter_runnable_nodes(route_model._default_flow)
         yield from _iter_runnable_nodes(route_model._fresh_form_opening_flow)
         yield from _iter_runnable_nodes(route_model._remark_acknowledgement_flow)
+        yield from _iter_runnable_nodes(route_model._respondent_substantive_flow)
         yield from _iter_runnable_nodes(route_model._respondent_opening_flow)
 
 
@@ -503,6 +514,12 @@ def _seal_runnable_structure(runnable: Runnable) -> _RunnableStructureSeal:
                     ),
                 ),
                 (
+                    "respondent_substantive_flow",
+                    _seal_runnable_structure(
+                        route_model._respondent_substantive_flow
+                    ),
+                ),
+                (
                     "respondent_opening_flow",
                     _seal_runnable_structure(route_model._respondent_opening_flow),
                 ),
@@ -546,6 +563,9 @@ def _matches_runnable_structure(value: Runnable, seal: _RunnableStructureSeal) -
             "fresh_form_opening_flow": route_model._fresh_form_opening_flow,
             "remark_acknowledgement_flow": (
                 route_model._remark_acknowledgement_flow
+            ),
+            "respondent_substantive_flow": (
+                route_model._respondent_substantive_flow
             ),
             "respondent_opening_flow": route_model._respondent_opening_flow,
         }
@@ -832,6 +852,10 @@ class BuiltIntakeModelNode:
     remark_acknowledgement_model: GovernedChatModel
     remark_acknowledgement_parser: PydanticOutputParser[
         IntakeRemarkAcknowledgementLlmOutput
+    ]
+    respondent_substantive_model: GovernedChatModel
+    respondent_substantive_parser: PydanticOutputParser[
+        IntakeRespondentSubstantiveLlmOutput
     ]
     respondent_opening_model: GovernedChatModel
     respondent_opening_parser: PydanticOutputParser[IntakeRespondentOpeningLlmOutput]
@@ -1260,6 +1284,21 @@ class _IntakeComponentSeal:
         IntakeRemarkAcknowledgementLlmOutput
     ]
     remark_acknowledgement_parser_diff: bool
+    respondent_substantive_model: GovernedChatModel
+    respondent_substantive_model_profile: ModelProfile
+    respondent_substantive_model_policy: ModelInvocationPolicy
+    respondent_substantive_model_profile_snapshot: ModelProfile
+    respondent_substantive_model_policy_snapshot: ModelInvocationPolicy
+    respondent_substantive_model_output_type: type[
+        IntakeRespondentSubstantiveLlmOutput
+    ]
+    respondent_substantive_parser: PydanticOutputParser[
+        IntakeRespondentSubstantiveLlmOutput
+    ]
+    respondent_substantive_parser_pydantic_object: type[
+        IntakeRespondentSubstantiveLlmOutput
+    ]
+    respondent_substantive_parser_diff: bool
     respondent_opening_model: GovernedChatModel
     respondent_opening_model_profile: ModelProfile
     respondent_opening_model_policy: ModelInvocationPolicy
@@ -1278,6 +1317,9 @@ class _IntakeComponentSeal:
         IntakeGraphStateV2, Mapping[str, Any]
     ]
     model_router_remark_acknowledgement_flow: Runnable[
+        IntakeGraphStateV2, Mapping[str, Any]
+    ]
+    model_router_respondent_substantive_flow: Runnable[
         IntakeGraphStateV2, Mapping[str, Any]
     ]
     model_router_respondent_opening_flow: Runnable[
@@ -1317,6 +1359,14 @@ class _IntakeComponentSeal:
     ]
     remark_acknowledgement_model_visible_fields: tuple[Any, ...]
     remark_acknowledgement_model_visible_field_names: frozenset[str]
+    respondent_substantive_model_clock: Callable[[], Any]
+    respondent_substantive_model_cancelled: Callable[[], bool]
+    respondent_substantive_model_user_content_parts: tuple[dict[str, Any], ...]
+    respondent_substantive_model_user_content_parts_snapshot: tuple[
+        dict[str, Any], ...
+    ]
+    respondent_substantive_model_visible_fields: tuple[Any, ...]
+    respondent_substantive_model_visible_field_names: frozenset[str]
     respondent_opening_model_clock: Callable[[], Any]
     respondent_opening_model_cancelled: Callable[[], bool]
     respondent_opening_model_user_content_parts: tuple[dict[str, Any], ...]
@@ -1338,6 +1388,10 @@ def _seal_intake_components(
     remark_acknowledgement_model: GovernedChatModel,
     remark_acknowledgement_parser: PydanticOutputParser[
         IntakeRemarkAcknowledgementLlmOutput
+    ],
+    respondent_substantive_model: GovernedChatModel,
+    respondent_substantive_parser: PydanticOutputParser[
+        IntakeRespondentSubstantiveLlmOutput
     ],
     respondent_opening_model: GovernedChatModel,
     respondent_opening_parser: PydanticOutputParser[
@@ -1418,16 +1472,22 @@ def _seal_intake_components(
         (model, model_behavior_methods),
         (fresh_form_opening_model, model_behavior_methods),
         (remark_acknowledgement_model, model_behavior_methods),
+        (respondent_substantive_model, model_behavior_methods),
         (respondent_opening_model, model_behavior_methods),
         (parser, parser_behavior_methods),
         (fresh_form_opening_parser, parser_behavior_methods),
         (remark_acknowledgement_parser, parser_behavior_methods),
+        (respondent_substantive_parser, parser_behavior_methods),
         (respondent_opening_parser, parser_behavior_methods),
         (model_router, ("_select_flow",)),
         (model._transport, ("generate", "agenerate", "stream", "astream")),
         (fresh_form_opening_model._transport, ("generate", "agenerate", "stream", "astream")),
         (
             remark_acknowledgement_model._transport,
+            ("generate", "agenerate", "stream", "astream"),
+        ),
+        (
+            respondent_substantive_model._transport,
             ("generate", "agenerate", "stream", "astream"),
         ),
         (respondent_opening_model._transport, ("generate", "agenerate", "stream", "astream")),
@@ -1488,6 +1548,23 @@ def _seal_intake_components(
             remark_acknowledgement_parser.pydantic_object
         ),
         remark_acknowledgement_parser_diff=remark_acknowledgement_parser.diff,
+        respondent_substantive_model=respondent_substantive_model,
+        respondent_substantive_model_profile=respondent_substantive_model.profile,
+        respondent_substantive_model_policy=respondent_substantive_model.policy,
+        respondent_substantive_model_profile_snapshot=deepcopy(
+            respondent_substantive_model.profile
+        ),
+        respondent_substantive_model_policy_snapshot=deepcopy(
+            respondent_substantive_model.policy
+        ),
+        respondent_substantive_model_output_type=(
+            respondent_substantive_model._output_type
+        ),
+        respondent_substantive_parser=respondent_substantive_parser,
+        respondent_substantive_parser_pydantic_object=(
+            respondent_substantive_parser.pydantic_object
+        ),
+        respondent_substantive_parser_diff=respondent_substantive_parser.diff,
         respondent_opening_model=respondent_opening_model,
         respondent_opening_model_profile=respondent_opening_model.profile,
         respondent_opening_model_policy=respondent_opening_model.policy,
@@ -1513,6 +1590,9 @@ def _seal_intake_components(
         ),
         model_router_remark_acknowledgement_flow=(
             model_router._remark_acknowledgement_flow
+        ),
+        model_router_respondent_substantive_flow=(
+            model_router._respondent_substantive_flow
         ),
         model_router_respondent_opening_flow=(
             model_router._respondent_opening_flow
@@ -1564,6 +1644,22 @@ def _seal_intake_components(
         ),
         remark_acknowledgement_model_visible_field_names=(
             remark_acknowledgement_model._visible_field_names
+        ),
+        respondent_substantive_model_clock=respondent_substantive_model._clock,
+        respondent_substantive_model_cancelled=(
+            respondent_substantive_model._cancelled
+        ),
+        respondent_substantive_model_user_content_parts=(
+            respondent_substantive_model._user_content_parts
+        ),
+        respondent_substantive_model_user_content_parts_snapshot=deepcopy(
+            respondent_substantive_model._user_content_parts
+        ),
+        respondent_substantive_model_visible_fields=(
+            respondent_substantive_model._visible_fields
+        ),
+        respondent_substantive_model_visible_field_names=(
+            respondent_substantive_model._visible_field_names
         ),
         respondent_opening_model_clock=respondent_opening_model._clock,
         respondent_opening_model_cancelled=respondent_opening_model._cancelled,
@@ -1678,6 +1774,34 @@ def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
     ):
         return False
 
+    respondent_substantive_model = seal.respondent_substantive_model
+    if (
+        respondent_substantive_model.profile
+        is not seal.respondent_substantive_model_profile
+        or respondent_substantive_model.policy
+        is not seal.respondent_substantive_model_policy
+        or respondent_substantive_model._output_type
+        is not seal.respondent_substantive_model_output_type
+        or respondent_substantive_model.profile
+        != seal.respondent_substantive_model_profile_snapshot
+        or respondent_substantive_model.policy
+        != seal.respondent_substantive_model_policy_snapshot
+        or respondent_substantive_model._transport is not seal.model_transport
+        or respondent_substantive_model._clock
+        is not seal.respondent_substantive_model_clock
+        or respondent_substantive_model._cancelled
+        is not seal.respondent_substantive_model_cancelled
+        or respondent_substantive_model._user_content_parts
+        is not seal.respondent_substantive_model_user_content_parts
+        or respondent_substantive_model._user_content_parts
+        != seal.respondent_substantive_model_user_content_parts_snapshot
+        or respondent_substantive_model._visible_fields
+        is not seal.respondent_substantive_model_visible_fields
+        or respondent_substantive_model._visible_field_names
+        is not seal.respondent_substantive_model_visible_field_names
+    ):
+        return False
+
     respondent_opening_model = seal.respondent_opening_model
     if (
         respondent_opening_model.profile is not seal.respondent_opening_model_profile
@@ -1729,6 +1853,15 @@ def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
     ):
         return False
 
+    respondent_substantive_parser = seal.respondent_substantive_parser
+    if (
+        respondent_substantive_parser.pydantic_object
+        is not seal.respondent_substantive_parser_pydantic_object
+        or respondent_substantive_parser.diff
+        is not seal.respondent_substantive_parser_diff
+    ):
+        return False
+
     respondent_opening_parser = seal.respondent_opening_parser
     if (
         respondent_opening_parser.pydantic_object
@@ -1748,6 +1881,8 @@ def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
         is not seal.model_router_fresh_form_opening_flow
         or model_router._remark_acknowledgement_flow
         is not seal.model_router_remark_acknowledgement_flow
+        or model_router._respondent_substantive_flow
+        is not seal.model_router_respondent_substantive_flow
         or model_router._respondent_opening_flow
         is not seal.model_router_respondent_opening_flow
     ):
@@ -1870,6 +2005,18 @@ def build_intake_model_node(
     remark_acknowledgement_parser = PydanticOutputParser(
         pydantic_object=IntakeRemarkAcknowledgementLlmOutput
     )
+    respondent_substantive_profile = deepcopy(profile)
+    respondent_substantive_policy = deepcopy(policy)
+    respondent_substantive_model = GovernedChatModel(
+        transport=transport,
+        output_type=IntakeRespondentSubstantiveLlmOutput,
+        profile=respondent_substantive_profile,
+        policy=respondent_substantive_policy,
+        visible_fields=_TARGET_INTAKE_VISIBLE_FIELDS,
+    )
+    respondent_substantive_parser = PydanticOutputParser(
+        pydantic_object=IntakeRespondentSubstantiveLlmOutput
+    )
     if (
         len(_RESPONDENT_OPENING_VISIBLE_FIELDS) != 1
         or _RESPONDENT_OPENING_VISIBLE_FIELDS[0].field != "room_utterance"
@@ -1915,6 +2062,16 @@ def build_intake_model_node(
         | remark_acknowledgement_model
         | remark_acknowledgement_parsed_generation
     )
+    respondent_substantive_parsed_generation = RunnableParallel(
+        message=RunnablePassthrough(),
+        draft=respondent_substantive_parser,
+    )
+    respondent_substantive_model_flow = (
+        lens
+        | prompt
+        | respondent_substantive_model
+        | respondent_substantive_parsed_generation
+    )
     respondent_opening_parsed_generation = RunnableParallel(
         message=RunnablePassthrough(),
         draft=respondent_opening_parser,
@@ -1938,6 +2095,10 @@ def build_intake_model_node(
         remark_acknowledgement_flow=cast(
             Runnable[IntakeGraphStateV2, Mapping[str, Any]],
             remark_acknowledgement_model_flow,
+        ),
+        respondent_substantive_flow=cast(
+            Runnable[IntakeGraphStateV2, Mapping[str, Any]],
+            respondent_substantive_model_flow,
         ),
         respondent_opening_flow=cast(
             Runnable[IntakeGraphStateV2, Mapping[str, Any]],
@@ -1975,6 +2136,8 @@ def build_intake_model_node(
         fresh_form_opening_parser=fresh_form_opening_parser,
         remark_acknowledgement_model=remark_acknowledgement_model,
         remark_acknowledgement_parser=remark_acknowledgement_parser,
+        respondent_substantive_model=respondent_substantive_model,
+        respondent_substantive_parser=respondent_substantive_parser,
         respondent_opening_model=respondent_opening_model,
         respondent_opening_parser=respondent_opening_parser,
         model_router=model_router,
@@ -2001,6 +2164,8 @@ def build_intake_model_node(
         fresh_form_opening_parser=fresh_form_opening_parser,
         remark_acknowledgement_model=remark_acknowledgement_model,
         remark_acknowledgement_parser=remark_acknowledgement_parser,
+        respondent_substantive_model=respondent_substantive_model,
+        respondent_substantive_parser=respondent_substantive_parser,
         respondent_opening_model=respondent_opening_model,
         respondent_opening_parser=respondent_opening_parser,
         preflight=preflight,
@@ -2405,7 +2570,7 @@ def _normalize_model_respondent_attitude(
             draft,
             request=fresh_form_request,
         )
-    grounded = _grounded_respondent_attitude(state)
+    grounded = _grounded_respondent_attitude(state, draft=draft)
     prior = _prior_authoritative_respondent_attitude(state)
     prior_is_substantive = _validate_prior_respondent_attitude_authority(state, prior)
     proposed = _respondent_attitude_discriminator(attitude)
@@ -2433,6 +2598,7 @@ def _normalize_model_respondent_attitude(
             respondent_role=grounded.respondent_role,
             grounded_attitude=grounded.attitude,
             grounded_position=grounded.position,
+            grounded_alternative_proposal=grounded.alternative_proposal,
             grounded_confidence=grounded.confidence,
             current_message_id=grounded.current_message_id,
         )
@@ -2808,6 +2974,7 @@ class _AuthorizedTurnSource:
 class _GroundedRespondentAttitude:
     attitude: str
     position: str
+    alternative_proposal: str | None
     confidence: float
     respondent_role: str
     current_message_id: str | None
@@ -2815,6 +2982,8 @@ class _GroundedRespondentAttitude:
 
 def _grounded_respondent_attitude(
     state: IntakeGraphStateV2,
+    *,
+    draft: IntakeCognitionDraft,
 ) -> _GroundedRespondentAttitude | None:
     private = state.get("bindings", {}).get("private", {})
     authority = state.get("node_results", {}).get(MATRIX_AUTHORITY_RECORD_KEY)
@@ -2839,6 +3008,24 @@ def _grounded_respondent_attitude(
     if actor_role != initiator_role:
         if source.message_id is None:
             raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID")
+        matrix_patch = draft.matrix_patch
+        if not isinstance(matrix_patch, CaseFactMatrixDeltaV2):
+            raise IntakeGraphContractError(
+                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+            )
+        if not any(
+            row.source_scope in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
+            and row.stance != "NOT_ADDRESSED"
+            for row in matrix_patch.fact_rows
+        ):
+            raise IntakeGraphContractError(
+                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+            )
+        claim = matrix_patch.respondent_claim
+        if claim is None:
+            raise IntakeGraphContractError(
+                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+            )
         detection = detect_direct_respondent_attitude(
             source.text,
             source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
@@ -2846,24 +3033,30 @@ def _grounded_respondent_attitude(
         )
         if detection.state == "UNRESOLVED":
             raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
-        if detection.state == "NONE":
+        if claim.attitude == "NOT_ADDRESSED":
+            if detection.state == "SUBSTANTIVE":
+                raise IntakeGraphContractError(
+                    "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+                )
             return None
-        candidate = detection.candidate
-        if not isinstance(candidate, Mapping):
-            raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
-        attitude = candidate.get("attitude")
-        confidence = candidate.get("confidence")
-        if (
-            attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDES
-            or isinstance(confidence, bool)
-            or not isinstance(confidence, int | float)
-            or confidence != DIRECT_RESPONDENT_CONFIDENCE
-        ):
-            raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
+        if claim.attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDES:
+            raise IntakeGraphContractError(
+                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+            )
+        if detection.state == "SUBSTANTIVE":
+            candidate = detection.candidate
+            if (
+                not isinstance(candidate, Mapping)
+                or candidate.get("attitude") != claim.attitude
+            ):
+                raise IntakeGraphContractError(
+                    "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+                )
         return _GroundedRespondentAttitude(
-            attitude=cast(str, attitude),
-            position=source.text,
-            confidence=float(confidence),
+            attitude=claim.attitude,
+            position=claim.position_summary,
+            alternative_proposal=claim.alternative_proposal,
+            confidence=DIRECT_RESPONDENT_CONFIDENCE,
             respondent_role=actor_role,
             current_message_id=source.message_id,
         )
@@ -2877,6 +3070,7 @@ def _grounded_respondent_attitude(
     return _GroundedRespondentAttitude(
         attitude=grounded[0],
         position=grounded[1],
+        alternative_proposal=None,
         confidence=grounded[2],
         respondent_role=("MERCHANT" if initiator_role == "USER" else "USER"),
         current_message_id=None,
@@ -2993,6 +3187,7 @@ def _pin_model_direct_respondent_attitude_authority(
     respondent_role: str,
     grounded_attitude: str,
     grounded_position: str,
+    grounded_alternative_proposal: str | None,
     grounded_confidence: float,
     current_message_id: str,
 ) -> IntakeCognitionDraft:
@@ -3019,6 +3214,8 @@ def _pin_model_direct_respondent_attitude_authority(
             "message_id": current_message_id,
         },
     }
+    if grounded_alternative_proposal is not None:
+        canonical["alternative_proposal"] = grounded_alternative_proposal
     if "confidence" in attitude:
         confidence = attitude["confidence"]
         if (

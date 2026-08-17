@@ -43,7 +43,7 @@
 
 - `case_story.one_sentence_summary`：每轮都必须重新生成一段第三人称完整事件摘要，用新摘要整体替换旧摘要。摘要应覆盖表单、旧摘要与本轮新增/更正事实，语义去重、句子完整；不得在完整摘要末尾用分号逐句追加本轮原话，不得只总结当前消息、重复同一事实或复制原始陈述。
 - `missing_information`、`intake_quality`、`admission`、`handoff_notes`：根据当前完整上下文重算。
-- 发起方本轮明确转述另一方态度时更新主观 `respondent_attitude`；被发起方本轮明确回应发起方诉求时才记录其直接诉求态度。`position` 只能写可归因给被发起方的态度、理由或替代处理意见，不得复制整段案情。只有发起方本人明确提出或变更诉求时才更新 `claim_resolution`；被发起方的处理意见只能写入 `respondent_claim`，不得覆盖发起方诉求或发起方原始陈述。本轮若只回答事实问题而未表达对诉求的态度，不得臆造 `respondent_claim`。
+- 发起方本轮明确转述另一方态度时更新主观 `respondent_attitude`；被发起方的 `case_detail.respondent_attitude` 仅是展示补丁，不是直接诉求态度 authority。被发起方的唯一语义 authority 是同轮 `case_matrix_delta.respondent_claim`，编排层只从该强类型字段生成角色、来源、grounding 和持久化 direct claim。只有发起方本人明确提出或变更诉求时才更新 `claim_resolution`；被发起方的处理意见不得覆盖发起方诉求或发起方原始陈述。
 - 争议事实或待核验方向变化时更新 `dispute_core_state`；核验重点只保留 3–4 个去重后的动作式短句。
 
 不要在模型补丁中输出 `claim_resolution.original_statement` 或其来源追踪字段。原始陈述由编排层按参与方消息逐字、按顺序维护，模型不得摘要、复制或拼接它。
@@ -60,7 +60,7 @@
 - `fact_target` 是中性、可核验的事实主题；`position_summary` 明确当前参与方怎么说；`asserted_value` 写当前方给出的具体值，`UNKNOWN/NOT_ADDRESSED` 时可为空。
 - `source_scope`：`PREVIOUS_MATRIX` 只允许用于 `NOT_ADDRESSED` 且完全沿用上一版立场的旧事实。只要本轮输出 `CONFIRM / DENY / PARTIAL / UNKNOWN` 等实质立场，就必须包含当前消息来源：首次回应旧事实使用 `CURRENT_SOURCE`，同时沿用历史立场来源时使用 `PREVIOUS_AND_CURRENT_SOURCE`；不得为实质立场使用纯 `PREVIOUS_MATRIX`。`NEW_*` 必须使用包含当前来源的 scope，禁止使用纯 `PREVIOUS_MATRIX`，也不得虚构历史来源。
 - 只有双方明确存在共同范围时填写 `agreed_statement`，仍有差异时同时填写 `conflict_summary`；不要计算 `party_alignment` 或 `requires_resolution`。
-- 当前方是被发起方且本轮明确回应发起方诉求时输出 `respondent_claim`，记录其直接态度、回应和可选替代方案；仅补充事实时该字段为空，编排层会保留此前已经形成的直接诉求态度；发起方阶段该字段为空。
+- 当前方是被发起方的实质接待轮时必须输出 `respondent_claim`。明确回应诉求时使用 `AGREE / PARTIALLY_AGREE / DISAGREE / ALTERNATIVE_PROPOSED / NEED_MORE_INFO` 并记录回应和可选替代方案；仅补充事实而未表达诉求态度时使用 `NOT_ADDRESSED`，不得省略该字段。`NOT_ADDRESSED` 不会创建新的 direct claim，编排层只保留此前已由冻结矩阵形成的 authority。发起方阶段该字段为空。
 - `summary_source_fact_keys` 只列确实支撑本轮 `case_story.one_sentence_summary` 的事实键，至少一项；不得为了凑数引用无关事实。
 - 不输出 `fact_id`、`content_hash`、`source_refs`、`truth_status`、`party_alignment`、`requires_resolution` 或矩阵版本，这些只由编排层确定性生成。
 
@@ -72,7 +72,7 @@
 - `references`：订单、售后、物流引用；只使用可信固定值，缺失留空。
 - `party_positions`：发起方立场、被转述的对方态度、平台中立观察。
 - `claim_resolution`：发起方诉求。
-- `respondent_attitude`：发起方主观转述或尚未回应；`position` 是“对方说了什么/接受什么/拒绝什么”的精炼提取，不是原始陈述副本。
+- `respondent_attitude`：发起方主观转述或展示状态；被发起方实质轮中它不能创建、覆盖或撤销 direct claim，持久化 authority 仅来自 `case_matrix_delta.respondent_claim`。
 - `dispute_core_state`：诉求冲突、争议事实、后续核验目标。
 - `dispute_focus`、`requested_resolution`：旧展板兼容字段，首轮填写；普通轮仅在语义变化时更新。
 - `risk_assessment`、`missing_information`、`intake_quality`、`admission`、`handoff_notes`。
@@ -81,7 +81,7 @@
 
 - `claim_resolution.requested_resolution` 取 `REFUND / RETURN_REFUND / RESHIP / REPLACE_OR_REPAIR / COMPENSATION / CANCEL_ORDER / VERIFY_OR_EXPLAIN_ONLY / OTHER / UNKNOWN`。
 - `normalized_statement` 只写第三人称诉求，不混入事情经过；经过写入摘要。普通事实补充不得扩充诉求。
-- `respondent_attitude.attitude` 取 `NOT_RESPONDED / AGREE / PARTIALLY_AGREE / DISAGREE / ALTERNATIVE_PROPOSED / NEED_MORE_INFO / PLATFORM_UNKNOWN`。
+- `respondent_attitude.attitude` 取 `NOT_RESPONDED / AGREE / PARTIALLY_AGREE / DISAGREE / ALTERNATIVE_PROPOSED / NEED_MORE_INFO / PLATFORM_UNKNOWN`；该展示字段中的非实质状态、说明文本、source、grounding 或 confidence 不得代替 `case_matrix_delta.respondent_claim`。
 - 发起方未提及另一方态度时写 `NOT_RESPONDED` 和“对方尚未在接待室表达态度”；不得臆造。
 - 发起方明确转述时，`source` 必须是“发起方单方陈述（主观）”；`confidence` 只表示提取明确度，不表示真实性。
 - `dispute_core_state.core_conflict` 必须说明谁提出什么诉求、另一方是否接受、争议卡在哪里。

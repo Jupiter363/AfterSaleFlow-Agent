@@ -554,8 +554,11 @@ def _claims(
         if delta.respondent_claim is not None
         else None
     )
-    if actor_role == respondent_role and respondent_claim is None and direct is None:
-        respondent_claim = _fallback_respondent_claim(case_detail, request)
+    if (
+        respondent_claim is not None
+        and respondent_claim.get("attitude") == "NOT_ADDRESSED"
+    ):
+        respondent_claim = None
     if actor_role == respondent_role and respondent_claim is not None:
         direct_candidate = {
             "respondent_role": respondent_role,
@@ -595,59 +598,6 @@ def _claims(
             _core_conflict(case_detail, summary) if direct is not None else None
         ),
     }
-
-
-def _fallback_respondent_claim(
-    case_detail: dict[str, Any], request: IntakeTurnRequest
-) -> dict[str, Any] | None:
-    attitude = _mapping(case_detail.get("respondent_attitude"))
-    attitude_code = str(attitude.get("attitude") or "").strip().upper()
-    attitude_source = _optional_text(attitude.get("source"))
-    position = _optional_text(attitude.get("position")) or _optional_text(
-        attitude.get("position_summary")
-    )
-    supported = {
-        "AGREE",
-        "PARTIALLY_AGREE",
-        "DISAGREE",
-        "ALTERNATIVE_PROPOSED",
-        "NEED_MORE_INFO",
-    }
-    if (
-        attitude_source != SUBJECTIVE_RESPONDENT_SOURCE
-        and attitude_code in supported
-        and position
-    ):
-        return {
-            "attitude": attitude_code,
-            "position_summary": position,
-            "alternative_proposal": _optional_text(
-                attitude.get("alternative_proposal")
-            ),
-        }
-
-    current = request.current_user_message
-    text = current.text.strip() if current is not None else ""
-    if not text:
-        return None
-    if re.search(r"部分(?:接受|同意|认可)", text):
-        code = "PARTIALLY_AGREE"
-        summary = "被发起方明确表示部分接受发起方诉求。"
-    elif re.search(r"不(?:接受|同意|认可)|拒绝|诉求不合理", text):
-        code = "DISAGREE"
-        summary = "被发起方明确表示不接受发起方诉求。"
-    elif re.search(r"(?:接受|同意|认可)(?:发起方)?(?:的)?(?:处理)?诉求", text):
-        code = "AGREE"
-        summary = "被发起方明确表示接受发起方诉求。"
-    else:
-        return None
-    return {
-        "attitude": code,
-        "position_summary": summary,
-        "alternative_proposal": None,
-    }
-
-
 def _reported_position(
     request: IntakeTurnRequest,
     case_detail: dict[str, Any],

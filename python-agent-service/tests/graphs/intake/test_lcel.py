@@ -30,6 +30,11 @@ from app.agents.dispute_intake_officer.schemas import (
     IntakeCaseDetailLlmOutput,
     IntakeFreshFormOpeningLlmOutput,
     IntakeRespondentOpeningLlmOutput,
+    intake_case_detail_output_type,
+    materialize_intake_case_detail_output,
+)
+from app.agents.dispute_intake_officer.workflow import (
+    project_intake_case_detail_output,
 )
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     CaseDetailDossierSkill,
@@ -7080,7 +7085,6 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     bindings,
     version_pins,
 ) -> None:
-    del bindings, version_pins
     case_id = "CASE_MODEL_RESPONDENT_AUTHORITY"
     message_id = "MESSAGE_USER_MODEL_RESPONDENT_CURRENT"
     exact_user_text = (
@@ -7313,15 +7317,66 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         )
 
     current_request = request_for(exact_user_text)
+    respondent_output_type = intake_case_detail_output_type(current_request)
+    assert respondent_output_type.__name__ == (
+        "IntakeRespondentSubstantiveLlmOutput"
+    )
+    respondent_wire_schema = respondent_output_type.model_json_schema()
+    matrix_wire_schema = respondent_wire_schema["properties"]["case_matrix_delta"]
+    matrix_ref = matrix_wire_schema.get("$ref")
+    if matrix_ref is None:
+        matrix_ref = matrix_wire_schema["allOf"][0]["$ref"]
+    matrix_definition = respondent_wire_schema["$defs"][
+        matrix_ref.rsplit("/", 1)[-1]
+    ]
+    assert "respondent_claim" in matrix_definition["required"]
+    canonical_provider_detail = copy.deepcopy(llm_case_detail)
+    canonical_provider_detail["respondent_attitude"] = {
+        "respondent_role": "USER",
+        "attitude": "NOT_RESPONDED",
+        "alternative_proposal": {"model": "noncanonical garbage"},
+        "source": "MODEL_NONCANONICAL_SOURCE",
+        "grounding": {"message_id": "MESSAGE_MODEL_NONCANONICAL"},
+        "status": "MODEL_PRESENTATIONAL_STATUS",
+    }
+    provider_payload = {
+        "conversation_action": "INVITE_OPTIONAL_REMARK",
+        "room_utterance": (
+            "当前信息已达到提交条件。您可以直接提交确认；"
+            "如有备注可选择补充，没有备注也可以直接确认提交。"
+        ),
+        "case_detail": canonical_provider_detail,
+        "case_matrix_delta": delta_for().model_dump(mode="json"),
+        "admission_recommendation": "ACCEPTED",
+        "confidence": 0.86,
+    }
+    provider_payload_before = copy.deepcopy(provider_payload)
+    provider_output = respondent_output_type.model_validate(provider_payload)
+    materialized_provider_output = materialize_intake_case_detail_output(
+        current_request,
+        provider_output,
+    )
+    assert provider_payload == provider_payload_before
+    projected_provider_output = project_intake_case_detail_output(
+        request=current_request,
+        output=materialized_provider_output,
+        source_text=exact_user_text,
+    )
+    projected_provider_replay = project_intake_case_detail_output(
+        request=current_request,
+        output=materialized_provider_output,
+        source_text=exact_user_text,
+    )
+    assert provider_payload == provider_payload_before
     first = render(
         current_request,
-        uat_model_output.case_matrix_delta,
-        detail=uat_model_output.case_detail,
+        materialized_provider_output.case_matrix_delta,
+        detail=materialized_provider_output.case_detail,
     )
     replay = render(
         current_request,
-        uat_model_output.case_matrix_delta,
-        detail=uat_model_output.case_detail,
+        materialized_provider_output.case_matrix_delta,
+        detail=materialized_provider_output.case_detail,
     )
     real_dual_field_detail = copy.deepcopy(llm_case_detail)
     real_dual_field_detail["respondent_attitude"].update(
@@ -7399,6 +7454,58 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     }
     assert replay_terminal == terminal
     assert canonical_sha256(replay_terminal) == canonical_sha256(terminal)
+    assert projected_provider_replay == projected_provider_output
+    assert canonical_sha256(projected_provider_replay) == canonical_sha256(
+        projected_provider_output
+    )
+    projected_matrix = projected_provider_output["scroll_snapshot"][
+        "case_fact_matrix"
+    ]
+    assert projected_matrix["claims"]["respondent_direct"] == direct_claim
+    assert "MODEL_NONCANONICAL" not in json.dumps(
+        projected_provider_output,
+        ensure_ascii=False,
+    )
+
+    lcel_state = _state_with_matrix_roles(
+        bindings,
+        version_pins,
+        actor="USER",
+        initiator="MERCHANT",
+    )
+    lcel_state["messages"] = {
+        message_id: {
+            "message_id": message_id,
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": exact_user_text,
+            "sequence": 2,
+            "source_hash": "7" * 64,
+        }
+    }
+    lcel_draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            conversation_action="INVITE_OPTIONAL_REMARK",
+            room_utterance=provider_payload["room_utterance"],
+            dossier_patch={"respondent_attitude": expected_attitude},
+            matrix_patch=materialized_provider_output.case_matrix_delta.model_dump(
+                mode="json"
+            ),
+        )
+    )
+    lcel_normalized = _normalize_model_respondent_attitude(
+        lcel_state,
+        lcel_draft,
+    )
+    lcel_replay = _normalize_model_respondent_attitude(
+        lcel_state,
+        lcel_draft,
+    )
+    assert lcel_normalized.dossier_patch.respondent_attitude == expected_attitude
+    assert lcel_replay == lcel_normalized
+    assert canonical_sha256(lcel_replay.model_dump(mode="json")) == canonical_sha256(
+        lcel_normalized.model_dump(mode="json")
+    )
     both_model_detail = both_model_fields.dossier_patch["case_detail"]
     assert both_model_detail["respondent_attitude"] == expected_attitude
     assert both_model_detail["case_fact_matrix"]["claims"][
@@ -7500,15 +7607,53 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
             "status": "NOT_RESPONDED",
         }
     )
-    dossier_fallback_with_metadata = render(
-        current_request,
-        delta_for(include_claim=False),
-        detail=provenance_candidate_detail,
+    with pytest.raises(AgentOutputSchemaError) as dossier_only_authority_error:
+        render(
+            current_request,
+            delta_for(include_claim=False),
+            detail=provenance_candidate_detail,
+        )
+    assert dossier_only_authority_error.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
     )
-    metadata_detail = dossier_fallback_with_metadata.dossier_patch["case_detail"]
-    assert metadata_detail["respondent_attitude"] == expected_attitude
-    assert "MESSAGE_MODEL_INVENTED_AUTHORITY" not in json.dumps(
-        metadata_detail,
+
+    dossier_only_payload = uat_model_output.model_dump(
+        mode="json",
+        exclude_none=True,
+    )
+    assert "respondent_claim" not in dossier_only_payload["case_matrix_delta"]
+    with pytest.raises(ValueError):
+        respondent_output_type.model_validate(dossier_only_payload)
+
+    fact_only_detail = copy.deepcopy(llm_case_detail)
+    fact_only_detail["respondent_attitude"] = {
+        "status": "NOT_RESPONDED",
+        "description": "展示字段不能创建 direct claim。",
+        "source": "MODEL_PRESENTATIONAL_SOURCE",
+    }
+    fact_only_payload = copy.deepcopy(provider_payload)
+    fact_only_payload.update(
+        {
+            "conversation_action": "ASK_SUBSTANTIVE",
+            "room_utterance": "已记录本轮事实，请继续说明对商家诉求的态度。",
+            "case_detail": fact_only_detail,
+            "case_matrix_delta": delta_for(
+                attitude="NOT_ADDRESSED"
+            ).model_dump(mode="json"),
+            "admission_recommendation": "NEED_MORE_INFO",
+        }
+    )
+    fact_only_output = respondent_output_type.model_validate(fact_only_payload)
+    fact_only_projected = project_intake_case_detail_output(
+        request=current_request,
+        output=fact_only_output,
+        source_text=exact_user_text,
+    )
+    assert fact_only_projected["scroll_snapshot"]["case_fact_matrix"][
+        "claims"
+    ]["respondent_direct"] is None
+    assert "MODEL_PRESENTATIONAL_SOURCE" not in json.dumps(
+        fact_only_projected,
         ensure_ascii=False,
     )
 
@@ -7568,6 +7713,21 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
     )
 
+    foreign_matrix_detail = copy.deepcopy(canonical_provider_detail)
+    foreign_matrix_detail["respondent_attitude"]["respondent_role"] = "MERCHANT"
+    foreign_matrix_output = respondent_output_type.model_validate(
+        {**provider_payload, "case_detail": foreign_matrix_detail}
+    )
+    with pytest.raises(AgentOutputSchemaError) as foreign_matrix_role:
+        project_intake_case_detail_output(
+            request=current_request,
+            output=foreign_matrix_output,
+            source_text=exact_user_text,
+        )
+    assert foreign_matrix_role.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+
     foreign_model_detail = copy.deepcopy(llm_case_detail)
     foreign_model_detail["respondent_attitude"]["respondent_role"] = "MERCHANT"
     with pytest.raises(AgentOutputSchemaError) as foreign_model_role:
@@ -7596,6 +7756,35 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     assert conflict_error.value.safe_code == (
         "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
     )
+
+    contradictory_output = respondent_output_type.model_validate(provider_payload)
+    with pytest.raises(AgentOutputSchemaError) as contradictory_output_error:
+        project_intake_case_detail_output(
+            request=request_for(contradictory),
+            output=contradictory_output,
+            source_text=contradictory,
+        )
+    assert contradictory_output_error.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+
+    missing_current_source_output = respondent_output_type.model_validate(
+        {
+            **provider_payload,
+            "case_matrix_delta": delta_for(
+                current_source=False
+            ).model_dump(mode="json"),
+        }
+    )
+    with pytest.raises(AgentOutputSchemaError) as missing_current_source_error:
+        project_intake_case_detail_output(
+            request=current_request,
+            output=missing_current_source_output,
+            source_text=exact_user_text,
+        )
+    assert missing_current_source_error.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
     agreement_detail = copy.deepcopy(llm_case_detail)
     agreement_detail["respondent_attitude"]["attitude"] = "AGREE"
     agreement_detail["respondent_attitude"]["position"] = detector_agreement
@@ -7610,6 +7799,45 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     ] == (
         "AGREE"
     )
+
+    adjacent_context = _agent_context(
+        role="MERCHANT",
+        case_id=case_id,
+        invocation_id="ATTEMPT_MODEL_RESPONDENT_INITIATOR_2",
+    )
+    adjacent_request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_MERCHANT_ADJACENT_CURRENT",
+                "sequence_no": 2,
+                "role": "MERCHANT",
+                "source": "ROOM_MESSAGE",
+                "text": "商家补充说明订单履约记录仍待平台核验。",
+            },
+            "previous_case_detail": copy.deepcopy(previous_detail),
+            "agent_context": adjacent_context,
+        }
+    )
+    assert intake_case_detail_output_type(adjacent_request) is IntakeCaseDetailLlmOutput
+    adjacent_detail = copy.deepcopy(llm_case_detail)
+    adjacent_detail.pop("respondent_attitude", None)
+    adjacent_output = IntakeCaseDetailLlmOutput.model_validate(
+        {
+            **provider_payload,
+            "case_detail": adjacent_detail,
+        }
+    )
+    adjacent_projected = project_intake_case_detail_output(
+        request=adjacent_request,
+        output=adjacent_output,
+        source_text=adjacent_request.current_user_message.text,
+    )
+    assert adjacent_projected["scroll_snapshot"]["case_fact_matrix"]["claims"][
+        "respondent_direct"
+    ] is None
 
     with pytest.raises(ValueError, match="current_user_message.role"):
         request_for(exact_user_text, role="MERCHANT")
