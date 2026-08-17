@@ -570,4 +570,37 @@ describe("agentStreamStore", () => {
     expect(run.receivedContent).toBe("original output");
     expect(run.receivedContent).not.toContain("replacement output");
   });
+
+  it("keeps the stable server diagnostic code in the visible error status", async () => {
+    const runId = "AGENT_RUN_EVIDENCE_CONTRACT_ERROR";
+    const attemptId = "ATTEMPT_EVIDENCE_CONTRACT_ERROR";
+    const diagnosticCode = "EVIDENCE_MODEL_INVOCATION_CONTRACT_INVALID";
+    const onError = vi.fn();
+    const fetchImpl = vi.fn().mockResolvedValue(streamResponse([
+      `id: v2:${attemptId}:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v2","runId":"${runId}","attemptId":"${attemptId}","sequence":0,"cursor":"v2:${attemptId}:0","audience":"USER","payload":{"node":"evidence_turn"}}\n\n`,
+      `id: v2:${attemptId}:1\nevent: error\ndata: {"protocol":"agent-stream.v2","runId":"${runId}","attemptId":"${attemptId}","sequence":1,"cursor":"v2:${attemptId}:1","audience":"USER","payload":{"errorCode":"${diagnosticCode}","retryable":false}}\n\n`,
+    ]));
+
+    await expect(consumeAgentRun({
+      actor,
+      caseId: "CASE_EVIDENCE_CONTRACT_ERROR",
+      roomType: "EVIDENCE",
+      descriptor: {
+        runId,
+        streamUrl: `/api/agent-runs/${runId}/events`,
+      },
+      fetchImpl,
+      onError,
+    })).rejects.toMatchObject({
+      code: diagnosticCode,
+      retryable: false,
+      message: expect.stringContaining(`诊断码：${diagnosticCode}`),
+    });
+
+    const run = getAgentStreamRun(runId);
+    expect(run.status).toBe("ERROR");
+    expect(run.error.code).toBe(diagnosticCode);
+    expect(run.error.message).toContain(`诊断码：${diagnosticCode}`);
+    expect(onError).toHaveBeenCalledWith(run.error, run);
+  });
 });

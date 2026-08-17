@@ -1081,6 +1081,46 @@ async def test_async_evidence_workflow_does_not_inherit_outer_command_checkpoint
 
 
 @pytest.mark.asyncio
+async def test_evidence_model_runner_signature_mismatch_has_stable_diagnostic_code() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.schemas import EvidenceTurnRequest
+
+    class IncompatibleRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke_structured(self, *, node_name: str):
+            self.calls += 1
+            raise AssertionError(f"incompatible runner must not execute: {node_name}")
+
+    incompatible = IncompatibleRunner()
+    request = EvidenceTurnRequest.model_validate(_java_evidence_turn_command_payload())
+    with pytest.raises(Exception) as captured:
+        await EvidenceTurnWorkflow(model_runner=incompatible).arun(request)
+
+    assert type(captured.value).__name__ == "EvidenceModelInvocationContractError"
+    assert getattr(captured.value, "code", None) == (
+        "EVIDENCE_MODEL_INVOCATION_CONTRACT_INVALID"
+    )
+    assert incompatible.calls == 0
+
+    class InternalTypeErrorRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke_structured(self, **_kwargs):
+            self.calls += 1
+            raise TypeError("runner-internal-type-failure")
+
+    internal_failure = InternalTypeErrorRunner()
+    with pytest.raises(TypeError, match="runner-internal-type-failure") as internal:
+        await EvidenceTurnWorkflow(model_runner=internal_failure).arun(request)
+
+    assert getattr(internal.value, "code", None) is None
+    assert internal_failure.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_submission_public_reply_is_derived_from_accepted_assessment_authority() -> None:
     from app.agents.evidence_clerk.public_reply import (
         EVIDENCE_CANONICAL_OPENING,
@@ -1418,9 +1458,14 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         runner.last_invocation["output_type"]
         is EvidenceParsedTextSubmissionLlmOutput
     )
-    private_catalog = runner.last_invocation[
-        "submission_observation_authority_catalog"
-    ]
+    assert "submission_observation_authority_catalog" not in runner.last_invocation
+    context_sections = {
+        section.name: section
+        for section in runner.last_invocation["context_pack"].prompt_sections()
+    }
+    private_catalog = json.loads(
+        context_sections["submission_observation_authority_catalog"].content
+    )
     assert private_catalog["schema_version"] == (
         "public_evidence_observation_authority_catalog.v1"
     )

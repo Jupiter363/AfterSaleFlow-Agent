@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import operator
 from typing import Annotated, Any
@@ -13,15 +14,16 @@ from typing_extensions import NotRequired, TypedDict
 from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
 from app.agents.evidence_clerk.public_reply import (
     EvidencePublicObservationAuthorityError,
+    build_submission_observation_catalog,
     compose_evidence_opening_public_reply,
     compose_evidence_submission_public_reply,
-    build_submission_observation_catalog,
-    submission_observation_catalog_prompt_payload,
     guard_evidence_public_reply,
     reconcile_accepted_public_observations,
     require_relevant_parsed_observation_coverage,
+    submission_observation_catalog_prompt_payload,
     validate_submission_public_observations,
 )
+from app.graph_runtime.errors import EvidenceModelInvocationContractError
 from app.harness.context_pack import build_context_pack
 from app.harness.evidence_context_assembler import (
     AssembledEvidenceContext,
@@ -238,6 +240,9 @@ def _reason_with_llm_node(
         )
         if model_runner is None:
             raise AgentServiceUnavailable("evidence clerk model runner is unavailable")
+        invoke = getattr(model_runner, "invoke_structured", None)
+        if not callable(invoke):
+            raise EvidenceModelInvocationContractError()
         try:
             # asset_loader 未配置时仍可基于 OCR/元数据做文本核验，但 manifest 明确没有任何像素输入。
             loaded_assets = (
@@ -254,9 +259,8 @@ def _reason_with_llm_node(
                 loaded_assets,
                 asset_manifest,
             )
-            generation = model_runner.invoke_structured(
-                **invocation,
-            )
+            _require_model_invocation_contract(invoke, invocation)
+            generation = invoke(**invocation)
             return {
                 "llm_output": generation.value,
                 "asset_manifest": asset_manifest,
@@ -289,11 +293,11 @@ def _async_reason_with_llm_node(
         agent_context = AgentInvocationContext.model_validate(
             assembled.agent_context.model_dump(mode="python")
         )
+        if model_runner is None:
+            raise AgentServiceUnavailable("evidence clerk model runner is unavailable")
         async_invoke = getattr(model_runner, "ainvoke_structured", None)
         if not callable(async_invoke):
-            raise AgentServiceUnavailable(
-                "evidence clerk native async structured model path is unavailable"
-            )
+            raise EvidenceModelInvocationContractError()
         try:
             loaded_assets = (
                 await asyncio.to_thread(asset_loader.load, assembled.raw_envelope)
@@ -309,6 +313,7 @@ def _async_reason_with_llm_node(
                 loaded_assets,
                 asset_manifest,
             )
+            _require_model_invocation_contract(async_invoke, invocation)
             generation = await async_invoke(**invocation)
             return {
                 "llm_output": generation.value,
@@ -366,13 +371,19 @@ def _evidence_model_invocation(
             actor_id=assembled.raw_envelope.actor_snapshot.actor_id,
             actor_role=assembled.raw_envelope.actor_snapshot.actor_role,
         )
-        context_sources["submission_observation_authority_catalog"] = (
-            submission_observation_catalog_prompt_payload(authority_catalog)
-        )
+        if authority_catalog:
+            context_sources["submission_observation_authority_catalog"] = (
+                submission_observation_catalog_prompt_payload(authority_catalog)
+            )
     context_pack = build_context_pack(
         EVIDENCE_TURN_MODEL_NODE_NAME,
         context_sources,
         actor_role=working_set.actor_role,
+        required_section_names=(
+            frozenset({"submission_observation_authority_catalog"})
+            if authority_catalog
+            else frozenset()
+        ),
     )
     output_type = (
         EvidenceParsedTextSubmissionLlmOutput
@@ -395,11 +406,19 @@ def _evidence_model_invocation(
     }
     if loaded_assets is not None:
         invocation["evidence_assets"] = loaded_assets
-    if is_submission:
-        invocation["submission_observation_authority_catalog"] = (
-            submission_observation_catalog_prompt_payload(authority_catalog)
-        )
     return invocation
+
+
+def _require_model_invocation_contract(
+    invoke: Any,
+    invocation: dict[str, Any],
+) -> None:
+    """Fail with one stable code before an incompatible runner can execute."""
+
+    try:
+        inspect.signature(invoke).bind(**invocation)
+    except (TypeError, ValueError) as failure:
+        raise EvidenceModelInvocationContractError() from failure
 
 
 # 所属模块：证据室 Agent > 单轮 LangGraph > 输出确定性验收节点。

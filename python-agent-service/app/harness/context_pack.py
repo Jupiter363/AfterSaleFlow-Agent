@@ -48,6 +48,7 @@ def build_context_pack(
     sources: Mapping[str, Any],
     *,
     actor_role: str | None = None,
+    required_section_names: frozenset[str] = frozenset(),
 ) -> ContextPack:
     """根据节点的 context contract，从多个 sources 中构造 ContextPack。
 
@@ -56,22 +57,34 @@ def build_context_pack(
     """
 
     contract = context_contract(node_name)
+    declared_sections = {spec.name: spec for spec in contract.sections}
+    unknown_required = required_section_names.difference(declared_sections)
+    if unknown_required:
+        raise ValueError(
+            "required context sections are not declared by the node contract: "
+            + ",".join(sorted(unknown_required))
+        )
+    if any(
+        not declared_sections[name].prompt_included for name in required_section_names
+    ):
+        raise ValueError("display-only context sections cannot be required for the prompt")
     sections: list[PromptSection] = []
     display_only: list[str] = []
     # 只遍历合同，不遍历 sources：sources 中多出的键因此天然被忽略，这是 allowlist（白名单）设计。
     for spec in contract.sections:
+        effective_required = spec.required or spec.name in required_section_names
         # optional section 缺失时直接跳过；required section 缺失则立刻报错。
-        if spec.name not in sources and not spec.required:
+        if spec.name not in sources and not effective_required:
             continue
         raw_value = sources.get(spec.name)
-        if spec.required and (spec.name not in sources or raw_value in (None, "")):
+        if effective_required and (spec.name not in sources or raw_value in (None, "")):
             raise ValueError(f"required context section {spec.name} is missing")
         content = _section_content(spec.name, raw_value, actor_role=actor_role)
         section = PromptSection(
             name=spec.name,
             content=content,
             priority=spec.priority,
-            required=spec.required,
+            required=effective_required,
             trust_level=spec.trust_level,
             prompt_included=spec.prompt_included,
         )
@@ -126,6 +139,7 @@ def _normalize_section_value(
         "current_user_message",
         "previous_case_detail",
         "party_visible_evidence_catalog",
+        "submission_observation_authority_catalog",
         "private_conversation_window",
         "evidence_matrix_snapshot",
         "fact_targets",

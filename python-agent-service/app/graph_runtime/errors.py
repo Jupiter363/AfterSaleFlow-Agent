@@ -23,6 +23,12 @@ class GraphContractError(GraphRuntimeError, ValueError):
     code = "GRAPH_CONTRACT_REJECTED"
 
 
+class EvidenceModelInvocationContractError(GraphRuntimeError):
+    """The formal Evidence workflow and its model runner cannot bind one call."""
+
+    code = "EVIDENCE_MODEL_INVOCATION_CONTRACT_INVALID"
+
+
 STABLE_INTAKE_GRAPH_CONTRACT_ERROR_CODES = frozenset(
     {
         "INTAKE_ACTION_GATE_ACTION_MISMATCH",

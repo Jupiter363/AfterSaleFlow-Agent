@@ -54,7 +54,7 @@ _CONTRACTS: dict[str, AgentContextContract] = {
     ),
     "evidence_turn": AgentContextContract(
         node_name="evidence_turn",
-        configuration_profile_key="EVIDENCE_CLERK_CONTEXT_PACK_V2",
+        configuration_profile_key="EVIDENCE_CLERK_CONTEXT_PACK_V3",
         sections=(
             ContextSectionSpec("current_turn", 100, True, "harness_assembled"),
             ContextSectionSpec("case_identity", 98, True, "harness_assembled"),
@@ -75,6 +75,12 @@ _CONTRACTS: dict[str, AgentContextContract] = {
                 95,
                 True,
                 "intake_dossier_allowlist",
+            ),
+            ContextSectionSpec(
+                "submission_observation_authority_catalog",
+                94,
+                False,
+                "harness_submission_authority",
             ),
             ContextSectionSpec(
                 "evidence_matrix_snapshot",

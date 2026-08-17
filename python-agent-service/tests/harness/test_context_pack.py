@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from pydantic import BaseModel
@@ -36,7 +37,16 @@ class RecordingContextPackLlm:
     # 具体功能：`generate` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`self.calls.append`、`StructuredGeneration`、`output_type`。
     # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `self.calls.append`、`StructuredGeneration`、`output_type`。
     # 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
-    def generate(self, *, node_name, system_prompt, user_prompt, output_type):
+    def generate(
+        self,
+        *,
+        node_name,
+        system_prompt,
+        user_prompt,
+        output_type,
+        user_content_parts=None,
+        governed_request=None,
+    ):
         from app.llm import StructuredGeneration
 
         self.calls.append(
@@ -45,6 +55,8 @@ class RecordingContextPackLlm:
                 "system_prompt": system_prompt,
                 "user_prompt": user_prompt,
                 "output_type": output_type,
+                "user_content_parts": user_content_parts,
+                "governed_request": governed_request,
             }
         )
         return StructuredGeneration(
@@ -52,6 +64,17 @@ class RecordingContextPackLlm:
             model="fake-model",
             latency_ms=1,
             token_usage={"input": 10, "output": 1, "total": 11},
+        )
+
+    async def agenerate(self, **kwargs):
+        return self.generate(**kwargs)
+
+    async def agenerate_stream(self, **kwargs):
+        from app.llm import StructuredStreamCompleted
+
+        yield StructuredStreamCompleted(
+            kind="completed",
+            generation=await self.agenerate(**kwargs),
         )
 
 
@@ -80,9 +103,14 @@ def test_prompt_contract_declares_standard_sections_and_configuration_center_slo
     assert specs["multimodal_observation"].trust_level == (
         "harness_asset_loader"
     )
+    assert specs["submission_observation_authority_catalog"].priority == 94
+    assert specs["submission_observation_authority_catalog"].trust_level == (
+        "harness_submission_authority"
+    )
+    assert specs["submission_observation_authority_catalog"].required is False
     assert specs["long_term_memory_preview"].prompt_included is False
     assert contract.configuration_source == "code"
-    assert contract.configuration_profile_key == "EVIDENCE_CLERK_CONTEXT_PACK_V2"
+    assert contract.configuration_profile_key == "EVIDENCE_CLERK_CONTEXT_PACK_V3"
 
 
 # 所属模块：Agent Harness > test_context_pack；函数角色：回归测试用例。
@@ -256,18 +284,43 @@ def test_model_runner_accepts_context_pack_and_excludes_display_only_sections() 
 
     llm = RecordingContextPackLlm()
     runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
+    authority_catalog = {
+        "schema_version": "public_evidence_observation_authority_catalog.v1",
+        "catalog_hash": "a" * 64,
+        "coordinates": [
+            {
+                "coordinate_id": "ECOORD_CONTEXT_PACK_PROBE",
+                "evidence_id": "EVIDENCE_CONTEXT_PACK_PROBE",
+                "parsed_content_sha256": "b" * 64,
+                "source_quote": "SIGNED_NOT_RECEIVED 原始坐标不得被本地化",
+                "source_start_byte": 0,
+                "source_end_byte": 52,
+                "quote_sha256": "c" * 64,
+                "attachment_order": 0,
+                "fact_ids": ["FACT_DELIVERY_STATUS"],
+            }
+        ],
+    }
     pack = build_context_pack(
         "evidence_turn",
             {
                 "current_turn": {"role": "USER", "text": "我上传了签收截图。"},
                 "case_identity": {"case_id": "CASE_CONTEXT_3"},
                 "fact_targets": FACT_TARGETS,
-                "canonical_case_dossier": {
+            "canonical_case_dossier": {
                 "dispute_focus": {"core_issue": "SIGNED_NOT_RECEIVED"},
             },
+            "submission_observation_authority_catalog": authority_catalog,
             "long_term_memory_preview": "这一段只给前端或配置中心预览，不进入 prompt。",
         },
+        required_section_names=frozenset(
+            {"submission_observation_authority_catalog"}
+        ),
     )
+
+    assert {
+        section.name: section for section in pack.prompt_sections()
+    }["submission_observation_authority_catalog"].required is True
 
     runner.invoke_structured(
         node_name="evidence_turn",
@@ -275,10 +328,24 @@ def test_model_runner_accepts_context_pack_and_excludes_display_only_sections() 
         output_type=ContextPackRunnerOutput,
         context_pack=pack,
     )
+    async_result = asyncio.run(
+        runner.ainvoke_structured(
+            node_name="evidence_turn",
+            case_data={"case_id": "CASE_context_pack"},
+            output_type=ContextPackRunnerOutput,
+            context_pack=pack,
+        )
+    )
 
     user_prompt = str(llm.calls[0]["user_prompt"])
+    async_user_prompt = str(llm.calls[1]["user_prompt"])
     assert "harness_context" in user_prompt
     assert "current_turn" in user_prompt
     assert "canonical_case_dossier" in user_prompt
     assert "物流显示签收但用户称未收到包裹" in user_prompt
+    assert "submission_observation_authority_catalog" in user_prompt
+    assert "ECOORD_CONTEXT_PACK_PROBE" in user_prompt
+    assert "SIGNED_NOT_RECEIVED 原始坐标不得被本地化" in user_prompt
+    assert async_result.value.answer == "ok"
+    assert async_user_prompt == user_prompt
     assert "这一段只给前端或配置中心预览" not in user_prompt

@@ -225,8 +225,16 @@ function wait(ms, signal) {
 
 // 业务位置：【前端状态仓库】streamFailure：围绕 Agent 流事件 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
 function streamFailure(eventError) {
-  const error = new Error(eventError?.message || "数字人生成失败，请稍后重试。");
-  error.code = eventError?.code || "AGENT_STREAM_FAILED";
+  const candidateCode = String(eventError?.code || "").trim();
+  const diagnosticCode = /^[A-Z][A-Z0-9_]{2,95}$/.test(candidateCode)
+    ? candidateCode
+    : "AGENT_STREAM_FAILED";
+  const sourceMessage = eventError?.message || "数字人生成失败，请稍后重试。";
+  const message = sourceMessage.includes(diagnosticCode)
+    ? sourceMessage
+    : `${sourceMessage}\n诊断码：${diagnosticCode}`;
+  const error = new Error(message);
+  error.code = diagnosticCode;
   error.retryable = Boolean(eventError?.retryable);
   return error;
 }
