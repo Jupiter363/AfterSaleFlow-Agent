@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 import hashlib
 import re
 
@@ -17,6 +18,7 @@ from app.schemas import (
     EvidenceItemAssessment,
     PublicEvidenceEpistemicStatus,
     PublicEvidenceObservationProposalV1,
+    PublicEvidenceObservationCoordinateProposalV1,
     PublicEvidenceObservationV1,
 )
 from app.streaming import STREAM_MAX_VISIBLE_OUTPUT_CHARS
@@ -95,6 +97,36 @@ _MAX_SUBMISSION_SOURCE_AUTHORITY_CHARS = 1200
 _MAX_TYPED_PUBLIC_SOURCE_QUOTE_CHARS = 200
 
 
+@dataclass(frozen=True)
+class PublicEvidenceObservationAuthorityCoordinate:
+    """Private request-bound coordinate used to resolve provider proposals."""
+
+    coordinate_id: str
+    evidence_id: str
+    parsed_content_sha256: str
+    source_quote: str
+    source_start_byte: int
+    source_end_byte: int
+    quote_sha256: str
+    attachment_order: int
+    fact_ids: tuple[str, ...]
+
+    def prompt_payload(self) -> dict[str, object]:
+        """Expose the private mapping only inside the governed model prompt."""
+
+        return {
+            "coordinate_id": self.coordinate_id,
+            "evidence_id": self.evidence_id,
+            "parsed_content_sha256": self.parsed_content_sha256,
+            "source_quote": self.source_quote,
+            "source_start_byte": self.source_start_byte,
+            "source_end_byte": self.source_end_byte,
+            "quote_sha256": self.quote_sha256,
+            "attachment_order": self.attachment_order,
+            "fact_ids": list(self.fact_ids),
+        }
+
+
 class EvidencePublicOutputPolicyError(RuntimeError):
     """The Evidence public stream violated its explicit output policy."""
 
@@ -115,6 +147,165 @@ class EvidencePublicObservationAuthorityError(
     """A typed public observation lacks exact current parsed authority."""
 
     code = "EVIDENCE_PUBLIC_OBSERVATION_AUTHORITY_INVALID"
+
+
+def build_submission_observation_catalog(
+    *,
+    evidence_content_authorities: Iterable[EvidenceContentAuthorityV1],
+    visible_evidence: Iterable[object],
+    attachment_refs: Iterable[str],
+    allowed_fact_targets: Iterable[Mapping[str, object]],
+    case_id: str,
+    actor_id: str,
+    actor_role: str,
+) -> tuple[PublicEvidenceObservationAuthorityCoordinate, ...]:
+    """Build deterministic opaque coordinates before the provider is invoked.
+
+    The provider receives only these coordinate identifiers.  All source quotes,
+    byte spans, hashes, and evidence/fact bindings remain server-owned and are
+    resolved again by the incremental prefix validator.
+    """
+
+    fact_targets = tuple(allowed_fact_targets)
+    authority_by_id, _visible, attachment_positions, _allowed_fact_ids = (
+        _public_observation_context(
+            evidence_content_authorities=evidence_content_authorities,
+            visible_evidence=visible_evidence,
+            attachment_refs=attachment_refs,
+            allowed_fact_targets=fact_targets,
+            case_id=case_id,
+            actor_id=actor_id,
+            actor_role=actor_role,
+        )
+    )
+    targets = {
+        str(target.get("fact_id") or ""): target
+        for target in fact_targets
+        if isinstance(target, Mapping) and str(target.get("fact_id") or "")
+    }
+    coordinates: list[PublicEvidenceObservationAuthorityCoordinate] = []
+    for evidence_id, authority in authority_by_id.items():
+        if authority.content_type not in {"text/plain", "text/markdown"}:
+            continue
+        fact_ids = recover_parsed_text_fact_coordinates(
+            authority.parsed_text,
+            tuple(targets.values()),
+        )
+        for fact_id in fact_ids:
+            fact_target = targets.get(fact_id, {})
+            quote = _derive_safe_coordinate_quote(
+                authority.parsed_text,
+                fact_target,
+            )
+            if quote is None:
+                raise EvidencePublicObservationAuthorityError(
+                    "Evidence public observation authority has no safe unique coordinate"
+                )
+            start_character = authority.parsed_text.index(quote)
+            start_byte = len(
+                authority.parsed_text[:start_character].encode("utf-8")
+            )
+            end_byte = start_byte + len(quote.encode("utf-8"))
+            quote_sha256 = hashlib.sha256(quote.encode("utf-8")).hexdigest()
+            coordinate_id = "ECOORD_" + canonical_sha256(
+                {
+                    "case_id": case_id,
+                    "evidence_id": evidence_id,
+                    "parsed_content_sha256": authority.parsed_content_sha256,
+                    "fact_id": fact_id,
+                    "fact_target": fact_target,
+                    "source_start_byte": start_byte,
+                    "source_end_byte": end_byte,
+                    "quote_sha256": quote_sha256,
+                    "attachment_order": attachment_positions[evidence_id],
+                }
+            )[:28].upper()
+            coordinates.append(
+                PublicEvidenceObservationAuthorityCoordinate(
+                    coordinate_id=coordinate_id,
+                    evidence_id=evidence_id,
+                    parsed_content_sha256=authority.parsed_content_sha256,
+                    source_quote=quote,
+                    source_start_byte=start_byte,
+                    source_end_byte=end_byte,
+                    quote_sha256=quote_sha256,
+                    attachment_order=attachment_positions[evidence_id],
+                    fact_ids=(fact_id,),
+                )
+            )
+    return tuple(
+        sorted(
+            coordinates,
+            key=lambda item: (
+                item.attachment_order,
+                item.source_start_byte,
+                item.source_end_byte,
+                item.coordinate_id,
+            ),
+        )
+    )
+
+
+def submission_observation_catalog_prompt_payload(
+    coordinates: Iterable[PublicEvidenceObservationAuthorityCoordinate],
+) -> dict[str, object]:
+    """Return stable private prompt data without exposing it in public output."""
+
+    entries = tuple(item.prompt_payload() for item in coordinates)
+    return {
+        "schema_version": "public_evidence_observation_authority_catalog.v1",
+        "catalog_hash": canonical_sha256(entries),
+        "coordinates": list(entries),
+    }
+
+
+def _derive_safe_coordinate_quote(
+    parsed_text: str,
+    fact_target: Mapping[str, object],
+) -> str | None:
+    target_text = " ".join(
+        str(fact_target.get(key) or "")
+        for key in ("fact", "category", "match_text")
+        if str(fact_target.get(key) or "")
+    )
+    target_grams = _coordinate_bigrams(target_text)
+    candidates: list[tuple[float, int, int, str]] = []
+    for raw_line in re.split(r"\r?\n+", parsed_text):
+        line = re.sub(r"^(?:#{1,6}\s+|[-*+]\s+|\d{1,3}[.)、]\s+)", "", raw_line)
+        for raw_segment in re.split(r"(?<=[。！？!?；;])", line):
+            candidate = raw_segment.strip().strip("。！？!?；;")
+            if (
+                not candidate
+                or len(candidate) > _MAX_TYPED_PUBLIC_SOURCE_QUOTE_CHARS
+                or any(mark in candidate for mark in "\r\n\"'“”‘’")
+                or any(mark in candidate for mark in "。！？!?；;")
+                or parsed_text.count(candidate) != 1
+                or _sentence_violates_public_boundary(
+                    _typed_public_observation_sentence(
+                        epistemic_status=PublicEvidenceEpistemicStatus.PROVISIONAL,
+                        text=candidate,
+                    )
+                )
+            ):
+                continue
+            grams = _coordinate_bigrams(candidate)
+            score = len(grams & target_grams) / max(1, len(target_grams))
+            if score <= 0:
+                continue
+            start = parsed_text.index(candidate)
+            candidates.append((score, -len(candidate), start, candidate))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
+    return candidates[0][3]
+
+
+def _coordinate_bigrams(value: str) -> set[str]:
+    normalized = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value.casefold())
+    return {
+        normalized[index : index + 2]
+        for index in range(max(0, len(normalized) - 1))
+    }
 
 
 def sanitize_evidence_public_prefix(text: str) -> str:
@@ -304,6 +495,8 @@ def validate_public_observation_prefix(
     case_id: str,
     actor_id: str,
     actor_role: str,
+    authority_catalog: Iterable[PublicEvidenceObservationAuthorityCoordinate]
+    | None = None,
 ) -> PublicEvidenceObservationV1:
     """Accept one complete provider item against its request-bound prefix."""
 
@@ -311,6 +504,79 @@ def validate_public_observation_prefix(
         raise EvidencePublicObservationAuthorityError(
             "Evidence public observation candidate must be a provider proposal"
         )
+    if authority_catalog is not None:
+        if not isinstance(candidate, PublicEvidenceObservationCoordinateProposalV1):
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence public observation provider proposal shape is invalid"
+            )
+        accepted = tuple(prior_accepted)
+        if any(not isinstance(item, PublicEvidenceObservationV1) for item in accepted):
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence public observation prefix is not canonical"
+            )
+        context = _public_observation_context(
+            evidence_content_authorities=evidence_content_authorities,
+            visible_evidence=visible_evidence,
+            attachment_refs=attachment_refs,
+            allowed_fact_targets=allowed_fact_targets,
+            case_id=case_id,
+            actor_id=actor_id,
+            actor_role=actor_role,
+        )
+        seen_spans: set[tuple[str, int, int]] = set()
+        last_order: tuple[int, int, int] | None = None
+        total_chars = 0
+        for index, item in enumerate(accepted, start=1):
+            normalized, order_key = _validate_canonical_public_observation(
+                item,
+                expected_slot_id=f"OBS_{index:02d}",
+                context=context,
+            )
+            span_key = (
+                normalized.evidence_id,
+                normalized.source_start_byte,
+                normalized.source_end_byte,
+            )
+            if span_key in seen_spans or (
+                last_order is not None and order_key <= last_order
+            ):
+                raise EvidencePublicObservationAuthorityError(
+                    "Evidence public observation order or source span is invalid"
+                )
+            seen_spans.add(span_key)
+            last_order = order_key
+            total_chars += len(normalized.public_text)
+        canonical = _derive_coordinate_public_observation(
+            candidate,
+            expected_slot_id=f"OBS_{len(accepted) + 1:02d}",
+            context=context,
+            authority_catalog=tuple(authority_catalog),
+        )
+        order_key = (
+            context[2][canonical.evidence_id],
+            canonical.source_start_byte,
+            canonical.source_end_byte,
+        )
+        span_key = (
+            canonical.evidence_id,
+            canonical.source_start_byte,
+            canonical.source_end_byte,
+        )
+        if span_key in seen_spans or (
+            last_order is not None and order_key <= last_order
+        ):
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence public observation order or source span is invalid"
+            )
+        if (
+            len(accepted) + 1 > _MAX_SUBMISSION_SOURCE_OBSERVATIONS
+            or total_chars + len(canonical.public_text)
+            > _MAX_SUBMISSION_SOURCE_AUTHORITY_CHARS
+        ):
+            raise EvidencePublicObservationAuthorityError(
+                "Evidence public observation budget is exceeded"
+            )
+        return canonical
     raw_candidate = (
         candidate
         if isinstance(candidate, PublicEvidenceObservationProposalV1)
@@ -384,7 +650,7 @@ def validate_public_observation_prefix(
 
 def validate_submission_public_observations(
     *,
-    observations: Iterable[PublicEvidenceObservationProposalV1],
+    observations: Iterable[object],
     evidence_content_authorities: Iterable[EvidenceContentAuthorityV1],
     visible_evidence: Iterable[object],
     attachment_refs: Iterable[str],
@@ -392,6 +658,8 @@ def validate_submission_public_observations(
     case_id: str,
     actor_id: str,
     actor_role: str,
+    authority_catalog: Iterable[PublicEvidenceObservationAuthorityCoordinate]
+    | None = None,
 ) -> tuple[PublicEvidenceObservationV1, ...]:
     """Atomically fold the same prefix validator over one completed array."""
 
@@ -409,9 +677,58 @@ def validate_submission_public_observations(
                 case_id=case_id,
                 actor_id=actor_id,
                 actor_role=actor_role,
+                authority_catalog=authority_catalog,
             ),
         )
     return accepted
+
+
+def _derive_coordinate_public_observation(
+    observation: PublicEvidenceObservationCoordinateProposalV1,
+    *,
+    expected_slot_id: str,
+    context: tuple[
+        dict[str, EvidenceContentAuthorityV1],
+        dict[str, object],
+        dict[str, int],
+        set[str],
+    ],
+    authority_catalog: tuple[PublicEvidenceObservationAuthorityCoordinate, ...],
+) -> PublicEvidenceObservationV1:
+    if observation.provider_slot_id != expected_slot_id:
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation slot order is invalid"
+        )
+    by_id = {item.coordinate_id: item for item in authority_catalog}
+    coordinate = by_id.get(observation.coordinate_id)
+    if coordinate is None or not coordinate.fact_ids:
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation coordinate is unauthorized"
+        )
+    legacy = PublicEvidenceObservationProposalV1(
+        schema_version="public_evidence_observation.v1",
+        provider_slot_id=observation.provider_slot_id,
+        evidence_id=coordinate.evidence_id,
+        fact_id=coordinate.fact_ids[0],
+        observation_kind=observation.observation_kind,
+        epistemic_status=observation.epistemic_status,
+        parsed_content_sha256=coordinate.parsed_content_sha256,
+        source_quote=coordinate.source_quote,
+    )
+    canonical, _order_key = _derive_canonical_public_observation(
+        legacy,
+        expected_slot_id=expected_slot_id,
+        context=context,
+    )
+    if (
+        canonical.source_start_byte != coordinate.source_start_byte
+        or canonical.source_end_byte != coordinate.source_end_byte
+        or canonical.quote_sha256 != coordinate.quote_sha256
+    ):
+        raise EvidencePublicObservationAuthorityError(
+            "Evidence public observation coordinate binding is invalid"
+        )
+    return canonical
 
 
 def require_relevant_parsed_observation_coverage(

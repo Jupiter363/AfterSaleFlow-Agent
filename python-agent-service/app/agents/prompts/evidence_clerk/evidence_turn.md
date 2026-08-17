@@ -112,12 +112,12 @@
 
 - `ROOM_OPENING`、无附件的 `PARTY_MESSAGE` 必须输出空数组。
 - 有本轮附件的 `EVIDENCE_REVIEW` 只可从 `evidence_content_authorities` 中当前附件、`status="SUCCEEDED"` 的冻结非空 `parsed_text` 选择观察；`claimed_fact`、metadata、extraction、文件名、模型推断和未解析原件都不能建立公开观察。系统会逐附件用冻结 `parsed_text` 与允许的 fact targets 校验所有达到阈值的共享文本坐标集合；只要该集合非空，该附件就必须至少输出一项绑定集合中任一 `fact_id` 的观察。模型给出的低 `relevance_score` 或空 `fact_links` 不能豁免此要求，也不得在已识别具体材料内容时返回空数组并退化为通用回复。
-- 每项依次输出：`schema_version="public_evidence_observation.v1"`、有序 slot `provider_slot_id`（严格为 `OBS_01`、`OBS_02`……）、`evidence_id`、允许的 `fact_id`、`observation_kind`、`epistemic_status`、`parsed_content_sha256` 与 `source_quote`。
-- `source_quote` 必须逐字符摘自对应 frozen `parsed_text`，在该文本中恰好出现一次；单行、不含引号或句末标点、最多 200 个字符。不得改写、拼接、翻译、补充或用当事人/模型的文字替代。
-- `parsed_content_sha256` 必须逐字符等于对应 authority 的值。`public_text`（包含系统固定的“材料记载/材料所载”临时性句框）、byte offset、quote hash 和最终 observation ID 由系统从已验证 quote 确定性生成；不要输出或猜测这些派生字段。
+- 每项只输出服务器目录中的 `schema_version="public_evidence_observation_coordinate.v1"`、有序 slot `provider_slot_id`（严格为 `OBS_01`、`OBS_02`……）、不透明 `coordinate_id`、`observation_kind` 与 `epistemic_status`。`coordinate_id` 必须逐字取自当前请求的服务器坐标目录；不得输出或猜测 evidence_id、fact_id、parsed_content_sha256、source_quote、byte offset、quote hash、observation_id 或任何内部字段。
+- 坐标目录已经绑定冻结文本中的唯一安全 source quote、UTF-8 span/hash、附件顺序及服务器验证的 fact 坐标集合；模型只能选择坐标，不得自行摘录、改写、拼接或翻译原文。
+- `public_text`（包含系统固定的“材料记载/材料所载”临时性句框）、byte offset、quote hash 和最终 observation ID 由系统从坐标目录确定性生成；不要输出或猜测这些派生字段。
 - `observation_kind` 只能为 `PARSED_RECORD`、`PARSED_PARTY_STATEMENT` 或 `PARSED_TRANSACTION_STATUS`；`epistemic_status` 只能为 `PENDING_VERIFICATION` 或 `PROVISIONAL`。它们都不是真实性、责任、救济或执行结论。
-- 每个观察都必须在同一附件的 `evidence_assessments[].public_observation_slots` 中用相同 slot 引用，并且该 assessment 的 `fact_links` 必须包含同一 `fact_id`。验收后系统才会写入派生的 `public_observation_ids`。完整的 `OBS_01` 对象应在确认第一项安全 source quote 后立即输出，不得等待后续观察、assessment 或终态文案；随后观察仍按原文位置依次输出。最多 12 项，总 quote 长度最多 1200 个字符。
-- 观察和 source quote 不得含真实性/伪造、责任/过错、退款/赔付指令、最终方案、执行指令或内部 ID/字段/评分。只有对应冻结 `parsed_text` 与允许 fact targets 的服务器可验证共享文本坐标集合确实为空时，才可诚实输出空数组并把缺口交由人工复核；若集合非空但没有安全 quote，必须保持空数组并让正式语义校验失败关闭，绝不能编造、改写或泄露原文。
+- 每个观察都必须在同一附件的 `evidence_assessments[].public_observation_slots` 中用相同 slot 引用；验收后系统才会写入派生的 `public_observation_ids`。完整的 `OBS_01` 坐标对象应在确认第一项坐标后立即输出，不得等待后续观察、assessment 或终态文案；随后观察仍按目录顺序输出。最多 12 项。
+- 坐标目录中的公开句框不会作真实性、责任、退款/赔付指令、最终方案或执行结论；只有服务器验证的坐标集合确实为空时，才可诚实输出空数组并交由人工复核。若集合非空但无法安全建立目录，系统会在 provider invocation 前 fail closed。
 
 ### room_utterance
 

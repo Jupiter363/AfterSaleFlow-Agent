@@ -1086,7 +1086,11 @@ class PublicEvidenceEpistemicStatus(StrEnum):
 
 
 class PublicEvidenceObservationProposalV1(StrictModel):
-    """Provider-supplied proposal before frozen-source canonicalization."""
+    """Legacy direct proposal retained only for internal compatibility tests.
+
+    Provider invocations use :class:`PublicEvidenceObservationCoordinateProposalV1`;
+    this shape must never be exposed by the request-bound submission contract.
+    """
 
     schema_version: Literal["public_evidence_observation.v1"]
     provider_slot_id: Identifier
@@ -1096,6 +1100,16 @@ class PublicEvidenceObservationProposalV1(StrictModel):
     epistemic_status: PublicEvidenceEpistemicStatus
     parsed_content_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
     source_quote: Annotated[ShortText, Field(max_length=200)]
+
+
+class PublicEvidenceObservationCoordinateProposalV1(StrictModel):
+    """Provider proposal resolved through a server-owned authority coordinate."""
+
+    schema_version: Literal["public_evidence_observation_coordinate.v1"]
+    provider_slot_id: Identifier
+    coordinate_id: Identifier
+    observation_kind: PublicEvidenceObservationKind
+    epistemic_status: PublicEvidenceEpistemicStatus
 
 
 class PublicEvidenceObservationV1(StrictModel):
@@ -1276,7 +1290,12 @@ class EvidenceTurnLlmOutput(StrictModel):
 
 
 class EvidenceParsedTextSubmissionLlmOutput(EvidenceTurnLlmOutput):
-    """Request marker; authority-aware coverage is enforced after server validation."""
+    """Provider contract used only when a request-bound coordinate exists."""
+
+    public_observations: Annotated[
+        list[PublicEvidenceObservationCoordinateProposalV1],
+        Field(min_length=1, max_length=12),
+    ]
 
 
 class EvidenceTurnRequest(StrictModel):

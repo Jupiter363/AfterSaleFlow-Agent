@@ -1088,6 +1088,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         EVIDENCE_PUBLIC_NODE,
         EvidencePublicObservationAuthorityError,
         EvidencePublicOutputPolicy,
+        build_submission_observation_catalog,
         compose_evidence_opening_public_reply,
         derive_submission_observation_authority,
         guard_evidence_public_reply,
@@ -1105,6 +1106,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         EvidenceTurnLlmOutput,
         EvidenceTurnRequest,
         EvidenceTurnResult,
+        PublicEvidenceObservationCoordinateProposalV1,
         PublicEvidenceObservationProposalV1,
         PublicEvidenceObservationV1,
     )
@@ -1164,39 +1166,39 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
             "status": "SUCCEEDED",
         }
     ]
+    request = EvidenceTurnRequest.model_validate(payload)
+    allowed_fact_targets = EvidenceContextAssembler().assemble(
+        request
+    ).working_set.allowed_fact_targets
+    authority_catalog = build_submission_observation_catalog(
+        evidence_content_authorities=request.context_envelope.evidence_content_authorities,
+        visible_evidence=request.context_envelope.visible_evidence,
+        attachment_refs=request.context_envelope.current_event.attachment_refs,
+        allowed_fact_targets=allowed_fact_targets,
+        case_id=request.context_envelope.case_snapshot.case_id,
+        actor_id=request.context_envelope.actor_snapshot.actor_id,
+        actor_role=request.context_envelope.actor_snapshot.actor_role,
+    )
+    assert authority_catalog
     typed_public_observations = [
         {
-            "schema_version": "public_evidence_observation.v1",
+            "schema_version": "public_evidence_observation_coordinate.v1",
             "provider_slot_id": "OBS_01",
-            "evidence_id": "EVIDENCE_signature_photo",
-            "fact_id": "FACT_SIGNATURE",
+            "coordinate_id": authority_catalog[0].coordinate_id,
             "observation_kind": "PARSED_RECORD",
             "epistemic_status": "PENDING_VERIFICATION",
-            "parsed_content_sha256": parsed_content_sha256,
-            "source_quote": "页面日期显示2026-08-13，形成时间仍需与平台记录核对",
-        },
-        {
-            "schema_version": "public_evidence_observation.v1",
-            "provider_slot_id": "OBS_02",
-            "evidence_id": "EVIDENCE_signature_photo",
-            "fact_id": "FACT_SIGNATURE",
-            "observation_kind": "PARSED_PARTY_STATEMENT",
-            "epistemic_status": "PENDING_VERIFICATION",
-            "parsed_content_sha256": parsed_content_sha256,
-            "source_quote": "2026-08-13，平台客服在会话中承诺退款20元",
-        },
-        {
-            "schema_version": "public_evidence_observation.v1",
-            "provider_slot_id": "OBS_03",
-            "evidence_id": "EVIDENCE_signature_photo",
-            "fact_id": "FACT_SIGNATURE",
-            "observation_kind": "PARSED_TRANSACTION_STATUS",
-            "epistemic_status": "PROVISIONAL",
-            "parsed_content_sha256": parsed_content_sha256,
-            "source_quote": "未发现成功退款流水",
-        },
+        }
     ]
-    request = EvidenceTurnRequest.model_validate(payload)
+    legacy_public_observation = {
+        "schema_version": "public_evidence_observation.v1",
+        "provider_slot_id": "OBS_01",
+        "evidence_id": "EVIDENCE_signature_photo",
+        "fact_id": "FACT_SIGNATURE",
+        "observation_kind": "PARSED_RECORD",
+        "epistemic_status": "PENDING_VERIFICATION",
+        "parsed_content_sha256": parsed_content_sha256,
+        "source_quote": "未发现成功退款流水",
+    }
     system_prompt, user_prompt = PromptRepository().render(
         "evidence_turn",
         request.model_dump(mode="json"),
@@ -1220,20 +1222,22 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         "public_observations"
     )
     provider_schema = EvidenceParsedTextSubmissionLlmOutput.model_json_schema()
+    assert provider_schema["properties"]["public_observations"]["minItems"] == 1
     proposal_ref = provider_schema["properties"]["public_observations"]["items"][
         "$ref"
     ]
-    assert proposal_ref == "#/$defs/PublicEvidenceObservationProposalV1"
-    proposal_schema = provider_schema["$defs"]["PublicEvidenceObservationProposalV1"]
+    assert proposal_ref == (
+        "#/$defs/PublicEvidenceObservationCoordinateProposalV1"
+    )
+    proposal_schema = provider_schema["$defs"][
+        "PublicEvidenceObservationCoordinateProposalV1"
+    ]
     assert set(proposal_schema["properties"]) == {
         "schema_version",
         "provider_slot_id",
-        "evidence_id",
-        "fact_id",
+        "coordinate_id",
         "observation_kind",
         "epistemic_status",
-        "parsed_content_sha256",
-        "source_quote",
     }
     assert set(proposal_schema["required"]) == set(proposal_schema["properties"])
     assert (
@@ -1270,19 +1274,19 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
             *accepted_prefix,
             validate_public_observation_prefix(
                 prior_accepted=accepted_prefix,
-                candidate=PublicEvidenceObservationProposalV1.model_validate(
-                    raw_observation
+                candidate=(
+                    PublicEvidenceObservationCoordinateProposalV1.model_validate(
+                        raw_observation
+                    )
                 ),
                 evidence_content_authorities=request.context_envelope.evidence_content_authorities,
                 visible_evidence=request.context_envelope.visible_evidence,
                 attachment_refs=request.context_envelope.current_event.attachment_refs,
-                allowed_fact_targets=(
-                    {"fact_id": "FACT_SIGNATURE"},
-                    {"fact_id": "FACT_RECIPIENT"},
-                ),
+                allowed_fact_targets=allowed_fact_targets,
                 case_id=request.context_envelope.case_snapshot.case_id,
                 actor_id=request.context_envelope.actor_snapshot.actor_id,
                 actor_role=request.context_envelope.actor_snapshot.actor_role,
+                authority_catalog=authority_catalog,
             ),
         )
     expected_typed_prefix = EVIDENCE_CANONICAL_OPENING + "".join(
@@ -1414,6 +1418,15 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         runner.last_invocation["output_type"]
         is EvidenceParsedTextSubmissionLlmOutput
     )
+    private_catalog = runner.last_invocation[
+        "submission_observation_authority_catalog"
+    ]
+    assert private_catalog["schema_version"] == (
+        "public_evidence_observation_authority_catalog.v1"
+    )
+    assert [
+        item["coordinate_id"] for item in private_catalog["coordinates"]
+    ] == [item.coordinate_id for item in authority_catalog]
     asset_manifest = runner.last_invocation["evidence_assets"].manifest
     assert asset_manifest["items"][0]["visual_input_status"] == (
         "UNSUPPORTED_MODALITY"
@@ -1432,7 +1445,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     assert "2026-08-13" in reply
     assert "平台客服" in reply
     assert "20元" in reply
-    assert "未发现成功退款流水" in reply
+    assert authority_catalog[0].source_quote in reply
     assert "平台导出的退款记录页面" not in reply
     assert "覆盖范围有限" in reply or "尚不足以" in reply
     assert "仅核对了可读取文本" in reply
@@ -1478,14 +1491,14 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     with pytest.raises(ValidationError):
         PublicEvidenceObservationProposalV1.model_validate(
             {
-                **typed_public_observations[0],
+                **legacy_public_observation,
                 "source_quote": "甲" * 201,
             }
         )
     with pytest.raises(ValidationError):
         PublicEvidenceObservationProposalV1.model_validate(
             {
-                **typed_public_observations[0],
+                **legacy_public_observation,
                 "observation_id": "PUBOBS_PROVIDER_AUTHORED",
             }
         )
@@ -1503,7 +1516,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         ("evidence_id", "EVIDENCE_foreign_attachment"),
         ("fact_id", "FACT_foreign_fact"),
     ):
-        foreign_candidate = deepcopy(typed_public_observations[0])
+        foreign_candidate = deepcopy(legacy_public_observation)
         foreign_candidate[field] = value
         with pytest.raises(EvidencePublicObservationAuthorityError):
             validate_prefix_for(foreign_candidate)
@@ -1513,14 +1526,14 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         "claimed_fact"
     ] = "平台已经实际完成退款"
     spoof_request = EvidenceTurnRequest.model_validate(spoof_request_payload)
-    spoof_candidate = deepcopy(typed_public_observations[0])
+    spoof_candidate = deepcopy(legacy_public_observation)
     spoof_candidate["source_quote"] = "平台已经实际完成退款"
     with pytest.raises(EvidencePublicObservationAuthorityError):
         validate_prefix_for(spoof_candidate, active_request=spoof_request)
 
     ambiguous_text = "重复材料内容\n重复材料内容"
     ambiguous_request = request_with_frozen_text(ambiguous_text)
-    ambiguous_candidate = deepcopy(typed_public_observations[0])
+    ambiguous_candidate = deepcopy(legacy_public_observation)
     ambiguous_candidate["source_quote"] = "重复材料内容"
     ambiguous_candidate["parsed_content_sha256"] = (
         ambiguous_request.context_envelope.evidence_content_authorities[
@@ -1531,7 +1544,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         validate_prefix_for(ambiguous_candidate, active_request=ambiguous_request)
 
     conclusion_request = request_with_frozen_text("商家应当退款")
-    conclusion_candidate = deepcopy(typed_public_observations[0])
+    conclusion_candidate = deepcopy(legacy_public_observation)
     conclusion_candidate["source_quote"] = "商家应当退款"
     conclusion_candidate["parsed_content_sha256"] = (
         conclusion_request.context_envelope.evidence_content_authorities[
@@ -1540,6 +1553,16 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     )
     with pytest.raises(EvidencePublicObservationAuthorityError):
         validate_prefix_for(conclusion_candidate, active_request=conclusion_request)
+    unsafe_catalog_runner = AuthorityBoundSubmissionRunner(stream_observations=())
+    unsafe_catalog_workflow = EvidenceTurnWorkflow(
+        model_runner=unsafe_catalog_runner
+    )
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="no safe unique coordinate",
+    ):
+        await unsafe_catalog_workflow.arun(conclusion_request)
+    assert unsafe_catalog_runner.calls == 0
 
     budget_quotes = tuple(f"材料记录{index}" + "甲" * 190 for index in range(6))
     budget_request = request_with_frozen_text("\n".join(budget_quotes))
@@ -1651,8 +1674,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     faithful_workflow = EvidenceTurnWorkflow(model_runner=faithful_runner)
     faithful_runner.release_completion.set()
     with pytest.raises(
-        EvidencePublicObservationAuthorityError,
-        match="relevant parsed evidence requires public observation authority",
+        (EvidencePublicObservationAuthorityError, ValidationError),
     ):
         await invoke(
             "submission-authority-faithful-first",
@@ -1673,8 +1695,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     )
     recovered_relevant_runner.release_completion.set()
     with pytest.raises(
-        EvidencePublicObservationAuthorityError,
-        match="relevant parsed evidence requires public observation authority",
+        (EvidencePublicObservationAuthorityError, ValidationError),
     ):
         await invoke(
             "submission-authority-recovered-relevant",
@@ -1696,8 +1717,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     )
     low_relevance_runner.release_completion.set()
     with pytest.raises(
-        EvidencePublicObservationAuthorityError,
-        match="relevant parsed evidence requires public observation authority",
+        (EvidencePublicObservationAuthorityError, ValidationError),
     ):
         await invoke(
             "submission-authority-provider-low-score-evasion",
@@ -1738,20 +1758,28 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
         if strongest_fact_id == "FACT_SIGNATURE"
         else "FACT_SIGNATURE"
     )
-    multi_source_quote = {
-        "FACT_SIGNATURE": "未发现成功退款流水",
-        "FACT_RECIPIENT": "收件人称本人及同住人员未收到包裹",
-    }[non_strong_fact_id]
-    multi_observation = {
-        **typed_public_observations[0],
-        "provider_slot_id": "OBS_01",
-        "fact_id": non_strong_fact_id,
-        "parsed_content_sha256": (
-            multi_coordinate_request.context_envelope.evidence_content_authorities[
-                0
-            ].parsed_content_sha256
+    multi_catalog = build_submission_observation_catalog(
+        evidence_content_authorities=(
+            multi_coordinate_request.context_envelope.evidence_content_authorities
         ),
-        "source_quote": multi_source_quote,
+        visible_evidence=multi_coordinate_request.context_envelope.visible_evidence,
+        attachment_refs=(
+            multi_coordinate_request.context_envelope.current_event.attachment_refs
+        ),
+        allowed_fact_targets=multi_allowed_fact_targets,
+        case_id=multi_coordinate_request.context_envelope.case_snapshot.case_id,
+        actor_id=multi_coordinate_request.context_envelope.actor_snapshot.actor_id,
+        actor_role=multi_coordinate_request.context_envelope.actor_snapshot.actor_role,
+    )
+    non_strong_coordinate = next(
+        item for item in multi_catalog if non_strong_fact_id in item.fact_ids
+    )
+    multi_observation = {
+        "schema_version": "public_evidence_observation_coordinate.v1",
+        "provider_slot_id": "OBS_01",
+        "coordinate_id": non_strong_coordinate.coordinate_id,
+        "observation_kind": "PARSED_RECORD",
+        "epistemic_status": "PENDING_VERIFICATION",
     }
     multi_assessment = deepcopy(faithful_assessment)
     multi_assessment.update(
@@ -1786,7 +1814,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     zero_overlap_observation = {
         **typed_public_observations[0],
         "provider_slot_id": "OBS_01",
-        "fact_id": "FACT_RECIPIENT",
+        "coordinate_id": "ECOORD_ALLOWED_ZERO_OVERLAP",
     }
     zero_overlap_assessment = deepcopy(faithful_assessment)
     zero_overlap_assessment.update(
@@ -1813,7 +1841,6 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     zero_overlap_workflow = EvidenceTurnWorkflow(model_runner=zero_overlap_runner)
     with pytest.raises(
         EvidencePublicObservationAuthorityError,
-        match="relevant parsed evidence requires public observation authority",
     ):
         await invoke(
             "submission-authority-allowed-zero-overlap-coordinate",
@@ -1877,7 +1904,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     assert unrelated_runner.calls == 1
     assert (
         unrelated_runner.last_invocation["output_type"]
-        is EvidenceParsedTextSubmissionLlmOutput
+        is EvidenceTurnLlmOutput
     )
 
     unsupported_runner = AuthorityBoundSubmissionRunner(
@@ -1953,8 +1980,7 @@ async def test_submission_public_reply_is_derived_from_accepted_assessment_autho
     )
     mixed_material_runner.release_completion.set()
     with pytest.raises(
-        EvidencePublicObservationAuthorityError,
-        match="relevant parsed evidence requires public observation authority",
+        (EvidencePublicObservationAuthorityError, ValidationError),
     ):
         await invoke(
             "submission-authority-mixed-material-text-relevant-image",

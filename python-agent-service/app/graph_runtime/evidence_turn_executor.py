@@ -26,6 +26,7 @@ from app.agents.evidence_clerk.public_reply import (
     EVIDENCE_PUBLIC_FIELD,
     EVIDENCE_PUBLIC_NODE,
     EvidencePublicOutputPolicy,
+    build_submission_observation_catalog,
     compose_evidence_opening_public_reply,
     require_relevant_parsed_observation_coverage,
     validate_public_observation_prefix,
@@ -57,7 +58,7 @@ from app.harness.evidence_context_assembler import EvidenceContextAssembler
 from app.schemas import (
     EvidenceTurnRequest,
     EvidenceTurnResult,
-    PublicEvidenceObservationProposalV1,
+    PublicEvidenceObservationCoordinateProposalV1,
     PublicEvidenceObservationV1,
 )
 from app.streaming import (
@@ -220,6 +221,15 @@ class _SubmissionObservationPublicOutputPolicy:
         self._case_id = envelope.case_snapshot.case_id
         self._actor_id = envelope.actor_snapshot.actor_id
         self._actor_role = envelope.actor_snapshot.actor_role
+        self._authority_catalog = build_submission_observation_catalog(
+            evidence_content_authorities=self._evidence_content_authorities,
+            visible_evidence=self._visible_evidence,
+            attachment_refs=self._attachment_refs,
+            allowed_fact_targets=self._allowed_fact_targets,
+            case_id=self._case_id,
+            actor_id=self._actor_id,
+            actor_role=self._actor_role,
+        )
         self._accepted: list[PublicEvidenceObservationV1] = []
         self._visible_text = ""
         self._bootstrapped = False
@@ -279,7 +289,9 @@ class _SubmissionObservationPublicOutputPolicy:
         if not isinstance(candidate, Mapping):
             raise GraphContractError("EVIDENCE_PUBLIC_OBSERVATION_STREAM_ITEM_INVALID")
         try:
-            proposal = PublicEvidenceObservationProposalV1.model_validate(candidate)
+            proposal = PublicEvidenceObservationCoordinateProposalV1.model_validate(
+                candidate
+            )
             canonical = validate_public_observation_prefix(
                 prior_accepted=self._accepted,
                 candidate=proposal,
@@ -290,6 +302,7 @@ class _SubmissionObservationPublicOutputPolicy:
                 case_id=self._case_id,
                 actor_id=self._actor_id,
                 actor_role=self._actor_role,
+                authority_catalog=self._authority_catalog,
             )
         except ValueError as error:
             raise GraphContractError(

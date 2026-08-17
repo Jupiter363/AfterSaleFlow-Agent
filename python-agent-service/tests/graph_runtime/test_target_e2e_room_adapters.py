@@ -121,6 +121,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         EVIDENCE_CANONICAL_OPENING,
         EvidencePublicObservationAuthorityError,
         EvidencePublicOutputPolicyError,
+        build_submission_observation_catalog,
         compose_evidence_opening_public_reply,
         compose_evidence_submission_public_reply,
         validate_public_observation_prefix,
@@ -133,7 +134,11 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     from app.harness.model_runner import (
         HarnessGeneration,
     )
-    from app.schemas import EvidenceTurnRequest, EvidenceTurnResult
+    from app.schemas import (
+        EvidenceTurnRequest,
+        EvidenceTurnResult,
+        PublicEvidenceObservationCoordinateProposalV1,
+    )
     from app.security.graph_runtime import GraphSecurityRuntime
     from app.streaming import (
         STREAM_MAX_VISIBLE_OUTPUT_CHARS,
@@ -185,11 +190,34 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             "metadata": {"claimed_fact": "承诺退款金额为20元"},
         }
     )
+    second_evidence = deepcopy(submitted_evidence)
+    second_evidence.update(
+        {
+            "evidence_id": "EVIDENCE_recipient_record",
+            "original_filename": "recipient-record.md",
+            "file_hash": hashlib.sha256(b"recipient-record-content").hexdigest(),
+            "parsed_text": "收件记录摘要\n收件人称本人及同住人员未收到包裹\n仍需核对物流底单",
+            "metadata": {"claimed_fact": "本人及同住人员未收到包裹"},
+        }
+    )
+    request_document["context_envelope"]["visible_evidence"].append(
+        second_evidence
+    )
+    request_document["context_envelope"]["current_event"][
+        "attachment_refs"
+    ].append(second_evidence["evidence_id"])
     dossier = request_document["context_envelope"]["intake_dossier_snapshot"]["payload"]
     dossier.pop("unilateral_case_matrix", None)
     case_fact_matrix = helper_module["_case_fact_matrix_v2"]()
     case_fact_matrix["fact_rows"][0]["fact_target"] = (
         "退款工单未生成，且未发现成功退款流水"
+    )
+    second_fact_row = deepcopy(case_fact_matrix["fact_rows"][0])
+    second_fact_row["fact_id"] = "FACT_RECIPIENT"
+    second_fact_row["fact_target"] = "收件人称本人及同住人员未收到包裹"
+    case_fact_matrix["fact_rows"].append(second_fact_row)
+    case_fact_matrix["case_overview"]["summary_source_fact_ids"].append(
+        "FACT_RECIPIENT"
     )
     helper_module["_rehash_case_fact_matrix"](case_fact_matrix)
     dossier["case_fact_matrix"] = case_fact_matrix
@@ -202,6 +230,11 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     parsed_text = submitted_evidence["parsed_text"]
     assert isinstance(parsed_text, str)
     parsed_content_sha256 = hashlib.sha256(parsed_text.encode("utf-8")).hexdigest()
+    second_parsed_text = second_evidence["parsed_text"]
+    assert isinstance(second_parsed_text, str)
+    second_parsed_content_sha256 = hashlib.sha256(
+        second_parsed_text.encode("utf-8")
+    ).hexdigest()
     request_document["context_envelope"]["evidence_content_authorities"] = [
         {
             "schema_version": "evidence_content_authority.v1",
@@ -217,7 +250,22 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
             "parsed_byte_length": len(parsed_text.encode("utf-8")),
             "completed_at": "2026-08-17T10:00:00+08:00",
             "status": "SUCCEEDED",
-        }
+        },
+        {
+            "schema_version": "evidence_content_authority.v1",
+            "case_id": request_document["context_envelope"]["case_snapshot"][
+                "case_id"
+            ],
+            "evidence_id": "EVIDENCE_recipient_record",
+            "file_sha256": second_evidence["file_hash"],
+            "content_type": "text/markdown",
+            "parser_version": "PARSER_TEST_V1",
+            "parsed_content_sha256": second_parsed_content_sha256,
+            "parsed_text": second_parsed_text,
+            "parsed_byte_length": len(second_parsed_text.encode("utf-8")),
+            "completed_at": "2026-08-17T10:00:01+08:00",
+            "status": "SUCCEEDED",
+        },
     ]
     request = EvidenceTurnRequest.model_validate(request_document)
     submission_working_set = EvidenceContextAssembler().assemble(request).working_set
@@ -228,19 +276,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         )
         == "FACT_SIGNATURE"
     )
-    raw_public_observation = {
-        "schema_version": "public_evidence_observation.v1",
-        "provider_slot_id": "OBS_01",
-        "evidence_id": "EVIDENCE_signature_photo",
-        "fact_id": "FACT_SIGNATURE",
-        "observation_kind": "PARSED_RECORD",
-        "epistemic_status": "PENDING_VERIFICATION",
-        "parsed_content_sha256": parsed_content_sha256,
-        "source_quote": submission_observation,
-    }
-    canonical_public_observation = validate_public_observation_prefix(
-        prior_accepted=(),
-        candidate=raw_public_observation,
+    authority_catalog = build_submission_observation_catalog(
         evidence_content_authorities=request.context_envelope.evidence_content_authorities,
         visible_evidence=request.context_envelope.visible_evidence,
         attachment_refs=request.context_envelope.current_event.attachment_refs,
@@ -249,20 +285,31 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         actor_id=request.context_envelope.actor_snapshot.actor_id,
         actor_role=request.context_envelope.actor_snapshot.actor_role,
     )
-    assert canonical_public_observation.observation_id is not None
-    second_raw_public_observation = {
-        "schema_version": "public_evidence_observation.v1",
-        "provider_slot_id": "OBS_02",
-        "evidence_id": "EVIDENCE_signature_photo",
-        "fact_id": "FACT_SIGNATURE",
-        "observation_kind": "PARSED_TRANSACTION_STATUS",
-        "epistemic_status": "PROVISIONAL",
-        "parsed_content_sha256": parsed_content_sha256,
-        "source_quote": second_submission_observation,
+    first_coordinate = next(
+        item
+        for item in authority_catalog
+        if item.evidence_id == "EVIDENCE_signature_photo"
+        and "FACT_SIGNATURE" in item.fact_ids
+    )
+    second_coordinate = next(
+        item
+        for item in authority_catalog
+        if item.evidence_id == "EVIDENCE_recipient_record"
+        and "FACT_RECIPIENT" in item.fact_ids
+    )
+    assert first_coordinate.attachment_order < second_coordinate.attachment_order
+    raw_public_observation = {
+        "schema_version": "public_evidence_observation_coordinate.v1",
+        "provider_slot_id": "OBS_01",
+        "coordinate_id": first_coordinate.coordinate_id,
+        "observation_kind": "PARSED_RECORD",
+        "epistemic_status": "PENDING_VERIFICATION",
     }
-    second_canonical_public_observation = validate_public_observation_prefix(
-        prior_accepted=(canonical_public_observation,),
-        candidate=second_raw_public_observation,
+    canonical_public_observation = validate_public_observation_prefix(
+        prior_accepted=(),
+        candidate=PublicEvidenceObservationCoordinateProposalV1.model_validate(
+            raw_public_observation
+        ),
         evidence_content_authorities=request.context_envelope.evidence_content_authorities,
         visible_evidence=request.context_envelope.visible_evidence,
         attachment_refs=request.context_envelope.current_event.attachment_refs,
@@ -270,18 +317,108 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         case_id=request.context_envelope.case_snapshot.case_id,
         actor_id=request.context_envelope.actor_snapshot.actor_id,
         actor_role=request.context_envelope.actor_snapshot.actor_role,
+        authority_catalog=authority_catalog,
+    )
+    assert canonical_public_observation.observation_id is not None
+    second_raw_public_observation = {
+        "schema_version": "public_evidence_observation_coordinate.v1",
+        "provider_slot_id": "OBS_02",
+        "coordinate_id": second_coordinate.coordinate_id,
+        "observation_kind": "PARSED_TRANSACTION_STATUS",
+        "epistemic_status": "PROVISIONAL",
+    }
+    second_canonical_public_observation = validate_public_observation_prefix(
+        prior_accepted=(canonical_public_observation,),
+        candidate=PublicEvidenceObservationCoordinateProposalV1.model_validate(
+            second_raw_public_observation
+        ),
+        evidence_content_authorities=request.context_envelope.evidence_content_authorities,
+        visible_evidence=request.context_envelope.visible_evidence,
+        attachment_refs=request.context_envelope.current_event.attachment_refs,
+        allowed_fact_targets=submission_working_set.allowed_fact_targets,
+        case_id=request.context_envelope.case_snapshot.case_id,
+        actor_id=request.context_envelope.actor_snapshot.actor_id,
+        actor_role=request.context_envelope.actor_snapshot.actor_role,
+        authority_catalog=authority_catalog,
     )
     assert second_canonical_public_observation.observation_id is not None
     canonical_public_observations = (
         canonical_public_observation,
         second_canonical_public_observation,
     )
+
+    def validate_coordinate(candidate, *, prior=()):
+        return validate_public_observation_prefix(
+            prior_accepted=prior,
+            candidate=PublicEvidenceObservationCoordinateProposalV1.model_validate(
+                candidate
+            ),
+            evidence_content_authorities=(
+                request.context_envelope.evidence_content_authorities
+            ),
+            visible_evidence=request.context_envelope.visible_evidence,
+            attachment_refs=request.context_envelope.current_event.attachment_refs,
+            allowed_fact_targets=submission_working_set.allowed_fact_targets,
+            case_id=request.context_envelope.case_snapshot.case_id,
+            actor_id=request.context_envelope.actor_snapshot.actor_id,
+            actor_role=request.context_envelope.actor_snapshot.actor_role,
+            authority_catalog=authority_catalog,
+        )
+
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="coordinate is unauthorized",
+    ):
+        validate_coordinate(
+            {
+                **raw_public_observation,
+                "coordinate_id": "ECOORD_FOREIGN_AUTHORITY",
+            }
+        )
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="order or source span is invalid",
+    ):
+        validate_coordinate(
+            {
+                **raw_public_observation,
+                "provider_slot_id": "OBS_02",
+            },
+            prior=(canonical_public_observation,),
+        )
+    reverse_first = validate_coordinate(
+        {
+            **second_raw_public_observation,
+            "provider_slot_id": "OBS_01",
+        }
+    )
+    with pytest.raises(
+        EvidencePublicObservationAuthorityError,
+        match="order or source span is invalid",
+    ):
+        validate_coordinate(
+            {
+                **raw_public_observation,
+                "provider_slot_id": "OBS_02",
+            },
+            prior=(reverse_first,),
+        )
+    for forbidden_provider_field in (
+        "evidence_id",
+        "fact_id",
+        "parsed_content_sha256",
+        "source_quote",
+    ):
+        with pytest.raises(ValueError):
+            PublicEvidenceObservationCoordinateProposalV1.model_validate(
+                {
+                    **raw_public_observation,
+                    forbidden_provider_field: "FORGED_PROVIDER_AUTHORITY",
+                }
+            )
     submission_assessment = {
         "evidence_id": "EVIDENCE_signature_photo",
-        "public_observation_ids": [
-            observation.observation_id
-            for observation in canonical_public_observations
-        ],
+        "public_observation_ids": [canonical_public_observation.observation_id],
         "analysis_method": "TEXT_ONLY",
         "inspected_modalities": ["PARSED_TEXT"],
         "authenticity_score": 0.55,
@@ -310,10 +447,34 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         },
         "summary": "页面日期与退款记录范围仍待交叉核对",
     }
+    second_submission_assessment = deepcopy(submission_assessment)
+    second_submission_assessment.update(
+        {
+            "evidence_id": "EVIDENCE_recipient_record",
+            "public_observation_ids": [
+                second_canonical_public_observation.observation_id
+            ],
+            "source_basis": [second_submission_observation],
+            "fact_links": [
+                {
+                    "fact_id": "FACT_RECIPIENT",
+                    "relation": "INCONCLUSIVE",
+                    "reason": "材料所载收件范围仍需与物流原始记录核对。",
+                    "confidence": 0.61,
+                }
+            ],
+            "formation_time_assessment": "收件记录形成时间仍需核对",
+            "summary": "收件记录与未签收争议相关但仍待核验",
+        }
+    )
+    submission_assessments = [
+        submission_assessment,
+        second_submission_assessment,
+    ]
     submission_room_utterance = compose_evidence_submission_public_reply(
         fact_targets=submission_working_set.allowed_fact_targets,
         public_observations=canonical_public_observations,
-        evidence_assessments=[submission_assessment],
+        evidence_assessments=submission_assessments,
         human_review_tasks=[],
     )
     serialized_public_observations = tuple(
@@ -357,7 +518,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 room_utterance = compose_evidence_submission_public_reply(
                     fact_targets=submission_working_set.allowed_fact_targets,
                     public_observations=canonical_public_observations,
-                    evidence_assessments=[submission_assessment],
+                    evidence_assessments=submission_assessments,
                     human_review_tasks=[],
                 )
                 timeline.append("terminal:composed")
@@ -374,9 +535,12 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 confidence=0.8,
                 memory_frame={"guarded": True},
                 canvas_operations=[],
-                referenced_evidence_ids=["EVIDENCE_signature_photo"],
+                referenced_evidence_ids=[
+                    "EVIDENCE_signature_photo",
+                    "EVIDENCE_recipient_record",
+                ],
                 public_observations=list(canonical_public_observations),
-                evidence_assessments=[submission_assessment],
+                evidence_assessments=submission_assessments,
             )
 
         @staticmethod
@@ -784,7 +948,9 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         first_material_event.payload.delta
         == canonical_public_observation.public_text
     )
-    assert submission_observation in (first_material_event.payload.delta or "")
+    assert first_coordinate.source_quote in (
+        first_material_event.payload.delta or ""
+    )
     assert all(
         serialized not in (first_material_event.payload.delta or "")
         for serialized in serialized_public_observations
@@ -815,7 +981,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
         second_material_event.payload.delta
         == second_canonical_public_observation.public_text
     )
-    assert second_submission_observation in (
+    assert second_coordinate.source_quote in (
         second_material_event.payload.delta or ""
     )
     assert not workflow.array_closed.is_set()
@@ -851,7 +1017,25 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
     ) == submission_room_utterance
     assert submission_room_utterance.count(EVIDENCE_CANONICAL_OPENING) == 1
     assert arbitrary_safe_submission_sentence not in submission_room_utterance
-    assert submission_observation in submission_room_utterance
+    assert first_coordinate.source_quote in submission_room_utterance
+    assert second_coordinate.source_quote in submission_room_utterance
+    public_bytes = "".join(
+        event.payload.delta or ""
+        for event in first
+        if event.event_type == "visible_delta"
+    )
+    for private_value in (
+        first_coordinate.coordinate_id,
+        second_coordinate.coordinate_id,
+        first_coordinate.evidence_id,
+        second_coordinate.evidence_id,
+        first_coordinate.parsed_content_sha256,
+        second_coordinate.parsed_content_sha256,
+        "source_quote",
+        "coordinate_id",
+        "parsed_content_sha256",
+    ):
+        assert private_value not in public_bytes
     assert risky_sentence not in submission_room_utterance
     assert raw_room_utterance not in submission_room_utterance
     assert all(

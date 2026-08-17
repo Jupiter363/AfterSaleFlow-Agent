@@ -15,6 +15,8 @@ from app.agents.evidence_clerk.public_reply import (
     EvidencePublicObservationAuthorityError,
     compose_evidence_opening_public_reply,
     compose_evidence_submission_public_reply,
+    build_submission_observation_catalog,
+    submission_observation_catalog_prompt_payload,
     guard_evidence_public_reply,
     reconcile_accepted_public_observations,
     require_relevant_parsed_observation_coverage,
@@ -345,12 +347,33 @@ def _evidence_model_invocation(
             "与下载内容一致的证据实际进入多模态模型。"
         ),
     }
+    current_event = assembled.raw_envelope.current_event
+    is_submission = (
+        current_event.event_type == "PARTY_MESSAGE"
+        and current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
+        and bool(current_event.attachment_refs)
+    )
+    authority_catalog = ()
+    if is_submission:
+        authority_catalog = build_submission_observation_catalog(
+            evidence_content_authorities=(
+                assembled.raw_envelope.evidence_content_authorities
+            ),
+            visible_evidence=assembled.raw_envelope.visible_evidence,
+            attachment_refs=current_event.attachment_refs,
+            allowed_fact_targets=working_set.allowed_fact_targets,
+            case_id=assembled.raw_envelope.case_snapshot.case_id,
+            actor_id=assembled.raw_envelope.actor_snapshot.actor_id,
+            actor_role=assembled.raw_envelope.actor_snapshot.actor_role,
+        )
+        context_sources["submission_observation_authority_catalog"] = (
+            submission_observation_catalog_prompt_payload(authority_catalog)
+        )
     context_pack = build_context_pack(
         EVIDENCE_TURN_MODEL_NODE_NAME,
         context_sources,
         actor_role=working_set.actor_role,
     )
-    current_event = assembled.raw_envelope.current_event
     output_type = (
         EvidenceParsedTextSubmissionLlmOutput
         if (
@@ -358,6 +381,7 @@ def _evidence_model_invocation(
             and current_event.message_type == "PARTY_EVIDENCE_REFERENCE"
             and bool(current_event.attachment_refs)
             and bool(assembled.raw_envelope.evidence_content_authorities)
+            and bool(authority_catalog)
         )
         else EvidenceTurnLlmOutput
     )
@@ -371,6 +395,10 @@ def _evidence_model_invocation(
     }
     if loaded_assets is not None:
         invocation["evidence_assets"] = loaded_assets
+    if is_submission:
+        invocation["submission_observation_authority_catalog"] = (
+            submission_observation_catalog_prompt_payload(authority_catalog)
+        )
     return invocation
 
 
@@ -404,6 +432,17 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
     )
     envelope = state["assembled_context"].raw_envelope
     current_event = envelope.current_event
+    authority_catalog = ()
+    if current_event.attachment_refs:
+        authority_catalog = build_submission_observation_catalog(
+            evidence_content_authorities=envelope.evidence_content_authorities,
+            visible_evidence=envelope.visible_evidence,
+            attachment_refs=current_event.attachment_refs,
+            allowed_fact_targets=request.allowed_fact_targets,
+            case_id=envelope.case_snapshot.case_id,
+            actor_id=envelope.actor_snapshot.actor_id,
+            actor_role=envelope.actor_snapshot.actor_role,
+        )
     if request.turn_source == "ROOM_OPENING":
         if output.public_observations:
             raise EvidencePublicObservationAuthorityError(
@@ -420,6 +459,7 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
             case_id=envelope.case_snapshot.case_id,
             actor_id=envelope.actor_snapshot.actor_id,
             actor_role=envelope.actor_snapshot.actor_role,
+            authority_catalog=authority_catalog,
         )
     else:
         if output.public_observations:
