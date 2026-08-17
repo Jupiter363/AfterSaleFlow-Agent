@@ -29,6 +29,7 @@ from app.agents.dispute_intake_officer.case_fact_matrix import (
 from app.agents.dispute_intake_officer.schemas import (
     IntakeCaseDetailLlmOutput,
     IntakeFreshFormOpeningLlmOutput,
+    IntakeRemarkAcknowledgementLlmOutput,
     IntakeRespondentOpeningLlmOutput,
     IntakeRespondentSubstantiveLlmOutput,
     intake_case_detail_output_type,
@@ -7325,7 +7326,7 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     bindings,
     version_pins,
 ) -> None:
-    case_id = "CASE_MODEL_RESPONDENT_AUTHORITY"
+    case_id = bindings["private"]["case_id"]
     message_id = "MESSAGE_USER_MODEL_RESPONDENT_CURRENT"
     exact_user_text = (
         "用户侧说明：我本人和同住人员均未签收，也未授权他人代收；"
@@ -7820,6 +7821,236 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         projected_provider_output,
         ensure_ascii=False,
     )
+
+    remark_text = "无其他备注。"
+    remark_message_id = "MESSAGE_USER_NO_EXTRA_REMARK_CURRENT"
+    remark_event_hash = "8" * 64
+    remark_room_utterance = (
+        "已确认您无其他补充备注。当前案情信息已整理完毕，将提交至下一环节进行核验处理。"
+        "感谢您的配合。"
+    )
+    handoff_state = _state_with_matrix_roles(
+        bindings,
+        version_pins,
+        actor="USER",
+        initiator="MERCHANT",
+    )
+    handoff_state["bindings"]["command"].update(
+        command_id="COMMAND_USER_NO_EXTRA_REMARK_3",
+        logical_run_id="RUN_USER_NO_EXTRA_REMARK_3",
+        attempt_id="ATTEMPT_USER_NO_EXTRA_REMARK_3_1",
+    )
+    handoff_state.update(
+        {
+            "dossier_draft": copy.deepcopy(first_detail),
+            "baseline_previous_case_detail": copy.deepcopy(first_detail),
+            "memory_summary": json.dumps(
+                {
+                    "authorized_initial_case_facts": (
+                        initiator_request.initial_case_facts.model_dump(
+                            mode="json",
+                            exclude_none=True,
+                        )
+                    ),
+                    "initiator_statement_transcript": [],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "messages": {
+                remark_message_id: {
+                    "message_id": remark_message_id,
+                    "role": "HUMAN",
+                    "audience": "USER",
+                    "content": remark_text,
+                    "sequence": 3,
+                    "source_hash": remark_event_hash,
+                }
+            },
+            "last_event_hash": remark_event_hash,
+            "last_event_ref": "EVENT_USER_NO_EXTRA_REMARK_3",
+            "route": "message",
+        }
+    )
+    handoff_context = _agent_context(
+        role="USER",
+        case_id=case_id,
+        invocation_id="ATTEMPT_USER_NO_EXTRA_REMARK_3_1",
+    )
+    handoff_request = build_intake_baseline_request(
+        handoff_state,
+        agent_context=handoff_context,
+    )
+    handoff_output_type = intake_case_detail_output_type(handoff_request)
+    assert handoff_output_type is IntakeRemarkAcknowledgementLlmOutput
+    handoff_provider_output = handoff_output_type.model_validate(
+        {
+            "conversation_action": "ACK_NO_REMARK",
+            "room_utterance": remark_room_utterance,
+            "confidence": 0.91,
+        }
+    )
+    materialized_handoff_output = materialize_intake_case_detail_output(
+        handoff_request,
+        handoff_provider_output,
+    )
+    assert materialized_handoff_output.case_detail == {}
+    assert materialized_handoff_output.case_matrix_delta is None
+    adapted_handoff = adapt_intake_baseline_output(
+        handoff_state,
+        agent_context=handoff_context,
+        output=materialized_handoff_output,
+    )
+    assert adapted_handoff.matrix_patch is None
+    assert adapted_handoff.dossier_patch.respondent_attitude == expected_attitude
+    handoff_generation = {
+        "state": handoff_state,
+        "generation": {
+            "message": AIMessage(content="{}"),
+            "draft": handoff_provider_output,
+        },
+    }
+    handoff_state_before = copy.deepcopy(handoff_state)
+    handoff_provider_before = handoff_provider_output.model_dump(mode="json")
+    handoff_parts = _generation_parts_with_baseline_context(
+        handoff_generation,
+        agent_context=handoff_context,
+    )
+    handoff_replay_parts = _generation_parts_with_baseline_context(
+        handoff_generation,
+        agent_context=handoff_context,
+    )
+    normalized_handoff = handoff_parts[2]
+    frozen_handoff_matrix = handoff_parts[3]
+    materialized_handoff_dossier = handoff_parts[4]
+    assert normalized_handoff.conversation_action == "ACK_NO_REMARK"
+    assert normalized_handoff.room_utterance == remark_room_utterance
+    assert normalized_handoff.matrix_patch is None
+    assert normalized_handoff.dossier_patch.respondent_attitude is None
+    assert frozen_handoff_matrix == first_detail["case_fact_matrix"]
+    assert frozen_handoff_matrix["content_hash"] == first_detail[
+        "case_fact_matrix"
+    ]["content_hash"]
+    assert materialized_handoff_dossier["respondent_attitude"] == expected_attitude
+    user_handoff = materialized_handoff_dossier["handoff_remark_partition"][
+        "parties"
+    ]["USER"]
+    assert user_handoff == {
+        "party_role": "USER",
+        "remark_status": "NO_EXTRA_REMARKS",
+        "source": {
+            "source_kind": "ROOM_MESSAGE",
+            "message_id": remark_message_id,
+            "message_hash": handoff_remark_message_hash(
+                party_role="USER",
+                message_id=remark_message_id,
+                text=remark_text,
+            ),
+        },
+        "latest_remark": "",
+        "remarks": [],
+    }
+    assert materialized_handoff_dossier["handoff_remark_partition"]["parties"][
+        "MERCHANT"
+    ] == first_detail["handoff_remark_partition"]["parties"]["MERCHANT"]
+    for index in (2, 3, 4, 5):
+        first_part = handoff_parts[index]
+        replay_part = handoff_replay_parts[index]
+        first_payload = (
+            first_part.model_dump(mode="json")
+            if hasattr(first_part, "model_dump")
+            else first_part
+        )
+        replay_payload = (
+            replay_part.model_dump(mode="json")
+            if hasattr(replay_part, "model_dump")
+            else replay_part
+        )
+        assert replay_payload == first_payload
+        assert canonical_sha256(replay_payload) == canonical_sha256(first_payload)
+    assert handoff_state == handoff_state_before
+    assert handoff_provider_output.model_dump(mode="json") == handoff_provider_before
+
+    tampered_handoff_payload = adapted_handoff.model_dump(mode="json")
+    tampered_handoff_payload["dossier_patch"]["respondent_attitude"][
+        "position"
+    ] = "被篡改的继承态度。"
+    tampered_handoff = IntakeCognitionDraft.model_validate(tampered_handoff_payload)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID",
+    ):
+        _normalize_model_respondent_attitude(
+            handoff_state,
+            tampered_handoff,
+            handoff_request=handoff_request,
+        )
+
+    missing_prior_state = copy.deepcopy(handoff_state)
+    missing_prior_state["dossier_draft"].pop("respondent_attitude")
+    missing_prior_state["baseline_previous_case_detail"].pop(
+        "respondent_attitude"
+    )
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID",
+    ):
+        _normalize_model_respondent_attitude(
+            missing_prior_state,
+            adapted_handoff,
+            handoff_request=handoff_request,
+        )
+
+    invalid_matrix_request_payload = handoff_request.model_dump(mode="json")
+    invalid_matrix_request_payload["previous_case_detail"]["case_fact_matrix"][
+        "case_overview"
+    ]["neutral_summary"] += "篡改"
+    invalid_matrix_request = IntakeTurnRequest.model_validate(
+        invalid_matrix_request_payload
+    )
+    assert (
+        intake_case_detail_output_type(invalid_matrix_request)
+        is IntakeRemarkAcknowledgementLlmOutput
+    )
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID",
+    ):
+        _normalize_model_respondent_attitude(
+            handoff_state,
+            adapted_handoff,
+            handoff_request=invalid_matrix_request,
+        )
+
+    wrong_handoff_action_payload = adapted_handoff.model_dump(mode="json")
+    wrong_handoff_action_payload["conversation_action"] = "ASK_SUBSTANTIVE"
+    wrong_handoff_action = IntakeCognitionDraft.model_validate(
+        wrong_handoff_action_payload
+    )
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID",
+    ):
+        _normalize_model_respondent_attitude(
+            handoff_state,
+            wrong_handoff_action,
+            handoff_request=handoff_request,
+        )
+    with pytest.raises(ValueError):
+        IntakeRemarkAcknowledgementLlmOutput.model_validate(
+            {
+                "conversation_action": "INVITE_OPTIONAL_REMARK",
+                "room_utterance": remark_room_utterance,
+                "confidence": 0.91,
+            }
+        )
+    for field, value in (("role", "MERCHANT"), ("source", "FORM_SUBMISSION")):
+        invalid_handoff_request_payload = handoff_request.model_dump(mode="json")
+        invalid_handoff_request_payload["current_user_message"][field] = value
+        with pytest.raises(ValueError):
+            IntakeTurnRequest.model_validate(invalid_handoff_request_payload)
+
     with pytest.raises(AgentOutputSchemaError) as wrong_ready_action:
         render(
             current_request,
@@ -7869,6 +8100,19 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     assert canonical_sha256(lcel_replay.model_dump(mode="json")) == canonical_sha256(
         lcel_normalized.model_dump(mode="json")
     )
+    missing_substantive_matrix_payload = lcel_draft.model_dump(mode="json")
+    missing_substantive_matrix_payload["matrix_patch"] = None
+    missing_substantive_matrix = IntakeCognitionDraft.model_validate(
+        missing_substantive_matrix_payload
+    )
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID",
+    ):
+        _normalize_model_respondent_attitude(
+            lcel_state,
+            missing_substantive_matrix,
+        )
     both_model_detail = both_model_fields.dossier_patch["case_detail"]
     assert both_model_detail["respondent_attitude"] == expected_attitude
     assert both_model_detail["case_fact_matrix"]["claims"][

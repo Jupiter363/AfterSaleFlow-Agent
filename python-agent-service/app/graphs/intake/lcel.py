@@ -24,6 +24,7 @@ from typing_extensions import TypedDict
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.agents.dispute_intake_officer.case_fact_matrix import (
+    case_fact_matrix_content_hash,
     finalize_case_fact_matrix,
     respondent_opening_carry_delta,
 )
@@ -85,7 +86,10 @@ from app.model_runtime.profiles import (
     system_prompt_sha256,
 )
 from app.model_runtime.transports import ModelTransport
-from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2 as FormalCaseFactMatrixDeltaV2
+from app.schemas.case_fact_matrix import (
+    CaseFactMatrixDeltaV2 as FormalCaseFactMatrixDeltaV2,
+    CaseFactMatrixV2 as FormalCaseFactMatrixV2,
+)
 from app.schemas.final_agents import IntakeTurnRequest
 from app.schemas.intake_case_matrix import (
     UnilateralCaseMatrixDraftV1 as FormalUnilateralCaseMatrixDraftV1,
@@ -2322,6 +2326,7 @@ def _adapt_and_normalize_generation_parts(
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     typed_state = cast(IntakeGraphStateV2, state)
     fresh_form_request: IntakeTurnRequest | None = None
+    handoff_request: IntakeTurnRequest | None = None
     if typed_state.get("route") == "respondent_opening":
         if not isinstance(draft, IntakeRespondentOpeningLlmOutput):
             raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
@@ -2359,6 +2364,7 @@ def _adapt_and_normalize_generation_parts(
             raise IntakeGraphContractError(
                 "INTAKE_REMARK_ACKNOWLEDGEMENT_AUTHORITY_INVALID"
             ) from error
+        handoff_request = request
     if not isinstance(draft, IntakeCaseDetailLlmOutput):
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     try:
@@ -2374,6 +2380,7 @@ def _adapt_and_normalize_generation_parts(
         typed_state,
         normalized,
         fresh_form_request=fresh_form_request,
+        handoff_request=handoff_request,
     )
     return (
         typed_state,
@@ -2549,6 +2556,7 @@ def _normalize_model_respondent_attitude(
     draft: IntakeCognitionDraft,
     *,
     fresh_form_request: IntakeTurnRequest | None = None,
+    handoff_request: IntakeTurnRequest | None = None,
 ) -> IntakeCognitionDraft:
     """Keep respondent silence out of the unilateral claim projection.
 
@@ -2562,6 +2570,12 @@ def _normalize_model_respondent_attitude(
     """
 
     attitude = draft.dossier_patch.respondent_attitude
+    if handoff_request is not None:
+        return _require_exact_handoff_inherited_respondent_attitude(
+            state,
+            draft,
+            request=handoff_request,
+        )
     if attitude is None:
         return draft
     if fresh_form_request is not None:
@@ -2603,6 +2617,92 @@ def _normalize_model_respondent_attitude(
             current_message_id=grounded.current_message_id,
         )
     return _pin_model_respondent_attitude_position(draft, grounded.position)
+
+
+def _require_exact_handoff_inherited_respondent_attitude(
+    state: IntakeGraphStateV2,
+    draft: IntakeCognitionDraft,
+    *,
+    request: IntakeTurnRequest,
+) -> IntakeCognitionDraft:
+    """Carry only the exact frozen attitude; never ground it to remark text."""
+
+    if (
+        intake_case_detail_output_type(request)
+        is not IntakeRemarkAcknowledgementLlmOutput
+        or draft.conversation_action not in {"ACK_REMARK", "ACK_NO_REMARK"}
+        or draft.matrix_patch is not None
+    ):
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+        )
+
+    attitude = draft.dossier_patch.respondent_attitude
+    prior = _prior_authoritative_respondent_attitude(state)
+    if attitude is None and prior is None:
+        return draft
+    if (
+        not isinstance(attitude, Mapping)
+        or prior is None
+        or not _validate_prior_respondent_attitude_authority(state, prior)
+        or canonicalize(attitude) != canonicalize(prior)
+    ):
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+        )
+
+    previous = request.previous_case_detail
+    request_prior = (
+        previous.get("respondent_attitude")
+        if isinstance(previous, Mapping)
+        else None
+    )
+    matrix_payload = (
+        previous.get("case_fact_matrix")
+        if isinstance(previous, Mapping)
+        else None
+    )
+    if (
+        not isinstance(request_prior, Mapping)
+        or canonicalize(request_prior) != canonicalize(prior)
+        or not isinstance(matrix_payload, Mapping)
+    ):
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+        )
+    raw_matrix = deepcopy(dict(matrix_payload))
+    try:
+        matrix = FormalCaseFactMatrixV2.model_validate(raw_matrix)
+    except ValueError as error:
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+        ) from error
+    if matrix.content_hash != case_fact_matrix_content_hash(raw_matrix):
+        raise IntakeGraphContractError(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+        )
+
+    if prior.get("source") == DIRECT_RESPONDENT_SOURCE:
+        direct = matrix.claims.respondent_direct
+        grounding = prior.get("grounding")
+        message_id = (
+            grounding.get("message_id")
+            if isinstance(grounding, Mapping)
+            else None
+        )
+        if (
+            direct is None
+            or direct.respondent_role != prior.get("respondent_role")
+            or direct.attitude != prior.get("attitude")
+            or direct.position_summary != prior.get("position")
+            or direct.alternative_proposal != prior.get("alternative_proposal")
+            or not isinstance(message_id, str)
+            or message_id not in direct.source_refs
+        ):
+            raise IntakeGraphContractError(
+                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
+            )
+    return _without_respondent_attitude_patch(draft)
 
 
 def _require_deterministic_initial_form_respondent_attitude(
