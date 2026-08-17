@@ -11,6 +11,10 @@ limit.versionCompatibleSetLimitPerQueue:
   - value: 100
     constraints: {}
 
+limit.versionBuildIdLimitPerQueue:
+  - value: 200
+    constraints: {}
+
 system.forceSearchAttributesCacheRefreshOnRead:
   - value: true
     constraints: {}
