@@ -83,6 +83,10 @@ _DIRECT_ATTITUDE_REMEDY_ACTION_ZH = re.compile(
     r"延长保修|更换|换货|退款|退货|维修|补偿|赔偿|退还|延保|补发|重发"
 )
 _DIRECT_ATTITUDE_INVESTIGATION_ACTION_ZH = re.compile(r"送检|检测|核查|调查|核验|验证|排查|查验")
+_DIRECT_ATTITUDE_PROCESS_COOPERATION_ACTION_ZH = re.compile(
+    r"提交|提供|补充|出示|上传|配合|协助|说明|回答|"
+    rf"{_DIRECT_ATTITUDE_INVESTIGATION_ACTION_ZH.pattern}"
+)
 _DIRECT_ATTITUDE_INVESTIGATION_AGREEMENT_ZH = re.compile(
     rf"(?:同意|接受|愿意|支持).{{0,12}}"
     rf"(?:{_DIRECT_ATTITUDE_INVESTIGATION_ACTION_ZH.pattern})"
@@ -3189,6 +3193,15 @@ def _direct_attitude_has_investigation_agreement_zh(clause: str) -> bool:
     return False
 
 
+def _direct_attitude_has_process_cooperation_zh(clause: str) -> bool:
+    """Recognize cooperation with verification, not agreement to a remedy."""
+
+    return (
+        _DIRECT_ATTITUDE_PROCESS_COOPERATION_ACTION_ZH.search(clause) is not None
+        and _DIRECT_ATTITUDE_REMEDY_ACTION_ZH.search(clause) is None
+    )
+
+
 def _direct_attitude_action_scoped_alternative(
     *,
     authenticated_current_message: bool,
@@ -3362,6 +3375,7 @@ def detect_direct_respondent_attitude(
     refused_remedy_scopes: set[str] = set()
     conditional_remedy_scopes: set[str] = set()
     investigation_agreement_seen = False
+    process_cooperation_codes: set[str] = set()
     authenticated_current_message = (
         source_authority == RESPONDENT_AUTHORED_CURRENT_MESSAGE
     )
@@ -3445,9 +3459,16 @@ def detect_direct_respondent_attitude(
                     code == "AGREE"
                     and _direct_attitude_has_investigation_agreement_zh(clause)
                 )
+                process_cooperation = (
+                    code in {"AGREE", "PARTIALLY_AGREE", "DISAGREE"}
+                    and _direct_attitude_has_process_cooperation_zh(scoped_clause)
+                )
                 if investigation_agreement:
                     investigation_agreement_seen = True
-                if investigation_agreement and not remedy_scopes:
+                if (
+                    investigation_agreement or process_cooperation
+                ) and not remedy_scopes:
+                    process_cooperation_codes.add(code)
                     continue
                 resolved.append(code)
                 if code == "AGREE" and _DIRECT_ATTITUDE_CONDITIONAL_SCOPE_ZH.search(
@@ -3488,6 +3509,8 @@ def detect_direct_respondent_attitude(
             elif code != "NONE":
                 resolved.append(code)
     codes = set(resolved)
+    if len(process_cooperation_codes) > 1:
+        unresolved_signal = True
     authenticated_party_scope = (
         authenticated_current_message
         and str(respondent_role or "").upper() in _DIRECT_ATTITUDE_ROLE_SELF_ZH

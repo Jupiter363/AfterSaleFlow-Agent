@@ -7577,6 +7577,7 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         *,
         attitude: str = "DISAGREE",
         position: str = claim_position,
+        alternative_proposal: str | None = None,
         include_claim: bool = True,
         current_source: bool = True,
     ) -> CaseFactMatrixDeltaV2:
@@ -7608,6 +7609,10 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
                 "attitude": attitude,
                 "position_summary": position,
             }
+            if alternative_proposal is not None:
+                document["respondent_claim"]["alternative_proposal"] = (
+                    alternative_proposal
+                )
         return CaseFactMatrixDeltaV2.model_validate(document)
 
     llm_case_detail = copy.deepcopy(initiator_detail)
@@ -7665,6 +7670,88 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
             llm_case_matrix_delta=delta,
         )
 
+    # The aborted UAT retained no typed terminal payload.  This is therefore a
+    # controlled, schema-valid fixture, not a reconstruction of provider output:
+    # it retains the exact current USER text while asserting only the governed
+    # typed respondent claim required by the live wire contract.
+    exact_uat_remedy_text = (
+        "我现在明确要求平台核验并履行该客服承诺，将20元原路退回。"
+        "如需核验，我愿意提交原件。"
+    )
+    semantic_position = "当前用户要求平台核验并履行既有退款承诺，将20元原路退回。"
+    semantic_alternative = "平台核验后履行既有客服退款承诺，将20元原路退回。"
+    semantic_detail = copy.deepcopy(llm_case_detail)
+    semantic_detail["respondent_attitude"] = {
+        "respondent_role": "USER",
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position": "模型展示字段不得替代当前 matrix 立场。",
+        "alternative_proposal": "模型展示字段不得替代当前 matrix 方案。",
+    }
+    semantic_request = request_for(exact_uat_remedy_text)
+    semantic_first = render(
+        semantic_request,
+        delta_for(
+            attitude="ALTERNATIVE_PROPOSED",
+            position=semantic_position,
+            alternative_proposal=semantic_alternative,
+        ),
+        detail=semantic_detail,
+    )
+    semantic_replay = render(
+        semantic_request,
+        delta_for(
+            attitude="ALTERNATIVE_PROPOSED",
+            position=semantic_position,
+            alternative_proposal=semantic_alternative,
+        ),
+        detail=semantic_detail,
+    )
+    semantic_attitude = semantic_first.dossier_patch["case_detail"]["respondent_attitude"]
+    assert semantic_attitude == {
+        "respondent_role": "USER",
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position": semantic_position,
+        "source": "被发起方接待室直接陈述",
+        "confidence": 0.65,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": message_id,
+        },
+        "alternative_proposal": semantic_alternative,
+    }
+    assert "模型展示字段不得替代当前 matrix" not in json.dumps(
+        semantic_first.dossier_patch,
+        ensure_ascii=False,
+    )
+    assert semantic_replay.dossier_patch == semantic_first.dossier_patch
+    assert canonical_sha256(semantic_replay.dossier_patch) == canonical_sha256(
+        semantic_first.dossier_patch
+    )
+    assert (
+        detect_direct_respondent_attitude(
+            exact_uat_remedy_text,
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role="USER",
+        ).state
+        == "NONE"
+    )
+    assert (
+        detect_direct_respondent_attitude(
+            "如需核验，我愿意提交原件。",
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role="USER",
+        ).state
+        == "NONE"
+    )
+    assert (
+        detect_direct_respondent_attitude(
+            "我不同意提供交易记录。",
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role="USER",
+        ).state
+        == "NONE"
+    )
+
     previous_detail_before = copy.deepcopy(previous_detail)
     current_request = request_for(exact_user_text)
     respondent_output_type = intake_case_detail_output_type(current_request)
@@ -7680,6 +7767,57 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         matrix_ref.rsplit("/", 1)[-1]
     ]
     assert "respondent_claim" in matrix_definition["required"]
+    semantic_provider_payload = {
+        "conversation_action": "INVITE_OPTIONAL_REMARK",
+        "room_utterance": runtime_room_utterance,
+        "case_detail": semantic_detail,
+        "case_matrix_delta": delta_for(
+            attitude="ALTERNATIVE_PROPOSED",
+            position=semantic_position,
+            alternative_proposal=semantic_alternative,
+        ).model_dump(mode="json"),
+        "admission_recommendation": "ACCEPTED",
+        "confidence": 0.86,
+    }
+    semantic_parser_transport = IntakeTransport()
+    semantic_parser_policy = _policy().model_copy(
+        update={
+            "invocation_id": user_context.agent_invocation_id,
+            "trusted_system_sha256": system_prompt_sha256(
+                _trusted_system_prompt(user_context)
+            ),
+        }
+    )
+    semantic_parser_node = build_intake_model_node(
+        transport=semantic_parser_transport,
+        profile=_profile(),
+        policy=semantic_parser_policy,
+        agent_context=user_context,
+    )
+    assert semantic_parser_node.respondent_substantive_parser.pydantic_object is (
+        respondent_output_type
+    )
+    semantic_provider_json = json.dumps(
+        semantic_provider_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    semantic_provider_message = AIMessage(content=semantic_provider_json)
+    semantic_provider_output = (
+        semantic_parser_node.respondent_substantive_parser.invoke(
+            semantic_provider_message
+        )
+    )
+    assert semantic_parser_transport.generate_calls == 0
+    assert semantic_provider_output.case_matrix_delta.respondent_claim is not None
+    assert semantic_provider_output.case_matrix_delta.respondent_claim.attitude == (
+        "ALTERNATIVE_PROPOSED"
+    )
+    assert (
+        semantic_provider_output.case_matrix_delta.respondent_claim.alternative_proposal
+        == semantic_alternative
+    )
     canonical_provider_detail = copy.deepcopy(llm_case_detail)
     canonical_provider_detail["respondent_attitude"] = {
         "respondent_role": "USER",
@@ -8100,6 +8238,85 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     assert canonical_sha256(lcel_replay.model_dump(mode="json")) == canonical_sha256(
         lcel_normalized.model_dump(mode="json")
     )
+    # Exercise the exact UAT payload through the live phase-specific parser,
+    # its identity materializer, and the production LCEL adapter/normalizer.
+    # This deliberately does not hand-build an IntakeCognitionDraft.
+    assert initiator_request.initial_case_facts is not None
+    semantic_event_hash = "a" * 64
+    semantic_pipeline_state = copy.deepcopy(lcel_state)
+    semantic_pipeline_state.update(
+        {
+            "dossier_draft": copy.deepcopy(previous_detail),
+            "baseline_previous_case_detail": copy.deepcopy(previous_detail),
+            "memory_summary": json.dumps(
+                {
+                    "authorized_initial_case_facts": (
+                        initiator_request.initial_case_facts.model_dump(
+                            mode="json",
+                            exclude_none=True,
+                        )
+                    ),
+                    "initiator_statement_transcript": [],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "last_event_hash": semantic_event_hash,
+            "last_event_ref": "EVENT_UAT_CURRENT_RESPONDENT",
+            "route": "message",
+        }
+    )
+    semantic_pipeline_state["messages"] = {
+        message_id: {
+            "message_id": message_id,
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": exact_uat_remedy_text,
+            "sequence": 2,
+            "source_hash": semantic_event_hash,
+        }
+    }
+    semantic_pipeline_request = build_intake_baseline_request(
+        semantic_pipeline_state,
+        agent_context=user_context,
+    )
+    assert semantic_pipeline_request.current_user_message is not None
+    assert semantic_pipeline_request.current_user_message.text == exact_uat_remedy_text
+    semantic_pipeline_output_type = intake_case_detail_output_type(
+        semantic_pipeline_request
+    )
+    assert semantic_pipeline_output_type is respondent_output_type
+    assert semantic_pipeline_output_type is (
+        semantic_parser_node.respondent_substantive_parser.pydantic_object
+    )
+    semantic_pipeline_materialized = materialize_intake_case_detail_output(
+        semantic_pipeline_request,
+        semantic_provider_output,
+    )
+    assert semantic_pipeline_materialized is semantic_provider_output
+    semantic_pipeline_generation = {
+        "state": semantic_pipeline_state,
+        "generation": {
+            "message": semantic_provider_message,
+            "draft": semantic_pipeline_materialized,
+        },
+    }
+    _, _, semantic_pipeline_normalized = _production_generation_parts(
+        semantic_pipeline_generation,
+        agent_context=user_context,
+    )
+    _, _, semantic_pipeline_replay = _production_generation_parts(
+        semantic_pipeline_generation,
+        agent_context=user_context,
+    )
+    assert semantic_pipeline_normalized.dossier_patch.respondent_attitude == (
+        semantic_attitude
+    )
+    assert semantic_pipeline_replay == semantic_pipeline_normalized
+    assert canonical_sha256(
+        semantic_pipeline_replay.model_dump(mode="json")
+    ) == canonical_sha256(semantic_pipeline_normalized.model_dump(mode="json"))
     missing_substantive_matrix_payload = lcel_draft.model_dump(mode="json")
     missing_substantive_matrix_payload["matrix_patch"] = None
     missing_substantive_matrix = IntakeCognitionDraft.model_validate(
@@ -8302,9 +8519,23 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         ).state
         == "UNRESOLVED"
     )
+    contradictory_cooperation = "我同意提供交易记录，同时我不同意提供交易记录。"
+    assert (
+        detect_direct_respondent_attitude(
+            contradictory_cooperation,
+            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+            respondent_role="USER",
+        ).state
+        == "UNRESOLVED"
+    )
     with pytest.raises(AgentOutputSchemaError) as unresolved_error:
         render(request_for(contradictory), delta_for())
     assert unresolved_error.value.safe_code == (
+        "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+    with pytest.raises(AgentOutputSchemaError) as contradictory_cooperation_error:
+        render(request_for(contradictory_cooperation), delta_for())
+    assert contradictory_cooperation_error.value.safe_code == (
         "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
     )
 
