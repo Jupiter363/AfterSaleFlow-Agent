@@ -7360,7 +7360,7 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
                 "after_sales_reference": "AS_MODEL_AUTHORITY_1",
                 "logistics_reference": "SF1001001001",
                 "initiator_role": "MERCHANT",
-                "requested_outcome_hint": "REFUND",
+                "requested_outcome_hint": "VERIFY_OR_EXPLAIN_ONLY",
             },
             "agent_context": initiator_context,
         }
@@ -7382,8 +7382,8 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         },
         "claim_resolution": {
             "initiator_role": "MERCHANT",
-            "requested_resolution": "REFUND",
-            "normalized_statement": "商家请求平台处理退款争议。",
+            "requested_resolution": "VERIFY_OR_EXPLAIN_ONLY",
+            "normalized_statement": "商家请求平台核验并说明订单履约情况。",
             "request_reason": "双方对签收和退款状态存在争议。",
         },
         "dispute_core_state": {
@@ -7417,6 +7417,114 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         case_detail=initiator_detail,
         delta=initiator_delta,
     ).model_dump(mode="json")
+    score_components = {
+        "references": 0,
+        "event_story": 0,
+        "party_positions": 0,
+        "requested_resolution": 0,
+        "risk_and_conflicts": 0,
+        "next_action_clarity": 0,
+    }
+    user_not_ready = {
+        "intake_quality": {
+            "score": 0,
+            "threshold": 85,
+            "ready_for_next_step": False,
+            "score_breakdown": copy.deepcopy(score_components),
+            "improvement_reason": "仍缺少当前参与方的直接说明和处理诉求。",
+        },
+        "missing_information": {
+            "blocking_gaps": [
+                "当前参与方对案情的直接说明",
+                "明确的处理诉求",
+            ],
+            "nice_to_have_gaps": [],
+            "next_questions": ["请说明案情并明确希望如何处理？"],
+        },
+        "handoff_notes": {
+            "remark_status": "NOT_READY",
+            "phase_source_message_id": "MESSAGE_USER_PRIOR_INCOMPLETE",
+            "latest_remark": "",
+            "remarks": [],
+            "instruction": "当前参与方案情达到阈值后，接待官会询问交接备注。",
+        },
+        "admission": {
+            "recommendation": "NEED_MORE_INFO",
+            "reasoning": "",
+            "confidence": 0.0,
+        },
+    }
+    merchant_confirmed = {
+        "intake_quality": {
+            "score": 100,
+            "threshold": 85,
+            "ready_for_next_step": True,
+            "score_breakdown": {
+                "references": 15,
+                "event_story": 20,
+                "party_positions": 20,
+                "requested_resolution": 15,
+                "risk_and_conflicts": 15,
+                "next_action_clarity": 15,
+            },
+            "improvement_reason": "信息完整度已达到提交阈值。",
+        },
+        "missing_information": {
+            "blocking_gaps": [],
+            "nice_to_have_gaps": [],
+            "next_questions": [],
+        },
+        "handoff_notes": {
+            "remark_status": "NO_EXTRA_REMARKS",
+            "phase_source_message_id": "MESSAGE_MERCHANT_CONFIRMED",
+            "latest_remark": "无额外备注。",
+            "remarks": [],
+            "instruction": "案情已达阈值，可确认交接。",
+        },
+        "admission": {
+            "recommendation": "ACCEPTED",
+            "reasoning": "",
+            "confidence": 0.9,
+        },
+    }
+    previous_detail["party_intake_state"] = {
+        "schema_version": "party-intake-state.v1",
+        "USER": copy.deepcopy(user_not_ready),
+        "MERCHANT": copy.deepcopy(merchant_confirmed),
+    }
+    for branch in (
+        "intake_quality",
+        "missing_information",
+        "handoff_notes",
+        "admission",
+    ):
+        previous_detail[branch] = copy.deepcopy(user_not_ready[branch])
+    previous_matrix = previous_detail["case_fact_matrix"]
+    previous_detail["handoff_remark_partition"] = {
+        "schema_version": "handoff_remark_partition.v1",
+        "case_fact_matrix_id": previous_matrix["matrix_id"],
+        "case_fact_matrix_version": previous_matrix["matrix_version"],
+        "case_fact_matrix_hash": previous_matrix["content_hash"],
+        "parties": {
+            "USER": {
+                "party_role": "USER",
+                "remark_status": "NOT_READY",
+                "latest_remark": "",
+                "remarks": [],
+            },
+            "MERCHANT": {
+                "party_role": "MERCHANT",
+                "remark_status": "NO_EXTRA_REMARKS",
+                "source": {
+                    "source_kind": "FORMAL_CONFIRMATION",
+                    "command_id": "COMMAND_MERCHANT_FORMAL_CONFIRM",
+                    "request_hash": "9" * 64,
+                },
+                "latest_remark": "",
+                "remarks": [],
+            },
+        },
+    }
     previous_fact = previous_detail["case_fact_matrix"]["fact_rows"][0]
 
     user_context = _agent_context(
@@ -7455,6 +7563,13 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
 
     claim_position = (
         "用户不接受商家现有处理说明，并要求核验退款与物流签收记录。"
+    )
+    runtime_room_utterance = (
+        "已收到您的说明。您明确表示本人及同住人员均未签收且未授权代收，"
+        "物流页面缺乏详细签收凭证；同时指出2026年8月13日平台客服曾承诺退款20元"
+        "但至今未到账，目前坚持要求退还该笔款项并核验相关记录。"
+        "当前案情信息已完整，可以提交至下一环节处理。"
+        "请问您是否有其他需要补充的交接备注？如果没有，可以直接确认提交。"
     )
 
     def delta_for(
@@ -7510,11 +7625,6 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         "facts_in_dispute": ["签收状态", "退款状态"],
         "next_verification_focus": ["客服原始会话", "物流签收记录"],
     }
-    llm_case_detail["missing_information"] = {
-        "blocking_gaps": [],
-        "nice_to_have_gaps": [],
-        "next_questions": [],
-    }
     uat_model_output = IntakeCaseDetailLlmOutput.model_validate(
         {
             "conversation_action": "INVITE_OPTIONAL_REMARK",
@@ -7538,14 +7648,12 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         delta: CaseFactMatrixDeltaV2,
         *,
         detail: dict[str, Any] | None = None,
+        conversation_action: str = "INVITE_OPTIONAL_REMARK",
     ):
         return CaseDetailDossierSkill().render(
             request=request,
-            conversation_action="INVITE_OPTIONAL_REMARK",
-            room_utterance=(
-                "当前信息已达到提交条件。您可以直接提交确认；"
-                "如有备注可选择补充，没有备注也可以直接确认提交。"
-            ),
+            conversation_action=conversation_action,
+            room_utterance=runtime_room_utterance,
             llm_case_detail=copy.deepcopy(detail or llm_case_detail),
             llm_dossier_patch=None,
             llm_scroll_snapshot=None,
@@ -7556,6 +7664,7 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
             llm_case_matrix_delta=delta,
         )
 
+    previous_detail_before = copy.deepcopy(previous_detail)
     current_request = request_for(exact_user_text)
     respondent_output_type = intake_case_detail_output_type(current_request)
     assert respondent_output_type.__name__ == (
@@ -7581,10 +7690,7 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     }
     provider_payload = {
         "conversation_action": "INVITE_OPTIONAL_REMARK",
-        "room_utterance": (
-            "当前信息已达到提交条件。您可以直接提交确认；"
-            "如有备注可选择补充，没有备注也可以直接确认提交。"
-        ),
+        "room_utterance": runtime_room_utterance,
         "case_detail": canonical_provider_detail,
         "case_matrix_delta": delta_for().model_dump(mode="json"),
         "admission_recommendation": "ACCEPTED",
@@ -7654,6 +7760,7 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     first_detail = first.dossier_patch["case_detail"]
     assert first_detail["respondent_attitude"] == expected_attitude
     assert first_detail["missing_information"]["blocking_gaps"] == []
+    assert first_detail["missing_information"]["next_questions"] == []
     assert first_detail["intake_quality"]["ready_for_next_step"] is True
     assert first_detail["party_intake_state"]["USER"][
         "intake_quality"
@@ -7661,7 +7768,12 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     assert first_detail["handoff_notes"]["remark_status"] == (
         "WAITING_FOR_REMARK"
     )
+    assert first_detail["party_intake_state"]["MERCHANT"] == merchant_confirmed
+    assert first_detail["handoff_remark_partition"]["parties"]["MERCHANT"] == (
+        previous_detail["handoff_remark_partition"]["parties"]["MERCHANT"]
+    )
     assert first.admission_recommendation == "ACCEPTED"
+    assert first.dossier_patch["room_utterance_source"] == runtime_room_utterance
     direct_claim = first_detail["case_fact_matrix"]["claims"][
         "respondent_direct"
     ]
@@ -7698,6 +7810,8 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     assert canonical_sha256(projected_provider_replay) == canonical_sha256(
         projected_provider_output
     )
+    assert projected_provider_output["room_utterance"] == runtime_room_utterance
+    assert previous_detail == previous_detail_before
     projected_matrix = projected_provider_output["scroll_snapshot"][
         "case_fact_matrix"
     ]
@@ -7705,6 +7819,15 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     assert "MODEL_NONCANONICAL" not in json.dumps(
         projected_provider_output,
         ensure_ascii=False,
+    )
+    with pytest.raises(AgentOutputSchemaError) as wrong_ready_action:
+        render(
+            current_request,
+            delta_for(),
+            conversation_action="ASK_SUBSTANTIVE",
+        )
+    assert wrong_ready_action.value.safe_code == (
+        "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT"
     )
 
     lcel_state = _state_with_matrix_roles(
@@ -8045,6 +8168,22 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         case_id=case_id,
         invocation_id="ATTEMPT_MODEL_RESPONDENT_INITIATOR_2",
     )
+    refund_request_payload = initiator_request.model_dump(mode="json")
+    refund_request_payload["initial_case_facts"]["requested_outcome_hint"] = "REFUND"
+    refund_initiator_request = IntakeTurnRequest.model_validate(refund_request_payload)
+    refund_previous_detail = copy.deepcopy(initiator_detail)
+    refund_previous_detail["claim_resolution"].update(
+        {
+            "requested_resolution": "REFUND",
+            "normalized_statement": "商家请求平台处理退款争议。",
+        }
+    )
+    refund_previous_detail["case_fact_matrix"] = finalize_case_fact_matrix(
+        request=refund_initiator_request,
+        case_detail=refund_previous_detail,
+        delta=initiator_delta,
+    ).model_dump(mode="json")
+    refund_previous_fact = refund_previous_detail["case_fact_matrix"]["fact_rows"][0]
     adjacent_request = IntakeTurnRequest.model_validate(
         {
             "case_id": case_id,
@@ -8057,17 +8196,35 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
                 "source": "ROOM_MESSAGE",
                 "text": "商家补充说明订单履约记录仍待平台核验。",
             },
-            "previous_case_detail": copy.deepcopy(previous_detail),
+            "previous_case_detail": copy.deepcopy(refund_previous_detail),
             "agent_context": adjacent_context,
         }
     )
     assert intake_case_detail_output_type(adjacent_request) is IntakeCaseDetailLlmOutput
-    adjacent_detail = copy.deepcopy(llm_case_detail)
+    adjacent_detail = copy.deepcopy(refund_previous_detail)
+    adjacent_detail.pop("case_fact_matrix")
     adjacent_detail.pop("respondent_attitude", None)
+    adjacent_matrix = {
+        "schema_version": "case_fact_matrix.delta.v2",
+        "fact_rows": [
+            {
+                "fact_key": refund_previous_fact["fact_id"],
+                "category": refund_previous_fact["category"],
+                "fact_target": refund_previous_fact["fact_target"],
+                "materiality": refund_previous_fact["materiality"],
+                "stance": "CONFIRM",
+                "position_summary": "商家补充说明订单履约记录仍待平台核验。",
+                "asserted_value": "待平台核验",
+                "source_scope": "CURRENT_SOURCE",
+            }
+        ],
+        "summary_source_fact_keys": [refund_previous_fact["fact_id"]],
+    }
     adjacent_output = IntakeCaseDetailLlmOutput.model_validate(
         {
             **provider_payload,
             "case_detail": adjacent_detail,
+            "case_matrix_delta": adjacent_matrix,
         }
     )
     adjacent_projected = project_intake_case_detail_output(
@@ -8078,6 +8235,9 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     assert adjacent_projected["scroll_snapshot"]["case_fact_matrix"]["claims"][
         "respondent_direct"
     ] is None
+    assert adjacent_projected["scroll_snapshot"]["claim_resolution"][
+        "requested_resolution"
+    ] == "REFUND"
 
     with pytest.raises(ValueError, match="current_user_message.role"):
         request_for(exact_user_text, role="MERCHANT")

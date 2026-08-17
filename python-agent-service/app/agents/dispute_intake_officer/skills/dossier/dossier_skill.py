@@ -587,44 +587,10 @@ class CaseDetailDossierSkill:
             "logistics_reference": trusted_refs.get("logistics_reference") or "",
         }
 
-        missing_info = _ensure_dict(detail, "missing_information")
-        for field_name in ("blocking_gaps", "nice_to_have_gaps", "next_questions"):
-            values = [
-                value
-                for value in _list_values(missing_info.get(field_name))
-                if not _is_evidence_material_request(value)
-                and not _question_targets_resolved_intake_field(
-                    value,
-                    detail,
-                    actor_role=actor_role,
-                )
-            ]
-            missing_info[field_name] = values[:2] if field_name == "next_questions" else values
-        utterance_questions = _follow_up_questions_from_utterance(room_utterance)
-        if utterance_questions and not _is_evidence_material_request(room_utterance):
-            missing_info["next_questions"] = [
-                question
-                for question in utterance_questions
-                if not _question_targets_resolved_intake_field(
-                    question,
-                    detail,
-                    actor_role=actor_role,
-                )
-            ][:2]
-        llm_missing_from_detail = _list_values(missing_info.get("blocking_gaps"))
-        missing = self._hard_missing_fields(trusted_refs)
-        missing.extend(
-            field
-            for field in llm_missing_fields
-            if field not in missing and not _is_evidence_material_request(field)
-        )
-        missing.extend(field for field in llm_missing_from_detail if field not in missing)
         actor_source_records = _authoritative_intake_source_records(
             request,
             initiator_role=initiator_role,
         )
-        if not actor_source_records and "CURRENT_PARTY_STATEMENT" not in missing:
-            missing.append("CURRENT_PARTY_STATEMENT")
         claim = _quality_mapping(detail.get("claim_resolution"))
         actor_is_initiator = (
             initiator_role is not None and actor_role == initiator_role
@@ -639,6 +605,60 @@ class CaseDetailDossierSkill:
                 actor_role=actor_role,
                 initiator_role=initiator_role,
             )
+
+        missing_info = _ensure_dict(detail, "missing_information")
+        for field_name in ("blocking_gaps", "nice_to_have_gaps", "next_questions"):
+            values = [
+                value
+                for value in _list_values(missing_info.get(field_name))
+                if not _is_evidence_material_request(value)
+                and not _missing_field_is_resolved_by_current_authority(
+                    value,
+                    detail,
+                    actor_role=actor_role,
+                    actor_source_records=actor_source_records,
+                    resolution_authorized=resolution_authorized,
+                    trusted_references=trusted_refs,
+                )
+            ]
+            missing_info[field_name] = values[:2] if field_name == "next_questions" else values
+        utterance_questions = _follow_up_questions_from_utterance(room_utterance)
+        if utterance_questions and not _is_evidence_material_request(room_utterance):
+            missing_info["next_questions"] = [
+                question
+                for question in utterance_questions
+                if not _missing_field_is_resolved_by_current_authority(
+                    question,
+                    detail,
+                    actor_role=actor_role,
+                    actor_source_records=actor_source_records,
+                    resolution_authorized=resolution_authorized,
+                    trusted_references=trusted_refs,
+                )
+            ][:2]
+        llm_missing_from_detail = [
+            _canonical_missing_field_identity(field)
+            for field in _list_values(missing_info.get("blocking_gaps"))
+        ]
+        missing = self._hard_missing_fields(trusted_refs)
+        for field in llm_missing_fields:
+            canonical_field = _canonical_missing_field_identity(field)
+            if (
+                canonical_field not in missing
+                and not _is_evidence_material_request(field)
+                and not _missing_field_is_resolved_by_current_authority(
+                    field,
+                    detail,
+                    actor_role=actor_role,
+                    actor_source_records=actor_source_records,
+                    resolution_authorized=resolution_authorized,
+                    trusted_references=trusted_refs,
+                )
+            ):
+                missing.append(canonical_field)
+        missing.extend(field for field in llm_missing_from_detail if field not in missing)
+        if not actor_source_records and "CURRENT_PARTY_STATEMENT" not in missing:
+            missing.append("CURRENT_PARTY_STATEMENT")
         if not resolution_authorized and "REQUESTED_RESOLUTION" not in missing:
             missing.append("REQUESTED_RESOLUTION")
         missing_info["blocking_gaps"] = _human_missing_fields(missing)
@@ -3890,6 +3910,50 @@ def _follow_up_questions_from_utterance(value: Any) -> list[str]:
         if question not in unique:
             unique.append(question)
     return unique[:2]
+
+
+def _canonical_missing_field_identity(value: Any) -> str:
+    """Recover one exact internal gap identity from its persisted display label."""
+
+    normalized = str(value or "").strip()
+    if normalized in FIELD_DISPLAY_LABELS:
+        return normalized
+    matches = [
+        identifier
+        for identifier, label in FIELD_DISPLAY_LABELS.items()
+        if label == normalized
+    ]
+    return matches[0] if len(matches) == 1 else normalized
+
+
+def _missing_field_is_resolved_by_current_authority(
+    value: Any,
+    case_detail: dict[str, Any],
+    *,
+    actor_role: str | None,
+    actor_source_records: tuple[tuple[str, str], ...],
+    resolution_authorized: bool,
+    trusted_references: Mapping[str, Any],
+) -> bool:
+    """Resolve durable gap identities only from current authenticated authority."""
+
+    identity = _canonical_missing_field_identity(value)
+    if identity == "CURRENT_PARTY_STATEMENT":
+        return bool(actor_source_records)
+    if identity == "REQUESTED_RESOLUTION":
+        return resolution_authorized
+    reference_field = {
+        "ORDER_REFERENCE": "order_reference",
+        "AFTER_SALES_REFERENCE": "after_sales_reference",
+        "LOGISTICS_REFERENCE": "logistics_reference",
+    }.get(identity)
+    if reference_field is not None:
+        return _quality_text(trusted_references.get(reference_field))
+    return _question_targets_resolved_intake_field(
+        value,
+        case_detail,
+        actor_role=actor_role,
+    )
 
 
 def _question_targets_resolved_intake_field(
