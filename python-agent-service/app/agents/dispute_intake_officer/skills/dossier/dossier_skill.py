@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import re
+from collections.abc import Mapping
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -95,6 +96,24 @@ _DIRECT_ATTITUDE_CONDITIONAL_REMEDY_COMMITMENT_ZH = re.compile(
     rf"(?:则|就|将|会|可|可以|愿意|同意|接受).{{0,12}}"
     rf"(?:{_DIRECT_ATTITUDE_REMEDY_ACTION_ZH.pattern})"
 )
+_DIRECT_ATTITUDE_PROPOSAL_OBJECT_ZH = re.compile(
+    r"(?:替代|处理|解决|补救)(?:方案|建议)"
+)
+_DIRECT_ATTITUDE_FOREIGN_PROPOSAL_OBJECT_ZH = re.compile(
+    rf"(?:其(?:所)?|对方(?:的)?)\s*"
+    rf"(?:{_DIRECT_ATTITUDE_PROPOSAL_OBJECT_ZH.pattern})"
+)
+_DIRECT_ATTITUDE_NEGATED_PROPOSAL_VERB_ZH = re.compile(
+    r"(?:从未|未曾|未|没有|不)\s*(?:明确(?:地)?\s*)?(?:提出|建议)"
+)
+_DIRECT_ATTITUDE_PROPOSAL_DECLARATION_ZH = re.compile(
+    rf"^\s*(?:(?:现阶段|现在|目前|当前|现)\s*)?(?:明确\s*)?(?:的\s*)?"
+    rf"(?:{_DIRECT_ATTITUDE_PROPOSAL_OBJECT_ZH.pattern})\s*"
+    r"(?:为|是|包括|采用|拟为|确定为)"
+)
+_DIRECT_ATTITUDE_PROPOSAL_SPAN_BOUNDARY_ZH = re.compile(
+    r"(?:但(?:是)?|不过|然而|却|而(?:是|非|不|未|没有))"
+)
 _DIRECT_ATTITUDE_REMEDY_SCOPE_ZH = {
     "更换": "EXCHANGE",
     "换货": "EXCHANGE",
@@ -133,7 +152,8 @@ _DIRECT_ATTITUDE_THIRD_PARTY_PROPOSAL_OBJECT_EN = re.compile(
 )
 _DIRECT_ATTITUDE_SIGNAL_ZH = re.compile(
     r"部分(?:同意|接受)|同意|接受|拒绝|不同意|不支持|不接受|愿意|"
-    r"提出|建议|替代方案|要求补充|需要更多信息|未表态|没有表态"
+    rf"提出|建议|{_DIRECT_ATTITUDE_PROPOSAL_OBJECT_ZH.pattern}|"
+    r"要求补充|需要更多信息|未表态|没有表态"
 )
 _DIRECT_ATTITUDE_SELF_ZH = re.compile(
     r"^\s*(?:本公司|本人|我方|我们|本方|我司|我)(?P<body>.*)$"
@@ -3202,6 +3222,47 @@ def _direct_attitude_has_process_cooperation_zh(clause: str) -> bool:
     )
 
 
+def _direct_attitude_has_alternative_proposal_zh(body: str) -> bool:
+    """Bind only respondent-owned proposal objects inside one parsed clause."""
+
+    respondent_scope = _DIRECT_ATTITUDE_FOREIGN_PROPOSAL_OBJECT_ZH.sub("", body)
+    proposal_verbs = tuple(re.finditer(r"提出|建议", respondent_scope))
+    negated_verbs = tuple(
+        _DIRECT_ATTITUDE_NEGATED_PROPOSAL_VERB_ZH.finditer(respondent_scope)
+    )
+
+    def verb_is_negated(proposal: re.Match[str]) -> bool:
+        return any(
+            negated.start() <= proposal.start() < negated.end()
+            for negated in negated_verbs
+        )
+
+    if _DIRECT_ATTITUDE_PROPOSAL_DECLARATION_ZH.search(respondent_scope):
+        return True
+    for index, proposal in enumerate(proposal_verbs):
+        if verb_is_negated(proposal):
+            continue
+        span_end = (
+            proposal_verbs[index + 1].start()
+            if index + 1 < len(proposal_verbs)
+            else len(respondent_scope)
+        )
+        adversative = _DIRECT_ATTITUDE_PROPOSAL_SPAN_BOUNDARY_ZH.search(
+            respondent_scope,
+            proposal.end(),
+            span_end,
+        )
+        if adversative is not None:
+            span_end = adversative.start()
+        local_span = respondent_scope[proposal.end() : span_end]
+        if (
+            _DIRECT_ATTITUDE_REMEDY_ACTION_ZH.search(local_span) is not None
+            or _DIRECT_ATTITUDE_PROPOSAL_OBJECT_ZH.search(local_span) is not None
+        ):
+            return True
+    return False
+
+
 def _direct_attitude_action_scoped_alternative(
     *,
     authenticated_current_message: bool,
@@ -3617,12 +3678,18 @@ def _direct_respondent_attitude_clause_zh(
         remaining_body = disagreement.sub("", remaining_body)
     if partial_match is None and re.search(r"同意|接受|支持|愿意", remaining_body):
         codes.add("AGREE")
-    if re.search(r"提出|建议|替代方案", body):
+    if _direct_attitude_has_alternative_proposal_zh(body):
         codes.add("ALTERNATIVE_PROPOSED")
     if re.search(r"要求补充|需要更多信息", body):
         codes.add("NEED_MORE_INFO")
     reduced = _reduce_direct_respondent_attitude_codes(codes)
     if reduced is None and denied_alternative and not codes:
+        return "NONE"
+    if reduced is None and not codes:
+        # A factual actor may have "raised" a fee, question, or other
+        # non-remedy subject.  Bare proposal verbs are not themselves a
+        # respondent remedy stance; the governed typed claim supplies that
+        # semantic proposal and this detector only checks scoped conflicts.
         return "NONE"
     return reduced
 

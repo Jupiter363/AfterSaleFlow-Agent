@@ -7244,15 +7244,64 @@ def test_exact_uat_merchant_current_remedy_stance_is_direct_authority(
     version_pins,
 ) -> None:
     text = (
-        "我方在收到用户反馈前并不知道该手表存在破损或无法开机的情况，"
-        "出库记录显示发货前外观及开机检测正常。"
-        "客服确实在签收当天回复会核实，但后续跟进不及时。"
-        "针对用户提出的退款20元诉求，我方现明确同意退款20元，"
-        "且不要求用户退回该商品。"
+        "经核查，150元并非平台或商家的官方统一收费，而是安装承揽人员在现场"
+        "提出的附加收费。商品页面和订单确认页均未展示该费用，也没有取得用户"
+        "的书面确认。针对用户提出的退款诉求，我方现明确同意退还150元，不提供"
+        "其他替代方案；退款尚未执行，待平台流程确认后原路退回。无其他备注。"
+    )
+    typed_position = (
+        "商家现明确同意退还150元，不提供其他替代方案；退款尚未执行，"
+        "待平台流程确认后原路退回。"
     )
 
-    def normalize(current_text: str) -> IntakeCognitionDraft:
-        state, prior = _direct_respondent_adversarial_state(
+    def matrix_delta(
+        *,
+        attitude: str = "AGREE",
+    ) -> CaseFactMatrixDeltaV2:
+        return CaseFactMatrixDeltaV2.model_validate(
+            {
+                "schema_version": "case_fact_matrix.delta.v2",
+                "fact_rows": [
+                    {
+                        "fact_key": "NEW_FEE_AUTHORITY_DISCLOSURE",
+                        "category": "PAYMENT",
+                        "fact_target": "150元附加收费是否为官方收费并已披露确认。",
+                        "materiality": "CORE",
+                        "stance": "DENY",
+                        "position_summary": (
+                            "150元不是官方统一收费，页面未展示且无用户书面确认。"
+                        ),
+                        "asserted_value": "非官方收费且未披露确认",
+                        "source_scope": "CURRENT_SOURCE",
+                    },
+                    {
+                        "fact_key": "NEW_CURRENT_REFUND_STANCE",
+                        "category": "AFTER_SALES",
+                        "fact_target": "商家是否同意退还150元。",
+                        "materiality": "CORE",
+                        "stance": "CONFIRM",
+                        "position_summary": typed_position,
+                        "asserted_value": "同意退还150元但尚未执行",
+                        "source_scope": "CURRENT_SOURCE",
+                    },
+                ],
+                "summary_source_fact_keys": [
+                    "NEW_FEE_AUTHORITY_DISCLOSURE",
+                    "NEW_CURRENT_REFUND_STANCE",
+                ],
+                "respondent_claim": {
+                    "attitude": attitude,
+                    "position_summary": typed_position,
+                },
+            }
+        )
+
+    def normalize(
+        current_text: str,
+        *,
+        attitude: str = "AGREE",
+    ) -> IntakeCognitionDraft:
+        state, _ = _direct_respondent_adversarial_state(
             bindings,
             version_pins,
             text=current_text,
@@ -7266,7 +7315,14 @@ def test_exact_uat_merchant_current_remedy_stance_is_direct_authority(
                         "position": "Model wording is not source authority.",
                         "confidence": 0.8,
                     }
-                }
+                },
+                matrix_patch=matrix_delta(attitude=attitude).model_dump(
+                    mode="json"
+                ),
+                conversation_action="INVITE_OPTIONAL_REMARK",
+                room_utterance=(
+                    "已记录费用说明和退款立场。若无其他交接备注，可直接确认提交。"
+                ),
             )
         )
         return _generation_parts(
@@ -7292,10 +7348,97 @@ def test_exact_uat_merchant_current_remedy_stance_is_direct_authority(
         "position": text,
         "confidence": 0.65,
     }
+    for factual_modifier in (
+        "150元并非平台或商家的官方统一收费，而是安装承揽人员在现场提出的附加收费。",
+        "商品页面和订单确认页均未展示该费用，也没有取得用户的书面确认。",
+        "我方不提供其他替代方案。",
+    ):
+        assert (
+            detect_direct_respondent_attitude(
+                factual_modifier,
+                source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+                respondent_role="MERCHANT",
+            ).state
+            == "NONE"
+        )
+    scoped_alternative = detect_direct_respondent_attitude(
+        "我方提出维修方案。",
+        source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        respondent_role="MERCHANT",
+    )
+    assert scoped_alternative.state == "SUBSTANTIVE"
+    assert scoped_alternative.candidate is not None
+    assert scoped_alternative.candidate["attitude"] == "ALTERNATIVE_PROPOSED"
+    third_party_proposal = detect_direct_respondent_attitude(
+        "本方不接受对方提出的处理方案。",
+        source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        respondent_role="MERCHANT",
+    )
+    assert third_party_proposal.state == "SUBSTANTIVE"
+    assert third_party_proposal.candidate is not None
+    assert third_party_proposal.candidate["attitude"] == "DISAGREE"
+    self_owned_proposal = detect_direct_respondent_attitude(
+        "我方处理方案为补偿100元。",
+        source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        respondent_role="MERCHANT",
+    )
+    assert self_owned_proposal.state == "SUBSTANTIVE"
+    assert self_owned_proposal.candidate is not None
+    assert self_owned_proposal.candidate["attitude"] == "ALTERNATIVE_PROPOSED"
+    long_same_clause_proposal = detect_direct_respondent_attitude(
+        "我方建议在平台完成订单记录与原支付渠道核对后退还150元。",
+        source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        respondent_role="MERCHANT",
+    )
+    assert long_same_clause_proposal.state == "SUBSTANTIVE"
+    assert long_same_clause_proposal.candidate is not None
+    assert long_same_clause_proposal.candidate["attitude"] == (
+        "ALTERNATIVE_PROPOSED"
+    )
+    for negated_proposal_text in (
+        "我方未提出退款。",
+        "我方不建议退款。",
+    ):
+        assert (
+            detect_direct_respondent_attitude(
+                negated_proposal_text,
+                source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+                respondent_role="MERCHANT",
+            ).state
+            == "NONE"
+        )
+    for bounded_nonproposal_text in (
+        "我方建议先核查但不建议退款。",
+        "我方暂无处理方案。",
+    ):
+        assert (
+            detect_direct_respondent_attitude(
+                bounded_nonproposal_text,
+                source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+                respondent_role="MERCHANT",
+            ).state
+            == "NONE"
+        )
+    rejected_unowned_object = detect_direct_respondent_attitude(
+        "我方不接受该处理方案。",
+        source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        respondent_role="MERCHANT",
+    )
+    assert rejected_unowned_object.state == "SUBSTANTIVE"
+    assert rejected_unowned_object.candidate is not None
+    assert rejected_unowned_object.candidate["attitude"] == "DISAGREE"
+    contrasted_rejection = detect_direct_respondent_attitude(
+        "我方建议先核查而不接受退款。",
+        source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
+        respondent_role="MERCHANT",
+    )
+    assert contrasted_rejection.state == "SUBSTANTIVE"
+    assert contrasted_rejection.candidate is not None
+    assert contrasted_rejection.candidate["attitude"] == "DISAGREE"
     expected = {
         "respondent_role": "MERCHANT",
         "attitude": "AGREE",
-        "position": text,
+        "position": typed_position,
         "source": "被发起方接待室直接陈述",
         "confidence": 0.65,
         "grounding": {
@@ -7304,9 +7447,27 @@ def test_exact_uat_merchant_current_remedy_stance_is_direct_authority(
         },
     }
     assert first.dossier_patch.respondent_attitude == expected
+    assert first.matrix_patch is not None
+    assert first.matrix_patch.respondent_claim is not None
+    assert first.matrix_patch.respondent_claim.attitude == "AGREE"
+    assert first.matrix_patch.respondent_claim.position_summary == typed_position
+    assert first.matrix_patch.respondent_claim.alternative_proposal is None
+    assert {
+        row.position_summary for row in first.matrix_patch.fact_rows
+    } == {
+        "150元不是官方统一收费，页面未展示且无用户书面确认。",
+        typed_position,
+    }
+    assert first.conversation_action == "INVITE_OPTIONAL_REMARK"
+    assert "备注" in first.room_utterance
     assert replay == first
+    assert canonical_sha256(replay.model_dump(mode="json")) == canonical_sha256(
+        first.model_dump(mode="json")
+    )
 
-    contradictory = "我方现明确同意退款20元。我方同时明确拒绝退款20元。"
+    contradictory = (
+        "我方现明确同意退还150元，同时明确拒绝退还150元。无其他备注。"
+    )
     assert (
         detect_direct_respondent_attitude(
             contradictory,
