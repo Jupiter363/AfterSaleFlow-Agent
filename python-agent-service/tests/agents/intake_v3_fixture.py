@@ -132,6 +132,7 @@ def intake_initiator_v3_payload(
                     },
                     "respondent_attitude": {
                         "respondent_role": "MERCHANT",
+                        "source_attribution": "NO_DIRECT_POSITION",
                         "attitude": "NOT_RESPONDED",
                         "position": "商家尚未在接待室表达态度。",
                         "alternative_proposal": None,

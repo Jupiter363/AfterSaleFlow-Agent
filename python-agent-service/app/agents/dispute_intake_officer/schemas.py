@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
+from functools import lru_cache
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
 from typing_extensions import NotRequired, Required, TypedDict
 
 from app.schemas.case_fact_matrix import (
@@ -125,6 +128,11 @@ class IntakeRoomClaimResolutionValue(StrictIntakeRoomModel):
 
 class IntakeRoomRespondentAttitudeValue(StrictIntakeRoomModel):
     respondent_role: PartyRole
+    source_attribution: Literal[
+        "INITIATOR_REPORTED",
+        "RESPONDENT_DIRECT",
+        "NO_DIRECT_POSITION",
+    ]
     attitude: Literal[
         "NOT_RESPONDED",
         "AGREE",
@@ -136,6 +144,22 @@ class IntakeRoomRespondentAttitudeValue(StrictIntakeRoomModel):
     ]
     position: str = Field(max_length=20_000)
     alternative_proposal: str | None = Field(max_length=20_000)
+
+    @model_validator(mode="after")
+    def bind_attitude_to_attribution(self) -> "IntakeRoomRespondentAttitudeValue":
+        substantive = self.attitude in {
+            "AGREE",
+            "PARTIALLY_AGREE",
+            "DISAGREE",
+            "ALTERNATIVE_PROPOSED",
+            "NEED_MORE_INFO",
+        }
+        if self.source_attribution == "NO_DIRECT_POSITION":
+            if substantive:
+                raise ValueError("a substantive attitude requires an attributed source")
+        elif not substantive:
+            raise ValueError("an attributed attitude must be substantive")
+        return self
 
 
 class IntakeRoomClaimAndResponseValue(StrictIntakeRoomModel):
@@ -363,6 +387,13 @@ class IntakeInitiatorRoomLlmOutputV3(StrictIntakeRoomModel):
     @model_validator(mode="after")
     def validate_turn_outcome(self) -> "IntakeInitiatorRoomLlmOutputV3":
         _validate_ordered_room_outcome(self.ordered_sections)
+        if (
+            self.ordered_sections[3].value.respondent_attitude.source_attribution
+            == "RESPONDENT_DIRECT"
+        ):
+            raise ValueError(
+                "an initiator turn cannot create direct respondent attribution"
+            )
         return self
 
 
@@ -384,7 +415,121 @@ class IntakeRespondentRoomLlmOutputV3(StrictIntakeRoomModel):
             raise ValueError("respondent display role must match the bound claim role")
         if claim.attitude != "NOT_ADDRESSED" and display.attitude != claim.attitude:
             raise ValueError("respondent display attitude must match the bound matrix claim")
+        expected_attribution = (
+            "NO_DIRECT_POSITION"
+            if claim.attitude == "NOT_ADDRESSED"
+            else "RESPONDENT_DIRECT"
+        )
+        if display.source_attribution != expected_attribution:
+            raise ValueError(
+                "respondent display attribution must match the bound matrix claim"
+            )
         return self
+
+
+_FROZEN_CLAIM_FIELDS = (
+    "initiator_role",
+    "requested_resolution",
+    "requested_amount",
+    "requested_items",
+    "request_reason",
+    "normalized_statement",
+)
+
+
+def _frozen_respondent_claim_authority(
+    request: IntakeTurnRequest,
+) -> tuple[Any, ...] | None:
+    """Return the complete initiator claim already frozen before a respondent turn."""
+
+    previous = request.previous_case_detail
+    if not isinstance(previous, Mapping):
+        return None
+    claim = previous.get("claim_resolution")
+    if not isinstance(claim, Mapping) or any(
+        field not in claim for field in _FROZEN_CLAIM_FIELDS
+    ):
+        return None
+    try:
+        canonical = IntakeRoomClaimResolutionValue.model_validate(
+            {field: claim[field] for field in _FROZEN_CLAIM_FIELDS}
+        ).model_dump(mode="python")
+    except ValueError:
+        return None
+    return tuple(canonical[field] for field in _FROZEN_CLAIM_FIELDS)
+
+
+@lru_cache(maxsize=256)
+def _respondent_output_type_with_frozen_claim(
+    initiator_role: str,
+    requested_resolution: str,
+    requested_amount: float | None,
+    requested_items: str | None,
+    request_reason: str,
+    normalized_statement: str,
+) -> type[BaseModel]:
+    """Build a Provider Schema whose cross-party claim is an exact frozen projection."""
+
+    authority = {
+        "initiator_role": initiator_role,
+        "requested_resolution": requested_resolution,
+        "requested_amount": requested_amount,
+        "requested_items": requested_items,
+        "request_reason": request_reason,
+        "normalized_statement": normalized_statement,
+    }
+    suffix = hashlib.sha256(
+        json.dumps(
+            authority,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
+    frozen_claim_type = create_model(
+        f"IntakeFrozenClaimResolution_{suffix}",
+        __base__=IntakeRoomClaimResolutionValue,
+        initiator_role=(Literal[initiator_role], ...),
+        requested_resolution=(Literal[requested_resolution], ...),
+        requested_amount=(Literal[requested_amount], ...),
+        requested_items=(Literal[requested_items], ...),
+        request_reason=(Literal[request_reason], ...),
+        normalized_statement=(Literal[normalized_statement], ...),
+    )
+    frozen_attitude_type = create_model(
+        f"IntakeFrozenRespondentRole_{suffix}",
+        __base__=IntakeRoomRespondentAttitudeValue,
+        respondent_role=(Literal[respondent_role], ...),
+    )
+    frozen_claim_and_response_type = create_model(
+        f"IntakeFrozenClaimAndResponse_{suffix}",
+        __base__=IntakeRoomClaimAndResponseValue,
+        claim_resolution=(frozen_claim_type, ...),
+        respondent_attitude=(frozen_attitude_type, ...),
+    )
+    frozen_claim_section_type = create_model(
+        f"IntakeFrozenClaimAndResponseSection_{suffix}",
+        __base__=IntakeRoomClaimAndResponseSection,
+        value=(frozen_claim_and_response_type, ...),
+    )
+    ordered_sections_type = tuple[
+        IntakeRespondentRoomCaseMatrixSection,
+        IntakeRoomCaseStorySection,
+        IntakeRoomPartyPositionsSection,
+        frozen_claim_section_type,
+        IntakeRoomDisputeFocusSection,
+        IntakeRoomVerificationFocusSection,
+        IntakeRoomRiskAssessmentSection,
+        IntakeRoomMissingInformationSection,
+        IntakeRoomHandoffSummarySection,
+        IntakeRoomTurnEvaluationSection,
+    ]
+    return create_model(
+        f"IntakeRespondentRoomLlmOutputV3_{suffix}",
+        __base__=IntakeRespondentRoomLlmOutputV3,
+        ordered_sections=(ordered_sections_type, ...),
+    )
 
 
 class IntakeCaseStoryPatch(TypedDict, total=False):
@@ -734,6 +879,9 @@ def intake_case_detail_output_type(
     if is_exact_handoff_remark_turn(request):
         return IntakeRemarkAcknowledgementLlmOutput
     if is_exact_respondent_substantive_turn(request):
+        frozen_claim = _frozen_respondent_claim_authority(request)
+        if frozen_claim is not None:
+            return _respondent_output_type_with_frozen_claim(*frozen_claim)
         return IntakeRespondentRoomLlmOutputV3
     return IntakeInitiatorRoomLlmOutputV3
 
@@ -778,16 +926,21 @@ def _materialize_ordered_intake_room_output(
 
     dispute_core_state = dispute.dispute_core_state.model_dump(mode="json")
     dispute_core_state["next_verification_focus"] = list(verification_focus.items)
+    respondent_attitude = claim_and_response.respondent_attitude.model_dump(
+        mode="json",
+        exclude_none=True,
+    )
+    # Provider-only attribution selects the trusted source branch below; public
+    # dossiers retain the established source/grounding contract instead of a
+    # second, model-owned provenance field.
+    respondent_attitude.pop("source_attribution", None)
     case_detail = {
         "case_story": case_story,
         "party_positions": party_positions,
         "claim_resolution": claim_and_response.claim_resolution.model_dump(
             mode="json"
         ),
-        "respondent_attitude": claim_and_response.respondent_attitude.model_dump(
-            mode="json",
-            exclude_none=True,
-        ),
+        "respondent_attitude": respondent_attitude,
         "dispute_core_state": dispute_core_state,
         "dispute_focus": dispute.dispute_focus.model_dump(mode="json"),
         "risk_assessment": risk_assessment,

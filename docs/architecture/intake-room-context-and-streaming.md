@@ -68,7 +68,7 @@ ordered_sections
 | 1 | `CASE_MATRIX` | 正式矩阵的模型语义输入；服务端生成 ID、来源、哈希和版本 |
 | 2 | `CASE_STORY` | `case_story` |
 | 3 | `PARTY_POSITIONS` | `party_positions` |
-| 4 | `CLAIM_AND_RESPONSE` | `claim_resolution`、`respondent_attitude` |
+| 4 | `CLAIM_AND_RESPONSE` | `claim_resolution`、`respondent_attitude`；被发起方轮的发起方诉求由冻结权威约束为精确回显 |
 | 5 | `DISPUTE_FOCUS` | `dispute_core_state`、`dispute_focus` |
 | 6 | `VERIFICATION_FOCUS` | `dispute_core_state.next_verification_focus` |
 | 7 | `RISK_ASSESSMENT` | `risk_assessment` |
@@ -110,7 +110,7 @@ Provider SSE bytes
 - 服务端只验证角色、引文是否来自当前认证消息、关联键是否属于当前来源事实；不再用中文/英文正则重新判断引文到底是同意、拒绝还是替代方案；
 - `source_quote` 只在本轮内用于来源绑定，不写入跨方正式矩阵或最终卷宗；正式卷宗只保留消息 ID 和来源类型。
 
-发起方转述的对方态度只能作为“发起方单方陈述（主观）”，不会创建被发起方直接态度。
+`CLAIM_AND_RESPONSE.respondent_attitude.source_attribution` 在 Provider Schema 中显式区分 `INITIATOR_REPORTED / RESPONDENT_DIRECT / NO_DIRECT_POSITION`。发起方转述的对方态度只能作为“发起方单方陈述（主观）”，不会创建被发起方直接态度；若模型判定为尚未直接回应，终态只保留中性的“尚未回应”对象，不把具体转述内容与该来源混装。被发起方轮的 `claim_resolution` 不是重新生成的语义权威：Provider Schema 把上一版完整发起方诉求约束为常量，终态再从冻结卷宗原样投影，因此当前被发起方只拥有自身回应和新事实语义。
 
 ## 6. 完整度评价
 

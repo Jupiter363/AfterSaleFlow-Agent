@@ -59,6 +59,7 @@
 `CASE_MATRIX.value.schema_version` 固定为 `case_fact_matrix.delta.v2`。每轮覆盖 `frozen_case_matrix.fact_rows` 的全部旧事实，并加入本轮新事实；它只表达当前参与方立场，不表示事实已核验。
 
 - 每行是一个可单独确认或反驳的事实命题，不把诉求、情绪、证据要求、责任判断或流程状态当成事实。
+- 当前方转述另一方说过或主张过什么时，`position_summary` 必须明确写成“发起方转述：……”或“被发起方转述：……”，不能写成另一方直接陈述，也不能用“我方”把另一方态度变成当前方本人的态度。
 - 旧事实沿用原 `FACT_*`；逐字复制旧行的 `category / fact_target / materiality`。需要修正命题时新增 `NEW_*`，不得修改旧命题。
 - `category` 取 `ORDER / PRODUCT_PAGE / PAYMENT / FULFILLMENT / LOGISTICS / PRODUCT_STATE / COMMUNICATION / AFTER_SALES / TIME / OTHER`。
 - `materiality` 取 `CORE / SUPPORTING / CONTEXT`。
@@ -83,8 +84,8 @@
 
 - `CASE_STORY`：中立标题和一段第三人称累计事件摘要；覆盖表单、旧矩阵/轮廓和本轮新增或更正，语义去重，不拼接原话。
 - `PARTY_POSITIONS`：分别写用户、商家、发起方、被发起方立场与平台中立观察；未知就明确未知。
-- `CLAIM_AND_RESPONSE.claim_resolution`：只表示发起方诉求。被发起方处理意见不得覆盖它；`normalized_statement` 只写第三人称诉求。
-- `CLAIM_AND_RESPONSE.respondent_attitude`：展示累计回应状态；发起方轮只能写发起方主观转述或尚未回应，被发起方直接态度必须与同轮 `respondent_claim` 一致。
+- `CLAIM_AND_RESPONSE.claim_resolution`：只表示发起方诉求。被发起方轮必须逐字段复制输入中的冻结诉求，不得缩写、改述或补写；被发起方处理意见不得覆盖它；`normalized_statement` 只写第三人称诉求。
+- `CLAIM_AND_RESPONSE.respondent_attitude`：展示累计回应状态。发起方轮若只有其对另一方的转述，使用 `source_attribution=INITIATOR_REPORTED`，且 `position` 必须以“据发起方单方转述，……”开头；若没有可归因的实质转述，则使用 `source_attribution=NO_DIRECT_POSITION + attitude=NOT_RESPONDED`，并只写“被发起方尚未在其接待室直接回应”，不得在同一对象中夹带具体对方态度。被发起方有直接诉求态度时使用 `source_attribution=RESPONDENT_DIRECT` 并与同轮 `respondent_claim` 一致；其当前消息未表达诉求态度时使用 `NO_DIRECT_POSITION`。
 - `DISPUTE_FOCUS`：写核心冲突、争议事实和争议焦点；它分别投影为正式 `dispute_core_state` 与 `dispute_focus`，不写流程占位语。
 - `VERIFICATION_FOCUS.items`：保留最多 4 个去重的动作式事实核验方向，如“核验……是否……”，不写裸材料名、疑问句或证据索要。
 - `RISK_ASSESSMENT`：只评估案情复杂度与冲突风险，不作责任或真实性结论。

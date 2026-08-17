@@ -2858,15 +2858,12 @@ def _bind_model_trusted_claim_authority(
         "normalized_statement",
     )
     if actor_role != initiator_role and previous_claim:
-        if any(
-            claim.get(field) != previous_claim.get(field)
-            for field in semantic_fields
-            if field in previous_claim
-        ):
-            raise _party_intake_state_error(
-                "INTAKE_PARTY_STATE_ROLE_AUTHORITY_DRIFT",
-                "respondent output cannot rewrite the initiator claim",
-            )
+        # The respondent model owns only the current respondent semantics.  Its
+        # cumulative card still contains the initiator claim for display, but that
+        # branch is an echo of frozen cross-party authority rather than a second
+        # model-authored claim.  Project every already-authoritative field from the
+        # previous dossier so harmless summarization cannot abort the whole turn and
+        # a respondent can never rewrite a value that the initiator already froze.
         for field in semantic_fields:
             if field in previous_claim:
                 claim[field] = copy.deepcopy(previous_claim[field])
@@ -2949,10 +2946,17 @@ def _bind_model_trusted_respondent_attitude(
                 "message_id": current.message_id if current is not None else "",
             }
         else:
-            attitude["source"] = "尚未回应"
-            attitude["confidence"] = 0.5
-            attitude.pop("confidence_note", None)
-            attitude.pop("grounding", None)
+            # A model may summarize what the initiator reported while still
+            # classifying the direct-response state as NOT_RESPONDED.  Keeping that
+            # summary beside source=尚未回应 produces contradictory public authority.
+            # With no substantive reported-attitude classification, publish only the
+            # neutral no-direct-response object.  Explicit reported attitudes remain
+            # in the substantive branch above and retain their subjective source.
+            attitude = _default_respondent_attitude(
+                request.initial_case_facts,
+                allow_subjective_seed=False,
+                initiator_role=initiator_role,
+            )
         detail["respondent_attitude"] = attitude
         return
 

@@ -5,12 +5,14 @@ from __future__ import annotations
 import copy
 
 import pytest
+from pydantic import ValidationError
 
 from app.agents.dispute_intake_officer.schemas import (
     INTAKE_ROOM_SECTION_KINDS,
     IntakeInitiatorRoomLlmOutputV3,
     IntakeRespondentRoomLlmOutputV3,
     MaterializedIntakeRoomLlmOutputV3,
+    intake_case_detail_output_type,
     materialize_intake_case_detail_output,
     revalidate_materialized_intake_output,
 )
@@ -110,6 +112,7 @@ def _initiator_v3_payload() -> dict[str, object]:
                     },
                     "respondent_attitude": {
                         "respondent_role": "MERCHANT",
+                        "source_attribution": "NO_DIRECT_POSITION",
                         "attitude": "NOT_RESPONDED",
                         "position": "商家尚未在接待室表达态度。",
                         "alternative_proposal": None,
@@ -384,6 +387,152 @@ def test_v3_direct_binding_uses_typed_model_authority_without_regex(
     assert failure.value.safe_code == "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
 
 
+def test_respondent_turn_projects_frozen_claim_and_keeps_reported_attitude_attribution() -> None:
+    case_id = "CASE_ORDERED_ROOM_CROSS_PARTY_AUTHORITY"
+    frozen_claim = {
+        "initiator_role": "USER",
+        "requested_resolution": "RETURN_REFUND",
+        "requested_amount": 1899,
+        "requested_items": "空气净化器 1 台",
+        "request_reason": "核心性能未达到宣传标准，要求退货退款并核验宣传参数依据。",
+        "normalized_statement": "用户要求退回空气净化器并获得全额退款，理由是商品实际性能与宣传不符。",
+    }
+    previous = {
+        "schema_version": "intake_case_detail.v1",
+        "claim_resolution": copy.deepcopy(frozen_claim),
+        "case_fact_matrix": {
+            "schema_version": "case_fact_matrix.v2",
+            "party_map": {
+                "initiator_role": "USER",
+                "respondent_role": "MERCHANT",
+            },
+        },
+    }
+    respondent_request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_CROSS_PARTY_AUTHORITY",
+                "sequence_no": 5,
+                "role": "MERCHANT",
+                "source": "ROOM_MESSAGE",
+                "text": "我方同意标准复检，复检不达标时同意退货退款。",
+            },
+            "previous_case_detail": previous,
+            "agent_context": _agent_context(case_id=case_id, role="MERCHANT"),
+        }
+    )
+    provider_detail = {
+        "claim_resolution": {
+            **copy.deepcopy(frozen_claim),
+            # The model is allowed to understand the current respondent turn,
+            # but it does not own a new wording of the other party's frozen claim.
+            "request_reason": "核心性能未达到宣传标准",
+        }
+    }
+    provider_payload = _initiator_v3_payload()
+    matrix = provider_payload["ordered_sections"][0]["value"]
+    matrix["respondent_claim"] = {
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position_summary": "商家同意标准复检，复检不达标时同意退货退款。",
+        "alternative_proposal": "标准复检",
+        "source_binding": {
+            "schema_version": "respondent-claim-binding.v1",
+            "binding_kind": "CURRENT_ACTOR_DIRECT",
+            "subject_role": "MERCHANT",
+            "source_quote": "我方同意标准复检，复检不达标时同意退货退款",
+            "linked_fact_keys": ["NEW_DELIVERY_STATE"],
+        },
+    }
+    claim_and_response = provider_payload["ordered_sections"][3]["value"]
+    claim_and_response["claim_resolution"] = copy.deepcopy(
+        provider_detail["claim_resolution"]
+    )
+    claim_and_response["respondent_attitude"] = {
+        "respondent_role": "MERCHANT",
+        "source_attribution": "RESPONDENT_DIRECT",
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position": "商家同意标准复检，复检不达标时同意退货退款。",
+        "alternative_proposal": "标准复检",
+    }
+    respondent_output_type = intake_case_detail_output_type(respondent_request)
+
+    with pytest.raises(ValidationError):
+        respondent_output_type.model_validate(provider_payload)
+    provider_payload["ordered_sections"][3]["value"]["claim_resolution"] = (
+        copy.deepcopy(frozen_claim)
+    )
+    assert respondent_output_type.model_validate(provider_payload)
+
+    first = copy.deepcopy(provider_detail)
+    dossier_skill._bind_model_trusted_claim_authority(
+        first,
+        respondent_request,
+        copy.deepcopy(previous),
+    )
+    replay = copy.deepcopy(provider_detail)
+    dossier_skill._bind_model_trusted_claim_authority(
+        replay,
+        respondent_request,
+        copy.deepcopy(previous),
+    )
+
+    assert first["claim_resolution"] == frozen_claim
+    assert replay == first
+
+    wrong_role = copy.deepcopy(provider_detail)
+    wrong_role["claim_resolution"]["initiator_role"] = "MERCHANT"
+    with pytest.raises(AgentOutputSchemaError) as role_failure:
+        dossier_skill._bind_model_trusted_claim_authority(
+            wrong_role,
+            respondent_request,
+            copy.deepcopy(previous),
+        )
+    assert role_failure.value.safe_code == "INTAKE_PARTY_STATE_ROLE_AUTHORITY_DRIFT"
+
+    initiator_request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_REPORTED_ATTITUDE",
+                "sequence_no": 3,
+                "role": "USER",
+                "source": "ROOM_MESSAGE",
+                "text": "商家此前表示不认可我的检测结果。",
+            },
+            "previous_case_detail": previous,
+            "agent_context": _agent_context(case_id=case_id, role="USER"),
+        }
+    )
+    no_direct_response = {
+        "respondent_attitude": {
+            "respondent_role": "MERCHANT",
+            "attitude": "NOT_RESPONDED",
+            "position": "据用户单方陈述，商家不认可现有检测结果。",
+        }
+    }
+    dossier_skill._bind_model_trusted_respondent_attitude(
+        no_direct_response,
+        initiator_request,
+        copy.deepcopy(previous),
+        copy.deepcopy(no_direct_response),
+        None,
+        None,
+    )
+
+    assert no_direct_response["respondent_attitude"] == {
+        "respondent_role": "MERCHANT",
+        "attitude": "NOT_RESPONDED",
+        "position": "商家尚未在接待室表达态度。",
+        "source": "尚未回应",
+        "confidence": 0.5,
+    }
+
+
 def test_v3_fact_key_normalization_rebinds_private_respondent_source() -> None:
     case_id = "CASE_ORDERED_ROOM_NORMALIZED_BINDING"
     current_text = "我方不同意退款，订单已按时送达。"
@@ -446,6 +595,7 @@ def test_v3_fact_key_normalization_rebinds_private_respondent_source() -> None:
     claim_and_response = provider_payload["ordered_sections"][3]["value"]
     claim_and_response["respondent_attitude"] = {
         "respondent_role": "MERCHANT",
+        "source_attribution": "RESPONDENT_DIRECT",
         "attitude": "DISAGREE",
         "position": "商家不同意退款。",
         "alternative_proposal": None,
