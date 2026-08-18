@@ -533,7 +533,7 @@ class CaseProcessLedgerActivitiesImplTest {
         when(eventRef.sha256()).thenReturn(authority.messageHash());
         when(run.getTenantSurrogate()).thenReturn(TENANT);
         when(run.getCaseId()).thenReturn(CASE_ID);
-        when(run.getProtocol()).thenReturn(AgentRunProtocol.V2.wireValue());
+        when(run.getProtocol()).thenReturn(AgentRunProtocol.V3.wireValue());
         when(run.getExecutorKind()).thenReturn(AgentRunExecutorKind.TEMPORAL_ACTIVITY);
         when(run.getRoomType()).thenReturn(RoomType.INTAKE);
         when(run.getRoomEpoch()).thenReturn(0L);
@@ -606,7 +606,7 @@ class CaseProcessLedgerActivitiesImplTest {
 
         assertThat(run.getTenantSurrogate()).as("run tenant").isEqualTo(TENANT);
         assertThat(run.getCaseId()).as("run case").isEqualTo(CASE_ID);
-        assertThat(run.getProtocol()).as("run protocol").isEqualTo(AgentRunProtocol.V2.wireValue());
+        assertThat(run.getProtocol()).as("run protocol").isEqualTo(AgentRunProtocol.V3.wireValue());
         assertThat(run.getExecutorKind())
                 .as("run executor")
                 .isEqualTo(AgentRunExecutorKind.TEMPORAL_ACTIVITY);
@@ -1186,7 +1186,7 @@ class CaseProcessLedgerActivitiesImplTest {
         when(eventRef.sha256()).thenReturn(authority.messageHash());
         when(run.getTenantSurrogate()).thenReturn(TENANT);
         when(run.getCaseId()).thenReturn(CASE_ID);
-        when(run.getProtocol()).thenReturn(AgentRunProtocol.V2.wireValue());
+        when(run.getProtocol()).thenReturn(AgentRunProtocol.V3.wireValue());
         when(run.getExecutorKind()).thenReturn(AgentRunExecutorKind.TEMPORAL_ACTIVITY);
         when(run.getRoomType()).thenReturn(RoomType.INTAKE);
         when(run.getRoomEpoch()).thenReturn(0L);

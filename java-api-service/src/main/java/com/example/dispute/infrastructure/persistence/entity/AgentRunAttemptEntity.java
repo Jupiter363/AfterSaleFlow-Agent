@@ -590,7 +590,10 @@ public class AgentRunAttemptEntity extends AbstractEntity {
                 "attemptStatus");
     }
 
-    public void markCommitted(AgentExecutionManifest manifest, long finalStreamSequenceNo) {
+    public void markCommitted(
+            AgentExecutionManifest manifest,
+            long finalStreamSequenceNo,
+            String expectedStreamProtocol) {
         requireEqual(getId(), manifest.agentRun().attemptId(), "attemptId");
         if (attemptStatus != AgentRunAttemptStatus.RESULT_READY
                 && attemptStatus != AgentRunAttemptStatus.COMPLETED) {
@@ -632,7 +635,7 @@ public class AgentRunAttemptEntity extends AbstractEntity {
                 manifest.contractVersions().get("output_schema"),
                 "outputSchemaVersion");
         requireEqual(
-                AgentRunProtocol.V2.wireValue(),
+                requiredTemporalStreamProtocol(expectedStreamProtocol),
                 manifest.contractVersions().get("stream"),
                 "streamProtocol");
         if (manifest.finalizedAt().isBefore(completedAt.toInstant())) {
@@ -654,6 +657,15 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         latencyMs = manifest.usage().latencyMs();
         attemptStatus = AgentRunAttemptStatus.COMPLETED;
         updatedAt = at(manifest.finalizedAt(), "finalizedAt");
+    }
+
+    private static String requiredTemporalStreamProtocol(String value) {
+        if (!AgentRunProtocol.V2.wireValue().equals(value)
+                && !AgentRunProtocol.V3.wireValue().equals(value)) {
+            throw new IllegalArgumentException(
+                    "expectedStreamProtocol must identify a versioned Temporal stream");
+        }
+        return value;
     }
 
     private void requireIdentity(String runId, String attemptId, long number) {

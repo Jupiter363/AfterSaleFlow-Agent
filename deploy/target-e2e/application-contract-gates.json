@@ -17,7 +17,7 @@
       "id": "intake-temporal-allocation",
       "required": true,
       "status": "BLOCKING_UNTIL_RUNTIME_PROVES",
-      "proof": "INTAKE allocation=TEMPORAL and protocol=V2/TEMPORAL_ACTIVITY on candidate lane"
+      "proof": "INTAKE allocation=TEMPORAL and protocol=V3/TEMPORAL_ACTIVITY on candidate lane"
     },
     {
       "id": "short-lived-activation-consumption",

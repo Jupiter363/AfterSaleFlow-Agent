@@ -128,7 +128,7 @@ public final class TargetHearingInternalStageMaterializer {
     AgentRunCommandBindingFactory.Binding binding = bindings.bind(new AgentRunCommandBindingFactory.Context(
         start.roomId(), roomEpochId, "HEARING_" + input.operation().toUpperCase(), commandId), command);
     LogicalRun logical = ledger.createOrLoad(new CreateLogicalRun(logicalRunId, start.tenantSurrogate(), start.caseId(), start.roomId(),
-        "HEARING_" + input.operation().toUpperCase(), commandId, AgentRunProtocol.V2, AgentRunExecutorKind.TEMPORAL_ACTIVITY,
+        "HEARING_" + input.operation().toUpperCase(), commandId, AgentRunProtocol.V3, AgentRunExecutorKind.TEMPORAL_ACTIVITY,
         roomEpochId, RoomType.HEARING, start.roomEpoch(), transition.expectedProcessRevision(),
         start.fencingToken(), command.requestHash(), binding.logicalInputHash(), ATTEMPT_LIMIT, command.deadlineAt(), now));
     require(logical.agentRunId().equals(logicalRunId), "logical run replay");

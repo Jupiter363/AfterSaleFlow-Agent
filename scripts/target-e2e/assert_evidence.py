@@ -166,7 +166,7 @@ def _validate_evidence(
             raise common.TargetE2EError(f"AgentRun {index} has an unknown room")
         if run["allocation"] != "TEMPORAL":
             raise common.TargetE2EError(f"AgentRun {index} was not TEMPORAL")
-        if run["protocol"] != "V2" or run["execution_engine"] != "TEMPORAL_ACTIVITY":
+        if run["protocol"] != "V3" or run["execution_engine"] != "TEMPORAL_ACTIVITY":
             raise common.TargetE2EError(
                 f"AgentRun {index} did not execute V2 as a Temporal activity"
             )
@@ -200,7 +200,7 @@ def _validate_evidence(
         room_type = room["room_type"]
         if room["allocation"] != "TEMPORAL":
             raise common.TargetE2EError(f"{room_type} allocation is not TEMPORAL")
-        if room["protocol"] != "V2" or room["execution_engine"] != "TEMPORAL_ACTIVITY":
+        if room["protocol"] != "V3" or room["execution_engine"] != "TEMPORAL_ACTIVITY":
             raise common.TargetE2EError(f"{room_type} did not run V2/TEMPORAL_ACTIVITY")
         if room["execution_lane"] != "TARGET_E2E_CANDIDATE":
             raise common.TargetE2EError(

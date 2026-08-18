@@ -41,6 +41,9 @@ public class AgentRunEntity extends AbstractEntity {
     public static final String V2_LOGICAL_FAILURE_MESSAGE =
             "AgentRun V2 logical execution cannot continue";
     public static final String V2_LOGICAL_FAILURE_STOP_REASON = "STREAM_FAILED";
+    public static final String V3_LOGICAL_FAILURE_MESSAGE =
+            "AgentRun V3 logical execution cannot continue";
+    public static final String V3_LOGICAL_FAILURE_STOP_REASON = "STREAM_FAILED";
 
     @Column(name = "case_id", length = 64)
     private String caseId;
@@ -363,11 +366,22 @@ public class AgentRunEntity extends AbstractEntity {
     }
 
     public static AgentRunEntity logicalV2(CreateLogicalRun command) {
-        if (command.protocol() != AgentRunProtocol.V2) {
-            throw new IllegalArgumentException("logicalV2 requires protocol V2");
+        return logicalTemporal(command, AgentRunProtocol.V2);
+    }
+
+    public static AgentRunEntity logicalV3(CreateLogicalRun command) {
+        return logicalTemporal(command, AgentRunProtocol.V3);
+    }
+
+    private static AgentRunEntity logicalTemporal(
+            CreateLogicalRun command, AgentRunProtocol expectedProtocol) {
+        if (command.protocol() != expectedProtocol) {
+            throw new IllegalArgumentException(
+                    "logical " + expectedProtocol.wireValue() + " factory requires an exact protocol");
         }
         if (command.executorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
-            throw new IllegalArgumentException("AgentRun V2 requires the Temporal Activity executor");
+            throw new IllegalArgumentException(
+                    "Temporal AgentRun requires the Temporal Activity executor");
         }
         AgentRunEntity run = new AgentRunEntity(required(command.agentRunId(), "agentRunId"));
         run.caseId = required(command.caseId(), "caseId");
@@ -378,13 +392,16 @@ public class AgentRunEntity extends AbstractEntity {
         run.profileVersion = "runtime";
         run.promptVersion = "runtime";
         run.skillVersion = "runtime";
-        run.rulesetVersion = AgentRunProtocol.V2.wireValue();
+        run.rulesetVersion = expectedProtocol.wireValue();
         run.runStatus = "PENDING";
         run.inputRefsJson = "[]";
         run.validationJson = "{}";
         run.riskFlagsJson = "[]";
         run.startedAt = at(command.createdAt(), "createdAt");
-        run.traceId = "agent-run-v2:" + command.agentRunId();
+        run.traceId = "agent-run-"
+                + expectedProtocol.name().toLowerCase(java.util.Locale.ROOT)
+                + ':'
+                + command.agentRunId();
         run.createdBy = "temporal-agent-run";
         run.streamOperation = command.operation();
         run.streamRequestJson = "{}";
@@ -475,10 +492,11 @@ public class AgentRunEntity extends AbstractEntity {
     }
 
     public void requireAttemptRequest(ExecuteAgentRunRequest request) {
+        requireTemporalProtocol();
         requireEqual(getId(), request.agentRunId(), "agentRunId");
         requireEqual(getId(), request.logicalRunId(), "logicalRunId");
         requireEqual(attemptLimit, request.attemptLimit(), "attemptLimit");
-        requireEqual(AgentRunProtocol.V2.wireValue(), request.streamProtocol(), "streamProtocol");
+        requireEqual(protocol, request.streamProtocol(), "streamProtocol");
         requireAttemptCommand(request.command());
         requireBoundLineage(request.logicalInputHash());
     }
@@ -502,9 +520,19 @@ public class AgentRunEntity extends AbstractEntity {
     }
 
     public void bindV2Audience(String actorRole, String audienceJson, String actorIdsJson) {
-        if (!AgentRunProtocol.V2.wireValue().equals(protocol)) {
-            throw new IllegalStateException("operation requires an AgentRun V2 row");
-        }
+        bindAudience(AgentRunProtocol.V2, actorRole, audienceJson, actorIdsJson);
+    }
+
+    public void bindV3Audience(String actorRole, String audienceJson, String actorIdsJson) {
+        bindAudience(AgentRunProtocol.V3, actorRole, audienceJson, actorIdsJson);
+    }
+
+    private void bindAudience(
+            AgentRunProtocol expectedProtocol,
+            String actorRole,
+            String audienceJson,
+            String actorIdsJson) {
+        requireProtocol(expectedProtocol);
         if ("[]".equals(streamAudienceJson) && "[]".equals(streamAudienceActorIdsJson)) {
             this.agentRole = required(actorRole, "actorRole");
             this.streamAudienceJson = required(audienceJson, "audienceJson");
@@ -517,7 +545,15 @@ public class AgentRunEntity extends AbstractEntity {
     }
 
     public void markV2AttemptStarted() {
-        requireV2Mutable();
+        markAttemptStarted(AgentRunProtocol.V2);
+    }
+
+    public void markV3AttemptStarted() {
+        markAttemptStarted(AgentRunProtocol.V3);
+    }
+
+    private void markAttemptStarted(AgentRunProtocol expectedProtocol) {
+        requireMutable(expectedProtocol);
         if (!"PENDING".equals(runStatus) && !"RUNNING".equals(runStatus)) {
             throw new IllegalStateException("logical AgentRun cannot start another attempt from " + runStatus);
         }
@@ -526,7 +562,19 @@ public class AgentRunEntity extends AbstractEntity {
     }
 
     public void markV2ResultReady(String attemptId, String resultHash, Instant completedAt) {
-        requireV2Mutable();
+        markResultReady(AgentRunProtocol.V2, attemptId, resultHash, completedAt);
+    }
+
+    public void markV3ResultReady(String attemptId, String resultHash, Instant completedAt) {
+        markResultReady(AgentRunProtocol.V3, attemptId, resultHash, completedAt);
+    }
+
+    private void markResultReady(
+            AgentRunProtocol expectedProtocol,
+            String attemptId,
+            String resultHash,
+            Instant completedAt) {
+        requireMutable(expectedProtocol);
         if ("RESULT_READY".equals(runStatus)) {
             requireEqual(resultReadyAttemptId, attemptId, "resultReadyAttemptId");
             requireEqual(finalResultHash, resultHash, "finalResultHash");
@@ -543,7 +591,20 @@ public class AgentRunEntity extends AbstractEntity {
 
     public void markV2AttemptFailed(
             AgentRunAttemptStatus attemptStatus, boolean retryable, Instant completedAt) {
-        requireV2Mutable();
+        markAttemptFailed(AgentRunProtocol.V2, attemptStatus, retryable, completedAt);
+    }
+
+    public void markV3AttemptFailed(
+            AgentRunAttemptStatus attemptStatus, boolean retryable, Instant completedAt) {
+        markAttemptFailed(AgentRunProtocol.V3, attemptStatus, retryable, completedAt);
+    }
+
+    private void markAttemptFailed(
+            AgentRunProtocol expectedProtocol,
+            AgentRunAttemptStatus attemptStatus,
+            boolean retryable,
+            Instant completedAt) {
+        requireMutable(expectedProtocol);
         if (attemptStatus != AgentRunAttemptStatus.FAILED
                 && attemptStatus != AgentRunAttemptStatus.ABORTED
                 && attemptStatus != AgentRunAttemptStatus.CANCELLED) {
@@ -619,7 +680,38 @@ public class AgentRunEntity extends AbstractEntity {
             AgentRunAttemptStatus terminalStatus,
             String safeErrorCode,
             Instant completedAt) {
-        requireV2Mutable();
+        return recordFinalizationFailure(
+                AgentRunProtocol.V2,
+                attemptId,
+                resultHash,
+                terminalStatus,
+                safeErrorCode,
+                completedAt);
+    }
+
+    public boolean recordV3FinalizationFailure(
+            String attemptId,
+            String resultHash,
+            AgentRunAttemptStatus terminalStatus,
+            String safeErrorCode,
+            Instant completedAt) {
+        return recordFinalizationFailure(
+                AgentRunProtocol.V3,
+                attemptId,
+                resultHash,
+                terminalStatus,
+                safeErrorCode,
+                completedAt);
+    }
+
+    private boolean recordFinalizationFailure(
+            AgentRunProtocol expectedProtocol,
+            String attemptId,
+            String resultHash,
+            AgentRunAttemptStatus terminalStatus,
+            String safeErrorCode,
+            Instant completedAt) {
+        requireMutable(expectedProtocol);
         if (terminalStatus != AgentRunAttemptStatus.FAILED
                 && terminalStatus != AgentRunAttemptStatus.ABORTED) {
             throw new IllegalArgumentException(
@@ -657,13 +749,14 @@ public class AgentRunEntity extends AbstractEntity {
         return false;
     }
 
-    public void commitV2Final(
+    public void commitTemporalFinal(
             String attemptId,
             String resultHash,
             String manifestId,
             String manifestHash,
             long finalSequenceNo,
             Instant committedAt) {
+        requireTemporalProtocol();
         if ("COMMITTED".equals(finalizationStatus)) {
             requireEqual(committedAttemptId, attemptId, "committedAttemptId");
             requireEqual(finalResultHash, resultHash, "finalResultHash");
@@ -1174,12 +1267,27 @@ public class AgentRunEntity extends AbstractEntity {
         }
     }
 
-    private void requireV2Mutable() {
-        if (!AgentRunProtocol.V2.wireValue().equals(protocol)) {
-            throw new IllegalStateException("operation requires an AgentRun V2 row");
-        }
+    private void requireMutable(AgentRunProtocol expectedProtocol) {
+        requireProtocol(expectedProtocol);
         if ("COMMITTED".equals(finalizationStatus)) {
             throw new IllegalStateException("logical AgentRun already has a committed final");
+        }
+    }
+
+    private void requireProtocol(AgentRunProtocol expectedProtocol) {
+        if (!expectedProtocol.wireValue().equals(protocol)
+                || executorKind != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
+            throw new IllegalStateException(
+                    "operation requires an exact " + expectedProtocol.wireValue()
+                            + " Temporal AgentRun row");
+        }
+    }
+
+    private void requireTemporalProtocol() {
+        if (executorKind != AgentRunExecutorKind.TEMPORAL_ACTIVITY
+                || (!AgentRunProtocol.V2.wireValue().equals(protocol)
+                        && !AgentRunProtocol.V3.wireValue().equals(protocol))) {
+            throw new IllegalStateException("operation requires a versioned Temporal AgentRun row");
         }
     }
 }

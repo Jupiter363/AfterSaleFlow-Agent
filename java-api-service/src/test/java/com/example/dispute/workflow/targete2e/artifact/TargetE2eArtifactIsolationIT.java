@@ -126,7 +126,7 @@ class TargetE2eArtifactIsolationIT {
                 "--app.temporal.worker.enabled=true",
                 "--app.temporal.worker.role=CONTROL",
                 "--app.temporal.worker.versioning-mode=BUILD_ID",
-                "--app.agent-run-v2.protocol-default=V2",
+                "--app.agent-run-v2.protocol-default=V3",
                 "--app.agent-run-v2.scheduler-mode=DETECTOR",
                 "--app.target-e2e.activation.manifest-jws=");
         assertStartupRejected(
@@ -144,7 +144,7 @@ class TargetE2eArtifactIsolationIT {
                 "--app.temporal.worker.enabled=true",
                 "--app.temporal.worker.role=AGENT",
                 "--app.temporal.worker.versioning-mode=BUILD_ID",
-                "--app.agent-run-v2.protocol-default=V2",
+                "--app.agent-run-v2.protocol-default=V3",
                 "--app.agent-run-v2.scheduler-mode=DETECTOR");
     }
 

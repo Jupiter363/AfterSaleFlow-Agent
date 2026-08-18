@@ -605,10 +605,10 @@ class AgentRunV2RecoveryTerminalEventTest {
                 recoveryEventStore,
                 entityManager,
                 MAPPER);
-        AgentRunEntity run = AgentRunEntity.logicalV2(
-                AgentRunPersistenceFixtures.logicalRun());
-        run.bindV2Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
-        run.markV2AttemptStarted();
+        AgentRunEntity run = AgentRunEntity.logicalV3(
+                AgentRunPersistenceFixtures.logicalRunV3());
+        run.bindV3Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
+        run.markV3AttemptStarted();
         AgentRunAttemptEntity attempt = AgentRunAttemptEntity.start(
                 run.getId(),
                 AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_1"),
@@ -630,7 +630,7 @@ class AgentRunV2RecoveryTerminalEventTest {
                 "PROVIDER_TIMEOUT",
                 AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
                 AgentRunPersistenceFixtures.COMPLETED_AT);
-        run.markV2AttemptFailed(
+        run.markV3AttemptFailed(
                 AgentRunAttemptStatus.ABORTED,
                 true,
                 AgentRunPersistenceFixtures.COMPLETED_AT);
@@ -722,14 +722,14 @@ class AgentRunV2RecoveryTerminalEventTest {
                 attempt,
                 "errorMessage",
                 "FOREIGN_TERMINAL_MESSAGE",
-                AgentRunEntity.V2_LOGICAL_FAILURE_MESSAGE);
+                AgentRunEntity.V3_LOGICAL_FAILURE_MESSAGE);
         assertRecoveryReplayRunDriftRejected(
                 ledger,
                 run,
                 attempt,
                 "stopReason",
                 "FOREIGN_TERMINAL_STOP",
-                AgentRunEntity.V2_LOGICAL_FAILURE_STOP_REASON);
+                AgentRunEntity.V3_LOGICAL_FAILURE_STOP_REASON);
         assertRecoveryReplayRunDriftRejected(
                 ledger,
                 run,
@@ -935,9 +935,9 @@ class AgentRunV2RecoveryTerminalEventTest {
                 recoveryEventStore,
                 mock(EntityManager.class),
                 MAPPER);
-        AgentRunEntity run = AgentRunEntity.logicalV2(
-                AgentRunPersistenceFixtures.logicalRun());
-        run.bindV2Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
+        AgentRunEntity run = AgentRunEntity.logicalV3(
+                AgentRunPersistenceFixtures.logicalRunV3());
+        run.bindV3Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
         AgentRunAttemptEntity attempt = AgentRunAttemptEntity.start(
                 run.getId(),
                 AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_1"),
@@ -993,9 +993,9 @@ class AgentRunV2RecoveryTerminalEventTest {
                 recoveryEventStore,
                 mock(EntityManager.class),
                 MAPPER);
-        AgentRunEntity run = AgentRunEntity.logicalV2(
-                AgentRunPersistenceFixtures.logicalRun());
-        run.bindV2Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
+        AgentRunEntity run = AgentRunEntity.logicalV3(
+                AgentRunPersistenceFixtures.logicalRunV3());
+        run.bindV3Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
         AgentRunAttemptEntity attempt = AgentRunAttemptEntity.start(
                 run.getId(),
                 AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_1"),
@@ -1112,7 +1112,7 @@ class AgentRunV2RecoveryTerminalEventTest {
                     null, null, null, null);
         };
         return new AgentStreamEvent(
-                "agent-stream.v2",
+                "agent-stream.v3",
                 runId,
                 attemptId,
                 sequenceNo,
@@ -1277,15 +1277,15 @@ class AgentRunV2RecoveryTerminalEventTest {
                 recoveryEventStore,
                 entityManager,
                 MAPPER);
-        AgentRunEntity run = AgentRunEntity.logicalV2(
-                AgentRunPersistenceFixtures.logicalRun());
-        run.bindV2Audience(
+        AgentRunEntity run = AgentRunEntity.logicalV3(
+                AgentRunPersistenceFixtures.logicalRunV3());
+        run.bindV3Audience(
                 audience.name(),
                 "[\"" + audience.name() + "\"]",
                 audience == Audience.MERCHANT
                         ? "[\"merchant-persistence\"]"
                         : "[\"user-persistence\"]");
-        run.markV2AttemptStarted();
+        run.markV3AttemptStarted();
         String attemptId = "ATTEMPT_V2_ACTIVITY_FAILURE";
         AgentRunAttemptEntity attempt = AgentRunAttemptEntity.start(
                 run.getId(),

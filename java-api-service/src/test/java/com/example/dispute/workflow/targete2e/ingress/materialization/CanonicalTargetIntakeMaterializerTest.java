@@ -40,6 +40,7 @@ import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
@@ -383,6 +384,9 @@ class CanonicalTargetIntakeMaterializerTest {
         ArgumentCaptor<CreateLogicalRun> logicalRun = ArgumentCaptor.forClass(CreateLogicalRun.class);
         verify(ledger).createOrLoad(logicalRun.capture());
         assertThat(logicalRun.getValue().roomEpochId()).isEqualTo("CRE_1");
+        assertThat(logicalRun.getValue().protocol()).isEqualTo(AgentRunProtocol.V3);
+        assertThat(context.getValue().targetAgentRun().request().streamProtocol())
+                .isEqualTo(AgentRunProtocol.V3.wireValue());
         ArgumentCaptor<IntakeGraphCommandFactory.CommandRequest> graphRequest =
                 ArgumentCaptor.forClass(IntakeGraphCommandFactory.CommandRequest.class);
         verify(commands).create(graphRequest.capture());
@@ -596,9 +600,9 @@ class CanonicalTargetIntakeMaterializerTest {
         when(epoch.getTemporalWorkflowId())
                 .thenReturn("case-process:tenant-target-activation:CASE_TARGET_001");
         when(epoch.getTemporalBuildId()).thenReturn("p9-control-build");
-        when(epoch.getGraphKey()).thenReturn("all-rooms.target-e2e.v1");
-        when(epoch.getGraphVersion()).thenReturn("target-e2e-graph.2026-07-27.1");
-        when(epoch.getCheckpointSchemaVersion()).thenReturn("target-e2e-checkpoint.v1");
+        when(epoch.getGraphKey()).thenReturn("all-rooms.target-e2e.v2");
+        when(epoch.getGraphVersion()).thenReturn("target-e2e-graph.2026-08-18.1");
+        when(epoch.getCheckpointSchemaVersion()).thenReturn("target-e2e-checkpoint.v2");
         return epoch;
     }
 

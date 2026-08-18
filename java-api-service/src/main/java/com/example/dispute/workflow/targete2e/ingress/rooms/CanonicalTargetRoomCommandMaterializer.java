@@ -272,7 +272,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         AgentRunCommandBindingFactory.Binding binding = bindings.bind(new AgentRunCommandBindingFactory.Context(
                 epoch.getRoomId(), caseId + ":" + epoch.getRoomEpoch(), command.commandType().name(), commandId), graph);
         LogicalRun logical = ledger.createOrLoad(new CreateLogicalRun(logicalRunId, epoch.getTenantSurrogate(), caseId,
-                epoch.getRoomId(), command.commandType().name(), commandId, AgentRunProtocol.V2,
+                epoch.getRoomId(), command.commandType().name(), commandId, AgentRunProtocol.V3,
                 AgentRunExecutorKind.TEMPORAL_ACTIVITY, caseId + ":" + epoch.getRoomEpoch(), command.roomType(),
                 epoch.getRoomEpoch(), epoch.getProcessRevision(), epoch.getFencingToken(), graph.requestHash(),
                 binding.logicalInputHash(), ATTEMPT_LIMIT, command.deadlineAt(), now));

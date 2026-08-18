@@ -76,10 +76,10 @@ public class JpaAgentRunLedger implements AgentRunLedger {
     @Transactional
     public LogicalRun createOrLoad(CreateLogicalRun command) {
         if (command.protocol() != AgentRunProtocol.V3) {
-            throw new IllegalArgumentException("logical AgentRun creation only accepts protocol V2");
+            throw new IllegalArgumentException("logical AgentRun creation only accepts protocol V3");
         }
         if (command.executorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
-            throw new IllegalArgumentException("AgentRun V2 requires the Temporal Activity executor");
+            throw new IllegalArgumentException("AgentRun V3 requires the Temporal Activity executor");
         }
         lockLogicalKey(command.caseId(), command.logicalIdempotencyKey());
         Optional<AgentRunEntity> existing =
@@ -92,7 +92,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         if (runRepository.existsById(command.agentRunId())) {
             throw new IllegalStateException("agentRunId is already bound to another logical run");
         }
-        AgentRunEntity created = runRepository.saveAndFlush(AgentRunEntity.logicalV2(command));
+        AgentRunEntity created = runRepository.saveAndFlush(AgentRunEntity.logicalV3(command));
         return logical(created);
     }
 
@@ -114,7 +114,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         }
         if (!AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
                 || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
-            throw new IllegalStateException("recovery candidate is not a Temporal AgentRun V2");
+            throw new IllegalStateException("recovery candidate is not a Temporal AgentRun V3");
         }
         if (!"PENDING".equals(run.getRunStatus()) && !"RUNNING".equals(run.getRunStatus())) {
             return Optional.empty();
@@ -166,7 +166,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         AgentRunEntity run = lockRun(agentRunId);
         if (!AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
                 || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
-            throw new IllegalStateException("recovery candidate is not a Temporal AgentRun V2");
+            throw new IllegalStateException("recovery candidate is not a Temporal AgentRun V3");
         }
         long latestAttemptNo = attemptRepository.findMaxAttemptNoByAgentRunId(agentRunId);
         requireEqual(latestAttemptNo, attemptNo, "latestAttemptNo");
@@ -175,7 +175,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 .orElseThrow(() -> new IllegalStateException("latest AgentRun attempt was not found"));
         requireEqual(attempt.getId(), attemptId, "attemptId");
         if ("FAILED".equals(run.getRunStatus())) {
-            requireV2RecoveryTerminalProjection(run, attempt, errorCode, terminalAt);
+            requireV3RecoveryTerminalProjection(run, attempt, errorCode, terminalAt);
             return;
         }
         if (!"PENDING".equals(run.getRunStatus()) && !"RUNNING".equals(run.getRunStatus())) {
@@ -208,16 +208,16 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         }
         run.markFailed(
                 errorCode,
-                AgentRunEntity.V2_LOGICAL_FAILURE_MESSAGE,
+                AgentRunEntity.V3_LOGICAL_FAILURE_MESSAGE,
                 false,
                 null);
-        // markFailed owns the public GET error projection; the V2 transition restores the
+        // markFailed owns the public GET error projection; the V3 transition restores the
         // authority-supplied terminal timestamp instead of retaining its wall-clock timestamp.
-        run.markV2AttemptFailed(AgentRunAttemptStatus.FAILED, false, terminalAt);
+        run.markV3AttemptFailed(AgentRunAttemptStatus.FAILED, false, terminalAt);
         attempt.advanceRecoveryTerminalErrorSequence(terminalPosition.sequenceNo());
         persistRecoveryTerminalError(
                 run, attempt, errorCode, terminalAt, terminalPosition);
-        requireV2RecoveryTerminalProjection(run, attempt, errorCode, terminalAt);
+        requireV3RecoveryTerminalProjection(run, attempt, errorCode, terminalAt);
     }
 
     @Override
@@ -237,7 +237,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         Binding binding = requireVerifiedBinding(run, command, allocation.binding());
         AttemptAllocation verified =
                 new AttemptAllocation(allocation.attemptNo(), command, binding);
-        run.bindV2Audience(
+        run.bindV3Audience(
                 command.actorScope().actorRole().name(),
                 json(List.of(command.actorScope().audience().name())),
                 json(List.of(command.actorScope().actorId())));
@@ -317,7 +317,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                         resetRequired,
                         publicSequenceOffset,
                         persistedStartedAt);
-        run.markV2AttemptStarted();
+        run.markV3AttemptStarted();
         attemptRepository.saveAndFlush(created);
         persistPublicPrelude(created, command, resetReasonCode);
         requirePersistedPrelude(created, command);
@@ -375,7 +375,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             requireEqual(run.getFinalResultHash(), result.resultHash(), "finalResultHash");
             return;
         }
-        run.markV2ResultReady(result.attemptId(), result.resultHash(), result.completedAt());
+        run.markV3ResultReady(result.attemptId(), result.resultHash(), result.completedAt());
     }
 
     @Override
@@ -405,7 +405,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 command.publicOutputEmitted(),
                 terminalStatus,
                 command.safeErrorCode());
-        boolean runReplayed = run.recordV2FinalizationFailure(
+        boolean runReplayed = run.recordV3FinalizationFailure(
                 command.attemptId(),
                 command.resultHash(),
                 terminalStatus,
@@ -424,7 +424,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 command.attemptId(),
                 terminalSequenceNo,
                 StreamEventType.ERROR,
-                requireV2Audience(run),
+                requireV3Audience(run),
                 attempt.getCompletedAt().toInstant(),
                 new AgentStreamEvent.Payload(
                         null,
@@ -476,12 +476,12 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         attempt.recordFailure(status, errorCode, recoveryAction, completedAt);
         Instant durableCompletedAt = attempt.getCompletedAt().toInstant();
         if (previousStatus == status) {
-            requireV2AttemptFailureProjection(
+            requireV3AttemptFailureProjection(
                     run, status, errorCode, recoveryAction, durableCompletedAt);
             return;
         }
-        projectV2AttemptFailure(run, status, errorCode, recoveryAction, durableCompletedAt);
-        requireV2AttemptFailureProjection(
+        projectV3AttemptFailure(run, status, errorCode, recoveryAction, durableCompletedAt);
+        requireV3AttemptFailureProjection(
                 run, status, errorCode, recoveryAction, durableCompletedAt);
     }
 
@@ -529,7 +529,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             attempt.recordFailureResult(status, durableResult, json(durableResult));
         }
         if (previousStatus == status) {
-            requireV2AttemptFailureProjection(
+            requireV3AttemptFailureProjection(
                     run,
                     status,
                     durableResult.errorCode(),
@@ -537,13 +537,13 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                     durableResult.completedAt());
             return durableResult;
         }
-        projectV2AttemptFailure(
+        projectV3AttemptFailure(
                 run,
                 status,
                 durableResult.errorCode(),
                 durableResult.recoveryAction(),
                 durableResult.completedAt());
-        requireV2AttemptFailureProjection(
+        requireV3AttemptFailureProjection(
                 run,
                 status,
                 durableResult.errorCode(),
@@ -597,7 +597,9 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 run.getLogicalIdempotencyKey(),
                 AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
                         ? AgentRunProtocol.V3
-                        : AgentRunProtocol.V1,
+                        : AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
+                                ? AgentRunProtocol.V2
+                                : AgentRunProtocol.V1,
                 run.getExecutorKind(),
                 run.getRoomEpochId(),
                 run.getRoomEpoch(),
@@ -670,7 +672,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 replay.retryable(),
                 replay.recoveryAction() == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
                 "durableFailureRetryable");
-        requireV2AttemptFailureProjection(
+        requireV3AttemptFailureProjection(
                 run,
                 suppliedStatus,
                 replay.errorCode(),
@@ -700,7 +702,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             throw new IllegalStateException(
                     "durable failure terminal event is invalid", exception);
         }
-        Audience audience = requireV2Audience(run);
+        Audience audience = requireV3Audience(run);
         requireEqual(persisted.getAgentRunId(), run.getId(), "durableFailureStoredRunId");
         requireEqual(
                 persisted.getAgentRunAttemptId(),
@@ -732,7 +734,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 terminal.payload().retryable(), replay.retryable(), "durableFailureErrorRetryable");
     }
 
-    private static void projectV2AttemptFailure(
+    private static void projectV3AttemptFailure(
             AgentRunEntity run,
             AgentRunAttemptStatus status,
             String errorCode,
@@ -742,14 +744,14 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         if (!retryable) {
             run.markFailed(
                     errorCode,
-                    AgentRunEntity.V2_LOGICAL_FAILURE_MESSAGE,
+                    AgentRunEntity.V3_LOGICAL_FAILURE_MESSAGE,
                     false,
                     null);
         }
-        run.markV2AttemptFailed(status, retryable, completedAt);
+        run.markV3AttemptFailed(status, retryable, completedAt);
     }
 
-    private static void requireV2AttemptFailureProjection(
+    private static void requireV3AttemptFailureProjection(
             AgentRunEntity run,
             AgentRunAttemptStatus status,
             String errorCode,
@@ -757,26 +759,26 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             Instant completedAt) {
         boolean retryable = recoveryAction == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT;
         requireEqual(
-                run.getRunStatus(), retryable ? "PENDING" : status.name(), "v2FailureRunStatus");
+                run.getRunStatus(), retryable ? "PENDING" : status.name(), "v3FailureRunStatus");
         requireEqual(
-                run.getErrorCode(), retryable ? null : errorCode, "v2FailureRunErrorCode");
+                run.getErrorCode(), retryable ? null : errorCode, "v3FailureRunErrorCode");
         requireEqual(
-                run.getErrorRetryable(), retryable ? null : Boolean.FALSE, "v2FailureRunRetryable");
+                run.getErrorRetryable(), retryable ? null : Boolean.FALSE, "v3FailureRunRetryable");
         requireEqual(
                 run.getErrorMessage(),
-                retryable ? null : AgentRunEntity.V2_LOGICAL_FAILURE_MESSAGE,
-                "v2FailureRunErrorMessage");
+                retryable ? null : AgentRunEntity.V3_LOGICAL_FAILURE_MESSAGE,
+                "v3FailureRunErrorMessage");
         requireEqual(
                 run.getStopReason(),
-                retryable ? null : AgentRunEntity.V2_LOGICAL_FAILURE_STOP_REASON,
-                "v2FailureRunStopReason");
+                retryable ? null : AgentRunEntity.V3_LOGICAL_FAILURE_STOP_REASON,
+                "v3FailureRunStopReason");
         Instant runCompletedAt =
                 run.getCompletedAt() == null ? null : run.getCompletedAt().toInstant();
         requireEqual(
-                runCompletedAt, retryable ? null : completedAt, "v2FailureRunCompletedAt");
+                runCompletedAt, retryable ? null : completedAt, "v3FailureRunCompletedAt");
     }
 
-    private void requireV2RecoveryTerminalProjection(
+    private void requireV3RecoveryTerminalProjection(
             AgentRunEntity run,
             AgentRunAttemptEntity attempt,
             String errorCode,
@@ -786,11 +788,11 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         requireEqual(run.getErrorRetryable(), Boolean.FALSE, "recoveryWinnerRetryable");
         requireEqual(
                 run.getErrorMessage(),
-                AgentRunEntity.V2_LOGICAL_FAILURE_MESSAGE,
+                AgentRunEntity.V3_LOGICAL_FAILURE_MESSAGE,
                 "recoveryWinnerErrorMessage");
         requireEqual(
                 run.getStopReason(),
-                AgentRunEntity.V2_LOGICAL_FAILURE_STOP_REASON,
+                AgentRunEntity.V3_LOGICAL_FAILURE_STOP_REASON,
                 "recoveryWinnerStopReason");
         requireEqual(
                 run.getCompletedAt() == null ? null : run.getCompletedAt().toInstant(),
@@ -844,7 +846,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                         "recovery winner terminal event is missing"));
         persisted.requireCompatibilityBinding();
         persisted.canonicalPayloadHash(streamObjectMapper);
-        Audience audience = requireV2Audience(run);
+        Audience audience = requireV3Audience(run);
         AgentStreamEvent terminal;
         try {
             terminal = streamObjectMapper.readValue(
@@ -902,7 +904,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         if (!AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
                 || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
             throw new IllegalStateException(
-                    "Activity failure terminal requires a Temporal AgentRun V2");
+                    "Activity failure terminal requires a Temporal AgentRun V3");
         }
         requireEqual(run.getId(), result.logicalRunId(), "logicalRunId");
         requireEqual(run.getRunStatus(), "RUNNING", "runStatus");
@@ -935,7 +937,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             throw new IllegalStateException(
                     "Activity failure source event is invalid", exception);
         }
-        Audience audience = requireV2Audience(run);
+        Audience audience = requireV3Audience(run);
         requireEqual(persisted.getAgentRunId(), run.getId(), "activityFailureStoredRunId");
         requireEqual(
                 persisted.getAgentRunAttemptId(),
@@ -1309,7 +1311,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             throw new IllegalStateException(
                     "recovery terminal source event is invalid", exception);
         }
-        Audience audience = requireV2Audience(run);
+        Audience audience = requireV3Audience(run);
         requireEqual(persisted.getAgentRunId(), run.getId(), "recoveryTerminalStoredRunId");
         requireEqual(
                 persisted.getAgentRunAttemptId(),
@@ -1345,18 +1347,18 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         return new RecoveryTerminalPosition(Math.addExact(highWatermark, 1L), audience);
     }
 
-    private Audience requireV2Audience(AgentRunEntity run) {
+    private Audience requireV3Audience(AgentRunEntity run) {
         try {
             List<Audience> audiences = streamObjectMapper.readValue(
                     run.getStreamAudienceJson(), new TypeReference<>() {});
             if (audiences == null || audiences.size() != 1 || audiences.getFirst() == null) {
                 throw new IllegalStateException(
-                        "V2 recovery terminal requires exactly one stream audience");
+                        "V3 recovery terminal requires exactly one stream audience");
             }
             return audiences.getFirst();
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException(
-                    "V2 recovery terminal has an invalid stream audience", exception);
+                    "V3 recovery terminal has an invalid stream audience", exception);
         }
     }
 

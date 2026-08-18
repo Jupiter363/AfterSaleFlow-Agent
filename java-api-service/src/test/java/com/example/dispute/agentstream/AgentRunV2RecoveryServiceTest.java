@@ -425,7 +425,7 @@ class AgentRunV2RecoveryServiceTest {
                 firstCommand.logicalRunId(),
                 firstCommand.caseId(),
                 "logical-key-001",
-                AgentRunProtocol.V2,
+                AgentRunProtocol.V3,
                 AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                 "EPOCH_INTAKE_001",
                 firstCommand.roomEpoch(),

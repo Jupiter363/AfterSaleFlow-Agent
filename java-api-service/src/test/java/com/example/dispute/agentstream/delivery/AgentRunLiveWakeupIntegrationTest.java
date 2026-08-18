@@ -87,7 +87,7 @@ class AgentRunLiveWakeupIntegrationTest {
         insertCase();
         AgentRunLedger.LogicalRun logical =
                 ledger.createOrLoad(
-                        AgentRunPersistenceFixtures.logicalRun("ATTEMPT_WAKEUP_1"));
+                        AgentRunPersistenceFixtures.logicalRunV3("ATTEMPT_WAKEUP_1"));
         AgentRunLedger.Attempt attempt =
                 ledger.startNextAttempt(
                         logical.agentRunId(),
@@ -140,7 +140,7 @@ class AgentRunLiveWakeupIntegrationTest {
 
     private AgentStreamEvent event(String attemptId, long sequence, String delta) {
         return new AgentStreamEvent(
-                "agent-stream.v2",
+                "agent-stream.v3",
                 AgentRunPersistenceFixtures.RUN_ID,
                 attemptId,
                 sequence,

@@ -77,7 +77,7 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
             throw new IllegalStateException("logical AgentRun is committed without its manifest row");
         }
 
-        attempt.markCommitted(manifest, commit.finalStreamSequenceNo());
+        attempt.markCommitted(manifest, commit.finalStreamSequenceNo(), run.getProtocol());
 
         AgentExecutionManifestEntity entity =
                 AgentExecutionManifestEntity.formal(
@@ -87,7 +87,7 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
                         commit.manifestHash(),
                         json(manifest.inputs()));
         manifestRepository.saveAndFlush(entity);
-        run.commitV2Final(
+        run.commitTemporalFinal(
                 attempt.getId(),
                 commit.finalResultHash(),
                 entity.getId(),

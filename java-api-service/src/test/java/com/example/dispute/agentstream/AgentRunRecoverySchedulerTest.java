@@ -65,7 +65,7 @@ class AgentRunRecoverySchedulerTest {
                         "RUNNING");
         verify(runRepository, never())
                 .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
-                        AgentRunProtocol.V2.wireValue(),
+                        AgentRunProtocol.V3.wireValue(),
                         AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                         "PENDING");
     }
@@ -85,13 +85,13 @@ class AgentRunRecoverySchedulerTest {
                                 "running_count", 6L));
         when(runRepository
                         .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
-                                AgentRunProtocol.V2.wireValue(),
+                                AgentRunProtocol.V3.wireValue(),
                                 AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                                 "PENDING"))
                 .thenReturn(List.of(pending));
         when(runRepository
                         .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
-                                AgentRunProtocol.V2.wireValue(),
+                                AgentRunProtocol.V3.wireValue(),
                                 AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                                 "RUNNING"))
                 .thenReturn(List.of(running));
@@ -152,7 +152,7 @@ class AgentRunRecoverySchedulerTest {
         verifyNoInteractions(runRepository, worker, lifecycleService, eventService, v2RecoveryService, v2Coordinator);
         verify(runRepository, never())
                 .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
-                        AgentRunProtocol.V2.wireValue(),
+                        AgentRunProtocol.V3.wireValue(),
                         AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                         "PENDING");
     }

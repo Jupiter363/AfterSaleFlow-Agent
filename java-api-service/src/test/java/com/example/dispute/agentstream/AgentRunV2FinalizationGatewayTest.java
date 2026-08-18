@@ -87,7 +87,7 @@ class AgentRunV2FinalizationGatewayTest {
                 request.agentRunId(),
                 request.command().caseId(),
                 facts.logicalIdempotencyKey(),
-                AgentRunProtocol.V2,
+                AgentRunProtocol.V3,
                 AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                 "EPOCH_EVIDENCE_001",
                 request.command().roomEpoch(),

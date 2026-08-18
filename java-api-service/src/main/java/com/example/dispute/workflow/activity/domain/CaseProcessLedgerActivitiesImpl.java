@@ -1371,7 +1371,7 @@ public class CaseProcessLedgerActivitiesImpl
         boolean exactRun =
                 authority.command().tenantSurrogate().equals(run.getTenantSurrogate())
                         && authority.command().caseId().equals(run.getCaseId())
-                        && AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
+                        && AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
                         && run.getExecutorKind() == AgentRunExecutorKind.TEMPORAL_ACTIVITY
                         && run.getRoomType() == RoomType.EVIDENCE
                         && run.getRoomEpoch() == authority.command().roomEpoch()
@@ -1416,20 +1416,10 @@ public class CaseProcessLedgerActivitiesImpl
         }
 
         requireTargetEvidenceFailureTerminalEvent(run, attempt, terminalCommand, authority);
-        try {
-            run.repairLegacyV2TerminalFailureScalars(
-                    authority.terminalAttemptStatus(),
-                    authority.terminalErrorCode(),
-                    authority.terminalAt());
-        } catch (IllegalArgumentException | IllegalStateException mismatch) {
-            throw permanentFailure(
-                    "TARGET_EVIDENCE_TERMINAL_NO_COMMIT_RUN_INVALID",
-                    "logical Evidence AgentRun failure projection is partial or conflicting");
-        }
         if (!authority.terminalErrorCode().equals(run.getErrorCode())
                 || !Boolean.FALSE.equals(run.getErrorRetryable())
-                || !AgentRunEntity.V2_LOGICAL_FAILURE_MESSAGE.equals(run.getErrorMessage())
-                || !AgentRunEntity.V2_LOGICAL_FAILURE_STOP_REASON.equals(run.getStopReason())) {
+                || !AgentRunEntity.V3_LOGICAL_FAILURE_MESSAGE.equals(run.getErrorMessage())
+                || !AgentRunEntity.V3_LOGICAL_FAILURE_STOP_REASON.equals(run.getStopReason())) {
             throw permanentFailure(
                     "TARGET_EVIDENCE_TERMINAL_NO_COMMIT_RUN_INVALID",
                     "logical Evidence AgentRun failure projection is not canonical");
@@ -1466,7 +1456,7 @@ public class CaseProcessLedgerActivitiesImpl
                     ? null
                     : persisted.getCreatedAt().toInstant();
             AgentStreamEvent expected = new AgentStreamEvent(
-                    AgentRunProtocol.V2.wireValue(),
+                    AgentRunProtocol.V3.wireValue(),
                     run.getId(),
                     attempt.getId(),
                     highWatermark,
@@ -1487,7 +1477,7 @@ public class CaseProcessLedgerActivitiesImpl
             boolean exact = run.getId().equals(persisted.getAgentRunId())
                     && attempt.getId().equals(persisted.getAgentRunAttemptId())
                     && highWatermark == persisted.getSequenceNo()
-                    && AgentRunProtocol.V2.wireValue().equals(persisted.getStreamProtocol())
+                    && AgentRunProtocol.V3.wireValue().equals(persisted.getStreamProtocol())
                     && StreamEventType.ERROR.wireValue().equals(persisted.getEventType())
                     && terminalCommand.actorScope().audience() == persisted.getAudience()
                     && eventOccurredAt != null
@@ -1854,7 +1844,7 @@ public class CaseProcessLedgerActivitiesImpl
         }
         if (!authority.tenantSurrogate().equals(run.getTenantSurrogate())
                 || !authority.caseId().equals(run.getCaseId())
-                || !AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
+                || !AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
                 || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY
                 || run.getRoomType() != RoomType.INTAKE
                 || run.getRoomEpoch() != authority.roomEpoch()

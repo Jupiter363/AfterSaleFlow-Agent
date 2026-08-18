@@ -129,7 +129,7 @@ final class TargetE2eArtifactPrerequisites {
         if (AGENT_WORKER_ROLE.equals(workerRole)) {
             require(agentRunV2Enabled, "TARGET_E2E_AGENT_RUN_V2_REQUIRED");
         }
-        require("V2".equals(agentRunProtocol), "TARGET_E2E_AGENT_RUN_PROTOCOL_INVALID");
+        require("V3".equals(agentRunProtocol), "TARGET_E2E_AGENT_RUN_PROTOCOL_INVALID");
         require("DETECTOR".equals(agentRunScheduler), "TARGET_E2E_AGENT_RUN_SCHEDULER_INVALID");
         if (AGENT_WORKER_ROLE.equals(workerRole)) {
             require(

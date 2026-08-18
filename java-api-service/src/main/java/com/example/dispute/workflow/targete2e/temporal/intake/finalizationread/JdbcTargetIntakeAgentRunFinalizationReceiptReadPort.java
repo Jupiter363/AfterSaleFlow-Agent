@@ -453,7 +453,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
 
         ExecuteAgentRunResult completedAudit = decodeCompletedAudit(terminal);
         AgentRunAttemptStatus terminalStatus = terminalAttemptStatus(terminal.attemptStatus());
-        if (!AgentRunProtocol.V2.wireValue().equals(terminal.runProtocol())
+        if (!AgentRunProtocol.V3.wireValue().equals(terminal.runProtocol())
                 || !AgentRunExecutorKind.TEMPORAL_ACTIVITY.name().equals(terminal.runExecutorKind())
                 || !command.tenantSurrogate().equals(terminal.runTenantSurrogate())
                 || !command.caseId().equals(terminal.runCaseId())

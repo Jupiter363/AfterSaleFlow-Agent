@@ -17,10 +17,14 @@ class TargetE2eAgentRunV2RetryPreparationTest {
   void reservesInitialAttemptReplayForTheTargetRoomWorkflow() throws IOException {
     String source = Files.readString(SOURCE);
     String policy = method(source, "mayReplayInitialAttemptFromRecovery");
+    String supports = method(source, "supports");
 
     assertThat(policy)
         .contains("Objects.requireNonNull(state, \"state\");")
         .contains("return false;");
+    assertThat(supports)
+        .contains("state.logicalRun().protocol() != AgentRunProtocol.V3")
+        .doesNotContain("state.logicalRun().protocol() != AgentRunProtocol.V2");
   }
 
   private static String method(String source, String methodName) {

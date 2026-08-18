@@ -139,7 +139,7 @@ class AgentRunV2NextAttemptFactoryTest {
                 source.logicalRunId(),
                 source.caseId(),
                 "logical-key-001",
-                AgentRunProtocol.V2,
+                AgentRunProtocol.V3,
                 AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                 "EPOCH_INTAKE_001",
                 source.roomEpoch(),

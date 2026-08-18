@@ -103,7 +103,7 @@ class AgentRunV2CoordinatorTest {
                 ArgumentCaptor.forClass(CreateLogicalRun.class);
         verify(ledger).createOrLoad(logicalCaptor.capture());
         assertThat(logicalCaptor.getValue().agentRunId()).isEqualTo(graphCommand.logicalRunId());
-        assertThat(logicalCaptor.getValue().protocol()).isEqualTo(AgentRunProtocol.V2);
+        assertThat(logicalCaptor.getValue().protocol()).isEqualTo(AgentRunProtocol.V3);
         assertThat(logicalCaptor.getValue().executorKind())
                 .isEqualTo(AgentRunExecutorKind.TEMPORAL_ACTIVITY);
 
@@ -360,7 +360,7 @@ class AgentRunV2CoordinatorTest {
                 graphCommand.logicalRunId(),
                 graphCommand.caseId(),
                 "logical-key-001",
-                AgentRunProtocol.V2,
+                AgentRunProtocol.V3,
                 AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                 "EPOCH_EVIDENCE_001",
                 graphCommand.roomEpoch(),
@@ -435,7 +435,7 @@ class AgentRunV2CoordinatorTest {
                 later.logicalRunId(),
                 2,
                 3,
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 binding.logicalInputHash(),
                 graphCommand.attemptId(),
                 false,
@@ -456,7 +456,7 @@ class AgentRunV2CoordinatorTest {
                 graphCommand.logicalRunId(),
                 1,
                 3,
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 binding.logicalInputHash(),
                 null,
                 false,

@@ -18,8 +18,9 @@ public record AgentRunV2Properties(
         if (protocolDefault == null || schedulerMode == null) {
             throw new IllegalArgumentException("protocolDefault and schedulerMode are required");
         }
-        if (!enabled && protocolDefault == AgentRunProtocol.V2) {
-            throw new IllegalArgumentException("V2 protocol default requires agent-run-v2.enabled=true");
+        if (!enabled && protocolDefault != AgentRunProtocol.V1) {
+            throw new IllegalArgumentException(
+                    "versioned protocol default requires agent-run-v2.enabled=true");
         }
         if (enabled && schedulerMode == SchedulerMode.EXECUTOR) {
             throw new IllegalArgumentException(

@@ -238,7 +238,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                         request.roomId(), roomEpochId, OPERATION, request.idempotencyKey()), graph);
         LogicalRun logical = ledger.createOrLoad(new CreateLogicalRun(
                 logicalRunId, activation.tenantSurrogate(), request.caseId(), request.roomId(), OPERATION,
-                request.idempotencyKey(), AgentRunProtocol.V2, AgentRunExecutorKind.TEMPORAL_ACTIVITY,
+                request.idempotencyKey(), AgentRunProtocol.V3, AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                 roomEpochId, graph.roomType(), graph.roomEpoch(),
                 graph.processRevision(), activation.roomFencingToken(), graph.requestHash(),
                 binding.logicalInputHash(), ATTEMPT_LIMIT, deadline, now));

@@ -11,6 +11,7 @@ import com.example.dispute.infrastructure.persistence.entity.AgentRunAttemptEnti
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import java.util.HashMap;
@@ -270,22 +271,28 @@ class AgentRunAttemptEntityTest {
                                                 "ATTEMPT_V2_MANIFEST",
                                                 "f".repeat(64),
                                                 RESULT_HASH),
-                                        3))
+                                        3,
+                                        AgentRunProtocol.V3.wireValue()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("requestHash");
         assertThatThrownBy(
                         () ->
                                 attempt.markCommitted(
-                                        AgentRunPersistenceFixtures.manifest(
+                                        AgentRunPersistenceFixtures.manifestV3(
                                                 "ATTEMPT_V2_MANIFEST"),
-                                        2))
+                                        2,
+                                        AgentRunProtocol.V3.wireValue()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("finalStreamSequenceNo");
 
         attempt.markCommitted(
-                AgentRunPersistenceFixtures.manifest("ATTEMPT_V2_MANIFEST"), 3);
+                AgentRunPersistenceFixtures.manifestV3("ATTEMPT_V2_MANIFEST"),
+                3,
+                AgentRunProtocol.V3.wireValue());
         attempt.markCommitted(
-                AgentRunPersistenceFixtures.manifest("ATTEMPT_V2_MANIFEST"), 3);
+                AgentRunPersistenceFixtures.manifestV3("ATTEMPT_V2_MANIFEST"),
+                3,
+                AgentRunProtocol.V3.wireValue());
         assertThat(attempt.getAttemptStatus()).isEqualTo(AgentRunAttemptStatus.COMPLETED);
         assertThat(attempt.getProvider()).isEqualTo("provider-v2");
         assertThat(attempt.getModelVersion()).isEqualTo("model-v2");
@@ -305,14 +312,16 @@ class AgentRunAttemptEntityTest {
         attempt.recordResultReady(
                 AgentRunPersistenceFixtures.result(1, attemptId),
                 "{\"result_hash\":\"" + RESULT_HASH + "\"}");
-        AgentExecutionManifest manifest = AgentRunPersistenceFixtures.manifest(attemptId);
+        AgentExecutionManifest manifest = AgentRunPersistenceFixtures.manifestV3(attemptId);
 
         Map<String, String> missingOutputSchema = new HashMap<>(manifest.contractVersions());
         missingOutputSchema.remove("output_schema");
         assertThatThrownBy(
                         () ->
                                 attempt.markCommitted(
-                                        withContractVersions(manifest, missingOutputSchema), 3))
+                                        withContractVersions(manifest, missingOutputSchema),
+                                        3,
+                                        AgentRunProtocol.V3.wireValue()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("outputSchemaVersion");
 
@@ -321,7 +330,9 @@ class AgentRunAttemptEntityTest {
         assertThatThrownBy(
                         () ->
                                 attempt.markCommitted(
-                                        withContractVersions(manifest, wrongGraphEnvelope), 3))
+                                        withContractVersions(manifest, wrongGraphEnvelope),
+                                        3,
+                                        AgentRunProtocol.V3.wireValue()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("graphResultSchemaVersion");
     }

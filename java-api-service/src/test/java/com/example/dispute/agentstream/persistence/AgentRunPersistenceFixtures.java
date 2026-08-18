@@ -88,6 +88,33 @@ public final class AgentRunPersistenceFixtures {
                 STARTED_AT);
     }
 
+    public static CreateLogicalRun logicalRunV3() {
+        return logicalRunV3("ATTEMPT_V3_1");
+    }
+
+    public static CreateLogicalRun logicalRunV3(String firstAttemptId) {
+        CreateLogicalRun source = logicalRun(firstAttemptId);
+        return new CreateLogicalRun(
+                source.agentRunId(),
+                source.tenantSurrogate(),
+                source.caseId(),
+                source.roomId(),
+                source.operation(),
+                source.logicalIdempotencyKey(),
+                AgentRunProtocol.V3,
+                source.executorKind(),
+                source.roomEpochId(),
+                source.roomType(),
+                source.roomEpoch(),
+                source.processRevision(),
+                source.fencingToken(),
+                source.requestHash(),
+                source.logicalInputHash(),
+                source.attemptLimit(),
+                source.deadlineAt(),
+                source.createdAt());
+    }
+
     public static ExecuteAgentRunRequest request(long attemptNo, String attemptId) {
         return request(
                 attemptNo,
@@ -108,6 +135,33 @@ public final class AgentRunPersistenceFixtures {
                 RUN_ID,
                 attemptNo,
                 AgentRunProtocol.V2.wireValue(),
+                binding.logicalInputHash(),
+                previousAttemptId,
+                resetRequired,
+                resetRequired ? 1 : 0,
+                command);
+    }
+
+    public static ExecuteAgentRunRequest requestV3(long attemptNo, String attemptId) {
+        return requestV3(
+                attemptNo,
+                attemptId,
+                attemptNo == 1 ? null : "ATTEMPT_V3_1",
+                false);
+    }
+
+    public static ExecuteAgentRunRequest requestV3(
+            long attemptNo,
+            String attemptId,
+            String previousAttemptId,
+            boolean resetRequired) {
+        RoomGraphCommand command = command(attemptNo, attemptId);
+        Binding binding = binding(command);
+        return new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                RUN_ID,
+                attemptNo,
+                AgentRunProtocol.V3.wireValue(),
                 binding.logicalInputHash(),
                 previousAttemptId,
                 resetRequired,
@@ -301,8 +355,31 @@ public final class AgentRunPersistenceFixtures {
                 attemptId, command(1, attemptId).requestHash(), RESULT_HASH);
     }
 
+    static AgentExecutionManifest manifestV3(String attemptId) {
+        return manifestWithModelHashes(
+                attemptId,
+                command(1, attemptId).requestHash(),
+                RESULT_HASH,
+                AgentRunProtocol.V3.wireValue());
+    }
+
+    static AgentExecutionManifest manifestV3(
+            String attemptId, String requestHash, String responseHash) {
+        return manifestWithModelHashes(
+                attemptId, requestHash, responseHash, AgentRunProtocol.V3.wireValue());
+    }
+
     static AgentExecutionManifest manifestWithModelHashes(
             String attemptId, String requestHash, String responseHash) {
+        return manifestWithModelHashes(
+                attemptId, requestHash, responseHash, AgentRunProtocol.V2.wireValue());
+    }
+
+    private static AgentExecutionManifest manifestWithModelHashes(
+            String attemptId,
+            String requestHash,
+            String responseHash,
+            String streamProtocol) {
         return new AgentExecutionManifest(
                 "agent-execution-manifest.v1",
                 "MANIFEST_V2_PERSISTENCE",
@@ -330,7 +407,7 @@ public final class AgentRunPersistenceFixtures {
                         "graph_command", "room-graph-command.v1",
                         "graph_result", "room-graph-result.v1",
                         "output_schema", "room-graph-result.v1",
-                        "stream", "agent-stream.v2"),
+                        "stream", streamProtocol),
                 "policy-v2",
                 "guardrail-v2",
                 List.of("evidence.search.v1"),

@@ -117,9 +117,9 @@ class AgentRunAttemptRepositoryIntegrationTest {
                             assertThat(persisted.getAttemptNo()).isEqualTo(1);
                         });
 
-        AgentRunLedger.LogicalRun logical = ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRun());
+        AgentRunLedger.LogicalRun logical = ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRunV3());
         AgentRunLedger.LogicalRun replayedLogical =
-                ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRun());
+                ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRunV3());
         assertThat(replayedLogical.agentRunId()).isEqualTo(logical.agentRunId());
 
         var firstAllocation = AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_1");
@@ -156,7 +156,7 @@ class AgentRunAttemptRepositoryIntegrationTest {
         assertThat(firstPrelude.occurredAt()).isEqualTo(AgentRunPersistenceFixtures.STARTED_AT);
         assertThat(firstPrelude.payload().node()).isEqualTo("evidence.graph");
 
-        var firstRequest = AgentRunPersistenceFixtures.request(1, first.attemptId());
+        var firstRequest = AgentRunPersistenceFixtures.requestV3(1, first.attemptId());
         Instant nanosecondClock =
                 AgentRunPersistenceFixtures.COMPLETED_AT.plusNanos(789);
         AgentRunExecutionGateway failingGateway =
@@ -217,7 +217,7 @@ class AgentRunAttemptRepositoryIntegrationTest {
         assertThat(second.resetRequired()).isFalse();
         assertThat(second.publicSequenceOffset()).isZero();
         assertThat(ledger.requireAllocatedAttempt(
-                        AgentRunPersistenceFixtures.request(
+                        AgentRunPersistenceFixtures.requestV3(
                                 2, second.attemptId(), first.attemptId(), false)))
                 .isEqualTo(second);
         assertThat(second.lastSequenceNo()).isZero();
@@ -234,7 +234,7 @@ class AgentRunAttemptRepositoryIntegrationTest {
                              where agent_run_id = ?
                                and agent_run_attempt_id = ?
                                and sequence_no = 0
-                               and stream_protocol = 'agent-stream.v2'
+                               and stream_protocol = 'agent-stream.v3'
                             """,
                             "f".repeat(64),
                             logical.agentRunId(),
@@ -253,7 +253,7 @@ class AgentRunAttemptRepositoryIntegrationTest {
                              where agent_run_id = ?
                                and agent_run_attempt_id = ?
                                and sequence_no = 0
-                               and stream_protocol = 'agent-stream.v2'
+                               and stream_protocol = 'agent-stream.v3'
                             """,
                             "e".repeat(64),
                             logical.agentRunId(),
@@ -325,7 +325,7 @@ class AgentRunAttemptRepositoryIntegrationTest {
                   from agent_run_stream_event
                  where agent_run_id = ?
                    and agent_run_attempt_id = ?
-                   and stream_protocol = 'agent-stream.v2'
+                   and stream_protocol = 'agent-stream.v3'
                    and event_type in ('attempt_started', 'attempt_reset')
                 """,
                 Long.class,
@@ -340,7 +340,7 @@ class AgentRunAttemptRepositoryIntegrationTest {
                   from agent_run_stream_event
                  where agent_run_id = ?
                    and agent_run_attempt_id = ?
-                   and stream_protocol = 'agent-stream.v2'
+                   and stream_protocol = 'agent-stream.v3'
                    and sequence_no = ?
                 """,
                 (resultSet, rowNumber) -> {

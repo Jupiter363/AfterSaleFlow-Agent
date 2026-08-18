@@ -70,13 +70,13 @@ class AgentExecutionManifestEntityTest {
 
     @Test
     void storeCommitsOneHashBoundManifestAndReplaysTheSameReceipt() {
-        AgentRunEntity run = AgentRunEntity.logicalV2(AgentRunPersistenceFixtures.logicalRun());
-        run.markV2AttemptStarted();
-        run.markV2AttemptFailed(
+        AgentRunEntity run = AgentRunEntity.logicalV3(AgentRunPersistenceFixtures.logicalRunV3());
+        run.markV3AttemptStarted();
+        run.markV3AttemptFailed(
                 AgentRunAttemptStatus.FAILED,
                 true,
                 AgentRunPersistenceFixtures.STARTED_AT.plusSeconds(1));
-        run.markV2AttemptStarted();
+        run.markV3AttemptStarted();
         var allocation = AgentRunPersistenceFixtures.allocation(2, "ATTEMPT_V2_MANIFEST");
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(
@@ -89,7 +89,7 @@ class AgentExecutionManifestEntityTest {
         attempt.recordResultReady(
                 AgentRunPersistenceFixtures.result(2, "ATTEMPT_V2_MANIFEST"),
                 "{\"result_hash\":\"" + RESULT_HASH + "\"}");
-        run.markV2ResultReady(
+        run.markV3ResultReady(
                 "ATTEMPT_V2_MANIFEST",
                 RESULT_HASH,
                 AgentRunPersistenceFixtures.COMPLETED_AT);
@@ -125,7 +125,7 @@ class AgentExecutionManifestEntityTest {
 
         ManifestCommit invalidProvenance =
                 new ManifestCommit(
-                        AgentRunPersistenceFixtures.manifestWithModelHashes(
+                        AgentRunPersistenceFixtures.manifestV3(
                                 "ATTEMPT_V2_MANIFEST",
                                 allocation.binding().commandRequestHash(),
                                 "e".repeat(64)),
@@ -139,10 +139,8 @@ class AgentExecutionManifestEntityTest {
                 .hasMessageContaining("responseHash");
         verify(manifestRepository, never()).saveAndFlush(any());
 
-        var manifest = AgentRunPersistenceFixtures.manifestWithModelHashes(
-                "ATTEMPT_V2_MANIFEST",
-                allocation.binding().commandRequestHash(),
-                RESULT_HASH);
+        var manifest = AgentRunPersistenceFixtures.manifestV3(
+                "ATTEMPT_V2_MANIFEST", allocation.binding().commandRequestHash(), RESULT_HASH);
         ManifestCommit commit =
                 new ManifestCommit(
                         manifest,

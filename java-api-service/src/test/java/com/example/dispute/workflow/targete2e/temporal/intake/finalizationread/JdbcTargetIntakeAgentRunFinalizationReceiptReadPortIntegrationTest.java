@@ -179,7 +179,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
                     id, protocol, executor_kind, committed_attempt_id, final_result_hash,
                     finalization_status, logical_input_hash, attempt_limit
                 ) values (
-                    :runId, 'agent-stream.v2', 'TEMPORAL_ACTIVITY', :winningAttemptId,
+                    :runId, 'agent-stream.v3', 'TEMPORAL_ACTIVITY', :winningAttemptId,
                     :winningResultHash, 'COMMITTED', :logicalInputHash, 3
                 )
                 """, new MapSqlParameterSource()

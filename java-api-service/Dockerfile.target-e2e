@@ -27,7 +27,7 @@ COPY --from=build --chown=app:app /workspace/target/java-api-service-0.1.0-SNAPS
 
 ENV SPRING_PROFILES_ACTIVE=target-e2e,agent-worker \
     APP_AGENT_RUN_V2_ENABLED=true \
-    APP_AGENT_RUN_V2_PROTOCOL_DEFAULT=V2 \
+    APP_AGENT_RUN_V2_PROTOCOL_DEFAULT=V3 \
     APP_AGENT_RUN_V2_SCHEDULER_MODE=DETECTOR
 
 USER app

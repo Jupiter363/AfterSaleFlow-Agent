@@ -229,7 +229,7 @@ def _valid_evidence(
                 "run_id": run_id,
                 "room_type": room_type,
                 "allocation": "TEMPORAL",
-                "protocol": "V2",
+                "protocol": "V3",
                 "execution_engine": "TEMPORAL_ACTIVITY",
                 "execution_lane": "TARGET_E2E_CANDIDATE",
                 "shadow": False,
@@ -239,7 +239,7 @@ def _valid_evidence(
             {
                 "room_type": room_type,
                 "allocation": "TEMPORAL",
-                "protocol": "V2",
+                "protocol": "V3",
                 "execution_engine": "TEMPORAL_ACTIVITY",
                 "execution_lane": "TARGET_E2E_CANDIDATE",
                 "temporal_run_id": run_id,

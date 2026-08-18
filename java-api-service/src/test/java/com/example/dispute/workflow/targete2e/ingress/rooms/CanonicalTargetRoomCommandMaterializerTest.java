@@ -19,6 +19,7 @@ import com.example.dispute.workflow.application.command.AcceptCaseCommand;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelectionContext.TrafficSource;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.FrozenIntakeSubmissionAuthority;
@@ -143,6 +144,8 @@ class CanonicalTargetRoomCommandMaterializerTest {
         verify(evidence, org.mockito.Mockito.times(2)).append(any(), materials.capture());
         assertThat(materials.getAllValues()).allSatisfy(material -> {
             assertThat(material.schemaVersion()).isEqualTo("target-e2e-evidence-command-material.v2");
+            assertThat(material.request().streamProtocol())
+                    .isEqualTo(AgentRunProtocol.V3.wireValue());
             assertThat(material.evidenceAgentTurnCommand()).isEqualTo(clerkTurn);
             assertThat(material.request().command().domainSnapshotRef().schemaVersion())
                     .isEqualTo("target-e2e-evidence-turn-invocation.v2");
@@ -158,9 +161,11 @@ class CanonicalTargetRoomCommandMaterializerTest {
         verify(ledger, org.mockito.Mockito.times(2)).createOrLoad(logicalRuns.capture());
         assertThat(logicalRuns.getAllValues())
                 .allSatisfy(
-                        allocation ->
-                                assertThat(allocation.agentRunId())
-                                        .isEqualTo(firstReceipt.logicalRunId()));
+                        allocation -> {
+                            assertThat(allocation.agentRunId())
+                                    .isEqualTo(firstReceipt.logicalRunId());
+                            assertThat(allocation.protocol()).isEqualTo(AgentRunProtocol.V3);
+                        });
         assertThat(objects).hasSize(1);
         byte[] body = objects.values().iterator().next();
         ObjectNode invocation = (ObjectNode) MAPPER.readTree(body);

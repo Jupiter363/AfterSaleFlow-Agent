@@ -60,7 +60,7 @@ public final class TargetE2eAgentRunV2RetryPreparation
   @Override
   public boolean supports(RecoveryState state) {
     Objects.requireNonNull(state, "state");
-    if (state.logicalRun().protocol() != AgentRunProtocol.V2
+    if (state.logicalRun().protocol() != AgentRunProtocol.V3
         || state.logicalRun().executorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
       return false;
     }

@@ -131,8 +131,8 @@ class AgentRunStreamEventServiceTest {
         String caseId = AgentRunPersistenceFixtures.CASE_ID;
         String firstAttemptId = "ATTEMPT_V2_FIRST";
         String secondAttemptId = "ATTEMPT_V2_SECOND";
-        AgentRunEntity run = AgentRunEntity.logicalV2(AgentRunPersistenceFixtures.logicalRun());
-        run.bindV2Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
+        AgentRunEntity run = AgentRunEntity.logicalV3(AgentRunPersistenceFixtures.logicalRunV3());
+        run.bindV3Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
         AgentRunAttemptEntity first = AgentRunAttemptEntity.start(
                 runId,
                 AgentRunPersistenceFixtures.allocation(1, firstAttemptId),
@@ -1000,7 +1000,7 @@ class AgentRunStreamEventServiceTest {
             Audience audience,
             AgentStreamEvent.Payload payload) throws Exception {
         AgentStreamEvent event = new AgentStreamEvent(
-                "agent-stream.v2",
+                "agent-stream.v3",
                 runId,
                 attemptId,
                 sequence,
@@ -1022,8 +1022,8 @@ class AgentRunStreamEventServiceTest {
 
     private AgentRunEntity v2Run() {
         AgentRunEntity run =
-                AgentRunEntity.logicalV2(AgentRunPersistenceFixtures.logicalRun());
-        run.bindV2Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
+                AgentRunEntity.logicalV3(AgentRunPersistenceFixtures.logicalRunV3());
+        run.bindV3Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
         return run;
     }
 
