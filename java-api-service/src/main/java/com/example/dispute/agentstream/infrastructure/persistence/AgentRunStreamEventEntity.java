@@ -122,7 +122,7 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
         AgentRunStreamEventEntity event =
                 create(id, agentRunId, sequenceNo, eventType, payloadJson);
         event.agentRunAttemptId = required(attemptId, "attemptId");
-        event.streamProtocol = AgentRunProtocol.V2.wireValue();
+        event.streamProtocol = AgentRunProtocol.V3.wireValue();
         event.audience = java.util.Objects.requireNonNull(audience, "audience must not be null");
         event.payloadHash = requireSha256(payloadHash);
         return event;
@@ -221,7 +221,7 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
             String canonicalHash = ContractJson.sha256Hex(
                     java.util.Objects.requireNonNull(objectMapper, "objectMapper")
                             .readTree(payloadJson));
-            if (AgentRunProtocol.V2.wireValue().equals(streamProtocol)
+            if (AgentRunProtocol.V3.wireValue().equals(streamProtocol)
                     && !canonicalHash.equals(payloadHash)) {
                 throw new IllegalStateException(
                         "V2 source stream payload hash conflicts with canonical payload");
@@ -239,10 +239,10 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
             throw new IllegalStateException("source stream event has no attempt identity");
         }
         if (!AgentRunProtocol.V1.wireValue().equals(streamProtocol)
-                && !AgentRunProtocol.V2.wireValue().equals(streamProtocol)) {
+                && !AgentRunProtocol.V3.wireValue().equals(streamProtocol)) {
             throw new IllegalStateException("source stream event has an unsupported protocol");
         }
-        if (AgentRunProtocol.V2.wireValue().equals(streamProtocol)
+        if (AgentRunProtocol.V3.wireValue().equals(streamProtocol)
                 && (audience == null || payloadHash == null)) {
             throw new IllegalStateException("V2 source stream event is missing audience or hash");
         }

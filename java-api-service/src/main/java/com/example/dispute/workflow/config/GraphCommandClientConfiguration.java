@@ -2,6 +2,7 @@ package com.example.dispute.workflow.config;
 
 import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
+import com.example.dispute.agentstream.application.AgentRunTransientStreamPublisher;
 import com.example.dispute.workflow.activity.agent.AgentGraphCommandClient;
 import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClient;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
@@ -113,12 +114,14 @@ public class GraphCommandClientConfiguration {
             AgentGraphCommandClient commandClient,
             AgentGraphReconciliationClient reconciliationClient,
             AgentRunV2StreamStore streamStore,
-            AgentRunReconciledFinalStore reconciledFinalStore) {
+            AgentRunReconciledFinalStore reconciledFinalStore,
+            AgentRunTransientStreamPublisher transientPublisher) {
         return new DurableAgentRunExecutionGateway(
                 commandClient,
                 reconciliationClient,
                 streamStore,
-                reconciledFinalStore);
+                reconciledFinalStore,
+                transientPublisher);
     }
 
     private static void requireSyntheticShadow(AgentRunV2Properties properties) {

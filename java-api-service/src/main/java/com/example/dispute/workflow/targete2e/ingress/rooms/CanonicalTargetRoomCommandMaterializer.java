@@ -62,7 +62,7 @@ import java.util.UUID;
  */
 public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomCommandIngress {
     private static final int ATTEMPT_LIMIT = 3;
-    private static final String OUTPUT_SCHEMA = "target-e2e-room-proposal-source.v1";
+    private static final String OUTPUT_SCHEMA = "target-e2e-room-proposal-source.v2";
 
     private final CaseRoomEpochRepository epochs;
     private final JdbcTargetE2eApiAuthority authority;
@@ -282,7 +282,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
             throw new IllegalStateException("target AgentRun attempt replay drifted");
         }
         ExecuteAgentRunRequest request = new ExecuteAgentRunRequest(ExecuteAgentRunRequest.SCHEMA_VERSION,
-                logicalRunId, 1, ATTEMPT_LIMIT, "agent-stream.v2", binding.logicalInputHash(), null, false, 0, graph);
+                logicalRunId, 1, ATTEMPT_LIMIT, "agent-stream.v3", binding.logicalInputHash(), null, false, 0, graph);
         ActorRef caseCommandActor = new ActorRef(
                 graph.actorScope().actorId(), graph.actorScope().actorRole(), graph.actorScope().capabilities());
         String caseCommandRequestHash = CaseCommandRequestHasher.hash(

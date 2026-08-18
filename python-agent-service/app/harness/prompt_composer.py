@@ -48,7 +48,7 @@ class PromptComposer:
         ),
         "evidence_turn": PromptTemplateRef(
             "evidence_clerk",
-            "evidence_turn.md",
+            "evidence_turn_v2.md",
         ),
         "evaluation_analyze": PromptTemplateRef(
             "evaluation_agent",

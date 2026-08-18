@@ -25,7 +25,7 @@ import java.util.Objects;
 public final class TargetHearingRoomFinalizationStrategy
     implements TargetE2eRoomFinalizationStrategy {
 
-  private static final String SOURCE_SCHEMA = "target-e2e-room-proposal-source.v1";
+  private static final String SOURCE_SCHEMA = "target-e2e-room-proposal-source.v2";
 
   private final TargetHearingCommandMaterialStore materialStore;
   private final TargetHearingFinalizationEvidenceResolver evidenceResolver;

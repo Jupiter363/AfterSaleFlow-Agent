@@ -29,6 +29,13 @@ import java.util.HexFormat;
 import java.util.Objects;
 import org.springframework.stereotype.Component;
 
+/**
+ * 从案件根工作流读取权威控制面状态的查询适配器。
+ *
+ * <p>上游是 projection reconciliation；下游只调用 {@code CaseProcessWorkflow.state()} 与
+ * {@code provisioningCommitment()} Query，并用执行历史/Memo 校验 Continue-As-New 链。它不信任普通
+ * 投影作为房间 authority，也不会向 workflow 发送信号或 Update。
+ */
 @Component
 public final class SdkTemporalAuthoritativeProcessStateReader
         implements AuthoritativeProcessStateReader {
@@ -49,6 +56,10 @@ public final class SdkTemporalAuthoritativeProcessStateReader
                         "Temporal dataConverter must not be null");
     }
 
+    /**
+     * 查询指定 case workflow 的快照与最新 commitment。下游返回的 {@code Verified} 结果供投影层决定
+     * 是否可安全对齐；Query 不进入 Temporal history，因此不能用于触发恢复或业务写入。
+     */
     @Override
     public ReadResult read(ReconciliationTarget target) {
         try {

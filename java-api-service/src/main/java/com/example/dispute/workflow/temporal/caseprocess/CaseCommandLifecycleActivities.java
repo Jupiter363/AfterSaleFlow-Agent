@@ -12,24 +12,61 @@ import io.temporal.activity.ActivityMethod;
 import java.time.Instant;
 import java.util.List;
 
+/**
+ * CaseProcessWorkflowImpl 调度的案件命令生命周期 Temporal Activity 合同。
+ *
+ * <p>上游是 CaseProcess 工作流的路由、超时和恢复分支；下游实现
+ * {@code CaseProcessLedgerActivitiesImpl} 使用命令、投影和 target material/receipt 持久化边界收敛状态。
+ * 请求中的命令、revision 与哈希用于将 Activity 重试限定在同一份 durable authority 上。
+ */
 @ActivityInterface
 public interface CaseCommandLifecycleActivities {
 
+    /**
+     * 上游：CaseProcessWorkflowImpl 的 deadline 分支。
+     *
+     * <p>Temporal 角色：Activity；下游：实现把匹配的命令账本标为过期，供后续路由和恢复逻辑以同一命令
+     * 序列判断幂等终态。
+     */
     @ActivityMethod(name = "ExpireCaseCommand")
     ExpireCaseCommandResult expireCaseCommand(ExpireCaseCommand request);
 
+    /**
+     * 上游：CaseProcessWorkflowImpl 在命令被选中路由时调用。
+     *
+     * <p>Temporal 角色：Activity；下游：实现记录命令与 room epoch 的路由事实，使子工作流派发和重放能
+     * 共享同一账本坐标。
+     */
     @ActivityMethod(name = "RecordCaseCommandRouted")
     RecordCaseCommandRoutedResult recordCaseCommandRouted(
             RecordCaseCommandRouted request);
 
+    /**
+     * 上游：CaseProcessWorkflowImpl 在路由完成路径调用。
+     *
+     * <p>Temporal 角色：Activity；下游：实现完成同一条命令的路由账本收敛，避免 workflow 重放时再次把
+     * 已确认路由当作新派发。
+     */
     @ActivityMethod(name = "CompleteCaseCommandRouting")
     RecordCaseCommandRoutedResult completeCaseCommandRouting(
             RecordCaseCommandRouted request);
 
+    /**
+     * 上游：CaseProcessWorkflowImpl 消费 Intake terminal-no-commit Signal 后调用。
+     *
+     * <p>Temporal 角色：Activity；下游：实现以 terminal authority、receipt 和 revision CAS 收敛命令与
+     * 流程投影，重复调用返回相同的幂等边界。
+     */
     @ActivityMethod(name = "ConvergeTargetIntakeTerminalNoCommit")
     ConvergeTargetIntakeTerminalNoCommitResult convergeTargetIntakeTerminalNoCommit(
             ConvergeTargetIntakeTerminalNoCommit request);
 
+    /**
+     * 上游：CaseProcessWorkflowImpl 的 Target Evidence terminal-no-commit 收敛分支。
+     *
+     * <p>Temporal 角色：Activity；下游：实现把精确 Evidence authority 与 receipt 写入命令/投影边界，
+     * 让 Activity 重试和 workflow replay 不重复生成 durable terminal。
+     */
     @ActivityMethod(name = "ConvergeTargetEvidenceTerminalNoCommit")
     default ConvergeTargetEvidenceTerminalNoCommitResult convergeTargetEvidenceTerminalNoCommit(
             ConvergeTargetEvidenceTerminalNoCommit request) {
@@ -37,6 +74,12 @@ public interface CaseCommandLifecycleActivities {
                 "target Evidence terminal-no-commit convergence is unavailable");
     }
 
+    /**
+     * 上游：CaseProcessWorkflowImpl 在 Evidence 收敛前请求已持久化的 terminal authority。
+     *
+     * <p>Temporal 角色：Activity；下游：实现按命令、fencing token、revision 和 target material 解析并
+     * 校验已持久化对象，供后续 converge 使用而不创建新的 terminal authority。
+     */
     @ActivityMethod(name = "ResolveTargetEvidenceTerminalNoCommit")
     default ResolveTargetEvidenceTerminalNoCommitResult resolveTargetEvidenceTerminalNoCommit(
             ResolveTargetEvidenceTerminalNoCommit request) {
@@ -44,6 +87,12 @@ public interface CaseCommandLifecycleActivities {
                 "target Evidence terminal-no-commit resolution is unavailable");
     }
 
+    /**
+     * 上游：过期 Evidence terminal-no-commit Recovery Update。
+     *
+     * <p>Temporal 角色：Activity；下游：实现基于 recoveryId/request hash 固化失败命令的 terminal receipt
+     * 与坐标，结果可由同一 Recovery Update 幂等重放。
+     */
     @ActivityMethod(name = "RecoverExpiredTargetEvidenceTerminalNoCommit")
     default RecoverExpiredTargetEvidenceTerminalNoCommitResult
             recoverExpiredTargetEvidenceTerminalNoCommit(
@@ -52,6 +101,12 @@ public interface CaseCommandLifecycleActivities {
                 "expired target Evidence terminal recovery is unavailable");
     }
 
+    /**
+     * 上游：CaseProcessWorkflowImpl 在 Intake terminal-no-commit 收敛前调用。
+     *
+     * <p>Temporal 角色：Activity；下游：实现解析并校验一条 Intake terminal authority，返回给 converge
+     * 路径，避免工作流依据未经持久化的子工作流结果推进。
+     */
     @ActivityMethod(name = "ResolveTargetIntakeTerminalNoCommit")
     ResolveTargetIntakeTerminalNoCommitResult resolveTargetIntakeTerminalNoCommit(
             ResolveTargetIntakeTerminalNoCommit request);

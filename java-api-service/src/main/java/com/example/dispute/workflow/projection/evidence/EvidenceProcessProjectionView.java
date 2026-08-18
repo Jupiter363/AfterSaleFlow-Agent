@@ -576,11 +576,11 @@ public record EvidenceProcessProjectionView(
                 String toolPolicyVersion) {
             requireEquals(
                     graphVersion,
-                    "target-e2e-graph.2026-07-27.1",
+                    "target-e2e-graph.2026-08-18.1",
                     "target graphVersion");
             requireEquals(
                     checkpointSchemaVersion,
-                    "target-e2e-checkpoint.v1",
+                    "target-e2e-checkpoint.v2",
                     "target checkpointSchemaVersion");
             requireEquals(
                     promptVersion,
@@ -622,8 +622,8 @@ public record EvidenceProcessProjectionView(
 
         boolean hasTargetComposite() {
             return hasRuntimePins()
-                    && "target-e2e-graph.2026-07-27.1".equals(graphVersion)
-                    && "target-e2e-checkpoint.v1".equals(checkpointSchemaVersion)
+                    && "target-e2e-graph.2026-08-18.1".equals(graphVersion)
+                    && "target-e2e-checkpoint.v2".equals(checkpointSchemaVersion)
                     && "evidence-graph-state.v2".equals(stateSchemaVersion)
                     && "all-rooms-prompt.target-e2e.v1".equals(promptVersion)
                     && "target-e2e.contract-blocked".equals(modelProfileId)

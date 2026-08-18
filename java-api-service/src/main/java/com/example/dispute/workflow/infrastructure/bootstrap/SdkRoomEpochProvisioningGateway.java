@@ -27,6 +27,13 @@ import java.util.concurrent.TimeoutException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+/**
+ * 房间 epoch authority 到案件根工作流的 Temporal 入口。
+ *
+ * <p>上游 bootstrap/epoch allocator 提供已持久化的 provisioning 请求；下游以 Update-with-Start 调用
+ * {@code CaseProcessWorkflow.provisionRoomEpoch}，由根工作流验证 selection 后启动对应的 Room Control、
+ * Intake 或 target typed room child。
+ */
 @Component
 public final class SdkRoomEpochProvisioningGateway
         implements RoomEpochProvisioningGateway {
@@ -50,6 +57,10 @@ public final class SdkRoomEpochProvisioningGateway
         this.completionExecutor = completionExecutor;
     }
 
+    /**
+     * 以请求携带的 updateId 和 case workflowId 做幂等 provisioning。返回的 receipt 来自根工作流的
+     * commitment，可被投影查询器用来核对下游 child execution，而不是在 gateway 内猜测启动结果。
+     */
     @Override
     public ProvisionRoomEpochReceipt provision(ProvisioningRequest request) {
         Future<ProvisionRoomEpochReceipt> completion =

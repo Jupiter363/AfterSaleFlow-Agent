@@ -46,7 +46,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _PROPOSAL_SCHEMA_BY_ROOM = {
     "INTAKE": "target-e2e-intake-proposal.v1",
-    "EVIDENCE": "target-e2e-evidence-proposal.v1",
+    "EVIDENCE": "target-e2e-evidence-proposal.v2",
     "HEARING": "target-e2e-hearing-proposal.v1",
     "REVIEW": "target-e2e-review-proposal.v1",
 }
@@ -137,7 +137,7 @@ class TargetE2ERoomProposal(BaseModel):
 
     schema_version: Literal[
         "target-e2e-intake-proposal.v1",
-        "target-e2e-evidence-proposal.v1",
+        "target-e2e-evidence-proposal.v2",
         "target-e2e-hearing-proposal.v1",
         "target-e2e-review-proposal.v1",
     ]
@@ -161,7 +161,7 @@ class TargetE2ERoomProposalSource(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    schema_version: Literal["target-e2e-room-proposal-source.v1"]
+    schema_version: Literal["target-e2e-room-proposal-source.v2"]
     room_type: Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]
     proposal: TargetE2ERoomProposal
 
@@ -256,10 +256,10 @@ class TargetE2ERuntimeAuthority:
             raise ValueError("target-E2E runtime authority requires one composite binding")
         binding = bindings[0]
         if (
-            binding.graph_key != "all-rooms.target-e2e.v1"
-            or binding.graph_version != "target-e2e-graph.2026-07-27.1"
-            or binding.checkpoint_schema_version != "target-e2e-checkpoint.v1"
-            or binding.output_schema_version != "target-e2e-room-proposal-source.v1"
+            binding.graph_key != "all-rooms.target-e2e.v2"
+            or binding.graph_version != "target-e2e-graph.2026-08-18.1"
+            or binding.checkpoint_schema_version != "target-e2e-checkpoint.v2"
+            or binding.output_schema_version != "target-e2e-room-proposal-source.v2"
             or frozenset(binding.allowed_room_types)
             != frozenset({"INTAKE", "EVIDENCE", "HEARING", "REVIEW"})
         ):

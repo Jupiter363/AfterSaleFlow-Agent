@@ -25,6 +25,17 @@ from app.schemas import (
     PublicEvidenceObservationProposalV1,
     PublicEvidenceObservationV1,
 )
+from app.agents.evidence_clerk.v2_contracts import (
+    CommittedEvidenceFrameV2,
+    EvidenceFactBindingV2,
+    EvidenceFrameHeaderV2,
+    EvidenceFrameTupleV2,
+    EvidenceMaterialReviewStreamV2,
+    EvidenceRoomOpeningStreamV2,
+    EvidenceTextFollowupStreamV2,
+    EvidenceTurnResultV2,
+    EvidenceTurnStreamV2,
+)
 
 __all__ = [
     "EvidenceAuthenticityFlag",
@@ -46,4 +57,13 @@ __all__ = [
     "PublicEvidenceObservationKind",
     "PublicEvidenceObservationProposalV1",
     "PublicEvidenceObservationV1",
+    "CommittedEvidenceFrameV2",
+    "EvidenceFactBindingV2",
+    "EvidenceFrameHeaderV2",
+    "EvidenceFrameTupleV2",
+    "EvidenceMaterialReviewStreamV2",
+    "EvidenceRoomOpeningStreamV2",
+    "EvidenceTextFollowupStreamV2",
+    "EvidenceTurnResultV2",
+    "EvidenceTurnStreamV2",
 ]

@@ -49,6 +49,11 @@ public class WakeupPublishingAgentRunV2StreamStore
     }
 
     @Override
+    public boolean markPublicOutputStarted(String runId, String attemptId) {
+        return eventStore.markPublicOutputStarted(runId, attemptId);
+    }
+
+    @Override
     public BatchAppendReceipt appendBatch(List<AgentStreamEvent> events) {
         BatchAppendReceipt receipt = eventStore.appendBatch(events);
         AgentStreamEvent first = events.getFirst();

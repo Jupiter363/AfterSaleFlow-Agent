@@ -1737,7 +1737,7 @@ class CompiledIntakeGraphShadowExecutor:
             return None
         command = execution.admission.command
         return TargetE2ERoomProposalSource(
-            schema_version="target-e2e-room-proposal-source.v1",
+            schema_version="target-e2e-room-proposal-source.v2",
             room_type="INTAKE",
             proposal=TargetE2ERoomProposal(
                 schema_version="target-e2e-intake-proposal.v1",
@@ -1765,7 +1765,7 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphContractError("Intake executor clock must be timezone-aware")
         command = execution.admission.command
         return AgentStreamEvent(
-            schema_version="agent-stream.v2",
+            schema_version="agent-stream.v3",
             run_id=command.logical_run_id,
             attempt_id=command.attempt_id,
             sequence_no=sequence,

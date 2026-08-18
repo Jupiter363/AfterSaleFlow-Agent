@@ -254,7 +254,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             throw new IllegalStateException("target Intake AgentRun attempt allocation drifted");
         }
         ExecuteAgentRunRequest run = new ExecuteAgentRunRequest(ExecuteAgentRunRequest.SCHEMA_VERSION,
-                logical.agentRunId(), attempt.attemptNo(), logical.attemptLimit(), "agent-stream.v2",
+                logical.agentRunId(), attempt.attemptNo(), logical.attemptLimit(), "agent-stream.v3",
                 attempt.logicalInputHash(), attempt.previousAttemptId(), attempt.resetRequired(),
                 attempt.publicSequenceOffset(), graph);
         IntakeTargetAgentRunContext target = new IntakeTargetAgentRunContext(

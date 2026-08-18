@@ -120,7 +120,7 @@ public final class JdbcTargetE2eFinalizationAuthority
                 || !row.tenantSurrogate().equals(request.tenantSurrogate())
                 || !row.allowedRoomTypes().contains(request.roomType())
                 || !row.agentBuildId().equals(request.workflowBuildId())
-                || !row.graphKey().equals("all-rooms.target-e2e.v1")) {
+                || !row.graphKey().equals("all-rooms.target-e2e.v2")) {
             return AuthorizationDecision.denied(Decision.SCOPE_DENIED);
         }
         if (!row.exactAdmission(request)) {

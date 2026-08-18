@@ -8,7 +8,13 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.util.Objects;
 
-/** Acknowledged, hash-bound result of expired target Evidence terminal convergence. */
+/**
+ * 过期 Target Evidence terminal-no-commit 收敛后确认的、哈希绑定的恢复 Update 结果。
+ *
+ * <p>上游：CaseProcessWorkflowImpl 在 {@code recoverExpiredTargetEvidenceTerminalNoCommit} Activity 成功后构造；Temporal
+ * 角色：恢复 Update 返回 payload；下游：调用方据此观察已恢复或幂等重放，工作流以 request/result hash、receipt
+ * 和 revision 坐标保存 commitment，并且只在这些坐标一致时清除 COMMAND 协议错误。
+ */
 public record CaseProcessExpiredTargetEvidenceTerminalRecoveryResult(
     String schemaVersion,
     Disposition disposition,

@@ -9,7 +9,15 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
 import java.util.Objects;
 
-/** Stable workflow authority for recovering one already-consumed expired Evidence command. */
+/**
+ * 恢复一条已消费且过期的 Target Evidence 命令的稳定 Workflow authority。
+ *
+ * <p>上游：持有恢复权限的调用方提交 {@link CaseProcessWorkflow} 的过期 Evidence recovery Update；Temporal
+ * 角色：恢复 Update 的请求 payload；
+ * 下游：CaseProcessWorkflowImpl 以该对象校验当前 Evidence child、游标、revision 与 COMMAND 错误后调用命令
+ * 生命周期 Activity。由 canonical 字段导出的 recoveryId 排除 Continue-As-New run id，因此是同一已消费命令
+ * 的幂等 replay 边界。
+ */
 public record CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest(
     String schemaVersion,
     String recoveryId,

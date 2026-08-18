@@ -30,7 +30,7 @@ import java.util.Objects;
 public final class TargetE2eAgentRunV2RetryPreparation
     implements AgentRunV2RetryPreparation {
 
-  private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v1";
+  private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v2";
 
   private final ObjectMapper objectMapper;
   private final TargetE2EGraphEnvelopeCodec envelopes;

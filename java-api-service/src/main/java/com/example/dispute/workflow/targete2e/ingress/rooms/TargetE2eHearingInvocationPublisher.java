@@ -55,9 +55,9 @@ public final class TargetE2eHearingInvocationPublisher {
   public void bind(Authority authority, RoomGraphCommand command, String operation, InvocationInputs inputs) {
     String expectedStage = OPERATION_STAGE.get(operation);
     if (expectedStage == null || command.roomType().name().equals("HEARING") == false
-        || !expectedStage.equals(command.stageCode()) || !command.graphKey().equals("all-rooms.target-e2e.v1")
-        || !command.graphVersion().equals("target-e2e-graph.2026-07-27.1")
-        || !command.checkpointSchemaVersion().equals("target-e2e-checkpoint.v1")
+        || !expectedStage.equals(command.stageCode()) || !command.graphKey().equals("all-rooms.target-e2e.v2")
+        || !command.graphVersion().equals("target-e2e-graph.2026-08-18.1")
+        || !command.checkpointSchemaVersion().equals("target-e2e-checkpoint.v2")
         || !inputs.domainSnapshotRef().equals(command.domainSnapshotRef())
         || !inputs.eventRef().equals(command.eventRef())) {
       throw new IllegalArgumentException("Hearing invocation operation does not bind its outer command");

@@ -13,10 +13,10 @@ from app.graph_runtime.identity import RoomType
 from app.graph_runtime.persistence_models import GraphGatewayMode
 
 
-TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v1"
-TARGET_E2E_GRAPH_VERSION = "target-e2e-graph.2026-07-27.1"
-TARGET_E2E_CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v1"
-TARGET_E2E_OUTPUT_SCHEMA_VERSION = "target-e2e-room-proposal-source.v1"
+TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v2"
+TARGET_E2E_GRAPH_VERSION = "target-e2e-graph.2026-08-18.1"
+TARGET_E2E_CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v2"
+TARGET_E2E_OUTPUT_SCHEMA_VERSION = "target-e2e-room-proposal-source.v2"
 TARGET_E2E_ROOM_TYPES = frozenset(RoomType)
 
 

@@ -12,11 +12,11 @@ import java.util.regex.Pattern;
 public record TargetE2ERoomProposalSource(
     String schemaVersion, RoomType roomType, Proposal proposal) {
 
-  public static final String SCHEMA_VERSION = "target-e2e-room-proposal-source.v1";
+  public static final String SCHEMA_VERSION = "target-e2e-room-proposal-source.v2";
   private static final Map<RoomType, String> PROPOSAL_VERSIONS =
       Map.of(
           RoomType.INTAKE, "target-e2e-intake-proposal.v1",
-          RoomType.EVIDENCE, "target-e2e-evidence-proposal.v1",
+          RoomType.EVIDENCE, "target-e2e-evidence-proposal.v2",
           RoomType.HEARING, "target-e2e-hearing-proposal.v1",
           RoomType.REVIEW, "target-e2e-review-proposal.v1");
 

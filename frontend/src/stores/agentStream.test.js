@@ -571,6 +571,43 @@ describe("agentStreamStore", () => {
     expect(run.receivedContent).not.toContain("replacement output");
   });
 
+  it("renders v3 Evidence provider deltas immediately and folds the committed frame", async () => {
+    const runId = "AGENT_RUN_EVIDENCE_V3";
+    const attemptId = "ATTEMPT_EVIDENCE_V3";
+    const frameId = "EFRM_0123456789ABCDEF01234567";
+    const frames = [
+      `id: v3:${attemptId}:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":0,"cursor":"v3:${attemptId}:0","audience":"USER","payload":{"node":"evidence_turn"}}\n\n`,
+      `event: public_frame_start\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":1,"audience":"USER","payload":{"frameId":"${frameId}","frameSequence":1,"frameType":"ROOM_WELCOME","publicHeader":{"frame_sequence":1,"frame_type":"ROOM_WELCOME"}}}\n\n`,
+      `event: public_text_delta\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":2,"audience":"USER","payload":{"frameId":"${frameId}","frameSequence":1,"deltaIndex":0,"delta":"欢迎"}}\n\n`,
+      `event: public_text_delta\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":3,"audience":"USER","payload":{"frameId":"${frameId}","frameSequence":1,"deltaIndex":1,"delta":"进入"}}\n\n`,
+      `id: v3:${attemptId}:1\nevent: public_frame_start\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":1,"cursor":"v3:${attemptId}:1","audience":"USER","payload":{"frameId":"${frameId}","frameSequence":1,"frameType":"ROOM_WELCOME","publicHeader":{"frame_sequence":1,"frame_type":"ROOM_WELCOME"}}}\n\n`,
+      `id: v3:${attemptId}:2\nevent: active_frame_snapshot\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":2,"cursor":"v3:${attemptId}:2","audience":"USER","payload":{"frameId":"${frameId}","frameSequence":1,"deltaIndex":2,"publicText":"欢迎进入"}}\n\n`,
+      `id: v3:${attemptId}:3\nevent: public_frame_committed\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":3,"cursor":"v3:${attemptId}:3","audience":"USER","payload":{"frameId":"${frameId}","frameSequence":1,"durableCursor":"v3:${attemptId}:FRAME:1","headerSha256":"${"a".repeat(64)}","publicTextSha256":"${"b".repeat(64)}","frameSha256":"${"c".repeat(64)}","publicTextChars":4}}\n\n`,
+      `id: v3:${attemptId}:4\nevent: final\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":4,"cursor":"v3:${attemptId}:4","audience":"USER","payload":{"finalResultRef":"urn:target-e2e:result:${runId}","finalResultHash":"${"d".repeat(64)}"}}\n\n`,
+    ];
+    const visiblePrefixes = [];
+
+    await consumeAgentRun({
+      actor,
+      caseId: "CASE_EVIDENCE_V3",
+      roomType: "EVIDENCE",
+      descriptor: { runId, streamUrl: `/api/agent-runs/${runId}/events` },
+      fetchImpl: vi.fn().mockResolvedValue(streamResponse(frames)),
+      onEvent: (_event, run) => visiblePrefixes.push(run.content),
+    });
+
+    const run = getAgentStreamRun(runId);
+    expect(visiblePrefixes).toContain("欢迎");
+    expect(visiblePrefixes).toContain("欢迎进入");
+    expect(run.content).toBe("欢迎进入");
+    expect(run.frames[frameId]).toMatchObject({
+      status: "COMMITTED",
+      nextDeltaIndex: 2,
+      durableCursor: `v3:${attemptId}:FRAME:1`,
+    });
+    expect(run.lastEventId).toBe(`v3:${attemptId}:4`);
+  });
+
   it("keeps the stable server diagnostic code in the visible error status", async () => {
     const runId = "AGENT_RUN_EVIDENCE_CONTRACT_ERROR";
     const attemptId = "ATTEMPT_EVIDENCE_CONTRACT_ERROR";

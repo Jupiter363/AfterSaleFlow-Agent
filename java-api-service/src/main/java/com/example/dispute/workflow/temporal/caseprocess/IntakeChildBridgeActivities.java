@@ -9,16 +9,41 @@ import io.temporal.activity.ActivityInterface;
 import io.temporal.activity.ActivityMethod;
 import java.util.Objects;
 
-/** Read-only bridge from generic Case Workflow contracts to the typed Intake child protocol. */
+/**
+ * 从通用 CaseProcess 合同到 typed Intake child 协议的只读绑定桥。
+ *
+ * <p>上游：{@link CaseProcessWorkflowImpl} 在启动、命令路由和领域事件派发前调用；Temporal 角色：Activity；
+ * 下游：{@code IntakeChildBridgeActivitiesAdapter} 验证并生成 {@link IntakeRoomStart}、
+ * {@link IntakeWorkflowCommand} 或 {@link IntakeDomainEventRef}，返回的 hash/revision 绑定是 child 调用和
+ * workflow replay 的共同边界，不直接启动 child 或写入业务投影。
+ */
 @ActivityInterface
 public interface IntakeChildBridgeActivities {
 
+    /**
+     * 上游：CaseProcessWorkflowImpl 的 room epoch provisioning 分支。
+     *
+     * <p>Temporal 角色：Activity；下游：adapter 将 {@link ProvisionRoomEpoch} 与 active-child authority 绑定为
+     * {@link IntakeRoomStart}，供工作流只启动一次匹配的 Intake child。
+     */
     @ActivityMethod(name = "BindIntakeChildStart")
     StartBinding bindStart(StartRequest request);
 
+    /**
+     * 上游：CaseProcessWorkflowImpl 向当前 Intake child 路由命令前的分支。
+     *
+     * <p>Temporal 角色：Activity；下游：adapter 产出带 source/request hash 与 revision 的
+     * {@link IntakeWorkflowCommand}，这些坐标限制重放不能跨 child authority 派发。
+     */
     @ActivityMethod(name = "BindIntakeChildCommand")
     CommandBinding bindCommand(CommandRequest request);
 
+    /**
+     * 上游：CaseProcessWorkflowImpl 向当前 Intake child 转交已提交领域事件前的分支。
+     *
+     * <p>Temporal 角色：Activity；下游：adapter 产出带 hash/revision 的 {@link IntakeDomainEventRef}，供 child
+     * 事件处理与父 workflow 的 sequence/replay 校验使用。
+     */
     @ActivityMethod(name = "BindIntakeChildDomainEvent")
     DomainEventBinding bindDomainEvent(DomainEventRequest request);
 

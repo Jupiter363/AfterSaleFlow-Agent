@@ -8,7 +8,9 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import java.sql.Connection;
+import java.util.LinkedHashSet;
 import java.util.Objects;
+import java.util.Set;
 import javax.sql.DataSource;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 
@@ -52,6 +54,10 @@ public final class TargetEvidenceAgentRunDomainResultCommitter implements AgentR
     }
     var graph = command.request().command();
     var turnCommand = request.material().material().evidenceAgentTurnCommand();
+    request.proposal().evidenceTurnResult().requireFormalScope(
+        turnCommand.contextEnvelope().currentEvent().eventType(),
+        turnCommand.contextEnvelope().currentEvent().attachmentRefs(),
+        frozenFactIds(turnCommand.contextEnvelope().frozenSubmission().matrix()));
     AgentRunFinalizationContext finalization = new AgentRunFinalizationContext(
         command.request().agentRunId(),
         graph.caseId(),
@@ -60,10 +66,10 @@ public final class TargetEvidenceAgentRunDomainResultCommitter implements AgentR
         graph.traceparent(),
         request.formalOperationId(),
         objectMapper.valueToTree(turnCommand));
-    RoomMessageView formalMessage = Objects.requireNonNull(
-        evidenceAgentTurnService.finalizeTargetResult(
-            finalization, turnCommand, request.proposal().evidenceTurnResultJson()),
-        "Evidence formal service returned no message");
+        RoomMessageView formalMessage = Objects.requireNonNull(
+            evidenceAgentTurnService.finalizeTargetResultV2(
+                finalization, turnCommand, request.proposal().evidenceTurnResult()),
+            "Evidence formal service returned no message");
     entityManager.flush();
     Connection transaction = DataSourceUtils.getConnection(dataSource);
     try {
@@ -79,5 +85,23 @@ public final class TargetEvidenceAgentRunDomainResultCommitter implements AgentR
     } finally {
       DataSourceUtils.releaseConnection(transaction, dataSource);
     }
+  }
+
+  private static Set<String> frozenFactIds(com.fasterxml.jackson.databind.JsonNode matrix) {
+    if (matrix == null
+        || !matrix.isObject()
+        || !"case_fact_matrix.v2".equals(matrix.path("schema_version").asText())
+        || !matrix.path("fact_rows").isArray()
+        || matrix.path("fact_rows").isEmpty()) {
+      throw new IllegalStateException("target Evidence v2 requires a frozen case fact matrix");
+    }
+    Set<String> factIds = new LinkedHashSet<>();
+    for (var row : matrix.path("fact_rows")) {
+      String factId = row.path("fact_id").asText("").trim();
+      if (factId.isBlank() || !factIds.add(factId)) {
+        throw new IllegalStateException("frozen Evidence fact ids are invalid");
+      }
+    }
+    return Set.copyOf(factIds);
   }
 }

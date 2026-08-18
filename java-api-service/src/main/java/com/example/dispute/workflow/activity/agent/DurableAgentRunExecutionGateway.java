@@ -4,6 +4,8 @@ import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.NonRunningAttemptException;
 import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
+import com.example.dispute.agentstream.application.AgentRunTransientStreamPublisher;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
@@ -12,10 +14,16 @@ import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /** Persists bounded public-event batches before exposing their progress to the Activity. */
 public final class DurableAgentRunExecutionGateway implements AgentRunExecutionGateway {
@@ -29,11 +37,12 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
     private final AgentGraphReconciliationClient reconciliationClient;
     private final AgentRunV2StreamStore streamStore;
     private final AgentRunReconciledFinalStore reconciledFinalStore;
+    private final AgentRunTransientStreamPublisher transientPublisher;
 
     public DurableAgentRunExecutionGateway(
             AgentGraphCommandClient commandClient,
             AgentRunV2StreamStore streamStore) {
-        this(commandClient, null, streamStore, null);
+        this(commandClient, null, streamStore, null, AgentRunTransientStreamPublisher.noOp());
     }
 
     public DurableAgentRunExecutionGateway(
@@ -41,10 +50,26 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             AgentGraphReconciliationClient reconciliationClient,
             AgentRunV2StreamStore streamStore,
             AgentRunReconciledFinalStore reconciledFinalStore) {
+        this(
+                commandClient,
+                reconciliationClient,
+                streamStore,
+                reconciledFinalStore,
+                AgentRunTransientStreamPublisher.noOp());
+    }
+
+    public DurableAgentRunExecutionGateway(
+            AgentGraphCommandClient commandClient,
+            AgentGraphReconciliationClient reconciliationClient,
+            AgentRunV2StreamStore streamStore,
+            AgentRunReconciledFinalStore reconciledFinalStore,
+            AgentRunTransientStreamPublisher transientPublisher) {
         this.commandClient = Objects.requireNonNull(commandClient, "commandClient");
         this.reconciliationClient = reconciliationClient;
         this.streamStore = Objects.requireNonNull(streamStore, "streamStore");
         this.reconciledFinalStore = reconciledFinalStore;
+        this.transientPublisher =
+                Objects.requireNonNull(transientPublisher, "transientPublisher");
     }
 
     @Override
@@ -63,6 +88,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
 
         ProgressState state = new ProgressState(request);
         PendingBatch batch = new PendingBatch();
+        V3FrameAccumulator v3Frames = new V3FrameAccumulator();
         RoomGraphResult result;
         try {
             result = commandClient.execute(
@@ -79,6 +105,51 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                             state.stageFinal(candidate);
                             return;
                         }
+                        if (v3FrameEvent(publicEvent.eventType())) {
+                            switch (publicEvent.eventType()) {
+                                case PUBLIC_FRAME_START -> {
+                                    v3Frames.start(publicEvent);
+                                    if (!state.publicOutputStartMarked()) {
+                                        streamStore.markPublicOutputStarted(
+                                                publicEvent.runId(), publicEvent.attemptId());
+                                        state.markPublicOutputStart();
+                                    }
+                                    state.accept(candidate);
+                                    state.observeTransientPublicOutput();
+                                    transientPublisher.publish(publicEvent);
+                                }
+                                case PUBLIC_TEXT_DELTA -> {
+                                    v3Frames.append(publicEvent);
+                                    state.accept(candidate);
+                                    state.observeTransientPublicOutput();
+                                    transientPublisher.publish(publicEvent);
+                                }
+                                case ACTIVE_FRAME_SNAPSHOT -> {
+                                    v3Frames.snapshot(publicEvent);
+                                    state.accept(candidate);
+                                    state.observeTransientPublicOutput();
+                                    transientPublisher.publish(publicEvent);
+                                }
+                                case PUBLIC_FRAME_COMMITTED, PUBLIC_FRAME_INTERRUPTED -> {
+                                    for (AgentStreamEvent durable :
+                                            v3Frames.finish(publicEvent, state)) {
+                                        batch.add(durable);
+                                    }
+                                    state.accept(candidate);
+                                    flushBatch(
+                                            batch,
+                                            state,
+                                            false,
+                                            progressListener,
+                                            cancellationToken);
+                                }
+                                default -> throw new IllegalStateException(
+                                        "unreachable v3 frame event");
+                            }
+                            return;
+                        }
+                        AgentStreamEvent durablePublicEvent =
+                                state.allocateDurable(publicEvent);
                         if (batch.shouldFlushBefore(publicEvent)) {
                             flushBatch(
                                     batch,
@@ -88,7 +159,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                                     cancellationToken);
                         }
                         state.accept(candidate);
-                        batch.add(publicEvent);
+                        batch.add(durablePublicEvent);
                         if (publicEvent.eventType() == StreamEventType.VISIBLE_DELTA
                                 || terminal(publicEvent.eventType())
                                 || batch.shouldFlush()) {
@@ -196,7 +267,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             }
             throw failure;
         }
-        batch.add(finalEvent);
+        batch.add(state.allocateDurable(finalEvent));
         flushBatch(
                 batch,
                 state,
@@ -572,6 +643,168 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                 || eventType == StreamEventType.ATTEMPT_ABORTED;
     }
 
+    private static boolean v3FrameEvent(StreamEventType eventType) {
+        return eventType == StreamEventType.PUBLIC_FRAME_START
+                || eventType == StreamEventType.PUBLIC_TEXT_DELTA
+                || eventType == StreamEventType.ACTIVE_FRAME_SNAPSHOT
+                || eventType == StreamEventType.PUBLIC_FRAME_COMMITTED
+                || eventType == StreamEventType.PUBLIC_FRAME_INTERRUPTED;
+    }
+
+    /** Buffers only one public frame. Provider deltas stay in memory and are collapsed into one
+     * durable snapshot transaction when the matching commit arrives. */
+    private static final class V3FrameAccumulator {
+        private AgentStreamEvent start;
+        private final StringBuilder text = new StringBuilder();
+        private int nextDeltaIndex;
+        private int lastFrameSequence;
+
+        private void start(AgentStreamEvent event) {
+            if (start != null
+                    || event.eventType() != StreamEventType.PUBLIC_FRAME_START
+                    || event.payload().frameId() == null
+                    || event.payload().frameSequence() == null
+                    || event.payload().frameType() == null
+                    || event.payload().publicHeader() == null) {
+                throw invalid("public frame start is invalid or overlaps another frame");
+            }
+            if (event.payload().frameSequence() != lastFrameSequence + 1) {
+                throw invalid(
+                        "public frame sequence is not contiguous: expected "
+                                + (lastFrameSequence + 1)
+                                + " but received "
+                                + event.payload().frameSequence());
+            }
+            start = event;
+            text.setLength(0);
+            nextDeltaIndex = 0;
+        }
+
+        private void append(AgentStreamEvent event) {
+            requireActive(event, StreamEventType.PUBLIC_TEXT_DELTA);
+            if (event.payload().deltaIndex() == null
+                    || event.payload().deltaIndex() != nextDeltaIndex
+                    || event.payload().delta() == null
+                    || event.payload().delta().isEmpty()) {
+                throw invalid(
+                        "public frame delta is not contiguous: expected index "
+                                + nextDeltaIndex
+                                + " but received "
+                                + event.payload().deltaIndex());
+            }
+            text.append(event.payload().delta());
+            nextDeltaIndex++;
+        }
+
+        private void snapshot(AgentStreamEvent event) {
+            requireActive(event, StreamEventType.ACTIVE_FRAME_SNAPSHOT);
+            if (event.payload().deltaIndex() == null
+                    || event.payload().deltaIndex() < nextDeltaIndex
+                    || event.payload().publicText() == null) {
+                throw invalid("active frame snapshot is invalid");
+            }
+            text.setLength(0);
+            text.append(event.payload().publicText());
+            nextDeltaIndex = event.payload().deltaIndex();
+        }
+
+        private List<AgentStreamEvent> finish(
+                AgentStreamEvent terminalEvent, ProgressState progress) {
+            StreamEventType type = terminalEvent.eventType();
+            if (type != StreamEventType.PUBLIC_FRAME_COMMITTED
+                    && type != StreamEventType.PUBLIC_FRAME_INTERRUPTED) {
+                throw invalid("public frame terminal type is invalid");
+            }
+            requireActive(terminalEvent, type);
+            String publicText = text.toString();
+            if (type == StreamEventType.PUBLIC_FRAME_COMMITTED) {
+                requireCommittedHashes(terminalEvent, publicText);
+            } else if (!Objects.equals(terminalEvent.payload().publicText(), publicText)) {
+                throw invalid("interrupted frame text differs from relayed bytes");
+            }
+
+            AgentStreamEvent durableStart = progress.allocateDurable(start);
+            AgentStreamEvent snapshot = progress.allocateDurable(
+                    new AgentStreamEvent(
+                            terminalEvent.schemaVersion(),
+                            terminalEvent.runId(),
+                            terminalEvent.attemptId(),
+                            terminalEvent.sequenceNo(),
+                            StreamEventType.ACTIVE_FRAME_SNAPSHOT,
+                            terminalEvent.audience(),
+                            terminalEvent.occurredAt(),
+                            new AgentStreamEvent.Payload(
+                                    null, null, null, null, null, null, null, null, null, null,
+                                    start.payload().frameId(),
+                                    start.payload().frameSequence(),
+                                    null,
+                                    null,
+                                    nextDeltaIndex,
+                                    publicText,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null)));
+            AgentStreamEvent durableTerminal = progress.allocateDurable(terminalEvent);
+            lastFrameSequence = start.payload().frameSequence();
+            start = null;
+            text.setLength(0);
+            nextDeltaIndex = 0;
+            return List.of(durableStart, snapshot, durableTerminal);
+        }
+
+        private void requireCommittedHashes(AgentStreamEvent event, String publicText) {
+            String headerHash = ContractJson.sha256Hex(start.payload().publicHeader());
+            String textHash = sha256(publicText.getBytes(StandardCharsets.UTF_8));
+            int characters = publicText.codePointCount(0, publicText.length());
+            if (!Objects.equals(headerHash, event.payload().headerSha256())
+                    || !Objects.equals(textHash, event.payload().publicTextSha256())
+                    || !Objects.equals(characters, event.payload().publicTextChars())) {
+                throw invalid("committed frame hashes differ from relayed bytes");
+            }
+            ObjectNode preimage = JsonNodeFactory.instance.objectNode();
+            preimage.put("frame_id", start.payload().frameId());
+            preimage.put("frame_sequence", start.payload().frameSequence());
+            preimage.put("frame_type", start.payload().frameType());
+            preimage.set("header", start.payload().publicHeader());
+            preimage.put("header_sha256", headerHash);
+            preimage.put("public_text", publicText);
+            preimage.put("public_text_sha256", textHash);
+            preimage.put("public_text_length", characters);
+            if (!Objects.equals(
+                    ContractJson.sha256Hex(preimage), event.payload().frameSha256())) {
+                throw invalid("committed frame authority hash differs");
+            }
+        }
+
+        private void requireActive(AgentStreamEvent event, StreamEventType expectedType) {
+            if (start == null
+                    || event.eventType() != expectedType
+                    || !Objects.equals(start.runId(), event.runId())
+                    || !Objects.equals(start.attemptId(), event.attemptId())
+                    || !Objects.equals(start.payload().frameId(), event.payload().frameId())
+                    || !Objects.equals(
+                            start.payload().frameSequence(), event.payload().frameSequence())) {
+                throw invalid("public frame identity differs from its active frame");
+            }
+        }
+
+        private static AgentRunExecutionException invalid(String message) {
+            return AgentRunExecutionException.failLogicalRun(
+                    "AGENT_RUN_STREAM_V3_FRAME_INVALID", message, 0, true, null);
+        }
+    }
+
+    private static String sha256(byte[] value) {
+        try {
+            return HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(value));
+        } catch (Exception failure) {
+            throw new IllegalStateException("SHA-256 is unavailable", failure);
+        }
+    }
+
     private static final class PendingBatch {
         private final List<AgentStreamEvent> events = new ArrayList<>();
         private int deltaBytes;
@@ -615,16 +848,19 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
     private static final class ProgressState {
         private final ExecuteAgentRunRequest request;
         private long lastSequence;
+        private long allocatedSequence;
         private long acceptedCandidateSequence = -1;
         private boolean handshakeAccepted;
         private boolean acceptedTerminal;
         private boolean finalObserved;
         private boolean publicOutputEmitted;
+        private boolean publicOutputStartMarked;
         private AgentStreamEvent pendingFinal;
 
         private ProgressState(ExecuteAgentRunRequest request) {
             this.request = request;
             this.lastSequence = request.publicSequenceOffset();
+            this.allocatedSequence = request.publicSequenceOffset();
         }
 
         private ProjectedCandidate projectCandidate(AgentStreamEvent event) {
@@ -665,12 +901,15 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             if (event.eventType() == StreamEventType.ATTEMPT_STARTED) {
                 throw protocolFailure("stream cannot contain another attempt_started event");
             }
-            long publicSequence;
-            try {
-                publicSequence = Math.addExact(
-                        event.sequenceNo(), (long) request.publicSequenceOffset());
-            } catch (ArithmeticException failure) {
-                throw protocolFailure("stream event sequence exceeds the public sequence range");
+            long publicSequence = event.sequenceNo();
+            if (!"agent-stream.v3".equals(event.schemaVersion())) {
+                try {
+                    publicSequence = Math.addExact(
+                            event.sequenceNo(), (long) request.publicSequenceOffset());
+                } catch (ArithmeticException failure) {
+                    throw protocolFailure(
+                            "stream event sequence exceeds the public sequence range");
+                }
             }
             return new ProjectedCandidate(
                     event.sequenceNo(),
@@ -698,11 +937,42 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
 
         private void commit(AgentStreamEvent event) {
             lastSequence = event.sequenceNo();
-            publicOutputEmitted |= event.eventType() == StreamEventType.VISIBLE_DELTA;
+            allocatedSequence = Math.max(allocatedSequence, event.sequenceNo());
+            publicOutputEmitted |= event.eventType() == StreamEventType.VISIBLE_DELTA
+                    || event.eventType() == StreamEventType.PUBLIC_FRAME_START
+                    || event.eventType() == StreamEventType.ACTIVE_FRAME_SNAPSHOT
+                    || event.eventType() == StreamEventType.PUBLIC_FRAME_COMMITTED;
             if (event.eventType() == StreamEventType.FINAL) {
                 finalObserved = true;
                 pendingFinal = null;
             }
+        }
+
+        private void observeTransientPublicOutput() {
+            publicOutputEmitted = true;
+        }
+
+        private AgentStreamEvent allocateDurable(AgentStreamEvent event) {
+            if (!"agent-stream.v3".equals(event.schemaVersion())) {
+                allocatedSequence = Math.max(allocatedSequence, event.sequenceNo());
+                return event;
+            }
+            long sequence;
+            try {
+                sequence = Math.incrementExact(allocatedSequence);
+            } catch (ArithmeticException failure) {
+                throw protocolFailure("durable v3 stream sequence is exhausted");
+            }
+            allocatedSequence = sequence;
+            return new AgentStreamEvent(
+                    event.schemaVersion(),
+                    event.runId(),
+                    event.attemptId(),
+                    sequence,
+                    event.eventType(),
+                    event.audience(),
+                    event.occurredAt(),
+                    event.payload());
         }
 
         private AgentRunProgress snapshot() {
@@ -729,6 +999,14 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
 
         private boolean hasPendingFinal() {
             return pendingFinal != null;
+        }
+
+        private boolean publicOutputStartMarked() {
+            return publicOutputStartMarked;
+        }
+
+        private void markPublicOutputStart() {
+            publicOutputStartMarked = true;
         }
 
         private boolean hasObservedTerminal() {
@@ -790,7 +1068,9 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
 
         private AgentRunExecutionException protocolFailure(String message) {
             return AgentRunExecutionException.failLogicalRun(
-                    "AGENT_RUN_STREAM_V2_INVALID",
+                    "agent-stream.v3".equals(request.streamProtocol())
+                            ? "AGENT_RUN_STREAM_V3_INVALID"
+                            : "AGENT_RUN_STREAM_V2_INVALID",
                     message,
                     Math.max(0, lastSequence),
                     publicOutputEmitted,

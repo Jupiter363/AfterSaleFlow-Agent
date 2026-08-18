@@ -50,7 +50,7 @@ public class AgentRunStreamArchiveStore {
                 on terminal.agent_run_id = run.id
                and terminal.agent_run_attempt_id = run.committed_attempt_id
                and terminal.sequence_no = run.final_stream_sequence_no
-               and terminal.stream_protocol = 'agent-stream.v2'
+               and terminal.stream_protocol = 'agent-stream.v3'
                and terminal.event_type = 'final'
              where run.id = ? and run.committed_attempt_id = ?
                and run.finalization_status = 'COMMITTED'
@@ -121,7 +121,7 @@ public class AgentRunStreamArchiveStore {
             AgentRunStreamRetentionManifest retention) {
         Objects.requireNonNull(retention, "retention");
         CompatibilityReport currentCompatibility = validatedCompatibility(
-                "agent-stream.v2", retention.runId(), retention.attemptId());
+                "agent-stream.v3", retention.runId(), retention.attemptId());
         String currentCompatibilityHash = ContractJson.sha256Hex(
                 objectMapper.valueToTree(currentCompatibility));
         List<ArchiveReceipt> receipts = jdbc.query(
@@ -155,7 +155,7 @@ public class AgentRunStreamArchiveStore {
                        exists (
                            select 1 from agent_run_stream_event terminal
                             where terminal.id = manifest.terminal_event_id
-                              and terminal.stream_protocol = 'agent-stream.v2'
+                              and terminal.stream_protocol = 'agent-stream.v3'
                               and terminal.agent_run_id = manifest.agent_run_id
                               and terminal.agent_run_attempt_id = manifest.agent_run_attempt_id
                               and terminal.sequence_no = manifest.last_sequence_no
@@ -197,7 +197,7 @@ public class AgentRunStreamArchiveStore {
                    and watermark.agent_run_id = receipt.agent_run_id
                    and watermark.agent_run_attempt_id = receipt.agent_run_attempt_id
                  where receipt.receipt_status = 'VERIFIED'
-                   and receipt.stream_protocol = 'agent-stream.v2'
+                   and receipt.stream_protocol = 'agent-stream.v3'
                    and receipt.agent_run_id = ?
                    and receipt.agent_run_attempt_id = ?
                    and receipt.first_sequence_no = 0
@@ -269,7 +269,7 @@ public class AgentRunStreamArchiveStore {
                             resultSet.getString("target_partition_name"),
                             resultSet.getTimestamp("partition_range_start").toInstant(),
                             resultSet.getTimestamp("partition_range_end").toInstant(),
-                            "agent-stream.v2",
+                            "agent-stream.v3",
                             resultSet.getString("agent_run_id"),
                             resultSet.getString("agent_run_attempt_id"),
                             resultSet.getLong("first_sequence_no"),
@@ -306,7 +306,7 @@ public class AgentRunStreamArchiveStore {
                             resultSet.getString("manifest_id"),
                             recomputedManifestHash,
                             resultSet.getString("target_partition_name"),
-                            "agent-stream.v2",
+                            "agent-stream.v3",
                             resultSet.getString("agent_run_id"),
                             resultSet.getString("agent_run_attempt_id"),
                             resultSet.getLong("first_sequence_no"),
@@ -881,7 +881,7 @@ public class AgentRunStreamArchiveStore {
             if (!partitionRangeEnd.isAfter(partitionRangeStart)) {
                 throw new IllegalArgumentException("partition range must be increasing");
             }
-            if (!"agent-stream.v2".equals(streamProtocol)) {
+            if (!"agent-stream.v3".equals(streamProtocol)) {
                 throw new IllegalArgumentException(
                         "archive store currently requires exact AgentRun V2 identity");
             }

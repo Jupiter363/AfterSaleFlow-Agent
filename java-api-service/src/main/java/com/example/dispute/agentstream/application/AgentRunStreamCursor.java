@@ -7,6 +7,7 @@ public record AgentRunStreamCursor(
         AgentRunProtocol protocol, String attemptId, long sequence) {
 
     private static final String V2_PREFIX = "v2:";
+    private static final String V3_PREFIX = "v3:";
 
     public AgentRunStreamCursor {
         if (protocol == null || sequence < -1) {
@@ -15,7 +16,7 @@ public record AgentRunStreamCursor(
         if (protocol == AgentRunProtocol.V1 && attemptId != null) {
             throw new IllegalArgumentException("V1 cursor cannot contain an attemptId");
         }
-        if (protocol == AgentRunProtocol.V2
+        if ((protocol == AgentRunProtocol.V2 || protocol == AgentRunProtocol.V3)
                 && sequence >= 0
                 && (attemptId == null || attemptId.isBlank())) {
             throw new IllegalArgumentException("V2 cursor sequence requires an attemptId");
@@ -33,14 +34,15 @@ public record AgentRunStreamCursor(
         if (protocol == AgentRunProtocol.V1) {
             return new AgentRunStreamCursor(protocol, null, parseSequence(raw));
         }
-        if (!raw.startsWith(V2_PREFIX)) {
-            throw new IllegalArgumentException("V2 cursor must bind an attemptId");
+        String prefix = protocol == AgentRunProtocol.V3 ? V3_PREFIX : V2_PREFIX;
+        if (!raw.startsWith(prefix)) {
+            throw new IllegalArgumentException("attempt cursor must bind an attemptId");
         }
         int separator = raw.lastIndexOf(':');
-        if (separator <= V2_PREFIX.length() || separator == raw.length() - 1) {
-            throw new IllegalArgumentException("V2 cursor is malformed");
+        if (separator <= prefix.length() || separator == raw.length() - 1) {
+            throw new IllegalArgumentException("attempt cursor is malformed");
         }
-        String attemptId = raw.substring(V2_PREFIX.length(), separator);
+        String attemptId = raw.substring(prefix.length(), separator);
         if (!attemptId.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")) {
             throw new IllegalArgumentException("V2 cursor attemptId is invalid");
         }
@@ -53,7 +55,8 @@ public record AgentRunStreamCursor(
                 ? Long.toString(sequence)
                 : attemptId == null
                         ? "-1"
-                        : V2_PREFIX + attemptId + ':' + sequence;
+                        : (protocol == AgentRunProtocol.V3 ? V3_PREFIX : V2_PREFIX)
+                                + attemptId + ':' + sequence;
     }
 
     private static long parseSequence(String value) {

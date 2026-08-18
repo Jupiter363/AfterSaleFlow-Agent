@@ -470,6 +470,8 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
     terminalProgressReceipt = receipt;
     processRevision = receipt.processRevision();
     roomRevision = receipt.roomRevision();
+    // 反向通知案件根工作流：Evidence child 是进度事实的生产者，父 workflow 校验 epoch/fencing
+    // 并更新可 replay 的 active-child revision；这里不直接写 case process projection。
     CaseProcessWorkflow parent = Workflow.newExternalWorkflowStub(
         CaseProcessWorkflow.class,
         CaseProcessWorkflowProtocol.caseWorkflowId(start.tenantSurrogate(), start.caseId()));

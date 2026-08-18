@@ -134,6 +134,7 @@ def _normalize_section_value(
     """按 section 类型决定是否本地化、是否保留原文、是否改写平台叙事。"""
 
     if name in {
+        "evidence_room_context_v2",
         "case_identity",
         "initial_case_facts",
         "frozen_case_matrix",

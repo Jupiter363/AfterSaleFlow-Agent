@@ -474,7 +474,7 @@ public final class JdbcHearingFormalFinalizer implements HearingFormalFinalizer 
                        and run.room_epoch = :roomEpoch
                        and run.process_revision = :processRevision
                        and run.fencing_token = :fencingToken
-                       and run.protocol = 'agent-stream.v2'
+                       and run.protocol = 'agent-stream.v3'
                        and run.executor_kind = :executorKind
                        and attempt.executor_kind = :executorKind
                        and run.result_ready_attempt_id = attempt.id

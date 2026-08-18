@@ -22,6 +22,13 @@ import java.util.concurrent.CompletableFuture;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+/**
+ * 案件命令进入 {@code CaseProcessWorkflow} 的 SDK 边界。
+ *
+ * <p>上游是事务后 outbox/命令应用服务；下游使用 Temporal Update-with-Start 调用根工作流的
+ * {@code acceptCommand} Update。由 Temporal 记录 updateId 和 history，根工作流再把已接收命令路由到
+ * 当前房间 child，因此此类不直接调用房间服务或写命令终态。
+ */
 @Component
 public final class SdkTemporalUpdateGateway implements TemporalUpdateGateway {
 
@@ -40,6 +47,10 @@ public final class SdkTemporalUpdateGateway implements TemporalUpdateGateway {
         this.searchAttributes = searchAttributes;
     }
 
+    /**
+     * 将已提交的 outbox 命令投递到案件根工作流。工作流不存在时会用 carry-state 初值创建它，存在时复用
+     * 同一 workflowId；下游 {@code CaseProcessWorkflowImpl.acceptCommand} 以 updateId 去重并等待路由完成。
+     */
     @Override
     public DeliveryReceipt deliver(UpdateWithStartRequest request) {
         try {

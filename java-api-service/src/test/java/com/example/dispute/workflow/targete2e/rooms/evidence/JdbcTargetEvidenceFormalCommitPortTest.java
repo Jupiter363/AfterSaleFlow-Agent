@@ -9,12 +9,12 @@ import com.example.dispute.agentstream.application.AgentRunFinalizationFailure;
 import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter.CommitCommand;
 import com.example.dispute.room.application.AgentInvocationContext;
 import com.example.dispute.room.application.EvidenceAgentTurnCommand;
-import com.example.dispute.room.application.EvidenceAgentTurnResult;
 import com.example.dispute.room.application.EvidenceContextEnvelopeV1;
 import com.example.dispute.room.application.RoomMessageView;
 import com.example.dispute.room.domain.MessageSource;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
@@ -26,10 +26,14 @@ import com.example.dispute.workflow.contract.v1.RoomGraphCommand.SnapshotRef;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterialStore.MaterialSnapshot;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnProposalLoader.LoadedProposal;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnProposalLoader.Usage;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.HexFormat;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -100,6 +104,10 @@ class JdbcTargetEvidenceFormalCommitPortTest {
             "target_test",
             "target_test");
     jdbc = new JdbcTemplate(dataSource);
+    jdbc.execute("drop table if exists evidence_fact_edge_v2");
+    jdbc.execute("drop table if exists evidence_turn_projection_v2");
+    jdbc.execute("drop table if exists agent_run_frame_authority");
+    jdbc.execute("drop table if exists agent_run_public_frame");
     jdbc.execute("drop table if exists room_message");
     jdbc.execute("drop table if exists case_room");
     jdbc.execute("drop table if exists case_process_projection");
@@ -494,7 +502,7 @@ class JdbcTargetEvidenceFormalCommitPortTest {
     when(graph.caseId()).thenReturn(CASE_ID);
     when(graph.commandId()).thenReturn(graphCommandId);
     when(graph.logicalRunId()).thenReturn("target-evidence-run:RUN_1");
-    when(graph.attemptId()).thenReturn("target-evidence-run:RUN_1:" + attemptNo);
+    when(graph.attemptId()).thenReturn("target-evidence-attempt:RUN_1:" + attemptNo);
     when(graph.threadId()).thenReturn("target-evidence-thread:USER_1");
     when(graph.roomType()).thenReturn(RoomType.EVIDENCE);
     when(graph.roomEpoch()).thenReturn(ROOM_EPOCH);
@@ -600,17 +608,9 @@ class JdbcTargetEvidenceFormalCommitPortTest {
     MaterialSnapshot snapshot =
         new MaterialSnapshot(admissionId, null, material, "b".repeat(64), Instant.EPOCH);
     var mapper = JsonMapper.builder().build();
-    EvidenceAgentTurnResult turnResult =
-        new EvidenceAgentTurnResult(
-            GUARDED_ROOM_UTTERANCE,
-            mapper.createObjectNode(),
-            mapper.createArrayNode(),
-            java.util.List.of(),
-            false,
-            false,
-            "NONE",
-            0.8);
-    var turnResultJson = mapper.valueToTree(turnResult);
+    TargetEvidenceTurnResultV2 turnResult =
+        singleReadinessResult(mapper, graphCommandId, graph.attemptId());
+    var turnResultJson = turnResult.document();
     LoadedProposal proposal =
         new LoadedProposal(
             "urn:target-e2e:proposal:PROPOSAL_1",
@@ -634,6 +634,7 @@ class JdbcTargetEvidenceFormalCommitPortTest {
             "f".repeat(64),
             new Usage(7, 5, 12),
             Instant.parse("2030-01-01T00:00:00Z"));
+    seedPublicFrames(graph, turnResult);
     return new TargetEvidenceFinalizationRequest(
         TargetEvidenceCommandMaterial.TARGET_LANE,
         activationId,
@@ -655,6 +656,89 @@ class JdbcTargetEvidenceFormalCommitPortTest {
         command,
         snapshot,
         proposal);
+  }
+
+  private static TargetEvidenceTurnResultV2 singleReadinessResult(
+      ObjectMapper mapper, String commandId, String attemptId) {
+    var header = mapper.createObjectNode();
+    header.put("frame_sequence", 1);
+    header.put("frame_type", "ROOM_READINESS");
+    header.put("core_fact_coverage", "UNKNOWN");
+    header.put("source_chain_coverage", "UNKNOWN");
+    header.put("time_integrity_coverage", "UNKNOWN");
+    header.put("human_review_status", "NONE");
+    header.put("overall_readiness", "UNKNOWN");
+
+    var frame = mapper.createObjectNode();
+    frame.put(
+        "frame_id",
+        TargetEvidenceTurnResultV2.frameId(commandId, attemptId, 1, "ROOM_READINESS"));
+    frame.put("frame_sequence", 1);
+    frame.put("frame_type", "ROOM_READINESS");
+    frame.set("header", header);
+    frame.put("header_sha256", ContractJson.sha256Hex(header));
+    frame.put("public_text", GUARDED_ROOM_UTTERANCE);
+    frame.put("public_text_sha256", sha256(GUARDED_ROOM_UTTERANCE));
+    frame.put(
+        "public_text_length",
+        GUARDED_ROOM_UTTERANCE.codePointCount(0, GUARDED_ROOM_UTTERANCE.length()));
+    var framePreimage = frame.deepCopy();
+    frame.put("frame_sha256", ContractJson.sha256Hex(framePreimage));
+
+    var manifest = mapper.createArrayNode().add(frame);
+    var result = mapper.createObjectNode();
+    result.put("schema_version", TargetEvidenceTurnResultV2.SCHEMA_VERSION);
+    result.put("frame_authority_schema", TargetEvidenceTurnResultV2.FRAME_SCHEMA_VERSION);
+    result.set("frame_manifest", manifest);
+    result.put("frame_manifest_sha256", ContractJson.sha256Hex(manifest));
+    result.put("room_utterance", GUARDED_ROOM_UTTERANCE);
+    result.set("referenced_evidence_ids", mapper.createArrayNode());
+    result.set("observation_graph", mapper.createArrayNode());
+    result.set("evidence_assessments", mapper.createArrayNode());
+    result.set("evidence_requests", mapper.createArrayNode());
+    result.set("human_review_tasks", mapper.createArrayNode());
+    result.set("room_readiness", header);
+    return TargetEvidenceTurnResultV2.parse(mapper, result);
+  }
+
+  private void seedPublicFrames(
+      RoomGraphCommand graph, TargetEvidenceTurnResultV2 turnResult) {
+    for (TargetEvidenceTurnResultV2.Frame frame : turnResult.frames()) {
+      if (frame.publicText() == null) {
+        continue;
+      }
+      jdbc.update(
+          """
+          insert into agent_run_public_frame (
+            id, agent_run_id, agent_run_attempt_id, frame_id, frame_sequence, frame_type,
+            public_header, public_text, header_sha256, public_text_sha256, frame_sha256,
+            public_text_chars, durable_cursor, commit_status)
+          values (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, 'COMMITTED')
+          on conflict (agent_run_id, agent_run_attempt_id, frame_id) do nothing
+          """,
+          "ARPF_" + frame.frameId(),
+          graph.logicalRunId(),
+          graph.attemptId(),
+          frame.frameId(),
+          frame.frameSequence(),
+          frame.frameType(),
+          ContractJson.canonicalString(frame.header()),
+          frame.publicText(),
+          frame.headerSha256(),
+          frame.publicTextSha256(),
+          frame.frameSha256(),
+          frame.publicTextLength(),
+          "v3:" + graph.attemptId() + ":FRAME:" + frame.frameSequence());
+    }
+  }
+
+  private static String sha256(String value) {
+    try {
+      return HexFormat.of().formatHex(
+          MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+    } catch (Exception failure) {
+      throw new IllegalStateException("SHA-256 is unavailable", failure);
+    }
   }
 
   private void createSchema() {
@@ -787,11 +871,79 @@ class JdbcTargetEvidenceFormalCommitPortTest {
           created_by varchar(128) not null,
           unique (case_id, idempotency_key))
         """);
+    jdbc.execute("""
+        create table agent_run_public_frame (
+          id varchar(64) primary key,
+          agent_run_id varchar(128) not null,
+          agent_run_attempt_id varchar(128) not null,
+          frame_id varchar(128) not null,
+          frame_sequence integer not null,
+          frame_type varchar(64) not null,
+          public_header jsonb not null,
+          public_text text not null,
+          header_sha256 varchar(64) not null,
+          public_text_sha256 varchar(64) not null,
+          frame_sha256 varchar(64) not null,
+          public_text_chars integer not null,
+          durable_cursor varchar(256) not null,
+          commit_status varchar(32) not null,
+          unique (agent_run_id, agent_run_attempt_id, frame_id))
+        """);
+    jdbc.execute("""
+        create table agent_run_frame_authority (
+          id varchar(64) primary key,
+          agent_run_id varchar(128) not null,
+          agent_run_attempt_id varchar(128) not null,
+          command_id varchar(128) not null,
+          frame_id varchar(128) not null,
+          frame_sequence integer not null,
+          frame_type varchar(64) not null,
+          private_header jsonb not null,
+          public_header jsonb not null,
+          public_text text,
+          header_sha256 varchar(64) not null,
+          public_text_sha256 varchar(64) not null,
+          frame_sha256 varchar(64) not null,
+          unique (agent_run_id, agent_run_attempt_id, frame_id))
+        """);
+    jdbc.execute("""
+        create table evidence_turn_projection_v2 (
+          id varchar(64) primary key,
+          case_id varchar(64) not null,
+          room_epoch bigint not null,
+          command_id varchar(128) not null,
+          agent_run_id varchar(128) not null,
+          agent_run_attempt_id varchar(128) not null,
+          actor_id varchar(128) not null,
+          actor_role varchar(32) not null,
+          room_message_id varchar(64) not null,
+          frame_manifest_sha256 varchar(64) not null,
+          result_sha256 varchar(64) not null,
+          observation_graph jsonb not null,
+          evidence_assessments jsonb not null,
+          evidence_requests jsonb not null,
+          human_review_tasks jsonb not null,
+          room_readiness jsonb not null,
+          unique (case_id, command_id))
+        """);
+    jdbc.execute("""
+        create table evidence_fact_edge_v2 (
+          id varchar(64) primary key,
+          projection_id varchar(64) not null,
+          case_id varchar(64) not null,
+          evidence_id varchar(64) not null,
+          source_unit_id varchar(128) not null,
+          observation_slot varchar(128) not null,
+          fact_id varchar(128) not null,
+          relation varchar(64) not null,
+          reason text not null,
+          unique (projection_id, observation_slot, fact_id))
+        """);
   }
 
   private void seedAuthority() {
     jdbc.update(
-        "insert into agent_run values (?, 'agent-stream.v2', 'TEMPORAL_ACTIVITY')",
+        "insert into agent_run values (?, 'agent-stream.v3', 'TEMPORAL_ACTIVITY')",
         "target-evidence-run:RUN_1");
     jdbc.update(
         "insert into agent_run_attempt values (?, ?, 1, ?)",

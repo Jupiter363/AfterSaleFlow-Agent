@@ -31,6 +31,10 @@ public final class IntakeAuthorityWorkerRegistration {
 
     public static final String VERSION_MARKER = "typed-intake-bridge-authority-v1";
 
+    /**
+     * CASE_CONTROL worker 必须注册的根 workflow。它由 SDK Update-with-Start 调用，并在运行时调用本
+     * 注册描述符提供的 authority-backed Intake bridge 活动；Room Control/Intake child 属于另一队列。
+     */
     private static final List<Class<?>> CASE_CONTROL_WORKFLOW_TYPES =
             List.of(CaseProcessWorkflowImpl.class);
     private static final List<Class<?>> ROOM_CONTROL_WORKFLOW_TYPES =

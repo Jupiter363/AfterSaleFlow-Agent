@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Generic, Literal, TypeVar, cast
@@ -248,6 +248,41 @@ class HarnessModelRunner:
     ) -> HarnessGeneration[T]:
         """Execute one governed structured invocation on the native async model path."""
 
+        # A bound public stream must use the provider SSE path even when the
+        # business caller asks for the ordinary async result API.  This keeps
+        # the one-call contract while allowing the observer to receive the
+        # explicitly whitelisted fields before the terminal JSON document.
+        observer = current_stream_observer()
+        if observer is not None:
+            visible_fields = observer.visible_fields_for(node_name)
+            if visible_fields:
+                generation: HarnessGeneration[T] | None = None
+                async for update in self.ainvoke_structured_stream(
+                    node_name=node_name,
+                    case_data=case_data,
+                    output_type=output_type,
+                    visible_fields=visible_fields,
+                    context_sections=context_sections,
+                    context_pack=context_pack,
+                    max_input_tokens=max_input_tokens,
+                    agent_context=agent_context,
+                    prompt_profile_id=prompt_profile_id,
+                    evidence_assets=evidence_assets,
+                ):
+                    if isinstance(update, HarnessStreamDelta):
+                        observer.visible_delta(node_name, update.field, update.delta)
+                    elif isinstance(update, HarnessStreamCompleted):
+                        if generation is not None:
+                            raise RuntimeError(
+                                "governed async stream emitted multiple completions"
+                            )
+                        generation = update.generation
+                    else:
+                        raise RuntimeError("governed async stream emitted an unknown update")
+                if generation is None:
+                    raise RuntimeError("governed async stream emitted no completion")
+                return generation
+
         user_content_parts = (
             validated_evidence_content_parts(evidence_assets)
             if evidence_assets is not None
@@ -297,6 +332,92 @@ class HarnessModelRunner:
                 token_usage=generation.token_usage,
             )
         return generation
+
+    async def ainvoke_structured_stream(
+        self,
+        *,
+        node_name: str,
+        case_data: dict[str, Any],
+        output_type: type[T],
+        visible_fields: tuple[VisibleFieldSpec, ...] = (),
+        context_sections: list[PromptSection] | None = None,
+        context_pack: ContextPack | None = None,
+        max_input_tokens: int | None = None,
+        agent_context: AgentInvocationContext | None = None,
+        prompt_profile_id: str | None = None,
+        evidence_assets: LoadedEvidenceAssets | None = None,
+    ) -> AsyncIterator[HarnessStreamUpdate[T]]:
+        """Run one native async structured call and expose governed deltas.
+
+        The provider's JSON document is still parsed and validated exactly once
+        at the end of this generator.  Only fields explicitly declared in
+        ``visible_fields`` can cross the stream boundary before that point.
+        This is the async counterpart of ``invoke_structured_stream`` and is
+        intentionally a single provider invocation (there is no preview call
+        followed by a second terminal call).
+        """
+
+        user_content_parts = (
+            validated_evidence_content_parts(evidence_assets)
+            if evidence_assets is not None
+            else ()
+        )
+        prepared = self._prepare(
+            node_name=node_name,
+            case_data=case_data,
+            output_type=output_type,
+            context_sections=context_sections,
+            context_pack=context_pack,
+            max_input_tokens=max_input_tokens,
+            agent_context=agent_context,
+            prompt_profile_id=prompt_profile_id,
+        )
+        built = self._build_node(
+            node_name=node_name,
+            output_type=output_type,
+            prepared=prepared,
+            visible_fields=visible_fields,
+            user_content_parts=user_content_parts,
+        )
+        capture = InvocationMetadataCapture()
+        state = {"human_prompt": prepared.user_prompt}
+        prompt_input = built.lens.invoke(state)
+        prompt_value = built.prompt.invoke(prompt_input)
+        messages = tuple(prompt_value.messages)
+        final_document: str | None = None
+        async for chunk in built.model.astream(
+            prompt_value,
+            config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
+        ):
+            for event in governed_events_from_chunk(chunk):
+                yield HarnessStreamDelta(
+                    kind="visible_delta",
+                    field=event["field"],
+                    delta=event["delta"],
+                )
+            if chunk.content:
+                if not isinstance(chunk.content, str) or final_document is not None:
+                    raise RuntimeError(
+                        "governed async stream must emit one final JSON document"
+                    )
+                final_document = chunk.content
+        if final_document is None:
+            raise RuntimeError("governed async stream ended without a final JSON document")
+        parsed = built.parser.invoke(AIMessage(content=final_document))
+        guarded = built.guardrail.invoke(parsed)
+        patch = built.patch_projector.invoke(guarded)
+        metadata = capture.metadata
+        yield HarnessStreamCompleted(
+            kind="completed",
+            generation=HarnessGeneration(
+                value=output_type.model_validate(patch["value"]),
+                model=str(metadata["model"]),
+                latency_ms=int(metadata["latency_ms"]),
+                token_usage=dict(metadata["token_usage"]),
+                context=prepared.context,
+                messages=messages,
+            ),
+        )
 
     # 所属模块：Agent Harness > 模型执行中枢 > 单次调用流式适配。
     # 具体功能：`invoke_structured_stream` 复用与非流式完全相同的裁剪/Prompt/身份规则，消费一次 `llm.generate_stream`，把可见字段增量映射为 HarnessStreamDelta，最终映射为已校验 HarnessGeneration。

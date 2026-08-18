@@ -182,7 +182,7 @@ public final class ReconciledTargetEvidenceFinalizationEvidenceSource
           : completedReplay && provider != null && !provider.isBlank()
               && modelVersion != null && !modelVersion.isBlank();
       return (resultReady || completedReplay) && executionLifecycle
-          && "agent-stream.v2".equals(protocol) && "TEMPORAL_ACTIVITY".equals(runExecutor)
+          && "agent-stream.v3".equals(protocol) && "TEMPORAL_ACTIVITY".equals(runExecutor)
           && "TEMPORAL_ACTIVITY".equals(attemptExecutor) && "EVIDENCE".equals(roomType)
           && tenant.equals(command.tenantSurrogate()) && caseId.equals(command.caseId()) && roomEpoch == command.roomEpoch()
           && processRevision == command.processRevision() && fencingToken == material.material().roomFencingToken()

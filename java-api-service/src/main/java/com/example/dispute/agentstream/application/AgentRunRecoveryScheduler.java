@@ -153,7 +153,7 @@ public class AgentRunRecoveryScheduler {
         for (String status : List.of("PENDING", "RUNNING")) {
             runRepository
                     .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
-                            AgentRunProtocol.V2.wireValue(),
+                            AgentRunProtocol.V3.wireValue(),
                             AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                             status)
                     .forEach(

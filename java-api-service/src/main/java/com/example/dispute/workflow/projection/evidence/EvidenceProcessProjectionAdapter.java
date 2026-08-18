@@ -202,7 +202,7 @@ public class EvidenceProcessProjectionAdapter {
                        and run.room_epoch = epoch.room_epoch
                        and run.process_revision = epoch.process_revision
                        and run.fencing_token = epoch.fencing_token
-                       and run.protocol = 'agent-stream.v2'
+                       and run.protocol = 'agent-stream.v3'
                        and run.run_status in ('PENDING', 'RUNNING')
                        and run.stream_operation is not null
                        and exists (

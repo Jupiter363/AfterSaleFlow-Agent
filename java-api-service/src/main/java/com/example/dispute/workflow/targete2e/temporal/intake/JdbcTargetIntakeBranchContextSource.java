@@ -56,14 +56,14 @@ public final class JdbcTargetIntakeBranchContextSource implements TargetIntakeBr
          and thread.actor_scope_hash = :actorScopeHash
          and thread.registration_status = 'REGISTERED'
          and thread.writer_mode = 'TEMPORAL'
-         and thread.graph_key = 'all-rooms.target-e2e.v1'
+         and thread.graph_key = 'all-rooms.target-e2e.v2'
          and thread.graph_key = activation.graph_key
          and thread.graph_version = activation.graph_version
          and thread.checkpoint_schema_version = activation.graph_checkpoint_schema_version
          and thread.state_schema_version = 'intake-graph-state.v2'
-         and thread.output_schema_version = 'target-e2e-room-proposal-source.v1'
+         and thread.output_schema_version = 'target-e2e-room-proposal-source.v2'
          and activation.tenant_surrogate = thread.tenant_surrogate
-         and activation.graph_key = 'all-rooms.target-e2e.v1'
+         and activation.graph_key = 'all-rooms.target-e2e.v2'
          and binding.activation_id = :activationId
          and binding.activation_manifest_hash = :activationManifestHash
          and binding.execution_lane = 'TARGET_E2E_CANDIDATE'

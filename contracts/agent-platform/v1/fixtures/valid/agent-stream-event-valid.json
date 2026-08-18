@@ -2,7 +2,7 @@
   "case": "allowlisted visible delta",
   "schema": "agent-stream-event.schema.json",
   "instance": {
-    "schema_version": "agent-stream.v2",
+    "schema_version": "agent-stream.v3",
     "run_id": "run-001",
     "attempt_id": "attempt-001",
     "sequence_no": 1,

@@ -61,7 +61,7 @@ public final class JdbcTargetReviewFinalizationFactsProvider implements TargetRe
     require(value.tenant.equals(graph.tenantSurrogate()) && value.caseId.equals(graph.caseId()), "run case scope");
     require("REVIEW".equals(value.roomType) && value.epoch == graph.roomEpoch()
         && value.processRevision == graph.processRevision(), "run room scope");
-    require("agent-stream.v2".equals(value.protocol) && "TEMPORAL_ACTIVITY".equals(value.executorKind)
+    require("agent-stream.v3".equals(value.protocol) && "TEMPORAL_ACTIVITY".equals(value.executorKind)
         && "TEMPORAL_ACTIVITY".equals(value.attemptExecutor), "AgentRun protocol");
     boolean resultReady = "RESULT_READY".equals(value.runStatus) && "UNCOMMITTED".equals(value.finalizationStatus)
         && "RESULT_READY".equals(value.attemptStatus);

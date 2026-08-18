@@ -135,7 +135,7 @@ public final class TargetHearingInternalStageMaterializer {
     Attempt attempt = ledger.startNextAttempt(logicalRunId, new AttemptAllocation(1, command, binding), now);
     require(attempt.attemptId().equals(attemptId) && attempt.attemptNo() == 1, "attempt replay");
     ExecuteAgentRunRequest request = new ExecuteAgentRunRequest(ExecuteAgentRunRequest.SCHEMA_VERSION, logicalRunId, 1, ATTEMPT_LIMIT,
-        "agent-stream.v2", binding.logicalInputHash(), null, false, 0, command);
+        "agent-stream.v3", binding.logicalInputHash(), null, false, 0, command);
     CommandAdmission admission = new CommandAdmission(grant.activationId(), grant.activationManifestHash(),
         grant.isolatedDomainDbBindingHash(), start.tenantSurrogate(), start.caseId(), commandId,
         envelope.commandHash(), envelope.commandEnvelopeHash(), start.roomEpoch(), start.fencingToken());
@@ -176,7 +176,7 @@ public final class TargetHearingInternalStageMaterializer {
       long processRevision, HearingWorkflowStage stage, RoomGraphCommand.SnapshotRef domain,
       RoomGraphCommand.SnapshotRef event, Instant deadlineAt) {
     RoomGraphCommand.InvocationContext invocation = new RoomGraphCommand.InvocationContext(pins.agentProfileId(),
-        pins.promptVersion(), pins.modelProfileId(), "target-e2e-room-proposal-source.v1", pins.policyVersion(),
+        pins.promptVersion(), pins.modelProfileId(), "target-e2e-room-proposal-source.v2", pins.policyVersion(),
         pins.guardrailVersion(), List.of(), pins.envelopeKeyId(), "target-hearing-nonce:" + stable(commandId));
     RoomGraphCommand provisional = new RoomGraphCommand("room-graph-command.v1", commandId, logicalRunId, attemptId,
         start.tenantSurrogate(), start.caseId(), RoomType.HEARING, start.roomEpoch(), TargetTypedRoomProtocol.GRAPH_KEY,

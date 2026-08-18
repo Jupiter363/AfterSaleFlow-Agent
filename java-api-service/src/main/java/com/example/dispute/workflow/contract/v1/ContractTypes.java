@@ -92,6 +92,11 @@ public final class ContractTypes {
     public enum StreamEventType {
         ATTEMPT_STARTED("attempt_started"),
         VISIBLE_DELTA("visible_delta"),
+        PUBLIC_FRAME_START("public_frame_start"),
+        PUBLIC_TEXT_DELTA("public_text_delta"),
+        ACTIVE_FRAME_SNAPSHOT("active_frame_snapshot"),
+        PUBLIC_FRAME_COMMITTED("public_frame_committed"),
+        PUBLIC_FRAME_INTERRUPTED("public_frame_interrupted"),
         USAGE("usage"),
         ATTEMPT_ABORTED("attempt_aborted"),
         ATTEMPT_RESET("attempt_reset"),
@@ -122,7 +127,8 @@ public final class ContractTypes {
 
     public enum AgentRunProtocol {
         V1("agent_stream.v1"),
-        V2("agent-stream.v2");
+        V2("agent-stream.v2"),
+        V3("agent-stream.v3");
 
         private final String wireValue;
 

@@ -13,7 +13,7 @@ import java.util.Objects;
 public final class TargetE2eIntakeFinalizationRequestResolver
         implements IntakeAgentRunFinalizationRequestResolver {
 
-    static final String TARGET_EXECUTION_OUTPUT_SCHEMA = "target-e2e-room-proposal-source.v1";
+    static final String TARGET_EXECUTION_OUTPUT_SCHEMA = "target-e2e-room-proposal-source.v2";
     static final String INTAKE_PROPOSAL_OUTPUT_SCHEMA = "intake-turn-proposal.v2";
 
     private final TargetE2eAuthorizedIntakeFinalizationSource source;

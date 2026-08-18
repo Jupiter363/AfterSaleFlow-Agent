@@ -28,9 +28,9 @@ public final class TargetE2eRoomExchangeContract {
       id(logicalRunId, "logicalRunId"); id(attemptId, "attemptId"); id(graphKey, "graphKey");
       id(graphVersion, "graphVersion"); id(checkpointSchemaVersion, "checkpointSchemaVersion"); id(stageCode, "stageCode");
       if (roomType == null || !ROOM.matcher(roomType).matches()) invalid("roomType");
-      exact(graphKey, "all-rooms.target-e2e.v1", "graphKey");
-      exact(graphVersion, "target-e2e-graph.2026-07-27.1", "graphVersion");
-      exact(checkpointSchemaVersion, "target-e2e-checkpoint.v1", "checkpointSchemaVersion");
+      exact(graphKey, "all-rooms.target-e2e.v2", "graphKey");
+      exact(graphVersion, "target-e2e-graph.2026-08-18.1", "graphVersion");
+      exact(checkpointSchemaVersion, "target-e2e-checkpoint.v2", "checkpointSchemaVersion");
     }
   }
 

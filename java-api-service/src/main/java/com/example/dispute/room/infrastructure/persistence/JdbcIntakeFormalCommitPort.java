@@ -684,7 +684,7 @@ public final class JdbcIntakeFormalCommitPort
                    and run.tenant_surrogate = :tenantSurrogate
                    and run.case_id = :caseId
                    and run.room_id = :roomId
-                   and run.protocol = 'agent-stream.v2'
+                   and run.protocol = 'agent-stream.v3'
                    and run.executor_kind = 'TEMPORAL_ACTIVITY'
                    and run.room_type = 'INTAKE'
                    and run.room_epoch = :roomEpoch

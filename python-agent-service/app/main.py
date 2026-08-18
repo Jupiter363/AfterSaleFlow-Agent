@@ -58,7 +58,8 @@ from app.agents.dispute_intake_officer import DisputeIntakeOfficer
 from app.agents.evaluation_agent import EvaluationAgent
 from app.agents.evidence_clerk import EvidenceClerk
 from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
-from app.agents.evidence_clerk.public_reply import EvidencePublicOutputPolicy
+from app.agents.evidence_clerk.v2_workflow import EvidenceTurnWorkflowV2
+from app.agents.evidence_clerk.v2_policy import EvidenceV2PublicOutputPolicy
 from app.agents.hearing_flow import HearingFlowWorkflows
 from app.agents.model_roles import ModelCriticEvaluator, ModelReviewAnswerer
 from app.agents.review_copilot import ReviewCopilot
@@ -115,7 +116,6 @@ from app.schemas import (
     EvidenceBuildRequest,
     EvidenceDossierResult,
     EvidenceTurnRequest,
-    EvidenceTurnResult,
     EvaluationAnalysisResult,
     EvaluationAnalyzeRequest,
     IntakeAnalysisOutput,
@@ -127,6 +127,7 @@ from app.schemas import (
     SimulatedExternalImportRequest,
     SimulatedExternalImportResult,
 )
+from app.agents.evidence_clerk.v2_contracts import EvidenceTurnResultV2
 
 # ---- 流式传输 & 追踪 ----
 from app.streaming import (
@@ -160,7 +161,7 @@ def create_app(
     settings: Settings | None = None,
     intake_workflow: IntakeWorkflow | None = None,
     intake_turn_workflow: IntakeTurnWorkflow | None = None,
-    evidence_turn_workflow: EvidenceTurnWorkflow | None = None,
+    evidence_turn_workflow: EvidenceTurnWorkflow | EvidenceTurnWorkflowV2 | None = None,
     evaluation_workflow: EvaluationWorkflow | None = None,
     final_agent_services: FinalAgentServices | None = None,
     simulated_import_workflow: SimulatedExternalImportWorkflow | None = None,
@@ -511,12 +512,12 @@ def create_app(
     # 系统意义：该函数在系统中的业务边界是：鉴权、追踪、异常映射必须完整；不泄露内部推理。
     @app.post(
         "/internal/agents/evidence/turn",
-        response_model=EvidenceTurnResult,
+        response_model=EvidenceTurnResultV2,
     )
     async def evidence_turn(
         payload: EvidenceTurnRequest,
         x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
-    ) -> EvidenceTurnResult:
+    ) -> EvidenceTurnResultV2:
         """证据轮转处理。"""
         _authorize(x_service_secret, resolved.python_agent_service_secret)
         return await run_in_threadpool(resolved_evidence_turn_workflow.run, payload)
@@ -829,8 +830,8 @@ def create_app(
             invoke=lambda: resolved_evidence_turn_workflow.run(payload),
             finalized_visible=lambda result: result.room_utterance,
             finalized_visible_node="evidence_turn",
-            finalized_visible_field="room_utterance",
-            public_output_policy=EvidencePublicOutputPolicy(),
+            finalized_visible_field="frames",
+            public_output_policy=EvidenceV2PublicOutputPolicy(),
         )
 
     @app.post("/internal/agents/hearing-flow/intake/questions/stream")
@@ -1099,10 +1100,10 @@ def _build_intake_turn_workflow(settings: Settings) -> IntakeTurnWorkflow:
 # 具体功能：`_build_evidence_turn_workflow` 构建证据轮转工作流（含外部资产加载器）；关键协作调用：`EvidenceTurnWorkflow`、`HarnessModelRunner`、`EvidenceAssetLoader`。
 # 上下游：上游为 本文件的 `create_app`；下游为 本文件的 `_build_llm_client`。
 # 系统意义：定义可恢复、可追踪的阶段顺序，使案件重试仍沿相同业务路径推进。
-def _build_evidence_turn_workflow(settings: Settings) -> EvidenceTurnWorkflow:
+def _build_evidence_turn_workflow(settings: Settings) -> EvidenceTurnWorkflowV2:
     """构建证据轮转工作流（含外部资产加载器）。"""
     llm = _build_llm_client(settings)
-    return EvidenceTurnWorkflow(
+    return EvidenceTurnWorkflowV2(
         model_runner=HarnessModelRunner(
             llm=llm,
             prompts=PromptRepository(),

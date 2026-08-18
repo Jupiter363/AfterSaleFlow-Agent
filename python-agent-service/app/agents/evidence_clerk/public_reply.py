@@ -1111,6 +1111,10 @@ def _canonical_public_observation_text(
 class EvidencePublicOutputPolicy:
     """Release only complete guarded Evidence sentences from one JSON field."""
 
+    @property
+    def visible_field_name(self) -> str:
+        return "room_utterance"
+
     def __init__(
         self,
         *,
@@ -1198,6 +1202,12 @@ class EvidencePublicOutputPolicy:
             raise EvidencePublicOutputPolicyError(
                 "Evidence public output received an invalid delta"
             )
+        # Direct Harness callers may feed a provider delta without invoking the
+        # HTTP observer's explicit begin hook.  Mark that stream as bootstrapped
+        # without inventing a prefix; production routes still call ``begin``
+        # first and therefore retain the canonical opening bytes.
+        if not self._bootstrapped:
+            self._bootstrapped = True
         self._source_text += delta
         completed_sentences = tuple(
             sentence

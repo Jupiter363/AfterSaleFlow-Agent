@@ -209,6 +209,8 @@ public class TemporalWorkerConfiguration {
 
         Worker caseControl =
                 factory.newWorker(CASE_CONTROL, optionsFactory.workerOptions(CASE_CONTROL));
+        // CASE_CONTROL 是 CaseProcessWorkflowImpl 的执行端：Update-with-Start 的根流程在此 poll，
+        // 同一个 worker 还提供它调用的 ledger、Intake bridge 与 process-projection 活动实现。
         List<Class<?>> caseControlWorkflows = new ArrayList<>();
         caseControlWorkflows.add(
                 targetRegistration == null
@@ -236,6 +238,8 @@ public class TemporalWorkerConfiguration {
                 caseControlWorkflows,
                 caseControlActivities,
                 v2BridgeRegistration);
+        // 注册后，SDK gateway 投递到 CASE_CONTROL 的 CaseProcessWorkflow Update 才会由上面的实现消费；
+        // room child 则由独立的 ROOM_CONTROL worker 执行，保持父/子工作流职责边界清晰。
         caseControl.registerWorkflowImplementationTypes(caseControlWorkflows.toArray(Class[]::new));
         caseControl.registerActivitiesImplementations(caseControlActivities.toArray());
 

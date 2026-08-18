@@ -6,6 +6,12 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
+/**
+ * 上游领域事件进入父 {@code CaseProcessWorkflow} 时使用的不可变引用。
+ *
+ * <p>工作流按 {@code caseEventSequence} 将它缓冲到携带状态中，使 Temporal 重放或续跑仍按同一顺序
+ * 处理；下游房间推进和投影恢复只依据受校验的载荷引用及坐标定位该事件。
+ */
 public record CaseDomainEventRef(
         String schemaVersion,
         String eventId,

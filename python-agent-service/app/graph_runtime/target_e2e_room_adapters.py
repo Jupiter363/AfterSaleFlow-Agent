@@ -218,11 +218,11 @@ def _require_target_intake_command(execution: GatewayExecution) -> None:
         execution.fence.execution_lane is not GraphGatewayMode.TARGET_E2E_CANDIDATE
         or execution.admission.candidate_authority is None
         or command.room_type != "INTAKE"
-        or command.graph_key != "all-rooms.target-e2e.v1"
-        or command.graph_version != "target-e2e-graph.2026-07-27.1"
-        or command.checkpoint_schema_version != "target-e2e-checkpoint.v1"
+        or command.graph_key != "all-rooms.target-e2e.v2"
+        or command.graph_version != "target-e2e-graph.2026-08-18.1"
+        or command.checkpoint_schema_version != "target-e2e-checkpoint.v2"
         or command.invocation_context.output_schema_version
-        != "target-e2e-room-proposal-source.v1"
+        != "target-e2e-room-proposal-source.v2"
         or execution.admission.binding.execution_lane
         is not GraphGatewayMode.TARGET_E2E_CANDIDATE
         or execution.admission.registry.binding.graph_key != command.graph_key
@@ -723,7 +723,7 @@ def _event(
 ) -> AgentStreamEvent:
     command = execution.admission.command
     return AgentStreamEvent(
-        schema_version="agent-stream.v2",
+            schema_version="agent-stream.v3",
         run_id=command.logical_run_id,
         attempt_id=command.attempt_id,
         sequence_no=sequence_no,

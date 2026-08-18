@@ -6,7 +6,6 @@ import static org.mockito.Mockito.when;
 
 import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter.CommitCommand;
 import com.example.dispute.room.application.EvidenceAgentTurnCommand;
-import com.example.dispute.room.application.EvidenceAgentTurnResult;
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
@@ -97,7 +96,7 @@ class TargetEvidenceFinalizationRequestResolverTest {
     CommitCommand command = new CommitCommand(execution, result, manifest);
     TargetEvidenceTurnProposalLoader proposalLoader = mock(TargetEvidenceTurnProposalLoader.class);
     LoadedProposal proposal = mock(LoadedProposal.class);
-    EvidenceAgentTurnResult turnResult = mock(EvidenceAgentTurnResult.class);
+    TargetEvidenceTurnResultV2 turnResult = mock(TargetEvidenceTurnResultV2.class);
     when(turnResult.roomUtterance()).thenReturn("guarded Evidence Clerk message");
     when(proposal.proposalHash()).thenReturn("7".repeat(64));
     when(proposal.commandId()).thenReturn(graph.commandId());
@@ -139,9 +138,9 @@ class TargetEvidenceFinalizationRequestResolverTest {
         "CASE_EVIDENCE_1",
         RoomType.EVIDENCE,
         2,
-        "all-rooms.target-e2e.v1",
-        "target-e2e-graph.2026-07-27.1",
-        "target-e2e-checkpoint.v1",
+        "all-rooms.target-e2e.v2",
+        "target-e2e-graph.2026-08-18.1",
+        "target-e2e-checkpoint.v2",
         "target-evidence-thread:USER_1",
         new RoomGraphCommand.ActorScope(
             "USER_1", ActorRole.USER, Audience.USER, List.of("case:evidence:submit")),
@@ -164,7 +163,7 @@ class TargetEvidenceFinalizationRequestResolverTest {
             "all-rooms-agent.target-e2e.v1",
             "all-rooms-prompt.target-e2e.v1",
             "target-e2e.contract-blocked",
-            "target-e2e-room-proposal-source.v1",
+            "target-e2e-room-proposal-source.v2",
             "all-rooms-policy.target-e2e.v1",
             "all-rooms-guardrail.target-e2e.v1",
             List.of(),

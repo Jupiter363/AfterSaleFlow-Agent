@@ -154,7 +154,7 @@ public final class ReconciledTargetReviewFinalizationEvidenceSource
           : completedReplay && provider != null && !provider.isBlank()
               && modelVersion != null && !modelVersion.isBlank();
       return (resultReady || completedReplay) && executionLifecycle
-          && "agent-stream.v2".equals(protocol) && "TEMPORAL_ACTIVITY".equals(runExecutor)
+          && "agent-stream.v3".equals(protocol) && "TEMPORAL_ACTIVITY".equals(runExecutor)
           && "TEMPORAL_ACTIVITY".equals(attemptExecutor) && "REVIEW".equals(roomType)
           && roomId != null && !roomId.isBlank()
           && tenant.equals(command.tenantSurrogate()) && caseId.equals(command.caseId())

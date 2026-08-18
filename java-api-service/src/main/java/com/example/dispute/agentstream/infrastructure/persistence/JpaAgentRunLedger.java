@@ -75,7 +75,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
     @Override
     @Transactional
     public LogicalRun createOrLoad(CreateLogicalRun command) {
-        if (command.protocol() != AgentRunProtocol.V2) {
+        if (command.protocol() != AgentRunProtocol.V3) {
             throw new IllegalArgumentException("logical AgentRun creation only accepts protocol V2");
         }
         if (command.executorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
@@ -112,7 +112,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         if (run == null) {
             return Optional.empty();
         }
-        if (!AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
+        if (!AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
                 || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
             throw new IllegalStateException("recovery candidate is not a Temporal AgentRun V2");
         }
@@ -164,7 +164,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         Instant terminalAt = java.util.Objects.requireNonNull(completedAt, "completedAt")
                 .truncatedTo(ChronoUnit.MICROS);
         AgentRunEntity run = lockRun(agentRunId);
-        if (!AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
+        if (!AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
                 || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
             throw new IllegalStateException("recovery candidate is not a Temporal AgentRun V2");
         }
@@ -419,7 +419,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         entityManager.flush();
         long terminalSequenceNo = Math.addExact(command.finalSequenceNo(), 1L);
         AgentStreamEvent terminalError = new AgentStreamEvent(
-                "agent-stream.v2",
+                "agent-stream.v3",
                 command.agentRunId(),
                 command.attemptId(),
                 terminalSequenceNo,
@@ -595,8 +595,8 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 run.getId(),
                 run.getCaseId(),
                 run.getLogicalIdempotencyKey(),
-                AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
-                        ? AgentRunProtocol.V2
+                AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
+                        ? AgentRunProtocol.V3
                         : AgentRunProtocol.V1,
                 run.getExecutorKind(),
                 run.getRoomEpochId(),
@@ -710,7 +710,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 persisted.getSequenceNo(), highWatermark, "durableFailureStoredSequenceNo");
         requireEqual(
                 persisted.getStreamProtocol(),
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 "durableFailureStoredProtocol");
         requireEqual(
                 persisted.getEventType(),
@@ -722,7 +722,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         requireEqual(terminal.sequenceNo(), highWatermark, "durableFailureSequenceNo");
         requireEqual(
                 terminal.schemaVersion(),
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 "durableFailureProtocol");
         requireEqual(terminal.eventType(), StreamEventType.ERROR, "durableFailureEventType");
         requireEqual(terminal.audience(), audience, "durableFailureAudience");
@@ -854,7 +854,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                     "recovery winner terminal event is invalid", exception);
         }
         AgentStreamEvent expected = new AgentStreamEvent(
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 run.getId(),
                 attempt.getId(),
                 highWatermark,
@@ -881,7 +881,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 persisted.getSequenceNo(), highWatermark, "recoveryWinnerStoredSequenceNo");
         requireEqual(
                 persisted.getStreamProtocol(),
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 "recoveryWinnerStoredProtocol");
         requireEqual(
                 persisted.getEventType(),
@@ -899,7 +899,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             AgentRunEntity run,
             AgentRunAttemptEntity attempt,
             ExecuteAgentRunResult result) {
-        if (!AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
+        if (!AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
                 || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
             throw new IllegalStateException(
                     "Activity failure terminal requires a Temporal AgentRun V2");
@@ -945,7 +945,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 persisted.getSequenceNo(), highWatermark, "activityFailureStoredSequenceNo");
         requireEqual(
                 persisted.getStreamProtocol(),
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 "activityFailureStoredProtocol");
         requireEqual(persisted.getAudience(), audience, "activityFailureStoredAudience");
         requireEqual(lastEvent.runId(), run.getId(), "activityFailureRunId");
@@ -982,7 +982,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             ExecuteAgentRunResult result,
             FailureTerminalPosition position) {
         AgentStreamEvent terminal = new AgentStreamEvent(
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 run.getId(),
                 attempt.getId(),
                 position.sequenceNo(),
@@ -1143,7 +1143,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                     "publicPreludeEventType");
             requireEqual(
                     persisted.getStreamProtocol(),
-                    AgentRunProtocol.V2.wireValue(),
+                    AgentRunProtocol.V3.wireValue(),
                     "publicPreludeProtocol");
             requireEqual(
                     persisted.getAudience(), item.event().audience(), "publicPreludeAudience");
@@ -1183,7 +1183,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             AgentRunAttemptEntity attempt, RoomGraphCommand command, String resetReasonCode) {
         Instant occurredAt = attempt.getStartedAt().toInstant();
         AgentStreamEvent started = new AgentStreamEvent(
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 attempt.getAgentRunId(),
                 attempt.getId(),
                 0,
@@ -1209,7 +1209,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT.name(),
                 "resetReasonCode");
         AgentStreamEvent reset = new AgentStreamEvent(
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 attempt.getAgentRunId(),
                 attempt.getId(),
                 1,
@@ -1245,7 +1245,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             Instant occurredAt,
             RecoveryTerminalPosition position) {
         AgentStreamEvent terminal = new AgentStreamEvent(
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 run.getId(),
                 attempt.getId(),
                 position.sequenceNo(),
@@ -1319,7 +1319,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 persisted.getSequenceNo(), highWatermark, "recoveryTerminalStoredSequenceNo");
         requireEqual(
                 persisted.getStreamProtocol(),
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 "recoveryTerminalStoredProtocol");
         requireEqual(
                 persisted.getAudience(), audience, "recoveryTerminalStoredAudience");
@@ -1401,7 +1401,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                           from agent_run_stream_event
                          where agent_run_id = :runId
                            and agent_run_attempt_id = :attemptId
-                           and stream_protocol = 'agent-stream.v2'
+                           and stream_protocol = 'agent-stream.v3'
                            and event_type = 'visible_delta'
                         """)
                 .setParameter("runId", agentRunId)

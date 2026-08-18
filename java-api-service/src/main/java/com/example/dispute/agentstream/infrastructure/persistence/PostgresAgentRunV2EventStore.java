@@ -39,7 +39,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** PostgreSQL source of truth for attempt-scoped {@code agent-stream.v2} events. */
+/** PostgreSQL source of truth for attempt-scoped {@code agent-stream.v3} events. */
 @Repository
 public class PostgresAgentRunV2EventStore {
 
@@ -49,9 +49,9 @@ public class PostgresAgentRunV2EventStore {
                 id, agent_run_id, agent_run_attempt_id, sequence_no,
                 event_type, payload_json, created_at, created_by,
                 stream_protocol, audience, payload_hash
-            ) values (?, ?, ?, ?, ?, cast(? as jsonb), ?, ?, 'agent-stream.v2', ?, ?)
+            ) values (?, ?, ?, ?, ?, cast(? as jsonb), ?, ?, 'agent-stream.v3', ?, ?)
             on conflict (agent_run_id, agent_run_attempt_id, sequence_no)
-                where stream_protocol = 'agent-stream.v2'
+                where stream_protocol = 'agent-stream.v3'
             do nothing
             """;
 
@@ -61,7 +61,7 @@ public class PostgresAgentRunV2EventStore {
               from agent_run_stream_event
              where agent_run_id = :runId
                and agent_run_attempt_id = :attemptId
-               and stream_protocol = 'agent-stream.v2'
+               and stream_protocol = 'agent-stream.v3'
                and sequence_no in (:sequences)
             """;
 
@@ -71,7 +71,7 @@ public class PostgresAgentRunV2EventStore {
               from agent_run_stream_event
              where agent_run_id = ?
                and agent_run_attempt_id = ?
-               and stream_protocol = 'agent-stream.v2'
+               and stream_protocol = 'agent-stream.v3'
                and sequence_no > ?
              order by sequence_no asc
              limit ?
@@ -83,7 +83,7 @@ public class PostgresAgentRunV2EventStore {
               from agent_run_stream_event
              where agent_run_id = ?
                and agent_run_attempt_id = ?
-               and stream_protocol = 'agent-stream.v2'
+               and stream_protocol = 'agent-stream.v3'
             """;
 
     private static final String TARGET_REPLAY_SQL =
@@ -98,7 +98,7 @@ public class PostgresAgentRunV2EventStore {
                and watermark.agent_run_attempt_id = delivery.agent_run_attempt_id
              where delivery.agent_run_id = ?
                and delivery.agent_run_attempt_id = ?
-               and delivery.stream_protocol = 'agent-stream.v2'
+               and delivery.stream_protocol = 'agent-stream.v3'
                and delivery.sequence_no > ?
                and delivery.sequence_no <= watermark.highest_contiguous_sequence_no
              order by delivery.sequence_no asc
@@ -109,7 +109,7 @@ public class PostgresAgentRunV2EventStore {
             """
             select highest_contiguous_sequence_no
               from agent_run_stream_delivery_high_watermark
-             where stream_protocol = 'agent-stream.v2'
+             where stream_protocol = 'agent-stream.v3'
                and agent_run_id = ?
                and agent_run_attempt_id = ?
             """;
@@ -124,7 +124,7 @@ public class PostgresAgentRunV2EventStore {
               join agent_run run on run.id = event.agent_run_id
              where event.agent_run_id = :runId
                and event.agent_run_attempt_id = :attemptId
-               and event.stream_protocol = 'agent-stream.v2'
+               and event.stream_protocol = 'agent-stream.v3'
                and event.sequence_no in (:sequences)
             """;
 
@@ -132,9 +132,9 @@ public class PostgresAgentRunV2EventStore {
             """
             select was_inserted, highest_contiguous_sequence_no
               from record_agent_run_stream_delivery(
-                   ?, 'agent-stream.v2', ?, ?, ?, ?, cast(? as jsonb), ?, ?, ?,
+                   ?, 'agent-stream.v3', ?, ?, ?, ?, cast(? as jsonb), ?, ?, ?,
                    cast(? as jsonb), ?, 'agent_run_stream_event',
-                   'agent-stream-v2-dual-write')
+                   'agent-stream-v3-dual-write')
             """;
 
     private static final String SOURCE_COMPATIBILITY_SQL =
@@ -187,7 +187,7 @@ public class PostgresAgentRunV2EventStore {
               from agent_run_stream_event
              where agent_run_id = ?
                and agent_run_attempt_id = ?
-               and stream_protocol = 'agent-stream.v2'
+               and stream_protocol = 'agent-stream.v3'
              order by sequence_no asc
             """;
 
@@ -197,7 +197,7 @@ public class PostgresAgentRunV2EventStore {
               from agent_run_stream_event
              where agent_run_id = ?
                and agent_run_attempt_id = ?
-               and stream_protocol = 'agent-stream.v2'
+               and stream_protocol = 'agent-stream.v3'
              order by sequence_no desc
             limit 1
             """;
@@ -217,6 +217,28 @@ public class PostgresAgentRunV2EventStore {
                     or (? and not public_output_emitted)
                     or (? and not final_frame_observed)
                )
+            """;
+
+    private static final String MARK_PUBLIC_OUTPUT_STARTED_SQL =
+            """
+            update agent_run_attempt
+               set public_output_started = true,
+                   public_output_started_at = coalesce(public_output_started_at, clock_timestamp()),
+                   public_output_emitted = true,
+                   updated_at = greatest(updated_at, clock_timestamp()),
+                   attempt_version = attempt_version + 1
+             where agent_run_id = ? and id = ? and attempt_status = 'RUNNING'
+               and not public_output_started
+            """;
+
+    private static final String INSERT_PUBLIC_FRAME_SQL =
+            """
+            insert into agent_run_public_frame (
+                id, agent_run_id, agent_run_attempt_id, frame_id, frame_sequence,
+                frame_type, public_header, public_text, header_sha256,
+                public_text_sha256, frame_sha256, public_text_chars, durable_cursor
+            ) values (?, ?, ?, ?, ?, ?, cast(? as jsonb), ?, ?, ?, ?, ?, ?)
+            on conflict (agent_run_id, agent_run_attempt_id, frame_id) do nothing
             """;
 
     private static final String RETENTION_MANIFEST_SQL =
@@ -242,7 +264,7 @@ public class PostgresAgentRunV2EventStore {
                 on event.agent_run_id = run.id
                and event.agent_run_attempt_id = run.committed_attempt_id
                and event.sequence_no = run.final_stream_sequence_no
-               and event.stream_protocol = 'agent-stream.v2'
+               and event.stream_protocol = 'agent-stream.v3'
                and event.event_type = 'final'
              where run.id = ?
                and run.committed_attempt_id = ?
@@ -283,6 +305,41 @@ public class PostgresAgentRunV2EventStore {
         BatchAppendReceipt batch = appendBatch(List.of(requireEvent(event)));
         return new AgentRunV2StreamStore.AppendReceipt(
                 batch.inserted().getFirst(), batch.durableHighWatermark());
+    }
+
+    public boolean markPublicOutputStarted(String runId, String attemptId) {
+        Objects.requireNonNull(runId, "runId");
+        Objects.requireNonNull(attemptId, "attemptId");
+        Boolean inserted = writeTransaction.execute(status -> {
+            int updated = jdbc.update(MARK_PUBLIC_OUTPUT_STARTED_SQL, runId, attemptId);
+            if (updated == 1) {
+                return true;
+            }
+            List<Map<String, Object>> rows = jdbc.queryForList(
+                    """
+                    select attempt_status, public_output_started
+                      from agent_run_attempt
+                     where agent_run_id = ? and id = ?
+                    """,
+                    runId,
+                    attemptId);
+            if (rows.size() != 1) {
+                throw new IllegalStateException("agent run attempt is absent or ambiguous");
+            }
+            String attemptStatus = Objects.toString(rows.getFirst().get("attempt_status"), "");
+            boolean alreadyStarted = Boolean.TRUE.equals(
+                    rows.getFirst().get("public_output_started"));
+            if (!"RUNNING".equals(attemptStatus)) {
+                throw new NonRunningAttemptException(
+                        AgentRunAttemptStatus.valueOf(attemptStatus));
+            }
+            if (!alreadyStarted) {
+                throw new IllegalStateException(
+                        "public output marker update did not reach the running attempt");
+            }
+            return false;
+        });
+        return Boolean.TRUE.equals(inserted);
     }
 
     /**
@@ -401,7 +458,7 @@ public class PostgresAgentRunV2EventStore {
         List<AgentStreamEvent> targetEvents = replayTarget(
                 runId, attemptId, afterSequence, limit);
         if (compatibilityMode.reader() == StreamCompatibilityMode.Reader.TARGET_ONLY) {
-            validateCompatibility("agent-stream.v2", runId, attemptId).requireCompatible();
+            validateCompatibility("agent-stream.v3", runId, attemptId).requireCompatible();
             return targetEvents;
         }
         return compatibleUnion(oldEvents, targetEvents, limit);
@@ -436,7 +493,7 @@ public class PostgresAgentRunV2EventStore {
         requireIdentity(streamProtocol, "streamProtocol");
         requireIdentity(runId, "runId");
         requireIdentity(attemptId, "attemptId");
-        if (!Set.of("agent_stream.v1", "agent-stream.v2").contains(streamProtocol)) {
+        if (!Set.of("agent_stream.v1", "agent-stream.v3").contains(streamProtocol)) {
             throw new IllegalArgumentException("unsupported streamProtocol");
         }
         CompatibilityReport report = writeTransaction.execute(status ->
@@ -600,6 +657,8 @@ public class PostgresAgentRunV2EventStore {
             }
         }
 
+        persistCommittedPublicFrames(batch);
+
         if (compatibilityMode.writer() == StreamCompatibilityMode.Writer.DUAL_WRITE) {
             mirrorBatchToTarget(batch);
         }
@@ -635,7 +694,7 @@ public class PostgresAgentRunV2EventStore {
                                 statement.setString(6, event.canonicalJson());
                                 statement.setTimestamp(
                                         7, Timestamp.from(event.event().occurredAt()));
-                                statement.setString(8, "agent-stream-v2");
+                                statement.setString(8, "agent-stream-v3");
                                 statement.setString(9, event.event().audience().name());
                                 statement.setString(10, event.payloadHash());
                             }
@@ -669,6 +728,8 @@ public class PostgresAgentRunV2EventStore {
                         "durable stream sequence is bound to another payload hash");
             }
         }
+
+        persistCommittedPublicFrames(batch);
 
         if (compatibilityMode.writer() == StreamCompatibilityMode.Writer.DUAL_WRITE) {
             mirrorBatchToTarget(batch);
@@ -744,7 +805,7 @@ public class PostgresAgentRunV2EventStore {
         long sequence = events.getLast().sequenceNo() + 1;
         Instant occurredAt = databaseNow();
         AgentStreamEvent finalEvent = new AgentStreamEvent(
-                "agent-stream.v2",
+                "agent-stream.v3",
                 request.logicalRunId(),
                 request.attemptId(),
                 sequence,
@@ -1141,6 +1202,90 @@ public class PostgresAgentRunV2EventStore {
         }
     }
 
+    private void persistCommittedPublicFrames(List<PersistedEvent> batch) {
+        for (int index = 0; index < batch.size(); index++) {
+            AgentStreamEvent commit = batch.get(index).event();
+            if (commit.eventType() != StreamEventType.PUBLIC_FRAME_COMMITTED) {
+                continue;
+            }
+            if (index < 2) {
+                throw new IllegalStateException(
+                        "v3 frame commit is missing its durable start or snapshot");
+            }
+            AgentStreamEvent start = batch.get(index - 2).event();
+            AgentStreamEvent snapshot = batch.get(index - 1).event();
+            boolean exact = start.eventType() == StreamEventType.PUBLIC_FRAME_START
+                    && snapshot.eventType() == StreamEventType.ACTIVE_FRAME_SNAPSHOT
+                    && "agent-stream.v3".equals(commit.schemaVersion())
+                    && Objects.equals(start.runId(), commit.runId())
+                    && Objects.equals(snapshot.runId(), commit.runId())
+                    && Objects.equals(start.attemptId(), commit.attemptId())
+                    && Objects.equals(snapshot.attemptId(), commit.attemptId())
+                    && Objects.equals(start.payload().frameId(), commit.payload().frameId())
+                    && Objects.equals(snapshot.payload().frameId(), commit.payload().frameId())
+                    && Objects.equals(
+                            start.payload().frameSequence(), commit.payload().frameSequence())
+                    && Objects.equals(
+                            snapshot.payload().frameSequence(), commit.payload().frameSequence())
+                    && start.payload().publicHeader() != null
+                    && snapshot.payload().publicText() != null;
+            if (!exact) {
+                throw new IllegalStateException(
+                        "v3 frame commit differs from its durable snapshot");
+            }
+            String headerJson = ContractJson.canonicalString(start.payload().publicHeader());
+            String rowId = "ARPF_" + commit.payload().frameId();
+            jdbc.update(
+                    INSERT_PUBLIC_FRAME_SQL,
+                    rowId,
+                    commit.runId(),
+                    commit.attemptId(),
+                    commit.payload().frameId(),
+                    commit.payload().frameSequence(),
+                    start.payload().frameType(),
+                    headerJson,
+                    snapshot.payload().publicText(),
+                    commit.payload().headerSha256(),
+                    commit.payload().publicTextSha256(),
+                    commit.payload().frameSha256(),
+                    commit.payload().publicTextChars(),
+                    commit.payload().durableCursor());
+            List<PublicFrameRow> rows = jdbc.query(
+                    """
+                    select frame_sequence, frame_type, public_header::text, public_text,
+                           header_sha256, public_text_sha256, frame_sha256,
+                           public_text_chars, durable_cursor
+                      from agent_run_public_frame
+                     where agent_run_id = ? and agent_run_attempt_id = ? and frame_id = ?
+                    """,
+                    (row, ignored) -> new PublicFrameRow(
+                            row.getInt(1), row.getString(2), row.getString(3), row.getString(4),
+                            row.getString(5), row.getString(6), row.getString(7), row.getInt(8),
+                            row.getString(9)),
+                    commit.runId(),
+                    commit.attemptId(),
+                    commit.payload().frameId());
+            if (rows.size() != 1) {
+                throw new IllegalStateException("v3 public frame row is absent or ambiguous");
+            }
+            PublicFrameRow stored = rows.getFirst();
+            boolean replayExact = stored.frameSequence()
+                            == commit.payload().frameSequence()
+                    && stored.frameType().equals(start.payload().frameType())
+                    && readJson(stored.publicHeader()).equals(start.payload().publicHeader())
+                    && stored.publicText().equals(snapshot.payload().publicText())
+                    && stored.headerSha256().equals(commit.payload().headerSha256())
+                    && stored.publicTextSha256().equals(commit.payload().publicTextSha256())
+                    && stored.frameSha256().equals(commit.payload().frameSha256())
+                    && stored.publicTextChars() == commit.payload().publicTextChars()
+                    && stored.durableCursor().equals(commit.payload().durableCursor());
+            if (!replayExact) {
+                throw new IllegalStateException(
+                        "v3 public frame replay differs from its immutable bytes");
+            }
+        }
+    }
+
     private List<AgentStreamEvent> replayTarget(
             String runId, String attemptId, long afterSequence, int limit) {
         return jdbc.query(
@@ -1487,6 +1632,17 @@ public class PostgresAgentRunV2EventStore {
     private record PersistedEvent(
             String id, AgentStreamEvent event, String canonicalJson, String payloadHash) {}
 
+    private record PublicFrameRow(
+            int frameSequence,
+            String frameType,
+            String publicHeader,
+            String publicText,
+            String headerSha256,
+            String publicTextSha256,
+            String frameSha256,
+            int publicTextChars,
+            String durableCursor) {}
+
     private record FinalizationAuthority(
             String attemptStatus,
             String resultHash,
@@ -1557,7 +1713,7 @@ public class PostgresAgentRunV2EventStore {
         private String compositeCursor() {
             AgentRunProtocol protocol = AgentRunProtocol.V1.wireValue().equals(streamProtocol)
                     ? AgentRunProtocol.V1
-                    : AgentRunProtocol.V2;
+                    : AgentRunProtocol.V3;
             return new AgentRunStreamCursor(
                             protocol,
                             protocol == AgentRunProtocol.V1 ? null : attemptId,

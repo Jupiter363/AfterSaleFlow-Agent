@@ -169,8 +169,8 @@ const targetTemporalProjection = computed(() =>
   processProjection.value?.real_case_shadow_allowed === false &&
   projectionManifestItemCount.value !== null &&
   Boolean(projectionVersionPins.value?.workflow_build_id) &&
-  projectionVersionPins.value?.graph_version === "target-e2e-graph.2026-07-27.1" &&
-  projectionVersionPins.value?.checkpoint_schema_version === "target-e2e-checkpoint.v1" &&
+  projectionVersionPins.value?.graph_version === "target-e2e-graph.2026-08-18.1" &&
+  projectionVersionPins.value?.checkpoint_schema_version === "target-e2e-checkpoint.v2" &&
   projectionVersionPins.value?.state_schema_version === "evidence-graph-state.v2" &&
   projectionVersionPins.value?.prompt_version === "all-rooms-prompt.target-e2e.v1" &&
   projectionVersionPins.value?.model_profile_id === "target-e2e.contract-blocked" &&
@@ -227,6 +227,22 @@ const projectionWriteLocked = computed(() =>
   projectionRecoveryState.value !== "NONE" ||
   (targetProjectionClaimed.value &&
     (!targetTemporalProjection.value || projectionState.value !== "AVAILABLE")),
+);
+const completionNextRoom = computed(() =>
+  String(
+    completion.value?.next_room || completion.value?.nextRoom || "",
+  ).toUpperCase(),
+);
+const hearingNavigationAllowed = computed(() =>
+  !historyMode.value &&
+  !projectionHistoryMode.value &&
+  projectionState.value !== "FAILED" &&
+  projectionRecoveryState.value === "NONE" &&
+  projectionPendingState.value === "NONE" &&
+  (!targetProjectionClaimed.value ||
+    (targetTemporalProjection.value && projectionState.value === "AVAILABLE")) &&
+  completion.value?.sealed === true &&
+  completionNextRoom.value === "HEARING",
 );
 const role = computed(() => props.viewerRole || actor.role);
 const demoActorIds = {
@@ -313,6 +329,45 @@ const evidenceStreamingRuns = computed(() =>
     };
   }),
 );
+const liveEvidenceFrames = computed(() => evidenceStreamingRuns.value.flatMap((run) =>
+  (run.frameOrder || [])
+    .map((frameId) => run.frames?.[frameId])
+    .filter((frame) => frame && [
+      "EVIDENCE_OBSERVATION",
+      "EVIDENCE_ASSESSMENT",
+      "EVIDENCE_REQUEST",
+      "ROOM_READINESS",
+    ].includes(frame.frameType))
+    .map((frame) => ({ ...frame, runId: run.runId })),
+));
+
+function liveEvidenceFrameTitle(frame) {
+  return {
+    EVIDENCE_OBSERVATION: "材料观察",
+    EVIDENCE_ASSESSMENT: "证据核验",
+    EVIDENCE_REQUEST: "补证要求",
+    ROOM_READINESS: "举证完善度",
+  }[frame?.frameType] || "证据更新";
+}
+
+function liveEvidenceFrameSummary(frame) {
+  const header = frame?.publicHeader || {};
+  if (frame?.frameType === "EVIDENCE_OBSERVATION") {
+    const facts = (header.fact_bindings || []).map((item) => item.fact_id).filter(Boolean);
+    return [header.binding_status, ...facts].filter(Boolean).join(" · ");
+  }
+  if (frame?.frameType === "EVIDENCE_ASSESSMENT") {
+    return [
+      header.evidence_id,
+      header.authenticity_status,
+      header.relevance,
+    ].filter(Boolean).join(" · ");
+  }
+  if (frame?.frameType === "EVIDENCE_REQUEST") {
+    return [header.requested_material_kind, header.priority].filter(Boolean).join(" · ");
+  }
+  return [header.overall_readiness, header.core_fact_coverage].filter(Boolean).join(" · ");
+}
 const modelConnected = computed(() => modelConnectionState.value === "connected");
 const modelConnectionLabel = computed(() => {
   if (historyMode.value) return "历史记录已封存";
@@ -2004,7 +2059,7 @@ function dismissStreamError() {
 
 // 业务位置：【前端证据室】enterHearing：切换与 庭审轮次和法官发言 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function enterHearing() {
-  if (historyMode.value || projectionWriteLocked.value) return;
+  if (!hearingNavigationAllowed.value) return;
   return router.push(`/disputes/${caseId.value}/hearing`);
 }
 
@@ -2205,6 +2260,42 @@ onBeforeUnmount(() => {
         </header>
 
         <div class="evidence-board__cards" data-evidence-list-scroll>
+          <section
+            v-if="liveEvidenceFrames.length"
+            class="evidence-library evidence-library--private"
+            data-live-evidence-frames
+            aria-live="polite"
+          >
+            <header>
+              <div>
+                <span class="evidence-kicker">LIVE MODEL FRAMES</span>
+                <h3>书记官实时核验</h3>
+              </div>
+              <span class="privacy-seal">{{ liveEvidenceFrames.length }} 帧</span>
+            </header>
+            <div class="evidence-card-strip" data-evidence-horizontal-strip>
+              <article
+                v-for="frame in liveEvidenceFrames"
+                :key="`${frame.runId}:${frame.frameId}`"
+                class="evidence-card evidence-card--compact evidence-card--stream-updating"
+                :data-frame-id="frame.frameId"
+                :data-frame-type="frame.frameType"
+                :data-frame-status="frame.status"
+                data-live-evidence-frame
+              >
+                <span class="evidence-card__main">
+                  <strong>{{ liveEvidenceFrameTitle(frame) }}</strong>
+                  <small>{{ liveEvidenceFrameSummary(frame) || "正在生成结构化核验内容…" }}</small>
+                  <small v-if="frame.publicText">{{ frame.publicText }}</small>
+                </span>
+                <span class="evidence-card__labels">
+                  <em>#{{ frame.frameSequence }}</em>
+                  <em>{{ frame.status === "COMMITTED" ? "已持久化" : "流式生成中" }}</em>
+                </span>
+              </article>
+            </div>
+          </section>
+
           <section class="evidence-uploader">
             <div class="evidence-uploader__illustration" aria-hidden="true">
               <span>📎</span><span>🖼️</span><span>🎞️</span>
@@ -2406,7 +2497,7 @@ onBeforeUnmount(() => {
             v-if="completion?.sealed"
             type="button"
             data-enter-hearing
-            :disabled="historyMode || projectionWriteLocked"
+            :disabled="!hearingNavigationAllowed"
             @click="enterHearing"
           >
             进入小法庭

@@ -58,7 +58,7 @@ from app.graphs.hearing.state import (
 
 TARGET_E2E_EXECUTION_LANE = "TARGET_E2E_CANDIDATE"
 TARGET_E2E_HEARING_PROPOSAL_SCHEMA = "target-e2e-hearing-proposal.v1"
-TARGET_E2E_HEARING_SOURCE_SCHEMA = "target-e2e-room-proposal-source.v1"
+TARGET_E2E_HEARING_SOURCE_SCHEMA = "target-e2e-room-proposal-source.v2"
 _TARGET_RUNTIME_BINDING_METADATA_KEY = "hearing_target_e2e_runtime_binding_sha256"
 _ACTIVATION_ID = re.compile(r"^p9act\.v1\.[0-9a-f]{32}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
@@ -103,7 +103,7 @@ class HearingTargetE2EProposal(BaseModel):
 class HearingTargetE2EProposalSource(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    schema_version: Literal["target-e2e-room-proposal-source.v1"] = (
+    schema_version: Literal["target-e2e-room-proposal-source.v2"] = (
         TARGET_E2E_HEARING_SOURCE_SCHEMA
     )
     room_type: Literal["HEARING"] = "HEARING"
@@ -1045,7 +1045,7 @@ class HearingTargetE2ERuntimeAdapter:
             raise HearingGraphContractError("HEARING_TARGET_CLOCK_INVALID")
         command = execution.admission.command
         return AgentStreamEvent(
-            schema_version="agent-stream.v2",
+            schema_version="agent-stream.v3",
             run_id=command.logical_run_id,
             attempt_id=command.attempt_id,
             sequence_no=sequence_no,

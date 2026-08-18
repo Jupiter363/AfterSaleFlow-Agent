@@ -65,6 +65,8 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       String formalCommitHash = formalHash(request, existing, command);
 
       if ("APPLIED".equals(command.status())) {
+        persistOrVerifyFrameAuthority(transaction, request, false);
+        persistOrVerifyTurnProjection(transaction, request, formalMessage, false);
         requireReplayState(
             request,
             command,
@@ -77,6 +79,9 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       require("ORCHESTRATION_ACCEPTED".equals(command.status()),
           "case command is not ready for Evidence formalization");
       requireInitialCoordinates(request, epoch, projection);
+
+      persistOrVerifyFrameAuthority(transaction, request, true);
+      persistOrVerifyTurnProjection(transaction, request, formalMessage, true);
 
       advanceEpoch(transaction, epoch.id(), request);
       advanceProjection(transaction, graph.caseId(), request);
@@ -201,7 +206,7 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
           from agent_run run
           join agent_run_attempt attempt
             on attempt.agent_run_id = run.id and attempt.attempt_no = 1
-         where run.id = ? and run.protocol = 'agent-stream.v2'
+         where run.id = ? and run.protocol = 'agent-stream.v3'
            and run.executor_kind = 'TEMPORAL_ACTIVITY'
          for key share of run, attempt
         """)) {
@@ -600,6 +605,278 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
     }
   }
 
+  private void persistOrVerifyFrameAuthority(
+      Connection transaction,
+      TargetEvidenceFinalizationRequest request,
+      boolean allowInsert) throws SQLException {
+    var graph = request.command().request().command();
+    for (TargetEvidenceTurnResultV2.Frame frame :
+        request.proposal().evidenceTurnResult().frames()) {
+      String privateHeader = ContractJson.canonicalString(frame.header());
+      boolean publicFrame = frame.publicText() != null;
+      String publicHeader = publicFrame ? privateHeader : "{}";
+      if (allowInsert) {
+        try (PreparedStatement statement = transaction.prepareStatement("""
+            insert into agent_run_frame_authority (
+                id, agent_run_id, agent_run_attempt_id, command_id, frame_id,
+                frame_sequence, frame_type, private_header, public_header, public_text,
+                header_sha256, public_text_sha256, frame_sha256
+            ) values (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?)
+            on conflict (agent_run_id, agent_run_attempt_id, frame_id) do nothing
+            """)) {
+          statement.setString(1, "ARFA_" + frame.frameId());
+          statement.setString(2, graph.logicalRunId());
+          statement.setString(3, graph.attemptId());
+          statement.setString(4, graph.commandId());
+          statement.setString(5, frame.frameId());
+          statement.setInt(6, frame.frameSequence());
+          statement.setString(7, frame.frameType());
+          statement.setString(8, privateHeader);
+          statement.setString(9, publicHeader);
+          statement.setString(10, frame.publicText());
+          statement.setString(11, frame.headerSha256());
+          statement.setString(12, frame.publicTextSha256());
+          statement.setString(13, frame.frameSha256());
+          statement.executeUpdate();
+        }
+      }
+
+      List<FrameAuthorityRow> rows;
+      try (PreparedStatement statement = transaction.prepareStatement("""
+          select command_id, frame_sequence, frame_type,
+                 private_header::text, public_header::text, public_text,
+                 header_sha256, public_text_sha256, frame_sha256
+            from agent_run_frame_authority
+           where agent_run_id = ? and agent_run_attempt_id = ? and frame_id = ?
+           for key share
+          """)) {
+        statement.setString(1, graph.logicalRunId());
+        statement.setString(2, graph.attemptId());
+        statement.setString(3, frame.frameId());
+        try (ResultSet result = statement.executeQuery()) {
+          var collected = new java.util.ArrayList<FrameAuthorityRow>();
+          while (result.next()) {
+            collected.add(new FrameAuthorityRow(
+                result.getString(1), result.getInt(2), result.getString(3),
+                result.getString(4), result.getString(5), result.getString(6),
+                result.getString(7), result.getString(8), result.getString(9)));
+          }
+          rows = List.copyOf(collected);
+        }
+      }
+      require(rows.size() == 1, "Evidence frame authority is absent or ambiguous");
+      FrameAuthorityRow stored = rows.getFirst();
+      try {
+        require(stored.commandId().equals(graph.commandId())
+                && stored.frameSequence() == frame.frameSequence()
+                && stored.frameType().equals(frame.frameType())
+                && objectMapper.readTree(stored.privateHeader()).equals(frame.header())
+                && objectMapper.readTree(stored.publicHeader()).equals(
+                    publicFrame ? frame.header() : objectMapper.createObjectNode())
+                && Objects.equals(stored.publicText(), frame.publicText())
+                && stored.headerSha256().equals(frame.headerSha256())
+                && stored.publicTextSha256().equals(frame.publicTextSha256())
+                && stored.frameSha256().equals(frame.frameSha256()),
+            "Evidence frame authority replay differs");
+      } catch (JsonProcessingException failure) {
+        throw new IllegalStateException("Evidence frame authority JSON is invalid", failure);
+      }
+
+      int publicRows;
+      try (PreparedStatement statement = transaction.prepareStatement("""
+          select count(*)
+            from agent_run_public_frame
+           where agent_run_id = ? and agent_run_attempt_id = ? and frame_id = ?
+             and frame_sequence = ? and frame_type = ?
+             and header_sha256 = ? and public_text_sha256 = ? and frame_sha256 = ?
+          """)) {
+        statement.setString(1, graph.logicalRunId());
+        statement.setString(2, graph.attemptId());
+        statement.setString(3, frame.frameId());
+        statement.setInt(4, frame.frameSequence());
+        statement.setString(5, frame.frameType());
+        statement.setString(6, frame.headerSha256());
+        statement.setString(7, frame.publicTextSha256());
+        statement.setString(8, frame.frameSha256());
+        try (ResultSet result = statement.executeQuery()) {
+          require(result.next(), "Evidence public frame count is absent");
+          publicRows = result.getInt(1);
+        }
+      }
+      require(publicRows == (publicFrame ? 1 : 0),
+          "Evidence public frame projection differs from private authority");
+    }
+  }
+
+  private void persistOrVerifyTurnProjection(
+      Connection transaction,
+      TargetEvidenceFinalizationRequest request,
+      RoomMessageView formalMessage,
+      boolean allowInsert) throws SQLException {
+    var graph = request.command().request().command();
+    TargetEvidenceTurnResultV2 result = request.proposal().evidenceTurnResult();
+    String resultHash = ContractJson.sha256Hex(result.document());
+    String projectionId = "ETPV2_" + resultHash.substring(0, 32).toUpperCase();
+    String observations = ContractJson.canonicalString(
+        objectMapper.valueToTree(result.observationGraph()));
+    String assessments = ContractJson.canonicalString(
+        objectMapper.valueToTree(result.evidenceAssessments()));
+    String requests = ContractJson.canonicalString(
+        objectMapper.valueToTree(result.evidenceRequests()));
+    String reviews = ContractJson.canonicalString(
+        objectMapper.valueToTree(result.humanReviewTasks()));
+    String readiness = ContractJson.canonicalString(result.roomReadiness());
+    if (allowInsert) {
+      try (PreparedStatement statement = transaction.prepareStatement("""
+          insert into evidence_turn_projection_v2 (
+              id, case_id, room_epoch, command_id, agent_run_id,
+              agent_run_attempt_id, actor_id, actor_role, room_message_id,
+              frame_manifest_sha256, result_sha256, observation_graph,
+              evidence_assessments, evidence_requests, human_review_tasks,
+              room_readiness
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb,
+                    ?::jsonb, ?::jsonb, ?::jsonb)
+          on conflict (case_id, command_id) do nothing
+          """)) {
+        statement.setString(1, projectionId);
+        statement.setString(2, graph.caseId());
+        statement.setLong(3, graph.roomEpoch());
+        statement.setString(4, graph.commandId());
+        statement.setString(5, graph.logicalRunId());
+        statement.setString(6, graph.attemptId());
+        statement.setString(7, request.actorId());
+        statement.setString(8, request.actorRole().name());
+        statement.setString(9, formalMessage.id());
+        statement.setString(10, result.frameManifestSha256());
+        statement.setString(11, resultHash);
+        statement.setString(12, observations);
+        statement.setString(13, assessments);
+        statement.setString(14, requests);
+        statement.setString(15, reviews);
+        statement.setString(16, readiness);
+        statement.executeUpdate();
+      }
+    }
+    int exactProjection;
+    try (PreparedStatement statement = transaction.prepareStatement("""
+        select count(*)
+          from evidence_turn_projection_v2
+         where id = ? and case_id = ? and room_epoch = ? and command_id = ?
+           and agent_run_id = ? and agent_run_attempt_id = ?
+           and actor_id = ? and actor_role = ? and room_message_id = ?
+           and frame_manifest_sha256 = ? and result_sha256 = ?
+           and observation_graph = ?::jsonb and evidence_assessments = ?::jsonb
+           and evidence_requests = ?::jsonb and human_review_tasks = ?::jsonb
+           and room_readiness = ?::jsonb
+        """)) {
+      statement.setString(1, projectionId);
+      statement.setString(2, graph.caseId());
+      statement.setLong(3, graph.roomEpoch());
+      statement.setString(4, graph.commandId());
+      statement.setString(5, graph.logicalRunId());
+      statement.setString(6, graph.attemptId());
+      statement.setString(7, request.actorId());
+      statement.setString(8, request.actorRole().name());
+      statement.setString(9, formalMessage.id());
+      statement.setString(10, result.frameManifestSha256());
+      statement.setString(11, resultHash);
+      statement.setString(12, observations);
+      statement.setString(13, assessments);
+      statement.setString(14, requests);
+      statement.setString(15, reviews);
+      statement.setString(16, readiness);
+      try (ResultSet row = statement.executeQuery()) {
+        require(row.next(), "Evidence v2 projection verification returned no row");
+        exactProjection = row.getInt(1);
+      }
+    }
+    require(exactProjection == 1, "Evidence v2 projection replay differs");
+
+    java.util.Map<String, String> evidenceByObservation = new java.util.LinkedHashMap<>();
+    for (var assessment : result.evidenceAssessments()) {
+      String evidenceId = assessment.path("evidence_id").asText("");
+      for (var slot : assessment.path("observation_slots")) {
+        String previous = evidenceByObservation.putIfAbsent(slot.asText(), evidenceId);
+        require(previous == null || previous.equals(evidenceId),
+            "Evidence observation is attributed to conflicting attachments");
+      }
+    }
+    java.util.List<FactEdge> edges = new java.util.ArrayList<>();
+    for (var observation : result.observationGraph()) {
+      if (!"BOUND".equals(observation.path("binding_status").asText())) {
+        continue;
+      }
+      String slot = observation.path("observation_slot").asText("");
+      String evidenceId = evidenceByObservation.get(slot);
+      require(evidenceId != null && !evidenceId.isBlank(),
+          "bound Evidence observation has no assessment attachment");
+      String sourceUnitId = observation.path("source_unit_id").asText("");
+      for (var binding : observation.path("fact_bindings")) {
+        edges.add(new FactEdge(
+            evidenceId,
+            sourceUnitId,
+            slot,
+            binding.path("fact_id").asText(""),
+            binding.path("relation").asText(""),
+            binding.path("reason").asText("")));
+      }
+    }
+    for (FactEdge edge : edges) {
+      String edgeHash = ContractJson.sha256Hex(objectMapper.valueToTree(List.of(
+          projectionId, edge.evidenceId(), edge.sourceUnitId(), edge.observationSlot(),
+          edge.factId(), edge.relation(), edge.reason())));
+      if (allowInsert) {
+        try (PreparedStatement statement = transaction.prepareStatement("""
+            insert into evidence_fact_edge_v2 (
+                id, projection_id, case_id, evidence_id, source_unit_id,
+                observation_slot, fact_id, relation, reason
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict (projection_id, observation_slot, fact_id) do nothing
+            """)) {
+          statement.setString(1, "EFEDGE_" + edgeHash.substring(0, 32).toUpperCase());
+          statement.setString(2, projectionId);
+          statement.setString(3, graph.caseId());
+          statement.setString(4, edge.evidenceId());
+          statement.setString(5, edge.sourceUnitId());
+          statement.setString(6, edge.observationSlot());
+          statement.setString(7, edge.factId());
+          statement.setString(8, edge.relation());
+          statement.setString(9, edge.reason());
+          statement.executeUpdate();
+        }
+      }
+      int exactEdge;
+      try (PreparedStatement statement = transaction.prepareStatement("""
+          select count(*) from evidence_fact_edge_v2
+           where projection_id = ? and case_id = ? and evidence_id = ?
+             and source_unit_id = ? and observation_slot = ? and fact_id = ?
+             and relation = ? and reason = ?
+          """)) {
+        statement.setString(1, projectionId);
+        statement.setString(2, graph.caseId());
+        statement.setString(3, edge.evidenceId());
+        statement.setString(4, edge.sourceUnitId());
+        statement.setString(5, edge.observationSlot());
+        statement.setString(6, edge.factId());
+        statement.setString(7, edge.relation());
+        statement.setString(8, edge.reason());
+        try (ResultSet row = statement.executeQuery()) {
+          require(row.next(), "Evidence fact edge verification returned no row");
+          exactEdge = row.getInt(1);
+        }
+      }
+      require(exactEdge == 1, "Evidence fact edge replay differs");
+    }
+    try (PreparedStatement statement = transaction.prepareStatement(
+        "select count(*) from evidence_fact_edge_v2 where projection_id = ?")) {
+      statement.setString(1, projectionId);
+      try (ResultSet row = statement.executeQuery()) {
+        require(row.next() && row.getInt(1) == edges.size(),
+            "Evidence fact edge cardinality differs");
+      }
+    }
+  }
+
   private static void requireCallerTransaction(Connection transaction) throws SQLException {
     if (transaction.getAutoCommit()
         || transaction.getTransactionIsolation() != Connection.TRANSACTION_REPEATABLE_READ) {
@@ -753,4 +1030,23 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       String agentRunId,
       String idempotencyKey,
       String createdBy) {}
+
+  private record FrameAuthorityRow(
+      String commandId,
+      int frameSequence,
+      String frameType,
+      String privateHeader,
+      String publicHeader,
+      String publicText,
+      String headerSha256,
+      String publicTextSha256,
+      String frameSha256) {}
+
+  private record FactEdge(
+      String evidenceId,
+      String sourceUnitId,
+      String observationSlot,
+      String factId,
+      String relation,
+      String reason) {}
 }

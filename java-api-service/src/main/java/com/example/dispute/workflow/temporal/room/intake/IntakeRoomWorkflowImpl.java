@@ -100,7 +100,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private static final String FORMAL_EVENT_REJECTION_RECOVERY_CHANGE_ID =
       "intake-room-formal-event-rejection-recovery-v1";
   private static final String TARGET_BRANCH_OUTPUT_SCHEMA_VERSION =
-      "target-e2e-room-proposal-source.v1";
+      "target-e2e-room-proposal-source.v2";
   private static final long HISTORY_EVENT_LIMIT = 2_000;
   private static final Duration RUN_MAX_AGE = Duration.ofHours(24);
   private static final int POST_COMMIT_RECONCILIATION_ATTEMPTS = 5;
@@ -1788,6 +1788,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     }
   }
 
+  /**
+   * Intake child 向案件根工作流回传“已执行、尚未由父流程落账”的终态 authority。下游
+   * {@code CaseProcessWorkflow.targetIntakeCommandTerminalNoCommit} 只入队，随后由父 workflow 的
+   * command-lifecycle 活动以幂等方式收敛命令账本；这使 child 重试不会重复完成同一命令。
+   */
   private void signalTerminalNoCommit(TargetIntakeCommandTerminalNoCommit authority) {
     CaseProcessWorkflow parent =
         Workflow.newExternalWorkflowStub(

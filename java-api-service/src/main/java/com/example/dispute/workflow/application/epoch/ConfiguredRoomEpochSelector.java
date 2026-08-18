@@ -28,7 +28,7 @@ public final class ConfiguredRoomEpochSelector implements RoomEpochSelector {
     public static final String PROCESS_CONTRACT_VERSION = "case-process-contract.v1";
     public static final String GRAPH_VERSION = "1.0.0";
     public static final String CHECKPOINT_SCHEMA_VERSION = "checkpoint.v1";
-    public static final String STREAM_PROTOCOL = "agent-stream.v2";
+    public static final String STREAM_PROTOCOL = "agent-stream.v3";
     public static final String LEGACY_BUILD_ID = "legacy-java.v1";
     public static final String LEGACY_WORKFLOW_TYPE = "LegacyJavaRoomState";
     public static final String INTAKE_GRAPH_VERSION = "2.0.0";

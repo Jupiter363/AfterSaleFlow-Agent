@@ -3,7 +3,12 @@ package com.example.dispute.workflow.temporal.caseprocess;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import java.util.Objects;
 
-/** Bounded, replay-stable parent callback for one Java-formal target-room receipt. */
+/**
+ * 一份 Java formal target-room 回执回传给父工作流时使用的有界、重放稳定值对象。
+ *
+ * <p>上游子房间执行产生回执并通过父工作流回调送达；父流程把最近回执放入携带状态，以 epoch、fence、
+ * revision 和回执哈希抵御重复回调，供后续房间推进和投影观察消费。
+ */
 public record TargetRoomProgressReceipt(
     RoomType roomType,
     long roomEpoch,

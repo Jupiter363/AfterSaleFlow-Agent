@@ -59,7 +59,7 @@ class IntakeExchangeAuthority(_ExchangeModel):
     logical_run_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     attempt_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    graph_key: Literal["intake.v2", "all-rooms.target-e2e.v1"]
+    graph_key: Literal["intake.v2", "all-rooms.target-e2e.v2"]
     graph_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     checkpoint_schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     process_revision: int = Field(ge=0)

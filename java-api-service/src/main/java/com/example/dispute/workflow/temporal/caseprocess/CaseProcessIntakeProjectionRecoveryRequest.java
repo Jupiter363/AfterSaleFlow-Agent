@@ -5,6 +5,14 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
 import java.util.Objects;
 
+/**
+ * 对已消费 Intake 正式投影完成失败进行确认式恢复的 Workflow authority。
+ *
+ * <p>上游：持有投影恢复权限的调用方提交 {@link CaseProcessWorkflow} 的 Intake projection recovery Update；
+ * Temporal 角色：恢复 Update 的请求 payload；下游：
+ * CaseProcessWorkflowImpl 只在当前 Intake child、领域事件、projection command、fencing token 和序列游标
+ * 全部一致时采用投影结果并消费缓冲事件。该精确坐标是 Update replay 不能跨事件或 child 复用的边界。
+ */
 public record CaseProcessIntakeProjectionRecoveryRequest(
     String schemaVersion,
     String workflowId,

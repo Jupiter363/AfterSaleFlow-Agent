@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AwareDatetime,
@@ -148,6 +148,27 @@ class AgentStreamPayload(StrictContractModel):
     node: Identifier | None = None
     field: Identifier | None = None
     delta: Annotated[str, StringConstraints(min_length=1, max_length=4096)] | None = None
+    frame_id: Identifier | None = None
+    frame_sequence: int | None = Field(default=None, ge=1, le=128)
+    frame_type: Identifier | None = None
+    public_header: dict[str, Any] | None = None
+    delta_index: int | None = Field(default=None, ge=0)
+    public_text: Annotated[
+        str,
+        StringConstraints(max_length=100_000),
+    ] | None = None
+    durable_cursor: Annotated[
+        str,
+        StringConstraints(
+            min_length=1,
+            max_length=256,
+            pattern=r"^v3:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}:(?:FRAME:[1-9][0-9]{0,2}|INTERRUPTED:[1-9][0-9]{0,2}|FINAL|ERROR)$",
+        ),
+    ] | None = None
+    header_sha256: Sha256 | None = None
+    public_text_sha256: Sha256 | None = None
+    frame_sha256: Sha256 | None = None
+    public_text_chars: int | None = Field(default=None, ge=0, le=100_000)
     usage: Usage | None = None
     reason_code: Identifier | None = None
     reset_attempt_id: Identifier | None = None
@@ -160,6 +181,11 @@ class AgentStreamPayload(StrictContractModel):
 StreamEventType = Literal[
     "attempt_started",
     "visible_delta",
+    "public_frame_start",
+    "public_text_delta",
+    "active_frame_snapshot",
+    "public_frame_committed",
+    "public_frame_interrupted",
     "usage",
     "attempt_aborted",
     "attempt_reset",
@@ -169,7 +195,7 @@ StreamEventType = Literal[
 
 
 class AgentStreamEvent(StrictContractModel):
-    schema_version: Literal["agent-stream.v2"]
+    schema_version: Literal["agent-stream.v3"]
     run_id: Identifier
     attempt_id: Identifier
     sequence_no: int = Field(ge=0)
@@ -183,6 +209,40 @@ class AgentStreamEvent(StrictContractModel):
         required = {
             "attempt_started": {"node"},
             "visible_delta": {"node", "field", "delta"},
+            "public_frame_start": {
+                "frame_id",
+                "frame_sequence",
+                "frame_type",
+                "public_header",
+            },
+            "public_text_delta": {
+                "frame_id",
+                "frame_sequence",
+                "delta_index",
+                "delta",
+            },
+            "active_frame_snapshot": {
+                "frame_id",
+                "frame_sequence",
+                "delta_index",
+                "public_text",
+            },
+            "public_frame_committed": {
+                "frame_id",
+                "frame_sequence",
+                "durable_cursor",
+                "header_sha256",
+                "public_text_sha256",
+                "frame_sha256",
+                "public_text_chars",
+            },
+            "public_frame_interrupted": {
+                "frame_id",
+                "frame_sequence",
+                "durable_cursor",
+                "reason_code",
+                "public_text",
+            },
             "usage": {"usage"},
             "attempt_aborted": {"reason_code"},
             "attempt_reset": {"reset_attempt_id", "reason_code"},
@@ -193,6 +253,12 @@ class AgentStreamEvent(StrictContractModel):
         missing = required - present
         if missing:
             raise ValueError(f"{self.event_type} payload missing {sorted(missing)}")
+        unexpected = present - required
+        if unexpected:
+            raise ValueError(
+                f"{self.event_type} payload contains incompatible fields "
+                f"{sorted(unexpected)}"
+            )
         return self
 
 

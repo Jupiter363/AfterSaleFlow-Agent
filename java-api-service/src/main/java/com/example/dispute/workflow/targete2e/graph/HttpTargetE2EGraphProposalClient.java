@@ -245,7 +245,7 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
         return;
       }
       AgentStreamEvent event =
-          AgentNdjsonStreamClient.parseV2Line(
+          AgentNdjsonStreamClient.parseV3Line(
               mapper, Objects.requireNonNull(line, "line"), protocolState);
       if (terminal != null) {
         throw TargetE2EGraphClientException.protocol(

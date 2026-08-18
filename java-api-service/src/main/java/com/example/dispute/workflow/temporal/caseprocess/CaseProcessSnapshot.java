@@ -6,6 +6,12 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.R
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.UnreconciledChildExecution;
 import java.util.List;
 
+/**
+ * 父 {@code CaseProcessWorkflow} 向 Temporal 查询/观测端返回的无载荷状态快照。
+ *
+ * <p>上游从当前工作流字段和 {@link CaseProcessCarryState} 归纳该值；它不驱动命令执行，而是让 API
+ * 与恢复观察者读取同一组游标、子流程和阻塞信息，不改变重放结果。
+ */
 public record CaseProcessSnapshot(
     String schemaVersion,
     String workflowId,

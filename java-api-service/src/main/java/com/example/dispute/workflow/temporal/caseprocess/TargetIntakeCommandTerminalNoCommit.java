@@ -12,7 +12,12 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.time.Instant;
 import java.util.List;
 
-/** Exact, payload-free authority for one target Intake AgentRun that terminated without a commit. */
+/**
+ * 一次 target Intake AgentRun 终止且未提交时的精确、无载荷 authority。
+ *
+ * <p>上游命令生命周期活动将失败终态、尝试和 revision lineage 封装后交给父工作流；工作流在 Temporal
+ * 重放中以命令/尝试/哈希坐标校验并去重，随后由无提交终态处理与恢复路径记录失败，而不生成正式提交。
+ */
 public record TargetIntakeCommandTerminalNoCommit(
     String schemaVersion,
     String tenantSurrogate,

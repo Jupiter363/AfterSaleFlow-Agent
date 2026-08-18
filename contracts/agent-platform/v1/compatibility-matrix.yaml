@@ -79,7 +79,7 @@
     },
     {
       "schema_file": "agent-stream-event.schema.json",
-      "schema_version": "agent-stream.v2",
+      "schema_version": "agent-stream.v3",
       "max_serialized_bytes": 16384,
       "current_reader": "ACCEPT",
       "previous_reader": "NONE_FOR_INITIAL_VERSION",

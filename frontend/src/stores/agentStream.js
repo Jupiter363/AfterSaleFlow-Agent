@@ -139,6 +139,142 @@ function rebuildReceivedContent(run) {
     .join("\n\n");
 }
 
+function frameFieldKey(frameSequence) {
+  return `frame:${frameSequence}`;
+}
+
+function ensureV3Frame(run, event) {
+  if (!event.frameId || !Number.isSafeInteger(event.frameSequence) || event.frameSequence < 1) {
+    const error = new Error("Evidence 流帧缺少有效身份");
+    error.code = "AGENT_STREAM_V3_FRAME_INVALID";
+    throw error;
+  }
+  const existing = run.frames[event.frameId];
+  if (existing) {
+    if (
+      existing.frameSequence !== event.frameSequence ||
+      (event.frameType && existing.frameType !== event.frameType)
+    ) {
+      const error = new Error("Evidence 流帧身份发生冲突");
+      error.code = "AGENT_STREAM_V3_FRAME_CONFLICT";
+      throw error;
+    }
+    return existing;
+  }
+  if (event.event !== "public_frame_start") {
+    const error = new Error("Evidence 流帧在 header 前到达");
+    error.code = "AGENT_STREAM_V3_FRAME_HEADER_MISSING";
+    throw error;
+  }
+  const expectedSequence = run.frameOrder.length + 1;
+  if (event.frameSequence !== expectedSequence || !event.frameType || !event.publicHeader) {
+    const error = new Error("Evidence 流帧顺序或 header 无效");
+    error.code = "AGENT_STREAM_V3_FRAME_ORDER_INVALID";
+    throw error;
+  }
+  const frame = reactive({
+    frameId: event.frameId,
+    frameSequence: event.frameSequence,
+    frameType: event.frameType,
+    publicHeader: event.publicHeader,
+    publicText: "",
+    nextDeltaIndex: 0,
+    status: "STREAMING",
+    durableCursor: "",
+    headerSha256: "",
+    publicTextSha256: "",
+    frameSha256: "",
+  });
+  run.frames[event.frameId] = frame;
+  run.frameOrder.push(event.frameId);
+  return frame;
+}
+
+function rebuildV3FrameProjection(run) {
+  const card = run.cards.default || ensureStreamCard(run, {});
+  const publicFrames = run.frameOrder
+    .map((frameId) => run.frames[frameId])
+    .filter(Boolean);
+  card.fieldOrder = publicFrames.map((frame) => frameFieldKey(frame.frameSequence));
+  card.fieldText = Object.fromEntries(
+    publicFrames.map((frame) => [frameFieldKey(frame.frameSequence), frame.publicText]),
+  );
+  rebuildCardContent(card);
+  run.fieldOrder = [...card.fieldOrder];
+  run.fieldText = { ...card.fieldText };
+  run.receivedFieldOrder = [...card.fieldOrder];
+  run.receivedFieldText = { ...card.fieldText };
+  run.content = card.content;
+  run.receivedContent = card.content;
+  run.activeCardKey = card.key;
+}
+
+function applyV3FrameEvent(run, event) {
+  const frame = ensureV3Frame(run, event);
+  if (event.event === "public_frame_start") {
+    if (
+      event.publicHeader &&
+      JSON.stringify(frame.publicHeader) !== JSON.stringify(event.publicHeader)
+    ) {
+      const error = new Error("Evidence 流帧 header 重放不一致");
+      error.code = "AGENT_STREAM_V3_FRAME_HEADER_CONFLICT";
+      throw error;
+    }
+    return;
+  }
+  if (event.event === "public_text_delta") {
+    if (!Number.isSafeInteger(event.deltaIndex) || event.deltaIndex !== frame.nextDeltaIndex) {
+      const error = new Error("Evidence 文本 delta 序号不连续");
+      error.code = "AGENT_STREAM_V3_DELTA_OUT_OF_ORDER";
+      throw error;
+    }
+    frame.publicText += event.delta;
+    frame.nextDeltaIndex += 1;
+    frame.status = "STREAMING";
+    rebuildV3FrameProjection(run);
+    return;
+  }
+  if (event.event === "active_frame_snapshot") {
+    if (!Number.isSafeInteger(event.deltaIndex) || event.deltaIndex < frame.nextDeltaIndex) {
+      const error = new Error("Evidence 活动帧快照发生回退");
+      error.code = "AGENT_STREAM_V3_SNAPSHOT_REWIND";
+      throw error;
+    }
+    frame.publicText = event.publicText;
+    frame.nextDeltaIndex = event.deltaIndex;
+    rebuildV3FrameProjection(run);
+    return;
+  }
+  if (event.event === "public_frame_committed") {
+    if (
+      !event.durableCursor ||
+      !event.headerSha256 ||
+      !event.publicTextSha256 ||
+      !event.frameSha256 ||
+      event.publicTextChars !== [...frame.publicText].length
+    ) {
+      const error = new Error("Evidence 已提交帧与当前文本不一致");
+      error.code = "AGENT_STREAM_V3_FRAME_COMMIT_INVALID";
+      throw error;
+    }
+    frame.status = "COMMITTED";
+    frame.durableCursor = event.durableCursor;
+    frame.headerSha256 = event.headerSha256;
+    frame.publicTextSha256 = event.publicTextSha256;
+    frame.frameSha256 = event.frameSha256;
+    return;
+  }
+  if (event.event === "public_frame_interrupted") {
+    if (event.publicText !== frame.publicText) {
+      const error = new Error("Evidence 中断帧与已显示文本不一致");
+      error.code = "AGENT_STREAM_V3_FRAME_INTERRUPTED_INVALID";
+      throw error;
+    }
+    frame.status = "INTERRUPTED";
+    frame.durableCursor = event.durableCursor;
+  }
+}
+
 function installDisplayPacer(run) {
   run.displayPacer = markRaw(createStreamTextPacer({
     onReveal: (pacedFieldKey, fragment) => {
@@ -198,6 +334,8 @@ function resetAttemptProjection(run, resetAttemptId, nextAttemptId) {
   run.cardOrder = [];
   run.activeCardKey = "default";
   run.pacedFieldMeta = {};
+  run.frames = {};
+  run.frameOrder = [];
   run.replyThenBoardPending = isReplyThenBoardBarrierEnabled(run);
   run.currentAttemptId = nextAttemptId;
   run.pendingAttemptId = "";
@@ -207,6 +345,13 @@ function resetAttemptProjection(run, resetAttemptId, nextAttemptId) {
 }
 
 function eventIdentity(event) {
+  if (event.protocol === "agent-stream.v3" && event.frameId) {
+    const discriminator = event.event === "public_text_delta"
+      || event.event === "active_frame_snapshot"
+      ? `${event.event}:${event.deltaIndex}`
+      : event.event;
+    return `${event.protocol}:${event.attemptId}:${event.frameId}:${discriminator}`;
+  }
   return `${event.protocol || "v1"}:${event.attemptId || "legacy"}:${event.sequence}`;
 }
 
@@ -394,6 +539,8 @@ export async function consumeAgentRun({
     receivedFieldOrder: [],
     cards: {},
     cardOrder: [],
+    frames: {},
+    frameOrder: [],
     activeCardKey: "default",
     pacedFieldMeta: {},
     // This presentation policy is intentionally opt-in. Intake enables it so
@@ -445,8 +592,8 @@ export async function consumeAgentRun({
               }
               run.protocol ||= event.protocol;
 
-              const isV2 = event.protocol === "agent-stream.v2";
-              if (isV2 && event.event === "attempt_started") {
+              const attemptScoped = ["agent-stream.v2", "agent-stream.v3"].includes(event.protocol);
+              if (attemptScoped && event.event === "attempt_started") {
                 run.attempts[event.attemptId] ||= {
                   startedAt: Date.now(),
                   hasVisibleOutput: false,
@@ -469,7 +616,7 @@ export async function consumeAgentRun({
                   }
                 }
               }
-              if (isV2 && event.event === "attempt_reset") {
+              if (attemptScoped && event.event === "attempt_reset") {
                 if (!event.resetAttemptId || !event.attemptId) {
                   const error = new Error("数字人 reset 缺少 attempt 绑定");
                   error.code = "AGENT_STREAM_RESET_INVALID";
@@ -482,7 +629,7 @@ export async function consumeAgentRun({
                 run.attempts[event.attemptId] ||= { startedAt: Date.now() };
                 run.attempts[event.attemptId].status = "STREAMING";
               } else if (
-                isV2 &&
+                attemptScoped &&
                 !["attempt_started"].includes(event.event) &&
                 run.currentAttemptId !== event.attemptId
               ) {
@@ -493,10 +640,24 @@ export async function consumeAgentRun({
 
               if (event.event === "start" || event.event === "attempt_started") {
                 run.status = "STREAMING";
+              } else if (
+                event.protocol === "agent-stream.v3" &&
+                [
+                  "public_frame_start",
+                  "public_text_delta",
+                  "active_frame_snapshot",
+                  "public_frame_committed",
+                  "public_frame_interrupted",
+                ].includes(event.event)
+              ) {
+                applyV3FrameEvent(run, event);
+                run.status = event.event === "public_frame_interrupted"
+                  ? "ERROR"
+                  : "STREAMING";
               } else if (event.event === "visible_delta") {
                 if (!isVisibleField(event.fieldPath) || !event.delta) {
                   run.seenEventSequences.add(identity);
-                  run.lastEventId = event.cursor;
+                  if (event.durable && event.cursor) run.lastEventId = event.cursor;
                   return;
                 }
                 const structuredField = isStructuredVisibleField(event.fieldPath);
@@ -511,7 +672,7 @@ export async function consumeAgentRun({
                   // reconnect can safely replay the same durable event.
                   await awaitReplyThenBoardBarrier(run, controller.signal);
                 }
-                if (isV2 && run.attempts[event.attemptId]) {
+                if (attemptScoped && run.attempts[event.attemptId]) {
                   run.attempts[event.attemptId].hasVisibleOutput = true;
                 }
                 run.status = "STREAMING";
@@ -557,7 +718,7 @@ export async function consumeAgentRun({
                     throw controller.signal.reason || new DOMException("Aborted", "AbortError");
                   }
                   run.seenEventSequences.add(identity);
-                  run.lastEventId = event.cursor;
+                  if (event.durable && event.cursor) run.lastEventId = event.cursor;
                   run.replyThenBoardPending = false;
                   return;
                 }
@@ -601,7 +762,7 @@ export async function consumeAgentRun({
                 throw streamFailure(event.error);
               }
               run.seenEventSequences.add(identity);
-              run.lastEventId = event.cursor;
+              if (event.durable && event.cursor) run.lastEventId = event.cursor;
               await onEvent?.(event, run);
             },
           });

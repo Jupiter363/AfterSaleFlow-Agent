@@ -39,7 +39,7 @@ public final class TargetE2eEvidenceRoomFinalizationStrategy
         && TargetE2eExecutionLaneVerifier.GRAPH_VERSION.equals(request.command().graphVersion())
         && TargetE2eExecutionLaneVerifier.CHECKPOINT_SCHEMA_VERSION.equals(
             request.command().checkpointSchemaVersion())
-        && "target-e2e-room-proposal-source.v1".equals(
+        && "target-e2e-room-proposal-source.v2".equals(
             request.command().invocationContext().outputSchemaVersion());
   }
 

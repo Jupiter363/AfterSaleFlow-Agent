@@ -568,7 +568,7 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
         select scope.logical_run_id,
                run.committed_attempt_id,
                case when run.id is not null
-                          and run.protocol = 'agent-stream.v2'
+                          and run.protocol = 'agent-stream.v3'
                           and run.executor_kind = 'TEMPORAL_ACTIVITY'
                           and run.run_status = 'COMPLETED'
                           and run.finalization_status = 'COMMITTED'

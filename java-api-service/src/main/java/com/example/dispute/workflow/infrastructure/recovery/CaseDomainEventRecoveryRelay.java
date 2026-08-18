@@ -19,6 +19,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+/**
+ * case-domain-event 的恢复投递器。
+ *
+ * <p>上游是定期扫描到的活动房间 epoch；下游先查询 {@code CaseProcessWorkflow.state()} 确定缺口，
+ * 再把账本活动读出的事件以 {@code domainEventCommitted} Signal 送回根工作流。Signal 有意采用至少一次
+ * 语义，去重与顺序收敛由 {@code CaseProcessWorkflowImpl} 负责。
+ */
 @Component
 public class CaseDomainEventRecoveryRelay {
 
@@ -127,6 +134,10 @@ public class CaseDomainEventRecoveryRelay {
         }
     }
 
+    /**
+     * 为一个已锁定 epoch 补投缺失的领域事件。这里不直接修改 projection：真正的下游路由和 target
+     * Intake 投影完成都留在根工作流的确定性事件消费器中。
+     */
     private RecoveryAttempt recover(ClaimedRoomEpoch candidate) {
         requireClaimOwnership(candidate);
         String expectedWorkflowId =

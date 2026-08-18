@@ -72,7 +72,7 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
 
     private static final String EVENT_REF_PREFIX = "urn:after-sale-flow:intake-event:";
     private static final String DEFAULT_GRAPH_KEY = "intake.v2";
-    private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v1";
+    private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v2";
 
     private final NamedParameterJdbcTemplate jdbc;
     private final TransactionTemplate transactions;

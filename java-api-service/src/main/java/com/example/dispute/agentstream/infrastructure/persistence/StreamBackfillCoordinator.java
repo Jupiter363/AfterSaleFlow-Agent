@@ -329,7 +329,7 @@ public class StreamBackfillCoordinator {
         try {
             JsonNode payload = objectMapper.readTree(source.payloadJson());
             String canonicalHash = ContractJson.sha256Hex(payload);
-            if (AgentRunProtocol.V2.wireValue().equals(source.streamProtocol())
+            if (AgentRunProtocol.V3.wireValue().equals(source.streamProtocol())
                     && !canonicalHash.equals(source.payloadHash())) {
                 throw new IllegalStateException(
                         "V2 source payload hash conflicts with canonical payload");
@@ -436,12 +436,12 @@ public class StreamBackfillCoordinator {
             requireText(audienceRolesJson, "audienceRolesJson");
             requireText(audienceActorIdsJson, "audienceActorIdsJson");
             if (!AgentRunProtocol.V1.wireValue().equals(streamProtocol)
-                    && !AgentRunProtocol.V2.wireValue().equals(streamProtocol)) {
+                    && !AgentRunProtocol.V3.wireValue().equals(streamProtocol)) {
                 throw new IllegalStateException("unsupported source stream protocol");
             }
             if (sequenceNo < 0
                     || createdAt == null
-                    || (AgentRunProtocol.V2.wireValue().equals(streamProtocol)
+                    || (AgentRunProtocol.V3.wireValue().equals(streamProtocol)
                             && (payloadHash == null || audience == null))) {
                 throw new IllegalStateException("source stream event is not compatibility-bound");
             }

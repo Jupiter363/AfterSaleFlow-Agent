@@ -58,7 +58,7 @@ TARGET_E2E_EXECUTION_LANE = "TARGET_E2E_CANDIDATE"
 TARGET_E2E_EVIDENCE_CHECKPOINT_SCHEMA_VERSION = TARGET_E2E_CHECKPOINT_SCHEMA_VERSION
 TARGET_E2E_EVIDENCE_OUTPUT_SCHEMA_VERSION = TARGET_E2E_OUTPUT_SCHEMA_VERSION
 TARGET_E2E_EVIDENCE_PROPOSAL_SCHEMA_VERSION = "target-e2e-evidence-proposal.v1"
-TARGET_E2E_ROOM_PROPOSAL_SOURCE_SCHEMA_VERSION = "target-e2e-room-proposal-source.v1"
+TARGET_E2E_ROOM_PROPOSAL_SOURCE_SCHEMA_VERSION = "target-e2e-room-proposal-source.v2"
 _ACTIVATION_ID = re.compile(r"^p9act\.v1\.[0-9a-f]{32}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -533,7 +533,7 @@ class TargetEvidenceGraphProvider:
     ) -> AgentStreamEvent:
         command = execution.admission.command
         return AgentStreamEvent(
-            schema_version="agent-stream.v2",
+            schema_version="agent-stream.v3",
             run_id=command.logical_run_id,
             attempt_id=command.attempt_id,
             sequence_no=sequence_no,

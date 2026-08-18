@@ -191,7 +191,7 @@ public class AgentRunV2RecoveryService {
                 state.logicalRun().agentRunId(),
                 attempt.attemptNo(),
                 state.logicalRun().attemptLimit(),
-                "agent-stream.v2",
+                "agent-stream.v3",
                 attempt.logicalInputHash(),
                 attempt.previousAttemptId(),
                 attempt.resetRequired(),

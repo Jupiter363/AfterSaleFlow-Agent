@@ -234,8 +234,8 @@ function targetTemporalProjection(count, overrides = {}) {
     recovery: { state: "NONE" },
     version_pins: {
       workflow_build_id: "control-build.991ec9c5",
-      graph_version: "target-e2e-graph.2026-07-27.1",
-      checkpoint_schema_version: "target-e2e-checkpoint.v1",
+      graph_version: "target-e2e-graph.2026-08-18.1",
+      checkpoint_schema_version: "target-e2e-checkpoint.v2",
       state_schema_version: "evidence-graph-state.v2",
       prompt_version: "all-rooms-prompt.target-e2e.v1",
       model_profile_id: "target-e2e.contract-blocked",
@@ -1617,6 +1617,52 @@ describe("EvidenceRoomView", () => {
 
     expect(router.currentRoute.value.path).toBe(
       "/disputes/CASE_EVIDENCE_1/hearing",
+    );
+  });
+
+  it("keeps completed Evidence writes locked while allowing only the sealed Hearing handoff", async () => {
+    const sealedCompletion = {
+      ...initialCompletion,
+      user_completed: true,
+      merchant_completed: true,
+      sealed: true,
+      next_room: "HEARING",
+    };
+    const completedProjection = targetTemporalProjection(catalog.items.length, {
+      room_phase: "COMPLETED",
+      pending_state: "NONE",
+    });
+    const completeAction = vi.fn();
+    const { wrapper, router } = await mountView({
+      initialCompletion: sealedCompletion,
+      initialProcessProjection: completedProjection,
+      completeAction,
+    });
+
+    expect(wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(true);
+    expect(wrapper.get("[data-enter-hearing]").element.disabled).toBe(false);
+
+    await wrapper.get("[data-enter-hearing]").trigger("click");
+    await flushPromises();
+
+    expect(router.currentRoute.value.path).toBe(
+      "/disputes/CASE_EVIDENCE_1/hearing",
+    );
+    expect(completeAction).not.toHaveBeenCalled();
+    expect(evidenceApi.upload).not.toHaveBeenCalled();
+    wrapper.unmount();
+
+    const blocked = await mountView({
+      initialCompletion: { ...sealedCompletion, next_room: "EVIDENCE" },
+      initialProcessProjection: completedProjection,
+    });
+    expect(blocked.wrapper.get("[data-enter-hearing]").element.disabled).toBe(true);
+
+    await blocked.wrapper.get("[data-enter-hearing]").trigger("click");
+    await flushPromises();
+
+    expect(blocked.router.currentRoute.value.path).toBe(
+      "/disputes/CASE_EVIDENCE_1/evidence",
     );
   });
 

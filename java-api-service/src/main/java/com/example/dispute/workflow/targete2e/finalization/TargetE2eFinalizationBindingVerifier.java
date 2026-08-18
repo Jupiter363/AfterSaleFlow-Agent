@@ -81,7 +81,7 @@ public final class TargetE2eFinalizationBindingVerifier {
 
         JsonNode proposalSource = evidence.proposalSource();
         exactFields(proposalSource, PROPOSAL_SOURCE_FIELDS, "proposal source");
-        text(proposalSource, "schema_version", "target-e2e-room-proposal-source.v1");
+        text(proposalSource, "schema_version", "target-e2e-room-proposal-source.v2");
         text(proposalSource, "room_type", "INTAKE");
         JsonNode proposal = proposalSource.required("proposal");
         exactFields(proposal, PROPOSAL_FIELDS, "proposal");

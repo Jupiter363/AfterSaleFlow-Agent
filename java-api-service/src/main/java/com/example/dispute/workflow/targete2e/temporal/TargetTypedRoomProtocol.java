@@ -17,10 +17,10 @@ public final class TargetTypedRoomProtocol {
     public static final String CASE_WORKFLOW_TYPE = "CaseProcessWorkflow";
     public static final String EVIDENCE_WORKFLOW_TYPE = "EvidenceRoomWorkflow";
     public static final String HEARING_WORKFLOW_TYPE = "HearingRoomWorkflow";
-    public static final String GRAPH_KEY = "all-rooms.target-e2e.v1";
-    public static final String GRAPH_VERSION = "target-e2e-graph.2026-07-27.1";
-    public static final String CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v1";
-    public static final String STREAM_PROTOCOL = "agent-stream.v2";
+    public static final String GRAPH_KEY = "all-rooms.target-e2e.v2";
+    public static final String GRAPH_VERSION = "target-e2e-graph.2026-08-18.1";
+    public static final String CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v2";
+    public static final String STREAM_PROTOCOL = "agent-stream.v3";
 
     private TargetTypedRoomProtocol() {}
 

@@ -57,8 +57,8 @@ public record ExecuteAgentRunRequest(
         if (attemptNo > attemptLimit) {
             throw new IllegalArgumentException("attemptNo exceeds attemptLimit");
         }
-        if (!"agent-stream.v2".equals(streamProtocol)) {
-            throw new IllegalArgumentException("streamProtocol must be agent-stream.v2");
+        if (!"agent-stream.v3".equals(streamProtocol)) {
+            throw new IllegalArgumentException("streamProtocol must be agent-stream.v3");
         }
         required(logicalInputHash, "logicalInputHash");
         if (!logicalInputHash.matches("[0-9a-f]{64}")) {

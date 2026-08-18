@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import ctypes
+import hashlib
 import json
 import re
 import shutil
 import subprocess
+import time
+from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
@@ -525,6 +529,7 @@ def _run_sandboxed_powershell(
     record_directory: Path,
     snapshots: list[list[dict[str, Any]]],
     terminator_mode: str = "success",
+    snapshot_error_calls: list[int] | None = None,
     protected_pids: list[int] | None = None,
     protected_executables: list[str] | None = None,
     protected_command_fragments: list[str] | None = None,
@@ -546,6 +551,7 @@ def _run_sandboxed_powershell(
                 "record_directory": str(record_directory),
                 "snapshots": snapshots,
                 "terminator_mode": terminator_mode,
+                "snapshot_error_calls": snapshot_error_calls or [],
                 "protected_pids": protected_pids or [],
                 "protected_executables": protected_executables or [],
                 "protected_command_fragments": protected_command_fragments or [],
@@ -574,8 +580,12 @@ $script:removalCalls = [System.Collections.Generic.List[string]]::new()
 
 # All process discovery, protection, termination, and record deletion are fakes.
 $snapshotProvider = {
-    $index = [Math]::Min($script:snapshotCallCount, $case.snapshots.Count - 1)
-    $script:snapshotCallCount += 1
+    $callNumber = $script:snapshotCallCount + 1
+    $script:snapshotCallCount = $callNumber
+    if (@($case.snapshot_error_calls) -contains $callNumber) {
+        throw "synthetic snapshot failure"
+    }
+    $index = [Math]::Min($callNumber - 1, $case.snapshots.Count - 1)
     return @($case.snapshots[$index])
 }
 $protectedProcessPolicy = {
@@ -3374,6 +3384,3030 @@ catch {
     return json.loads(result_file.read_text(encoding="utf-8-sig"))
 
 
+def _run_real_java_probe_native_handle_harness(
+    tmp_path: Path,
+    *,
+    scenario: str,
+) -> dict[str, Any]:
+    if shutil.which("powershell.exe") is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    source = LAUNCHER.read_text(encoding="utf-8-sig")
+    definitions = dict(_function_definitions(source))
+    required = (
+        "Get-SourceProcessOwnershipCanonicalPath",
+        "Test-SourceProcessOwnershipInteger",
+        "ConvertTo-SourceProcessOwnershipDate",
+        "Test-SourceProcessOwnershipCreationDateEquivalent",
+        "Initialize-SourceProcessOwnershipExitNativeMethods",
+        "Get-SourceProcessOwnershipNativeSafeHandleExitState",
+        "Initialize-SourceJavaProbeRetainedNativeMethods",
+        "Get-SourceJavaProbeRetainedNativeHandleExitState",
+        "New-SourceJavaProbeNativeHandleAuthority",
+        "Test-SourceJavaProbeNativeHandleAuthority",
+        "Get-SourceJavaProbeNativeHandleExitState",
+        "Release-SourceJavaProbeNativeHandleAuthority",
+        "Get-SourceJavaProbeCleanupAuthorityState",
+        "Test-SourceJavaProbeCleanupAuthorityBundle",
+        "Complete-SourceJavaProbeCleanupAuthorityBundle",
+        "New-SourceJavaProbeCleanupAuthorityBundle",
+        "Get-SourceProcessOwnershipHandleExitState",
+        "Test-SourceProcessOwnershipHandleExitStateMatchesIdentity",
+        "Stop-SourceJavaProbeProcessExact",
+        "Wait-SourceJavaProbeCleanupProof",
+        "Invoke-SourceJavaExecutableProbe",
+    )
+    assert set(required) <= set(definitions)
+    function_file = tmp_path / "real-java-probe-native-functions.ps1"
+    harness_file = tmp_path / "invoke-real-java-probe-native.ps1"
+    result_file = tmp_path / "real-java-probe-native-result.json"
+    function_file.write_text(
+        "\n\n".join(definitions[name] for name in required),
+        encoding="utf-8",
+    )
+    harness_file.write_text(
+        r'''
+param(
+    [Parameter(Mandatory = $true)][string]$FunctionFile,
+    [Parameter(Mandatory = $true)][string]$ResultFile,
+    [Parameter(Mandatory = $true)][string]$Scenario,
+    [Parameter(Mandatory = $true)][string]$PowerShellExecutable
+)
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+. $FunctionFile
+
+$warnings = [System.Collections.Generic.List[string]]::new()
+$killCalls = [System.Collections.Generic.List[int]]::new()
+$waitCalls = [System.Collections.Generic.List[int]]::new()
+$cleanupAttempts = [System.Collections.Generic.List[int]]::new()
+$probeWaitCalls = [System.Collections.Generic.List[string]]::new()
+$pauseCalls = [System.Collections.Generic.List[int]]::new()
+$releaseCalls = [System.Collections.Generic.List[int]]::new()
+$disposeCalls = [System.Collections.Generic.List[int]]::new()
+$completionEvents = [System.Collections.Generic.List[string]]::new()
+$failureObservation = [pscustomobject]@{
+    process_table_visible = $null
+    error = $null
+}
+$injectedState = [pscustomobject]@{
+    real_process = $null
+    ultra_fast_event = $null
+    safe_handle = $null
+    state_calls = 0
+}
+function Write-Warning {
+    param([Parameter(Position = 0)][string]$Message)
+    [void]$warnings.Add($Message)
+}
+function Test-RealProbeProcessTableVisible {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    $candidate = $null
+    try {
+        $candidate = [System.Diagnostics.Process]::GetProcessById($ProcessId)
+        return -not $candidate.HasExited
+    }
+    catch [System.ArgumentException] {
+        return $false
+    }
+    finally {
+        try {
+            if ($null -ne $candidate) {
+                $candidate.Dispose()
+            }
+        }
+        catch { }
+    }
+}
+function Wait-RealProbeProcessTableAbsent {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $visible = Test-RealProbeProcessTableVisible -ProcessId $ProcessId
+        if (-not $visible) {
+            return $true
+        }
+        [Threading.Thread]::Sleep(10)
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
+
+$script:originalRelease =
+    ${function:Release-SourceJavaProbeNativeHandleAuthority}
+function Release-SourceJavaProbeNativeHandleAuthority {
+    param(
+        [Parameter(Mandatory = $true)]$Authority,
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$CapturedProcess
+    )
+    [void]$releaseCalls.Add([int]$CapturedProcess.Id)
+    [void]$completionEvents.Add("release")
+    & $script:originalRelease `
+        -Authority $Authority `
+        -CapturedProcess $CapturedProcess
+}
+
+$output = [ordered]@{
+    scenario = $Scenario
+    error = $null
+    elapsed_ms = 0
+    pid = 0
+    running_state = $null
+    exited_state = $null
+    exited_result_count = 0
+    process_table_visible = $null
+    failure_observation_error = $null
+    warnings = @()
+    kill_calls = @()
+    wait_calls = @()
+    cleanup_attempts = @()
+    probe_wait_calls = @()
+    pause_calls = @()
+    release_calls = @()
+    dispose_calls = @()
+    completion_events = @()
+    child_exit_code = $null
+    child_stderr = $null
+}
+
+if ($Scenario -eq "CONTROLLED_RETAINED_STATE") {
+    $eventName = "CodexIssue0020_" + [Guid]::NewGuid().ToString("N")
+    $exitEvent = [Threading.EventWaitHandle]::new(
+        $false,
+        [Threading.EventResetMode]::ManualReset,
+        $eventName)
+    $process = [System.Diagnostics.Process]::new()
+    $authority = $null
+    try {
+        $info = [System.Diagnostics.ProcessStartInfo]::new()
+        $info.FileName = $PowerShellExecutable
+        $info.Arguments = '-NoProfile -NonInteractive -Command ' +
+            '"$e=[Threading.EventWaitHandle]::OpenExisting(' +
+            '$env:CODEX_ISSUE0020_EVENT);[void]$e.WaitOne();$e.Dispose()"'
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        $info.EnvironmentVariables["CODEX_ISSUE0020_EVENT"] = $eventName
+        $process.StartInfo = $info
+        if (-not $process.Start()) {
+            throw "real retained-state child did not start"
+        }
+        $output.pid = [int]$process.Id
+        $safeHandle = $process.SafeHandle
+        $authority = New-SourceJavaProbeNativeHandleAuthority `
+            -CapturedProcess $process `
+            -SafeHandle $safeHandle
+        $output.running_state = Get-SourceJavaProbeNativeHandleExitState `
+            -Authority $authority `
+            -CapturedProcess $process
+        [void]$exitEvent.Set()
+        $process.WaitForExit()
+        $output.process_table_visible = -not (
+            Wait-RealProbeProcessTableAbsent -ProcessId $output.pid)
+        $exitedResults = @(
+            Get-SourceJavaProbeNativeHandleExitState `
+                -Authority $authority `
+                -CapturedProcess $process)
+        $output.exited_result_count = $exitedResults.Count
+        if ($exitedResults.Count -eq 1) {
+            $output.exited_state = $exitedResults[0]
+        }
+    }
+    catch {
+        $output.error = $_.Exception.Message
+    }
+    finally {
+        if ($null -ne $authority -and
+            -not [bool]$authority.reference_released) {
+            Release-SourceJavaProbeNativeHandleAuthority `
+                -Authority $authority `
+                -CapturedProcess $process
+        }
+        if (-not $process.HasExited) {
+            $process.Kill()
+            $process.WaitForExit()
+        }
+        [void]$disposeCalls.Add([int]$output.pid)
+        $process.Dispose()
+        $exitEvent.Dispose()
+    }
+}
+else {
+    $childArguments =
+        '-NoProfile -NonInteractive -Command "Start-Sleep -Milliseconds 1000"'
+    $childEventName = $null
+    $childSignalPath = $null
+    $redirectStandardInput = $false
+    if ($Scenario -eq "ULTRA_FAST_EXIT") {
+        $eventName = "CodexIssue0020_" + [Guid]::NewGuid().ToString("N")
+        $injectedState.ultra_fast_event = [Threading.EventWaitHandle]::new(
+            $false,
+            [Threading.EventResetMode]::ManualReset,
+            $eventName)
+        $childArguments = '-NoProfile -NonInteractive -Command ' +
+            '"$e=[Threading.EventWaitHandle]::OpenExisting(' +
+            '$env:CODEX_ISSUE0020_EVENT);[void]$e.WaitOne();$e.Dispose()"'
+        $childEventName = $eventName
+    }
+    elseif ($Scenario -eq "POST_EXIT_WAIT_FAILURE") {
+        $childSignalPath = Join-Path `
+            ([IO.Path]::GetDirectoryName($ResultFile)) `
+            ("issue0020-exit-" + [Guid]::NewGuid().ToString("N"))
+        $childArguments = '-NoProfile -NonInteractive -Command ' +
+            '"while (-not [IO.File]::Exists(' +
+            '$env:CODEX_ISSUE0020_SIGNAL)) {' +
+            '[Threading.Thread]::Sleep(10)}"'
+    }
+    $processFactory = {
+        param($IgnoredStartInfo)
+        $candidate = [System.Diagnostics.Process]::new()
+        $info = [System.Diagnostics.ProcessStartInfo]::new()
+        $info.FileName = $PowerShellExecutable
+        $info.Arguments = $childArguments
+        $info.RedirectStandardInput = $redirectStandardInput
+        if ($null -ne $childEventName) {
+            $info.EnvironmentVariables["CODEX_ISSUE0020_EVENT"] =
+                $childEventName
+        }
+        if ($null -ne $childSignalPath) {
+            $info.EnvironmentVariables["CODEX_ISSUE0020_SIGNAL"] =
+                $childSignalPath
+        }
+        $info.UseShellExecute = $false
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $true
+        $info.CreateNoWindow = $true
+        $candidate.StartInfo = $info
+        $injectedState.real_process = $candidate
+        return $candidate
+    }.GetNewClosure()
+    $startProvider = {
+        param($Candidate)
+        $started = [bool]$Candidate.Start()
+        if ($started) {
+            $output.pid = [int]$Candidate.Id
+            $injectedState.safe_handle = $Candidate.SafeHandle
+        }
+        return $started
+    }.GetNewClosure()
+    $handleStateProvider = {
+        param($Candidate)
+        $injectedState.state_calls += 1
+        if ($Scenario -eq "ULTRA_FAST_EXIT" -and
+            $injectedState.state_calls -eq 1) {
+            [void]$injectedState.ultra_fast_event.Set()
+            $Candidate.WaitForExit()
+        }
+        return Get-SourceProcessOwnershipNativeSafeHandleExitState `
+            -SafeHandle $injectedState.safe_handle
+    }.GetNewClosure()
+    $killProvider = {
+        param($Candidate)
+        [void]$killCalls.Add([int]$Candidate.Id)
+        $Candidate.Kill()
+        return $true
+    }.GetNewClosure()
+    $cleanupWaitProvider = {
+        param($Candidate, $Milliseconds)
+        [void]$waitCalls.Add([int]$Candidate.Id)
+        return [bool]$Candidate.WaitForExit([int]$Milliseconds)
+    }.GetNewClosure()
+    $waitProvider = $null
+    if ($Scenario -eq "POST_EXIT_WAIT_FAILURE") {
+        $waitProvider = {
+            param($Candidate, $Milliseconds)
+            if ($null -ne $Milliseconds) {
+                [void]$probeWaitCalls.Add("timed")
+                [IO.File]::WriteAllText(
+                    $childSignalPath,
+                    "exit",
+                    [Text.UTF8Encoding]::new($false))
+                return [bool]$Candidate.WaitForExit([int]$Milliseconds)
+            }
+            [void]$probeWaitCalls.Add("flush")
+            $Candidate.WaitForExit()
+            $pidValue = [int]$Candidate.Id
+            try {
+                $failureObservation.process_table_visible = -not (
+                    Wait-RealProbeProcessTableAbsent -ProcessId $pidValue)
+            }
+            catch {
+                $failureObservation.error = $_.Exception.Message
+            }
+            throw "controlled post-exit wait failure"
+        }.GetNewClosure()
+    }
+    $streamTaskProvider = {
+        param($Candidate)
+        return [pscustomobject]@{
+            stdout_task = $Candidate.StandardOutput.ReadToEndAsync()
+            stderr_task = $Candidate.StandardError.ReadToEndAsync()
+        }
+    }
+    $script:originalStop = ${function:Stop-SourceJavaProbeProcessExact}
+    $cleanupAttemptProvider = {
+        param(
+            $Candidate,
+            $BoundIdentity,
+            $ExpectedProcessId,
+            $StateProvider,
+            $Terminator,
+            $CleanupWaiter)
+        [void]$cleanupAttempts.Add($cleanupAttempts.Count + 1)
+        return & $script:originalStop `
+            -CapturedProcess $Candidate `
+            -BoundIdentity $BoundIdentity `
+            -ExpectedProcessId $ExpectedProcessId `
+            -HandleStateProvider $StateProvider `
+            -KillProvider $Terminator `
+            -WaitProvider $CleanupWaiter
+    }.GetNewClosure()
+    $pauseAction = {
+        [void]$pauseCalls.Add($pauseCalls.Count + 1)
+    }.GetNewClosure()
+    $disposeProvider = {
+        param($Candidate)
+        [void]$disposeCalls.Add([int]$Candidate.Id)
+        [void]$completionEvents.Add("dispose")
+        if ($Candidate.HasExited) {
+            $output.child_exit_code = [int]$Candidate.ExitCode
+            $output.child_stderr = [string]$Candidate.StandardError.ReadToEnd()
+        }
+        $Candidate.Dispose()
+    }.GetNewClosure()
+    $streamResultProvider = {
+        param($StdoutTask, $StderrTask)
+        return [pscustomobject]@{
+            stdout = [string]$StdoutTask.GetAwaiter().GetResult()
+            stderr = [string]$StderrTask.GetAwaiter().GetResult()
+        }
+    }.GetNewClosure()
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        Invoke-SourceJavaExecutableProbe `
+            -ExecutablePath $PowerShellExecutable `
+            -Arguments @("-XshowSettings:properties", "-version") `
+            -TimeoutMilliseconds 5000 `
+            -ProcessFactory $processFactory `
+            -StartProvider $startProvider `
+            -HandleStateProvider $handleStateProvider `
+            -StreamTaskProvider $streamTaskProvider `
+            -WaitProvider $waitProvider `
+            -StreamResultProvider $streamResultProvider `
+            -KillProvider $killProvider `
+            -CleanupWaitProvider $cleanupWaitProvider `
+            -CleanupAttemptProvider $cleanupAttemptProvider `
+            -PauseAction $pauseAction `
+            -DisposeProvider $disposeProvider | Out-Null
+    }
+    catch {
+        $output.error = $_.Exception.Message
+    }
+    finally {
+        $stopwatch.Stop()
+        $output.elapsed_ms = [long]$stopwatch.ElapsedMilliseconds
+        if ($output.pid -eq 0 -and $null -ne $injectedState.real_process) {
+            try { $output.pid = [int]$injectedState.real_process.Id } catch { }
+        }
+        if ($null -ne $injectedState.ultra_fast_event) {
+            $injectedState.ultra_fast_event.Dispose()
+        }
+    }
+    $output.process_table_visible = $failureObservation.process_table_visible
+    $output.failure_observation_error = $failureObservation.error
+}
+
+$output.warnings = @($warnings)
+$output.kill_calls = @($killCalls)
+$output.wait_calls = @($waitCalls)
+$output.cleanup_attempts = @($cleanupAttempts)
+$output.probe_wait_calls = @($probeWaitCalls)
+$output.pause_calls = @($pauseCalls)
+$output.release_calls = @($releaseCalls)
+$output.dispose_calls = @($disposeCalls)
+$output.completion_events = @($completionEvents)
+[System.IO.File]::WriteAllText(
+    $ResultFile,
+    ([pscustomobject]$output | ConvertTo-Json -Depth 20 -Compress),
+    [System.Text.UTF8Encoding]::new($false))
+'''.strip(),
+        encoding="utf-8",
+    )
+    command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness_file),
+            "-FunctionFile",
+            str(function_file),
+            "-ResultFile",
+            str(result_file),
+            "-Scenario",
+            scenario,
+            "-PowerShellExecutable",
+            str(Path(shutil.which("powershell.exe") or "powershell.exe").resolve()),
+        ]
+    harness = subprocess.Popen(
+        command,
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        stdout, stderr = harness.communicate(timeout=20)
+    except subprocess.TimeoutExpired as timeout:
+        subprocess.run(
+            ["taskkill.exe", "/PID", str(harness.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        harness.communicate(timeout=10)
+        raise AssertionError(
+            f"isolated real-process harness stalled in {scenario}"
+        ) from timeout
+    assert harness.returncode == 0, stderr or stdout
+    assert result_file.is_file(), stdout
+    return json.loads(result_file.read_text(encoding="utf-8-sig"))
+
+
+def _run_real_java_probe_pre_bind_authority_failure_harness(
+    tmp_path: Path,
+) -> dict[str, Any]:
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    source = LAUNCHER.read_text(encoding="utf-8-sig")
+    definitions = dict(_function_definitions(source))
+    required = (
+        "Get-SourceProcessOwnershipCanonicalPath",
+        "Test-SourceProcessOwnershipInteger",
+        "ConvertTo-SourceProcessOwnershipDate",
+        "Test-SourceProcessOwnershipCreationDateEquivalent",
+        "Initialize-SourceProcessOwnershipExitNativeMethods",
+        "Get-SourceProcessOwnershipNativeSafeHandleExitState",
+        "Initialize-SourceJavaProbeRetainedNativeMethods",
+        "Get-SourceJavaProbeRetainedNativeHandleExitState",
+        "New-SourceJavaProbeNativeHandleAuthority",
+        "Test-SourceJavaProbeNativeHandleAuthority",
+        "Get-SourceJavaProbeNativeHandleExitState",
+        "Release-SourceJavaProbeNativeHandleAuthority",
+        "Get-SourceJavaProbeCleanupAuthorityState",
+        "Test-SourceJavaProbeCleanupAuthorityBundle",
+        "Complete-SourceJavaProbeCleanupAuthorityBundle",
+        "New-SourceJavaProbeCleanupAuthorityBundle",
+        "Get-SourceProcessOwnershipHandleExitState",
+        "Test-SourceProcessOwnershipHandleExitStateMatchesIdentity",
+        "Stop-SourceJavaProbeProcessExact",
+        "Wait-SourceJavaProbeCleanupProof",
+        "Invoke-SourceJavaExecutableProbe",
+    )
+    assert set(required) <= set(definitions)
+    function_file = tmp_path / "pre-bind-authority-functions.ps1"
+    harness_file = tmp_path / "invoke-pre-bind-authority-failure.ps1"
+    result_file = tmp_path / "pre-bind-authority-result.json"
+    function_file.write_text(
+        "\n\n".join(definitions[name] for name in required),
+        encoding="utf-8",
+    )
+    harness_file.write_text(
+        r'''
+param(
+    [Parameter(Mandatory = $true)][string]$FunctionFile,
+    [Parameter(Mandatory = $true)][string]$ResultFile,
+    [Parameter(Mandatory = $true)][string]$PowerShellExecutable
+)
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+. $FunctionFile
+
+$warnings = [System.Collections.Generic.List[string]]::new()
+$killCalls = [System.Collections.Generic.List[int]]::new()
+$waitCalls = [System.Collections.Generic.List[int]]::new()
+$disposeCalls = [System.Collections.Generic.List[int]]::new()
+$cleanupAttempts = [System.Collections.Generic.List[object]]::new()
+$pauseCalls = [System.Collections.Generic.List[int]]::new()
+$productionReleaseCalls = [System.Collections.Generic.List[int]]::new()
+$state = [pscustomobject]@{
+    real_process = $null
+    supervisor_safe_handle = $null
+    supervisor_native_handle = [IntPtr]::Zero
+    supervisor_reference_retained = $false
+    supervisor_release_count = 0
+    process_disposed = $false
+}
+
+function Write-Warning {
+    param([Parameter(Position = 0)][string]$Message)
+    [void]$warnings.Add($Message)
+}
+
+$output = [ordered]@{
+    error = $null
+    watchdog_triggered = $false
+    exact_process_reference = $false
+    safe_handle_type = $null
+    safe_handle_valid = $false
+    authority_returned = $false
+    pid = 0
+    running_state = $null
+    exited_state = $null
+    child_has_exited = $false
+    cleanup_attempts = @()
+    warnings = @()
+    pause_calls = @()
+    kill_calls = @()
+    wait_calls = @()
+    dispose_calls = @()
+    supervisor_release_count = 0
+    production_release_calls = @()
+    harness_forced_cleanup = $false
+}
+
+$writeEvidence = {
+    $output.cleanup_attempts = @($cleanupAttempts)
+    $output.warnings = @($warnings)
+    $output.pause_calls = @($pauseCalls)
+    $output.kill_calls = @($killCalls)
+    $output.wait_calls = @($waitCalls)
+    $output.dispose_calls = @($disposeCalls)
+    $output.supervisor_release_count =
+        [int]$state.supervisor_release_count
+    $output.production_release_calls = @($productionReleaseCalls)
+    [IO.File]::WriteAllText(
+        $ResultFile,
+        ([pscustomobject]$output | ConvertTo-Json -Depth 20 -Compress),
+        [Text.UTF8Encoding]::new($false))
+}.GetNewClosure()
+
+$eventName = "CodexPreBindProbe_" + [Guid]::NewGuid().ToString("N")
+$exitEvent = [Threading.EventWaitHandle]::new(
+    $false,
+    [Threading.EventResetMode]::ManualReset,
+    $eventName)
+
+$processFactory = {
+    param($IgnoredStartInfo)
+    $candidate = [Diagnostics.Process]::new()
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $PowerShellExecutable
+    $info.Arguments = '-NoProfile -NonInteractive -Command ' +
+        '"$e=[Threading.EventWaitHandle]::OpenExisting(' +
+        '$env:CODEX_PRE_BIND_EVENT);[void]$e.WaitOne();$e.Dispose()"'
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.CreateNoWindow = $true
+    $info.EnvironmentVariables["CODEX_PRE_BIND_EVENT"] = $eventName
+    $candidate.StartInfo = $info
+    $state.real_process = $candidate
+    return $candidate
+}.GetNewClosure()
+
+$startProvider = {
+    param($Candidate)
+    $started = [bool]$Candidate.Start()
+    if ($started) {
+        $output.pid = [int]$Candidate.Id
+    }
+    return $started
+}.GetNewClosure()
+
+$originalProductionRelease =
+    ${function:Release-SourceJavaProbeNativeHandleAuthority}
+function Release-SourceJavaProbeNativeHandleAuthority {
+    param(
+        [Parameter(Mandatory = $true)]$Authority,
+        [Parameter(Mandatory = $true)]
+        [Diagnostics.Process]$CapturedProcess
+    )
+    [void]$productionReleaseCalls.Add([int]$CapturedProcess.Id)
+    & $originalProductionRelease `
+        -Authority $Authority `
+        -CapturedProcess $CapturedProcess
+}
+
+function New-SourceJavaProbeNativeHandleAuthority {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Diagnostics.Process]$CapturedProcess,
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Win32.SafeHandles.SafeProcessHandle]$SafeHandle
+    )
+    $output.exact_process_reference = [object]::ReferenceEquals(
+        $state.real_process,
+        $CapturedProcess)
+    $output.safe_handle_type = $SafeHandle.GetType().FullName
+    $output.safe_handle_valid =
+        -not $SafeHandle.IsInvalid -and -not $SafeHandle.IsClosed
+    if (-not $output.exact_process_reference -or
+        -not $output.safe_handle_valid) {
+        throw "pre-bind real process authority is unavailable"
+    }
+    $runningState = Get-SourceProcessOwnershipNativeSafeHandleExitState `
+        -SafeHandle $SafeHandle
+    if ($runningState.IsExited -or
+        [int]$runningState.Pid -ne [int]$CapturedProcess.Id -or
+        $null -eq $runningState.CreationDate -or
+        $null -ne $runningState.ExitDate) {
+        throw "pre-bind real process authority is not running"
+    }
+    $output.running_state = $runningState
+    $referenceRetained = $false
+    $SafeHandle.DangerousAddRef([ref]$referenceRetained)
+    if (-not $referenceRetained) {
+        throw "pre-bind supervisor authority was not retained"
+    }
+    $state.supervisor_safe_handle = $SafeHandle
+    $state.supervisor_native_handle = $SafeHandle.DangerousGetHandle()
+    $state.supervisor_reference_retained = $true
+    throw "controlled authority construction failure before return"
+}
+
+$killProvider = {
+    param($Candidate)
+    [void]$killCalls.Add([int]$Candidate.Id)
+    $Candidate.Kill()
+    return $true
+}.GetNewClosure()
+
+$waitProvider = {
+    param($Candidate, $Milliseconds)
+    [void]$waitCalls.Add([int]$Candidate.Id)
+    return [bool]$Candidate.WaitForExit([int]$Milliseconds)
+}.GetNewClosure()
+
+$disposeProvider = {
+    param($Candidate)
+    [void]$disposeCalls.Add([int]$Candidate.Id)
+    $Candidate.Dispose()
+    $state.process_disposed = $true
+}.GetNewClosure()
+
+$originalStop = ${function:Stop-SourceJavaProbeProcessExact}
+$cleanupAttemptProvider = {
+    param(
+        $Candidate,
+        $BoundIdentity,
+        $ExpectedProcessId,
+        $StateProvider,
+        $Terminator,
+        $CleanupWaiter)
+    $record = [ordered]@{
+        expected_process_id = [int]$ExpectedProcessId
+        bound_identity_is_null = $null -eq $BoundIdentity
+        bound_pid = if ($null -eq $BoundIdentity) {
+            $null
+        }
+        else {
+            [int]$BoundIdentity.Pid
+        }
+        result = $false
+    }
+    $result = & $originalStop `
+        -CapturedProcess $Candidate `
+        -BoundIdentity $BoundIdentity `
+        -ExpectedProcessId $ExpectedProcessId `
+        -HandleStateProvider $StateProvider `
+        -KillProvider $Terminator `
+        -WaitProvider $CleanupWaiter
+    $record.result = [bool]$result
+    [void]$cleanupAttempts.Add([pscustomobject]$record)
+    return [bool]$result
+}.GetNewClosure()
+
+$pauseAction = {
+    [void]$pauseCalls.Add($pauseCalls.Count + 1)
+    $output.watchdog_triggered = $true
+    try {
+        $output.exited_state =
+            Get-SourceJavaProbeRetainedNativeHandleExitState `
+                -NativeHandle $state.supervisor_native_handle
+        $output.child_has_exited = [bool]$output.exited_state.IsExited
+    }
+    finally {
+        if ($state.supervisor_reference_retained) {
+            $state.supervisor_safe_handle.DangerousRelease()
+            $state.supervisor_reference_retained = $false
+            $state.supervisor_release_count += 1
+        }
+        if (-not $state.process_disposed) {
+            & $disposeProvider $state.real_process
+        }
+        $exitEvent.Dispose()
+        & $writeEvidence
+    }
+    [Environment]::Exit(86)
+}.GetNewClosure()
+
+try {
+    $candidate = & $processFactory $null
+    if (-not (& $startProvider $candidate)) {
+        throw "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED"
+    }
+    New-SourceJavaProbeCleanupAuthorityBundle `
+        -CapturedProcess $candidate `
+        -HandleStateProvider $null `
+        -KillProvider $killProvider `
+        -WaitProvider $waitProvider `
+        -CleanupAttemptProvider $cleanupAttemptProvider `
+        -PauseAction $pauseAction `
+        -DisposeProvider $disposeProvider | Out-Null
+}
+catch {
+    $output.error = $_.Exception.Message
+}
+finally {
+    if ($state.supervisor_reference_retained) {
+        try {
+            $output.exited_state =
+                Get-SourceJavaProbeRetainedNativeHandleExitState `
+                    -NativeHandle $state.supervisor_native_handle
+            $output.child_has_exited = [bool]$output.exited_state.IsExited
+        }
+        finally {
+            $state.supervisor_safe_handle.DangerousRelease()
+            $state.supervisor_reference_retained = $false
+            $state.supervisor_release_count += 1
+        }
+    }
+    if ($null -ne $state.real_process -and
+        -not $state.process_disposed) {
+        if (-not $state.real_process.HasExited) {
+            $output.harness_forced_cleanup = $true
+            $state.real_process.Kill()
+            $state.real_process.WaitForExit()
+        }
+        & $disposeProvider $state.real_process
+    }
+    $exitEvent.Dispose()
+    & $writeEvidence
+}
+'''.strip(),
+        encoding="utf-8",
+    )
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(harness_file),
+        "-FunctionFile",
+        str(function_file),
+        "-ResultFile",
+        str(result_file),
+        "-PowerShellExecutable",
+        str(Path(powershell).resolve()),
+    ]
+    harness = subprocess.Popen(
+        command,
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        stdout, stderr = harness.communicate(timeout=20)
+    except subprocess.TimeoutExpired as timeout:
+        subprocess.run(
+            ["taskkill.exe", "/PID", str(harness.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        stdout, stderr = harness.communicate(timeout=10)
+        raise AssertionError(
+            "isolated pre-bind harness exceeded its emergency ceiling"
+        ) from timeout
+    assert result_file.is_file(), stderr or stdout
+    result = json.loads(result_file.read_text(encoding="utf-8-sig"))
+    result["harness_returncode"] = harness.returncode
+    return result
+
+
+def _run_v4_native_start_authority_harness(
+    tmp_path: Path,
+    *,
+    scenario: str,
+) -> dict[str, Any]:
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    source = LAUNCHER.read_text(encoding="utf-8-sig")
+    definitions = dict(_function_definitions(source))
+    required = (
+        "Get-SourceProcessOwnershipCanonicalPath",
+        "Test-SourceProcessOwnershipInteger",
+        "ConvertTo-SourceProcessOwnershipDate",
+        "Initialize-SourceJavaProbeNativeStartAuthority",
+        "Invoke-SourceJavaNativeExecutableProbe",
+        "Invoke-SourceJavaExecutableProbe",
+    )
+    assert set(required) <= set(definitions)
+    def top_level_slice(name: str, next_name: str) -> str:
+        marker = f"function {name} {{"
+        next_marker = f"\nfunction {next_name} {{"
+        start = source.index(marker)
+        end = source.index(next_marker, start)
+        return source[start:end].rstrip()
+
+    initializer = top_level_slice(required[3], required[4])
+    native_runner = top_level_slice(required[4], required[5])
+    wrapper = top_level_slice(required[5], "Get-SourceJavaHomeFromProbeResult")
+    instrumentation_counts: dict[str, int] = {}
+    if scenario.startswith("V4_CLOSE_"):
+        using_anchor = "using System.ComponentModel;"
+        assert initializer.count(using_anchor) == 1
+        initializer = initializer.replace(
+            using_anchor,
+            using_anchor + "\nusing System.Collections.Generic;",
+            1,
+        )
+        ledger_anchor = "    private readonly NativeResourceLedger ledger;"
+        ledger_audit = r'''    public static string AuditPath;
+    private static readonly Dictionary<string, object> AuditReferences =
+        new Dictionary<string, object>(StringComparer.Ordinal);
+
+    private static RawHandleLease FindRawLease(
+        NativeResourceLedger ownedLedger,
+        string resourceId)
+    {
+        switch (resourceId)
+        {
+            case "process": return ownedLedger.Process;
+            case "thread": return ownedLedger.Thread;
+            case "stdout-read": return ownedLedger.StdoutRead;
+            case "stdout-write": return ownedLedger.StdoutWrite;
+            case "stderr-read": return ownedLedger.StderrRead;
+            case "stderr-write": return ownedLedger.StderrWrite;
+            case "child-stdin": return ownedLedger.ChildStdin;
+            default: return null;
+        }
+    }
+
+    private static ManagedLease FindManagedLease(
+        NativeResourceLedger ownedLedger,
+        string resourceId)
+    {
+        switch (resourceId)
+        {
+            case "stdout-reader": return ownedLedger.StdoutReader;
+            case "stdout-stream": return ownedLedger.StdoutStream;
+            case "stdout-wrapper": return ownedLedger.StdoutWrapper;
+            case "stderr-reader": return ownedLedger.StderrReader;
+            case "stderr-stream": return ownedLedger.StderrStream;
+            case "stderr-wrapper": return ownedLedger.StderrWrapper;
+            default: return null;
+        }
+    }
+
+    private static void EmitLeaseAudit(
+        NativeResourceLedger ownedLedger,
+        string resourceId,
+        int attempt,
+        string moment)
+    {
+        if (String.IsNullOrWhiteSpace(AuditPath)) return;
+        RawHandleLease raw = FindRawLease(ownedLedger, resourceId);
+        ManagedLease managed = FindManagedLease(ownedLedger, resourceId);
+        bool referencePresent = managed != null && managed.Reference != null;
+        bool sameReference = false;
+        if (referencePresent)
+        {
+            object firstReference;
+            if (!AuditReferences.TryGetValue(resourceId, out firstReference))
+            {
+                AuditReferences[resourceId] = managed.Reference;
+                firstReference = managed.Reference;
+            }
+            sameReference = Object.ReferenceEquals(firstReference, managed.Reference);
+        }
+        string line = String.Join("|", new string[] {
+            moment,
+            resourceId,
+            attempt.ToString(CultureInfo.InvariantCulture),
+            ownedLedger.Phase,
+            raw == null ? "0" : raw.Value.ToInt64().ToString(CultureInfo.InvariantCulture),
+            raw == null ? "" : raw.State.ToString(),
+            raw == null ? "0" : raw.CloseAttempts.ToString(CultureInfo.InvariantCulture),
+            raw == null ? "0" : raw.InjectedFailures.ToString(CultureInfo.InvariantCulture),
+            raw == null ? "False" : raw.RealCloseAttempted.ToString(),
+            raw == null ? "0" : raw.LastWin32Error.ToString(CultureInfo.InvariantCulture),
+            referencePresent.ToString(),
+            sameReference.ToString(),
+            managed == null ? "" : managed.State.ToString(),
+            managed == null ? "0" : managed.DisposeAttempts.ToString(CultureInfo.InvariantCulture),
+            managed == null ? "0" : managed.InjectedFailures.ToString(CultureInfo.InvariantCulture),
+            managed == null ? "False" : managed.RealDisposeAttempted.ToString(),
+            ownedLedger.StartupResourcesComplete.ToString(),
+            ownedLedger.OutputResourcesComplete.ToString(),
+            ownedLedger.AllResourcesComplete.ToString(),
+            ownedLedger.ExitProven.ToString(),
+            ownedLedger.Pid.ToString(CultureInfo.InvariantCulture),
+            ownedLedger.CreationFileTime.ToString(CultureInfo.InvariantCulture),
+            ownedLedger.ExitFileTime.ToString(CultureInfo.InvariantCulture)
+        });
+        File.AppendAllText(
+            AuditPath,
+            line + Environment.NewLine,
+            Encoding.UTF8);
+    }
+
+    private readonly NativeResourceLedger ledger;'''
+        assert initializer.count(ledger_anchor) == 1
+        initializer = initializer.replace(ledger_anchor, ledger_audit, 1)
+        audit_replacements = (
+            (
+                """            lease.Value = IntPtr.Zero;
+            lease.LastWin32Error = 0;
+            lease.State = RawLeaseState.CLOSED;""",
+                """            lease.Value = IntPtr.Zero;
+            lease.LastWin32Error = 0;
+            lease.State = RawLeaseState.CLOSED;
+            EmitLeaseAudit(
+                ledger,
+                lease.ResourceId,
+                lease.CloseAttempts,
+                \"FINAL\");""",
+            ),
+            (
+                """            lease.Reference = null;
+            lease.State = ManagedLeaseState.DISPOSED;""",
+                """            lease.Reference = null;
+            lease.State = ManagedLeaseState.DISPOSED;
+            EmitLeaseAudit(
+                ledger,
+                lease.ResourceId,
+                lease.DisposeAttempts,
+                \"FINAL\");""",
+            ),
+            (
+                """        lease.State = RawLeaseState.CLOSE_TRUTH_BROKEN;
+        ledger.CloseTruthBroken = true;
+        ledger.Phase = \"CLOSE_TRUTH_BROKEN\";
+        throw new CloseTruthBrokenException(lease.ResourceId);""",
+                """        lease.State = RawLeaseState.CLOSE_TRUTH_BROKEN;
+        ledger.CloseTruthBroken = true;
+        ledger.Phase = \"CLOSE_TRUTH_BROKEN\";
+        EmitLeaseAudit(
+            ledger,
+            lease.ResourceId,
+            lease.CloseAttempts,
+            \"BROKEN\");
+        throw new CloseTruthBrokenException(lease.ResourceId);""",
+            ),
+            (
+                """        lease.State = ManagedLeaseState.CLOSE_TRUTH_BROKEN;
+        ledger.CloseTruthBroken = true;
+        ledger.Phase = \"CLOSE_TRUTH_BROKEN\";
+        throw new CloseTruthBrokenException(lease.ResourceId);""",
+                """        lease.State = ManagedLeaseState.CLOSE_TRUTH_BROKEN;
+        ledger.CloseTruthBroken = true;
+        ledger.Phase = \"CLOSE_TRUTH_BROKEN\";
+        EmitLeaseAudit(
+            ledger,
+            lease.ResourceId,
+            lease.DisposeAttempts,
+            \"BROKEN\");
+        throw new CloseTruthBrokenException(lease.ResourceId);""",
+            ),
+        )
+        for old, new in audit_replacements:
+            assert initializer.count(old) == 1
+            initializer = initializer.replace(old, new, 1)
+        observer_anchor = """        try
+        {
+            ledger.CloseObserver(resourceId, attempt);
+        }
+        catch
+        {
+            // The observer is non-authoritative and cannot alter close truth.
+        }"""
+        observer_with_audit = observer_anchor + """
+        EmitLeaseAudit(ledger, resourceId, attempt, \"OBSERVER\");"""
+        assert initializer.count(observer_anchor) == 1
+        initializer = initializer.replace(observer_anchor, observer_with_audit, 1)
+        phase_anchor = """            ledger.Phase = \"CLOSED\";
+        }
+    }
+
+    private static void FailFastIfCloseTruthBroken("""
+        phase_audit = """            ledger.Phase = \"CLOSED\";
+            EmitLeaseAudit(ledger, \"phase\", 0, \"FINAL_PHASE\");
+        }
+    }
+
+    private static void FailFastIfCloseTruthBroken("""
+        assert initializer.count(phase_anchor) == 1
+        initializer = initializer.replace(phase_anchor, phase_audit, 1)
+        if scenario in {
+            "V4_CLOSE_RAW_TRUTH_BROKEN",
+            "V4_CLOSE_MANAGED_TRUTH_BROKEN",
+        }:
+            fail_fast_anchor = """        if (ledger.CloseTruthBroken)
+        {
+            Environment.FailFast(CloseTruthFailure);
+        }"""
+            fail_fast_audit = """        if (ledger.CloseTruthBroken)
+        {
+            EmitLeaseAudit(
+                ledger,
+                \"fail-fast\",
+                0,
+                CloseTruthFailure);
+            Environment.FailFast(CloseTruthFailure);
+        }"""
+            assert initializer.count(fail_fast_anchor) == 1
+            initializer = initializer.replace(
+                fail_fast_anchor,
+                fail_fast_audit,
+                1,
+            )
+            adapter_anchor = "    private readonly NativeResourceLedger ledger;"
+            adapter_helpers = r'''    public static string TestFailureTarget;
+    public static int TestAdapterCalls;
+
+    private static bool CloseRawWithTestAdapter(
+        string resourceId,
+        IntPtr handle)
+    {
+        if (String.Equals(
+                resourceId,
+                TestFailureTarget,
+                StringComparison.Ordinal))
+        {
+            TestAdapterCalls += 1;
+            return false;
+        }
+        return CloseHandle(handle);
+    }
+
+    private static void DisposeWithTestAdapter(
+        string resourceId,
+        IDisposable reference)
+    {
+        if (String.Equals(
+                resourceId,
+                TestFailureTarget,
+                StringComparison.Ordinal))
+        {
+            TestAdapterCalls += 1;
+            throw new InvalidOperationException(
+                "Injected managed close failure.");
+        }
+        reference.Dispose();
+    }
+
+    private readonly NativeResourceLedger ledger;'''
+            assert initializer.count(adapter_anchor) == 1
+            initializer = initializer.replace(
+                adapter_anchor,
+                adapter_helpers,
+                1,
+            )
+            audit_tail = """            ownedLedger.ExitFileTime.ToString(CultureInfo.InvariantCulture)
+        });"""
+            audit_adapter_tail = """            ownedLedger.ExitFileTime.ToString(CultureInfo.InvariantCulture),
+            TestAdapterCalls.ToString(CultureInfo.InvariantCulture)
+        });"""
+            assert initializer.count(audit_tail) == 1
+            initializer = initializer.replace(
+                audit_tail,
+                audit_adapter_tail,
+                1,
+            )
+            if scenario == "V4_CLOSE_RAW_TRUTH_BROKEN":
+                raw_close = "closed = CloseHandle(lease.Value);"
+                assert initializer.count(raw_close) == 1
+                initializer = initializer.replace(
+                    raw_close,
+                    "closed = CloseRawWithTestAdapter("
+                    "lease.ResourceId, lease.Value);",
+                    1,
+                )
+            else:
+                managed_close = "lease.Reference.Dispose();"
+                assert initializer.count(managed_close) == 1
+                initializer = initializer.replace(
+                    managed_close,
+                    "DisposeWithTestAdapter("
+                    "lease.ResourceId, lease.Reference);",
+                    1,
+                )
+    if scenario == "PRE_READY_FAILURE_OBSERVATION_LEGACY":
+        replacements = (
+            (
+                "    private string phase;",
+                """    private string phase;
+    public static string AuditPath;
+    private static int auditPid;
+    private static long auditCreation;
+    private static long auditExit;
+    private static void EmitAudit(
+        string stage,
+        int observedPid,
+        long observedCreation,
+        long observedExit,
+        bool streamsClosed,
+        bool processClosed)
+    {
+        if (observedPid > 0) auditPid = observedPid;
+        if (observedCreation > 0) auditCreation = observedCreation;
+        if (observedExit > 0) auditExit = observedExit;
+        if (!String.IsNullOrWhiteSpace(AuditPath))
+        {
+            try
+            {
+                File.AppendAllText(
+                    AuditPath,
+                    stage + "|" +
+                    auditPid.ToString(CultureInfo.InvariantCulture) + "|" +
+                    (auditCreation > 0 ? FormatFileTime(auditCreation) : "") + "|" +
+                    (auditExit > 0 ? FormatFileTime(auditExit) : "") + "|" +
+                    streamsClosed.ToString() + "|" +
+                    processClosed.ToString() + Environment.NewLine,
+                    Encoding.UTF8);
+            }
+            catch { }
+        }
+    }""",
+            ),
+            (
+                "            exactPid = checked((int)processInformation.dwProcessId);",
+                """            exactPid = checked((int)processInformation.dwProcessId);
+            EmitAudit(
+                \"AFTER_CREATE_PROCESS\",
+                exactPid,
+                0,
+                0,
+                false,
+                false);""",
+            ),
+            (
+                "            exactCreation = ReadExactCreationFileTime(rawProcessHandle, exactPid);",
+                """            exactCreation = ReadExactCreationFileTime(rawProcessHandle, exactPid);
+            EmitAudit(
+                \"AFTER_IDENTITY_BIND\",
+                exactPid,
+                exactCreation,
+                0,
+                false,
+                false);""",
+            ),
+            (
+                """                if (actualPid == checked((uint)boundPid) &&
+                    GetProcessTimes(
+                        process,
+                        out creation,
+                        out exit,
+                        out kernel,
+                        out user) &&
+                    creation == boundCreation &&
+                    exit >= creation &&
+                    exit > 0 &&
+                    wait == WaitObject0)
+                {
+                    break;
+                }""",
+                """                if (actualPid == checked((uint)boundPid) &&
+                    GetProcessTimes(
+                        process,
+                        out creation,
+                        out exit,
+                        out kernel,
+                        out user) &&
+                    creation == boundCreation &&
+                    exit >= creation &&
+                    exit > 0 &&
+                    wait == WaitObject0)
+                {
+                    EmitAudit(
+                        \"EXIT_PROVEN\",
+                        boundPid,
+                        boundCreation,
+                        exit,
+                        false,
+                        false);
+                    break;
+                }""",
+            ),
+            (
+                "        DisposeQuietly(activeStderrHandle);",
+                """        DisposeQuietly(activeStderrHandle);
+        EmitAudit(
+            \"STREAMS_CLOSED\",
+            boundPid,
+            boundCreation,
+            auditExit,
+            true,
+            false);""",
+            ),
+            (
+                """                else
+                {
+                    TryCloseRawHandle(ref rawProcessHandle);
+                }
+            }""",
+                """                else
+                {
+                    TryCloseRawHandle(ref rawProcessHandle);
+                }
+                EmitAudit(
+                    \"PROCESS_HANDLE_CLOSED\",
+                    exactPid,
+                    exactCreation,
+                    auditExit,
+                    true,
+                    true);
+            }""",
+            ),
+        )
+        for old, new in replacements:
+            count = initializer.count(old)
+            instrumentation_counts[old.splitlines()[0].strip()] = count
+            assert count == 1
+            initializer = initializer.replace(old, new, 1)
+
+        old_name = "function Invoke-SourceJavaNativeExecutableProbe {"
+        assert native_runner.count(old_name) == 1
+        native_runner = native_runner.replace(
+            old_name,
+            "function Invoke-SourceJavaNativeExecutableProbeWithStageFailure {",
+            1,
+        )
+        old_param = (
+            "        [Parameter(Mandatory = $true)]"
+            "[int]$TimeoutMilliseconds\n    )"
+        )
+        new_param = (
+            "        [Parameter(Mandatory = $true)]"
+            "[int]$TimeoutMilliseconds,\n"
+            "        [Parameter(Mandatory = $true)]"
+            "[scriptblock]$StageFailureProvider\n    )"
+        )
+        assert native_runner.count(old_param) == 1
+        native_runner = native_runner.replace(old_param, new_param, 1)
+        old_start = """            [SourceJavaProbeNativeStartAuthority]::Start(
+                $ExecutablePath,
+                $Arguments)"""
+        new_start = """            [SourceJavaProbeNativeStartAuthority]::Start(
+                $ExecutablePath,
+                $Arguments,
+                [Func[string, bool]]$StageFailureProvider)"""
+        assert native_runner.count(old_start) == 1
+        native_runner = native_runner.replace(old_start, new_start, 1)
+
+    function_file = tmp_path / f"v4-native-functions-{scenario}.ps1"
+    harness_file = tmp_path / f"invoke-v4-native-{scenario}.ps1"
+    result_file = tmp_path / f"v4-native-result-{scenario}.json"
+    fixture_file = tmp_path / "native-probe-fixture.exe"
+    functions = [definitions[name] for name in required[:3]]
+    functions.extend((initializer, native_runner, wrapper))
+    function_file.write_text("\n\n".join(functions), encoding="utf-8")
+    harness_file.write_text(
+        r'''
+param(
+    [Parameter(Mandatory = $true)][string]$FunctionFile,
+    [Parameter(Mandatory = $true)][string]$ResultFile,
+    [Parameter(Mandatory = $true)][string]$FixtureFile,
+    [Parameter(Mandatory = $true)][string]$Scenario
+)
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$fixtureSource = @'
+using System;
+using System.Threading;
+public static class NativeProbeFixture
+{
+    public static int Main(string[] args)
+    {
+        string mode = Environment.GetEnvironmentVariable("CODEX_NATIVE_MODE");
+        if (String.Equals(mode, "LARGE", StringComparison.Ordinal))
+        {
+            int length = Int32.Parse(
+                Environment.GetEnvironmentVariable("CODEX_NATIVE_LENGTH"));
+            Console.Out.Write(new String('O', length));
+            Console.Error.Write(new String('E', length));
+            return 0;
+        }
+        if (String.Equals(mode, "HOLD", StringComparison.Ordinal))
+        {
+            string eventName = Environment.GetEnvironmentVariable(
+                "CODEX_NATIVE_EVENT");
+            using (EventWaitHandle handle = EventWaitHandle.OpenExisting(eventName))
+            {
+                handle.WaitOne();
+            }
+            return 0;
+        }
+        Console.Out.Write("native-out");
+        Console.Error.Write("native-err");
+        return 7;
+    }
+}
+'@
+Add-Type `
+    -TypeDefinition $fixtureSource `
+    -OutputAssembly $FixtureFile `
+    -OutputType ConsoleApplication
+. $FunctionFile
+
+function Get-TextSha256 {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+    $digest = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+    return ([BitConverter]::ToString($digest)).Replace("-", "").ToLowerInvariant()
+}
+
+$output = [ordered]@{
+    scenario = $Scenario
+    error = $null
+    schema_version = $null
+    exit_code = $null
+    stdout = $null
+    stderr = $null
+    stdout_length = 0
+    stderr_length = 0
+    stdout_sha256 = $null
+    stderr_sha256 = $null
+    first = $null
+    second = $null
+    audit = @()
+    factory_calls = 0
+    start_calls = 0
+    elapsed_ms = 0
+    close_target = $null
+    final_phase = $null
+    close_count_before_noop = 0
+    close_count_after_noop = 0
+    error_chain = @()
+}
+$stopwatch = [Diagnostics.Stopwatch]::StartNew()
+try {
+    if ($Scenario.StartsWith("V4_CLOSE_", [StringComparison]::Ordinal)) {
+        Initialize-SourceJavaProbeNativeStartAuthority
+        $auditPath = $ResultFile + ".audit"
+        [SourceJavaProbeNativeStartAuthority]::AuditPath = $auditPath
+        $target = switch ($Scenario) {
+            "V4_CLOSE_RAW_STDOUT_WRITE" { "stdout-write" }
+            "V4_CLOSE_RAW_THREAD" { "thread" }
+            "V4_CLOSE_RAW_STDOUT_READ" { "stdout-read" }
+            "V4_CLOSE_RAW_PROCESS" { "process" }
+            "V4_CLOSE_MANAGED_READER" { "stdout-reader" }
+            "V4_CLOSE_MANAGED_STREAM" { "stdout-stream" }
+            "V4_CLOSE_MANAGED_WRAPPER" { "stdout-wrapper" }
+            "V4_CLOSE_PRE_CREATE_FAILURE" { "stdout-write" }
+            "V4_CLOSE_POST_CREATE_FAILURE" { "thread" }
+            "V4_CLOSE_RAW_TRUTH_BROKEN" { "stdout-read" }
+            "V4_CLOSE_MANAGED_TRUTH_BROKEN" { "stdout-reader" }
+            default { throw "unknown V4 close scenario" }
+        }
+        $truthBroken = $Scenario -eq "V4_CLOSE_RAW_TRUTH_BROKEN" -or
+            $Scenario -eq "V4_CLOSE_MANAGED_TRUTH_BROKEN"
+        $failureCount = if ($truthBroken) { 0 }
+        elseif ($target.StartsWith("stdout-", [StringComparison]::Ordinal) -and
+            ($target -eq "stdout-reader" -or $target -eq "stdout-stream" -or
+                $target -eq "stdout-wrapper")) { 1 } else { 2 }
+        $output.close_target = $target
+        if ($truthBroken) {
+            [SourceJavaProbeNativeStartAuthority]::TestFailureTarget = $target
+        }
+        $directive = [Func[string, int, SourceJavaProbeCloseDirective]]{
+            param($ResourceId, $Attempt)
+            if ([string]$ResourceId -ceq $target -and [int]$Attempt -le $failureCount) {
+                return [SourceJavaProbeCloseDirective]::FAILED_RETAINED
+            }
+            return [SourceJavaProbeCloseDirective]::PROCEED_REAL
+        }
+        $observer = [Action[string, int]]{ param($ResourceId, $Attempt) }
+        $stage = [Func[string, bool]]{
+            param($Stage)
+            return $Scenario -eq "V4_CLOSE_POST_CREATE_FAILURE" -and
+                [string]$Stage -ceq "AFTER_CREATE_PROCESS"
+        }
+        $application = if ($Scenario -eq "V4_CLOSE_PRE_CREATE_FAILURE") {
+            $FixtureFile + ".missing"
+        }
+        else { $FixtureFile }
+        try {
+            $authority = [SourceJavaProbeNativeStartAuthority]::Start(
+                $application,
+                [string[]]@("-XshowSettings:properties", "-version"),
+                $stage,
+                $directive,
+                $observer)
+            $authority.WaitForExitUnbounded()
+            $terminal = $authority.GetState()
+            $output.exit_code = $authority.GetExitCode()
+            $nativeOutput = $authority.ConsumeOutput()
+            $output.stdout = $nativeOutput.Stdout
+            $output.stderr = $nativeOutput.Stderr
+            $authority.Complete()
+            $output.final_phase = $authority.Phase
+            $output.close_count_before_noop = [IO.File]::ReadAllLines($auditPath).Count
+            $authority.Complete()
+            $output.close_count_after_noop = [IO.File]::ReadAllLines($auditPath).Count
+        }
+        catch {
+            $cursor = $_.Exception
+            $messages = @()
+            while ($null -ne $cursor) {
+                $messages += [string]$cursor.Message
+                $cursor = $cursor.InnerException
+            }
+            $output.error_chain = @($messages)
+            $output.error = if ($messages -contains
+                "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED") {
+                "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED"
+            }
+            else { [string]$messages[0] }
+        }
+        if ([IO.File]::Exists($auditPath)) {
+            $output.audit = @(
+                foreach ($line in [IO.File]::ReadAllLines($auditPath)) {
+                    $parts = $line.Split('|')
+                    [pscustomobject]@{
+                        moment = $parts[0]
+                        resource = $parts[1]
+                        attempt = [int]$parts[2]
+                        phase = $parts[3]
+                        raw_value = [long]$parts[4]
+                        raw_state = $parts[5]
+                        close_attempts = [int]$parts[6]
+                        injected_failures = [int]$parts[7]
+                        real_close_attempted = [bool]::Parse($parts[8])
+                        last_error = [int]$parts[9]
+                        reference_present = [bool]::Parse($parts[10])
+                        same_reference = [bool]::Parse($parts[11])
+                        managed_state = $parts[12]
+                        dispose_attempts = [int]$parts[13]
+                        managed_failures = [int]$parts[14]
+                        real_dispose_attempted = [bool]::Parse($parts[15])
+                        startup_complete = [bool]::Parse($parts[16])
+                        output_complete = [bool]::Parse($parts[17])
+                        all_complete = [bool]::Parse($parts[18])
+                        exit_proven = [bool]::Parse($parts[19])
+                        pid = [int]$parts[20]
+                        creation_file_time = [long]$parts[21]
+                        exit_file_time = [long]$parts[22]
+                        adapter_calls = if ($parts.Count -gt 23) {
+                            [int]$parts[23]
+                        }
+                        else { 0 }
+                    }
+                })
+        }
+    }
+    elseif ($Scenario -eq "NORMAL" -or $Scenario -eq "LARGE") {
+        $env:CODEX_NATIVE_MODE = $Scenario
+        if ($Scenario -eq "LARGE") {
+            $env:CODEX_NATIVE_LENGTH = "524288"
+        }
+        $result = Invoke-SourceJavaExecutableProbe `
+            -ExecutablePath $FixtureFile `
+            -Arguments @("-XshowSettings:properties", "-version") `
+            -TimeoutMilliseconds 10000
+        $output.schema_version = $result.schema_version
+        $output.exit_code = $result.exit_code
+        $output.stdout = if ($Scenario -eq "NORMAL") { $result.stdout } else { $null }
+        $output.stderr = if ($Scenario -eq "NORMAL") { $result.stderr } else { $null }
+        $output.stdout_length = $result.stdout.Length
+        $output.stderr_length = $result.stderr.Length
+        $output.stdout_sha256 = Get-TextSha256 -Text $result.stdout
+        $output.stderr_sha256 = Get-TextSha256 -Text $result.stderr
+    }
+    elseif ($Scenario -eq "REPEAT") {
+        Initialize-SourceJavaProbeNativeStartAuthority
+        $env:CODEX_NATIVE_MODE = "NORMAL"
+        $records = @()
+        foreach ($attempt in 1..2) {
+            $authority = [SourceJavaProbeNativeStartAuthority]::Start(
+                $FixtureFile,
+                [string[]]@("-XshowSettings:properties", "-version"))
+            $readyPhase = $authority.Phase
+            $processId = $authority.Pid
+            $creation = $authority.CreationDate
+            $authority.WaitForExitUnbounded()
+            $state = $authority.GetState()
+            $exitCode = $authority.GetExitCode()
+            $result = $authority.ConsumeOutput()
+            $authority.Complete()
+            $authority.Complete()
+            $records += [pscustomobject]@{
+                attempt = $attempt
+                ready_phase = $readyPhase
+                pid = $processId
+                creation_date = $creation
+                terminal_pid = $state.Pid
+                terminal_creation_date = $state.CreationDate
+                exit_date = $state.ExitDate
+                is_exited = $state.IsExited
+                exit_code = $exitCode
+                stdout = $result.Stdout
+                stderr = $result.Stderr
+                final_phase = $authority.Phase
+            }
+        }
+        $output.first = $records[0]
+        $output.second = $records[1]
+    }
+    elseif ($Scenario -eq "PRE_READY_FAILURE") {
+        Initialize-SourceJavaProbeNativeStartAuthority
+        $eventName = "CodexNativeFailure_" + [Guid]::NewGuid().ToString("N")
+        $holdEvent = [Threading.EventWaitHandle]::new(
+            $false,
+            [Threading.EventResetMode]::ManualReset,
+            $eventName)
+        $env:CODEX_NATIVE_MODE = "HOLD"
+        $env:CODEX_NATIVE_EVENT = $eventName
+        try {
+            [SourceJavaProbeNativeStartAuthority]::Start(
+                $FixtureFile,
+                [string[]]@("-XshowSettings:properties", "-version"),
+                [Func[string, bool]]{
+                    param($Stage)
+                    return [string]$Stage -ceq "BEFORE_READY_RETURN"
+                }) | Out-Null
+        }
+        catch {
+            $cursor = $_.Exception
+            $messages = @()
+            while ($null -ne $cursor) {
+                $messages += [string]$cursor.Message
+                $cursor = $cursor.InnerException
+            }
+            $output.error_chain = @($messages)
+            $output.error = if ($messages -contains
+                "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED") {
+                "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED"
+            }
+            else { [string]$messages[0] }
+        }
+        finally {
+            $holdEvent.Dispose()
+        }
+        $output.audit = @()
+    }
+    elseif ($Scenario -eq "INCOMPLETE_INJECTION") {
+        $factoryCalls = 0
+        $startCalls = 0
+        try {
+            Invoke-SourceJavaExecutableProbe `
+                -ExecutablePath $FixtureFile `
+                -Arguments @("-XshowSettings:properties", "-version") `
+                -TimeoutMilliseconds 10000 `
+                -ProcessFactory {
+                    param($Ignored)
+                    $factoryCalls += 1
+                    return [pscustomobject]@{}
+                } | Out-Null
+        }
+        catch {
+            $output.error = $_.Exception.Message
+        }
+        $output.factory_calls = $factoryCalls
+        $output.start_calls = $startCalls
+    }
+}
+catch {
+    $output.error = $_.Exception.Message
+}
+finally {
+    $stopwatch.Stop()
+    $output.elapsed_ms = [long]$stopwatch.ElapsedMilliseconds
+    Remove-Item Env:CODEX_NATIVE_MODE -ErrorAction SilentlyContinue
+    Remove-Item Env:CODEX_NATIVE_LENGTH -ErrorAction SilentlyContinue
+    Remove-Item Env:CODEX_NATIVE_EVENT -ErrorAction SilentlyContinue
+}
+[IO.File]::WriteAllText(
+    $ResultFile,
+    ([pscustomobject]$output | ConvertTo-Json -Depth 20 -Compress),
+    [Text.UTF8Encoding]::new($false))
+'''.strip(),
+        encoding="utf-8",
+    )
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(harness_file),
+        "-FunctionFile",
+        str(function_file),
+        "-ResultFile",
+        str(result_file),
+        "-FixtureFile",
+        str(fixture_file),
+        "-Scenario",
+        scenario,
+    ]
+    harness = subprocess.Popen(
+        command,
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        stdout, stderr = harness.communicate(timeout=30)
+    except subprocess.TimeoutExpired as timeout:
+        subprocess.run(
+            ["taskkill.exe", "/PID", str(harness.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        harness.communicate(timeout=10)
+        raise AssertionError(
+            f"isolated V4 native harness stalled in {scenario}"
+        ) from timeout
+    if scenario in {
+        "V4_CLOSE_RAW_TRUTH_BROKEN",
+        "V4_CLOSE_MANAGED_TRUTH_BROKEN",
+    }:
+        audit_file = Path(str(result_file) + ".audit")
+        assert harness.returncode != 0
+        assert audit_file.is_file(), stderr or stdout
+        audit: list[dict[str, Any]] = []
+        for line in audit_file.read_text(encoding="utf-8-sig").splitlines():
+            parts = line.split("|")
+            audit.append(
+                {
+                    "moment": parts[0],
+                    "resource": parts[1],
+                    "attempt": int(parts[2]),
+                    "phase": parts[3],
+                    "raw_value": int(parts[4]),
+                    "raw_state": parts[5],
+                    "close_attempts": int(parts[6]),
+                    "injected_failures": int(parts[7]),
+                    "real_close_attempted": parts[8] == "True",
+                    "last_error": int(parts[9]),
+                    "reference_present": parts[10] == "True",
+                    "same_reference": parts[11] == "True",
+                    "managed_state": parts[12],
+                    "dispose_attempts": int(parts[13]),
+                    "managed_failures": int(parts[14]),
+                    "real_dispose_attempted": parts[15] == "True",
+                    "startup_complete": parts[16] == "True",
+                    "output_complete": parts[17] == "True",
+                    "all_complete": parts[18] == "True",
+                    "exit_proven": parts[19] == "True",
+                    "pid": int(parts[20]),
+                    "creation_file_time": int(parts[21]),
+                    "exit_file_time": int(parts[22]),
+                    "adapter_calls": int(parts[23]),
+                }
+            )
+        return {
+            "host_returncode": harness.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "audit": audit,
+            "result_file_exists": result_file.exists(),
+        }
+    assert harness.returncode == 0, stderr or stdout
+    assert result_file.is_file(), stdout
+    result = json.loads(result_file.read_text(encoding="utf-8-sig"))
+    result["instrumentation_counts"] = instrumentation_counts
+    return result
+
+
+def _run_local_docker_hang_old_red_harness(tmp_path: Path) -> dict[str, Any]:
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    source = LAUNCHER.read_text(encoding="utf-8-sig")
+    function_start = source.index("function Invoke-LocalDocker {")
+    function_end = source.index(
+        "\nfunction Assert-LocalDockerCommandSucceeded {",
+        function_start,
+    )
+    local_docker_function = source[function_start:function_end].rstrip()
+    function_file = tmp_path / "local-docker-function.ps1"
+    harness_file = tmp_path / "invoke-local-docker-hang.ps1"
+    result_file = tmp_path / "local-docker-result.json"
+    ready_file = tmp_path / "fake-docker-ready.txt"
+    fake_docker = tmp_path / "docker.exe"
+    function_file.write_text(local_docker_function, encoding="utf-8")
+    harness_file.write_text(
+        r'''
+param(
+    [Parameter(Mandatory = $true)][string]$FunctionFile,
+    [Parameter(Mandatory = $true)][string]$ResultFile,
+    [Parameter(Mandatory = $true)][string]$ReadyFile,
+    [Parameter(Mandatory = $true)][string]$FakeDocker
+)
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$fixtureSource = @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Text;
+using System.Threading;
+
+public static class FakeDocker
+{
+    public static int Main(string[] args)
+    {
+        string readyPath = Environment.GetEnvironmentVariable(
+            "CODEX_ISSUE0021_READY");
+        string eventName = Environment.GetEnvironmentVariable(
+            "CODEX_ISSUE0021_EVENT");
+        string observedOtel = Environment.GetEnvironmentVariable(
+            "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT");
+        int pid;
+        using (Process current = Process.GetCurrentProcess())
+        {
+            pid = current.Id;
+        }
+        File.WriteAllText(
+            readyPath,
+            pid.ToString() + "|" +
+                (observedOtel == null ? "<NULL>" : observedOtel),
+            new UTF8Encoding(false));
+        Console.Out.WriteLine("fake-docker-ready");
+        Console.Error.WriteLine("fake-docker-blocked");
+        using (EventWaitHandle blocker = EventWaitHandle.OpenExisting(eventName))
+        {
+            blocker.WaitOne();
+        }
+        return 0;
+    }
+}
+'@
+Add-Type `
+    -TypeDefinition $fixtureSource `
+    -OutputAssembly $FakeDocker `
+    -OutputType ConsoleApplication
+. $FunctionFile
+
+$eventName = "CodexIssue0021_" + [Guid]::NewGuid().ToString("N")
+$blocker = [Threading.EventWaitHandle]::new(
+    $false,
+    [Threading.EventResetMode]::ManualReset,
+    $eventName)
+$savedPath = [Environment]::GetEnvironmentVariable("PATH", "Process")
+$savedOtel = "PT1S"
+[Environment]::SetEnvironmentVariable(
+    "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+    $savedOtel,
+    "Process")
+[Environment]::SetEnvironmentVariable(
+    "CODEX_ISSUE0021_READY",
+    $ReadyFile,
+    "Process")
+[Environment]::SetEnvironmentVariable(
+    "CODEX_ISSUE0021_EVENT",
+    $eventName,
+    "Process")
+[Environment]::SetEnvironmentVariable(
+    "PATH",
+    ([IO.Path]::GetDirectoryName($FakeDocker) + ";" + $savedPath),
+    "Process")
+$script:LocalDockerExitCode = 0
+$output = [ordered]@{
+    completed_by_production = $false
+    canonical_error = $null
+    error_chain = @()
+    local_docker_exit_code = $null
+    environment_restored = $false
+    output_lines = @()
+}
+try {
+    $output.output_lines = @(
+        Invoke-LocalDocker `
+            -CommandTimeoutMilliseconds 300 `
+            HANG)
+    $output.completed_by_production = $true
+}
+catch {
+    $output.completed_by_production = $true
+    $output.canonical_error = $_.Exception.Message
+    $cursor = $_.Exception
+    while ($null -ne $cursor) {
+        $output.error_chain += [pscustomobject]@{
+            type = $cursor.GetType().FullName
+            message = [string]$cursor.Message
+            stack_trace = [string]$cursor.StackTrace
+            native_error_code = if ($cursor -is [ComponentModel.Win32Exception]) {
+                [int]$cursor.NativeErrorCode
+            }
+            else { $null }
+        }
+        $cursor = $cursor.InnerException
+    }
+}
+finally {
+    $output.local_docker_exit_code = $script:LocalDockerExitCode
+    $output.environment_restored =
+        [Environment]::GetEnvironmentVariable(
+            "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+            "Process") -ceq $savedOtel
+    [Environment]::SetEnvironmentVariable("PATH", $savedPath, "Process")
+    [Environment]::SetEnvironmentVariable(
+        "CODEX_ISSUE0021_READY", $null, "Process")
+    [Environment]::SetEnvironmentVariable(
+        "CODEX_ISSUE0021_EVENT", $null, "Process")
+    $blocker.Dispose()
+}
+[IO.File]::WriteAllText(
+    $ResultFile,
+    ([pscustomobject]$output | ConvertTo-Json -Depth 10 -Compress),
+    [Text.UTF8Encoding]::new($false))
+'''.strip(),
+        encoding="utf-8",
+    )
+
+    harness = subprocess.Popen(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness_file),
+            "-FunctionFile",
+            str(function_file),
+            "-ResultFile",
+            str(result_file),
+            "-ReadyFile",
+            str(ready_file),
+            "-FakeDocker",
+            str(fake_docker),
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    ready_deadline = time.monotonic() + 20
+    while not ready_file.is_file() and harness.poll() is None:
+        if time.monotonic() >= ready_deadline:
+            break
+        time.sleep(0.02)
+    if not ready_file.is_file():
+        early_stdout, early_stderr = harness.communicate(timeout=10)
+        early_result = (
+            json.loads(result_file.read_text(encoding="utf-8-sig"))
+            if result_file.is_file()
+            else None
+        )
+        raise AssertionError(
+            "fake docker did not publish readiness: "
+            f"returncode={harness.returncode}, result={early_result}, "
+            f"stdout={early_stdout!r}, stderr={early_stderr!r}"
+        )
+    ready_parts = ready_file.read_text(encoding="utf-8-sig").split("|")
+    assert len(ready_parts) == 2
+    fake_pid = int(ready_parts[0])
+    assert fake_pid > 0 and fake_pid != harness.pid
+
+    class FileTime(ctypes.Structure):
+        _fields_ = (("low", wintypes.DWORD), ("high", wintypes.DWORD))
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetProcessTimes.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+    )
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    synchronize = 0x00100000
+    query_limited_information = 0x00001000
+    witness = kernel32.OpenProcess(
+        synchronize | query_limited_information,
+        False,
+        fake_pid,
+    )
+    assert witness
+    creation = FileTime()
+    pre_exit = FileTime()
+    kernel = FileTime()
+    user = FileTime()
+    assert kernel32.GetProcessTimes(
+        witness,
+        ctypes.byref(creation),
+        ctypes.byref(pre_exit),
+        ctypes.byref(kernel),
+        ctypes.byref(user),
+    )
+    creation_ticks = (creation.high << 32) | creation.low
+    assert creation_ticks > 0
+
+    emergency_cleanup_used = False
+    stdout = ""
+    stderr = ""
+    try:
+        stdout, stderr = harness.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        emergency_cleanup_used = True
+        cleanup = subprocess.run(
+            ["taskkill.exe", "/PID", str(harness.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert cleanup.returncode == 0, cleanup.stderr or cleanup.stdout
+        stdout, stderr = harness.communicate(timeout=10)
+
+    wait_result = kernel32.WaitForSingleObject(witness, 5000)
+    assert wait_result == 0
+    creation_after = FileTime()
+    exit_after = FileTime()
+    kernel_after = FileTime()
+    user_after = FileTime()
+    assert kernel32.GetProcessTimes(
+        witness,
+        ctypes.byref(creation_after),
+        ctypes.byref(exit_after),
+        ctypes.byref(kernel_after),
+        ctypes.byref(user_after),
+    )
+    creation_after_ticks = (creation_after.high << 32) | creation_after.low
+    exit_ticks = (exit_after.high << 32) | exit_after.low
+    exit_code = wintypes.DWORD()
+    assert kernel32.GetExitCodeProcess(witness, ctypes.byref(exit_code))
+    assert kernel32.CloseHandle(witness)
+    assert creation_after_ticks == creation_ticks
+    assert exit_ticks >= creation_ticks
+    assert exit_code.value != 259
+    assert harness.poll() is not None
+
+    production_result = (
+        json.loads(result_file.read_text(encoding="utf-8-sig"))
+        if result_file.is_file()
+        else None
+    )
+    return {
+        "completed_by_production": production_result is not None
+        and production_result["completed_by_production"] is True,
+        "canonical_error": None
+        if production_result is None
+        else production_result["canonical_error"],
+        "local_docker_exit_code": None
+        if production_result is None
+        else production_result["local_docker_exit_code"],
+        "environment_restored": None
+        if production_result is None
+        else production_result["environment_restored"],
+        "result_file_exists": result_file.is_file(),
+        "emergency_cleanup_used": emergency_cleanup_used,
+        "harness_pid": harness.pid,
+        "harness_returncode": harness.returncode,
+        "fake_pid": fake_pid,
+        "fake_observed_otel": ready_parts[1],
+        "fake_creation_file_time": creation_ticks,
+        "fake_exit_file_time": exit_ticks,
+        "fake_exit_code": exit_code.value,
+        "fake_exact_exit_proven": True,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def test_local_docker_permanent_hang_times_out_and_proves_exact_cleanup(
+    tmp_path: Path,
+) -> None:
+    result = _run_local_docker_hang_old_red_harness(tmp_path)
+
+    assert result["emergency_cleanup_used"] is False, result
+    assert result["completed_by_production"] is True
+    assert result["canonical_error"] == "LOCAL_DOCKER_COMMAND_TIMEOUT"
+    assert result["local_docker_exit_code"] == 124
+    assert result["environment_restored"] is True
+    assert result["result_file_exists"] is True
+    assert result["fake_observed_otel"] == "<NULL>"
+    assert result["fake_exact_exit_proven"] is True
+    assert result["fake_creation_file_time"] > 0
+    assert result["fake_exit_file_time"] >= result["fake_creation_file_time"]
+    assert result["harness_returncode"] == 0
+
+
+def _run_local_docker_runtime_contract_harness(tmp_path: Path) -> dict[str, Any]:
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    source = LAUNCHER.read_text(encoding="utf-8-sig")
+    function_start = source.index("function Invoke-LocalDocker {")
+    function_end = source.index(
+        "\nfunction Assert-LocalDockerCommandSucceeded {",
+        function_start,
+    )
+    function_file = tmp_path / "local-docker-runtime-function.ps1"
+    harness_file = tmp_path / "invoke-local-docker-runtime.ps1"
+    result_file = tmp_path / "local-docker-runtime-result.json"
+    fake_docker = tmp_path / "docker.exe"
+    function_file.write_text(
+        source[function_start:function_end].rstrip(),
+        encoding="utf-8",
+    )
+    harness_file.write_text(
+        r'''
+param(
+    [Parameter(Mandatory = $true)][string]$FunctionFile,
+    [Parameter(Mandatory = $true)][string]$ResultFile,
+    [Parameter(Mandatory = $true)][string]$FakeDocker
+)
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$fixtureSource = @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Text;
+using System.Threading;
+
+public static class FakeDockerRuntime
+{
+    private static string RequiredEnvironment(string name)
+    {
+        string value = Environment.GetEnvironmentVariable(name);
+        if (String.IsNullOrEmpty(value)) throw new InvalidOperationException(name);
+        return value;
+    }
+
+    private static void Append(string path, string value)
+    {
+        File.AppendAllText(path, value + Environment.NewLine, new UTF8Encoding(false));
+    }
+
+    private static Process StartSelf(string mode)
+    {
+        string executable;
+        using (Process current = Process.GetCurrentProcess())
+        {
+            executable = current.MainModule.FileName;
+        }
+        ProcessStartInfo info = new ProcessStartInfo();
+        info.FileName = executable;
+        info.Arguments = mode;
+        info.UseShellExecute = false;
+        info.CreateNoWindow = true;
+        Process child = new Process();
+        child.StartInfo = info;
+        if (!child.Start()) throw new InvalidOperationException("child-start");
+        return child;
+    }
+
+    private static void AuditEnvironment(string mode, string[] args)
+    {
+        string path = RequiredEnvironment("CODEX_ISSUE0021_AUDIT");
+        string otel = Environment.GetEnvironmentVariable(
+            "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT");
+        string sentinel = Environment.GetEnvironmentVariable(
+            "CODEX_ISSUE0021_SENTINEL");
+        int pid;
+        long startTicks;
+        using (Process current = Process.GetCurrentProcess())
+        {
+            pid = current.Id;
+            startTicks = current.StartTime.ToUniversalTime().Ticks;
+        }
+        Append(path, mode + "|" + pid.ToString() + "|" +
+            startTicks.ToString() + "|" +
+            (otel == null ? "<NULL>" : otel) + "|" + sentinel);
+        if (String.Equals(mode, "ARGV", StringComparison.Ordinal))
+        {
+            string argvPath = RequiredEnvironment("CODEX_ISSUE0021_ARGV");
+            foreach (string argument in args)
+            {
+                Append(argvPath, Convert.ToBase64String(
+                    Encoding.UTF8.GetBytes(argument)));
+            }
+        }
+    }
+
+    public static int Main(string[] args)
+    {
+        string mode = args.Length == 0 ? "NORMAL" : args[0];
+        AuditEnvironment(mode, args);
+        if (String.Equals(mode, "NORMAL", StringComparison.Ordinal))
+        {
+            Console.Out.WriteLine("normal-out");
+            return 0;
+        }
+        if (String.Equals(mode, "NONZERO", StringComparison.Ordinal))
+        {
+            Console.Out.WriteLine("nonzero-out");
+            Console.Error.WriteLine("nonzero-err");
+            return 17;
+        }
+        if (String.Equals(mode, "ULTRA_FAST", StringComparison.Ordinal))
+        {
+            return 3;
+        }
+        if (String.Equals(mode, "PIPE_ZERO", StringComparison.Ordinal)) return 0;
+        if (String.Equals(mode, "PIPE_ONE", StringComparison.Ordinal))
+        {
+            Console.Out.Write("one");
+            return 0;
+        }
+        if (String.Equals(mode, "PIPE_MULTI", StringComparison.Ordinal))
+        {
+            Console.Out.Write("first\nsecond\n");
+            Console.Error.Write("err-first\nerr-second\n");
+            return 0;
+        }
+        if (String.Equals(mode, "LARGE", StringComparison.Ordinal))
+        {
+            const int length = 1100000;
+            Console.Out.Write(new String('O', length));
+            Console.Error.Write(new String('E', length));
+            return 0;
+        }
+        if (String.Equals(mode, "ARGV", StringComparison.Ordinal)) return 0;
+        if (String.Equals(mode, "DESCENDANT_NORMAL", StringComparison.Ordinal))
+        {
+            using (Process holder = StartSelf("HOLDER")) { }
+            using (Process signaler = StartSelf("SIGNALER")) { }
+            Console.Out.WriteLine("root-out");
+            return 0;
+        }
+        if (String.Equals(mode, "DESCENDANT_HOLD", StringComparison.Ordinal))
+        {
+            using (Process holder = StartSelf("HOLDER")) { }
+            Console.Out.WriteLine("root-out");
+            return 0;
+        }
+        if (String.Equals(mode, "HOLDER", StringComparison.Ordinal) ||
+            String.Equals(mode, "SIBLING", StringComparison.Ordinal))
+        {
+            string readyPath = RequiredEnvironment("CODEX_ISSUE0021_CHILD_READY");
+            Append(readyPath, mode + "|" + Process.GetCurrentProcess().Id.ToString());
+            Console.Out.WriteLine(mode == "HOLDER" ? "child-out" : "sibling-out");
+            using (EventWaitHandle blocker = EventWaitHandle.OpenExisting(
+                RequiredEnvironment("CODEX_ISSUE0021_EVENT")))
+            {
+                blocker.WaitOne();
+            }
+            return 0;
+        }
+        if (String.Equals(mode, "SIGNALER", StringComparison.Ordinal))
+        {
+            string readyPath = RequiredEnvironment("CODEX_ISSUE0021_CHILD_READY");
+            while (!File.Exists(readyPath)) Thread.Sleep(10);
+            using (EventWaitHandle blocker = EventWaitHandle.OpenExisting(
+                RequiredEnvironment("CODEX_ISSUE0021_EVENT")))
+            {
+                blocker.Set();
+            }
+            return 0;
+        }
+        return 91;
+    }
+}
+'@
+Add-Type `
+    -TypeDefinition $fixtureSource `
+    -OutputAssembly $FakeDocker `
+    -OutputType ConsoleApplication
+. $FunctionFile
+
+function Get-TextSha256 {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($hash.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant() }
+    finally { $hash.Dispose() }
+}
+
+function Invoke-CapturedDocker {
+        param(
+            [Parameter(Mandatory = $true)]
+            [AllowEmptyString()]
+            [string[]]$Arguments,
+        [int]$TimeoutMilliseconds = 5000,
+        [switch]$RedirectAll
+    )
+    $caught = $null
+    $records = @()
+    $errors = @()
+    if ($RedirectAll) {
+        try {
+            $records = @(& { Invoke-LocalDocker `
+                    -CommandTimeoutMilliseconds $TimeoutMilliseconds `
+                    @Arguments } *> $null)
+        }
+        catch { $caught = $_.Exception.Message }
+    }
+    else {
+        try {
+            $records = @(Invoke-LocalDocker `
+                    -CommandTimeoutMilliseconds $TimeoutMilliseconds `
+                        @Arguments `
+                        -ErrorVariable +errors `
+                        -ErrorAction SilentlyContinue)
+        }
+        catch { $caught = $_.Exception.Message }
+    }
+        return [pscustomobject]@{
+            arguments = @($Arguments)
+            output = @($records | ForEach-Object { [string]$_ })
+            errors = @($errors |
+                Where-Object {
+                    $exceptionProperty = $_.PSObject.Properties["Exception"]
+                    $_.GetType().FullName -cne
+                        "System.Management.Automation.StopUpstreamCommandsException" -and
+                    ($null -eq $exceptionProperty -or
+                        $exceptionProperty.Value.GetType().FullName -cne
+                            "System.Management.Automation.StopUpstreamCommandsException")
+                } |
+                ForEach-Object { [string]$_ })
+        caught = $caught
+        exit_code = [int]$script:LocalDockerExitCode
+        outcome = [string]$script:LocalDockerOutcomeCode
+        output_types = @($records | ForEach-Object { $_.GetType().FullName })
+    }
+}
+
+$savedPath = [Environment]::GetEnvironmentVariable("PATH", "Process")
+$savedOtel = "PT1S"
+$auditPath = $ResultFile + ".audit"
+$argvPath = $ResultFile + ".argv"
+$childReady = $ResultFile + ".child"
+[Environment]::SetEnvironmentVariable("PATH", ([IO.Path]::GetDirectoryName($FakeDocker) + ";" + $savedPath), "Process")
+[Environment]::SetEnvironmentVariable("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", $savedOtel, "Process")
+[Environment]::SetEnvironmentVariable("CODEX_ISSUE0021_SENTINEL", "preserved-value", "Process")
+[Environment]::SetEnvironmentVariable("CODEX_ISSUE0021_AUDIT", $auditPath, "Process")
+[Environment]::SetEnvironmentVariable("CODEX_ISSUE0021_ARGV", $argvPath, "Process")
+[Environment]::SetEnvironmentVariable("CODEX_ISSUE0021_CHILD_READY", $childReady, "Process")
+
+$output = [ordered]@{}
+try {
+    $output.normal = Invoke-CapturedDocker -Arguments @("NORMAL")
+    $output.nonzero = Invoke-CapturedDocker -Arguments @("NONZERO")
+    $output.ultra_fast = Invoke-CapturedDocker -Arguments @("ULTRA_FAST")
+    $output.pipe_zero = Invoke-CapturedDocker -Arguments @("PIPE_ZERO")
+    $output.pipe_one = Invoke-CapturedDocker -Arguments @("PIPE_ONE")
+    $output.pipe_multi = Invoke-CapturedDocker -Arguments @("PIPE_MULTI")
+    $output.redirected = Invoke-CapturedDocker -Arguments @("PIPE_MULTI") -RedirectAll
+
+        $large = [LocalDockerCliExecutionAuthority]::Execute(
+            $FakeDocker,
+            [string[]]@("LARGE"),
+            10000)
+        $output.large = [pscustomobject]@{
+            exit_code = [int]$large.ActualExitCode
+            timed_out = [bool]$large.TimedOut
+            stdout_length = ([string]$large.Stdout).Length
+            stderr_length = ([string]$large.Stderr).Length
+            stdout_sha256 = Get-TextSha256 -Text ([string]$large.Stdout)
+            stderr_sha256 = Get-TextSha256 -Text ([string]$large.Stderr)
+            pid = [int]$large.Pid
+            creation_date = [string]$large.CreationDate
+            exit_date = [string]$large.ExitDate
+        }
+
+    $edgeArguments = @(
+        "ARGV", "", "white space", "`t", "Unicode-物流-✓", 'quote"inside',
+        'back\slash', 'trail\', '{name:^/proxy$}',
+        'type=bind,source=C:\path with space,target=/run/x,readonly',
+        'semi;colon', 'amp&ersand', '$(New-Item shell-marker)', '>marker.txt')
+    $output.argv = Invoke-CapturedDocker -Arguments $edgeArguments
+    $output.argv_expected = @($edgeArguments)
+
+    $eventName = "CodexIssue0021Normal_" + [Guid]::NewGuid().ToString("N")
+    $event = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $eventName)
+    [Environment]::SetEnvironmentVariable("CODEX_ISSUE0021_EVENT", $eventName, "Process")
+    Remove-Item -LiteralPath $childReady -ErrorAction SilentlyContinue
+    $output.descendant_normal = Invoke-CapturedDocker -Arguments @("DESCENDANT_NORMAL")
+    $event.Dispose()
+
+    $siblingEventName = "CodexIssue0021Sibling_" + [Guid]::NewGuid().ToString("N")
+    $siblingEvent = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $siblingEventName)
+    [Environment]::SetEnvironmentVariable("CODEX_ISSUE0021_EVENT", $siblingEventName, "Process")
+    Remove-Item -LiteralPath $childReady -ErrorAction SilentlyContinue
+    $sibling = [Diagnostics.Process]::new()
+    $sibling.StartInfo = [Diagnostics.ProcessStartInfo]::new($FakeDocker, "SIBLING")
+    $sibling.StartInfo.UseShellExecute = $false
+    $sibling.StartInfo.CreateNoWindow = $true
+    [void]$sibling.Start()
+    $siblingPid = [int]$sibling.Id
+    $readyDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not (Test-Path -LiteralPath $childReady) -and [DateTime]::UtcNow -lt $readyDeadline) {
+        [Threading.Thread]::Sleep(10)
+    }
+    if (-not (Test-Path -LiteralPath $childReady)) { throw "sibling readiness missing" }
+    $productionEventName = "CodexIssue0021Production_" + [Guid]::NewGuid().ToString("N")
+    $productionEvent = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $productionEventName)
+    [Environment]::SetEnvironmentVariable("CODEX_ISSUE0021_EVENT", $productionEventName, "Process")
+    Remove-Item -LiteralPath $childReady -ErrorAction SilentlyContinue
+    $output.descendant_timeout = Invoke-CapturedDocker `
+        -Arguments @("DESCENDANT_HOLD") `
+        -TimeoutMilliseconds 300
+    $sibling.Refresh()
+        $output.unrelated_sibling = [pscustomobject]@{
+            pid = $siblingPid
+            alive_after_timeout = -not $sibling.HasExited
+            exited_after_release = $false
+        }
+    [void]$siblingEvent.Set()
+    [void]$sibling.WaitForExit(5000)
+    $output.unrelated_sibling.exited_after_release = $sibling.HasExited
+    $sibling.Dispose()
+    $siblingEvent.Dispose()
+    $productionEvent.Dispose()
+
+    $output.repeat_first = Invoke-CapturedDocker -Arguments @("NORMAL")
+    $output.repeat_second = Invoke-CapturedDocker -Arguments @("NORMAL")
+
+    $oldPath = [Environment]::GetEnvironmentVariable("PATH", "Process")
+    $emptyPath = Join-Path ([IO.Path]::GetDirectoryName($ResultFile)) "empty-path"
+    [IO.Directory]::CreateDirectory($emptyPath) | Out-Null
+    [Environment]::SetEnvironmentVariable("PATH", $emptyPath, "Process")
+    $output.start_failure = Invoke-CapturedDocker -Arguments @("NORMAL")
+    [Environment]::SetEnvironmentVariable("PATH", $oldPath, "Process")
+
+    $auditLines = @([IO.File]::ReadAllLines($auditPath))
+    $output.audit_lines = $auditLines
+    $output.argv_actual = @(
+        [IO.File]::ReadAllLines($argvPath) | ForEach-Object {
+            [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_))
+        })
+    $output.parent_environment = [pscustomobject]@{
+        otel = [Environment]::GetEnvironmentVariable("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "Process")
+        sentinel = [Environment]::GetEnvironmentVariable("CODEX_ISSUE0021_SENTINEL", "Process")
+    }
+}
+finally {
+    [Environment]::SetEnvironmentVariable("PATH", $savedPath, "Process")
+    foreach ($name in @(
+        "CODEX_ISSUE0021_SENTINEL", "CODEX_ISSUE0021_AUDIT",
+        "CODEX_ISSUE0021_ARGV", "CODEX_ISSUE0021_CHILD_READY",
+        "CODEX_ISSUE0021_EVENT")) {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+    }
+}
+    [IO.File]::WriteAllText(
+        $ResultFile,
+        ([pscustomobject]$output | ConvertTo-Json -Depth 30 -Compress),
+        [Text.UTF8Encoding]::new($false))
+    '''.strip(),
+        encoding="utf-8-sig",
+    )
+    harness = subprocess.Popen(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness_file),
+            "-FunctionFile",
+            str(function_file),
+            "-ResultFile",
+            str(result_file),
+            "-FakeDocker",
+            str(fake_docker),
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    emergency_cleanup_used = False
+    try:
+        stdout, stderr = harness.communicate(timeout=45)
+    except subprocess.TimeoutExpired as timeout:
+        emergency_cleanup_used = True
+        subprocess.run(
+            ["taskkill.exe", "/PID", str(harness.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        harness.communicate(timeout=10)
+        raise AssertionError("local Docker runtime harness stalled") from timeout
+    assert emergency_cleanup_used is False
+    assert harness.returncode == 0, stderr or stdout
+    assert result_file.is_file(), stdout
+    result = json.loads(result_file.read_text(encoding="utf-8-sig"))
+    result["emergency_cleanup_used"] = emergency_cleanup_used
+    return result
+
+
+def test_local_docker_runtime_stream_argv_environment_and_job_contracts(
+    tmp_path: Path,
+) -> None:
+    result = _run_local_docker_runtime_contract_harness(tmp_path)
+
+    normal = result["normal"]
+    assert normal["output"] == ["normal-out"]
+    assert normal["errors"] == []
+    assert normal["caught"] is None
+    assert normal["exit_code"] == 0
+    assert normal["outcome"] == "LOCAL_DOCKER_CLI_SUCCEEDED"
+    assert normal["output_types"] == ["System.String"]
+
+    nonzero = result["nonzero"]
+    assert nonzero["output"] == ["nonzero-out"]
+    assert nonzero["errors"] == ["nonzero-err"]
+    assert nonzero["caught"] is None
+    assert nonzero["exit_code"] == 17
+    assert nonzero["outcome"] == "LOCAL_DOCKER_CLI_NONZERO_EXIT"
+    assert result["ultra_fast"] == {
+        "arguments": ["ULTRA_FAST"],
+        "output": [],
+        "errors": [],
+        "caught": None,
+        "exit_code": 3,
+        "outcome": "LOCAL_DOCKER_CLI_NONZERO_EXIT",
+        "output_types": [],
+    }
+
+    assert result["pipe_zero"]["output"] == []
+    assert result["pipe_one"]["output"] == ["one"]
+    assert result["pipe_multi"]["output"] == ["first", "second"]
+    assert result["pipe_multi"]["errors"] == ["err-first", "err-second"]
+    assert result["redirected"]["output"] == []
+    assert result["redirected"]["errors"] == []
+    assert result["redirected"]["exit_code"] == 0
+
+    large = result["large"]
+    assert large["exit_code"] == 0
+    assert large["timed_out"] is False
+    assert large["stdout_length"] == 1_100_000
+    assert large["stderr_length"] == 1_100_000
+    assert large["stdout_sha256"] == hashlib.sha256(b"O" * 1_100_000).hexdigest()
+    assert large["stderr_sha256"] == hashlib.sha256(b"E" * 1_100_000).hexdigest()
+    assert large["pid"] > 0
+    assert large["creation_date"]
+    assert large["exit_date"]
+
+    assert result["argv_actual"] == result["argv_expected"]
+    assert result["argv"]["exit_code"] == 0
+    assert not (tmp_path / "shell-marker").exists()
+    assert not (tmp_path / "marker.txt").exists()
+
+    descendant_normal = result["descendant_normal"]
+    assert descendant_normal["caught"] is None
+    assert descendant_normal["exit_code"] == 0
+    assert descendant_normal["output"] == ["root-out"]
+    assert any(line.startswith("HOLDER|") for line in result["audit_lines"])
+    assert any(line.startswith("SIGNALER|") for line in result["audit_lines"])
+    descendant_timeout = result["descendant_timeout"]
+    assert descendant_timeout["caught"] == "LOCAL_DOCKER_COMMAND_TIMEOUT"
+    assert descendant_timeout["exit_code"] == 124
+    assert descendant_timeout["outcome"] == "LOCAL_DOCKER_CLI_TIMED_OUT"
+    assert result["unrelated_sibling"]["alive_after_timeout"] is True
+    assert result["unrelated_sibling"]["exited_after_release"] is True
+
+    for repeated in (result["repeat_first"], result["repeat_second"]):
+        assert repeated["output"] == ["normal-out"]
+        assert repeated["exit_code"] == 0
+        assert repeated["outcome"] == "LOCAL_DOCKER_CLI_SUCCEEDED"
+    normal_audits = [
+        line.split("|")
+        for line in result["audit_lines"]
+        if line.startswith("NORMAL|")
+    ]
+    assert len(normal_audits) == 3
+    assert len({(entry[1], entry[2]) for entry in normal_audits}) == 3
+    assert all(entry[3:] == ["<NULL>", "preserved-value"] for entry in normal_audits)
+
+    start_failure = result["start_failure"]
+    assert "docker.exe" in start_failure["caught"]
+    assert "not recognized" in start_failure["caught"]
+    assert start_failure["exit_code"] == 1
+    assert start_failure["outcome"] == "LOCAL_DOCKER_CLI_START_FAILED"
+    assert result["parent_environment"] == {
+        "otel": "PT1S",
+        "sentinel": "preserved-value",
+    }
+    assert result["emergency_cleanup_used"] is False
+
+
+def test_local_docker_native_authority_and_all_callers_are_fail_closed() -> None:
+    launcher = LAUNCHER.read_text(encoding="utf-8-sig")
+    function_start = launcher.index("function Invoke-LocalDocker {")
+    function_end = launcher.index(
+        "\nfunction Assert-LocalDockerCommandSucceeded {",
+        function_start,
+    )
+    function = launcher[function_start:function_end]
+    execute_start = function.index(
+        "public static LocalDockerCliExecutionResult Execute("
+    )
+    execute_end = function.index("private static void ValidateInput(", execute_start)
+    execute = function[execute_start:execute_end]
+
+    assert "CREATE_SUSPENDED" in function
+    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in function
+    assert "CREATE_BREAKAWAY_FROM_JOB" not in function
+    assert "CREATE_NEW_PROCESS_GROUP" not in function
+    assert "OpenProcess(" not in function
+    assert "GetProcessById" not in function
+    assert "Win32_Process" not in function
+    assert function.index("AssignProcessToJobObject(", execute_start) < function.index(
+        "ResumeThread(", execute_start
+    )
+    assert execute.index("StartOutputDrains(ledger)") < execute.index(
+        "ResumeThread(ledger.Thread)"
+    )
+    assert execute.index("long started = Stopwatch.GetTimestamp()") < execute.index(
+        "ResumeThread(ledger.Thread)"
+    )
+    assert execute.count("ElapsedMilliseconds(started)") == 1
+    assert execute.index("TerminateJobObject(ledger.Job, TimeoutExitCode)") < execute.index(
+        "WaitForJobZeroUnbounded(ledger.Job)"
+    ) < execute.index("WaitForRootUnbounded(ledger.Process)")
+    normal_zero = execute.index('Fatal("normal-job-zero")')
+    normal_root_wait = execute.index("WaitForRootUnbounded(ledger.Process)", normal_zero)
+    assert normal_zero < normal_root_wait < execute.index("ProveExactRootExit(ledger)")
+    assert execute.index("ProveExactRootExit(ledger)") < execute.index(
+        "RequireTaskResult(ledger.StdoutTask"
+    ) < execute.index("CloseAll(ledger)") < execute.index('ledger.Phase = "CLOSED"')
+    close_raw = function[
+        function.index("private static void CloseRaw(") : function.index(
+            "private static void ReleaseStartupAllocations("
+        )
+    ]
+    assert close_raw.index("if (!CloseHandle(handle))") < close_raw.index(
+        "handle = IntPtr.Zero;",
+        close_raw.index("if (!CloseHandle(handle))"),
+    )
+    assert "SourceJavaProbeNativeStartAuthority" in launcher
+
+    invocation_count = launcher.count("Invoke-LocalDocker `")
+    strict_contexts = re.findall(
+        r'Assert-LocalDockerCommandSucceeded -Context "([A-Z_]+)"', launcher
+    )
+    assert invocation_count == 8
+    assert strict_contexts == [
+        "TEMPORAL_BUILD_READ",
+        "PROXY_DISCOVERY",
+        "PROXY_INSPECT",
+        "PROXY_REMOVE",
+        "PROXY_RUN",
+        "TEMPORAL_BUILD_UPDATE",
+        "TEMPORAL_CONTAINER_DISCOVERY",
+    ]
+    proxy_state = launcher[
+        launcher.index("function Get-LocalProxyContainerState {") : launcher.index(
+            "function Remove-LocalProxyContainerBounded {"
+        )
+    ]
+    assert proxy_state.index('Assert-LocalDockerCommandSucceeded -Context "PROXY_DISCOVERY"') < proxy_state.index(
+        'State = "ABSENT"'
+    )
+    temporal_discovery = launcher[
+        launcher.index("$temporalContainers = @(Invoke-LocalDocker `") : launcher.index(
+            "Wait-ExternalHttp `",
+            launcher.index("$temporalContainers = @(Invoke-LocalDocker `"),
+        )
+    ]
+    assert 'Assert-LocalDockerCommandSucceeded -Context "TEMPORAL_CONTAINER_DISCOVERY"' in temporal_discovery
+    assert "LOCAL_DOCKER_PROXY_REMOVAL_UNPROVEN" in launcher
+    assert "LOCAL_DOCKER_PROXY_START_UNPROVEN" in launcher
+    assert "LOCAL_DOCKER_TEMPORAL_BUILD_UPDATE_UNPROVEN" in launcher
+    assert "LOCAL_DOCKER_CLI_ROLLBACK_UNPROVEN" in launcher
+
+    allowed_manifest = launcher[
+        launcher.index("$allowedDirtyPaths =") : launcher.index(
+            "$reviewedDirtySourcePolicy =",
+            launcher.index("$allowedDirtyPaths ="),
+        )
+    ]
+    assert allowed_manifest.count('".local-dev/launch-source.ps1"') == 1
+    assert (
+        allowed_manifest.count(
+            '"tests/static/test_local_source_process_ownership.py"'
+        )
+        == 2
+    )
+    deployment = (
+        ROOT / "tests" / "static" / "test_phase9_target_e2e_deployment.py"
+    ).read_text(encoding="utf-8-sig")
+    assert '".local-dev/launch-source.ps1"' in deployment
+    assert '"tests/static/test_local_source_process_ownership.py"' in deployment
+
+
+def _run_local_docker_reconciliation_harness(tmp_path: Path) -> dict[str, Any]:
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    launcher = LAUNCHER.read_text(encoding="utf-8-sig")
+    function_start = launcher.index("function Assert-LocalDockerCommandSucceeded {")
+    function_end = launcher.index("\nfunction Wait-Http {", function_start)
+    function_file = tmp_path / "local-docker-reconciliation-functions.ps1"
+    harness_file = tmp_path / "local-docker-reconciliation-harness.ps1"
+    result_file = tmp_path / "local-docker-reconciliation-result.json"
+    function_file.write_text(
+        launcher[function_start:function_end].rstrip(),
+        encoding="utf-8",
+    )
+    harness_file.write_text(
+        r'''
+param(
+    [Parameter(Mandatory = $true)][string]$FunctionFile,
+    [Parameter(Mandatory = $true)][string]$ResultFile,
+    [Parameter(Mandatory = $true)][string]$SandboxRoot
+)
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+. $FunctionFile
+$env:TEMPORAL_NAMESPACE = "default"
+$script:ProviderQueue = [Collections.Generic.Queue[object]]::new()
+$script:ProviderCalls = [Collections.Generic.List[object]]::new()
+
+function Set-ProviderQueue {
+    param([Parameter(Mandatory = $true)][object[]]$Items)
+    $script:ProviderQueue.Clear()
+    $script:ProviderCalls.Clear()
+    foreach ($item in $Items) { $script:ProviderQueue.Enqueue($item) }
+}
+
+function Invoke-LocalDocker {
+    [CmdletBinding()]
+    param(
+        [int]$CommandTimeoutMilliseconds,
+        [Parameter(ValueFromRemainingArguments = $true)][object[]]$DockerArguments
+    )
+    if ($script:ProviderQueue.Count -eq 0) { throw "provider queue exhausted" }
+    $item = $script:ProviderQueue.Dequeue()
+    $script:ProviderCalls.Add([pscustomobject]@{
+            timeout = $CommandTimeoutMilliseconds
+            arguments = @($DockerArguments | ForEach-Object { [string]$_ })
+        })
+    $script:LocalDockerExitCode = [int]$item.exit_code
+    $script:LocalDockerOutcomeCode = [string]$item.outcome
+    if (-not [string]::IsNullOrEmpty([string]$item.error)) {
+        throw [InvalidOperationException]::new([string]$item.error)
+    }
+    foreach ($line in @($item.output)) { Write-Output ([string]$line) }
+}
+
+function New-ProviderItem {
+    param(
+        [string]$Outcome = "LOCAL_DOCKER_CLI_SUCCEEDED",
+        [int]$ExitCode = 0,
+        [object[]]$Output = @(),
+        [string]$Error = ""
+    )
+    return [pscustomobject]@{
+        outcome = $Outcome
+        exit_code = $ExitCode
+        output = @($Output)
+        error = $Error
+    }
+}
+
+function Invoke-CapturedScenario {
+    param([Parameter(Mandatory = $true)][scriptblock]$Action)
+    $errorMessage = ""
+    $errorDetail = ""
+    $value = $null
+    try { $value = & $Action }
+    catch {
+        $errorMessage = $_.Exception.Message
+        $errorDetail = [string]$_.InvocationInfo.PositionMessage + "|" +
+            [string]$_.ScriptStackTrace
+    }
+    return [pscustomobject]@{
+        error = $errorMessage
+        error_detail = $errorDetail
+        value = $value
+        calls = @($script:ProviderCalls)
+        remaining = $script:ProviderQueue.Count
+    }
+}
+
+$timeout = New-ProviderItem `
+    -Outcome "LOCAL_DOCKER_CLI_TIMED_OUT" `
+    -ExitCode 124 `
+    -Error "LOCAL_DOCKER_COMMAND_TIMEOUT"
+$success = New-ProviderItem
+
+Set-ProviderQueue -Items @($timeout, $success)
+$removeAccepted = Invoke-CapturedScenario {
+    Remove-LocalProxyContainerBounded -Name "proxy"
+    return "accepted"
+}
+
+Set-ProviderQueue -Items @(
+    $timeout,
+    (New-ProviderItem -Output @("cid-present")))
+$removeBlocked = Invoke-CapturedScenario {
+    Remove-LocalProxyContainerBounded -Name "proxy"
+    return "unexpected"
+}
+
+$nginx = Join-Path $SandboxRoot "nginx.conf"
+$mtls = Join-Path $SandboxRoot "mtls"
+[IO.File]::WriteAllText($nginx, "fixture")
+[IO.Directory]::CreateDirectory($mtls) | Out-Null
+$inspectExact = @([pscustomobject]@{
+        Name = "/proxy"
+        Config = [pscustomobject]@{ Image = "image:test" }
+        State = [pscustomobject]@{ Running = $true }
+        HostConfig = [pscustomobject]@{
+            PortBindings = [pscustomobject]@{
+                "8443/tcp" = @([pscustomobject]@{ HostIp = "127.0.0.1"; HostPort = "18443" })
+                "8080/tcp" = @([pscustomobject]@{ HostIp = "127.0.0.1"; HostPort = "18080" })
+            }
+        }
+        Mounts = @(
+            [pscustomobject]@{
+                Type = "bind"; Destination = "/etc/nginx/conf.d/default.conf"
+                RW = $false; Source = $nginx
+            },
+            [pscustomobject]@{
+                Type = "bind"; Destination = "/run/local-target/mtls"
+                RW = $false; Source = $mtls
+            })
+    }) | ConvertTo-Json -Depth 10 -Compress
+Set-ProviderQueue -Items @(
+    (New-ProviderItem -Output @("cid-exact")),
+    (New-ProviderItem -Output @($inspectExact)))
+$exactReadback = Invoke-CapturedScenario {
+    return Get-LocalProxyContainerState `
+        -Name "proxy" `
+        -ExpectedImage "image:test" `
+        -ExpectedNginxConfig $nginx `
+        -ExpectedMtlsDirectory $mtls
+}
+Set-ProviderQueue -Items @(
+    $timeout,
+    (New-ProviderItem -Output @("cid-exact")),
+    (New-ProviderItem -Output @($inspectExact)))
+$startAccepted = Invoke-CapturedScenario {
+    return Start-LocalProxyContainerBounded `
+        -Name "proxy" `
+        -Image "image:test" `
+        -NginxConfig $nginx `
+        -MtlsDirectory $mtls
+}
+
+$inspectMismatch = $inspectExact.Replace('"image:test"', '"image:wrong"')
+Set-ProviderQueue -Items @(
+    $timeout,
+    (New-ProviderItem -Output @("cid-mismatch")),
+    (New-ProviderItem -Output @($inspectMismatch)),
+    $success,
+    $success)
+$startBlocked = Invoke-CapturedScenario {
+    Start-LocalProxyContainerBounded `
+        -Name "proxy" `
+        -Image "image:test" `
+        -NginxConfig $nginx `
+        -MtlsDirectory $mtls
+    return "unexpected"
+}
+
+$oldRouting = @(
+    [pscustomobject]@{
+        isDefaultSet = $false
+        defaultForSet = "legacy-build"
+    },
+    [pscustomobject]@{
+        isDefaultSet = $true
+        defaultForSet = "old-build"
+    }) | ConvertTo-Json -Compress
+$newRouting = @([pscustomobject]@{
+        isDefaultSet = $true
+        defaultForSet = "new-build"
+    }) | ConvertTo-Json -Compress
+$emptyRouting = "null"
+Set-ProviderQueue -Items @(
+    (New-ProviderItem -Output @($oldRouting)),
+    $timeout,
+    (New-ProviderItem -Output @($newRouting)))
+$temporalAccepted = Invoke-CapturedScenario {
+    Ensure-TemporalDefaultBuildId `
+        -Container "temporal" `
+        -TaskQueue "queue" `
+        -BuildId "new-build"
+    return "accepted"
+}
+
+Set-ProviderQueue -Items @(
+    (New-ProviderItem -Output @($emptyRouting)),
+    $success,
+    (New-ProviderItem -Output @($newRouting)))
+$temporalEmptyAccepted = Invoke-CapturedScenario {
+    Ensure-TemporalDefaultBuildId `
+        -Container "temporal" `
+        -TaskQueue "empty-queue" `
+        -BuildId "new-build"
+    return "accepted"
+}
+
+Set-ProviderQueue -Items @(
+    (New-ProviderItem -Output @("{}")))
+$temporalMalformedBlocked = Invoke-CapturedScenario {
+    Ensure-TemporalDefaultBuildId `
+        -Container "temporal" `
+        -TaskQueue "malformed-queue" `
+        -BuildId "new-build"
+    return "unexpected"
+}
+
+Set-ProviderQueue -Items @(
+    (New-ProviderItem -Output @($oldRouting)),
+    $timeout,
+    (New-ProviderItem `
+        -Outcome "LOCAL_DOCKER_CLI_NONZERO_EXIT" `
+        -ExitCode 19 `
+        -Error "readback failed"))
+$temporalBlocked = Invoke-CapturedScenario {
+    Ensure-TemporalDefaultBuildId `
+        -Container "temporal" `
+        -TaskQueue "queue" `
+        -BuildId "new-build"
+    return "unexpected"
+}
+
+$output = [pscustomobject]@{
+    remove_accepted = $removeAccepted
+    remove_blocked = $removeBlocked
+    exact_readback = $exactReadback
+    start_accepted = $startAccepted
+    start_blocked = $startBlocked
+    temporal_accepted = $temporalAccepted
+    temporal_empty_accepted = $temporalEmptyAccepted
+    temporal_malformed_blocked = $temporalMalformedBlocked
+    temporal_blocked = $temporalBlocked
+}
+[IO.File]::WriteAllText(
+    $ResultFile,
+    ($output | ConvertTo-Json -Depth 30 -Compress),
+    [Text.UTF8Encoding]::new($false))
+'''.strip(),
+        encoding="utf-8-sig",
+    )
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness_file),
+            "-FunctionFile",
+            str(function_file),
+            "-ResultFile",
+            str(result_file),
+            "-SandboxRoot",
+            str(tmp_path),
+        ],
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    return json.loads(result_file.read_text(encoding="utf-8-sig"))
+
+
+def test_local_docker_mutations_reconcile_exact_state_without_blind_retry(
+    tmp_path: Path,
+) -> None:
+    result = _run_local_docker_reconciliation_harness(tmp_path)
+
+    exact_readback = result["exact_readback"]
+    assert exact_readback["error"] == ""
+    assert exact_readback["value"]["State"] == "EXACT_DESIRED"
+
+    remove_accepted = result["remove_accepted"]
+    assert remove_accepted["error"] == ""
+    assert remove_accepted["value"] == "accepted"
+    assert [call["arguments"][0] for call in remove_accepted["calls"]] == [
+        "rm",
+        "ps",
+    ]
+    assert remove_accepted["remaining"] == 0
+
+    remove_blocked = result["remove_blocked"]
+    assert remove_blocked["error"] == "LOCAL_DOCKER_PROXY_REMOVAL_UNPROVEN"
+    assert [call["arguments"][0] for call in remove_blocked["calls"]] == [
+        "rm",
+        "ps",
+    ]
+
+    start_accepted = result["start_accepted"]
+    assert start_accepted["error"] == ""
+    assert start_accepted["value"] == "cid-exact"
+    assert [call["arguments"][0] for call in start_accepted["calls"]] == [
+        "run",
+        "ps",
+        "inspect",
+    ]
+
+    start_blocked = result["start_blocked"]
+    assert start_blocked["error"] == "LOCAL_DOCKER_PROXY_START_UNPROVEN"
+    assert [call["arguments"][0] for call in start_blocked["calls"]] == [
+        "run",
+        "ps",
+        "inspect",
+        "rm",
+        "ps",
+    ]
+
+    temporal_accepted = result["temporal_accepted"]
+    assert temporal_accepted["error"] == ""
+    assert temporal_accepted["value"] == "accepted"
+    temporal_commands = [call["arguments"] for call in temporal_accepted["calls"]]
+    assert [arguments[0] for arguments in temporal_commands] == [
+        "exec",
+        "exec",
+        "exec",
+    ]
+    assert sum("update-build-ids" in arguments for arguments in temporal_commands) == 1
+    update_arguments = temporal_commands[1]
+    assert "add-new-compatible" in update_arguments
+    existing_index = update_arguments.index("--existing-compatible-build-id")
+    assert update_arguments[existing_index + 1] == "old-build"
+
+    temporal_empty_accepted = result["temporal_empty_accepted"]
+    assert temporal_empty_accepted["error"] == ""
+    assert temporal_empty_accepted["value"] == "accepted"
+    temporal_empty_commands = [
+        call["arguments"] for call in temporal_empty_accepted["calls"]
+    ]
+    assert [arguments[0] for arguments in temporal_empty_commands] == [
+        "exec",
+        "exec",
+        "exec",
+    ]
+    assert sum(
+        "update-build-ids" in arguments for arguments in temporal_empty_commands
+    ) == 1
+    assert "add-new-default" in temporal_empty_commands[1]
+    assert "add-new-compatible" not in temporal_empty_commands[1]
+
+    temporal_malformed_blocked = result["temporal_malformed_blocked"]
+    assert temporal_malformed_blocked["error"] == (
+        "LOCAL_DOCKER_TEMPORAL_BUILD_READ_INVALID"
+    )
+    assert len(temporal_malformed_blocked["calls"]) == 1
+    assert all(
+        "update-build-ids" not in arguments
+        for arguments in (
+            call["arguments"] for call in temporal_malformed_blocked["calls"]
+        )
+    )
+
+    temporal_blocked = result["temporal_blocked"]
+    assert temporal_blocked["error"] == (
+        "LOCAL_DOCKER_TEMPORAL_BUILD_UPDATE_UNPROVEN:queue"
+    )
+    temporal_blocked_commands = [
+        call["arguments"] for call in temporal_blocked["calls"]
+    ]
+    assert sum(
+        "update-build-ids" in arguments for arguments in temporal_blocked_commands
+    ) == 1
+    assert all(
+        scenario["remaining"] == 0
+        for scenario in result.values()
+    )
+
+
 def _run_writer_substage_harness(
     tmp_path: Path,
     *,
@@ -4409,6 +7443,10 @@ def test_java_executable_resolution_is_self_verified_and_closed(
     definitions = dict(_function_definitions(source))
     required = (
         "Invoke-SourceJavaExecutableProbe",
+        "Get-SourceJavaProbeCleanupAuthorityState",
+        "Test-SourceJavaProbeCleanupAuthorityBundle",
+        "Complete-SourceJavaProbeCleanupAuthorityBundle",
+        "New-SourceJavaProbeCleanupAuthorityBundle",
         "Stop-SourceJavaProbeProcessExact",
         "Wait-SourceJavaProbeCleanupProof",
         "Get-SourceJavaHomeFromProbeResult",
@@ -4416,17 +7454,26 @@ def test_java_executable_resolution_is_self_verified_and_closed(
     )
     assert set(required) <= set(definitions)
     runner = definitions[required[0]]
-    cleanup = definitions[required[1]]
-    cleanup_loop = definitions[required[2]]
-    parser = definitions[required[3]]
-    resolver = definitions[required[4]]
-    combined = "\n".join((runner, cleanup, cleanup_loop, parser, resolver))
+    authority_state = definitions[required[1]]
+    authority_validator = definitions[required[2]]
+    authority_completion = definitions[required[3]]
+    authority_constructor = definitions[required[4]]
+    cleanup = definitions[required[5]]
+    cleanup_loop = definitions[required[6]]
+    resolver = definitions[required[8]]
+    combined = "\n".join(definitions[name] for name in required)
     assert "UseShellExecute = $false" in runner
     assert "RedirectStandardOutput = $true" in runner
     assert "RedirectStandardError = $true" in runner
     assert "CreateNoWindow = $true" in runner
     assert runner.count("ReadToEndAsync()") == 2
-    assert "Get-SourceProcessOwnershipHandleExitState" in runner
+    assert "New-SourceJavaProbeCleanupAuthorityBundle" in runner
+    assert "Complete-SourceJavaProbeCleanupAuthorityBundle" in runner
+    assert "$provided = @(& $StateProvider $CapturedProcess)" in authority_state
+    assert "CreationDate" in authority_state and "ExitDate" in authority_state
+    assert "local-source-java-probe-cleanup-authority.v1" in authority_validator
+    assert "Wait-SourceJavaProbeCleanupProof" in authority_constructor
+    assert "DisposeProvider" in authority_completion
     assert "Wait-SourceJavaProbeCleanupProof" in runner
     assert "Test-SourceProcessOwnershipHandleExitStateMatchesIdentity" in cleanup
     state_validator = definitions[
@@ -4557,6 +7604,623 @@ def test_java_executable_resolution_is_self_verified_and_closed(
         assert result["error"] == "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED"
         expected_calls = 0 if scenario.startswith("JAVA_HOME_") or scenario == "MISSING_LEAF" else 1
         assert len(result["calls"]) == expected_calls
+
+
+def test_real_java_probe_retained_handle_proves_exit_after_process_table_absence(
+    tmp_path: Path,
+) -> None:
+    result = _run_real_java_probe_native_handle_harness(
+        tmp_path,
+        scenario="CONTROLLED_RETAINED_STATE",
+    )
+
+    assert result["error"] is None
+    assert result["process_table_visible"] is False
+    assert result["exited_result_count"] == 1
+    assert result["running_state"] == {
+        "Pid": result["pid"],
+        "CreationDate": result["exited_state"]["CreationDate"],
+        "ExitDate": None,
+        "IsExited": False,
+    }
+    assert result["exited_state"]["Pid"] == result["pid"]
+    assert result["exited_state"]["ExitDate"]
+    assert result["exited_state"]["IsExited"] is True
+    assert result["release_calls"] == [result["pid"]]
+    assert result["dispose_calls"] == [result["pid"]]
+
+
+def test_real_java_probe_post_exit_failure_cleans_on_first_attempt(
+    tmp_path: Path,
+) -> None:
+    result = _run_real_java_probe_native_handle_harness(
+        tmp_path,
+        scenario="POST_EXIT_WAIT_FAILURE",
+    )
+
+    assert result["error"] == "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED"
+    assert result["error_chain"].count("SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED") == 1
+    assert result["process_table_visible"] is False
+    assert result["failure_observation_error"] is None
+    assert result["probe_wait_calls"] == ["timed", "flush"]
+    assert result["child_exit_code"] == 0
+    assert result["child_stderr"] == ""
+    assert result["cleanup_attempts"] == [1]
+    assert result["warnings"] == []
+    assert result["pause_calls"] == []
+    assert result["kill_calls"] == []
+    assert result["wait_calls"] == []
+    assert result["release_calls"] == []
+    assert result["dispose_calls"] == [result["pid"]]
+    assert result["completion_events"] == ["dispose"]
+    assert result["elapsed_ms"] < 5000
+
+
+def test_real_java_probe_ultra_fast_exit_closes_without_pid_fallback(
+    tmp_path: Path,
+) -> None:
+    result = _run_real_java_probe_native_handle_harness(
+        tmp_path,
+        scenario="ULTRA_FAST_EXIT",
+    )
+
+    assert result["error"] == "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED"
+    assert result["cleanup_attempts"] == [1]
+    assert result["warnings"] == []
+    assert result["pause_calls"] == []
+    assert result["kill_calls"] == []
+    assert result["wait_calls"] == []
+    assert result["release_calls"] == []
+    assert result["dispose_calls"] == [result["pid"]]
+    assert result["completion_events"] == ["dispose"]
+    assert result["elapsed_ms"] < 5000
+    source = LAUNCHER.read_text(encoding="utf-8-sig")
+    runner = dict(_function_definitions(source))["Invoke-SourceJavaExecutableProbe"]
+    assert "Get-CimInstance" not in runner
+    assert "Win32_Process" not in runner
+    assert "GetProcessById" not in runner
+
+
+def test_real_java_probe_pre_bind_authority_failure_cleans_with_exact_identity(
+    tmp_path: Path,
+) -> None:
+    result = _run_real_java_probe_pre_bind_authority_failure_harness(tmp_path)
+
+    assert result["exact_process_reference"] is True
+    assert result["safe_handle_type"] == (
+        "Microsoft.Win32.SafeHandles.SafeProcessHandle"
+    )
+    assert result["safe_handle_valid"] is True
+    assert result["authority_returned"] is False
+    assert result["running_state"] == {
+        "Pid": result["pid"],
+        "CreationDate": result["exited_state"]["CreationDate"],
+        "ExitDate": None,
+        "IsExited": False,
+    }
+    assert result["exited_state"]["Pid"] == result["pid"]
+    assert result["exited_state"]["ExitDate"]
+    assert result["exited_state"]["IsExited"] is True
+    assert result["child_has_exited"] is True
+    assert result["supervisor_release_count"] == 1
+    assert result["production_release_calls"] == []
+    assert result["dispose_calls"] == [result["pid"]]
+    assert result["harness_forced_cleanup"] is False
+
+    assert result["harness_returncode"] == 0, result
+    assert result["watchdog_triggered"] is False
+    assert result["error"] == "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED"
+    assert result["cleanup_attempts"] == [
+        {
+            "expected_process_id": result["pid"],
+            "bound_identity_is_null": False,
+            "bound_pid": result["pid"],
+            "result": True,
+        }
+    ]
+    assert result["warnings"] == []
+    assert result["pause_calls"] == []
+    assert result["kill_calls"] == [result["pid"]]
+    assert result["wait_calls"] == [result["pid"]]
+
+
+def test_v3_native_default_start_compiles_and_closes_exact_authority(
+    tmp_path: Path,
+) -> None:
+    result = _run_v4_native_start_authority_harness(
+        tmp_path,
+        scenario="NORMAL",
+    )
+
+    assert result["error"] is None
+    assert result["schema_version"] == "local-source-java-probe.v1"
+    assert result["exit_code"] == 7
+    assert result["stdout"] == "native-out"
+    assert result["stderr"] == "native-err"
+    assert result["stdout_length"] == len("native-out")
+    assert result["stderr_length"] == len("native-err")
+    assert result["stdout_sha256"] == hashlib.sha256(b"native-out").hexdigest()
+    assert result["stderr_sha256"] == hashlib.sha256(b"native-err").hexdigest()
+
+    source = LAUNCHER.read_text(encoding="utf-8-sig")
+    initializer_start = source.index(
+        "function Initialize-SourceJavaProbeNativeStartAuthority {"
+    )
+    native_runner_start = source.index(
+        "\nfunction Invoke-SourceJavaNativeExecutableProbe {",
+        initializer_start,
+    )
+    wrapper_start = source.index(
+        "\nfunction Invoke-SourceJavaExecutableProbe {",
+        native_runner_start,
+    )
+    next_start = source.index(
+        "\nfunction Get-SourceJavaHomeFromProbeResult {",
+        wrapper_start,
+    )
+    native_initializer = source[initializer_start:native_runner_start]
+    native_runner = source[native_runner_start:wrapper_start]
+    wrapper = source[wrapper_start:next_start]
+    default_route = "\n".join((native_initializer, native_runner))
+    assert "CreateProcessW" in native_initializer
+    assert "local-source-java-probe-native-start-authority.v2" in native_initializer
+    assert "RawHandleLease" in native_initializer
+    assert "ManagedLease" in native_initializer
+    assert "SourceJavaProbeCloseDirective" in native_initializer
+    assert "FAILED_RETAINED" in native_initializer
+    assert "SOURCE_JAVA_EXECUTABLE_PROBE_CLOSE_TRUTH_BROKEN" in native_initializer
+    assert "CloseRawLease" in native_initializer
+    assert "CloseManagedLease" in native_initializer
+    assert "STARTUPINFOEX" in native_initializer
+    assert "PROC_THREAD_ATTRIBUTE_HANDLE_LIST" not in native_initializer
+    assert "ProcThreadAttributeHandleList" in native_initializer
+    assert "GetProcessId" in native_initializer
+    assert "GetProcessTimes" in native_initializer
+    assert "WaitForSingleObject" in native_initializer
+    assert "TerminateProcess" in native_initializer
+    assert "System.Diagnostics.Process" not in default_route
+    assert re.search(r"\bProcess\s*\.\s*SafeHandle\b", default_route) is None
+    assert re.search(r"\$process\s*\.\s*SafeHandle\b", default_route) is None
+    assert "GetProcessById" not in default_route
+    assert "Get-CimInstance" not in default_route
+    assert "OpenProcess" not in default_route
+    assert "Invoke-SourceJavaNativeExecutableProbe" in wrapper
+
+
+def test_v3_native_pre_ready_failure_closes_transaction_exactly(
+    tmp_path: Path,
+) -> None:
+    result = _run_v4_native_start_authority_harness(
+        tmp_path,
+        scenario="PRE_READY_FAILURE",
+    )
+
+    assert result["error"] == "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED"
+    assert result["elapsed_ms"] < 10000
+    assert result["instrumentation_counts"] == {}
+    assert result["audit"] == []
+
+
+def test_v3_native_large_stdout_stderr_drain_without_deadlock(
+    tmp_path: Path,
+) -> None:
+    result = _run_v4_native_start_authority_harness(
+        tmp_path,
+        scenario="LARGE",
+    )
+
+    length = 524288
+    assert result["error"] is None
+    assert result["exit_code"] == 0
+    assert result["stdout_length"] == length
+    assert result["stderr_length"] == length
+    assert result["stdout_sha256"] == hashlib.sha256(b"O" * length).hexdigest()
+    assert result["stderr_sha256"] == hashlib.sha256(b"E" * length).hexdigest()
+    assert result["elapsed_ms"] < 10000
+
+
+def test_v3_native_repeated_start_uses_fresh_exact_authority(
+    tmp_path: Path,
+) -> None:
+    result = _run_v4_native_start_authority_harness(
+        tmp_path,
+        scenario="REPEAT",
+    )
+
+    assert result["error"] is None
+    first = result["first"]
+    second = result["second"]
+    for attempt, record in enumerate((first, second), start=1):
+        assert record["attempt"] == attempt
+        assert record["ready_phase"] == "READY"
+        assert record["pid"] > 0
+        assert record["creation_date"]
+        assert record["terminal_pid"] == record["pid"]
+        assert record["terminal_creation_date"] == record["creation_date"]
+        assert record["exit_date"]
+        assert record["is_exited"] is True
+        assert record["exit_code"] == 7
+        assert record["stdout"] == "native-out"
+        assert record["stderr"] == "native-err"
+        assert record["final_phase"] == "CLOSED"
+    assert (first["pid"], first["creation_date"]) != (
+        second["pid"],
+        second["creation_date"],
+    )
+
+
+def test_v3_incomplete_injection_fails_before_factory_or_start(
+    tmp_path: Path,
+) -> None:
+    result = _run_v4_native_start_authority_harness(
+        tmp_path,
+        scenario="INCOMPLETE_INJECTION",
+    )
+
+    assert result["error"] == "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED"
+    assert result["factory_calls"] == 0
+    assert result["start_calls"] == 0
+
+
+@pytest.mark.parametrize(
+    ("scenario", "resource", "phase"),
+    (
+        ("V4_CLOSE_RAW_STDOUT_WRITE", "stdout-write", "CHILD_CREATED"),
+        ("V4_CLOSE_RAW_THREAD", "thread", "CHILD_CREATED"),
+        ("V4_CLOSE_RAW_STDOUT_READ", "stdout-read", "CLOSING"),
+        ("V4_CLOSE_RAW_PROCESS", "process", "CLOSING"),
+    ),
+)
+def test_v4_native_raw_close_lease_retains_exact_handle_until_real_success(
+    tmp_path: Path,
+    scenario: str,
+    resource: str,
+    phase: str,
+) -> None:
+    result = _run_v4_native_start_authority_harness(tmp_path, scenario=scenario)
+
+    assert result["error"] is None
+    assert result["exit_code"] == 7
+    assert result["stdout"] == "native-out"
+    assert result["stderr"] == "native-err"
+    assert result["final_phase"] == "CLOSED"
+    assert result["close_count_after_noop"] == result["close_count_before_noop"]
+    target = [entry for entry in result["audit"] if entry["resource"] == resource]
+    assert [entry["moment"] for entry in target] == [
+        "OBSERVER",
+        "OBSERVER",
+        "OBSERVER",
+        "FINAL",
+    ]
+    first, second, real, final = target
+    assert first["attempt"] == 1
+    assert second["attempt"] == 2
+    assert real["attempt"] == 3
+    assert final["attempt"] == 3
+    retained_value = first["raw_value"]
+    assert retained_value not in {0, -1}
+    for attempt, injected_failures in ((first, 1), (second, 2)):
+        assert attempt["phase"] == phase
+        assert attempt["raw_value"] == retained_value
+        assert attempt["raw_state"] == "RETRY_PENDING"
+        assert attempt["injected_failures"] == injected_failures
+        assert attempt["real_close_attempted"] is False
+        assert attempt["all_complete"] is False
+    assert real["raw_value"] == retained_value
+    assert real["raw_state"] == "RETRY_PENDING"
+    assert real["real_close_attempted"] is True
+    assert real["last_error"] == 0
+    assert final["raw_value"] == 0
+    assert final["raw_state"] == "CLOSED"
+    assert final["real_close_attempted"] is True
+    assert final["last_error"] == 0
+
+    real_attempts = [
+        entry
+        for entry in target
+        if entry["moment"] == "OBSERVER" and entry["real_close_attempted"]
+    ]
+    assert len(real_attempts) == 1
+    observer_attempts: dict[str, list[int]] = {}
+    for entry in result["audit"]:
+        if entry["moment"] == "OBSERVER":
+            observer_attempts.setdefault(entry["resource"], []).append(entry["attempt"])
+    assert observer_attempts[resource] == [1, 2, 3]
+    assert all(
+        attempts == [1]
+        for observed_resource, attempts in observer_attempts.items()
+        if observed_resource != resource
+    )
+    if resource == "process":
+        assert real["exit_proven"] is True
+        assert real["pid"] > 0
+        assert real["creation_file_time"] > 0
+        assert real["exit_file_time"] >= real["creation_file_time"]
+        assert real["startup_complete"] is True
+        assert real["output_complete"] is True
+
+
+@pytest.mark.parametrize(
+    "scenario,resource",
+    (
+        ("V4_CLOSE_MANAGED_READER", "stdout-reader"),
+        ("V4_CLOSE_MANAGED_STREAM", "stdout-stream"),
+        ("V4_CLOSE_MANAGED_WRAPPER", "stdout-wrapper"),
+    ),
+)
+def test_v4_native_managed_close_retains_same_reference_until_disposed(
+    tmp_path: Path,
+    scenario: str,
+    resource: str,
+) -> None:
+    result = _run_v4_native_start_authority_harness(tmp_path, scenario=scenario)
+
+    assert result["error"] is None
+    assert result["final_phase"] == "CLOSED"
+    assert result["close_count_after_noop"] == result["close_count_before_noop"]
+    target = [entry for entry in result["audit"] if entry["resource"] == resource]
+    assert [entry["moment"] for entry in target] == [
+        "OBSERVER",
+        "OBSERVER",
+        "FINAL",
+    ]
+    retained, real, final = target
+    assert retained["attempt"] == 1
+    assert retained["phase"] == "CLOSING"
+    assert retained["reference_present"] is True
+    assert retained["same_reference"] is True
+    assert retained["managed_state"] == "RETRY_PENDING"
+    assert retained["managed_failures"] == 1
+    assert retained["real_dispose_attempted"] is False
+    assert retained["all_complete"] is False
+    assert real["attempt"] == 2
+    assert real["reference_present"] is True
+    assert real["same_reference"] is True
+    assert real["managed_state"] == "RETRY_PENDING"
+    assert real["real_dispose_attempted"] is True
+    assert final["attempt"] == 2
+    assert final["reference_present"] is False
+    assert final["managed_state"] == "DISPOSED"
+    assert final["real_dispose_attempted"] is True
+    assert len(
+        [
+            entry
+            for entry in target
+            if entry["moment"] == "OBSERVER"
+            and entry["real_dispose_attempted"]
+        ]
+    ) == 1
+    observer_attempts: dict[str, list[int]] = {}
+    for entry in result["audit"]:
+        if entry["moment"] == "OBSERVER":
+            observer_attempts.setdefault(entry["resource"], []).append(entry["attempt"])
+    assert observer_attempts[resource] == [1, 2]
+    assert all(
+        attempts == [1]
+        for observed_resource, attempts in observer_attempts.items()
+        if observed_resource != resource
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario", "resource", "child_created"),
+    (
+        ("V4_CLOSE_PRE_CREATE_FAILURE", "stdout-write", False),
+        ("V4_CLOSE_POST_CREATE_FAILURE", "thread", True),
+    ),
+)
+def test_v4_native_failed_start_retries_retained_close_before_canonical_error(
+    tmp_path: Path,
+    scenario: str,
+    resource: str,
+    child_created: bool,
+) -> None:
+    result = _run_v4_native_start_authority_harness(tmp_path, scenario=scenario)
+
+    assert result["error"] == "SOURCE_JAVA_EXECUTABLE_RESOLUTION_FAILED"
+    assert result["elapsed_ms"] < 10000
+    target = [entry for entry in result["audit"] if entry["resource"] == resource]
+    assert [entry["moment"] for entry in target] == [
+        "OBSERVER",
+        "OBSERVER",
+        "OBSERVER",
+        "FINAL",
+    ]
+    retained_value = target[0]["raw_value"]
+    assert retained_value not in {0, -1}
+    assert [entry["raw_value"] for entry in target[:3]] == [
+        retained_value,
+        retained_value,
+        retained_value,
+    ]
+    assert [entry["raw_state"] for entry in target[:2]] == [
+        "RETRY_PENDING",
+        "RETRY_PENDING",
+    ]
+    assert [entry["real_close_attempted"] for entry in target[:3]] == [
+        False,
+        False,
+        True,
+    ]
+    assert target[-1]["raw_value"] == 0
+    assert target[-1]["raw_state"] == "CLOSED"
+    phase = [entry for entry in result["audit"] if entry["moment"] == "FINAL_PHASE"]
+    assert len(phase) == 1
+    assert phase[0]["phase"] == "CLOSED"
+    assert phase[0]["all_complete"] is True
+    assert phase[0]["exit_proven"] is child_created
+    if child_created:
+        assert phase[0]["pid"] > 0
+        assert phase[0]["creation_file_time"] > 0
+        assert phase[0]["exit_file_time"] >= phase[0]["creation_file_time"]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "resource", "managed"),
+    (
+        ("V4_CLOSE_RAW_TRUTH_BROKEN", "stdout-read", False),
+        ("V4_CLOSE_MANAGED_TRUTH_BROKEN", "stdout-reader", True),
+    ),
+)
+def test_v4_native_real_close_failure_fail_stops_with_truth_broken_lease(
+    tmp_path: Path,
+    scenario: str,
+    resource: str,
+    managed: bool,
+) -> None:
+    result = _run_v4_native_start_authority_harness(tmp_path, scenario=scenario)
+
+    assert result["host_returncode"] != 0
+    assert result["result_file_exists"] is False
+    target = [entry for entry in result["audit"] if entry["resource"] == resource]
+    expected_moments = ["BROKEN"] if managed else ["OBSERVER", "BROKEN"]
+    assert [entry["moment"] for entry in target] == expected_moments
+    observed = target[0]
+    broken = target[-1]
+    assert broken["attempt"] == 1
+    assert observed["phase"] == ("CLOSE_TRUTH_BROKEN" if managed else "CLOSING")
+    assert broken["phase"] == "CLOSE_TRUTH_BROKEN"
+    assert observed["exit_proven"] is True
+    assert broken["exit_proven"] is True
+    assert observed["pid"] > 0
+    assert observed["creation_file_time"] > 0
+    assert observed["exit_file_time"] >= observed["creation_file_time"]
+    assert observed["adapter_calls"] == 1
+    assert broken["adapter_calls"] == 1
+    assert observed["all_complete"] is False
+    assert broken["all_complete"] is False
+    if managed:
+        assert observed["reference_present"] is True
+        assert observed["same_reference"] is True
+        assert observed["managed_state"] == "CLOSE_TRUTH_BROKEN"
+        assert observed["dispose_attempts"] == 1
+        assert observed["real_dispose_attempted"] is True
+        assert broken["reference_present"] is True
+        assert broken["same_reference"] is True
+        assert broken["managed_state"] == "CLOSE_TRUTH_BROKEN"
+    else:
+        retained_handle = observed["raw_value"]
+        assert retained_handle not in {0, -1}
+        assert observed["raw_state"] == "OPEN"
+        assert observed["real_close_attempted"] is True
+        assert broken["raw_value"] == retained_handle
+        assert broken["raw_state"] == "CLOSE_TRUTH_BROKEN"
+        assert broken["real_close_attempted"] is True
+    fail_fast = [
+        entry
+        for entry in result["audit"]
+        if entry["resource"] == "fail-fast"
+    ]
+    assert len(fail_fast) == 1
+    assert fail_fast[0]["moment"] == (
+        "SOURCE_JAVA_EXECUTABLE_PROBE_CLOSE_TRUTH_BROKEN"
+    )
+    assert fail_fast[0]["phase"] == "CLOSE_TRUTH_BROKEN"
+    assert fail_fast[0]["adapter_calls"] == 1
+
+
+def test_ownership_record_reader_preserves_iso_date_as_schema_string(
+    tmp_path: Path,
+) -> None:
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell 7 is not available")
+
+    project_root = tmp_path / "candidate"
+    record_directory = tmp_path / "ownership"
+    record = _ownership_record(project_root)
+    record["creation_date"] = "2026-08-15T06:11:39.0879086+00:00"
+    record_path = _write_record(
+        record_directory,
+        record["name"],
+        json.dumps(record, separators=(",", ":")).encode("utf-8"),
+    )
+    harness_file = tmp_path / "read-ownership-record.ps1"
+    result_file = tmp_path / "result.json"
+    harness_file.write_text(
+        r"""
+param(
+    [Parameter(Mandatory = $true)][string]$LauncherFile,
+    [Parameter(Mandatory = $true)][string]$RecordPath,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][string]$ProjectRoot,
+    [Parameter(Mandatory = $true)][string]$ResultFile
+)
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+$parseTokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $LauncherFile,
+    [ref]$parseTokens,
+    [ref]$parseErrors
+)
+if (@($parseErrors).Count -ne 0) {
+    throw "launcher PowerShell AST is invalid"
+}
+$definitions = $ast.FindAll(
+    { param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] },
+    $true
+)
+$bundle = ($definitions | ForEach-Object { $_.Extent.Text }) -join "`n`n"
+. ([scriptblock]::Create($bundle))
+$record = Read-SourceProcessOwnershipRecord `
+    -Path $RecordPath `
+    -Name $Name `
+    -ProjectRoot $ProjectRoot
+$output = if ($null -eq $record) {
+    [pscustomobject]@{
+        record_is_null = $true
+        creation_date_type = $null
+        creation_date = $null
+    }
+} else {
+    [pscustomobject]@{
+        record_is_null = $false
+        creation_date_type = $record.creation_date.GetType().FullName
+        creation_date = [string]$record.creation_date
+    }
+}
+[System.IO.File]::WriteAllText(
+    $ResultFile,
+    ($output | ConvertTo-Json -Compress),
+    [System.Text.UTF8Encoding]::new($false)
+)
+""".strip(),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(harness_file),
+            "-LauncherFile",
+            str(LAUNCHER),
+            "-RecordPath",
+            str(record_path),
+            "-Name",
+            record["name"],
+            "-ProjectRoot",
+            str(project_root),
+            "-ResultFile",
+            str(result_file),
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    result = json.loads(result_file.read_text(encoding="utf-8-sig"))
+    assert result == {
+        "record_is_null": False,
+        "creation_date_type": "System.String",
+        "creation_date": record["creation_date"],
+    }
 
 
 def test_stale_reused_pid_is_rejected_without_termination(tmp_path: Path) -> None:
@@ -4939,7 +8603,7 @@ def test_snapshot_drift_before_termination_is_never_terminated(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("terminator_mode", "postcondition", "expected_code"),
     (
-        ("throw", "not-read", "PROCESS_TERMINATION_FAILED"),
+        ("throw", "alive", "PROCESS_TERMINATION_FAILED"),
         ("success", "alive", "PROCESS_STILL_RUNNING"),
     ),
 )
@@ -4978,6 +8642,117 @@ def test_termination_failure_or_alive_postcondition_preserves_record(
     )
 
     assert _result_code(result) == expected_code
+    assert result["snapshot_calls"] == 3
+    assert len(result["termination_calls"]) == 1
+    assert result["removal_calls"] == []
+    assert result["record_exists"] is True
+    assert result["record_content"].encode("utf-8") == raw_record
+
+
+def test_terminator_exception_with_empty_postcondition_removes_record_and_replays(
+    tmp_path: Path,
+) -> None:
+    bundle = _contract_bundle_or_outcome(decisive=False)
+    project_root = tmp_path / "candidate"
+    record_directory = tmp_path / "ownership"
+    record = _ownership_record(project_root)
+    _write_record(
+        record_directory,
+        record["name"],
+        json.dumps(record, separators=(",", ":")).encode("utf-8"),
+    )
+    root = _snapshot_process(record)
+    helper = _snapshot_process(
+        record,
+        pid=4101,
+        parent_pid=record["pid"],
+        creation_date="2026-08-06T00:00:01.0000000Z",
+        command_line=record["command_line"] + " --owned-helper",
+    )
+    tree = [root, helper]
+
+    result = _run_sandboxed_powershell(
+        tmp_path,
+        bundle=bundle,
+        name=record["name"],
+        project_root=project_root,
+        record_directory=record_directory,
+        snapshots=[tree, tree, []],
+        terminator_mode="throw",
+        invocation_count=2,
+    )
+
+    assert result["invocation_errors"] == [None, None]
+    assert [
+        str(next(value for key, value in item.items() if key.lower() == "code"))
+        for item in result["function_results"]
+    ] == ["TERMINATED", "NO_OWNERSHIP_RECORD"]
+    assert result["snapshot_calls"] == 3
+    assert len(result["termination_calls"]) == 1
+    assert len(result["removal_calls"]) == 1
+    assert result["record_exists"] is False
+
+
+def test_terminator_exception_with_late_owned_descendant_preserves_record(
+    tmp_path: Path,
+) -> None:
+    bundle = _contract_bundle_or_outcome(decisive=False)
+    project_root = tmp_path / "candidate"
+    record_directory = tmp_path / "ownership"
+    record = _ownership_record(project_root)
+    raw_record = json.dumps(record, separators=(",", ":")).encode("utf-8")
+    _write_record(record_directory, record["name"], raw_record)
+    root = _snapshot_process(record)
+    late_child = _snapshot_process(
+        record,
+        pid=4200,
+        parent_pid=record["pid"],
+        creation_date="2026-08-06T00:00:02.0000000Z",
+        command_line=record["command_line"] + " --late-owned-helper",
+    )
+
+    result = _run_sandboxed_powershell(
+        tmp_path,
+        bundle=bundle,
+        name=record["name"],
+        project_root=project_root,
+        record_directory=record_directory,
+        snapshots=[[root], [root], [late_child]],
+        terminator_mode="throw",
+    )
+
+    assert _result_code(result) == "PROCESS_TERMINATION_FAILED"
+    assert result["snapshot_calls"] == 3
+    assert len(result["termination_calls"]) == 1
+    assert result["removal_calls"] == []
+    assert result["record_exists"] is True
+    assert result["record_content"].encode("utf-8") == raw_record
+
+
+def test_terminator_exception_with_unavailable_postcondition_preserves_record(
+    tmp_path: Path,
+) -> None:
+    bundle = _contract_bundle_or_outcome(decisive=False)
+    project_root = tmp_path / "candidate"
+    record_directory = tmp_path / "ownership"
+    record = _ownership_record(project_root)
+    raw_record = json.dumps(record, separators=(",", ":")).encode("utf-8")
+    _write_record(record_directory, record["name"], raw_record)
+    root = _snapshot_process(record)
+
+    result = _run_sandboxed_powershell(
+        tmp_path,
+        bundle=bundle,
+        name=record["name"],
+        project_root=project_root,
+        record_directory=record_directory,
+        snapshots=[[root], [root], []],
+        terminator_mode="throw",
+        snapshot_error_calls=[3],
+    )
+
+    assert _result_code(result) == "PROCESS_SNAPSHOT_UNAVAILABLE"
+    assert result["snapshot_calls"] == 3
     assert len(result["termination_calls"]) == 1
     assert result["removal_calls"] == []
     assert result["record_exists"] is True
@@ -8364,6 +12139,120 @@ $output = [pscustomobject]@{
         "drift_error": "TARGET_E2E_DIRTY_SOURCE_AUTHORITY_DRIFT",
     }
     assert re.fullmatch(r"[0-9a-f]{64}", result["sha256"])
+
+
+def test_reviewed_modified_python_sources_are_closed_and_binding_complete(
+    tmp_path: Path,
+) -> None:
+    reviewed_paths = (
+        "python-agent-service/app/agents/dispute_intake_officer/room_utterance.py",
+        "python-agent-service/app/agents/dispute_intake_officer/workflow.py",
+        "python-agent-service/app/graph_runtime/intake_executor.py",
+    )
+    adjacent_path = "python-agent-service/app/graph_runtime/unreviewed_adjacent.py"
+    launcher = LAUNCHER.read_text(encoding="utf-8-sig")
+    allowlist_match = re.search(
+        r"\$allowedDirtyPaths\s*=.*?@\((?P<body>.*?)\)\s*\|\s*ForEach-Object\s*"
+        r"\{\s*\[void\]\$allowedDirtyPaths\.Add\(\$_\)\s*\}",
+        launcher,
+        flags=re.DOTALL,
+    )
+    assert allowlist_match is not None
+    allowed_paths = set(
+        re.findall(r'"([^"\r\n]+)"', allowlist_match.group("body"))
+    )
+    assert set(reviewed_paths) <= allowed_paths
+    assert adjacent_path not in allowed_paths
+
+    result = _run_launcher_helper_harness(
+        tmp_path,
+        helper_names={
+            "ConvertTo-TargetE2eNormalizedDirtySourcePath",
+            "Get-TargetE2eSourceBindingHash",
+            "New-TargetE2eReviewedDirtySourcePolicy",
+            "Resolve-TargetE2eDirtySourceAuthority",
+        },
+        body=r"""
+$firstPath = "python-agent-service/app/agents/dispute_intake_officer/room_utterance.py"
+$secondPath = "python-agent-service/app/agents/dispute_intake_officer/workflow.py"
+$thirdPath = "python-agent-service/app/graph_runtime/intake_executor.py"
+$adjacentPath = "python-agent-service/app/graph_runtime/unreviewed_adjacent.py"
+$files = @(
+    [pscustomobject]@{ Path = $firstPath; Content = "room-utterance-reviewed`n" },
+    [pscustomobject]@{ Path = $secondPath; Content = "workflow-reviewed`n" },
+    [pscustomobject]@{ Path = $thirdPath; Content = "intake-executor-reviewed`n" }
+)
+foreach ($file in $files) {
+    $target = Join-Path $SandboxRoot $file.Path
+    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+    [System.IO.File]::WriteAllText(
+        $target,
+        $file.Content,
+        [System.Text.UTF8Encoding]::new($false))
+}
+$policy = New-TargetE2eReviewedDirtySourcePolicy `
+    -ModifiedPaths @($firstPath, $secondPath, $thirdPath) `
+    -UntrackedPaths @()
+$entries = @(Resolve-TargetE2eDirtySourceAuthority `
+        -StatusLines @(" M $thirdPath", " M $secondPath", " M $firstPath") `
+        -ProjectRoot $SandboxRoot `
+        -Policy $policy)
+$entryBindings = @($entries | ForEach-Object { $_.Path + "|" + $_.Sha256 })
+$candidateSha = "a" * 40
+$binding = Get-TargetE2eSourceBindingHash `
+    -Value ((@("HEAD|$candidateSha") + $entryBindings) -join "`n")
+$withoutFirst = Get-TargetE2eSourceBindingHash `
+    -Value ((@("HEAD|$candidateSha") + @($entryBindings | Select-Object -Skip 1)) -join "`n")
+$withoutSecond = Get-TargetE2eSourceBindingHash `
+    -Value ((@("HEAD|$candidateSha") + @($entryBindings[0], $entryBindings[2])) -join "`n")
+$withoutThird = Get-TargetE2eSourceBindingHash `
+    -Value ((@("HEAD|$candidateSha") + @($entryBindings | Select-Object -First 2)) -join "`n")
+$unknownError = ""
+try {
+    Resolve-TargetE2eDirtySourceAuthority `
+        -StatusLines @(" M $adjacentPath") `
+        -ProjectRoot $SandboxRoot `
+        -Policy $policy | Out-Null
+}
+catch {
+    $unknownError = $_.Exception.Message
+}
+$output = [pscustomobject]@{
+    paths = @($entries | ForEach-Object { $_.Path })
+    statuses = @($entries | ForEach-Object { $_.Status })
+    hashes = @($entries | ForEach-Object { $_.Sha256 })
+    binding = $binding
+    binding_without_first = $withoutFirst
+    binding_without_second = $withoutSecond
+    binding_without_third = $withoutThird
+    unknown_error = $unknownError
+}
+""".strip(),
+    )
+
+    expected_hashes = (
+        hashlib.sha256(b"room-utterance-reviewed\n").hexdigest(),
+        hashlib.sha256(b"workflow-reviewed\n").hexdigest(),
+        hashlib.sha256(b"intake-executor-reviewed\n").hexdigest(),
+    )
+    expected_binding_material = "\n".join(
+        (
+            "HEAD|" + "a" * 40,
+            *(f"{path}|{sha256}" for path, sha256 in zip(reviewed_paths, expected_hashes)),
+        )
+    )
+    expected_binding = hashlib.sha256(
+        expected_binding_material.encode("utf-8")
+    ).hexdigest()
+
+    assert result["paths"] == list(reviewed_paths)
+    assert result["statuses"] == [" M", " M", " M"]
+    assert result["hashes"] == list(expected_hashes)
+    assert result["binding"] == expected_binding
+    assert result["binding"] != result["binding_without_first"]
+    assert result["binding"] != result["binding_without_second"]
+    assert result["binding"] != result["binding_without_third"]
+    assert result["unknown_error"] == "TARGET_E2E_DIRTY_SOURCE_AUTHORITY_REJECTED"
 
 
 def test_clean_worktree_accepts_empty_dirty_source_authority(tmp_path: Path) -> None:

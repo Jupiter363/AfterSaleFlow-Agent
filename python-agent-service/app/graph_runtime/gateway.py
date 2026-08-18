@@ -103,7 +103,7 @@ _CONTROL_PLANE_RETRY_LIMIT: Final[int] = 2
 _CONTROL_PLANE_RETRY_INITIAL_SECONDS: Final[float] = 0.05
 _CONTROL_PLANE_RETRY_MAX_SECONDS: Final[float] = 0.2
 _CONTROL_PLANE_LEASE_SAFETY_MARGIN: Final[timedelta] = timedelta(seconds=2)
-_TARGET_E2E_GRAPH_KEY: Final[str] = "all-rooms.target-e2e.v1"
+_TARGET_E2E_GRAPH_KEY: Final[str] = "all-rooms.target-e2e.v2"
 _TARGET_E2E_LEGACY_PROMPT_VERSION: Final[str] = "all-rooms-prompt.target-e2e.v1"
 _TARGET_E2E_INTAKE_ROLES: Final[frozenset[str]] = frozenset({"USER", "MERCHANT"})
 _LEASE_OBSERVABILITY_EMPTY: Final[str] = "NONE"
@@ -1738,7 +1738,7 @@ class GraphCommandGateway:
     ) -> None:
         command = execution.admission.command
         if (
-            event.schema_version != "agent-stream.v2"
+            event.schema_version != "agent-stream.v3"
             or event.run_id != command.logical_run_id
             or event.attempt_id != execution.attempt.attempt_id
             or event.audience != command.actor_scope.audience

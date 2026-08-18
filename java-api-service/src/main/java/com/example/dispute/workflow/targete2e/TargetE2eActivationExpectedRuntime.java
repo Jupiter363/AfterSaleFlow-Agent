@@ -199,7 +199,7 @@ public final class TargetE2eActivationExpectedRuntime {
       String codeBuildId) {
 
     public GraphBinding {
-      if (!"all-rooms.target-e2e.v1".equals(key)) {
+      if (!"all-rooms.target-e2e.v2".equals(key)) {
         throw new IllegalArgumentException("target E2E Graph key is invalid");
       }
       TargetE2eActivationContract.identifier(version, "graph version");

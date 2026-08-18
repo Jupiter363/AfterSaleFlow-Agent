@@ -43,7 +43,12 @@ class TargetE2ESpecializedRoomProviderFactory:
         self,
         workflow: EvidenceTurnWorkflowPort,
     ) -> TargetE2ESpecializedRoomProviderFactory:
-        if not callable(getattr(workflow, "run", None)):
+        if (
+            not callable(getattr(workflow, "run", None))
+            or not callable(getattr(workflow, "arun", None))
+            or getattr(workflow, "protocol_version", None)
+            != "evidence-turn-result.v2"
+        ):
             raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
         return replace(self, evidence_workflow=workflow)
 
@@ -63,7 +68,12 @@ class TargetE2ESpecializedRoomProviderFactory:
             raise GraphContractError("TARGET_E2E_GRAPH_SECURITY_RUNTIME_REQUIRED")
         if not callable(getattr(self.room_exchange, "for_execution", None)):
             raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_REQUIRED")
-        if not callable(getattr(self.evidence_workflow, "run", None)):
+        if (
+            not callable(getattr(self.evidence_workflow, "run", None))
+            or not callable(getattr(self.evidence_workflow, "arun", None))
+            or getattr(self.evidence_workflow, "protocol_version", None)
+            != "evidence-turn-result.v2"
+        ):
             raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
         if self.hearing_decoder is None:
             raise GraphContractError("TARGET_E2E_FORMAL_HEARING_WORKFLOW_REQUIRED")

@@ -71,7 +71,7 @@ public final class AgentRunV2Coordinator {
                         command.roomId(),
                         command.operation(),
                         command.logicalIdempotencyKey(),
-                        AgentRunProtocol.V2,
+                        AgentRunProtocol.V3,
                         AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                         command.roomEpochId(),
                         graphCommand.roomType(),
@@ -95,7 +95,7 @@ public final class AgentRunV2Coordinator {
                 logicalRun.agentRunId(),
                 command.attemptNo(),
                 logicalRun.attemptLimit(),
-                AgentRunProtocol.V2.wireValue(),
+                AgentRunProtocol.V3.wireValue(),
                 attempt.logicalInputHash(),
                 attempt.previousAttemptId(),
                 attempt.resetRequired(),
@@ -179,7 +179,7 @@ public final class AgentRunV2Coordinator {
                 || !graphCommand.logicalRunId().equals(logicalRun.agentRunId())
                 || !graphCommand.caseId().equals(logicalRun.caseId())
                 || !command.logicalIdempotencyKey().equals(logicalRun.logicalIdempotencyKey())
-                || logicalRun.protocol() != AgentRunProtocol.V2
+                || logicalRun.protocol() != AgentRunProtocol.V3
                 || logicalRun.executorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY
                 || !command.roomEpochId().equals(logicalRun.roomEpochId())
                 || graphCommand.roomEpoch() != logicalRun.roomEpoch()

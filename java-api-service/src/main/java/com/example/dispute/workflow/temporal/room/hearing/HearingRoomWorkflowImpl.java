@@ -854,6 +854,8 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     if (!isTargetChild()) {
       return;
     }
+    // 反向通知案件根工作流：Hearing child 完成阶段推进后只发送进度 receipt，由父 workflow
+    // 验证同一 epoch/fencing token 并更新下游房间绑定，避免 child 直接改写控制面状态。
     CaseProcessWorkflow parent =
         Workflow.newExternalWorkflowStub(
             CaseProcessWorkflow.class,

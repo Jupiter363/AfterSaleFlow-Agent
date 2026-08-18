@@ -7,6 +7,13 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Objects;
 
+/**
+ * CaseProcess 的跨进程 Temporal 协议常量与稳定 workflow identity 规则。
+ *
+ * <p>SDK update/provisioning gateway、房间子工作流、恢复 relay 和 CASE_CONTROL worker 都依赖这些名字；
+ * 它们与 {@code CaseProcessWorkflow} 的注解一一对应，修改会影响已写入历史的 Update/Signal/Query 路由。
+ * 下游 {@code caseWorkflowId}/{@code roomWorkflowId} 则为根流程及其房间 child 提供可重放的执行标识。
+ */
 public final class CaseProcessWorkflowProtocol {
 
   public static final String CASE_WORKFLOW_TYPE = "CaseProcessWorkflow";
@@ -35,6 +42,10 @@ public final class CaseProcessWorkflowProtocol {
 
   private CaseProcessWorkflowProtocol() {}
 
+  /**
+   * 根 CaseProcess workflowId 的唯一生成规则。命令网关、provisioning gateway、状态查询器及房间 child
+   * 都通过它定位同一父流程；过长输入使用稳定 hash，避免不同调用端产生不一致的 Temporal execution。
+   */
   public static String caseWorkflowId(String tenantSurrogate, String caseId) {
     requireText(tenantSurrogate, "tenantSurrogate");
     requireText(caseId, "caseId");
@@ -42,6 +53,10 @@ public final class CaseProcessWorkflowProtocol {
     return candidate.length() <= 128 ? candidate : "case-process:" + sha256(candidate);
   }
 
+  /**
+   * 下游房间 child workflowId 的唯一生成规则。根流程在 provisioning/legacy 路径创建 child，房间切换和
+   * Continue-As-New 恢复时以该标识重新绑定，从而把同一 case 的不同 epoch 隔离开。
+   */
   public static String roomWorkflowId(String caseId, RoomType roomType, long roomEpoch) {
     requireText(caseId, "caseId");
     Objects.requireNonNull(roomType, "roomType must not be null");

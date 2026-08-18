@@ -276,7 +276,7 @@ public class TargetE2eControlConfiguration {
         targetE2eIntakeBranchDomainService,
         targetE2eIntakeFormalBranchCommandResolver,
         roomEpochAllocator,
-        "all-rooms.target-e2e.v1",
+        "all-rooms.target-e2e.v2",
         objectMapper,
         Clock.systemUTC());
   }

@@ -16,10 +16,8 @@ from app.api.graph_stream_service import (
     ProviderRuntimeBinding,
     ShadowExecutorRegistration,
 )
-from app.agents.evidence_clerk.workflow import (
-    EVIDENCE_TURN_MODEL_NODE_NAME,
-    EvidenceTurnWorkflow,
-)
+from app.agents.evidence_clerk.workflow import EVIDENCE_TURN_MODEL_NODE_NAME
+from app.agents.evidence_clerk.v2_workflow import EvidenceTurnWorkflowV2
 from app.agents.hearing_flow import HearingFlowWorkflows
 from app.config import (
     GraphShadowBindingSettings,
@@ -261,7 +259,7 @@ def build_graph_runtime_bindings(
     structured_client: LiteLlmProxyClient | None = None
     intake_transport: Any = None
     intake_exchange: JavaIntakeExchangeClient | None = None
-    evidence_workflow: EvidenceTurnWorkflow | None = None
+    evidence_workflow: EvidenceTurnWorkflowV2 | None = None
     hearing_workflow: HearingFlowWorkflows | None = None
     target_uses_default_providers = (
         settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE"
@@ -493,7 +491,7 @@ def _build_target_e2e_room_providers(
     intake_exchange: Any,
     intake_provider: str | None,
     intake_model: str | None,
-    evidence_workflow: EvidenceTurnWorkflow | None,
+    evidence_workflow: EvidenceTurnWorkflowV2 | None,
     hearing_workflow: HearingFlowWorkflows | None,
     specialized_provider_factory: (
         Callable[[GraphExecutorKernel], Iterable[TargetE2ERoomProvider]] | None
@@ -508,7 +506,12 @@ def _build_target_e2e_room_providers(
         raise GraphContractError("TARGET_E2E_INTAKE_RUNTIME_DEPENDENCIES_REQUIRED")
     if specialized_provider_factory is None:
         raise GraphContractError("TARGET_E2E_SPECIALIZED_ROOM_RUNTIME_REQUIRED")
-    if not callable(getattr(evidence_workflow, "run", None)):
+    if (
+        not callable(getattr(evidence_workflow, "run", None))
+        or not callable(getattr(evidence_workflow, "arun", None))
+        or getattr(evidence_workflow, "protocol_version", None)
+        != "evidence-turn-result.v2"
+    ):
         raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
     if not callable(getattr(hearing_workflow, "target_e2e_invocation", None)):
         raise GraphContractError("TARGET_E2E_FORMAL_HEARING_WORKFLOW_REQUIRED")
@@ -551,12 +554,12 @@ def _build_target_e2e_evidence_workflow(
     *,
     settings: Settings,
     structured_client: LiteLlmProxyClient,
-) -> EvidenceTurnWorkflow:
+) -> EvidenceTurnWorkflowV2:
     """Bind the formal Clerk to the lifecycle-owned shared model client."""
 
     if not isinstance(structured_client, LiteLlmProxyClient):
         raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_MODEL_REQUIRED")
-    return EvidenceTurnWorkflow(
+    return EvidenceTurnWorkflowV2(
         model_runner=HarnessModelRunner(
             llm=structured_client,
             prompts=PromptRepository(),

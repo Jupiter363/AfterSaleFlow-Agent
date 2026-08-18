@@ -4,7 +4,10 @@ import copy
 import datetime as dt
 import importlib
 import json
+import shutil
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -1063,20 +1066,47 @@ def test_local_source_dirty_manifest_is_closed_complete_and_fully_hashed() -> No
         "java-api-service/src/main/java/com/example/dispute/room/infrastructure/persistence/repository/CaseTimelineEventRepository.java",
         "java-api-service/src/main/java/com/example/dispute/workflow/application/epoch/RoomEpochAllocator.java",
         "java-api-service/src/main/java/com/example/dispute/workflow/application/epoch/TransactionalRoomEpochAllocator.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/application/intake/IntakeDossierProjectionMerger.java",
         "java-api-service/src/main/java/com/example/dispute/workflow/contract/v1/FrozenIntakeSubmissionAuthority.java",
         "java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/entity/CaseProcessProjectionEntity.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/graph/HttpTargetE2EGraphProposalClient.java",
         "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomCaseProcessDispatcher.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/temporal/caseprocess/CaseProcessCarryState.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/temporal/caseprocess/CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/temporal/caseprocess/CaseProcessExpiredTargetEvidenceTerminalRecoveryResult.java",
         "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomSnapshot.java",
         "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomStart.java",
         "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomWorkflowImpl.java",
         "java-api-service/src/test/java/com/example/dispute/room/EvidenceAgentTurnServiceTest.java",
         "java-api-service/src/test/java/com/example/dispute/workflow/activity/intake/JdbcIntakeFormalBranchCommitPortTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/activity/intake/IntakeDossierProjectionMergerTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/caseprocess/CaseProcessCarryStateCompatibilityTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/caseprocess/CaseProcessWorkflowReplayTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/projection/IntakeProcessProjectionCompletionServiceIntegrationTest.java",
         "java-api-service/src/test/java/com/example/dispute/workflow/room/RoomEpochAllocatorIntegrationTest.java",
         "java-api-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceRoomWorkflowTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/targete2e/graph/HttpTargetE2EGraphProposalClientTest.java",
         "java-api-service/src/test/java/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomCaseProcessDispatcherTest.java",
+        "python-agent-service/app/agents/dispute_intake_officer/room_utterance.py",
+        "python-agent-service/app/agents/dispute_intake_officer/schemas.py",
+        "python-agent-service/app/agents/dispute_intake_officer/skills/dossier/dossier_skill.py",
+        "python-agent-service/app/agents/dispute_intake_officer/workflow.py",
+        "python-agent-service/app/agents/prompts/dispute_intake_officer/intake_turn_case_detail.md",
+        "python-agent-service/app/graph_runtime/intake_executor.py",
+        "python-agent-service/app/graphs/intake/__init__.py",
+        "python-agent-service/app/graphs/intake/baseline.py",
+        "python-agent-service/app/graphs/intake/contracts.py",
+        "python-agent-service/app/graphs/intake/lcel.py",
+        "python-agent-service/app/graphs/intake/nodes.py",
+        "python-agent-service/app/graphs/intake/validators.py",
         "python-agent-service/app/harness/evidence_context_assembler.py",
         "python-agent-service/app/schemas/final_agents.py",
+        "python-agent-service/tests/agents/test_intake_case_detail_dossier.py",
         "python-agent-service/tests/agents/test_evidence_clerk_turn.py",
+        "python-agent-service/tests/api/test_graph_commands.py",
+        "python-agent-service/tests/graph_runtime/unit/test_production_bindings.py",
+        "python-agent-service/tests/graphs/intake/test_lcel.py",
+        "python-agent-service/tests/graphs/intake/test_package_imports.py",
         "tests/static/test_local_source_process_ownership.py",
         "tests/static/test_phase9_target_e2e_contract.py",
         "tests/static/test_phase9_target_e2e_deployment.py",
@@ -1134,3 +1164,162 @@ def test_local_source_clean_launch_retains_exact_overlay_replay_semantics() -> N
     assert "$canonicalCompiledSourceSha -cne $candidateSha" in launcher
     assert "$canonicalWorktreeBinding -cne $expectedJavaSourceBinding" in launcher
     assert "$validatedTargetClasses = if ($null -eq $stagedTargetClasses)" in launcher
+
+
+def test_local_source_frontend_spawn_scopes_ci_and_preserves_identity() -> None:
+    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    command = launcher.index('$frontendCommand = \'pnpm --dir "{0}" dev\'')
+    capture = launcher.index(
+        '$frontendCiWasPresent = Test-Path -LiteralPath "Env:CI"', command
+    )
+    scoped_try = launcher.index("    try {", capture)
+    ci_true = launcher.index(
+        'Set-Item -LiteralPath "Env:CI" -Value "true"', scoped_try
+    )
+    spawn = launcher.index("$frontend = Start-Process `", ci_true)
+    scoped_finally = launcher.index("    } finally {", spawn)
+    restore = launcher.index(
+        'Set-Item -LiteralPath "Env:CI" -Value $frontendPreviousCiValue',
+        scoped_finally,
+    )
+    remove = launcher.index(
+        'Remove-Item -LiteralPath "Env:CI" -ErrorAction SilentlyContinue', restore
+    )
+    ownership = launcher.index("    if (-not $BypassFrontendOwnership)", remove)
+    java_readiness = launcher.index('        -Name "Java API"', ownership)
+    python_spawn = launcher.index("$pythonAgent = Start-Process `", java_readiness)
+
+    assert command < capture < scoped_try < ci_true < spawn
+    assert spawn < scoped_finally < restore < remove < ownership
+    assert ownership < java_readiness < python_spawn
+
+    scoped_spawn = launcher[capture:ownership]
+    assert (
+        '$frontend = Start-Process `\n'
+        '            -FilePath "cmd.exe" `\n'
+        '            -ArgumentList @("/d", "/c", $frontendCommand) `\n'
+        "            -WorkingDirectory $frontendDir `\n"
+        "            -WindowStyle Hidden `\n"
+        "            -PassThru"
+    ) in scoped_spawn
+    assert "RedirectStandardInput" not in scoped_spawn
+    assert '"NUL"' not in scoped_spawn
+    assert "'NUL'" not in scoped_spawn
+    assert "BypassFrontendOwnership" not in scoped_spawn
+
+
+def test_local_source_frontend_spawn_restores_ci_when_spawn_throws(
+    tmp_path: Path,
+) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is required to execute the launcher CI-scope contract")
+
+    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
+        encoding="utf-8"
+    )
+    scope_start = launcher.index(
+        '    $frontendCiWasPresent = Test-Path -LiteralPath "Env:CI"'
+    )
+    scope_end = launcher.index("    if (-not $BypassFrontendOwnership)", scope_start)
+    scoped_spawn = textwrap.dedent(launcher[scope_start:scope_end]).rstrip()
+    executable_scope = textwrap.indent(scoped_spawn, "        ")
+
+    harness = f'''$ErrorActionPreference = "Stop"
+$script:ThrowSpawn = $false
+$script:ObservedCi = @()
+
+function Start-Process {{
+    param(
+        [string]$FilePath,
+        [object[]]$ArgumentList,
+        [string]$WorkingDirectory,
+        [string]$WindowStyle,
+        [switch]$PassThru
+    )
+    $script:ObservedCi += if (Test-Path -LiteralPath "Env:CI") {{
+        (Get-Item -LiteralPath "Env:CI").Value
+    }} else {{
+        "<ABSENT>"
+    }}
+    if ($script:ThrowSpawn) {{
+        throw "synthetic spawn failure"
+    }}
+    return [pscustomobject]@{{ Id = 4242 }}
+}}
+
+function Invoke-CiScenario {{
+    param(
+        [bool]$InitiallyPresent,
+        [AllowEmptyString()][string]$InitialValue,
+        [bool]$ThrowSpawn
+    )
+    if ($InitiallyPresent) {{
+        Set-Item -LiteralPath "Env:CI" -Value $InitialValue
+    }} else {{
+        Remove-Item -LiteralPath "Env:CI" -ErrorAction SilentlyContinue
+    }}
+    $script:ThrowSpawn = $ThrowSpawn
+    $script:ObservedCi = @()
+    $frontendDir = "C:\\frontend"
+    $frontendCommand = 'pnpm --dir "C:\\frontend" dev'
+    $caughtExpectedFailure = $false
+    try {{
+{executable_scope}
+    }} catch {{
+        if (-not $ThrowSpawn -or $_.Exception.Message -cne "synthetic spawn failure") {{
+            throw
+        }}
+        $caughtExpectedFailure = $true
+    }}
+
+    if ($script:ObservedCi.Count -ne 1 -or $script:ObservedCi[0] -cne "true") {{
+        throw "frontend child did not observe exact CI=true"
+    }}
+    if ($ThrowSpawn -and -not $caughtExpectedFailure) {{
+        throw "synthetic spawn failure was not propagated"
+    }}
+    if ($InitiallyPresent) {{
+        if (-not (Test-Path -LiteralPath "Env:CI")) {{
+            throw "prior CI presence was not restored"
+        }}
+        $restored = (Get-Item -LiteralPath "Env:CI").Value
+        if ($restored -cne $InitialValue) {{
+            throw "prior CI value was not restored exactly"
+        }}
+    }} elseif (Test-Path -LiteralPath "Env:CI") {{
+        throw "originally absent CI was not removed"
+    }}
+}}
+
+Invoke-CiScenario -InitiallyPresent $false -InitialValue "" -ThrowSpawn $false
+Invoke-CiScenario -InitiallyPresent $true -InitialValue "Original-CI-Value" -ThrowSpawn $false
+Invoke-CiScenario -InitiallyPresent $false -InitialValue "" -ThrowSpawn $true
+Invoke-CiScenario -InitiallyPresent $true -InitialValue "Original-CI-Value" -ThrowSpawn $true
+Write-Output "FRONTEND_CI_SCOPE_OK"
+'''
+    harness_path = tmp_path / "frontend-ci-scope-harness.ps1"
+    harness_path.write_text(harness, encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert completed.stdout.strip() == "FRONTEND_CI_SCOPE_OK"

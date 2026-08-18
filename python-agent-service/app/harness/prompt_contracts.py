@@ -90,10 +90,22 @@ _CONTRACTS: dict[str, AgentContextContract] = {
     ),
     "evidence_turn": AgentContextContract(
         node_name="evidence_turn",
-        configuration_profile_key="EVIDENCE_CLERK_CONTEXT_PACK_V3",
+        configuration_profile_key="EVIDENCE_CLERK_CONTEXT_PACK_V4",
         sections=(
-            ContextSectionSpec("current_turn", 100, True, "harness_assembled"),
-            ContextSectionSpec("case_identity", 98, True, "harness_assembled"),
+            # Evidence activation v2 intentionally enters through one ordered
+            # business-context envelope.  The legacy named sections below stay
+            # available to older offline fixtures but are not populated by the
+            # v2 workflow, so the model cannot receive duplicate dossier/source
+            # representations.
+            ContextSectionSpec(
+                "evidence_room_context_v2",
+                101,
+                True,
+                "harness_ordered_v2",
+                prompt_order=1,
+            ),
+            ContextSectionSpec("current_turn", 100, False, "harness_assembled"),
+            ContextSectionSpec("case_identity", 98, False, "harness_assembled"),
             ContextSectionSpec(
                 "claim_and_response_state",
                 97,
@@ -109,7 +121,7 @@ _CONTRACTS: dict[str, AgentContextContract] = {
             ContextSectionSpec(
                 "fact_targets",
                 95,
-                True,
+                False,
                 "intake_dossier_allowlist",
             ),
             ContextSectionSpec(

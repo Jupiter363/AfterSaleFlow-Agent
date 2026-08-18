@@ -6,7 +6,7 @@ import java.util.Objects;
 
 /** Performs only the caller-transaction Evidence domain write. */
 public final class TargetEvidenceFinalizationAdapter {
-  public static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v1";
+  public static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v2";
   private final TargetEvidenceFormalCommitPort formalCommitPort;
 
   public TargetEvidenceFinalizationAdapter(TargetEvidenceFormalCommitPort formalCommitPort) {

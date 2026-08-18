@@ -12,6 +12,12 @@ public interface AgentRunV2StreamStore {
 
     AppendReceipt append(AgentStreamEvent event);
 
+    /** Marks the attempt as having exposed public output. This is intentionally idempotent and
+     * must be a short transaction before the first v3 public delta is relayed. */
+    default boolean markPublicOutputStarted(String runId, String attemptId) {
+        return true;
+    }
+
     BatchAppendReceipt appendBatch(List<AgentStreamEvent> events);
 
     default List<AgentStreamEvent> replay(

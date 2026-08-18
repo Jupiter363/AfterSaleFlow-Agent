@@ -965,7 +965,7 @@ public class IntakeProcessProjectionCompletionService {
         requireLong(run, "room_epoch", evidence.roomEpoch());
         requireLong(run, "process_revision", receipt.processRevision());
         requireLong(run, "fencing_token", evidence.fencingToken());
-        requireText(run, "protocol", "agent-stream.v2");
+        requireText(run, "protocol", "agent-stream.v3");
         requireText(run, "executor_kind", "TEMPORAL_ACTIVITY");
         requireText(run, "lineage_schema_version", "agent-run-lineage.v1");
         requireText(run, "run_status", "COMPLETED");

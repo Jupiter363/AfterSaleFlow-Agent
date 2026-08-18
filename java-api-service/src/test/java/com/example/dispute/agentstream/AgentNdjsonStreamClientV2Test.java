@@ -22,6 +22,94 @@ class AgentNdjsonStreamClientV2Test {
     private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
 
     @Test
+    void parsesV3FrameDeltasSnapshotCommitAndRejectsANonContiguousDelta() {
+        var state = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Map.of());
+        String frameId = "EFRM_0123456789ABCDEF01234567";
+
+        assertThat(parseV3(state, v3Event(
+                                0, "attempt_started", "{\"node\":\"evidence_turn\"}"))
+                        .eventType())
+                .isEqualTo(StreamEventType.ATTEMPT_STARTED);
+        assertThat(parseV3(state, v3Event(
+                                1,
+                                "public_frame_start",
+                                "{\"frame_id\":\"" + frameId
+                                        + "\",\"frame_sequence\":1,\"frame_type\":\"ROOM_WELCOME\","
+                                        + "\"public_header\":{\"frame_sequence\":1,"
+                                        + "\"frame_type\":\"ROOM_WELCOME\"}}"))
+                        .payload()
+                        .frameId())
+                .isEqualTo(frameId);
+        assertThat(parseV3(state, v3Event(
+                                2,
+                                "public_text_delta",
+                                "{\"frame_id\":\"" + frameId
+                                        + "\",\"frame_sequence\":1,\"delta_index\":0,"
+                                        + "\"delta\":\"欢迎\"}"))
+                        .payload()
+                        .delta())
+                .isEqualTo("欢迎");
+        assertThat(parseV3(state, v3Event(
+                                3,
+                                "public_text_delta",
+                                "{\"frame_id\":\"" + frameId
+                                        + "\",\"frame_sequence\":1,\"delta_index\":1,"
+                                        + "\"delta\":\"进入证据室\"}"))
+                        .payload()
+                        .deltaIndex())
+                .isEqualTo(1);
+        assertThat(parseV3(state, v3Event(
+                                4,
+                                "active_frame_snapshot",
+                                "{\"frame_id\":\"" + frameId
+                                        + "\",\"frame_sequence\":1,\"delta_index\":2,"
+                                        + "\"public_text\":\"欢迎进入证据室\"}"))
+                        .payload()
+                        .publicText())
+                .isEqualTo("欢迎进入证据室");
+        assertThat(parseV3(state, v3Event(
+                                5,
+                                "public_frame_committed",
+                                "{\"frame_id\":\"" + frameId
+                                        + "\",\"frame_sequence\":1,"
+                                        + "\"durable_cursor\":\"v3:attempt-1:FRAME:1\","
+                                        + "\"header_sha256\":\"" + "a".repeat(64) + "\","
+                                        + "\"public_text_sha256\":\"" + "b".repeat(64) + "\","
+                                        + "\"frame_sha256\":\"" + "c".repeat(64) + "\","
+                                        + "\"public_text_chars\":7}"))
+                        .payload()
+                        .durableCursor())
+                .isEqualTo("v3:attempt-1:FRAME:1");
+        parseV3(state, v3Event(6, "usage", usage()));
+        parseV3(state, v3Event(
+                7,
+                "final",
+                "{\"final_result_ref\":\"urn:result:1\",\"final_result_hash\":\""
+                        + "d".repeat(64)
+                        + "\"}"));
+        state.assertComplete();
+
+        var gap = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Map.of());
+        parseV3(gap, v3Event(0, "attempt_started", "{\"node\":\"evidence_turn\"}"));
+        parseV3(gap, v3Event(
+                1,
+                "public_frame_start",
+                "{\"frame_id\":\"" + frameId
+                        + "\",\"frame_sequence\":1,\"frame_type\":\"ROOM_WELCOME\","
+                        + "\"public_header\":{}}"));
+        assertThatThrownBy(() -> parseV3(gap, v3Event(
+                        2,
+                        "public_text_delta",
+                        "{\"frame_id\":\"" + frameId
+                                + "\",\"frame_sequence\":1,\"delta_index\":1,"
+                                + "\"delta\":\"跳号\"}")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("delta index is not contiguous");
+    }
+
+    @Test
     void parsesAttemptScopedAllowlistedEventsAndHashBoundFinal() {
         var state = new AgentNdjsonStreamClient.V2ProtocolState(
                 "run-1", "attempt-1", Audience.USER, Set.of("room_utterance"));
@@ -391,6 +479,11 @@ class AgentNdjsonStreamClientV2Test {
         return AgentNdjsonStreamClient.parseV2Line(MAPPER, event, state);
     }
 
+    private static com.example.dispute.workflow.contract.v1.AgentStreamEvent parseV3(
+            AgentNdjsonStreamClient.V2ProtocolState state, String event) {
+        return AgentNdjsonStreamClient.parseV3Line(MAPPER, event, state);
+    }
+
     private static String event(long sequence, String type, String payload) {
         return "{\"schema_version\":\"agent-stream.v2\",\"run_id\":\"run-1\","
                 + "\"attempt_id\":\"attempt-1\",\"sequence_no\":"
@@ -400,6 +493,10 @@ class AgentNdjsonStreamClientV2Test {
                 + "\",\"audience\":\"USER\",\"occurred_at\":\"2026-07-19T00:00:00Z\",\"payload\":"
                 + payload
                 + "}";
+    }
+
+    private static String v3Event(long sequence, String type, String payload) {
+        return event(sequence, type, payload).replace("agent-stream.v2", "agent-stream.v3");
     }
 
     private static String usage() {

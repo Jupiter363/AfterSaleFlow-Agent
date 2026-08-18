@@ -94,10 +94,10 @@ def build_target_e2e_fixture_transport(
         or scope.containsRealCaseOrPartyData is not False
         or scope.externalEffectsAllowed is not False
         or "INTAKE" not in context.allowedRoomTypes
-        or binding.graph_key != "all-rooms.target-e2e.v1"
-        or binding.graph_version != "target-e2e-graph.2026-07-27.1"
-        or binding.checkpoint_schema_version != "target-e2e-checkpoint.v1"
-        or binding.output_schema_version != "target-e2e-room-proposal-source.v1"
+        or binding.graph_key != "all-rooms.target-e2e.v2"
+        or binding.graph_version != "target-e2e-graph.2026-08-18.1"
+        or binding.checkpoint_schema_version != "target-e2e-checkpoint.v2"
+        or binding.output_schema_version != "target-e2e-room-proposal-source.v2"
         or frozenset(binding.allowed_room_types)
         != frozenset({"INTAKE", "EVIDENCE", "HEARING", "REVIEW"})
     ):

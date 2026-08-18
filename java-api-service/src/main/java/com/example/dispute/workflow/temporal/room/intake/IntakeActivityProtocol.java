@@ -109,7 +109,7 @@ public final class IntakeActivityProtocol {
       requireIdentifier(modelProfileId, "modelProfileId");
       String expectedOutputSchemaVersion =
           "intake-pinned-versions.v2".equals(schemaVersion)
-              ? "target-e2e-room-proposal-source.v1"
+              ? "target-e2e-room-proposal-source.v2"
               : "intake-turn-proposal.v2";
       if (!expectedOutputSchemaVersion.equals(outputSchemaVersion)) {
         throw new IllegalArgumentException(

@@ -5,6 +5,7 @@ import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter
 import com.example.dispute.agentstream.application.AgentRunFormalResultCommitter;
 import com.example.dispute.agentstream.application.AgentRunV2ManifestFactory;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
+import com.example.dispute.agentstream.application.AgentRunTransientStreamPublisher;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
 import com.example.dispute.room.infrastructure.persistence.JdbcIntakeFormalCommitPort;
@@ -261,9 +262,14 @@ public class TargetE2eArtifactConfiguration {
             AgentGraphCommandClient commandClient,
             AgentGraphReconciliationClient reconciliationClient,
             AgentRunV2StreamStore streamStore,
-            AgentRunReconciledFinalStore reconciledFinalStore) {
+            AgentRunReconciledFinalStore reconciledFinalStore,
+            AgentRunTransientStreamPublisher transientPublisher) {
         return new DurableAgentRunExecutionGateway(
-                commandClient, reconciliationClient, streamStore, reconciledFinalStore);
+                commandClient,
+                reconciliationClient,
+                streamStore,
+                reconciledFinalStore,
+                transientPublisher);
     }
 
     @Bean

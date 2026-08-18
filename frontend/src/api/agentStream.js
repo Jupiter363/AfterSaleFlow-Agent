@@ -6,15 +6,22 @@ import { consumeSse } from "./sse";
 
 export const AGENT_STREAM_SCHEMA_VERSION = "agent_stream.v1";
 export const AGENT_STREAM_V2_SCHEMA_VERSION = "agent-stream.v2";
+export const AGENT_STREAM_V3_SCHEMA_VERSION = "agent-stream.v3";
 const SUPPORTED_PROTOCOLS = new Set([
   AGENT_STREAM_SCHEMA_VERSION,
   AGENT_STREAM_V2_SCHEMA_VERSION,
+  AGENT_STREAM_V3_SCHEMA_VERSION,
 ]);
 const TERMINAL_EVENTS = new Set(["final", "error"]);
 const AGENT_STREAM_EVENTS = new Set([
   "start",
   "attempt_started",
   "visible_delta",
+  "public_frame_start",
+  "public_text_delta",
+  "active_frame_snapshot",
+  "public_frame_committed",
+  "public_frame_interrupted",
   "usage",
   "attempt_aborted",
   "attempt_reset",
@@ -125,9 +132,10 @@ function validateCursor(protocol, cursor, attemptId, sequence) {
     return;
   }
 
+  const prefix = protocol === AGENT_STREAM_V3_SCHEMA_VERSION ? "v3:" : "v2:";
   const separator = cursor.lastIndexOf(":");
-  if (!cursor.startsWith("v2:") || separator <= 2 || separator === cursor.length - 1) {
-    throw protocolError("AGENT_STREAM_CURSOR_INVALID", "数字人 V2 事件游标无效");
+  if (!cursor.startsWith(prefix) || separator <= 2 || separator === cursor.length - 1) {
+    throw protocolError("AGENT_STREAM_CURSOR_INVALID", "数字人事件游标无效");
   }
   const cursorAttemptId = cursor.slice(3, separator);
   const cursorSequence = cursor.slice(separator + 1);
@@ -282,6 +290,8 @@ export function normalizeAgentStreamEvent(
     );
   }
   const isV2 = schemaVersion === AGENT_STREAM_V2_SCHEMA_VERSION;
+  const isV3 = schemaVersion === AGENT_STREAM_V3_SCHEMA_VERSION;
+  const attemptScoped = isV2 || isV3;
 
   const runId = resolveStringDeclaration([
     envelope.run_id,
@@ -308,11 +318,20 @@ export function normalizeAgentStreamEvent(
     code: "AGENT_STREAM_ATTEMPT_INVALID",
     label: "attempt 标识",
     defaultValue: "",
-    required: isV2,
+    required: attemptScoped,
     nonEmpty: true,
   });
-  const cursor = resolveCursor(sseEvent, envelope, payload);
-  validateCursor(schemaVersion, cursor, attemptId, sequence);
+  const transientV3 = isV3 && new Set([
+    "public_frame_start",
+    "public_text_delta",
+    "active_frame_snapshot",
+  ]).has(event) && sseEvent?.id == null && envelope.cursor == null && payload.cursor == null;
+  const frameId = String(firstDefined(payload.frame_id, payload.frameId, ""));
+  const deltaIndex = firstDefined(payload.delta_index, payload.deltaIndex, null);
+  const cursor = transientV3
+    ? `v3-live:${attemptId}:${frameId}:${event}:${deltaIndex ?? sequence}`
+    : resolveCursor(sseEvent, envelope, payload);
+  if (!transientV3) validateCursor(schemaVersion, cursor, attemptId, sequence);
 
   const audience = resolveStringDeclaration([
     envelope.audience,
@@ -321,14 +340,14 @@ export function normalizeAgentStreamEvent(
     code: "AGENT_STREAM_AUDIENCE_INVALID",
     label: "audience",
     defaultValue: "",
-    required: isV2,
+    required: attemptScoped,
     nonEmpty: true,
   });
-  if (isV2 && !AGENT_STREAM_V2_AUDIENCES.has(audience)) {
-    throw protocolError("AGENT_STREAM_AUDIENCE_INVALID", "数字人 V2 事件 audience 无效");
+  if (attemptScoped && !AGENT_STREAM_V2_AUDIENCES.has(audience)) {
+    throw protocolError("AGENT_STREAM_AUDIENCE_INVALID", "数字人事件 audience 无效");
   }
   const actorRole = String(expectedAudience || "").toUpperCase();
-  if (isV2 && actorRole && actorRole !== "ADMIN" && actorRole !== audience) {
+  if (attemptScoped && actorRole && actorRole !== "ADMIN" && actorRole !== audience) {
     throw protocolError(
       "AGENT_STREAM_AUDIENCE_MISMATCH",
       "数字人 V2 事件 audience 与当前访问者不匹配",
@@ -348,6 +367,7 @@ export function normalizeAgentStreamEvent(
     event,
     sequence,
     cursor,
+    durable: !transientV3,
     audience,
     resetAttemptId: String(firstDefined(
       envelope.reset_attempt_id,
@@ -372,9 +392,32 @@ export function normalizeAgentStreamEvent(
       envelope.field,
       "room_utterance",
     )),
-    delta: event === "visible_delta"
+    delta: ["visible_delta", "public_text_delta"].includes(event)
       ? String(firstDefined(payload.delta, envelope.delta, ""))
       : "",
+    frameId,
+    frameSequence: firstDefined(payload.frame_sequence, payload.frameSequence, null),
+    frameType: String(firstDefined(payload.frame_type, payload.frameType, "")),
+    publicHeader: firstDefined(payload.public_header, payload.publicHeader, null),
+    deltaIndex,
+    publicText: String(firstDefined(payload.public_text, payload.publicText, "")),
+    durableCursor: String(firstDefined(
+      payload.durable_cursor,
+      payload.durableCursor,
+      "",
+    )),
+    headerSha256: String(firstDefined(payload.header_sha256, payload.headerSha256, "")),
+    publicTextSha256: String(firstDefined(
+      payload.public_text_sha256,
+      payload.publicTextSha256,
+      "",
+    )),
+    frameSha256: String(firstDefined(payload.frame_sha256, payload.frameSha256, "")),
+    publicTextChars: firstDefined(
+      payload.public_text_chars,
+      payload.publicTextChars,
+      null,
+    ),
     usage: firstDefined(
       payload.usage,
       envelope.usage,

@@ -37,9 +37,9 @@ public record IntakePrivateThreadRegistration(
         String registrationHash) {
 
     private static final String LEGACY_GRAPH_KEY = "intake.v2";
-    private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v1";
-    private static final String TARGET_GRAPH_VERSION = "target-e2e-graph.2026-07-27.1";
-    private static final String TARGET_CHECKPOINT_SCHEMA = "target-e2e-checkpoint.v1";
+    private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v2";
+    private static final String TARGET_GRAPH_VERSION = "target-e2e-graph.2026-08-18.1";
+    private static final String TARGET_CHECKPOINT_SCHEMA = "target-e2e-checkpoint.v2";
 
     public IntakePrivateThreadRegistration {
         if (!"graph-private-thread-registration.v1".equals(schemaVersion)) {
@@ -85,7 +85,7 @@ public record IntakePrivateThreadRegistration(
                 && (writerMode != WriterMode.TEMPORAL
                         || !TARGET_GRAPH_VERSION.equals(graphVersion)
                         || !TARGET_CHECKPOINT_SCHEMA.equals(checkpointSchemaVersion)
-                        || !"target-e2e-room-proposal-source.v1".equals(
+                        || !"target-e2e-room-proposal-source.v2".equals(
                                 outputSchemaVersion))) {
             throw new IllegalArgumentException(
                     "target graph requires the exact TEMPORAL target-E2E version pins");

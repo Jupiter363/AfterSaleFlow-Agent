@@ -10,6 +10,12 @@ import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * {@code CaseProcessWorkflow} 在续跑时恢复的完整携带状态。
+ *
+ * <p>上游由父工作流汇总已受理命令、缓冲事件、活动子流程及恢复承诺；Temporal 重放据此保持游标和
+ * 幂等边界，快照查询与后续子流程调度再消费这些受限状态。
+ */
 public record CaseProcessCarryState(
     String schemaVersion,
     String tenantSurrogate,

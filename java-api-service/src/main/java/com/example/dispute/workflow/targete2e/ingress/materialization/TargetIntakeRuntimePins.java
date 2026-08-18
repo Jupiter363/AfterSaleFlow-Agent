@@ -48,9 +48,9 @@ public record TargetIntakeRuntimePins(
 
     private IntakePrivateThreadRegistrationFactory.VersionPins registrationPins(String profilePromptVersion) {
         return new IntakePrivateThreadRegistrationFactory.VersionPins(
-                "all-rooms.target-e2e.v1", "target-e2e-graph.2026-07-27.1",
-                "target-e2e-checkpoint.v1", "intake-graph-state.v2", profilePromptVersion,
-                modelProfileId, "target-e2e-room-proposal-source.v1", policyVersion, guardrailVersion,
+                "all-rooms.target-e2e.v2", "target-e2e-graph.2026-08-18.1",
+                "target-e2e-checkpoint.v2", "intake-graph-state.v2", profilePromptVersion,
+                modelProfileId, "target-e2e-room-proposal-source.v2", policyVersion, guardrailVersion,
                 toolPolicyVersion);
     }
     /** Profile values are deployment expectations; activation-owned bindings must match them exactly. */
@@ -60,9 +60,9 @@ public record TargetIntakeRuntimePins(
             String activeGraphCodeBuildId, String activeDomainBindingHash) {
         if (!caseBuildId.equals(activeCaseBuildId)
                 || !agentBuildId.equals(activeAgentBuildId)
-                || !"all-rooms.target-e2e.v1".equals(graphKey)
-                || !"target-e2e-graph.2026-07-27.1".equals(graphVersion)
-                || !"target-e2e-checkpoint.v1".equals(checkpointSchemaVersion)
+                || !"all-rooms.target-e2e.v2".equals(graphKey)
+                || !"target-e2e-graph.2026-08-18.1".equals(graphVersion)
+                || !"target-e2e-checkpoint.v2".equals(checkpointSchemaVersion)
                 || !graphBindingHash.equals(activeGraphBindingHash)
                 || !graphCodeBuildId.equals(activeGraphCodeBuildId)
                 || !isolatedDomainDbBindingHash.equals(activeDomainBindingHash)) {

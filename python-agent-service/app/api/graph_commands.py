@@ -225,7 +225,7 @@ class AgentStreamProtocolValidator:
 
     def accept(self, event: AgentStreamEvent) -> None:
         if (
-            event.schema_version != "agent-stream.v2"
+            event.schema_version != "agent-stream.v3"
             or event.event_type not in _REQUIRED_PAYLOAD_FIELDS
             or not isinstance(event.payload, AgentStreamPayload)
             or isinstance(event.sequence_no, bool)
@@ -970,7 +970,7 @@ def _encode_terminal_error(
     error_code: str,
 ) -> bytes:
     event = AgentStreamEvent(
-        schema_version="agent-stream.v2",
+            schema_version="agent-stream.v3",
         run_id=validator.run_id,
         attempt_id=validator.attempt_id,
         sequence_no=validator.last_sequence + 1,
@@ -992,7 +992,7 @@ def _encode_terminal_attempt_aborted(
     reason_code: str,
 ) -> bytes:
     event = AgentStreamEvent(
-        schema_version="agent-stream.v2",
+            schema_version="agent-stream.v3",
         run_id=validator.run_id,
         attempt_id=validator.attempt_id,
         sequence_no=validator.last_sequence + 1,

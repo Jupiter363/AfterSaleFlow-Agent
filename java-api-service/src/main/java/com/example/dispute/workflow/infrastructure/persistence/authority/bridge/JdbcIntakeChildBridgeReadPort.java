@@ -387,7 +387,7 @@ public final class JdbcIntakeChildBridgeReadPort implements IntakeChildBridgeRea
            and run.committed_attempt_id = event.event_json #>> '{receipt,attempt_id}'
            and run.final_result_hash = event.event_json ->> 'result_hash'
            and run.finalization_status = 'COMMITTED'
-           and run.protocol = 'agent-stream.v2'
+           and run.protocol = 'agent-stream.v3'
            and run.executor_kind = 'TEMPORAL_ACTIVITY'
           join agent_run_attempt attempt
             on attempt.id = run.committed_attempt_id
@@ -448,7 +448,7 @@ public final class JdbcIntakeChildBridgeReadPort implements IntakeChildBridgeRea
             on final_event.agent_run_id = run.id
            and final_event.agent_run_attempt_id = run.committed_attempt_id
            and final_event.sequence_no = run.final_stream_sequence_no
-           and final_event.stream_protocol = 'agent-stream.v2'
+           and final_event.stream_protocol = 'agent-stream.v3'
            and final_event.event_type = 'final'
            and final_event.payload_json #>> '{payload,final_result_ref}' = output.object_uri
            and final_event.payload_json #>> '{payload,final_result_hash}' = run.final_result_hash
@@ -1006,7 +1006,7 @@ public final class JdbcIntakeChildBridgeReadPort implements IntakeChildBridgeRea
         JsonNode finalStream = parseJson(evidence.finalStreamPayloadJson(), "final stream event");
         requireEquals(evidence.finalStreamPayloadHash(), ContractJson.sha256Hex(finalStream),
                 "final stream payload hash");
-        requireJsonText(finalStream, "schema_version", "agent-stream.v2");
+        requireJsonText(finalStream, "schema_version", "agent-stream.v3");
         requireJsonText(finalStream, "run_id", evidence.logicalRunId());
         requireJsonText(finalStream, "attempt_id", evidence.attemptId());
         requireJsonLong(finalStream, "sequence_no", evidence.finalStreamSequence());

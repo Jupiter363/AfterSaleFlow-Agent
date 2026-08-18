@@ -83,7 +83,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
               from target_e2e_finalization_receipt receipt
               join agent_run run
                 on run.id = receipt.logical_run_id
-               and run.protocol = 'agent-stream.v2'
+               and run.protocol = 'agent-stream.v3'
                and run.executor_kind = 'TEMPORAL_ACTIVITY'
                and run.committed_attempt_id = receipt.attempt_id
                and run.final_result_hash = receipt.result_hash
@@ -846,7 +846,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                     receipt.logicalRunId(),
                     row.attemptNo(),
                     row.attemptLimit(),
-                    "agent-stream.v2",
+                    "agent-stream.v3",
                     row.logicalInputHash(),
                     row.previousAttemptId(),
                     row.resetRequired(),
@@ -1111,7 +1111,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
             IntakeAgentRunRef agentRun = new IntakeAgentRunRef("intake-agent-run-ref.v1", formal.logicalRunId(),
                     formal.attemptId(), formal.resultHash());
             IntakeGraphExecutionRef graph = new IntakeGraphExecutionRef("intake-graph-execution-ref.v1", formal.threadId(),
-                    formal.commandId(), "intake.v2", "target-e2e-graph.2026-07-27.1", checkpointId,
+                    formal.commandId(), "intake.v2", "target-e2e-graph.2026-08-18.1", checkpointId,
                     "urn:target-e2e:result:intake:" + formal.resultHash(), formal.resultHash(),
                     "urn:target-e2e:proposal:intake:" + formal.proposalHash(), formal.proposalHash());
             IntakeDomainEventRef committed = new IntakeDomainEventRef("intake-domain-event-ref.v1", event.id(),

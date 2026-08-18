@@ -1,7 +1,6 @@
 package com.example.dispute.workflow.targete2e.rooms.evidence;
 
 import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter.CommitCommand;
-import com.example.dispute.room.application.EvidenceAgentTurnResult;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactOperationType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.GraphStatus;
@@ -23,14 +22,15 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 /** Loads and validates the immutable proposal selected by one completed target Evidence run. */
 public final class TargetEvidenceTurnProposalLoader {
-  public static final String SCHEMA_VERSION = "target-e2e-evidence-turn-proposal.v1";
-  private static final long MAX_PROPOSAL_BYTES = 65_536;
+  public static final String SCHEMA_VERSION = "target-e2e-evidence-turn-proposal.v2";
+  private static final long MAX_PROPOSAL_BYTES = 2L * 1024 * 1024;
   private static final Set<String> EXACT_FIELDS = Set.of(
       "schema_version", "command_id", "logical_run_id", "attempt_id",
       "tenant_surrogate", "case_id", "room_epoch", "fencing_token", "thread_id",
       "actor_id", "actor_role", "actor_scope_hash", "input_hash",
-      "evidence_turn_result", "room_utterance", "room_utterance_sha256", "usage",
-      "completed_at", "proposal_hash");
+      "evidence_turn_result", "frame_manifest", "frame_manifest_sha256",
+      "room_utterance", "room_utterance_sha256", "usage", "completed_at",
+      "proposal_hash");
   private static final Set<String> EXACT_USAGE_FIELDS =
       Set.of("input_tokens", "output_tokens", "total_tokens");
 
@@ -167,10 +167,13 @@ public final class TargetEvidenceTurnProposalLoader {
       JsonNode resultNode = document.get("evidence_turn_result");
       require(resultNode != null && resultNode.isObject(),
           "Evidence proposal result is not an object");
-      EvidenceAgentTurnResult result =
-          objectMapper.treeToValue(resultNode, EvidenceAgentTurnResult.class);
-      require(objectMapper.valueToTree(result).equals(resultNode),
-          "Evidence proposal result is not an exact EvidenceAgentTurnResult");
+      TargetEvidenceTurnResultV2 result =
+          TargetEvidenceTurnResultV2.parse(objectMapper, resultNode);
+      result.requireCommandBinding(graph.commandId(), graph.attemptId());
+      require(document.get("frame_manifest").equals(resultNode.get("frame_manifest"))
+              && text(document, "frame_manifest_sha256")
+                  .equals(result.frameManifestSha256()),
+          "Evidence proposal frame manifest differs from result");
       String roomUtterance = text(document, "room_utterance");
       require(roomUtterance.equals(result.roomUtterance()),
           "Evidence proposal room utterance differs from result");
@@ -277,7 +280,7 @@ public final class TargetEvidenceTurnProposalLoader {
       String actorScopeHash,
       String inputHash,
       JsonNode evidenceTurnResultJson,
-      EvidenceAgentTurnResult evidenceTurnResult,
+      TargetEvidenceTurnResultV2 evidenceTurnResult,
       String roomUtterance,
       String roomUtteranceSha256,
       Usage usage,

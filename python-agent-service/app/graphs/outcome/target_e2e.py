@@ -62,7 +62,7 @@ class OutcomeTargetE2EProposalPayload(BaseModel):
 
 
 class OutcomeTargetE2EProposal(BaseModel):
-    """Exact REVIEW member of target-e2e-room-proposal-source.v1."""
+    """Exact REVIEW member of target-e2e-room-proposal-source.v2."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -91,8 +91,8 @@ class OutcomeTargetE2EProposalSource(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["target-e2e-room-proposal-source.v1"] = (
-        "target-e2e-room-proposal-source.v1"
+    schema_version: Literal["target-e2e-room-proposal-source.v2"] = (
+        "target-e2e-room-proposal-source.v2"
     )
     room_type: Literal["REVIEW"] = "REVIEW"
     proposal: OutcomeTargetE2EProposal

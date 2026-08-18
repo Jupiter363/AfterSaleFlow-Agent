@@ -5,7 +5,7 @@ import java.util.Objects;
 
 /** Writes only the Java-owned advisory projection in the caller's outer Finalizer transaction. */
 public final class TargetReviewFinalizationAdapter {
-  public static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v1";
+  public static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v2";
   private final TargetReviewFormalCommitPort formalCommitPort;
   public TargetReviewFinalizationAdapter(TargetReviewFormalCommitPort formalCommitPort) {
     this.formalCommitPort = Objects.requireNonNull(formalCommitPort, "formalCommitPort");

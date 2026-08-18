@@ -742,6 +742,105 @@ def test_incremental_projector_streams_only_complete_array_objects_in_source_ord
         non_object.feed('{"public_observations":["not-an-object"]}')
 
 
+def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_document_close() -> None:
+    spec = VisibleFieldSpec(
+        "frames",
+        "frames",
+        "json_frame_tuples",
+        max_array_items=4,
+        max_array_item_bytes=2_048,
+        max_array_bytes=8_192,
+    )
+    chunks = (
+        '{"schema_version":"evidence_turn_stream.v2","frames":'
+        '[[{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},"欢迎',
+        "进入证据",
+        '室。"],',
+        '[{"frame_sequence":2,"frame_type":"HUMAN_REVIEW_TASK",'
+        '"evidence_id":"EVIDENCE_1","observation_slots":[],"trigger_code":'
+        '"SOURCE_CHAIN","review_target":"原件","review_instruction":"核对原件",'
+        '"priority":"MEDIUM"},null]',
+        ']}'
+    )
+
+    projector = IncrementalVisibleJsonProjector((spec,))
+    replay = IncrementalVisibleJsonProjector((spec,))
+    emitted = [projector.feed(chunk) for chunk in chunks]
+    replayed = [replay.feed(chunk) for chunk in chunks]
+
+    assert emitted == replayed
+    assert [json.loads(delta)["kind"] for _, delta in emitted[0]] == [
+        "frame_start",
+        "public_text_delta",
+    ]
+    assert json.loads(emitted[0][1][1])["delta"] == "欢迎"
+    assert json.loads(emitted[1][0][1]) == {
+        "kind": "public_text_delta",
+        "frame_sequence": 1,
+        "delta": "进入证据",
+    }
+    assert [json.loads(delta)["kind"] for _, delta in emitted[2]] == [
+        "public_text_delta",
+        "frame_end",
+    ]
+    assert json.loads(emitted[2][0][1])["delta"] == "室。"
+    assert [json.loads(delta)["kind"] for _, delta in emitted[3]] == [
+        "frame_start",
+        "frame_end",
+    ]
+    assert emitted[4] == []
+
+
+def test_evidence_v2_public_policy_keeps_model_text_and_frame_identity() -> None:
+    from app.agents.evidence_clerk.v2_policy import EvidenceV2PublicOutputPolicy
+
+    policy = EvidenceV2PublicOutputPolicy()
+    assert policy.begin(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="frames",
+    ) == ()
+    header = {
+        "frame_sequence": 1,
+        "frame_type": "ROOM_WELCOME",
+    }
+    assert policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="frames",
+        delta=json.dumps(
+            {"kind": "frame_start", "frame_sequence": 1, "header": header},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    )[0][0] == "frame.1.header"
+    literal = "该文本包含退款、责任等模型原话，不由后端改写。"
+    projected = policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="frames",
+        delta=json.dumps(
+            {"kind": "public_text_delta", "frame_sequence": 1, "delta": literal},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    )
+    assert projected == (("frame.1.public_text", literal),)
+    policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="frames",
+        delta='{"kind":"frame_end","frame_sequence":1}',
+    )
+    assert policy.visible_text == literal
+    policy.finalize(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="frames",
+        final_text=literal,
+    )
+
+
 def test_target_intake_projector_streams_room_utterance_before_case_detail() -> None:
     projector = IncrementalVisibleJsonProjector(
         TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS

@@ -38,6 +38,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnResultV2;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -457,6 +458,165 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             EvidenceAgentTurnCommand command,
             JsonNode rawResult) {
         return finalizeResult(finalization, command, rawResult, true);
+    }
+
+    /**
+     * New activation formal boundary. The v2 frame result is projected directly to the room
+     * message and memory; it is never converted through the retired semantic result DTO.
+     */
+    @Transactional
+    public RoomMessageView finalizeTargetResultV2(
+            AgentRunFinalizationContext finalization,
+            EvidenceAgentTurnCommand command,
+            TargetEvidenceTurnResultV2 result) {
+        Objects.requireNonNull(finalization, "finalization");
+        Objects.requireNonNull(command, "command");
+        Objects.requireNonNull(result, "result");
+        if (!finalization.caseId().equals(command.agentContext().caseId())
+                || !finalization.caseId().equals(command.contextEnvelope().caseSnapshot().caseId())) {
+            throw new IllegalStateException(
+                    "v2 Evidence finalization differs from its persisted command authority");
+        }
+        EvidenceContextEnvelopeV1 envelope = command.contextEnvelope();
+        ActorRole audienceParty = ActorRole.valueOf(envelope.actorSnapshot().actorRole());
+        AuthenticatedActor actor =
+                new AuthenticatedActor(envelope.actorSnapshot().actorId(), audienceParty);
+        SessionContext session = resolveSession(finalization.caseId(), actor, RoomType.EVIDENCE);
+        if (!session.agentSession().getId().equals(envelope.actorSnapshot().agentSessionId())
+                || !session.accessSession().getId().equals(envelope.actorSnapshot().accessSessionId())) {
+            throw new IllegalStateException("v2 Evidence agent session changed before finalization");
+        }
+        TurnContext context = prepare(finalization.caseId(), RoomType.EVIDENCE);
+        contextEnvelopeFactory.requireCurrentFrozenSubmission(
+                context.dispute(), context.room(), envelope);
+        var event = envelope.currentEvent();
+        if (!"ROOM_OPENING".equals(event.eventType())
+                && (!"PARTY_MESSAGE".equals(event.eventType())
+                    || event.attachmentRefs().isEmpty())) {
+            throw new IllegalStateException("v2 Evidence event mode is invalid");
+        }
+        int turnNo = event.turnNo();
+        String idempotencyKey = "ROOM_OPENING".equals(event.eventType())
+                ? event.eventId()
+                : turnIdempotencyKey(
+                    context.dispute(), session.agentSession(), audienceParty, turnNo);
+        Optional<RoomMessageEntity> existing = messageRepository.findByCaseIdAndIdempotencyKey(
+                context.dispute().getId(), idempotencyKey);
+        if (existing.isPresent()) {
+            requireExactAgentMessage(
+                    existing.orElseThrow(),
+                    context.room(),
+                    result.roomUtterance(),
+                    finalization.runId(),
+                    true);
+            return view(existing.orElseThrow());
+        }
+        String frameSnapshot = json(result.document());
+        memoryRepository.save(
+                RoomTurnMemoryEntity.agentTurn(
+                        "MEMORY_" + compactUuid(),
+                        context.dispute().getId(),
+                        RoomType.EVIDENCE,
+                        turnNo,
+                        AGENT_SENDER_ID,
+                        AGENT_ROLE,
+                        result.roomUtterance(),
+                        frameSnapshot,
+                        frameSnapshot,
+                        "{}",
+                        finalization.runId(),
+                        session.agentSession(),
+                        session.accessSession(),
+                        "{}"));
+        RoomMessageEntity message = appendAgentMessage(
+                context.dispute(),
+                context.room(),
+                session.agentSession(),
+                audienceParty,
+                result.roomUtterance(),
+                turnNo,
+                finalization.traceId(),
+                idempotencyKey,
+                finalization.runId(),
+                true);
+        if (!"ROOM_OPENING".equals(event.eventType())) {
+            persistTargetV2Assessments(
+                    context.dispute().getId(),
+                    session.accessSession(),
+                    event.attachmentRefs(),
+                    result,
+                    finalization.runId(),
+                    finalization.traceId());
+        }
+        return view(message);
+    }
+
+    private void persistTargetV2Assessments(
+            String caseId,
+            CaseAccessSessionEntity accessSession,
+            List<String> attachmentRefs,
+            TargetEvidenceTurnResultV2 result,
+            String runId,
+            String traceId) {
+        Set<String> allowed = visibleEvidenceIds(caseId, accessSession);
+        allowed.retainAll(Set.copyOf(attachmentRefs));
+        Map<String, TargetEvidenceTurnResultV2.Frame> assessmentFrames =
+                result.frames().stream()
+                        .filter(frame -> "EVIDENCE_ASSESSMENT".equals(frame.frameType()))
+                        .collect(Collectors.toMap(
+                                frame -> frame.header().path("evidence_id").asText(""),
+                                frame -> frame,
+                                (left, right) -> { throw new IllegalStateException(
+                                        "duplicate v2 Evidence assessment frame"); },
+                                java.util.LinkedHashMap::new));
+        Set<String> supplied = new LinkedHashSet<>();
+        for (TargetEvidenceTurnResultV2.Frame frame : assessmentFrames.values()) {
+            supplied.add(frame.header().path("evidence_id").asText(""));
+        }
+        if (!supplied.equals(allowed)) {
+            throw new IllegalStateException(
+                    "v2 Evidence assessments must cover current attachments exactly once");
+        }
+        Set<String> reviewEvidenceIds = result.humanReviewTasks().stream()
+                .map(node -> node.path("evidence_id").asText(""))
+                .filter(value -> !value.isBlank())
+                .collect(Collectors.toSet());
+        for (TargetEvidenceTurnResultV2.Frame frame : assessmentFrames.values()) {
+            JsonNode header = frame.header();
+            String evidenceId = header.path("evidence_id").asText("");
+            String authenticity = header.path("authenticity_status").asText("UNAVAILABLE");
+            EvidenceVerificationStatus status = switch (authenticity) {
+                case "PROVISIONALLY_CONSISTENT" -> EvidenceVerificationStatus.PLAUSIBLE;
+                case "ANOMALY_DETECTED" -> EvidenceVerificationStatus.SUSPICIOUS;
+                case "REQUIRES_HUMAN_REVIEW" -> EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW;
+                default -> EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW;
+            };
+            boolean requiresReview = status == EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW
+                    || reviewEvidenceIds.contains(evidenceId);
+            ObjectNode findings = header.deepCopy();
+            findings.put("schema_version", "evidence-turn-result.v2");
+            findings.put("public_text_sha256", frame.publicTextSha256());
+            ObjectNode reasons = objectMapper.createObjectNode();
+            reasons.put("authenticity_status", authenticity);
+            reasons.put("source_chain_status", header.path("source_chain_status").asText());
+            reasons.put("formation_time_status", header.path("formation_time_status").asText());
+            verificationRepository.save(
+                    EvidenceVerificationEntity.create(
+                            "VERIFICATION_" + compactUuid(),
+                            caseId,
+                            evidenceId,
+                            nextVerificationVersion(evidenceId),
+                            status,
+                            json(Map.of("protocol", "evidence-turn-result.v2",
+                                    "frame_id", frame.frameId(),
+                                    "frame_sequence", frame.frameSequence())),
+                            json(findings),
+                            json(reasons),
+                            requiresReview,
+                            Instant.now(clock),
+                            AGENT_SENDER_ID,
+                            traceId));
+        }
     }
 
     private RoomMessageView finalizeResult(

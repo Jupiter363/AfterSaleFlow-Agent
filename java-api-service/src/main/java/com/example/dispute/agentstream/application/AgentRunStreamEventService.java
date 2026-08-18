@@ -35,6 +35,7 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -51,7 +52,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 // 边界意义：运行必须绑定案件、房间和受众；任何协议越界都要在内容公开前终止
 // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Service
-public class AgentRunStreamEventService {
+public class AgentRunStreamEventService implements AgentRunTransientStreamPublisher {
 
     private static final long EMITTER_TIMEOUT_MS = 4 * 60 * 60 * 1000L;
     private static final int SSE_CATCH_UP_BATCH_SIZE = 256;
@@ -211,6 +212,72 @@ public class AgentRunStreamEventService {
             throw new IllegalArgumentException("runId must not be blank");
         }
         publish(runId);
+    }
+
+    /** Relays a v3 in-flight frame event without advancing the durable SSE cursor. */
+    @Override
+    public void publish(AgentStreamEvent event) {
+        Objects.requireNonNull(event, "event");
+        if (!"agent-stream.v3".equals(event.schemaVersion())
+                || !Set.of(
+                                StreamEventType.PUBLIC_FRAME_START,
+                                StreamEventType.PUBLIC_TEXT_DELTA,
+                                StreamEventType.ACTIVE_FRAME_SNAPSHOT)
+                        .contains(event.eventType())) {
+            throw new IllegalArgumentException(
+                    "transient relay accepts only in-flight agent-stream.v3 frame events");
+        }
+        CopyOnWriteArrayList<Subscription> current = subscriptions.get(event.runId());
+        if (current == null || current.isEmpty()) {
+            return;
+        }
+        for (Subscription subscription : current) {
+            synchronized (subscription) {
+                try {
+                    AgentRunEntity run = requireVisibleRun(event.runId(), subscription.actor());
+                    if (protocol(run) != AgentRunProtocol.V3
+                            || event.audience() != requireV2Audience(run)) {
+                        throw new IllegalStateException(
+                                "transient v3 event differs from persisted run authority");
+                    }
+                    subscription.emitter().send(
+                            SseEmitter.event()
+                                    .name(event.eventType().wireValue())
+                                    .data(transientV3View(event)));
+                } catch (IOException | RuntimeException failure) {
+                    removeDisconnected(event.runId(), subscription, failure);
+                }
+            }
+        }
+    }
+
+    private AgentRunEventView transientV3View(AgentStreamEvent event) {
+        JsonNode payload = objectMapper.valueToTree(event.payload());
+        return new AgentRunEventView(
+                event.schemaVersion(),
+                AgentRunProtocol.V3.wireValue(),
+                event.runId(),
+                event.attemptId(),
+                null,
+                event.sequenceNo(),
+                null,
+                event.eventType().wireValue(),
+                event.audience().name(),
+                null,
+                payload,
+                null,
+                event.payload().node(),
+                event.payload().field(),
+                event.payload().delta(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                event.occurredAt().atOffset(java.time.ZoneOffset.UTC));
     }
 
     /** Schedules a durable-source catch-up without exposing an uncommitted terminal event. */
@@ -643,7 +710,7 @@ public class AgentRunStreamEventService {
                     || !entity.getEventType().equals(event.eventType().wireValue())
                     || entity.getAudience() != event.audience()
                     || event.audience() != runAudience
-                    || !AgentRunProtocol.V2.wireValue().equals(entity.getStreamProtocol())) {
+                    || !AgentRunProtocol.V3.wireValue().equals(entity.getStreamProtocol())) {
                 throw new IllegalStateException(
                         "V2 stream columns conflict with the hash-bound event");
             }
@@ -655,11 +722,11 @@ public class AgentRunStreamEventService {
                     ? payload.deepCopy()
                     : null;
             String cursor = new AgentRunStreamCursor(
-                            AgentRunProtocol.V2, event.attemptId(), event.sequenceNo())
+                            AgentRunProtocol.V3, event.attemptId(), event.sequenceNo())
                     .wireValue();
             return new AgentRunEventView(
                     event.schemaVersion(),
-                    AgentRunProtocol.V2.wireValue(),
+                    AgentRunProtocol.V3.wireValue(),
                     event.runId(),
                     event.attemptId(),
                     attemptNo,
@@ -693,8 +760,8 @@ public class AgentRunStreamEventService {
         if (AgentRunProtocol.V1.wireValue().equals(run.getProtocol())) {
             return AgentRunProtocol.V1;
         }
-        if (AgentRunProtocol.V2.wireValue().equals(run.getProtocol())) {
-            return AgentRunProtocol.V2;
+        if (AgentRunProtocol.V3.wireValue().equals(run.getProtocol())) {
+            return AgentRunProtocol.V3;
         }
         throw new IllegalStateException("unsupported persisted agent run protocol");
     }

@@ -26,9 +26,9 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 public final class TargetE2eIntakeExchangeAuthority
     implements IntakeExchangeAuthorityValidationPort {
 
-  private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v1";
+  private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v2";
   private static final String TARGET_REGISTRY_OUTPUT_SCHEMA =
-      "target-e2e-room-proposal-source.v1";
+      "target-e2e-room-proposal-source.v2";
   private static final String PROPOSAL_ARTIFACT_SCHEMA = "intake-turn-proposal.v2";
   private static final String AUTHORITY_SQL = """
       select material.activation_id, material.activation_manifest_hash,

@@ -22,7 +22,7 @@ import java.util.Optional;
 public final class IntakeGraphResultFinalizer {
 
     public static final String LEGACY_GRAPH_KEY = "intake.v2";
-    public static final String TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v1";
+    public static final String TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v2";
     private static final String TARGET_OUTER_TOOL_POLICY_VERSION = "tools.none.v1";
     private static final String INTAKE_PROPOSAL_TOOL_POLICY_VERSION = "no-tools.v1";
 

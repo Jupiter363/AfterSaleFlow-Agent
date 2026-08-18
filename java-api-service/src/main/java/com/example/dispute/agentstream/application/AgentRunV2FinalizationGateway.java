@@ -67,7 +67,7 @@ public final class AgentRunV2FinalizationGateway implements AgentRunFinalization
         if (!request.agentRunId().equals(logicalRun.agentRunId())
                 || !request.command().caseId().equals(logicalRun.caseId())
                 || !facts.logicalIdempotencyKey().equals(logicalRun.logicalIdempotencyKey())
-                || logicalRun.protocol() != AgentRunProtocol.V2
+                || logicalRun.protocol() != AgentRunProtocol.V3
                 || logicalRun.executorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY
                 || request.command().roomEpoch() != logicalRun.roomEpoch()
                 || request.command().processRevision() != logicalRun.processRevision()

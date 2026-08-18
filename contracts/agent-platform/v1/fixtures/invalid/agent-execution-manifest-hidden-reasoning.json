@@ -39,7 +39,7 @@
       "graph_command": "room-graph-command.v1",
       "graph_result": "room-graph-result.v1",
       "output_schema": "intake-dossier.v2",
-      "stream": "agent-stream.v2"
+      "stream": "agent-stream.v3"
     },
     "policy_version": "intake-policy.v1",
     "guardrail_version": "intake-guardrail.v1",

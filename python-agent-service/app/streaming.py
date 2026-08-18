@@ -36,9 +36,9 @@ STREAM_QUEUE_WAIT_POLL_SECONDS = 0.05
 STREAM_EVENT_MAX_DELTA_CHARS = 16 * 1024
 STREAM_MAX_VISIBLE_OUTPUT_CHARS = 512 * 1024
 STREAM_MAX_MODEL_DOCUMENT_CHARS = 2 * 1024 * 1024
-STREAM_MAX_VISIBLE_ARRAY_ITEMS = 64
-STREAM_MAX_VISIBLE_ARRAY_ITEM_BYTES = 16 * 1024
-STREAM_MAX_VISIBLE_ARRAY_BYTES = 64 * 1024
+STREAM_MAX_VISIBLE_ARRAY_ITEMS = 128
+STREAM_MAX_VISIBLE_ARRAY_ITEM_BYTES = 64 * 1024
+STREAM_MAX_VISIBLE_ARRAY_BYTES = 2 * 1024 * 1024
 V2_IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
 
 
@@ -340,7 +340,7 @@ class V2DeltaCoalescer:
 
 
 VISIBLE_FIELD_VALUE_MODES = frozenset(
-    {"string_prefix", "json_value", "json_array_items"}
+    {"string_prefix", "json_value", "json_array_items", "json_frame_tuples"}
 )
 
 
@@ -350,12 +350,21 @@ class VisibleFieldSpec:
 
     string_prefix 会逐字符投影字符串；json_value 只在整个 JSON 值闭合后投影一次，
     适合把右侧展板的独立结构分区按生成顺序安全送到前端；json_array_items
-    则只在数组中一个对象完整闭合后逐项投影，不等待整个数组或模型文档结束。
+    则只在数组中一个对象完整闭合后逐项投影，不等待整个数组或模型文档结束；
+    json_frame_tuples 用于 ``[[header, public_text|null], ...]``：header 完整后先
+    产生 frame_start，公开字符串按可解码前缀产生 public_text_delta，tuple 闭合后
+    再产生 frame_end。三类内部投影事件都使用同一个声明 field，由房间执行器进行
+    权威校验和公开/私有分流。
     """
 
     property_name: str
     field: str
-    value_mode: Literal["string_prefix", "json_value", "json_array_items"] = (
+    value_mode: Literal[
+        "string_prefix",
+        "json_value",
+        "json_array_items",
+        "json_frame_tuples",
+    ] = (
         "string_prefix"
     )
     requires_completed_root_property: str | None = None
@@ -369,6 +378,18 @@ class _RootProjectionGate:
     """一个需要先完成前导字符串、再开放后续字段的公开流契约。"""
 
     leading_spec: VisibleFieldSpec
+
+
+@dataclass(frozen=True)
+class _ProjectedJsonFrameTuple:
+    """Current append-only view of one header-first model frame tuple."""
+
+    header: dict[str, Any]
+    canonical_header: str
+    frame_sequence: int
+    value_kind: Literal["unknown", "public", "internal"]
+    public_text: str
+    complete: bool
 
 
 def _root_projection_gate_for(
@@ -651,11 +672,17 @@ VISIBLE_FIELD_REGISTRY: dict[str, dict[str, tuple[VisibleFieldSpec, ...]]] = {
     "evidence_turn": {
         "evidence_turn": (
             VisibleFieldSpec(
-                "public_observations",
-                "public_observations",
-                "json_array_items",
-                max_array_items=12,
+                "frames",
+                "frames",
+                "json_frame_tuples",
+                max_array_items=128,
+                max_array_item_bytes=64 * 1024,
+                max_array_bytes=2 * 1024 * 1024,
             ),
+            # The legacy Evidence workflow remains available to explicitly
+            # injected non-Target callers.  The public policy selects exactly
+            # one of these declarations; they are never sent together to a
+            # provider invocation.
             VisibleFieldSpec("room_utterance", "room_utterance"),
         ),
     },
@@ -722,7 +749,7 @@ class IncrementalVisibleJsonProjector:
     # 系统意义：没有 spec 就不会投影任何字段；已发送长度防止每次扫描累计缓冲时重复向前端发送旧文本。
     def __init__(self, specs: tuple[VisibleFieldSpec, ...]) -> None:
         for spec in specs:
-            if spec.value_mode != "json_array_items":
+            if spec.value_mode not in {"json_array_items", "json_frame_tuples"}:
                 continue
             if (
                 isinstance(spec.max_array_items, bool)
@@ -744,6 +771,21 @@ class IncrementalVisibleJsonProjector:
         self._emitted_lengths = {spec.field: 0 for spec in specs}
         self._emitted_json_fields: set[str] = set()
         self._emitted_array_item_counts = {spec.field: 0 for spec in specs}
+        self._emitted_frame_headers: dict[str, list[str]] = {
+            spec.field: []
+            for spec in specs
+            if spec.value_mode == "json_frame_tuples"
+        }
+        self._emitted_frame_text_lengths: dict[str, list[int]] = {
+            spec.field: []
+            for spec in specs
+            if spec.value_mode == "json_frame_tuples"
+        }
+        self._emitted_frame_ends: dict[str, set[int]] = {
+            spec.field: set()
+            for spec in specs
+            if spec.value_mode == "json_frame_tuples"
+        }
 
     # 所属模块：Agent 流式协议 > JSON 可见投影 > 增量消费入口。
     # 具体功能：`feed` 在追加 content_delta 前检查完整模型文档上限，对每个精确属性扫描当前可解码字符串前缀，仅返回相对 emitted_length 新增长的 `(field, delta)`。
@@ -781,6 +823,74 @@ class IncrementalVisibleJsonProjector:
                 raise AgentStreamProjectionError(
                     "visible stream JSON path is duplicated"
                 )
+            if spec.value_mode == "json_frame_tuples":
+                frames = _find_incremental_json_frame_tuples(
+                    self._buffer,
+                    spec.field,
+                    max_items=spec.max_array_items,
+                    max_item_bytes=spec.max_array_item_bytes,
+                    max_array_bytes=spec.max_array_bytes,
+                )
+                emitted_headers = self._emitted_frame_headers[spec.field]
+                emitted_text_lengths = self._emitted_frame_text_lengths[spec.field]
+                emitted_ends = self._emitted_frame_ends[spec.field]
+                if len(frames) < len(emitted_headers):
+                    raise AgentStreamProjectionError(
+                        "visible frame tuple projection regressed"
+                    )
+                for index, frame in enumerate(frames):
+                    if index < len(emitted_headers):
+                        if emitted_headers[index] != frame.canonical_header:
+                            raise AgentStreamProjectionError(
+                                "visible frame tuple header changed after publication"
+                            )
+                    else:
+                        if index != len(emitted_headers):
+                            raise AgentStreamProjectionError(
+                                "visible frame tuple order is not contiguous"
+                            )
+                        emitted_headers.append(frame.canonical_header)
+                        emitted_text_lengths.append(0)
+                        deltas.append(
+                            (
+                                spec.field,
+                                _frame_projection_event(
+                                    "frame_start",
+                                    frame_sequence=frame.frame_sequence,
+                                    header=frame.header,
+                                ),
+                            )
+                        )
+                    emitted_length = emitted_text_lengths[index]
+                    if len(frame.public_text) < emitted_length:
+                        raise AgentStreamProjectionError(
+                            "visible frame tuple text regressed"
+                        )
+                    if len(frame.public_text) > emitted_length:
+                        text_delta = frame.public_text[emitted_length:]
+                        emitted_text_lengths[index] = len(frame.public_text)
+                        deltas.append(
+                            (
+                                spec.field,
+                                _frame_projection_event(
+                                    "public_text_delta",
+                                    frame_sequence=frame.frame_sequence,
+                                    delta=text_delta,
+                                ),
+                            )
+                        )
+                    if frame.complete and frame.frame_sequence not in emitted_ends:
+                        emitted_ends.add(frame.frame_sequence)
+                        deltas.append(
+                            (
+                                spec.field,
+                                _frame_projection_event(
+                                    "frame_end",
+                                    frame_sequence=frame.frame_sequence,
+                                ),
+                            )
+                        )
+                continue
             if spec.value_mode == "json_value":
                 if spec.field in self._emitted_json_fields:
                     continue
@@ -909,11 +1019,24 @@ class AgentStreamObserver:
             policy = self._public_output_policy
             if policy is None or not policy.allows_node(self.operation, node_name):
                 return ()
+            declared = VISIBLE_FIELD_REGISTRY.get(self.operation, {}).get(node_name, ())
+            preferred_field = getattr(policy, "visible_field_name", None)
+            if isinstance(preferred_field, str) and preferred_field:
+                return tuple(
+                    spec for spec in declared if spec.field == preferred_field
+                )
+            return declared
         return VISIBLE_FIELD_REGISTRY.get(self.operation, {}).get(node_name, ())
 
     def public_output_policy_enabled(self, node_name: str) -> bool:
         policy = self._public_output_policy
         return policy is not None and policy.allows_node(self.operation, node_name)
+
+    @property
+    def public_output_policy(self) -> StreamPublicOutputPolicy | None:
+        """Expose the already-bound policy to a protocol-specific workflow."""
+
+        return self._public_output_policy
 
     # 所属模块：Agent 流式协议 > 事件观察器 > 可见增量限额与发布。
     # 具体功能：`visible_delta` 忽略空串、检查取消，在锁内累计总可见字符并限额，再按 16KiB 切块为多个 StreamVisibleDeltaEvent。
@@ -923,6 +1046,28 @@ class AgentStreamObserver:
         """发布一段可以给用户看的模型文本。"""
 
         if self._public_output_policy is not None:
+            # A frame-aware policy can return a different public field for each
+            # accepted tuple event (header/text/end).  This keeps frame identity
+            # on the wire without asking the generic observer to understand the
+            # Evidence business schema.
+            project_event = getattr(
+                self._public_output_policy,
+                "project_event",
+                None,
+            )
+            if callable(project_event):
+                for output_field, public_delta in project_event(
+                    operation=self.operation,
+                    node_name=node_name,
+                    field_name=field,
+                    delta=delta,
+                ):
+                    self._publish_visible_delta(
+                        node_name,
+                        output_field,
+                        public_delta,
+                    )
+                return
             for public_delta in self._public_output_policy.accept(
                 operation=self.operation,
                 node_name=node_name,
@@ -1478,6 +1623,245 @@ def _find_complete_json_path_value(document: str, field: str) -> Any | None:
     except ValueError:
         return None
     return value
+
+
+def _frame_projection_event(
+    kind: Literal["frame_start", "public_text_delta", "frame_end"],
+    *,
+    frame_sequence: int,
+    header: Mapping[str, Any] | None = None,
+    delta: str | None = None,
+) -> str:
+    """Encode one private bridge event without changing public text bytes."""
+
+    value: dict[str, Any] = {
+        "kind": kind,
+        "frame_sequence": frame_sequence,
+    }
+    if header is not None:
+        value["header"] = dict(header)
+    if delta is not None:
+        value["delta"] = delta
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _find_incremental_json_frame_tuples(
+    document: str,
+    field: str,
+    *,
+    max_items: int,
+    max_item_bytes: int,
+    max_array_bytes: int,
+) -> tuple[_ProjectedJsonFrameTuple, ...]:
+    """Scan header-first frame tuples while keeping incomplete public text visible.
+
+    The model document remains private.  A frame becomes addressable only after
+    its complete header object has been decoded.  Its second tuple element may
+    then expose a JSON-string prefix; ``null`` marks an internal frame and never
+    contains public text.  This scanner never guesses a missing delimiter.
+    """
+
+    start = _find_json_path_value_start(document, field)
+    if start is None:
+        return ()
+    if start >= len(document):
+        return ()
+    if document[start] != "[":
+        raise AgentStreamProjectionError(
+            "visible frame tuple field is not an array"
+        )
+    try:
+        observed_array_bytes = len(document[start:].encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise AgentStreamProjectionError(
+            "visible frame tuple array has invalid Unicode"
+        ) from error
+    if observed_array_bytes > max_array_bytes:
+        raise AgentStreamLimitExceeded(
+            "visible frame tuple array exceeds its limit"
+        )
+
+    decoder = json.JSONDecoder()
+    cursor = _skip_whitespace(document, start + 1)
+    frames: list[_ProjectedJsonFrameTuple] = []
+    if cursor >= len(document) or document[cursor] == "]":
+        return ()
+    while True:
+        if len(frames) >= max_items:
+            raise AgentStreamLimitExceeded(
+                "visible frame tuple count exceeds its limit"
+            )
+        tuple_start = cursor
+        if document[cursor] != "[":
+            raise AgentStreamProjectionError(
+                "visible frame item must be a tuple"
+            )
+        header_start = _skip_whitespace(document, cursor + 1)
+        if header_start >= len(document):
+            return tuple(frames)
+        try:
+            header, header_end = decoder.raw_decode(document, header_start)
+        except ValueError:
+            return tuple(frames)
+        if not isinstance(header, dict):
+            raise AgentStreamProjectionError(
+                "visible frame tuple header must be an object"
+            )
+        frame_sequence = header.get("frame_sequence")
+        frame_type = header.get("frame_type")
+        expected_sequence = len(frames) + 1
+        if (
+            isinstance(frame_sequence, bool)
+            or not isinstance(frame_sequence, int)
+            or frame_sequence != expected_sequence
+            or not isinstance(frame_type, str)
+            or not frame_type
+        ):
+            raise AgentStreamProjectionError(
+                "visible frame tuple header identity is invalid"
+            )
+        canonical_header = json.dumps(
+            header,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        try:
+            header_bytes = len(canonical_header.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise AgentStreamProjectionError(
+                "visible frame tuple header has invalid Unicode"
+            ) from error
+        if header_bytes > max_item_bytes:
+            raise AgentStreamLimitExceeded(
+                "visible frame tuple header exceeds its limit"
+            )
+
+        cursor = _skip_whitespace(document, header_end)
+        frame = _ProjectedJsonFrameTuple(
+            header=header,
+            canonical_header=canonical_header,
+            frame_sequence=frame_sequence,
+            value_kind="unknown",
+            public_text="",
+            complete=False,
+        )
+        if cursor >= len(document):
+            frames.append(frame)
+            return tuple(frames)
+        if document[cursor] != ",":
+            raise AgentStreamProjectionError(
+                "visible frame tuple header is not comma-delimited"
+            )
+        value_start = _skip_whitespace(document, cursor + 1)
+        if value_start >= len(document):
+            frames.append(frame)
+            return tuple(frames)
+
+        token = document[value_start]
+        value_end = value_start
+        if token == '"':
+            public_text, value_end, text_complete = _decode_json_string(
+                document,
+                value_start,
+            )
+            frame = _ProjectedJsonFrameTuple(
+                header=header,
+                canonical_header=canonical_header,
+                frame_sequence=frame_sequence,
+                value_kind="public",
+                public_text=public_text,
+                complete=False,
+            )
+            if not text_complete:
+                _require_frame_tuple_item_budget(
+                    document,
+                    tuple_start,
+                    len(document),
+                    max_item_bytes=max_item_bytes,
+                )
+                frames.append(frame)
+                return tuple(frames)
+        elif token == "n":
+            remaining = document[value_start:]
+            if len(remaining) < 4:
+                if not "null".startswith(remaining):
+                    raise AgentStreamProjectionError(
+                        "visible frame tuple second item is invalid"
+                    )
+                frames.append(frame)
+                return tuple(frames)
+            if not remaining.startswith("null"):
+                raise AgentStreamProjectionError(
+                    "visible frame tuple second item is invalid"
+                )
+            value_end = value_start + 4
+            frame = _ProjectedJsonFrameTuple(
+                header=header,
+                canonical_header=canonical_header,
+                frame_sequence=frame_sequence,
+                value_kind="internal",
+                public_text="",
+                complete=False,
+            )
+        else:
+            raise AgentStreamProjectionError(
+                "visible frame tuple second item must be a string or null"
+            )
+
+        tuple_end = _skip_whitespace(document, value_end)
+        if tuple_end >= len(document):
+            frames.append(frame)
+            return tuple(frames)
+        if document[tuple_end] != "]":
+            raise AgentStreamProjectionError(
+                "visible frame tuple has an invalid closing delimiter"
+            )
+        tuple_end += 1
+        _require_frame_tuple_item_budget(
+            document,
+            tuple_start,
+            tuple_end,
+            max_item_bytes=max_item_bytes,
+        )
+        frame = _ProjectedJsonFrameTuple(
+            header=frame.header,
+            canonical_header=frame.canonical_header,
+            frame_sequence=frame.frame_sequence,
+            value_kind=frame.value_kind,
+            public_text=frame.public_text,
+            complete=True,
+        )
+        frames.append(frame)
+
+        cursor = _skip_whitespace(document, tuple_end)
+        if cursor >= len(document) or document[cursor] == "]":
+            return tuple(frames)
+        if document[cursor] != ",":
+            raise AgentStreamProjectionError(
+                "visible frame tuples are not comma-delimited"
+            )
+        cursor = _skip_whitespace(document, cursor + 1)
+        if cursor >= len(document):
+            return tuple(frames)
+
+
+def _require_frame_tuple_item_budget(
+    document: str,
+    start: int,
+    end: int,
+    *,
+    max_item_bytes: int,
+) -> None:
+    try:
+        item_bytes = len(document[start:end].encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise AgentStreamProjectionError(
+            "visible frame tuple item has invalid Unicode"
+        ) from error
+    if item_bytes > max_item_bytes:
+        raise AgentStreamLimitExceeded(
+            "visible frame tuple item exceeds its limit"
+        )
 
 
 def _find_complete_json_array_object_items(

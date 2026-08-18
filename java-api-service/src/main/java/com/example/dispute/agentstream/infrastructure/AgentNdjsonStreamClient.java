@@ -242,6 +242,18 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
     /** Strict parser for the frozen public v2 envelope. It never accepts raw model JSON. */
     public static AgentStreamEvent parseV2Line(
             ObjectMapper mapper, String line, V2ProtocolState state) {
+        return parseVersionedLine(mapper, line, state, "agent-stream.v2");
+    }
+
+    /** Strict parser for the v3 frame stream. Public text deltas remain transient until a
+     * complete frame is committed by the Java gateway. */
+    public static AgentStreamEvent parseV3Line(
+            ObjectMapper mapper, String line, V2ProtocolState state) {
+        return parseVersionedLine(mapper, line, state, "agent-stream.v3");
+    }
+
+    private static AgentStreamEvent parseVersionedLine(
+            ObjectMapper mapper, String line, V2ProtocolState state, String expectedSchema) {
         JsonNode node;
         try {
             node = mapper.readTree(line);
@@ -254,7 +266,7 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
         rejectUnknown(node, V2_ENVELOPE_FIELDS, "v2 envelope");
         String runId = requiredV2Identifier(node, "run_id");
         String attemptId = requiredV2Identifier(node, "attempt_id");
-        if (!"agent-stream.v2".equals(node.path("schema_version").asText())
+        if (!expectedSchema.equals(node.path("schema_version").asText())
                 || !state.runId.equals(runId)
                 || !state.attemptId.equals(attemptId)) {
             throw new AgentStreamProtocolException("agent stream v2 identity does not match");
@@ -280,8 +292,8 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
         if (!payload.isObject()) {
             throw new AgentStreamProtocolException("agent stream v2 payload must be an object");
         }
-        rejectUnknown(payload, allowedPayloadFields(eventType), "v2 " + eventType.wireValue() + " payload");
-        validateV2Payload(eventType, payload, state);
+        rejectUnknown(payload, allowedPayloadFields(eventType), expectedSchema + " " + eventType.wireValue() + " payload");
+        validateVersionedPayload(eventType, payload, state, expectedSchema);
         if (audience != state.audience) {
             throw new AgentStreamProtocolException("agent stream v2 audience does not match");
         }
@@ -419,8 +431,11 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
         return value.asLong();
     }
 
-    private static void validateV2Payload(
-            StreamEventType eventType, JsonNode payload, V2ProtocolState state) {
+    private static void validateVersionedPayload(
+            StreamEventType eventType,
+            JsonNode payload,
+            V2ProtocolState state,
+            String schemaVersion) {
         switch (eventType) {
             case ATTEMPT_STARTED -> requiredV2Identifier(payload, "node");
             case VISIBLE_DELTA -> {
@@ -436,6 +451,71 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
                     throw new AgentStreamProtocolException("agent stream v2 visible output exceeds limit");
                 }
                 state.visibleCharacters += delta.length();
+            }
+            case PUBLIC_FRAME_START -> {
+                requireV3(schemaVersion);
+                String frameId = requiredV2Identifier(payload, "frame_id");
+                int frameSequence = requiredV3Int(payload, "frame_sequence", 1, 128);
+                String frameType = requiredV2Identifier(payload, "frame_type");
+                JsonNode publicHeader = payload.get("public_header");
+                if (publicHeader == null || !publicHeader.isObject()) {
+                    throw new AgentStreamProtocolException(
+                            "agent stream v3 public frame header is invalid");
+                }
+                state.startFrame(frameId, frameSequence, frameType);
+            }
+            case PUBLIC_TEXT_DELTA -> {
+                requireV3(schemaVersion);
+                String frameId = requiredV2Identifier(payload, "frame_id");
+                int frameSequence = requiredV3Int(payload, "frame_sequence", 1, 128);
+                int deltaIndex = requiredV3Int(payload, "delta_index", 0, Integer.MAX_VALUE);
+                String delta = requiredV2VisibleDelta(payload);
+                if (delta.length() > 4096
+                        || state.visibleCharacters + delta.length() > MAX_VISIBLE_CHARS) {
+                    throw new AgentStreamProtocolException(
+                            "agent stream v3 public output exceeds limit");
+                }
+                state.acceptFrameText(frameId, frameSequence, deltaIndex, delta.length());
+                state.visibleCharacters += delta.length();
+            }
+            case ACTIVE_FRAME_SNAPSHOT -> {
+                requireV3(schemaVersion);
+                String frameId = requiredV2Identifier(payload, "frame_id");
+                int frameSequence = requiredV3Int(payload, "frame_sequence", 1, 128);
+                int deltaIndex = requiredV3Int(payload, "delta_index", 0, Integer.MAX_VALUE);
+                JsonNode text = payload.get("public_text");
+                if (text == null || !text.isTextual()
+                        || text.textValue().length() > MAX_VISIBLE_CHARS) {
+                    throw new AgentStreamProtocolException(
+                            "agent stream v3 active frame snapshot is invalid");
+                }
+                state.acceptFrameSnapshot(
+                        frameId, frameSequence, deltaIndex, text.textValue().length());
+            }
+            case PUBLIC_FRAME_COMMITTED -> {
+                requireV3(schemaVersion);
+                String frameId = requiredV2Identifier(payload, "frame_id");
+                int frameSequence = requiredV3Int(payload, "frame_sequence", 1, 128);
+                requiredV3Cursor(payload, frameSequence, "FRAME");
+                requiredV3Sha(payload, "header_sha256");
+                requiredV3Sha(payload, "public_text_sha256");
+                requiredV3Sha(payload, "frame_sha256");
+                int chars = requiredV3Int(payload, "public_text_chars", 0, MAX_VISIBLE_CHARS);
+                state.commitFrame(frameId, frameSequence, chars);
+            }
+            case PUBLIC_FRAME_INTERRUPTED -> {
+                requireV3(schemaVersion);
+                String frameId = requiredV2Identifier(payload, "frame_id");
+                int frameSequence = requiredV3Int(payload, "frame_sequence", 1, 128);
+                requiredV3Cursor(payload, frameSequence, "INTERRUPTED");
+                requiredV2Identifier(payload, "reason_code");
+                JsonNode text = payload.get("public_text");
+                if (text == null || !text.isTextual()
+                        || text.textValue().length() > MAX_VISIBLE_CHARS) {
+                    throw new AgentStreamProtocolException(
+                            "agent stream v3 interrupted frame text is invalid");
+                }
+                state.interruptFrame(frameId, frameSequence, text.textValue().length());
             }
             case USAGE -> {
                 JsonNode usage = payload.path("usage");
@@ -483,12 +563,66 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
         return switch (eventType) {
             case ATTEMPT_STARTED -> Set.of("node");
             case VISIBLE_DELTA -> Set.of("node", "field", "delta");
+            case PUBLIC_FRAME_START ->
+                    Set.of("frame_id", "frame_sequence", "frame_type", "public_header");
+            case PUBLIC_TEXT_DELTA ->
+                    Set.of("frame_id", "frame_sequence", "delta_index", "delta");
+            case ACTIVE_FRAME_SNAPSHOT ->
+                    Set.of("frame_id", "frame_sequence", "delta_index", "public_text");
+            case PUBLIC_FRAME_COMMITTED ->
+                    Set.of(
+                            "frame_id", "frame_sequence", "durable_cursor",
+                            "header_sha256", "public_text_sha256", "frame_sha256",
+                            "public_text_chars");
+            case PUBLIC_FRAME_INTERRUPTED ->
+                    Set.of(
+                            "frame_id", "frame_sequence", "durable_cursor",
+                            "reason_code", "public_text");
             case USAGE -> Set.of("usage");
             case ATTEMPT_ABORTED -> Set.of("reason_code");
             case ATTEMPT_RESET -> Set.of("reset_attempt_id", "reason_code");
             case FINAL -> Set.of("final_result_ref", "final_result_hash");
             case ERROR -> Set.of("error_code", "retryable");
         };
+    }
+
+    private static void requireV3(String schemaVersion) {
+        if (!"agent-stream.v3".equals(schemaVersion)) {
+            throw new AgentStreamProtocolException(
+                    "frame stream events require agent-stream.v3");
+        }
+    }
+
+    private static int requiredV3Int(
+            JsonNode payload, String field, int minimum, int maximum) {
+        JsonNode value = payload.get(field);
+        if (value == null || !value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new AgentStreamProtocolException("agent stream v3 " + field + " is invalid");
+        }
+        int result = value.intValue();
+        if (result < minimum || result > maximum) {
+            throw new AgentStreamProtocolException("agent stream v3 " + field + " is invalid");
+        }
+        return result;
+    }
+
+    private static String requiredV3Sha(JsonNode payload, String field) {
+        String value = requiredV2Text(payload, field);
+        if (!value.matches("[0-9a-f]{64}")) {
+            throw new AgentStreamProtocolException("agent stream v3 " + field + " is invalid");
+        }
+        return value;
+    }
+
+    private static String requiredV3Cursor(
+            JsonNode payload, int frameSequence, String disposition) {
+        String cursor = requiredV2Text(payload, "durable_cursor");
+        String suffix = ":" + disposition + ":" + frameSequence;
+        if (!cursor.startsWith("v3:") || !cursor.endsWith(suffix)) {
+            throw new AgentStreamProtocolException(
+                    "agent stream v3 durable cursor is invalid");
+        }
+        return cursor;
     }
 
     private static String requiredV2Text(JsonNode node, String field) {
@@ -812,6 +946,11 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
         private long lastSequence = -1;
         private int visibleCharacters;
         private boolean terminal;
+        private String activeFrameId;
+        private int activeFrameSequence;
+        private String activeFrameType;
+        private int nextDeltaIndex;
+        private int nextFrameSequence = 1;
 
         public V2ProtocolState(
                 String runId,
@@ -881,6 +1020,66 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
                 return legacyVisibleFieldPaths.contains(field);
             }
             return visibleFieldsByNode.getOrDefault(node, Set.of()).contains(field);
+        }
+
+        private void startFrame(String frameId, int frameSequence, String frameType) {
+            if (activeFrameId != null || frameSequence != nextFrameSequence) {
+                throw new AgentStreamProtocolException(
+                        "agent stream v3 frame order is invalid");
+            }
+            activeFrameId = frameId;
+            activeFrameSequence = frameSequence;
+            activeFrameType = frameType;
+            nextDeltaIndex = 0;
+        }
+
+        private void acceptFrameText(
+                String frameId, int frameSequence, int deltaIndex, int chars) {
+            requireActiveFrame(frameId, frameSequence);
+            if (deltaIndex != nextDeltaIndex) {
+                throw new AgentStreamProtocolException(
+                        "agent stream v3 delta index is not contiguous");
+            }
+            nextDeltaIndex++;
+        }
+
+        private void acceptFrameSnapshot(
+                String frameId, int frameSequence, int deltaIndex, int chars) {
+            requireActiveFrame(frameId, frameSequence);
+            if (deltaIndex < nextDeltaIndex) {
+                throw new AgentStreamProtocolException(
+                        "agent stream v3 snapshot rewinds delta index");
+            }
+            nextDeltaIndex = deltaIndex;
+        }
+
+        private void commitFrame(String frameId, int frameSequence, int chars) {
+            requireActiveFrame(frameId, frameSequence);
+            if (activeFrameSequence != nextFrameSequence) {
+                throw new AgentStreamProtocolException(
+                        "agent stream v3 committed frame order is invalid");
+            }
+            activeFrameId = null;
+            activeFrameType = null;
+            nextDeltaIndex = 0;
+            nextFrameSequence++;
+        }
+
+        private void interruptFrame(String frameId, int frameSequence, int chars) {
+            requireActiveFrame(frameId, frameSequence);
+            activeFrameId = null;
+            activeFrameType = null;
+            nextDeltaIndex = 0;
+            nextFrameSequence++;
+        }
+
+        private void requireActiveFrame(String frameId, int frameSequence) {
+            if (activeFrameId == null
+                    || !activeFrameId.equals(frameId)
+                    || activeFrameSequence != frameSequence) {
+                throw new AgentStreamProtocolException(
+                        "agent stream v3 frame identity does not match");
+            }
         }
     }
 

@@ -19,9 +19,9 @@ import java.util.Objects;
 public final class TargetE2eExecutionLaneVerifier {
 
     public static final String EXECUTION_LANE = "TARGET_E2E_CANDIDATE";
-    public static final String GRAPH_KEY = "all-rooms.target-e2e.v1";
-    public static final String GRAPH_VERSION = "target-e2e-graph.2026-07-27.1";
-    public static final String CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v1";
+    public static final String GRAPH_KEY = "all-rooms.target-e2e.v2";
+    public static final String GRAPH_VERSION = "target-e2e-graph.2026-08-18.1";
+    public static final String CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v2";
 
     private final Clock clock;
 
@@ -113,8 +113,8 @@ public final class TargetE2eExecutionLaneVerifier {
         requireEqual(request.logicalRunId(), run.agentRunId(), "logical run id");
         requireEqual(request.attemptId(), attempt.attemptId(), "attempt id");
         requireEqual(request.attemptNo(), attempt.attemptNo(), "attempt number");
-        requireEqual(request.streamProtocol(), "agent-stream.v2", "request stream protocol");
-        requireEqual(run.protocol(), "agent-stream.v2", "persisted stream protocol");
+        requireEqual(request.streamProtocol(), "agent-stream.v3", "request stream protocol");
+        requireEqual(run.protocol(), "agent-stream.v3", "persisted stream protocol");
         requireEqual(run.roomType(), RoomType.INTAKE.name(), "run room type");
         requireEqual(run.executorKind(), AgentRunExecutorKind.TEMPORAL_ACTIVITY.name(), "run executor");
         requireEqual(
@@ -217,7 +217,7 @@ public final class TargetE2eExecutionLaneVerifier {
                 epoch.checkpointSchemaVersion(),
                 command.checkpointSchemaVersion(),
                 "command checkpoint schema");
-        requireEqual(epoch.streamProtocol(), "agent-stream.v2", "epoch stream protocol");
+        requireEqual(epoch.streamProtocol(), "agent-stream.v3", "epoch stream protocol");
 
         requireEqual(projection.tenantSurrogate(), run.tenantSurrogate(), "projection tenant");
         requireEqual(projection.caseId(), run.caseId(), "projection case");

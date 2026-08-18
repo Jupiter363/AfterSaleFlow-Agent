@@ -473,7 +473,7 @@ class CompiledGraphShadowExecutor:
             raise GraphContractError("compiled Graph clock must be timezone-aware")
         command = execution.admission.command
         return AgentStreamEvent(
-            schema_version="agent-stream.v2",
+            schema_version="agent-stream.v3",
             run_id=command.logical_run_id,
             attempt_id=command.attempt_id,
             sequence_no=sequence,
