@@ -1990,7 +1990,6 @@ def _validated_party_intake_entry(
             or not 0 <= breakdown[component] <= maximum
             for component, maximum in _QUALITY_SCORE_COMPONENT_MAXIMA.items()
         )
-        or sum(breakdown.values()) != score
     ):
         raise _party_intake_state_error(
             "INTAKE_PARTY_STATE_QUALITY_INVALID",

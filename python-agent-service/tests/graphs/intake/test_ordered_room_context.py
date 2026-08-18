@@ -363,7 +363,12 @@ def test_v3_projection_preserves_model_evaluation_without_legacy_recalculation()
             "agent_context": _agent_context(case_id=case_id, role="USER"),
         }
     )
-    output = IntakeInitiatorRoomLlmOutputV3.model_validate(_initiator_v3_payload())
+    payload = _initiator_v3_payload()
+    # The typed total is the model's sole score authority; component values are
+    # retained as explanatory detail and are not recomputed or cross-summed by
+    # the legacy dossier reducer.
+    payload["ordered_sections"][9]["value"]["score_breakdown"]["references"] = 11
+    output = IntakeInitiatorRoomLlmOutputV3.model_validate(payload)
     materialized = materialize_intake_case_detail_output(request, output)
 
     projected = project_intake_case_detail_output(
