@@ -39,6 +39,7 @@ class _Connection:
         self.events: list[str] = []
         self.query_started = asyncio.Event()
         self.query_cancelled = asyncio.Event()
+        self.closed = False
 
     def transaction(self) -> _Transaction:
         return _Transaction(self.events)
@@ -47,6 +48,29 @@ class _Connection:
         assert timeout > 0
         self.events.append("cancel-safe")
         self.query_cancelled.set()
+
+    async def close(self) -> None:
+        self.events.append("connection-close")
+        self.closed = True
+
+
+class _CancelTimeoutConnection(_Connection):
+    async def cancel_safe(self, *, timeout: float) -> None:
+        assert timeout > 0
+        self.events.append("cancel-safe")
+        raise TimeoutError("simulated cancellation timeout")
+
+
+class _RollbackFailureTransaction(_Transaction):
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self._events.append("transaction-rollback" if exc_type else "transaction-commit")
+        if exc_type:
+            raise RuntimeError("simulated rollback failure")
+
+
+class _RollbackFailureConnection(_Connection):
+    def transaction(self) -> _Transaction:
+        return _RollbackFailureTransaction(self.events)
 
 
 class _Pool:
@@ -136,5 +160,63 @@ async def test_anyio_level_cancellation_still_returns_connection_after_rollback(
         "transaction-enter",
         "cancel-safe",
         "transaction-rollback",
+        "pool-exit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_handshake_timeout_closes_connection_before_child_cancellation() -> None:
+    connection = _CancelTimeoutConnection()
+
+    async def operation(selected: _Connection) -> None:
+        selected.query_started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(
+        run_postgres_transaction(
+            _Pool(connection),
+            timeout=3.0,
+            operation=operation,
+            operation_name="lease renewal",
+        )
+    )
+    await connection.query_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert connection.closed is True
+    assert connection.events == [
+        "pool-enter",
+        "transaction-enter",
+        "cancel-safe",
+        "connection-close",
+        "transaction-rollback",
+        "pool-exit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_transaction_rollback_failure_closes_connection_before_pool_return() -> None:
+    connection = _RollbackFailureConnection()
+
+    async def operation(_: _Connection) -> None:
+        raise ValueError("simulated operation failure")
+
+    with pytest.raises(RuntimeError, match="simulated rollback failure"):
+        await run_postgres_transaction(
+            _Pool(connection),
+            timeout=3.0,
+            operation=operation,
+            operation_name="checkpoint write",
+        )
+
+    assert connection.closed is True
+    assert connection.events == [
+        "pool-enter",
+        "transaction-enter",
+        "transaction-rollback",
+        "connection-close",
         "pool-exit",
     ]

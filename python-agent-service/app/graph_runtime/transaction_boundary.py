@@ -27,10 +27,11 @@ logger = logging.getLogger(__name__)
 
 
 class _TransactionState:
-    __slots__ = ("connection",)
+    __slots__ = ("connection", "force_close_started")
 
     def __init__(self) -> None:
         self.connection: Any | None = None
+        self.force_close_started = False
 
 
 async def run_postgres_transaction(
@@ -81,6 +82,44 @@ async def run_postgres_transaction(
                 exc_info=True,
             )
 
+    async def force_close_connection(reason: str) -> None:
+        """Make an indeterminate transaction unusable before pool return."""
+
+        connection = state.connection
+        if connection is None or state.force_close_started:
+            return
+        state.force_close_started = True
+        notify("CONNECTION_FORCE_CLOSE_STARTED")
+        close = getattr(connection, "close", None)
+        if not callable(close):
+            notify("CONNECTION_FORCE_CLOSE_UNAVAILABLE")
+            logger.warning(
+                "graph transaction connection force-close unavailable: "
+                "operation=%s reason=%s",
+                operation_name,
+                reason,
+            )
+            return
+        try:
+            await close()
+        except Exception as error:
+            notify("CONNECTION_FORCE_CLOSE_FAILED")
+            logger.warning(
+                "graph transaction connection force-close failed: "
+                "operation=%s reason=%s error_type=%s error=%s",
+                operation_name,
+                reason,
+                type(error).__name__,
+                str(error)[:256],
+            )
+            return
+        notify("CONNECTION_FORCE_CLOSE_SUCCEEDED")
+        logger.warning(
+            "graph transaction connection force-closed: operation=%s reason=%s",
+            operation_name,
+            reason,
+        )
+
     async def execute() -> _Result:
         pool_context = pool.connection(timeout=timeout)
         pool_entered = False
@@ -104,6 +143,7 @@ async def run_postgres_transaction(
                     )
                 except BaseException:
                     notify("TRANSACTION_ROLLBACK_FAILED")
+                    await force_close_connection("transaction_rollback_failed")
                     raise
                 notify("TRANSACTION_ROLLBACK_SUCCEEDED")
                 if suppressed:
@@ -114,6 +154,7 @@ async def run_postgres_transaction(
                 suppressed = await transaction.__aexit__(None, None, None)
             except BaseException:
                 notify("TRANSACTION_COMMIT_FAILED")
+                await force_close_connection("transaction_commit_failed")
                 raise
             notify("TRANSACTION_COMMIT_SUCCEEDED")
             if suppressed:
@@ -128,6 +169,7 @@ async def run_postgres_transaction(
                     await pool_context.__aexit__(*sys.exc_info())
                 except BaseException:
                     notify("POOL_RELEASE_FAILED")
+                    await force_close_connection("pool_release_failed")
                     raise
                 notify("POOL_RELEASE_SUCCEEDED")
             state.connection = None
@@ -165,14 +207,19 @@ async def run_postgres_transaction(
                         )
                 if not cancel_requested and not task.done():
                     # Older/fake connections may not expose cancel_safe, or the
-                    # secure cancellation handshake may time out.  In that case
-                    # fall back to task cancellation; psycopg will discard an
-                    # uncooperative connection rather than return it INTRANS.
+                    # secure cancellation handshake may time out.  The active
+                    # transaction is then indeterminate: close the connection
+                    # before cancelling the child so pool return observes BAD,
+                    # never INTRANS with a live Transaction context.
+                    await force_close_connection("query_cancellation_failed")
                     task.cancel()
             await _drain_transaction_task(
                 task,
                 operation_name=operation_name,
                 timeout_seconds=max(1.0, float(cancel_timeout_seconds) * 2.0),
+                force_close=lambda: force_close_connection(
+                    "transaction_cleanup_timeout"
+                ),
             )
         raise
 
@@ -182,6 +229,7 @@ async def _drain_transaction_task(
     *,
     operation_name: str,
     timeout_seconds: float | None = None,
+    force_close: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """Wait for a transaction child and consume its cancellation-side error."""
 
@@ -212,6 +260,8 @@ async def _drain_transaction_task(
             operation_name,
         )
         if not task.done():
+            if force_close is not None:
+                await force_close()
             task.cancel()
         try:
             await asyncio.shield(task)
