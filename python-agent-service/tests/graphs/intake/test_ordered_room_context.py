@@ -494,6 +494,165 @@ def test_v3_direct_binding_uses_typed_model_authority_without_regex(
     assert failure.value.safe_code == "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
 
 
+def test_v3_direct_binding_ignores_known_historical_extras_but_requires_current_authority() -> None:
+    case_id = "CASE_ORDERED_ROOM_LINK_SUBSET"
+    current_text = (
+        "现阶段不同意直接退货退款，但同意核验宣传参数依据和检测方法。"
+    )
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_ORDERED_LINK_SUBSET",
+                "sequence_no": 6,
+                "role": "MERCHANT",
+                "source": "ROOM_MESSAGE",
+                "text": current_text,
+            },
+            "previous_case_detail": {
+                "schema_version": "intake_case_detail.v1",
+                "claim_resolution": {
+                    "initiator_role": "USER",
+                    "requested_resolution": "RETURN_REFUND",
+                },
+                "case_fact_matrix": {
+                    "schema_version": "case_fact_matrix.v2",
+                    "party_map": {
+                        "initiator_role": "USER",
+                        "respondent_role": "MERCHANT",
+                    },
+                },
+            },
+            "agent_context": _agent_context(case_id=case_id, role="MERCHANT"),
+        }
+    )
+    matrix = CaseFactMatrixDeltaV2.model_validate(
+        {
+            "schema_version": "case_fact_matrix.delta.v2",
+            "fact_rows": [
+                {
+                    "fact_key": "FACT_CURRENT_SPEC",
+                    "category": "PRODUCT_PAGE",
+                    "fact_target": "宣传参数是否有依据",
+                    "materiality": "CORE",
+                    "stance": "PARTIAL",
+                    "position_summary": "商家同意核验宣传参数依据。",
+                    "asserted_value": "同意核验",
+                    "source_scope": "PREVIOUS_AND_CURRENT_SOURCE",
+                },
+                {
+                    "fact_key": "FACT_CURRENT_METHOD",
+                    "category": "PRODUCT_STATE",
+                    "fact_target": "检测方法是否需要核验",
+                    "materiality": "CORE",
+                    "stance": "CONFIRM",
+                    "position_summary": "商家同意核验检测方法。",
+                    "asserted_value": "同意核验",
+                    "source_scope": "CURRENT_SOURCE",
+                },
+                {
+                    "fact_key": "FACT_PREVIOUS_REFUND",
+                    "category": "AFTER_SALES",
+                    "fact_target": "商家是否同意直接退货退款",
+                    "materiality": "CORE",
+                    "stance": "NOT_ADDRESSED",
+                    "position_summary": "本轮未就历史退款事实形成新陈述。",
+                    "asserted_value": None,
+                    "source_scope": "PREVIOUS_MATRIX",
+                },
+            ],
+            "summary_source_fact_keys": [
+                "FACT_CURRENT_SPEC",
+                "FACT_CURRENT_METHOD",
+            ],
+            "respondent_claim": {
+                "attitude": "DISAGREE",
+                "position_summary": "商家现阶段不同意直接退货退款，但同意核验依据和方法。",
+                "alternative_proposal": "先核验宣传参数依据和检测方法",
+            },
+        }
+    )
+    model_detail = {
+        "respondent_attitude": {
+            "respondent_role": "MERCHANT",
+            "attitude": "DISAGREE",
+            "position": "商家现阶段不同意直接退货退款，但同意核验依据和方法。",
+            "alternative_proposal": "先核验宣传参数依据和检测方法",
+        }
+    }
+    binding = {
+        "schema_version": "respondent-claim-binding.v1",
+        "binding_kind": "CURRENT_ACTOR_DIRECT",
+        "subject_role": "MERCHANT",
+        "source_quote": "现阶段不同意直接退货退款，但同意核验宣传参数依据和检测方法",
+        "linked_fact_keys": [
+            "FACT_CURRENT_SPEC",
+            "FACT_CURRENT_METHOD",
+            "FACT_PREVIOUS_REFUND",
+        ],
+    }
+
+    first = copy.deepcopy(model_detail)
+    dossier_skill._bind_model_trusted_respondent_attitude(
+        first,
+        request,
+        copy.deepcopy(request.previous_case_detail or {}),
+        copy.deepcopy(model_detail),
+        matrix,
+        copy.deepcopy(binding),
+    )
+    replay = copy.deepcopy(model_detail)
+    dossier_skill._bind_model_trusted_respondent_attitude(
+        replay,
+        request,
+        copy.deepcopy(request.previous_case_detail or {}),
+        copy.deepcopy(model_detail),
+        matrix,
+        copy.deepcopy(binding),
+    )
+
+    assert first["respondent_attitude"]["attitude"] == "DISAGREE"
+    assert first["respondent_attitude"]["grounding"] == {
+        "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+        "message_id": "MESSAGE_ORDERED_LINK_SUBSET",
+    }
+    assert replay == first
+
+    unknown_binding = copy.deepcopy(binding)
+    unknown_binding["linked_fact_keys"][-1] = "FACT_UNKNOWN"
+    with pytest.raises(AgentOutputSchemaError) as unknown_failure:
+        dossier_skill._bind_model_trusted_respondent_attitude(
+            copy.deepcopy(model_detail),
+            request,
+            copy.deepcopy(request.previous_case_detail or {}),
+            copy.deepcopy(model_detail),
+            matrix,
+            unknown_binding,
+        )
+    assert (
+        unknown_failure.value.safe_code
+        == "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+
+    historical_only_binding = copy.deepcopy(binding)
+    historical_only_binding["linked_fact_keys"] = ["FACT_PREVIOUS_REFUND"]
+    with pytest.raises(AgentOutputSchemaError) as historical_failure:
+        dossier_skill._bind_model_trusted_respondent_attitude(
+            copy.deepcopy(model_detail),
+            request,
+            copy.deepcopy(request.previous_case_detail or {}),
+            copy.deepcopy(model_detail),
+            matrix,
+            historical_only_binding,
+        )
+    assert (
+        historical_failure.value.safe_code
+        == "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    )
+
+
 def test_respondent_turn_projects_frozen_claim_and_keeps_reported_attitude_attribution() -> None:
     case_id = "CASE_ORDERED_ROOM_CROSS_PARTY_AUTHORITY"
     frozen_claim = {

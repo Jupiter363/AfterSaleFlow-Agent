@@ -3027,16 +3027,27 @@ def _bind_model_trusted_respondent_attitude(
             "direct respondent source binding does not match the current actor message",
         )
     rows_by_key = {row.fact_key: row for row in matrix_delta.fact_rows}
-    if any(
-        key not in rows_by_key
-        or rows_by_key[key].source_scope.value
-        not in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
-        or rows_by_key[key].stance.value == "NOT_ADDRESSED"
-        for key in linked_keys
-    ):
+    if any(key not in rows_by_key for key in linked_keys):
         raise _party_intake_state_error(
             "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-            "direct respondent binding must reference current-source matrix facts",
+            "direct respondent binding references an unknown matrix fact",
+        )
+    # The provider owns the semantic link selection, while the server owns fact
+    # identity and source authority.  A carried previous fact is therefore a
+    # known, harmless over-selection rather than authority for the current
+    # statement.  Preserve provider order and project the transient binding to
+    # the current substantive subset; at least one such row remains mandatory.
+    current_linked_keys = [
+        key
+        for key in linked_keys
+        if rows_by_key[key].source_scope.value
+        in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
+        and rows_by_key[key].stance.value != "NOT_ADDRESSED"
+    ]
+    if not current_linked_keys:
+        raise _party_intake_state_error(
+            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+            "direct respondent binding lacks a current-source substantive matrix fact",
         )
     model_claim = _current_respondent_model_claim(
         request,
