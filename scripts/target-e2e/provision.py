@@ -722,9 +722,9 @@ def _write_static_jwks(public_key_path: Path, destination: Path, key_id: str) ->
 
 def _target_binding(candidate: str) -> tuple[dict[str, Any], str]:
     binding = {
-        "graph_key": "all-rooms.target-e2e.v1",
-        "graph_version": "target-e2e-graph.2026-07-27.1",
-        "checkpoint_schema_version": "target-e2e-checkpoint.v1",
+        "graph_key": common.TARGET_E2E_GRAPH_KEY,
+        "graph_version": common.TARGET_E2E_GRAPH_VERSION,
+        "checkpoint_schema_version": common.TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
         "state_schema_version": "target-e2e-graph-state.v1",
         "state_schema_hash": hashlib.sha256(
             b"target-e2e:all-rooms-graph-state:v1"
@@ -734,24 +734,13 @@ def _target_binding(candidate: str) -> tuple[dict[str, Any], str]:
         "agent_profile_id": "all-rooms-agent.target-e2e.v1",
         "prompt_version": "all-rooms-prompt.target-e2e.v1",
         "model_profile_id": "target-e2e.contract-blocked",
-        "output_schema_version": "target-e2e-room-proposal-source.v1",
+        "output_schema_version": common.TARGET_E2E_OUTPUT_SCHEMA_VERSION,
         "policy_version": "all-rooms-policy.target-e2e.v1",
         "guardrail_version": "all-rooms-guardrail.target-e2e.v1",
-        "tool_policy_version": "tools.none.v1",
+        "tool_policy_version": common.TARGET_E2E_TOOL_POLICY_VERSION,
         "code_build_id": f"p9-graph-{candidate[:8]}",
-        "allowed_room_types": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"],
-        "allowed_stage_codes": [
-            "INTAKE_MESSAGE",
-            "EVIDENCE_SEAL",
-            "INTAKE_QUESTIONS_GENERATING",
-            "INTAKE_SYNTHESIZING",
-            "EVIDENCE_REQUESTS_GENERATING",
-            "EVIDENCE_SYNTHESIZING",
-            "JUDGE_V1_GENERATING",
-            "JURY_REVIEWING",
-            "JUDGE_V2_GENERATING",
-            "REVIEW_OUTCOME",
-        ],
+        "allowed_room_types": list(common.TARGET_E2E_ALLOWED_ROOM_TYPES),
+        "allowed_stage_codes": list(common.TARGET_E2E_ALLOWED_STAGE_CODES),
     }
     binding_hash = common.canonical_sha256(binding)
     return {**binding, "binding_hash": binding_hash}, binding_hash
@@ -1157,6 +1146,27 @@ def provision(
             "TARGET_E2E_GRAPH_VERSION": target_binding["graph_version"],
             "TARGET_E2E_GRAPH_CHECKPOINT_SCHEMA_VERSION": target_binding[
                 "checkpoint_schema_version"
+            ],
+            "TARGET_E2E_GRAPH_KEY": target_binding["graph_key"],
+            "TARGET_E2E_GRAPH_STATE_SCHEMA_VERSION": target_binding[
+                "state_schema_version"
+            ],
+            "TARGET_E2E_GRAPH_OUTPUT_SCHEMA_VERSION": target_binding[
+                "output_schema_version"
+            ],
+            "TARGET_E2E_GRAPH_AGENT_PROFILE_ID": target_binding[
+                "agent_profile_id"
+            ],
+            "TARGET_E2E_GRAPH_PROMPT_VERSION": target_binding["prompt_version"],
+            "TARGET_E2E_GRAPH_MODEL_PROFILE_ID": target_binding[
+                "model_profile_id"
+            ],
+            "TARGET_E2E_GRAPH_POLICY_VERSION": target_binding["policy_version"],
+            "TARGET_E2E_GRAPH_GUARDRAIL_VERSION": target_binding[
+                "guardrail_version"
+            ],
+            "TARGET_E2E_GRAPH_TOOL_POLICY_VERSION": target_binding[
+                "tool_policy_version"
             ],
             "TARGET_E2E_GRAPH_CODE_BUILD_ID": target_binding["code_build_id"],
             "TARGET_E2E_GRAPH_SHADOW_BINDINGS": json.dumps(

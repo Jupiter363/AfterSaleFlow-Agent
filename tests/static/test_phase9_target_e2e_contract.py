@@ -251,7 +251,7 @@ def test_target_graph_key_is_compatible_with_frozen_room_graph_command_v1() -> N
     )
     graph_key_schema = command_schema["$defs"]["identifier"]
 
-    assert target_key == "all-rooms.target-e2e.v1"
+    assert target_key == "all-rooms.target-e2e.v2"
     assert not list(jsonschema.Draft202012Validator(graph_key_schema).iter_errors(target_key))
     assert command_schema["properties"]["graph_key"] == {"$ref": "#/$defs/identifier"}
 

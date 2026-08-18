@@ -162,9 +162,9 @@ def _run_context(now: dt.datetime) -> dict[str, Any]:
             },
             "executor_bindings": [
                 {
-                    "graph_key": "all-rooms.target-e2e.v1",
-                    "graph_version": "target-e2e-graph.2026-07-27.1",
-                    "checkpoint_schema_version": "target-e2e-checkpoint.v1",
+                    "graph_key": "all-rooms.target-e2e.v2",
+                    "graph_version": "target-e2e-graph.2026-08-18.1",
+                    "checkpoint_schema_version": "target-e2e-checkpoint.v2",
                     "state_schema_version": "target-e2e-graph-state.v1",
                     "state_schema_hash": "7" * 64,
                     "command_schema_version": "room-graph-command.v1",
@@ -172,7 +172,7 @@ def _run_context(now: dt.datetime) -> dict[str, Any]:
                     "agent_profile_id": "all-rooms-agent.target-e2e.v1",
                     "prompt_version": "all-rooms-prompt.target-e2e.v1",
                     "model_profile_id": "target-e2e.contract-blocked",
-                    "output_schema_version": "target-e2e-room-proposal-source.v1",
+                    "output_schema_version": "target-e2e-room-proposal-source.v2",
                     "policy_version": "all-rooms-policy.target-e2e.v1",
                     "guardrail_version": "all-rooms-guardrail.target-e2e.v1",
                     "tool_policy_version": "tools.none.v1",

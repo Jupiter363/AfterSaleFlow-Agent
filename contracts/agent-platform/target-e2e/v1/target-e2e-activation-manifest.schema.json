@@ -155,7 +155,7 @@
       "additionalProperties": false,
       "required": ["key", "version", "checkpointSchemaVersion", "bindingHash", "codeBuildId"],
       "properties": {
-        "key": {"const": "all-rooms.target-e2e.v1"},
+        "key": {"const": "all-rooms.target-e2e.v2"},
         "version": {"$ref": "#/$defs/identifier"},
         "checkpointSchemaVersion": {"$ref": "#/$defs/identifier"},
         "bindingHash": {"$ref": "#/$defs/sha256"},

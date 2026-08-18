@@ -30,6 +30,30 @@ IMAGE_KEYS = (
     "curl",
 )
 APPLICATION_IMAGE_KEYS = {"java", "python", "ocr", "frontend"}
+
+# The target-E2E release unit has one shared graph binding.  Keep the
+# protocol identity in this module so provisioning and run-context validation
+# cannot silently drift apart again.  The profile/policy identifiers remain
+# the existing approved target profiles; the graph/checkpoint/proposal
+# identities are the v2 cutover boundary.
+TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v2"
+TARGET_E2E_GRAPH_VERSION = "target-e2e-graph.2026-08-18.1"
+TARGET_E2E_CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v2"
+TARGET_E2E_OUTPUT_SCHEMA_VERSION = "target-e2e-room-proposal-source.v2"
+TARGET_E2E_TOOL_POLICY_VERSION = "tools.none.v1"
+TARGET_E2E_ALLOWED_ROOM_TYPES = ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]
+TARGET_E2E_ALLOWED_STAGE_CODES = [
+    "INTAKE_MESSAGE",
+    "EVIDENCE_SEAL",
+    "INTAKE_QUESTIONS_GENERATING",
+    "INTAKE_SYNTHESIZING",
+    "EVIDENCE_REQUESTS_GENERATING",
+    "EVIDENCE_SYNTHESIZING",
+    "JUDGE_V1_GENERATING",
+    "JURY_REVIEWING",
+    "JUDGE_V2_GENERATING",
+    "REVIEW_OUTCOME",
+]
 IMAGE_RECORD_KEYS = {
     "reference",
     "manifest_digest",
@@ -676,24 +700,13 @@ def ledger_context_from_run_context(run_context: dict[str, Any]) -> dict[str, An
     if not isinstance(executor_binding, dict) or set(executor_binding) != TARGET_EXECUTOR_BINDING_KEYS:
         raise TargetE2EError("target E2E executor binding fields drifted")
     expected_executor_values = {
-        "graph_key": "all-rooms.target-e2e.v1",
-        "graph_version": "target-e2e-graph.2026-07-27.1",
-        "checkpoint_schema_version": "target-e2e-checkpoint.v1",
-        "output_schema_version": "target-e2e-room-proposal-source.v1",
-        "tool_policy_version": "tools.none.v1",
-        "allowed_room_types": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"],
-        "allowed_stage_codes": [
-            "INTAKE_MESSAGE",
-            "EVIDENCE_SEAL",
-            "INTAKE_QUESTIONS_GENERATING",
-            "INTAKE_SYNTHESIZING",
-            "EVIDENCE_REQUESTS_GENERATING",
-            "EVIDENCE_SYNTHESIZING",
-            "JUDGE_V1_GENERATING",
-            "JURY_REVIEWING",
-            "JUDGE_V2_GENERATING",
-            "REVIEW_OUTCOME",
-        ],
+        "graph_key": TARGET_E2E_GRAPH_KEY,
+        "graph_version": TARGET_E2E_GRAPH_VERSION,
+        "checkpoint_schema_version": TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
+        "output_schema_version": TARGET_E2E_OUTPUT_SCHEMA_VERSION,
+        "tool_policy_version": TARGET_E2E_TOOL_POLICY_VERSION,
+        "allowed_room_types": list(TARGET_E2E_ALLOWED_ROOM_TYPES),
+        "allowed_stage_codes": list(TARGET_E2E_ALLOWED_STAGE_CODES),
     }
     if any(executor_binding.get(key) != value for key, value in expected_executor_values.items()):
         raise TargetE2EError("target E2E executor binding is not the all-room composite")
