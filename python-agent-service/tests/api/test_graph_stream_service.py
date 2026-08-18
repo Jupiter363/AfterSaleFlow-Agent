@@ -1480,6 +1480,36 @@ async def test_prefetched_source_exception_is_propagated_on_the_next_read() -> N
 
 
 @pytest.mark.asyncio
+async def test_completed_prefetch_logs_only_the_code_owned_task_failure_site(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    namespace: dict[str, Any] = {"__name__": "pydantic.safe_prefetch_fixture"}
+    exec(
+        compile(
+            "async def fail():\n    raise KeyError('api_token=private')\n",
+            "C:/private/provider-payload.py",
+            "exec",
+        ),
+        namespace,
+    )
+    task = asyncio.create_task(namespace["fail"]())
+    await asyncio.gather(task, return_exceptions=True)
+
+    terminal, error = (
+        GatewayBackedGraphCommandStreamService._completed_prefetch_outcome(task)
+    )
+
+    assert terminal is False
+    assert type(error) is KeyError
+    assert caplog.messages == [
+        "graph_prefetch_source_failed error_type=KeyError "
+        "error_site=pydantic.safe_prefetch_fixture:fail:2"
+    ]
+    assert "private" not in caplog.text
+    assert "provider-payload" not in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failure", "expected_code", "expected_classification"),
     (

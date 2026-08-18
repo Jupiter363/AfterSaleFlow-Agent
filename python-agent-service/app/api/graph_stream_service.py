@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
 import logging
+import re
 import time
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -62,6 +63,11 @@ _GRAPH_PROVIDER_STREAM_INTERRUPTED_CODE = "GRAPH_PROVIDER_STREAM_INTERRUPTED"
 _MODEL_PROVIDER_STREAM_INTERRUPTED_CLASSIFICATION = "RECOVERABLE_ATTEMPT"
 _GRAPH_CONTRACT_ERROR_CLASSIFICATION = "CONTRACT_REJECTED"
 _LEASE_OBSERVABILITY_EMPTY = "NONE"
+_SAFE_PREFETCH_SITE_MODULE_PATTERN = re.compile(
+    r"^(?:app|asyncio|concurrent\.futures|langchain_core|langgraph|pydantic|pydantic_core)"
+    r"(?:\.[A-Za-z_][A-Za-z0-9_]*)*$"
+)
+_SAFE_PREFETCH_SITE_FUNCTION_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +139,26 @@ def _model_provider_stream_interruption_code(error: BaseException) -> str | None
     ):
         return _GRAPH_PROVIDER_STREAM_INTERRUPTED_CODE
     return None
+
+
+def _safe_prefetch_task_failure_site(
+    task: asyncio.Task[AgentStreamEvent],
+) -> tuple[str, str, int] | None:
+    """Read a completed task's code-owned traceback without exception values."""
+
+    candidate: tuple[str, str, int] | None = None
+    for frame in task.get_stack():
+        module_name = frame.f_globals.get("__name__")
+        function_name = frame.f_code.co_name
+        line_number = frame.f_lineno
+        if (
+            isinstance(module_name, str)
+            and _SAFE_PREFETCH_SITE_MODULE_PATTERN.fullmatch(module_name) is not None
+            and _SAFE_PREFETCH_SITE_FUNCTION_PATTERN.fullmatch(function_name) is not None
+            and 1 <= line_number <= 10_000_000
+        ):
+            candidate = (module_name, function_name, line_number)
+    return candidate
 
 
 class GraphRetainedCleanupError(GraphContractError):
@@ -1040,6 +1066,13 @@ class GatewayBackedGraphCommandStreamService:
         except StopAsyncIteration:
             return False, GraphContractError("gateway stream ended without a terminal event")
         except BaseException as error:
+            error_site = _safe_prefetch_task_failure_site(next_event)
+            if error_site is not None:
+                logger.error(
+                    "graph_prefetch_source_failed error_type=%s error_site=%s:%s:%s",
+                    type(error).__name__,
+                    *error_site,
+                )
             return False, error
         return event.event_type in TERMINAL_STREAM_EVENTS, None
 
