@@ -39,6 +39,7 @@ class _Connection:
         self.events: list[str] = []
         self.query_started = asyncio.Event()
         self.query_cancelled = asyncio.Event()
+        self.query_wait_released = asyncio.Event()
         self.closed = False
 
     def transaction(self) -> _Transaction:
@@ -59,6 +60,12 @@ class _CancelTimeoutConnection(_Connection):
         assert timeout > 0
         self.events.append("cancel-safe")
         raise TimeoutError("simulated cancellation timeout")
+
+    async def close(self) -> None:
+        self.events.append("connection-close")
+        if not self.query_wait_released.is_set():
+            raise RuntimeError("connection closed before query wait released")
+        self.closed = True
 
 
 class _RollbackFailureTransaction(_Transaction):
@@ -165,12 +172,16 @@ async def test_anyio_level_cancellation_still_returns_connection_after_rollback(
 
 
 @pytest.mark.asyncio
-async def test_cancel_handshake_timeout_closes_connection_before_child_cancellation() -> None:
+async def test_cancel_handshake_timeout_closes_connection_after_query_wait_releases() -> None:
     connection = _CancelTimeoutConnection()
 
     async def operation(selected: _Connection) -> None:
         selected.query_started.set()
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            selected.events.append("query-wait-released")
+            selected.query_wait_released.set()
 
     task = asyncio.create_task(
         run_postgres_transaction(
@@ -191,6 +202,7 @@ async def test_cancel_handshake_timeout_closes_connection_before_child_cancellat
         "pool-enter",
         "transaction-enter",
         "cancel-safe",
+        "query-wait-released",
         "connection-close",
         "transaction-rollback",
         "pool-exit",

@@ -27,10 +27,11 @@ logger = logging.getLogger(__name__)
 
 
 class _TransactionState:
-    __slots__ = ("connection", "force_close_started")
+    __slots__ = ("connection", "force_close_reason", "force_close_started")
 
     def __init__(self) -> None:
         self.connection: Any | None = None
+        self.force_close_reason: str | None = None
         self.force_close_started = False
 
 
@@ -120,6 +121,14 @@ async def run_postgres_transaction(
             reason,
         )
 
+    def request_force_close(reason: str) -> None:
+        """Delegate connection disposal to the task that owns its socket wait."""
+
+        if state.force_close_reason is not None:
+            return
+        state.force_close_reason = reason
+        notify("CONNECTION_FORCE_CLOSE_REQUESTED")
+
     async def execute() -> _Result:
         pool_context = pool.connection(timeout=timeout)
         pool_entered = False
@@ -133,7 +142,16 @@ async def run_postgres_transaction(
             notify("TRANSACTION_ENTERED")
             try:
                 result = await operation(connection)
+                if state.force_close_reason is not None:
+                    # An operation that suppresses task cancellation must not
+                    # commit an indeterminate transaction.
+                    raise asyncio.CancelledError
             except BaseException as operation_error:
+                if state.force_close_reason is not None:
+                    # The operation await has now unwound its psycopg socket
+                    # registration.  Closing here, from the owning child task,
+                    # cannot leave an invalid descriptor in SelectorEventLoop.
+                    await force_close_connection(state.force_close_reason)
                 notify("TRANSACTION_ROLLBACK_STARTED")
                 try:
                     suppressed = await transaction.__aexit__(
@@ -165,6 +183,8 @@ async def run_postgres_transaction(
             # cancellation arriving during transaction or pool __aexit__ still
             # needs to be treated as an active checked-out connection by parent.
             if pool_entered:
+                if state.force_close_reason is not None:
+                    await force_close_connection(state.force_close_reason)
                 try:
                     await pool_context.__aexit__(*sys.exc_info())
                 except BaseException:
@@ -208,18 +228,21 @@ async def run_postgres_transaction(
                 if not cancel_requested and not task.done():
                     # Older/fake connections may not expose cancel_safe, or the
                     # secure cancellation handshake may time out.  The active
-                    # transaction is then indeterminate: close the connection
-                    # before cancelling the child so pool return observes BAD,
-                    # never INTRANS with a live Transaction context.
-                    await force_close_connection("query_cancellation_failed")
+                    # transaction is then indeterminate.  Mark it for disposal
+                    # before cancelling the child; the child closes it only after
+                    # its active socket wait has unwound, then pool return observes
+                    # BAD rather than INTRANS.
+                    request_force_close("query_cancellation_failed")
                     task.cancel()
+
+            async def request_cleanup_force_close() -> None:
+                request_force_close("transaction_cleanup_timeout")
+
             await _drain_transaction_task(
                 task,
                 operation_name=operation_name,
                 timeout_seconds=max(1.0, float(cancel_timeout_seconds) * 2.0),
-                force_close=lambda: force_close_connection(
-                    "transaction_cleanup_timeout"
-                ),
+                force_close=request_cleanup_force_close,
             )
         raise
 
