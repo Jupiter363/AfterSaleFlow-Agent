@@ -301,6 +301,22 @@ def test_intake_room_v3_provider_schema_binds_readiness_before_streaming() -> No
     )
 
 
+def test_intake_room_v3_total_score_is_the_single_model_score_authority() -> None:
+    payload = _initiator_v3_payload()
+    evaluation = payload["ordered_sections"][9]["value"]
+    evaluation["score_breakdown"]["references"] = 11
+
+    schema = IntakeInitiatorRoomLlmOutputV3.model_json_schema()
+    assert Draft202012Validator(schema).is_valid(payload)
+
+    first = IntakeInitiatorRoomLlmOutputV3.model_validate(payload)
+    replay = IntakeInitiatorRoomLlmOutputV3.model_validate(copy.deepcopy(payload))
+
+    assert first.model_dump(mode="python") == replay.model_dump(mode="python")
+    assert first.ordered_sections[9].value.total_score == 50
+    assert first.ordered_sections[9].value.score_breakdown.references == 11
+
+
 def test_intake_context_retention_is_separate_from_physical_prompt_order() -> None:
     pack = build_context_pack(
         "intake_turn_case_detail",

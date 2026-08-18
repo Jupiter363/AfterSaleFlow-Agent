@@ -125,7 +125,7 @@ Provider SSE bytes
 | `risk_and_conflicts` | 15 | 核心冲突、争议事实和风险点是否明确中立 |
 | `next_action_clarity` | 15 | 缺口、问题或交接动作是否明确且不索要证据 |
 
-六项之和必须等于 `total_score`。阈值固定为 85：
+六项用于解释评分依据；`total_score` 是模型按六项标准综合给出的唯一最终完善度，后端不再用机械求和二次改写或否决它。阈值固定为 85：
 
 - `total_score >= 85` 且无阻塞缺口：`ready_for_next_step=true`；
 - 否则保持 `ASK_SUBSTANTIVE / NOT_READY`；

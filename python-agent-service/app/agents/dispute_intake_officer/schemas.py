@@ -245,12 +245,6 @@ class IntakeRoomTurnEvaluationValue(StrictIntakeRoomModel):
     conversation_action: IntakeConversationAction
     knowledge_answer_mode: KnowledgeAnswerMode
 
-    @model_validator(mode="after")
-    def score_breakdown_matches_total(self) -> "IntakeRoomTurnEvaluationValue":
-        if sum(self.score_breakdown.model_dump().values()) != self.total_score:
-            raise ValueError("turn evaluation score components must equal total_score")
-        return self
-
 
 class IntakeRoomCaseMatrixSection(StrictIntakeRoomModel):
     sequence: Literal[1]
