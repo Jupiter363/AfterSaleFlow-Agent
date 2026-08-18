@@ -108,17 +108,18 @@ def finalize_case_fact_matrix(
         previous_ids_by_fingerprint.setdefault(
             _fact_fingerprint(row.category, row.fact_target), []
         ).append(row.fact_id)
-    previous_fingerprints = {
-        fingerprint: matches[0]
-        for fingerprint, matches in previous_ids_by_fingerprint.items()
-        if len(matches) == 1
-    }
-    new_collision_groups = _new_fact_collision_groups(
+    explicit_previous_bindings = _explicit_previous_fact_bindings(
         resolved_delta.fact_rows,
+        previous_rows=previous_rows,
         previous_ids_by_fingerprint=previous_ids_by_fingerprint,
     )
-    for fingerprint, items in new_collision_groups.items():
-        if _fact_collision_is_conflicting(items):
+    new_previous_bindings, genuinely_new_groups = _new_fact_resolution_plan(
+        resolved_delta.fact_rows,
+        previous_ids_by_fingerprint=previous_ids_by_fingerprint,
+        explicitly_bound_previous_ids=set(explicit_previous_bindings.values()),
+    )
+    for fingerprint, items in genuinely_new_groups.items():
+        if len(items) > 1 and _fact_collision_is_conflicting(items):
             _schema_error(
                 "new matrix facts share an identity but carry conflicting positions: "
                 + fingerprint,
@@ -138,25 +139,9 @@ def finalize_case_fact_matrix(
     for item in resolved_delta.fact_rows:
         previous_row = None
         if item.fact_key.startswith("FACT_"):
-            fact_id = item.fact_key
-            previous_row = previous_rows.get(fact_id)
-            if previous_row is None:
-                matches = previous_ids_by_fingerprint.get(
-                    _fact_fingerprint(item.category, item.fact_target), []
-                )
-                if len(matches) != 1:
-                    if matches:
-                        _schema_error(
-                            "case matrix delta cannot uniquely resolve unknown fact "
-                            f"{item.fact_key}",
-                            safe_code="INTAKE_MATRIX_FACT_AMBIGUOUS",
-                        )
-                    _schema_error(
-                        f"case matrix delta references unknown fact {item.fact_key}",
-                        safe_code="INTAKE_MATRIX_FACT_UNKNOWN",
-                    )
-                fact_id = matches[0]
-                previous_row = previous_rows[fact_id]
+            fact_id = explicit_previous_bindings[item.fact_key]
+            previous_row = previous_rows[fact_id]
+            if fact_id != item.fact_key:
                 corrected_fact_keys[item.fact_key] = fact_id
             referenced_previous.add(fact_id)
             if _fact_fingerprint(previous_row.category, previous_row.fact_target) != _fact_fingerprint(
@@ -168,27 +153,21 @@ def finalize_case_fact_matrix(
                 )
         else:
             fingerprint = _fact_fingerprint(item.category, item.fact_target)
-            prior_matches = previous_ids_by_fingerprint.get(fingerprint, [])
-            if len(prior_matches) > 1:
-                _schema_error(
-                    "case matrix delta cannot uniquely resolve existing fact "
-                    + fingerprint,
-                    safe_code="INTAKE_MATRIX_FACT_AMBIGUOUS",
-                )
-            reused = previous_fingerprints.get(fingerprint)
+            reused = new_previous_bindings.get(item.fact_key)
             if reused is not None:
                 fact_id = reused
                 previous_row = previous_rows[reused]
                 referenced_previous.add(reused)
             else:
-                collision_items = new_collision_groups.get(fingerprint, ())
+                collision_items = genuinely_new_groups[fingerprint]
                 fact_id = _stable_fact_id(
                     request.case_id,
                     item.category,
                     item.fact_target,
                     discriminator=(
                         _fact_collision_digest(item)
-                        if len(collision_items) > 1
+                        if previous_ids_by_fingerprint.get(fingerprint)
+                        or len(collision_items) > 1
                         else None
                     ),
                 )
@@ -1182,53 +1161,102 @@ def _stable_fact_id(
     return "FACT_INTAKE_" + _digest(*parts)[:20].upper()
 
 
-def _new_fact_collision_groups(
+def _explicit_previous_fact_bindings(
+    rows: Any,
+    *,
+    previous_rows: Mapping[str, Any],
+    previous_ids_by_fingerprint: Mapping[str, Any],
+) -> dict[str, str]:
+    """Resolve every explicit FACT key before considering NEW compatibility binds."""
+
+    bindings: dict[str, str] = {}
+    for row in rows:
+        fact_key = _fact_delta_value(row, "fact_key")
+        if not isinstance(fact_key, str) or not fact_key.startswith("FACT_"):
+            continue
+        if fact_key in previous_rows:
+            bindings[fact_key] = fact_key
+            continue
+        fingerprint = _fact_fingerprint(
+            _fact_delta_value(row, "category"),
+            str(_fact_delta_value(row, "fact_target") or ""),
+        )
+        matches = previous_ids_by_fingerprint.get(fingerprint, [])
+        if len(matches) != 1:
+            if matches:
+                _schema_error(
+                    "case matrix delta cannot uniquely resolve unknown fact "
+                    f"{fact_key}",
+                    safe_code="INTAKE_MATRIX_FACT_AMBIGUOUS",
+                )
+            _schema_error(
+                f"case matrix delta references unknown fact {fact_key}",
+                safe_code="INTAKE_MATRIX_FACT_UNKNOWN",
+            )
+        bindings[fact_key] = matches[0]
+    return bindings
+
+
+def _new_fact_resolution_plan(
     rows: Any,
     *,
     previous_ids_by_fingerprint: Mapping[str, Any],
-) -> dict[str, tuple[Any, ...]]:
-    """Group only genuinely new rows whose coarse binding key collides.
+    explicitly_bound_previous_ids: set[str],
+) -> tuple[dict[str, str], dict[str, tuple[Any, ...]]]:
+    """Bind NEW rows only to unclaimed history, otherwise preserve NEW identity.
 
     ``category + fact_target`` remains the compatibility key for carrying a
-    frozen fact.  A fresh proposal can, however, contain two atomic facts that
-    accidentally reuse a broad target (for example an order reference).  Those
-    rows are still distinct when their proposal semantics differ, so the
-    reducer gives them deterministic collision identities instead of discarding
-    one or rejecting the whole opening.  Existing frozen rows are deliberately
-    excluded: an ambiguous historical binding must remain fail closed.
+    frozen fact when a provider emits one recoverable NEW key.  Explicit FACT
+    rows reserve their historical identities first.  A NEW row sharing that
+    broad target is therefore a distinct proposal and receives a deterministic
+    collision identity.  Planning the whole delta up front makes this invariant
+    independent of provider row order.
     """
 
     grouped: dict[str, list[Any]] = {}
     for row in rows:
-        fact_key = (
-            row.get("fact_key")
-            if isinstance(row, Mapping)
-            else getattr(row, "fact_key", None)
-        )
+        fact_key = _fact_delta_value(row, "fact_key")
         if not isinstance(fact_key, str) or not fact_key.startswith("NEW_"):
             continue
-        category = (
-            row.get("category")
-            if isinstance(row, Mapping)
-            else getattr(row, "category", "")
-        )
-        fact_target = (
-            row.get("fact_target")
-            if isinstance(row, Mapping)
-            else getattr(row, "fact_target", "")
-        )
         fingerprint = _fact_fingerprint(
-            category,
-            fact_target,
+            _fact_delta_value(row, "category"),
+            str(_fact_delta_value(row, "fact_target") or ""),
         )
-        if previous_ids_by_fingerprint.get(fingerprint):
-            continue
         grouped.setdefault(fingerprint, []).append(row)
-    return {
-        fingerprint: tuple(items)
-        for fingerprint, items in grouped.items()
-        if len(items) > 1
-    }
+
+    reused: dict[str, str] = {}
+    genuinely_new: dict[str, tuple[Any, ...]] = {}
+    for fingerprint, grouped_items in grouped.items():
+        items = tuple(grouped_items)
+        available_previous_ids = [
+            fact_id
+            for fact_id in previous_ids_by_fingerprint.get(fingerprint, [])
+            if fact_id not in explicitly_bound_previous_ids
+        ]
+        if not available_previous_ids:
+            genuinely_new[fingerprint] = items
+            continue
+        if len(available_previous_ids) == 1 and len(items) == 1:
+            fact_key = _fact_delta_value(items[0], "fact_key")
+            if not isinstance(fact_key, str):  # Pydantic guarantees this boundary.
+                _schema_error(
+                    "new matrix fact key is invalid",
+                    safe_code="INTAKE_MATRIX_FACT_UNKNOWN",
+                )
+            reused[fact_key] = available_previous_ids[0]
+            continue
+        _schema_error(
+            "case matrix delta cannot uniquely bind new facts to existing facts "
+            + fingerprint,
+            safe_code="INTAKE_MATRIX_FACT_AMBIGUOUS",
+        )
+    return reused, genuinely_new
+
+
+def _fact_delta_value(row: Any, name: str) -> Any:
+    if isinstance(row, Mapping):
+        return row.get(name)
+    return getattr(row, name, None)
 
 
 def _fact_collision_signature(row: Any) -> tuple[str, ...]:

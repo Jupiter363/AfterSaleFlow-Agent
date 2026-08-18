@@ -444,6 +444,71 @@ def test_fresh_same_target_rows_get_deterministic_collision_ids_without_merging_
     assert first.model_dump(mode="json") == replay.model_dump(mode="json")
 
 
+def test_follow_up_keeps_explicit_new_fact_distinct_from_carried_same_target_fact() -> None:
+    case_id = "CASE_matrix_follow_up_target_collision"
+    previous = _single_fact_initiator_matrix(case_id)
+    previous_row = previous.fact_rows[0]
+    request = _initiator_follow_up_request(
+        case_id,
+        previous.model_dump(mode="json"),
+    )
+    carried = {
+        "fact_key": previous_row.fact_id,
+        "category": previous_row.category,
+        "fact_target": previous_row.fact_target,
+        "materiality": previous_row.materiality,
+        "stance": "CONFIRM",
+        "position_summary": "用户继续确认页面标注包含基础安装。",
+        "asserted_value": "包含基础安装",
+        "source_scope": "PREVIOUS_AND_CURRENT_SOURCE",
+    }
+    added = {
+        "fact_key": "NEW_THIRD_PARTY_INSTALL_QUOTE",
+        "category": previous_row.category,
+        "fact_target": previous_row.fact_target,
+        "materiality": previous_row.materiality,
+        "stance": "CONFIRM",
+        "position_summary": "用户另行补充第三方安装报价为150元。",
+        "asserted_value": "第三方安装报价150元",
+        "source_scope": "CURRENT_SOURCE",
+    }
+
+    def reduce(rows: list[dict[str, object]]) -> CaseFactMatrixV2:
+        return finalize_case_fact_matrix(
+            request=request,
+            case_detail=_detail("用户补充第三方安装报价，同时继续确认页面安装承诺。"),
+            delta=CaseFactMatrixDeltaV2.model_validate(
+                {
+                    "fact_rows": rows,
+                    "summary_source_fact_keys": [
+                        previous_row.fact_id,
+                        "NEW_THIRD_PARTY_INSTALL_QUOTE",
+                    ],
+                }
+            ),
+        )
+
+    first = reduce([carried, added])
+    replay = reduce([carried, added])
+    reversed_rows = reduce([added, carried])
+
+    assert len(first.fact_rows) == 2
+    assert len({row.fact_id for row in first.fact_rows}) == 2
+    assert first.fact_rows[0].fact_id == previous_row.fact_id
+    assert first.fact_rows[1].fact_id != previous_row.fact_id
+    assert first.case_overview.summary_source_fact_ids == [
+        previous_row.fact_id,
+        first.fact_rows[1].fact_id,
+    ]
+    assert first.model_dump(mode="json") == replay.model_dump(mode="json")
+    assert {
+        row.positions.USER.position_summary: row.fact_id for row in first.fact_rows
+    } == {
+        row.positions.USER.position_summary: row.fact_id
+        for row in reversed_rows.fact_rows
+    }
+
+
 def test_fresh_same_target_conflicting_positions_remain_fail_closed() -> None:
     case_id = "CASE_matrix_target_conflict"
     request = IntakeTurnRequest.model_validate(
