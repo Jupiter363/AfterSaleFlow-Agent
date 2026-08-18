@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from types import MappingProxyType
+from typing import Annotated, Any, Final, Literal, Mapping
 
 from pydantic import (
     AwareDatetime,
@@ -194,6 +195,48 @@ StreamEventType = Literal[
 ]
 
 
+AGENT_STREAM_PAYLOAD_FIELDS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "attempt_started": frozenset({"node"}),
+        "visible_delta": frozenset({"node", "field", "delta"}),
+        "public_frame_start": frozenset(
+            {"frame_id", "frame_sequence", "frame_type", "public_header"}
+        ),
+        "public_text_delta": frozenset(
+            {"frame_id", "frame_sequence", "delta_index", "delta"}
+        ),
+        "active_frame_snapshot": frozenset(
+            {"frame_id", "frame_sequence", "delta_index", "public_text"}
+        ),
+        "public_frame_committed": frozenset(
+            {
+                "frame_id",
+                "frame_sequence",
+                "durable_cursor",
+                "header_sha256",
+                "public_text_sha256",
+                "frame_sha256",
+                "public_text_chars",
+            }
+        ),
+        "public_frame_interrupted": frozenset(
+            {
+                "frame_id",
+                "frame_sequence",
+                "durable_cursor",
+                "reason_code",
+                "public_text",
+            }
+        ),
+        "usage": frozenset({"usage"}),
+        "attempt_aborted": frozenset({"reason_code"}),
+        "attempt_reset": frozenset({"reset_attempt_id", "reason_code"}),
+        "final": frozenset({"final_result_ref", "final_result_hash"}),
+        "error": frozenset({"error_code", "retryable"}),
+    }
+)
+
+
 class AgentStreamEvent(StrictContractModel):
     schema_version: Literal["agent-stream.v3"]
     run_id: Identifier
@@ -206,49 +249,7 @@ class AgentStreamEvent(StrictContractModel):
 
     @model_validator(mode="after")
     def validate_event_payload(self) -> AgentStreamEvent:
-        required = {
-            "attempt_started": {"node"},
-            "visible_delta": {"node", "field", "delta"},
-            "public_frame_start": {
-                "frame_id",
-                "frame_sequence",
-                "frame_type",
-                "public_header",
-            },
-            "public_text_delta": {
-                "frame_id",
-                "frame_sequence",
-                "delta_index",
-                "delta",
-            },
-            "active_frame_snapshot": {
-                "frame_id",
-                "frame_sequence",
-                "delta_index",
-                "public_text",
-            },
-            "public_frame_committed": {
-                "frame_id",
-                "frame_sequence",
-                "durable_cursor",
-                "header_sha256",
-                "public_text_sha256",
-                "frame_sha256",
-                "public_text_chars",
-            },
-            "public_frame_interrupted": {
-                "frame_id",
-                "frame_sequence",
-                "durable_cursor",
-                "reason_code",
-                "public_text",
-            },
-            "usage": {"usage"},
-            "attempt_aborted": {"reason_code"},
-            "attempt_reset": {"reset_attempt_id", "reason_code"},
-            "final": {"final_result_ref", "final_result_hash"},
-            "error": {"error_code", "retryable"},
-        }[self.event_type]
+        required = AGENT_STREAM_PAYLOAD_FIELDS[self.event_type]
         present = set(self.payload.model_dump(exclude_none=True))
         missing = required - present
         if missing:

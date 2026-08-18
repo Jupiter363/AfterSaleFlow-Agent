@@ -14,7 +14,11 @@ from typing import Any, Final, Protocol, TypeVar
 
 from psycopg import errors as psycopg_errors
 
-from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
+from app.contracts.v1.models import (
+    AGENT_STREAM_PAYLOAD_FIELDS,
+    AgentStreamEvent,
+    RoomGraphCommand,
+)
 from app.graph_runtime.errors import (
     GraphCommandAbortedError,
     GraphCommandCancelledError,
@@ -89,16 +93,6 @@ class ReconciliationDisposition(StrEnum):
     RETURN_CACHED = "RETURN_CACHED"
     RECONCILED_TERMINAL = "RECONCILED_TERMINAL"
 
-
-_STREAM_PAYLOAD_FIELDS: Final[dict[str, frozenset[str]]] = {
-    "attempt_started": frozenset({"node"}),
-    "visible_delta": frozenset({"node", "field", "delta"}),
-    "usage": frozenset({"usage"}),
-    "attempt_aborted": frozenset({"reason_code"}),
-    "attempt_reset": frozenset({"reset_attempt_id", "reason_code"}),
-    "final": frozenset({"final_result_ref", "final_result_hash"}),
-    "error": frozenset({"error_code", "retryable"}),
-}
 
 _ControlPlaneResult = TypeVar("_ControlPlaneResult")
 _CONTROL_PLANE_RETRY_LIMIT: Final[int] = 2
@@ -1819,10 +1813,16 @@ class GraphCommandGateway:
             or event.audience != command.actor_scope.audience
             or event.sequence_no != expected_sequence
         ):
-            raise GraphContractError("Agent Stream v2 identity or ordering conflict")
+            raise GraphContractError("Agent Stream v3 identity or ordering conflict")
         present_payload_fields = frozenset(event.payload.model_dump(exclude_none=True))
-        if present_payload_fields != _STREAM_PAYLOAD_FIELDS[event.event_type]:
-            raise GraphContractError("Agent Stream v2 payload fields conflict with event type")
+        expected_payload_fields = AGENT_STREAM_PAYLOAD_FIELDS.get(event.event_type)
+        if (
+            expected_payload_fields is None
+            or present_payload_fields != expected_payload_fields
+        ):
+            raise GraphContractError(
+                "Agent Stream v3 payload fields conflict with event type"
+            )
 
     async def _emit(
         self,

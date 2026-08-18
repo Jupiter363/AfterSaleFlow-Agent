@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
-from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
+from app.contracts.v1.models import AgentStreamEvent, AgentStreamPayload, RoomGraphCommand
 from app.graph_runtime.errors import (
     GraphCommandAbortedError,
     GraphCommandCancelledError,
@@ -1290,7 +1290,7 @@ class _StreamGateway(GraphCommandGateway):
 def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> AgentStreamEvent:
     return AgentStreamEvent.model_validate(
         {
-            "schema_version": "agent-stream.v2",
+            "schema_version": "agent-stream.v3",
             "run_id": "run-1",
             "attempt_id": "attempt-1",
             "sequence_no": sequence,
@@ -1300,6 +1300,96 @@ def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> AgentStre
             "payload": payload,
         }
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            "public_frame_start",
+            {
+                "frame_id": "frame-1",
+                "frame_sequence": 1,
+                "frame_type": "ROOM_WELCOME",
+                "public_header": {
+                    "frame_sequence": 1,
+                    "frame_type": "ROOM_WELCOME",
+                },
+            },
+        ),
+        (
+            "public_text_delta",
+            {
+                "frame_id": "frame-1",
+                "frame_sequence": 1,
+                "delta_index": 0,
+                "delta": "欢迎进入证据室",
+            },
+        ),
+        (
+            "active_frame_snapshot",
+            {
+                "frame_id": "frame-1",
+                "frame_sequence": 1,
+                "delta_index": 0,
+                "public_text": "欢迎进入证据室",
+            },
+        ),
+        (
+            "public_frame_committed",
+            {
+                "frame_id": "frame-1",
+                "frame_sequence": 1,
+                "durable_cursor": "v3:attempt-1:FRAME:1",
+                "header_sha256": "a" * 64,
+                "public_text_sha256": "b" * 64,
+                "frame_sha256": "c" * 64,
+                "public_text_chars": 8,
+            },
+        ),
+        (
+            "public_frame_interrupted",
+            {
+                "frame_id": "frame-1",
+                "frame_sequence": 1,
+                "durable_cursor": "v3:attempt-1:INTERRUPTED:1",
+                "reason_code": "PROVIDER_INTERRUPTED",
+                "public_text": "欢迎进入证据室",
+            },
+        ),
+    ],
+)
+async def test_stream_accepts_contract_authorized_v3_frame_payloads(
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    gateway = _StreamGateway()
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "evidence.start"}),
+            _event(1, event_type, payload),
+            _event(
+                2,
+                "error",
+                {"error_code": "TEST_TERMINAL", "retryable": False},
+            ),
+        ]
+    )
+
+    events = [
+        event
+        async for event in gateway.execute_stream(
+            execution=_execution(),
+            executor=executor,
+        )
+    ]
+
+    assert [event.event_type for event in events] == [
+        "attempt_started",
+        event_type,
+        "error",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2143,10 +2233,18 @@ async def test_stream_rejects_incompatible_payload_before_durable_terminal_work(
     gateway = _StreamGateway()
     executor = _Executor(
         [
-            _event(
-                0,
-                "attempt_started",
-                {"node": "intake.start", "reason_code": "INJECTED_FIELD"},
+            AgentStreamEvent.model_construct(
+                schema_version="agent-stream.v3",
+                run_id="run-1",
+                attempt_id="attempt-1",
+                sequence_no=0,
+                event_type="attempt_started",
+                audience="USER",
+                occurred_at=NOW,
+                payload=AgentStreamPayload.model_construct(
+                    node="intake.start",
+                    reason_code="INJECTED_FIELD",
+                ),
             )
         ]
     )
