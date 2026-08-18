@@ -255,6 +255,126 @@ class ExecuteAgentRunActivityTest {
     }
 
     @Test
+    void terminalPersistenceRetriesOnlyAConflictInAFreshLedgerInvocation()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.requireAllocatedAttempt(request))
+                .thenReturn(runningAttempt(0, false));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                        any(),
+                        any()))
+                .thenThrow(AgentRunExecutionException.failLogicalRun(
+                        "AGENT_OUTPUT_SCHEMA_INVALID",
+                        "model output did not match the frozen schema",
+                        4,
+                        true,
+                        null));
+        SQLException serializationFailure = new SQLException(
+                "transaction serialization conflict",
+                "40001");
+        when(ledger.recordAttemptFailureResult(
+                        eq(AgentRunAttemptStatus.ABORTED), any()))
+                .thenThrow(new RuntimeException(
+                        "terminal transaction rolled back",
+                        serializationFailure))
+                .thenAnswer(invocation -> invocation.getArgument(1));
+
+        ExecuteAgentRunResult recovered =
+                activity(ledger, gateway, () -> context(1)).execute(request);
+
+        assertThat(recovered.errorCode()).isEqualTo("AGENT_OUTPUT_SCHEMA_INVALID");
+        assertThat(recovered.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+        assertThat(recovered.publicOutputEmitted()).isTrue();
+        verify(gateway, times(1)).execute(
+                eq(request),
+                eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                any(),
+                any());
+        verify(ledger, times(2)).recordAttemptFailureResult(
+                AgentRunAttemptStatus.ABORTED, recovered);
+
+        AgentRunLedger deterministicLedger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway deterministicGateway =
+                mock(AgentRunExecutionGateway.class);
+        when(deterministicLedger.requireAllocatedAttempt(request))
+                .thenReturn(runningAttempt(0, false));
+        when(deterministicGateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                        any(),
+                        any()))
+                .thenThrow(AgentRunExecutionException.failLogicalRun(
+                        "AGENT_OUTPUT_SCHEMA_INVALID",
+                        "model output did not match the frozen schema",
+                        4,
+                        true,
+                        null));
+        StackTraceElement sourceFrame = new StackTraceElement(
+                "org.hibernate.engine.jdbc.mutation.internal.ModelMutationHelper",
+                "identifiedResultsCheck",
+                "ModelMutationHelper.java",
+                75);
+        IllegalStateException deterministicFailure = new IllegalStateException(
+                "private invariant details must not cross Temporal");
+        deterministicFailure.setStackTrace(new StackTraceElement[] {sourceFrame});
+        when(deterministicLedger.recordAttemptFailureResult(
+                        eq(AgentRunAttemptStatus.ABORTED), any()))
+                .thenAnswer(ignored -> {
+                    throw deterministicFailure;
+                });
+
+        assertThatThrownBy(() -> activity(
+                                deterministicLedger,
+                                deterministicGateway,
+                                () -> context(1))
+                        .execute(request))
+                .isInstanceOfSatisfying(
+                        ApplicationFailure.class,
+                        failure -> {
+                            assertThat(failure.getType())
+                                    .isEqualTo(
+                                            ExecuteAgentRunActivityImpl
+                                                    .NON_RETRYABLE_FAILURE_TYPE);
+                            assertThat(failure.isNonRetryable()).isTrue();
+                            assertThat(failure.getDetails().get(0, String.class))
+                                    .isEqualTo(request.agentRunId());
+                            assertThat(failure.getDetails().get(1, String.class))
+                                    .isEqualTo(request.attemptId());
+                            assertThat(failure.getDetails().get(2, String.class))
+                                    .isEqualTo("AGENT_OUTPUT_SCHEMA_INVALID");
+                            assertThat(failure.getCause())
+                                    .isInstanceOf(ApplicationFailure.class);
+                            ApplicationFailure cause =
+                                    (ApplicationFailure) failure.getCause();
+                            assertThat(cause.getType())
+                                    .isEqualTo(IllegalStateException.class.getName());
+                            assertThat(cause.getMessage())
+                                    .contains("sanitized agent run terminal persistence cause")
+                                    .doesNotContain("private invariant details");
+                            assertThat(cause.getDetails().get(0, String.class))
+                                    .isEqualTo(IllegalStateException.class.getName());
+                            assertThat(cause.getDetails().get(1, String.class))
+                                    .isEqualTo("UNAVAILABLE");
+                            assertThat(cause.getDetails().get(2, String.class))
+                                    .isEqualTo("MESSAGE_REDACTED");
+                            assertThat(cause.getStackTrace())
+                                    .containsExactly(sourceFrame);
+                        });
+        verify(deterministicGateway, times(1)).execute(
+                eq(request),
+                eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                any(),
+                any());
+        verify(deterministicLedger, times(1)).recordAttemptFailureResult(
+                eq(AgentRunAttemptStatus.ABORTED), any());
+    }
+
+    @Test
     void replaysADurableFailureWithoutCallingTheGatewayAfterCompletionLoss()
             throws Exception {
         ExecuteAgentRunRequest request = request();
@@ -727,7 +847,7 @@ class ExecuteAgentRunActivityTest {
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
                 "run-001",
                 1,
-                "agent-stream.v2",
+                "agent-stream.v3",
                 "b".repeat(64),
                 null,
                 false,
@@ -764,7 +884,7 @@ class ExecuteAgentRunActivityTest {
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
                 "run-001",
                 1,
-                "agent-stream.v2",
+                "agent-stream.v3",
                 "b".repeat(64),
                 null,
                 false,

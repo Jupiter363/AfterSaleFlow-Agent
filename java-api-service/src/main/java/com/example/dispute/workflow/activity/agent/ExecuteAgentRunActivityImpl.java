@@ -12,6 +12,7 @@ import com.example.dispute.workflow.temporal.agentrun.AgentRunTemporalPolicy;
 import io.temporal.client.ActivityCanceledException;
 import io.temporal.client.ActivityCompletionException;
 import io.temporal.failure.ApplicationFailure;
+import jakarta.persistence.OptimisticLockException;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
@@ -24,6 +25,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.TransientDataAccessException;
 
 /** Executes one idempotent graph command and leaves formal domain finalization to a later Activity. */
 public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivity {
@@ -311,17 +313,149 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                                 ? AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
                                 : AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                         completedAt);
+        return persistTerminalFailureResult(
+                request,
+                status,
+                result,
+                executionFailure.errorCode());
+    }
+
+    /**
+     * Persists the exact terminal projection without ever re-entering provider execution.
+     *
+     * <p>The ledger is a Spring proxy, so an exception from the first invocation is observed only
+     * after that transaction has rolled back. A single replay is therefore safe for explicit
+     * transaction conflicts and optimistic-lock races: it starts a fresh transaction and the
+     * ledger's immutable result/event bindings make an ambiguously committed first invocation an
+     * exact replay. Deterministic contract failures are never retried.
+     */
+    private ExecuteAgentRunResult persistTerminalFailureResult(
+            ExecuteAgentRunRequest request,
+            AgentRunAttemptStatus status,
+            ExecuteAgentRunResult result,
+            String executionErrorCode) {
         try {
-            result = ledger.recordAttemptFailureResult(status, result);
-        } catch (RuntimeException persistenceFailure) {
-            throw ApplicationFailure.newNonRetryableFailure(
-                    "agent run terminal failure could not be persisted",
-                    NON_RETRYABLE_FAILURE_TYPE,
-                    request.agentRunId(),
-                    request.attemptId(),
-                    executionFailure.errorCode());
+            return ledger.recordAttemptFailureResult(status, result);
+        } catch (RuntimeException firstFailure) {
+            if (isRetryableTerminalPersistenceFailure(firstFailure)) {
+                LOG.warn(
+                        "agent_run_terminal_persistence_retry logical_run_id={} attempt_id={} "
+                                + "error_code={} persistence_type={} sql_state={}",
+                        request.agentRunId(),
+                        request.attemptId(),
+                        executionErrorCode,
+                        firstFailure.getClass().getName(),
+                        terminalPersistenceSqlState(firstFailure),
+                        firstFailure);
+                try {
+                    return ledger.recordAttemptFailureResult(status, result);
+                } catch (RuntimeException replayFailure) {
+                    replayFailure.addSuppressed(firstFailure);
+                    throw terminalPersistenceFailure(
+                            request,
+                            executionErrorCode,
+                            replayFailure);
+                }
+            }
+            throw terminalPersistenceFailure(
+                    request,
+                    executionErrorCode,
+                    firstFailure);
         }
-        return result;
+    }
+
+    private static ApplicationFailure terminalPersistenceFailure(
+            ExecuteAgentRunRequest request,
+            String executionErrorCode,
+            RuntimeException persistenceFailure) {
+        LOG.error(
+                "agent_run_terminal_persistence_failed logical_run_id={} attempt_id={} "
+                        + "error_code={} persistence_type={} sql_state={}",
+                request.agentRunId(),
+                request.attemptId(),
+                executionErrorCode,
+                persistenceFailure.getClass().getName(),
+                terminalPersistenceSqlState(persistenceFailure),
+                persistenceFailure);
+        return ApplicationFailure.newNonRetryableFailureWithCause(
+                "agent run terminal failure could not be persisted",
+                NON_RETRYABLE_FAILURE_TYPE,
+                sanitizedTerminalPersistenceCause(persistenceFailure),
+                request.agentRunId(),
+                request.attemptId(),
+                executionErrorCode);
+    }
+
+    private static boolean isRetryableTerminalPersistenceFailure(
+            RuntimeException persistenceFailure) {
+        Throwable current = persistenceFailure;
+        for (int depth = 0; current != null && depth < 16; depth++) {
+            if (current instanceof TransientDataAccessException
+                    || current instanceof OptimisticLockException) {
+                return true;
+            }
+            if (current instanceof SQLException sqlFailure
+                    && hasRetryableTransactionSqlState(sqlFailure)) {
+                return true;
+            }
+            Throwable next = current.getCause();
+            current = next == current ? null : next;
+        }
+        return false;
+    }
+
+    private static boolean hasRetryableTransactionSqlState(SQLException failure) {
+        SQLException current = failure;
+        for (int depth = 0; current != null && depth < 16; depth++) {
+            if ("40001".equals(current.getSQLState())
+                    || "40P01".equals(current.getSQLState())) {
+                return true;
+            }
+            SQLException next = current.getNextException();
+            current = next == current ? null : next;
+        }
+        return false;
+    }
+
+    private static String terminalPersistenceSqlState(Throwable failure) {
+        Throwable current = failure;
+        for (int depth = 0; current != null && depth < 16; depth++) {
+            if (current instanceof SQLException sqlFailure) {
+                SQLException chained = sqlFailure;
+                for (int sqlDepth = 0;
+                        chained != null && sqlDepth < 16;
+                        sqlDepth++) {
+                    String sqlState = chained.getSQLState();
+                    if (sqlState != null && sqlState.matches("[0-9A-Z]{5}")) {
+                        return sqlState;
+                    }
+                    SQLException next = chained.getNextException();
+                    chained = next == chained ? null : next;
+                }
+            }
+            Throwable next = current.getCause();
+            current = next == current ? null : next;
+        }
+        return "UNAVAILABLE";
+    }
+
+    private static ApplicationFailure sanitizedTerminalPersistenceCause(
+            RuntimeException persistenceFailure) {
+        Throwable rootCause = persistenceFailure;
+        Throwable current = persistenceFailure;
+        for (int depth = 0; current != null && depth < 16; depth++) {
+            rootCause = current;
+            Throwable next = current.getCause();
+            current = next == current ? null : next;
+        }
+        ApplicationFailure sanitized = ApplicationFailure.newNonRetryableFailure(
+                "sanitized agent run terminal persistence cause",
+                persistenceFailure.getClass().getName(),
+                rootCause.getClass().getName(),
+                terminalPersistenceSqlState(persistenceFailure),
+                "MESSAGE_REDACTED");
+        sanitized.setStackTrace(persistenceFailure.getStackTrace());
+        return sanitized;
     }
 
     private ExecuteAgentRunResult failedResult(
