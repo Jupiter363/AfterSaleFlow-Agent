@@ -318,126 +318,175 @@ class IntakeRoomTurnEvaluationSection(StrictIntakeRoomModel):
     value: IntakeRoomTurnEvaluationValue
 
 
-IntakeInitiatorRoomSections = tuple[
+class IntakeRoomQuestioningMissingInformationValue(
+    IntakeRoomMissingInformationValue
+):
+    next_questions: list[
+        Annotated[str, Field(min_length=1, max_length=2_000)]
+    ] = Field(min_length=1, max_length=2)
+
+
+class IntakeRoomBlockedMissingInformationValue(
+    IntakeRoomQuestioningMissingInformationValue
+):
+    blocking_gaps: list[
+        Annotated[str, Field(min_length=1, max_length=2_000)]
+    ] = Field(min_length=1, max_length=30)
+
+
+class IntakeRoomReadyMissingInformationValue(IntakeRoomMissingInformationValue):
+    blocking_gaps: list[
+        Annotated[str, Field(min_length=1, max_length=2_000)]
+    ] = Field(max_length=0)
+    next_questions: list[
+        Annotated[str, Field(min_length=1, max_length=2_000)]
+    ] = Field(max_length=0)
+
+
+class IntakeRoomNotReadyHandoffSummaryValue(IntakeRoomHandoffSummaryValue):
+    remark_status: Literal["NOT_READY"]
+
+
+class IntakeRoomWaitingHandoffSummaryValue(IntakeRoomHandoffSummaryValue):
+    remark_status: Literal["WAITING_FOR_REMARK"]
+
+
+class IntakeRoomNoRemarksHandoffSummaryValue(IntakeRoomHandoffSummaryValue):
+    remark_status: Literal["NO_EXTRA_REMARKS"]
+
+
+class IntakeRoomIncompleteTurnEvaluationValue(IntakeRoomTurnEvaluationValue):
+    ready_for_next_step: Literal[False]
+    admission_recommendation: Literal["NEED_MORE_INFO", "NOT_ADMISSIBLE"]
+    conversation_action: Literal["ASK_SUBSTANTIVE"]
+
+
+class IntakeRoomBelowThresholdEvaluationValue(
+    IntakeRoomIncompleteTurnEvaluationValue
+):
+    total_score: int = Field(ge=0, le=84)
+
+
+class IntakeRoomBlockedEvaluationValue(IntakeRoomIncompleteTurnEvaluationValue):
+    total_score: int = Field(ge=85, le=100)
+
+
+class IntakeRoomReadyTurnEvaluationValue(IntakeRoomTurnEvaluationValue):
+    total_score: int = Field(ge=85, le=100)
+    ready_for_next_step: Literal[True]
+    admission_recommendation: Literal["ACCEPTED"]
+
+
+class IntakeRoomInviteRemarkEvaluationValue(IntakeRoomReadyTurnEvaluationValue):
+    conversation_action: Literal["INVITE_OPTIONAL_REMARK"]
+
+
+class IntakeRoomNoRemarkEvaluationValue(IntakeRoomReadyTurnEvaluationValue):
+    conversation_action: Literal["ACK_NO_REMARK"]
+
+
+class IntakeRoomQuestioningMissingInformationSection(
+    IntakeRoomMissingInformationSection
+):
+    value: IntakeRoomQuestioningMissingInformationValue
+
+
+class IntakeRoomBlockedMissingInformationSection(
+    IntakeRoomMissingInformationSection
+):
+    value: IntakeRoomBlockedMissingInformationValue
+
+
+class IntakeRoomReadyMissingInformationSection(IntakeRoomMissingInformationSection):
+    value: IntakeRoomReadyMissingInformationValue
+
+
+class IntakeRoomNotReadyHandoffSummarySection(IntakeRoomHandoffSummarySection):
+    value: IntakeRoomNotReadyHandoffSummaryValue
+
+
+class IntakeRoomWaitingHandoffSummarySection(IntakeRoomHandoffSummarySection):
+    value: IntakeRoomWaitingHandoffSummaryValue
+
+
+class IntakeRoomNoRemarksHandoffSummarySection(IntakeRoomHandoffSummarySection):
+    value: IntakeRoomNoRemarksHandoffSummaryValue
+
+
+class IntakeRoomBelowThresholdEvaluationSection(IntakeRoomTurnEvaluationSection):
+    value: IntakeRoomBelowThresholdEvaluationValue
+
+
+class IntakeRoomBlockedEvaluationSection(IntakeRoomTurnEvaluationSection):
+    value: IntakeRoomBlockedEvaluationValue
+
+
+class IntakeRoomInviteRemarkEvaluationSection(IntakeRoomTurnEvaluationSection):
+    value: IntakeRoomInviteRemarkEvaluationValue
+
+
+class IntakeRoomNoRemarkEvaluationSection(IntakeRoomTurnEvaluationSection):
+    value: IntakeRoomNoRemarkEvaluationValue
+
+
+def _ordered_room_sections_type(
+    matrix_section_type: type[BaseModel],
+    claim_section_type: type[BaseModel],
+) -> Any:
+    common_prefix = (
+        matrix_section_type,
+        IntakeRoomCaseStorySection,
+        IntakeRoomPartyPositionsSection,
+        claim_section_type,
+        IntakeRoomDisputeFocusSection,
+        IntakeRoomVerificationFocusSection,
+        IntakeRoomRiskAssessmentSection,
+    )
+
+    def branch(
+        missing_section_type: type[BaseModel],
+        handoff_section_type: type[BaseModel],
+        evaluation_section_type: type[BaseModel],
+    ) -> Any:
+        return tuple[
+            *common_prefix,
+            missing_section_type,
+            handoff_section_type,
+            evaluation_section_type,
+        ]
+
+    return (
+        branch(
+            IntakeRoomQuestioningMissingInformationSection,
+            IntakeRoomNotReadyHandoffSummarySection,
+            IntakeRoomBelowThresholdEvaluationSection,
+        )
+        | branch(
+            IntakeRoomBlockedMissingInformationSection,
+            IntakeRoomNotReadyHandoffSummarySection,
+            IntakeRoomBlockedEvaluationSection,
+        )
+        | branch(
+            IntakeRoomReadyMissingInformationSection,
+            IntakeRoomWaitingHandoffSummarySection,
+            IntakeRoomInviteRemarkEvaluationSection,
+        )
+        | branch(
+            IntakeRoomReadyMissingInformationSection,
+            IntakeRoomNoRemarksHandoffSummarySection,
+            IntakeRoomNoRemarkEvaluationSection,
+        )
+    )
+
+
+IntakeInitiatorRoomSections = _ordered_room_sections_type(
     IntakeRoomCaseMatrixSection,
-    IntakeRoomCaseStorySection,
-    IntakeRoomPartyPositionsSection,
     IntakeRoomClaimAndResponseSection,
-    IntakeRoomDisputeFocusSection,
-    IntakeRoomVerificationFocusSection,
-    IntakeRoomRiskAssessmentSection,
-    IntakeRoomMissingInformationSection,
-    IntakeRoomHandoffSummarySection,
-    IntakeRoomTurnEvaluationSection,
-]
-IntakeRespondentRoomSections = tuple[
+)
+IntakeRespondentRoomSections = _ordered_room_sections_type(
     IntakeRespondentRoomCaseMatrixSection,
-    IntakeRoomCaseStorySection,
-    IntakeRoomPartyPositionsSection,
     IntakeRoomClaimAndResponseSection,
-    IntakeRoomDisputeFocusSection,
-    IntakeRoomVerificationFocusSection,
-    IntakeRoomRiskAssessmentSection,
-    IntakeRoomMissingInformationSection,
-    IntakeRoomHandoffSummarySection,
-    IntakeRoomTurnEvaluationSection,
-]
-
-
-def _ordered_room_section_value_schema(
-    properties: dict[str, dict[str, Any]],
-) -> dict[str, Any]:
-    return {"properties": {"value": {"properties": properties}}}
-
-
-def _ordered_room_outcome_provider_branch(
-    *,
-    score_constraint: dict[str, int],
-    blocking_gaps_constraint: dict[str, int] | None,
-    next_questions_constraint: dict[str, int],
-    remark_status: str,
-    ready_for_next_step: bool,
-    admission_recommendations: tuple[str, ...],
-    conversation_action: str,
-) -> dict[str, Any]:
-    prefix_items: list[dict[str, Any]] = [{} for _ in INTAKE_ROOM_SECTION_KINDS]
-    missing_properties: dict[str, dict[str, Any]] = {
-        "next_questions": next_questions_constraint,
-    }
-    if blocking_gaps_constraint is not None:
-        missing_properties["blocking_gaps"] = blocking_gaps_constraint
-    prefix_items[7] = _ordered_room_section_value_schema(missing_properties)
-    prefix_items[8] = _ordered_room_section_value_schema(
-        {"remark_status": {"const": remark_status}}
-    )
-    prefix_items[9] = _ordered_room_section_value_schema(
-        {
-            "total_score": score_constraint,
-            "threshold": {"const": 85},
-            "ready_for_next_step": {"const": ready_for_next_step},
-            "admission_recommendation": {
-                "enum": list(admission_recommendations)
-            },
-            "conversation_action": {"const": conversation_action},
-        }
-    )
-    return {"prefixItems": prefix_items}
-
-
-def _bind_ordered_room_outcome_provider_schema(schema: dict[str, Any]) -> None:
-    """Put the baseline readiness state machine into the provider wire schema."""
-
-    properties = schema.get("properties")
-    ordered_sections = (
-        properties.get("ordered_sections") if isinstance(properties, dict) else None
-    )
-    if not isinstance(ordered_sections, dict):
-        raise RuntimeError("ordered Intake provider schema is missing ordered_sections")
-    ordered_sections["anyOf"] = [
-        _ordered_room_outcome_provider_branch(
-            score_constraint={"maximum": 84},
-            blocking_gaps_constraint=None,
-            next_questions_constraint={"minItems": 1},
-            remark_status="NOT_READY",
-            ready_for_next_step=False,
-            admission_recommendations=("NEED_MORE_INFO", "NOT_ADMISSIBLE"),
-            conversation_action="ASK_SUBSTANTIVE",
-        ),
-        _ordered_room_outcome_provider_branch(
-            score_constraint={"minimum": 85},
-            blocking_gaps_constraint={"minItems": 1},
-            next_questions_constraint={"minItems": 1},
-            remark_status="NOT_READY",
-            ready_for_next_step=False,
-            admission_recommendations=("NEED_MORE_INFO", "NOT_ADMISSIBLE"),
-            conversation_action="ASK_SUBSTANTIVE",
-        ),
-        _ordered_room_outcome_provider_branch(
-            score_constraint={"minimum": 85},
-            blocking_gaps_constraint={"maxItems": 0},
-            next_questions_constraint={"maxItems": 0},
-            remark_status="WAITING_FOR_REMARK",
-            ready_for_next_step=True,
-            admission_recommendations=("ACCEPTED",),
-            conversation_action="INVITE_OPTIONAL_REMARK",
-        ),
-        _ordered_room_outcome_provider_branch(
-            score_constraint={"minimum": 85},
-            blocking_gaps_constraint={"maxItems": 0},
-            next_questions_constraint={"maxItems": 0},
-            remark_status="NO_EXTRA_REMARKS",
-            ready_for_next_step=True,
-            admission_recommendations=("ACCEPTED",),
-            conversation_action="ACK_NO_REMARK",
-        ),
-    ]
-
-
-class StrictOrderedIntakeRoomModel(StrictIntakeRoomModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        json_schema_extra=_bind_ordered_room_outcome_provider_schema,
-    )
+)
 
 
 def _validate_ordered_room_outcome(
@@ -474,7 +523,7 @@ def _validate_ordered_room_outcome(
         raise ValueError("an incomplete turn must remain in substantive Intake")
 
 
-class IntakeInitiatorRoomLlmOutputV3(StrictOrderedIntakeRoomModel):
+class IntakeInitiatorRoomLlmOutputV3(StrictIntakeRoomModel):
     """Ordered provider contract for initiator substantive/opening turns."""
 
     room_utterance: str = Field(min_length=1, max_length=20_000)
@@ -493,7 +542,7 @@ class IntakeInitiatorRoomLlmOutputV3(StrictOrderedIntakeRoomModel):
         return self
 
 
-class IntakeRespondentRoomLlmOutputV3(StrictOrderedIntakeRoomModel):
+class IntakeRespondentRoomLlmOutputV3(StrictIntakeRoomModel):
     """Ordered provider contract for an authenticated respondent turn."""
 
     room_utterance: str = Field(min_length=1, max_length=20_000)
@@ -609,18 +658,10 @@ def _respondent_output_type_with_frozen_claim(
         __base__=IntakeRoomClaimAndResponseSection,
         value=(frozen_claim_and_response_type, ...),
     )
-    ordered_sections_type = tuple[
+    ordered_sections_type = _ordered_room_sections_type(
         IntakeRespondentRoomCaseMatrixSection,
-        IntakeRoomCaseStorySection,
-        IntakeRoomPartyPositionsSection,
         frozen_claim_section_type,
-        IntakeRoomDisputeFocusSection,
-        IntakeRoomVerificationFocusSection,
-        IntakeRoomRiskAssessmentSection,
-        IntakeRoomMissingInformationSection,
-        IntakeRoomHandoffSummarySection,
-        IntakeRoomTurnEvaluationSection,
-    ]
+    )
     return create_model(
         f"IntakeRespondentRoomLlmOutputV3_{suffix}",
         __base__=IntakeRespondentRoomLlmOutputV3,
