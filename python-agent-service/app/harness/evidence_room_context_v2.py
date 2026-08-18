@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from app.contracts.v1.codec import canonical_sha256
+from app.graph_runtime.errors import GraphContractError
 from app.harness.evidence_context_assembler import (
     AssembledEvidenceContext,
     EvidenceContextAssembler,
@@ -90,8 +91,13 @@ def assemble_evidence_room_context_v2(
         "output_contract": {
             "schema_version": "evidence_turn_stream.v2",
             "frame_authority_schema": "evidence-turn-frame.v2",
+            "lead_public_text_property": "lead_public_text",
+            "lead_frame_type": (
+                None if mode == "REENTRY_REPLAY" else _leading_frame_type(mode)
+            ),
             "frame_wire": '{"header":{...},"public_text":string|null}',
             "frame_property_order": ["header", "public_text"],
+            "remaining_frame_sequence_start": 2,
             "allowed_frame_types": _allowed_frame_types(mode),
             "frame_order": _frame_order(mode),
             "max_public_text_chars": 100_000,
@@ -185,6 +191,17 @@ def _allowed_frame_types(mode: str) -> list[str]:
 
 def _frame_order(mode: str) -> str:
     return str(_turn_contract(mode, 0)["frame_order"])
+
+
+def _leading_frame_type(mode: str) -> str:
+    leading = {
+        "ROOM_OPENING": "ROOM_WELCOME",
+        "MATERIAL_REVIEW": "MATERIAL_RECEIPT",
+        "TEXT_FOLLOWUP": "TEXT_FOLLOWUP_REPLY",
+    }.get(mode)
+    if leading is None:
+        raise GraphContractError("EVIDENCE_V2_TURN_MODE_INVALID")
+    return leading
 
 
 def _frozen_matrix(base: AssembledEvidenceContext) -> dict[str, Any]:

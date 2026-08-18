@@ -743,90 +743,113 @@ def test_incremental_projector_streams_only_complete_array_objects_in_source_ord
 
 
 def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_document_close() -> None:
-    spec = VisibleFieldSpec(
+    lead_spec = VisibleFieldSpec("lead_public_text", "lead_public_text")
+    frame_spec = VisibleFieldSpec(
         "frames",
         "frames",
         "json_frame_objects",
+        requires_completed_root_property="lead_public_text",
+        requires_leading_property_order=True,
         max_array_items=4,
         max_array_item_bytes=2_048,
         max_array_bytes=8_192,
+        frame_sequence_start=2,
     )
     chunks = (
-        '{"schema_version":"evidence_turn_stream.v2","frames":'
-        '[{"header":{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},'
-        '"public_text":"欢迎',
+        '{"schema_version":"evidence_turn_stream.v2","lead_public_text":"欢迎',
         "进入证据",
-        '室。"},',
-        '{"header":{"frame_sequence":2,"frame_type":"HUMAN_REVIEW_TASK",'
+        '室。","frames":[{"header":{"frame_sequence":2,'
+        '"frame_type":"OPENING_ORIENTATION","focus_fact_ids":["FACT_1"]},'
+        '"public_text":"正在',
+        '核对。"},',
+        '{"header":{"frame_sequence":3,"frame_type":"HUMAN_REVIEW_TASK",'
         '"evidence_id":"EVIDENCE_1","observation_slots":[],"trigger_code":'
         '"SOURCE_CHAIN","review_target":"原件","review_instruction":"核对原件",'
         '"priority":"MEDIUM"},"public_text":null}',
         ']}'
     )
 
-    projector = IncrementalVisibleJsonProjector((spec,))
-    replay = IncrementalVisibleJsonProjector((spec,))
+    specs = (lead_spec, frame_spec)
+    projector = IncrementalVisibleJsonProjector(specs)
+    replay = IncrementalVisibleJsonProjector(specs)
     emitted = [projector.feed(chunk) for chunk in chunks]
     replayed = [replay.feed(chunk) for chunk in chunks]
 
     assert emitted == replayed
-    assert [json.loads(delta)["kind"] for _, delta in emitted[0]] == [
+    assert emitted[0] == [("lead_public_text", "欢迎")]
+    assert emitted[1] == [("lead_public_text", "进入证据")]
+    assert emitted[2][0] == ("lead_public_text", "室。")
+    assert [json.loads(delta)["kind"] for _, delta in emitted[2][1:]] == [
         "frame_start",
         "public_text_delta",
     ]
-    assert json.loads(emitted[0][1][1])["delta"] == "欢迎"
-    assert json.loads(emitted[1][0][1]) == {
-        "kind": "public_text_delta",
-        "frame_sequence": 1,
-        "delta": "进入证据",
-    }
-    assert [json.loads(delta)["kind"] for _, delta in emitted[2]] == [
-        "public_text_delta",
-        "frame_end",
-    ]
-    assert json.loads(emitted[2][0][1])["delta"] == "室。"
+    assert json.loads(emitted[2][2][1])["delta"] == "正在"
     assert [json.loads(delta)["kind"] for _, delta in emitted[3]] == [
+        "public_text_delta",
+        "frame_end",
+    ]
+    assert json.loads(emitted[3][0][1])["delta"] == "核对。"
+    assert [json.loads(delta)["kind"] for _, delta in emitted[4]] == [
         "frame_start",
         "frame_end",
     ]
-    assert emitted[4] == []
+    assert emitted[5] == []
 
-    public_null = IncrementalVisibleJsonProjector((spec,))
+    reordered_root = IncrementalVisibleJsonProjector(specs)
+    with pytest.raises(
+        AgentStreamProjectionError,
+        match="gate field is not first",
+    ):
+        reordered_root.feed(
+            '{"schema_version":"evidence_turn_stream.v2","frames":[],'
+            '"lead_public_text":"延迟输出"}'
+        )
+
+    negative_frame_spec = VisibleFieldSpec(
+        "frames",
+        "frames",
+        "json_frame_objects",
+        max_array_items=4,
+        max_array_item_bytes=2_048,
+        max_array_bytes=8_192,
+        frame_sequence_start=2,
+    )
+    public_null = IncrementalVisibleJsonProjector((negative_frame_spec,))
     with pytest.raises(
         AgentStreamProjectionError,
         match="public frame object must use non-empty public_text",
     ):
         public_null.feed(
             '{"schema_version":"evidence_turn_stream.v2","frames":'
-            '[{"header":{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},'
+            '[{"header":{"frame_sequence":2,"frame_type":"OPENING_ORIENTATION"},'
             '"public_text":null}]}'
         )
 
-    public_empty = IncrementalVisibleJsonProjector((spec,))
+    public_empty = IncrementalVisibleJsonProjector((negative_frame_spec,))
     with pytest.raises(
         AgentStreamProjectionError,
         match="public frame object must use non-empty public_text",
     ):
         public_empty.feed(
             '{"schema_version":"evidence_turn_stream.v2","frames":'
-            '[{"header":{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},'
+            '[{"header":{"frame_sequence":2,"frame_type":"OPENING_ORIENTATION"},'
             '"public_text":""}]}'
         )
 
-    internal_string = IncrementalVisibleJsonProjector((spec,))
+    internal_string = IncrementalVisibleJsonProjector((negative_frame_spec,))
     with pytest.raises(
         AgentStreamProjectionError,
         match="internal frame object must use a null public_text",
     ):
         internal_string.feed(
             '{"schema_version":"evidence_turn_stream.v2","frames":'
-            '[{"header":{"frame_sequence":1,"frame_type":"HUMAN_REVIEW_TASK",'
+            '[{"header":{"frame_sequence":2,"frame_type":"HUMAN_REVIEW_TASK",'
             '"evidence_id":"EVIDENCE_1","trigger_code":"SOURCE_CHAIN",'
             '"review_target":"原件","review_instruction":"核对原件",'
             '"priority":"MEDIUM"},"public_text":"不得公开"}]}'
         )
 
-    public_first = IncrementalVisibleJsonProjector((spec,))
+    public_first = IncrementalVisibleJsonProjector((negative_frame_spec,))
     with pytest.raises(
         AgentStreamProjectionError,
         match="must begin with header",
@@ -834,7 +857,7 @@ def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_docume
         public_first.feed(
             '{"schema_version":"evidence_turn_stream.v2","frames":['
             '{"public_text":"不得先公开","header":'
-            '{"frame_sequence":1,"frame_type":"ROOM_WELCOME"}}]}'
+            '{"frame_sequence":2,"frame_type":"OPENING_ORIENTATION"}}]}'
         )
 
 
@@ -842,49 +865,87 @@ def test_evidence_v2_public_policy_keeps_model_text_and_frame_identity() -> None
     from app.agents.evidence_clerk.v2_policy import EvidenceV2PublicOutputPolicy
 
     policy = EvidenceV2PublicOutputPolicy()
+    policy.configure(
+        SimpleNamespace(
+            payload={
+                "turn_contract": {
+                    "turn_mode": "ROOM_OPENING",
+                    "allowed_frame_types": [
+                        "ROOM_WELCOME",
+                        "OPENING_ORIENTATION",
+                        "ROOM_READINESS",
+                    ],
+                }
+            },
+            base=SimpleNamespace(
+                working_set=SimpleNamespace(
+                    allowed_fact_targets=[{"fact_id": "FACT_1"}]
+                ),
+                raw_envelope=SimpleNamespace(
+                    current_event=SimpleNamespace(attachment_refs=())
+                ),
+            ),
+            source_units=(),
+        )
+    )
     assert policy.begin(
         operation="evidence_turn",
         node_name="evidence_turn",
         field_name="frames",
     ) == ()
-    header = {
-        "frame_sequence": 1,
-        "frame_type": "ROOM_WELCOME",
-    }
-    assert policy.project_event(
-        operation="evidence_turn",
-        node_name="evidence_turn",
-        field_name="frames",
-        delta=json.dumps(
-            {"kind": "frame_start", "frame_sequence": 1, "header": header},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-    )[0][0] == "frame.1.header"
     literal = "该文本包含退款、责任等模型原话，不由后端改写。"
     projected = policy.project_event(
         operation="evidence_turn",
         node_name="evidence_turn",
+        field_name="lead_public_text",
+        delta=literal,
+    )
+    assert projected[0][0] == "frame.1.header"
+    assert projected[1] == ("frame.1.public_text", literal)
+    next_frame = policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
         field_name="frames",
         delta=json.dumps(
-            {"kind": "public_text_delta", "frame_sequence": 1, "delta": literal},
+            {
+                "kind": "frame_start",
+                "frame_sequence": 2,
+                "header": {
+                    "frame_sequence": 2,
+                    "frame_type": "OPENING_ORIENTATION",
+                    "focus_fact_ids": ["FACT_1"],
+                },
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         ),
     )
-    assert projected == (("frame.1.public_text", literal),)
+    assert next_frame[0] == ("frame.1.end", "{}")
+    assert next_frame[1][0] == "frame.2.header"
+    followup = "继续核对本案事实。"
     policy.project_event(
         operation="evidence_turn",
         node_name="evidence_turn",
         field_name="frames",
-        delta='{"kind":"frame_end","frame_sequence":1}',
+        delta=json.dumps(
+            {"kind": "public_text_delta", "frame_sequence": 2, "delta": followup},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     )
-    assert policy.visible_text == literal
+    policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="frames",
+        delta='{"kind":"frame_end","frame_sequence":2}',
+    )
+    expected = literal + "\n\n" + followup
+    assert policy.visible_text == expected
     policy.finalize(
         operation="evidence_turn",
         node_name="evidence_turn",
         field_name="frames",
-        final_text=literal,
+        final_text=expected,
     )
 
 

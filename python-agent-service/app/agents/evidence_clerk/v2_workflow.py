@@ -20,11 +20,13 @@ from app.schemas import EvidenceTurnRequest
 from app.streaming import current_stream_observer
 from app.agents.evidence_clerk.v2_contracts import (
     CommittedEvidenceFrameV2,
+    EvidenceFrameObjectV2,
     EvidenceMaterialReviewStreamV2,
     EvidenceRoomOpeningStreamV2,
     EvidenceTextFollowupStreamV2,
     EvidenceTurnResultV2,
     EvidenceTurnStreamV2,
+    leading_evidence_frame_header_v2,
 )
 from app.agents.evidence_clerk.v2_policy import EvidenceV2PublicOutputPolicy
 
@@ -149,7 +151,12 @@ def _validate_v2_frames(
     assembled: AssembledEvidenceRoomContextV2,
 ) -> None:
     mode = assembled.payload["turn_contract"]["turn_mode"]
-    headers = [frame.header for frame in stream.frames]
+    attachment_ids = tuple(assembled.base.raw_envelope.current_event.attachment_refs)
+    leading_header = leading_evidence_frame_header_v2(
+        mode,
+        attachment_ids=attachment_ids,
+    )
+    headers = [leading_header, *(frame.header for frame in stream.frames)]
     types = [header.frame_type for header in headers]
     if not headers:
         raise GraphContractError("EVIDENCE_V2_FRAME_STREAM_EMPTY")
@@ -160,7 +167,6 @@ def _validate_v2_frames(
         raise GraphContractError("EVIDENCE_V2_READINESS_NOT_LAST")
     fact_ids = {item["fact_id"] for item in assembled.base.working_set.allowed_fact_targets}
     source_units = {item["source_unit_id"]: item for item in assembled.source_units}
-    attachment_ids = tuple(assembled.base.raw_envelope.current_event.attachment_refs)
     attachment_set = set(attachment_ids)
     if len(attachment_set) != len(attachment_ids):
         raise GraphContractError("EVIDENCE_V2_ATTACHMENT_SCOPE_DUPLICATED")
@@ -275,7 +281,17 @@ def _materialize_result(
     requests: list[dict[str, Any]] = []
     review_tasks: list[dict[str, Any]] = []
     readiness: dict[str, Any] = {}
-    for frame in stream.frames:
+    mode = assembled.payload["turn_contract"]["turn_mode"]
+    leading_frame = EvidenceFrameObjectV2(
+        header=leading_evidence_frame_header_v2(
+            mode,
+            attachment_ids=tuple(
+                assembled.base.raw_envelope.current_event.attachment_refs
+            ),
+        ),
+        public_text=stream.lead_public_text,
+    )
+    for frame in (leading_frame, *stream.frames):
         header = frame.header
         text = frame.public_text
         header_doc = header.model_dump(

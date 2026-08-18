@@ -1,8 +1,9 @@
 """Evidence-room v2 business frame contracts.
 
-The provider owns each frame's ``public_text`` bytes.  The preceding nested
-``header`` is the small source-bound authority needed by the server to route,
-persist, replay and derive room projections.
+The provider owns every ``public_text`` byte.  The state machine owns the
+deterministic leading-frame header so the provider can emit the first public
+string before spending tokens on semantic frame headers.  Remaining frames
+keep their source-bound header ahead of their public text.
 """
 
 from __future__ import annotations
@@ -231,6 +232,32 @@ def validate_evidence_frame_header_v2(value: Any) -> EvidenceFrameHeaderV2:
     return _EVIDENCE_FRAME_HEADER_ADAPTER.validate_python(value)
 
 
+def leading_evidence_frame_header_v2(
+    mode: Literal["ROOM_OPENING", "MATERIAL_REVIEW", "TEXT_FOLLOWUP"],
+    *,
+    attachment_ids: tuple[str, ...] = (),
+) -> EvidenceFrameHeaderV2:
+    """Project the only legal first-frame header from authoritative turn mode."""
+
+    if mode == "ROOM_OPENING":
+        return EvidenceRoomWelcomeFrameHeaderV2(
+            frame_sequence=1,
+            frame_type="ROOM_WELCOME",
+        )
+    if mode == "MATERIAL_REVIEW":
+        return EvidenceMaterialReceiptFrameHeaderV2(
+            frame_sequence=1,
+            frame_type="MATERIAL_RECEIPT",
+            evidence_ids=list(attachment_ids),
+        )
+    if mode == "TEXT_FOLLOWUP":
+        return EvidenceTextFollowupFrameHeaderV2(
+            frame_sequence=1,
+            frame_type="TEXT_FOLLOWUP_REPLY",
+        )
+    raise ValueError("unsupported evidence leading-frame mode")
+
+
 class EvidenceFrameObjectV2(EvidenceV2Model):
     """Generic ordered frame object used only by the shared result model."""
 
@@ -246,8 +273,7 @@ class EvidenceFrameObjectV2(EvidenceV2Model):
 
 
 EvidenceRoomOpeningFrameHeaderV2 = Annotated[
-    EvidenceRoomWelcomeFrameHeaderV2
-    | EvidenceOpeningOrientationFrameHeaderV2
+    EvidenceOpeningOrientationFrameHeaderV2
     | EvidenceRequestFrameHeaderV2
     | EvidenceRoomReadinessFrameHeaderV2,
     Field(discriminator="frame_type"),
@@ -255,15 +281,14 @@ EvidenceRoomOpeningFrameHeaderV2 = Annotated[
 
 
 class EvidenceRoomOpeningFrameObjectV2(EvidenceV2Model):
-    """Opening wire object; header is serialized before public_text."""
+    """Opening semantic frame after the state-machine-owned welcome frame."""
 
     header: EvidenceRoomOpeningFrameHeaderV2
     public_text: PublicText
 
 
 EvidenceMaterialReviewPublicFrameHeaderV2 = Annotated[
-    EvidenceMaterialReceiptFrameHeaderV2
-    | EvidenceObservationFrameHeaderV2
+    EvidenceObservationFrameHeaderV2
     | EvidenceAssessmentFrameHeaderV2
     | EvidenceRequestFrameHeaderV2
     | EvidenceRoomReadinessFrameHeaderV2,
@@ -289,8 +314,7 @@ EvidenceMaterialReviewFrameObjectV2 = (
 
 
 EvidenceTextFollowupModeFrameHeaderV2 = Annotated[
-    EvidenceTextFollowupFrameHeaderV2
-    | EvidenceRequestFrameHeaderV2
+    EvidenceRequestFrameHeaderV2
     | EvidenceRoomReadinessFrameHeaderV2,
     Field(discriminator="frame_type"),
 ]
@@ -305,12 +329,13 @@ class EvidenceTextFollowupFrameObjectV2(EvidenceV2Model):
 
 class EvidenceTurnStreamV2(EvidenceV2Model):
     schema_version: Literal["evidence_turn_stream.v2"] = "evidence_turn_stream.v2"
+    lead_public_text: PublicText
     frames: list[EvidenceFrameObjectV2] = Field(min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def validate_sequence(self) -> "EvidenceTurnStreamV2":
         sequences = [frame.header.frame_sequence for frame in self.frames]
-        if sequences != list(range(1, len(sequences) + 1)):
+        if sequences != list(range(2, len(sequences) + 2)):
             raise ValueError("evidence frame sequences must be contiguous")
         if self.frames[-1].header.frame_type != "ROOM_READINESS":
             raise ValueError("evidence stream must end with room readiness")
@@ -385,4 +410,5 @@ __all__ = [
     "EvidenceTextFollowupStreamV2",
     "EvidenceTurnResultV2",
     "EvidenceTurnStreamV2",
+    "leading_evidence_frame_header_v2",
 ]

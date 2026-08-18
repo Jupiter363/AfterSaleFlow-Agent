@@ -34,7 +34,10 @@ from app.schemas import EvidenceTurnRequest
 from app.streaming import AgentStreamObserver, bind_stream_observer
 
 sys.path.insert(0, str(Path(__file__).parent))
-from test_evidence_clerk_turn import _java_evidence_opening_command_payload  # noqa: E402
+from test_evidence_clerk_turn import (  # noqa: E402
+    _java_evidence_opening_command_payload,
+    _java_evidence_turn_command_payload,
+)
 
 
 def _provider_binding_execution(prompt_profile_id: str) -> SimpleNamespace:
@@ -98,7 +101,6 @@ def _opening_frames(request: EvidenceTurnRequest) -> list[dict[str, object]]:
         for item in assemble_evidence_room_context_v2(request).base.working_set.allowed_fact_targets
     ]
     headers = [
-        {"frame_sequence": 1, "frame_type": "ROOM_WELCOME"},
         {
             "frame_sequence": 2,
             "frame_type": "OPENING_ORIENTATION",
@@ -144,6 +146,17 @@ def _opening_frames(request: EvidenceTurnRequest) -> list[dict[str, object]]:
 
 def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> None:
     schema = EvidenceRoomOpeningStreamV2.model_json_schema()
+    assert list(schema["properties"]) == [
+        "schema_version",
+        "lead_public_text",
+        "frames",
+    ]
+    assert schema["properties"]["lead_public_text"] == {
+        "maxLength": 100_000,
+        "minLength": 1,
+        "title": "Lead Public Text",
+        "type": "string",
+    }
     frame_schema = schema["$defs"]["EvidenceRoomOpeningFrameObjectV2"]
     assert list(frame_schema["properties"]) == ["header", "public_text"]
     assert frame_schema["additionalProperties"] is False
@@ -153,7 +166,6 @@ def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> No
     assert header_schema["discriminator"]["propertyName"] == "frame_type"
     mapping = header_schema["discriminator"]["mapping"]
     assert set(mapping) == {
-        "ROOM_WELCOME",
         "OPENING_ORIENTATION",
         "EVIDENCE_REQUEST",
         "ROOM_READINESS",
@@ -173,7 +185,6 @@ def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> No
     internal_branch = material_schema["$defs"]["EvidenceHumanReviewFrameObjectV2"]
     assert list(public_branch["properties"]) == ["header", "public_text"]
     assert set(public_branch["properties"]["header"]["discriminator"]["mapping"]) == {
-        "MATERIAL_RECEIPT",
         "EVIDENCE_OBSERVATION",
         "EVIDENCE_ASSESSMENT",
         "EVIDENCE_REQUEST",
@@ -185,11 +196,7 @@ def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> No
         "public_text": {"title": "Public Text", "type": "null"},
     }
 
-    welcome = schema["$defs"][mapping["ROOM_WELCOME"].rsplit("/", 1)[-1]]
     orientation = schema["$defs"][mapping["OPENING_ORIENTATION"].rsplit("/", 1)[-1]]
-    assert welcome["additionalProperties"] is False
-    assert set(welcome["properties"]) == {"frame_sequence", "frame_type"}
-    assert set(welcome["required"]) == {"frame_sequence", "frame_type"}
     assert orientation["additionalProperties"] is False
     assert set(orientation["properties"]) == {
         "frame_sequence",
@@ -220,6 +227,13 @@ class _StreamingRunner:
 
     async def ainvoke_structured_stream(self, **_: object):
         self.calls += 1
+        yield HarnessStreamDelta(
+            kind="visible_delta",
+            field="lead_public_text",
+            delta=self.stream.lead_public_text,
+        )
+        self.first_frame_sent.set()
+        await self.release.wait()
         for frame in self.stream.frames:
             header = frame.header.model_dump(
                 mode="json",
@@ -238,9 +252,6 @@ class _StreamingRunner:
                 field="frames",
                 delta=_event("public_text_delta", sequence, delta=frame.public_text),
             )
-            if sequence == 1:
-                self.first_frame_sent.set()
-                await self.release.wait()
             yield HarnessStreamDelta(
                 kind="visible_delta",
                 field="frames",
@@ -263,7 +274,10 @@ class _StreamingRunner:
 async def test_v2_workflow_releases_first_frame_before_terminal_json_and_is_single_call() -> None:
     request = EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
     frames = _opening_frames(request)
-    stream = EvidenceRoomOpeningStreamV2.model_validate({"frames": frames})
+    lead_public_text = "欢迎进入证据室，本轮将按冻结案情梳理证据。"
+    stream = EvidenceRoomOpeningStreamV2.model_validate(
+        {"lead_public_text": lead_public_text, "frames": frames}
+    )
     runner = _StreamingRunner(stream)
     policy = EvidenceV2PublicOutputPolicy()
     events: list[object] = []
@@ -290,7 +304,7 @@ async def test_v2_workflow_releases_first_frame_before_terminal_json_and_is_sing
     observer.finalize_public_output("evidence_turn", "frames", result.room_utterance)
     assert runner.calls == 1
     assert result.room_utterance == "\n\n".join(
-        str(frame["public_text"]) for frame in frames
+        [lead_public_text, *(str(frame["public_text"]) for frame in frames)]
     )
     assert result.frame_manifest_sha256
 
@@ -299,9 +313,11 @@ async def test_v2_workflow_releases_first_frame_before_terminal_json_and_is_sing
 async def test_v2_workflow_rejects_out_of_scope_focus_fact_before_public_text() -> None:
     request = EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
     frames = _opening_frames(request)
-    assert isinstance(frames[1]["header"], dict)
-    frames[1]["header"]["focus_fact_ids"] = ["FACT_NOT_IN_FROZEN_MATRIX"]
-    stream = EvidenceRoomOpeningStreamV2.model_validate({"frames": frames})
+    assert isinstance(frames[0]["header"], dict)
+    frames[0]["header"]["focus_fact_ids"] = ["FACT_NOT_IN_FROZEN_MATRIX"]
+    stream = EvidenceRoomOpeningStreamV2.model_validate(
+        {"lead_public_text": "欢迎进入证据室。", "frames": frames}
+    )
     runner = _StreamingRunner(stream)
     policy = EvidenceV2PublicOutputPolicy()
     events: list[object] = []
@@ -343,38 +359,44 @@ async def test_v2_executor_bridge_preserves_provider_deltas_and_commits_one_fram
     )
     bridge.bind(observer)
     observer.begin_public_output("evidence_turn", "frames")
-    header = {"frame_sequence": 1, "frame_type": "ROOM_WELCOME"}
 
     observer.visible_delta(
         "evidence_turn",
-        "frames",
-        _event("frame_start", 1, header=header),
+        "lead_public_text",
+        "欢迎",
     )
     observer.visible_delta(
         "evidence_turn",
-        "frames",
-        _event("public_text_delta", 1, delta="欢迎"),
+        "lead_public_text",
+        "进入证据室",
     )
+    focus_fact_id = assembled.base.working_set.allowed_fact_targets[0]["fact_id"]
     observer.visible_delta(
         "evidence_turn",
         "frames",
-        _event("public_text_delta", 1, delta="进入证据室"),
-    )
-    observer.visible_delta(
-        "evidence_turn",
-        "frames",
-        _event("frame_end", 1),
+        _event(
+            "frame_start",
+            2,
+            header={
+                "frame_sequence": 2,
+                "frame_type": "OPENING_ORIENTATION",
+                "focus_fact_ids": [focus_fact_id],
+            },
+        ),
     )
 
     events = list(bridge.pending)
-    assert [event.event_type for event in events] == [
+    assert [event.event_type for event in events[:4]] == [
         "public_frame_start",
         "public_text_delta",
         "public_text_delta",
         "public_frame_committed",
     ]
+    assert events[4].event_type == "public_frame_start"
     frame_id = events[0].payload.frame_id
-    assert frame_id and all(event.payload.frame_id == frame_id for event in events)
+    assert frame_id and all(
+        event.payload.frame_id == frame_id for event in events[:4]
+    )
     assert [events[1].payload.delta_index, events[2].payload.delta_index] == [0, 1]
     assert [events[1].payload.delta, events[2].payload.delta] == [
         "欢迎",
@@ -385,6 +407,32 @@ async def test_v2_executor_bridge_preserves_provider_deltas_and_commits_one_fram
         "欢迎进入证据室".encode("utf-8")
     ).hexdigest()
     assert events[3].payload.public_text_chars == len("欢迎进入证据室")
+
+
+def test_v2_material_leading_frame_uses_frozen_attachment_authority() -> None:
+    request = EvidenceTurnRequest.model_validate(_java_evidence_turn_command_payload())
+    assembled = assemble_evidence_room_context_v2(request)
+    assert assembled.payload["turn_contract"]["turn_mode"] == "MATERIAL_REVIEW"
+    policy = EvidenceV2PublicOutputPolicy()
+    policy.configure(assembled)
+
+    projected = policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="lead_public_text",
+        delta="已收到本批材料，正在按冻结案情核验。",
+    )
+
+    assert [field for field, _ in projected] == [
+        "frame.1.header",
+        "frame.1.public_text",
+    ]
+    header = json.loads(projected[0][1])
+    assert header == {
+        "frame_sequence": 1,
+        "frame_type": "MATERIAL_RECEIPT",
+        "evidence_ids": list(request.context_envelope.current_event.attachment_refs),
+    }
 
 
 def test_target_e2e_binding_is_exactly_the_v2_evidence_workflow() -> None:

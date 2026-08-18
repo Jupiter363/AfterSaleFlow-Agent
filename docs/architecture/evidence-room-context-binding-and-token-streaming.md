@@ -301,18 +301,22 @@ Source Unit ID 由 evidence ID、内容权威哈希、模态、位置/页面权�
 ```json
 {
   "schema_version": "evidence_turn_stream.v2",
+  "lead_public_text": "由模型首先生成的首帧公开文本",
   "frames": []
 }
 ```
 
 这里的 `evidence_turn_stream.v2` 是模型响应 Schema，不等同于浏览器传输协议 `agent-stream.v3`。模型 header 和跨服务事件都统一使用 `frame_sequence`；传输层不得把它当成 SSE 事件序号或 durable cursor。
 
-真实 Provider UAT 已证明其虽然接受 nested `prefixItems`/tuple strict Schema，却不能稳定生成该方言：合法输出两帧后把下一数组起始符 `[{` 写成第三帧公开字符串并以 `finish_reason=stop` 结束。因此模型 wire 改为只有两个属性的有序 frame object：
+真实 Provider UAT 已证明其虽然接受 nested `prefixItems`/tuple strict Schema，却不能稳定生成该方言：合法输出两帧后把下一数组起始符 `[{` 写成第三帧公开字符串并以 `finish_reason=stop` 结束。因此其余语义帧使用只有两个属性的有序 frame object：
 
 ```json
-{"header": {"frame_sequence": 1, "frame_type": "ROOM_WELCOME"}, "public_text": "欢迎进入证据室。"}
+{"header": {"frame_sequence": 2, "frame_type": "OPENING_ORIENTATION", "focus_fact_ids": ["FACT_001"]}, "public_text": "我正在梳理本案待证事项。"}
 ```
 
+- `lead_public_text` 必须紧跟 `schema_version`，由模型生成并按 Provider delta 立即公开；它是当前模式唯一且确定的首帧文本；
+- 首帧 header 不由模型回显，而由正式 `turn_mode` 投影：`ROOM_OPENING` 为 `ROOM_WELCOME`，`MATERIAL_REVIEW` 为绑定当前 attachment refs 的 `MATERIAL_RECEIPT`，`TEXT_FOLLOWUP` 为 `TEXT_FOLLOWUP_REPLY`；
+- `frames` 只包含 sequence 2 起的其余帧，不能重复首帧；
 - 每个 frame object 必须且只能按 `header`、`public_text` 顺序生成；
 - `header` 必须是完整对象；`public_text` 对公开 frame 必须是 JSON string，对内部 frame 必须是 `null`；
 - header 完整关闭后，后端先执行权威校验；
@@ -344,17 +348,13 @@ ROOM_WELCOME
 -> ROOM_READINESS
 ```
 
-`ROOM_WELCOME` 负责最快首包：
+`ROOM_WELCOME` 负责最快首包。模型首先输出：
 
 ```json
-{
-  "header": {
-    "frame_sequence": 1,
-    "frame_type": "ROOM_WELCOME"
-  },
-  "public_text": "欢迎进入证据室。"
-}
+"lead_public_text": "欢迎进入证据室。"
 ```
+
+服务端依据 `ROOM_OPENING` 状态机权威为这段模型文本绑定 `frame_sequence=1 / frame_type=ROOM_WELCOME`，不生成或改写文本；模型随后从 sequence 2 输出 `frames`。
 
 `OPENING_ORIENTATION` 必须引用冻结矩阵中的案件特定 focus facts：
 
@@ -385,19 +385,13 @@ MATERIAL_RECEIPT
 -> ROOM_READINESS
 ```
 
-第一帧必须承认当前批次并引用案件核验焦点：
+模型首字段必须承认当前批次：
 
 ```json
-[
-  {
-    "frame_sequence": 1,
-    "frame_type": "MATERIAL_RECEIPT",
-    "evidence_ids": ["EVIDENCE_001"],
-    "focus_fact_ids": ["FACT_LOGISTICS_DELAY"]
-  },
-  "已收到本批物流和沟通材料，我正在核对其与延迟送达、使用影响及补偿分歧的关联。"
-]
+"lead_public_text": "已收到本批物流和沟通材料，我正在核对其与延迟送达、使用影响及补偿分歧的关联。"
 ```
+
+服务端从当前正式 attachment refs 生成 `frame_sequence=1 / frame_type=MATERIAL_RECEIPT / evidence_ids`，模型不回显或改写这些附件权威；案件核验焦点在后续 observation、assessment 和 request headers 中表达。
 
 ### 8.3 `TEXT_FOLLOWUP`
 
@@ -537,7 +531,7 @@ Header 至少包括：
 
 三个序号域必须分开：
 
-- `frame_sequence`：模型 header 中的业务 frame 顺序，从 1 连续递增；
+- `frame_sequence`：业务 frame 顺序从 1 连续递增；sequence 1 的 header 由正式模式投影，模型 header 从 sequence 2 开始；
 - `delta_index`：同一公开 frame 内 Provider 可见增量的顺序，从 0 连续递增；
 - `durable_cursor`：只指向已经完成持久化的 frame、interruption 或 terminal 记录，用于断线重连。
 
@@ -942,7 +936,7 @@ Token 治理应分别记录：系统提示、数字人提示、业务上下文�
 
 1. `PUBLIC_INTRO` 被取消，模式首帧分别为 `ROOM_WELCOME`、`MATERIAL_RECEIPT` 和 `TEXT_FOLLOWUP_REPLY`；
 2. opening 使用独立 `OPENING_ORIENTATION` 表达“正在根据冻结案情矩阵梳理并生成证据问询”；
-3. 公开 frame 使用仅含有序 `header`、`public_text` 的 object，先绑定后逐 delta 输出；
+3. 模型首字段 `lead_public_text` 逐 delta 输出并绑定状态机确定的首帧 header；其余公开 frame 使用有序 `header`、`public_text` object，绑定后逐 delta 输出；
 4. Source Unit 与 fact 解耦，一个来源通过 `fact_bindings` 显式关联多个事实；
 5. 模型语义不由后端正则或相似度二次解释；
 6. 正式矩阵、卡片、人工任务和庭审交接从同一 observation graph 派生；

@@ -7,6 +7,7 @@ from typing import Any
 
 from app.agents.evidence_clerk.v2_contracts import (
     EvidenceFrameHeaderV2,
+    leading_evidence_frame_header_v2,
     validate_evidence_frame_header_v2,
 )
 from app.graph_runtime.errors import GraphContractError
@@ -34,6 +35,7 @@ class EvidenceV2PublicOutputPolicy:
         self._seen_source_units: set[str] = set()
         self._assessment_evidence_ids: list[str] = []
         self._request_slots: set[str] = set()
+        self._leading_header: EvidenceFrameHeaderV2 | None = None
 
     def configure(self, assembled: Any) -> None:
         """Bind the live policy to one immutable assembled room context."""
@@ -48,13 +50,17 @@ class EvidenceV2PublicOutputPolicy:
         self._attachment_ids = tuple(
             assembled.base.raw_envelope.current_event.attachment_refs
         )
+        self._leading_header = leading_evidence_frame_header_v2(
+            self._mode,
+            attachment_ids=self._attachment_ids,
+        )
         self._source_units = {
             str(item["source_unit_id"]): dict(item) for item in assembled.source_units
         }
 
     @property
-    def visible_field_name(self) -> str:
-        return "frames"
+    def visible_field_names(self) -> tuple[str, str]:
+        return ("lead_public_text", "frames")
 
     @property
     def source_observed(self) -> bool:
@@ -93,6 +99,8 @@ class EvidenceV2PublicOutputPolicy:
         self._require_node(operation, node_name, field_name)
         if not isinstance(delta, str) or not delta:
             raise GraphContractError("EVIDENCE_V2_FRAME_EVENT_INVALID")
+        if field_name == "lead_public_text":
+            return self._project_leading_text(delta)
         try:
             event = json.loads(delta)
         except (TypeError, ValueError) as error:
@@ -109,7 +117,13 @@ class EvidenceV2PublicOutputPolicy:
         ):
             raise GraphContractError("EVIDENCE_V2_FRAME_EVENT_INVALID")
         if kind == "frame_start":
-            return self._start_frame(sequence, event.get("header"))
+            leading_end: tuple[tuple[str, str], ...] = ()
+            if self._current is None:
+                raise GraphContractError("EVIDENCE_V2_LEAD_PUBLIC_TEXT_MISSING")
+            if self._current["frame_sequence"] == 1 and not self._current["ended"]:
+                self._current["ended"] = True
+                leading_end = (("frame.1.end", "{}"),)
+            return leading_end + self._start_frame(sequence, event.get("header"))
         if self._current is None or self._current["frame_sequence"] != sequence:
             raise GraphContractError("EVIDENCE_V2_FRAME_ORDER_INVALID")
         if kind == "public_text_delta":
@@ -129,6 +143,37 @@ class EvidenceV2PublicOutputPolicy:
         if self._current["internal"]:
             return ()
         return ((f"frame.{sequence}.end", "{}"),)
+
+    def _project_leading_text(
+        self,
+        delta: str,
+    ) -> tuple[tuple[str, str], ...]:
+        leading_start: tuple[tuple[str, str], ...] = ()
+        if self._current is None:
+            if self._leading_header is None:
+                raise GraphContractError("EVIDENCE_V2_LEADING_FRAME_UNCONFIGURED")
+            leading_start = self._start_frame(
+                1,
+                self._leading_header.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                    exclude_defaults=True,
+                ),
+            )
+        if (
+            self._current is None
+            or self._current["frame_sequence"] != 1
+            or self._current["ended"]
+            or self._current["internal"]
+        ):
+            raise GraphContractError("EVIDENCE_V2_LEAD_PUBLIC_TEXT_INVALID")
+        self._current["public_text"] += delta
+        self._visible_text = "\n\n".join(
+            str(frame["public_text"])
+            for frame in self._frames
+            if not frame["internal"]
+        )
+        return leading_start + (("frame.1.public_text", delta),)
 
     def accept(
         self,
@@ -283,7 +328,7 @@ class EvidenceV2PublicOutputPolicy:
         if (
             operation != "evidence_turn"
             or node_name != "evidence_turn"
-            or field_name != "frames"
+            or field_name not in {"lead_public_text", "frames"}
         ):
             raise GraphContractError("EVIDENCE_V2_FRAME_FIELD_INVALID")
 

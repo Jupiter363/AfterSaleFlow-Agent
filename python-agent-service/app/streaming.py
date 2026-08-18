@@ -371,6 +371,8 @@ class VisibleFieldSpec:
     max_array_items: int = STREAM_MAX_VISIBLE_ARRAY_ITEMS
     max_array_item_bytes: int = STREAM_MAX_VISIBLE_ARRAY_ITEM_BYTES
     max_array_bytes: int = STREAM_MAX_VISIBLE_ARRAY_BYTES
+    frame_sequence_start: int = 1
+    requires_leading_property_order: bool = False
 
 
 @dataclass(frozen=True)
@@ -378,6 +380,7 @@ class _RootProjectionGate:
     """一个需要先完成前导字符串、再开放后续字段的公开流契约。"""
 
     leading_spec: VisibleFieldSpec
+    dependent_specs: tuple[VisibleFieldSpec, ...]
 
 
 @dataclass(frozen=True)
@@ -430,7 +433,10 @@ def _root_projection_gate_for(
         raise ValueError("visible stream gate field must be first in publication order")
     if any(spec is not leading and spec not in dependent_specs for spec in specs):
         raise ValueError("visible stream gate cannot contain an ungated field")
-    return _RootProjectionGate(leading_spec=leading)
+    return _RootProjectionGate(
+        leading_spec=leading,
+        dependent_specs=dependent_specs,
+    )
 
 
 def _intake_case_detail_field(
@@ -671,13 +677,17 @@ VISIBLE_FIELD_REGISTRY: dict[str, dict[str, tuple[VisibleFieldSpec, ...]]] = {
     },
     "evidence_turn": {
         "evidence_turn": (
+            VisibleFieldSpec("lead_public_text", "lead_public_text"),
             VisibleFieldSpec(
                 "frames",
                 "frames",
                 "json_frame_objects",
+                requires_completed_root_property="lead_public_text",
+                requires_leading_property_order=True,
                 max_array_items=128,
                 max_array_item_bytes=64 * 1024,
                 max_array_bytes=2 * 1024 * 1024,
+                frame_sequence_start=2,
             ),
             # The legacy Evidence workflow remains available to explicitly
             # injected non-Target callers.  The public policy selects exactly
@@ -761,6 +771,9 @@ class IncrementalVisibleJsonProjector:
                 or isinstance(spec.max_array_bytes, bool)
                 or spec.max_array_bytes < 1
                 or spec.max_array_bytes > STREAM_MAX_VISIBLE_ARRAY_BYTES
+                or isinstance(spec.frame_sequence_start, bool)
+                or spec.frame_sequence_start < 1
+                or spec.frame_sequence_start > 128
             ):
                 raise AgentStreamProjectionError(
                     "visible stream array-item budget is invalid"
@@ -830,6 +843,7 @@ class IncrementalVisibleJsonProjector:
                     max_items=spec.max_array_items,
                     max_item_bytes=spec.max_array_item_bytes,
                     max_array_bytes=spec.max_array_bytes,
+                    frame_sequence_start=spec.frame_sequence_start,
                 )
                 emitted_headers = self._emitted_frame_headers[spec.field]
                 emitted_text_lengths = self._emitted_frame_text_lengths[spec.field]
@@ -1020,6 +1034,14 @@ class AgentStreamObserver:
             if policy is None or not policy.allows_node(self.operation, node_name):
                 return ()
             declared = VISIBLE_FIELD_REGISTRY.get(self.operation, {}).get(node_name, ())
+            preferred_fields = getattr(policy, "visible_field_names", None)
+            if (
+                isinstance(preferred_fields, tuple)
+                and preferred_fields
+                and all(isinstance(field, str) and field for field in preferred_fields)
+            ):
+                preferred = frozenset(preferred_fields)
+                return tuple(spec for spec in declared if spec.field in preferred)
             preferred_field = getattr(policy, "visible_field_name", None)
             if isinstance(preferred_field, str) and preferred_field:
                 return tuple(
@@ -1586,6 +1608,21 @@ def _root_projection_gate_is_open(
 ) -> bool:
     """只在精确根路径的前导公开字符串闭合后开放后续字段。"""
 
+    leading_start = _find_json_path_value_start(
+        document,
+        gate.leading_spec.field,
+    )
+    for spec in gate.dependent_specs:
+        if not spec.requires_leading_property_order:
+            continue
+        dependent_start = _find_json_path_value_start(document, spec.field)
+        if dependent_start is not None and (
+            leading_start is None or dependent_start < leading_start
+        ):
+            raise AgentStreamProjectionError(
+                "visible stream gate field is not first in model output"
+            )
+
     return _find_complete_json_string_path(
         document,
         gate.leading_spec.field,
@@ -1652,6 +1689,7 @@ def _find_incremental_json_frame_objects(
     max_items: int,
     max_item_bytes: int,
     max_array_bytes: int,
+    frame_sequence_start: int = 1,
 ) -> tuple[_ProjectedJsonFrameObject, ...]:
     """Scan ordered frame objects while keeping incomplete public text visible.
 
@@ -1730,7 +1768,7 @@ def _find_incremental_json_frame_objects(
             )
         frame_sequence = header.get("frame_sequence")
         frame_type = header.get("frame_type")
-        expected_sequence = len(frames) + 1
+        expected_sequence = frame_sequence_start + len(frames)
         if (
             isinstance(frame_sequence, bool)
             or not isinstance(frame_sequence, int)

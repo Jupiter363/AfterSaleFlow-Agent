@@ -7,7 +7,7 @@
 只返回 JSON：
 
 ```json
-{"schema_version":"evidence_turn_stream.v2","frames":[{"header":完整header对象,"public_text":"公开文本"}]}
+{"schema_version":"evidence_turn_stream.v2","lead_public_text":"首帧公开文本","frames":[{"header":其余完整header对象,"public_text":"公开文本"}]}
 ```
 
 ## 业务原则
@@ -22,14 +22,15 @@
 
 ## 模式顺序
 
-- `ROOM_OPENING`：`ROOM_WELCOME` → `OPENING_ORIENTATION` → `EVIDENCE_REQUEST` 2 至 3 个 → `ROOM_READINESS`。欢迎语应尽快生成；orientation 必须引用冻结矩阵的 focus fact；不能声称本批附件已收到。
-- `MATERIAL_REVIEW`：`MATERIAL_RECEIPT` → 零个或多个 `EVIDENCE_OBSERVATION` → 每份当前附件恰好一个 `EVIDENCE_ASSESSMENT` → 零至三个 `EVIDENCE_REQUEST` → 零个或多个 `HUMAN_REVIEW_TASK` → `ROOM_READINESS`。不要求每份附件都生成 observation，但每份必须有 assessment。
-- `TEXT_FOLLOWUP`：`TEXT_FOLLOWUP_REPLY` → 零至三个 `EVIDENCE_REQUEST` → `ROOM_READINESS`。没有新附件时不得生成 observation、assessment 或 review task。
+- `ROOM_OPENING`：`lead_public_text` 是 `ROOM_WELCOME` 的模型文本；`frames` 依次为 `OPENING_ORIENTATION` → `EVIDENCE_REQUEST` 2 至 3 个 → `ROOM_READINESS`。欢迎语必须最先、立即生成；orientation 必须引用冻结矩阵的 focus fact；不能声称本批附件已收到。
+- `MATERIAL_REVIEW`：`lead_public_text` 是 `MATERIAL_RECEIPT` 的模型文本；`frames` 依次为零个或多个 `EVIDENCE_OBSERVATION` → 每份当前附件恰好一个 `EVIDENCE_ASSESSMENT` → 零至三个 `EVIDENCE_REQUEST` → 零个或多个 `HUMAN_REVIEW_TASK` → `ROOM_READINESS`。不要求每份附件都生成 observation，但每份必须有 assessment。
+- `TEXT_FOLLOWUP`：`lead_public_text` 是 `TEXT_FOLLOWUP_REPLY` 的模型文本；`frames` 依次为零至三个 `EVIDENCE_REQUEST` → `ROOM_READINESS`。没有新附件时不得生成 observation、assessment 或 review task。
 
 ## Header 规则
 
-- 每个 `frame_sequence` 从 1 连续递增，最后一帧必须是 `ROOM_READINESS`。
-- 每个 frame object 必须严格先输出完整 `header`，随后且仅随后输出 `public_text`；公开帧为非空字符串，内部 `HUMAN_REVIEW_TASK` 为 `null`。
+- `lead_public_text` 必须紧跟 `schema_version` 输出，且必须是非空字符串；它是模型生成的首帧公开内容，首帧类型及 sequence=1 由正式 `turn_mode` 和当前附件权威确定，模型不要重复输出首帧 header。
+- `frames` 中的 `frame_sequence` 从 2 连续递增，最后一帧必须是 `ROOM_READINESS`。
+- `frames` 中每个 object 必须严格先输出完整 `header`，随后且仅随后输出 `public_text`；公开帧为非空字符串，内部 `HUMAN_REVIEW_TASK` 为 `null`。
 - `EVIDENCE_OBSERVATION` 必须使用目录中的 source unit，填写 `BOUND`、`UNRELATED` 或 `AMBIGUOUS`；BOUND 至少一个允许 fact binding，AMBIGUOUS 给候选 fact IDs，不建立确定矩阵边。
 - `EVIDENCE_ASSESSMENT` 必须逐附件给出 source-chain、formation-time、integrity、readability、cross-source、authenticity 和 capability 状态，以及限制/冲突。
 - `EVIDENCE_REQUEST` 必须指出允许的 fact 或 gap、材料类型、优先级和具体原因。
@@ -37,4 +38,4 @@
 
 ## 流式要求
 
-输出数组中的每个 frame object 按真实 Provider delta 生成。必须先完整输出 `header`，再立即开始 `public_text` 字符串；不要在 `public_text` 后追加其他属性，也不要人为等待 `}`、数组 `]`、完整 JSON 或模型终态。不要把 JSON 转义片段、内部 header、思考过程或工具结果作为公开文本发送。
+先生成 `lead_public_text`，不要在它前面生成任何业务 header、说明或占位内容；该字符串的 Provider delta 会立即公开。随后生成 `frames`：每个 frame 必须先完整输出 `header`，再立即开始 `public_text` 字符串；不要在 `public_text` 后追加其他属性，也不要人为等待 `}`、数组 `]`、完整 JSON 或模型终态。不要把 JSON 转义片段、内部 header、思考过程或工具结果作为公开文本发送。
