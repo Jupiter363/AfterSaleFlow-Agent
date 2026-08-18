@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from app.agents.dispute_intake_officer.schemas import (
@@ -213,6 +214,88 @@ def test_intake_room_v3_contract_places_reply_first_and_evaluation_last() -> Non
     assert section_schema["minItems"] == len(INTAKE_ROOM_SECTION_KINDS)
     assert section_schema["maxItems"] == len(INTAKE_ROOM_SECTION_KINDS)
     assert len(section_schema["prefixItems"]) == len(INTAKE_ROOM_SECTION_KINDS)
+
+
+def test_intake_room_v3_provider_schema_binds_readiness_before_streaming() -> None:
+    payload = _initiator_v3_payload()
+    missing = payload["ordered_sections"][7]["value"]
+    missing.update(
+        {
+            "blocking_gaps": [],
+            "nice_to_have_gaps": [
+                "detailed_delivery_address",
+                "property_management_confirmation",
+            ],
+            "next_questions": [
+                "该订单的收货地址具体是哪里？",
+                "您是否尝试过联系物业或前台核实？",
+            ],
+        }
+    )
+    evaluation = payload["ordered_sections"][9]["value"]
+    evaluation.update(
+        {
+            "score_breakdown": {
+                "references": 15,
+                "event_story": 20,
+                "party_positions": 20,
+                "requested_resolution": 15,
+                "risk_and_conflicts": 12,
+                "next_action_clarity": 12,
+            },
+            "total_score": 94,
+            "threshold": 85,
+            "ready_for_next_step": False,
+            "improvement_reason": "仍有两项补充信息可进一步明确履约事实。",
+            "admission_recommendation": "NEED_MORE_INFO",
+            "admission_reasoning": "本轮继续询问补充信息。",
+            "conversation_action": "ASK_SUBSTANTIVE",
+        }
+    )
+
+    schema = IntakeInitiatorRoomLlmOutputV3.model_json_schema()
+    Draft202012Validator.check_schema(schema)
+    provider_validator = Draft202012Validator(schema)
+
+    assert list(provider_validator.iter_errors(payload))
+    with pytest.raises(
+        ValidationError,
+        match="ready_for_next_step must follow the rubric score and blocking gaps",
+    ):
+        IntakeInitiatorRoomLlmOutputV3.model_validate(payload)
+
+    ready = copy.deepcopy(payload)
+    ready["ordered_sections"][7]["value"]["next_questions"] = []
+    ready["ordered_sections"][8]["value"].update(
+        {
+            "remark_status": "WAITING_FOR_REMARK",
+            "instruction": "案情已达到接待要求，请确认是否还有可选交接备注。",
+        }
+    )
+    ready["ordered_sections"][9]["value"].update(
+        {
+            "ready_for_next_step": True,
+            "admission_recommendation": "ACCEPTED",
+            "admission_reasoning": "评分达到阈值且不存在阻塞缺口。",
+            "conversation_action": "INVITE_OPTIONAL_REMARK",
+        }
+    )
+    assert provider_validator.is_valid(ready)
+    first = IntakeInitiatorRoomLlmOutputV3.model_validate(ready)
+    replay = IntakeInitiatorRoomLlmOutputV3.model_validate(copy.deepcopy(ready))
+    assert first.model_dump(mode="python") == replay.model_dump(mode="python")
+
+    blocked = copy.deepcopy(payload)
+    blocked["ordered_sections"][7]["value"]["blocking_gaps"] = [
+        "缺少可核对的具体收货地址"
+    ]
+    assert provider_validator.is_valid(blocked)
+    assert (
+        IntakeInitiatorRoomLlmOutputV3.model_validate(blocked)
+        .ordered_sections[9]
+        .value.ready_for_next_step
+        is False
+    )
 
 
 def test_intake_context_retention_is_separate_from_physical_prompt_order() -> None:
@@ -458,6 +541,9 @@ def test_respondent_turn_projects_frozen_claim_and_keeps_reported_attitude_attri
         "alternative_proposal": "标准复检",
     }
     respondent_output_type = intake_case_detail_output_type(respondent_request)
+    respondent_schema = respondent_output_type.model_json_schema()
+    Draft202012Validator.check_schema(respondent_schema)
+    assert len(respondent_schema["properties"]["ordered_sections"]["anyOf"]) == 4
 
     with pytest.raises(ValidationError):
         respondent_output_type.model_validate(provider_payload)

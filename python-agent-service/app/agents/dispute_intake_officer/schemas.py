@@ -344,6 +344,102 @@ IntakeRespondentRoomSections = tuple[
 ]
 
 
+def _ordered_room_section_value_schema(
+    properties: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    return {"properties": {"value": {"properties": properties}}}
+
+
+def _ordered_room_outcome_provider_branch(
+    *,
+    score_constraint: dict[str, int],
+    blocking_gaps_constraint: dict[str, int] | None,
+    next_questions_constraint: dict[str, int],
+    remark_status: str,
+    ready_for_next_step: bool,
+    admission_recommendations: tuple[str, ...],
+    conversation_action: str,
+) -> dict[str, Any]:
+    prefix_items: list[dict[str, Any]] = [{} for _ in INTAKE_ROOM_SECTION_KINDS]
+    missing_properties: dict[str, dict[str, Any]] = {
+        "next_questions": next_questions_constraint,
+    }
+    if blocking_gaps_constraint is not None:
+        missing_properties["blocking_gaps"] = blocking_gaps_constraint
+    prefix_items[7] = _ordered_room_section_value_schema(missing_properties)
+    prefix_items[8] = _ordered_room_section_value_schema(
+        {"remark_status": {"const": remark_status}}
+    )
+    prefix_items[9] = _ordered_room_section_value_schema(
+        {
+            "total_score": score_constraint,
+            "threshold": {"const": 85},
+            "ready_for_next_step": {"const": ready_for_next_step},
+            "admission_recommendation": {
+                "enum": list(admission_recommendations)
+            },
+            "conversation_action": {"const": conversation_action},
+        }
+    )
+    return {"prefixItems": prefix_items}
+
+
+def _bind_ordered_room_outcome_provider_schema(schema: dict[str, Any]) -> None:
+    """Put the baseline readiness state machine into the provider wire schema."""
+
+    properties = schema.get("properties")
+    ordered_sections = (
+        properties.get("ordered_sections") if isinstance(properties, dict) else None
+    )
+    if not isinstance(ordered_sections, dict):
+        raise RuntimeError("ordered Intake provider schema is missing ordered_sections")
+    ordered_sections["anyOf"] = [
+        _ordered_room_outcome_provider_branch(
+            score_constraint={"maximum": 84},
+            blocking_gaps_constraint=None,
+            next_questions_constraint={"minItems": 1},
+            remark_status="NOT_READY",
+            ready_for_next_step=False,
+            admission_recommendations=("NEED_MORE_INFO", "NOT_ADMISSIBLE"),
+            conversation_action="ASK_SUBSTANTIVE",
+        ),
+        _ordered_room_outcome_provider_branch(
+            score_constraint={"minimum": 85},
+            blocking_gaps_constraint={"minItems": 1},
+            next_questions_constraint={"minItems": 1},
+            remark_status="NOT_READY",
+            ready_for_next_step=False,
+            admission_recommendations=("NEED_MORE_INFO", "NOT_ADMISSIBLE"),
+            conversation_action="ASK_SUBSTANTIVE",
+        ),
+        _ordered_room_outcome_provider_branch(
+            score_constraint={"minimum": 85},
+            blocking_gaps_constraint={"maxItems": 0},
+            next_questions_constraint={"maxItems": 0},
+            remark_status="WAITING_FOR_REMARK",
+            ready_for_next_step=True,
+            admission_recommendations=("ACCEPTED",),
+            conversation_action="INVITE_OPTIONAL_REMARK",
+        ),
+        _ordered_room_outcome_provider_branch(
+            score_constraint={"minimum": 85},
+            blocking_gaps_constraint={"maxItems": 0},
+            next_questions_constraint={"maxItems": 0},
+            remark_status="NO_EXTRA_REMARKS",
+            ready_for_next_step=True,
+            admission_recommendations=("ACCEPTED",),
+            conversation_action="ACK_NO_REMARK",
+        ),
+    ]
+
+
+class StrictOrderedIntakeRoomModel(StrictIntakeRoomModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra=_bind_ordered_room_outcome_provider_schema,
+    )
+
+
 def _validate_ordered_room_outcome(
     sections: IntakeInitiatorRoomSections | IntakeRespondentRoomSections,
 ) -> None:
@@ -378,7 +474,7 @@ def _validate_ordered_room_outcome(
         raise ValueError("an incomplete turn must remain in substantive Intake")
 
 
-class IntakeInitiatorRoomLlmOutputV3(StrictIntakeRoomModel):
+class IntakeInitiatorRoomLlmOutputV3(StrictOrderedIntakeRoomModel):
     """Ordered provider contract for initiator substantive/opening turns."""
 
     room_utterance: str = Field(min_length=1, max_length=20_000)
@@ -397,7 +493,7 @@ class IntakeInitiatorRoomLlmOutputV3(StrictIntakeRoomModel):
         return self
 
 
-class IntakeRespondentRoomLlmOutputV3(StrictIntakeRoomModel):
+class IntakeRespondentRoomLlmOutputV3(StrictOrderedIntakeRoomModel):
     """Ordered provider contract for an authenticated respondent turn."""
 
     room_utterance: str = Field(min_length=1, max_length=20_000)
