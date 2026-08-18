@@ -340,7 +340,7 @@ class V2DeltaCoalescer:
 
 
 VISIBLE_FIELD_VALUE_MODES = frozenset(
-    {"string_prefix", "json_value", "json_array_items", "json_frame_tuples"}
+    {"string_prefix", "json_value", "json_array_items", "json_frame_objects"}
 )
 
 
@@ -351,8 +351,8 @@ class VisibleFieldSpec:
     string_prefix 会逐字符投影字符串；json_value 只在整个 JSON 值闭合后投影一次，
     适合把右侧展板的独立结构分区按生成顺序安全送到前端；json_array_items
     则只在数组中一个对象完整闭合后逐项投影，不等待整个数组或模型文档结束；
-    json_frame_tuples 用于 ``[[header, public_text|null], ...]``：header 完整后先
-    产生 frame_start，公开字符串按可解码前缀产生 public_text_delta，tuple 闭合后
+    json_frame_objects 用于 ``[{header:{...},public_text:string|null}, ...]``：header 完整后先
+    产生 frame_start，公开字符串按可解码前缀产生 public_text_delta，object 闭合后
     再产生 frame_end。三类内部投影事件都使用同一个声明 field，由房间执行器进行
     权威校验和公开/私有分流。
     """
@@ -363,7 +363,7 @@ class VisibleFieldSpec:
         "string_prefix",
         "json_value",
         "json_array_items",
-        "json_frame_tuples",
+        "json_frame_objects",
     ] = (
         "string_prefix"
     )
@@ -381,8 +381,8 @@ class _RootProjectionGate:
 
 
 @dataclass(frozen=True)
-class _ProjectedJsonFrameTuple:
-    """Current append-only view of one header-first model frame tuple."""
+class _ProjectedJsonFrameObject:
+    """Current append-only view of one header-first model frame object."""
 
     header: dict[str, Any]
     canonical_header: str
@@ -674,7 +674,7 @@ VISIBLE_FIELD_REGISTRY: dict[str, dict[str, tuple[VisibleFieldSpec, ...]]] = {
             VisibleFieldSpec(
                 "frames",
                 "frames",
-                "json_frame_tuples",
+                "json_frame_objects",
                 max_array_items=128,
                 max_array_item_bytes=64 * 1024,
                 max_array_bytes=2 * 1024 * 1024,
@@ -749,7 +749,7 @@ class IncrementalVisibleJsonProjector:
     # 系统意义：没有 spec 就不会投影任何字段；已发送长度防止每次扫描累计缓冲时重复向前端发送旧文本。
     def __init__(self, specs: tuple[VisibleFieldSpec, ...]) -> None:
         for spec in specs:
-            if spec.value_mode not in {"json_array_items", "json_frame_tuples"}:
+            if spec.value_mode not in {"json_array_items", "json_frame_objects"}:
                 continue
             if (
                 isinstance(spec.max_array_items, bool)
@@ -774,17 +774,17 @@ class IncrementalVisibleJsonProjector:
         self._emitted_frame_headers: dict[str, list[str]] = {
             spec.field: []
             for spec in specs
-            if spec.value_mode == "json_frame_tuples"
+            if spec.value_mode == "json_frame_objects"
         }
         self._emitted_frame_text_lengths: dict[str, list[int]] = {
             spec.field: []
             for spec in specs
-            if spec.value_mode == "json_frame_tuples"
+            if spec.value_mode == "json_frame_objects"
         }
         self._emitted_frame_ends: dict[str, set[int]] = {
             spec.field: set()
             for spec in specs
-            if spec.value_mode == "json_frame_tuples"
+            if spec.value_mode == "json_frame_objects"
         }
 
     # 所属模块：Agent 流式协议 > JSON 可见投影 > 增量消费入口。
@@ -823,8 +823,8 @@ class IncrementalVisibleJsonProjector:
                 raise AgentStreamProjectionError(
                     "visible stream JSON path is duplicated"
                 )
-            if spec.value_mode == "json_frame_tuples":
-                frames = _find_incremental_json_frame_tuples(
+            if spec.value_mode == "json_frame_objects":
+                frames = _find_incremental_json_frame_objects(
                     self._buffer,
                     spec.field,
                     max_items=spec.max_array_items,
@@ -836,18 +836,18 @@ class IncrementalVisibleJsonProjector:
                 emitted_ends = self._emitted_frame_ends[spec.field]
                 if len(frames) < len(emitted_headers):
                     raise AgentStreamProjectionError(
-                        "visible frame tuple projection regressed"
+                        "visible frame object projection regressed"
                     )
                 for index, frame in enumerate(frames):
                     if index < len(emitted_headers):
                         if emitted_headers[index] != frame.canonical_header:
                             raise AgentStreamProjectionError(
-                                "visible frame tuple header changed after publication"
+                                "visible frame object header changed after publication"
                             )
                     else:
                         if index != len(emitted_headers):
                             raise AgentStreamProjectionError(
-                                "visible frame tuple order is not contiguous"
+                                "visible frame object order is not contiguous"
                             )
                         emitted_headers.append(frame.canonical_header)
                         emitted_text_lengths.append(0)
@@ -864,7 +864,7 @@ class IncrementalVisibleJsonProjector:
                     emitted_length = emitted_text_lengths[index]
                     if len(frame.public_text) < emitted_length:
                         raise AgentStreamProjectionError(
-                            "visible frame tuple text regressed"
+                            "visible frame object text regressed"
                         )
                     if len(frame.public_text) > emitted_length:
                         text_delta = frame.public_text[emitted_length:]
@@ -1645,20 +1645,21 @@ def _frame_projection_event(
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _find_incremental_json_frame_tuples(
+def _find_incremental_json_frame_objects(
     document: str,
     field: str,
     *,
     max_items: int,
     max_item_bytes: int,
     max_array_bytes: int,
-) -> tuple[_ProjectedJsonFrameTuple, ...]:
-    """Scan header-first frame tuples while keeping incomplete public text visible.
+) -> tuple[_ProjectedJsonFrameObject, ...]:
+    """Scan ordered frame objects while keeping incomplete public text visible.
 
     The model document remains private.  A frame becomes addressable only after
-    its complete header object has been decoded.  Its second tuple element may
-    then expose a JSON-string prefix; ``null`` marks an internal frame and never
-    contains public text.  This scanner never guesses a missing delimiter.
+    its complete ``header`` object has been decoded.  The immediately following
+    ``public_text`` property may then expose a JSON-string prefix; ``null`` marks
+    an internal frame and never contains public text.  Exact property order is a
+    wire invariant, so no object-key ordering guess can leak an unbound string.
     """
 
     start = _find_json_path_value_start(document, field)
@@ -1668,35 +1669,55 @@ def _find_incremental_json_frame_tuples(
         return ()
     if document[start] != "[":
         raise AgentStreamProjectionError(
-            "visible frame tuple field is not an array"
+            "visible frame object field is not an array"
         )
     try:
         observed_array_bytes = len(document[start:].encode("utf-8"))
     except UnicodeEncodeError as error:
         raise AgentStreamProjectionError(
-            "visible frame tuple array has invalid Unicode"
+            "visible frame object array has invalid Unicode"
         ) from error
     if observed_array_bytes > max_array_bytes:
         raise AgentStreamLimitExceeded(
-            "visible frame tuple array exceeds its limit"
+            "visible frame object array exceeds its limit"
         )
 
     decoder = json.JSONDecoder()
     cursor = _skip_whitespace(document, start + 1)
-    frames: list[_ProjectedJsonFrameTuple] = []
+    frames: list[_ProjectedJsonFrameObject] = []
     if cursor >= len(document) or document[cursor] == "]":
         return ()
     while True:
         if len(frames) >= max_items:
             raise AgentStreamLimitExceeded(
-                "visible frame tuple count exceeds its limit"
+                "visible frame object count exceeds its limit"
             )
-        tuple_start = cursor
-        if document[cursor] != "[":
+        object_start = cursor
+        if document[cursor] != "{":
             raise AgentStreamProjectionError(
-                "visible frame item must be a tuple"
+                "visible frame item must be an object"
             )
-        header_start = _skip_whitespace(document, cursor + 1)
+        header_key_start = _skip_whitespace(document, cursor + 1)
+        if header_key_start >= len(document):
+            return tuple(frames)
+        try:
+            header_key, header_key_end = decoder.raw_decode(
+                document, header_key_start
+            )
+        except ValueError:
+            return tuple(frames)
+        if header_key != "header":
+            raise AgentStreamProjectionError(
+                "visible frame object must begin with header"
+            )
+        header_colon = _skip_whitespace(document, header_key_end)
+        if header_colon >= len(document):
+            return tuple(frames)
+        if document[header_colon] != ":":
+            raise AgentStreamProjectionError(
+                "visible frame object header key is not colon-delimited"
+            )
+        header_start = _skip_whitespace(document, header_colon + 1)
         if header_start >= len(document):
             return tuple(frames)
         try:
@@ -1705,7 +1726,7 @@ def _find_incremental_json_frame_tuples(
             return tuple(frames)
         if not isinstance(header, dict):
             raise AgentStreamProjectionError(
-                "visible frame tuple header must be an object"
+                "visible frame header must be an object"
             )
         frame_sequence = header.get("frame_sequence")
         frame_type = header.get("frame_type")
@@ -1718,7 +1739,7 @@ def _find_incremental_json_frame_tuples(
             or not frame_type
         ):
             raise AgentStreamProjectionError(
-                "visible frame tuple header identity is invalid"
+                "visible frame header identity is invalid"
             )
         canonical_header = json.dumps(
             header,
@@ -1729,15 +1750,15 @@ def _find_incremental_json_frame_tuples(
             header_bytes = len(canonical_header.encode("utf-8"))
         except UnicodeEncodeError as error:
             raise AgentStreamProjectionError(
-                "visible frame tuple header has invalid Unicode"
+                "visible frame header has invalid Unicode"
             ) from error
         if header_bytes > max_item_bytes:
             raise AgentStreamLimitExceeded(
-                "visible frame tuple header exceeds its limit"
+                "visible frame header exceeds its limit"
             )
 
         cursor = _skip_whitespace(document, header_end)
-        frame = _ProjectedJsonFrameTuple(
+        frame = _ProjectedJsonFrameObject(
             header=header,
             canonical_header=canonical_header,
             frame_sequence=frame_sequence,
@@ -1750,9 +1771,32 @@ def _find_incremental_json_frame_tuples(
             return tuple(frames)
         if document[cursor] != ",":
             raise AgentStreamProjectionError(
-                "visible frame tuple header is not comma-delimited"
+                "visible frame header is not comma-delimited"
             )
-        value_start = _skip_whitespace(document, cursor + 1)
+        public_key_start = _skip_whitespace(document, cursor + 1)
+        if public_key_start >= len(document):
+            frames.append(frame)
+            return tuple(frames)
+        try:
+            public_key, public_key_end = decoder.raw_decode(
+                document, public_key_start
+            )
+        except ValueError:
+            frames.append(frame)
+            return tuple(frames)
+        if public_key != "public_text":
+            raise AgentStreamProjectionError(
+                "visible frame header must be followed by public_text"
+            )
+        public_colon = _skip_whitespace(document, public_key_end)
+        if public_colon >= len(document):
+            frames.append(frame)
+            return tuple(frames)
+        if document[public_colon] != ":":
+            raise AgentStreamProjectionError(
+                "visible frame public_text key is not colon-delimited"
+            )
+        value_start = _skip_whitespace(document, public_colon + 1)
         if value_start >= len(document):
             frames.append(frame)
             return tuple(frames)
@@ -1763,13 +1807,13 @@ def _find_incremental_json_frame_tuples(
         if token == '"':
             if internal_frame:
                 raise AgentStreamProjectionError(
-                    "internal frame tuple must use a null slot"
+                    "internal frame object must use a null public_text"
                 )
             public_text, value_end, text_complete = _decode_json_string(
                 document,
                 value_start,
             )
-            frame = _ProjectedJsonFrameTuple(
+            frame = _ProjectedJsonFrameObject(
                 header=header,
                 canonical_header=canonical_header,
                 frame_sequence=frame_sequence,
@@ -1778,9 +1822,9 @@ def _find_incremental_json_frame_tuples(
                 complete=False,
             )
             if not text_complete:
-                _require_frame_tuple_item_budget(
+                _require_frame_object_item_budget(
                     document,
-                    tuple_start,
+                    object_start,
                     len(document),
                     max_item_bytes=max_item_bytes,
                 )
@@ -1788,27 +1832,27 @@ def _find_incremental_json_frame_tuples(
                 return tuple(frames)
             if not public_text:
                 raise AgentStreamProjectionError(
-                    "public frame tuple must use a non-empty string slot"
+                    "public frame object must use non-empty public_text"
                 )
         elif token == "n":
             if not internal_frame:
                 raise AgentStreamProjectionError(
-                    "public frame tuple must use a non-empty string slot"
+                    "public frame object must use non-empty public_text"
                 )
             remaining = document[value_start:]
             if len(remaining) < 4:
                 if not "null".startswith(remaining):
                     raise AgentStreamProjectionError(
-                        "visible frame tuple second item is invalid"
+                        "visible frame public_text is invalid"
                     )
                 frames.append(frame)
                 return tuple(frames)
             if not remaining.startswith("null"):
                 raise AgentStreamProjectionError(
-                    "visible frame tuple second item is invalid"
+                    "visible frame public_text is invalid"
                 )
             value_end = value_start + 4
-            frame = _ProjectedJsonFrameTuple(
+            frame = _ProjectedJsonFrameObject(
                 header=header,
                 canonical_header=canonical_header,
                 frame_sequence=frame_sequence,
@@ -1818,25 +1862,25 @@ def _find_incremental_json_frame_tuples(
             )
         else:
             raise AgentStreamProjectionError(
-                "visible frame tuple second item must be a string or null"
+                "visible frame public_text must be a string or null"
             )
 
-        tuple_end = _skip_whitespace(document, value_end)
-        if tuple_end >= len(document):
+        object_end = _skip_whitespace(document, value_end)
+        if object_end >= len(document):
             frames.append(frame)
             return tuple(frames)
-        if document[tuple_end] != "]":
+        if document[object_end] != "}":
             raise AgentStreamProjectionError(
-                "visible frame tuple has an invalid closing delimiter"
+                "visible frame object has an invalid closing delimiter"
             )
-        tuple_end += 1
-        _require_frame_tuple_item_budget(
+        object_end += 1
+        _require_frame_object_item_budget(
             document,
-            tuple_start,
-            tuple_end,
+            object_start,
+            object_end,
             max_item_bytes=max_item_bytes,
         )
-        frame = _ProjectedJsonFrameTuple(
+        frame = _ProjectedJsonFrameObject(
             header=frame.header,
             canonical_header=frame.canonical_header,
             frame_sequence=frame.frame_sequence,
@@ -1846,19 +1890,19 @@ def _find_incremental_json_frame_tuples(
         )
         frames.append(frame)
 
-        cursor = _skip_whitespace(document, tuple_end)
+        cursor = _skip_whitespace(document, object_end)
         if cursor >= len(document) or document[cursor] == "]":
             return tuple(frames)
         if document[cursor] != ",":
             raise AgentStreamProjectionError(
-                "visible frame tuples are not comma-delimited"
+                "visible frame objects are not comma-delimited"
             )
         cursor = _skip_whitespace(document, cursor + 1)
         if cursor >= len(document):
             return tuple(frames)
 
 
-def _require_frame_tuple_item_budget(
+def _require_frame_object_item_budget(
     document: str,
     start: int,
     end: int,
@@ -1869,11 +1913,11 @@ def _require_frame_tuple_item_budget(
         item_bytes = len(document[start:end].encode("utf-8"))
     except UnicodeEncodeError as error:
         raise AgentStreamProjectionError(
-            "visible frame tuple item has invalid Unicode"
+            "visible frame object item has invalid Unicode"
         ) from error
     if item_bytes > max_item_bytes:
         raise AgentStreamLimitExceeded(
-            "visible frame tuple item exceeds its limit"
+            "visible frame object item exceeds its limit"
         )
 
 

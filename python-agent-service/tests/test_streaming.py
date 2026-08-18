@@ -746,20 +746,21 @@ def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_docume
     spec = VisibleFieldSpec(
         "frames",
         "frames",
-        "json_frame_tuples",
+        "json_frame_objects",
         max_array_items=4,
         max_array_item_bytes=2_048,
         max_array_bytes=8_192,
     )
     chunks = (
         '{"schema_version":"evidence_turn_stream.v2","frames":'
-        '[[{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},"欢迎',
+        '[{"header":{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},'
+        '"public_text":"欢迎',
         "进入证据",
-        '室。"],',
-        '[{"frame_sequence":2,"frame_type":"HUMAN_REVIEW_TASK",'
+        '室。"},',
+        '{"header":{"frame_sequence":2,"frame_type":"HUMAN_REVIEW_TASK",'
         '"evidence_id":"EVIDENCE_1","observation_slots":[],"trigger_code":'
         '"SOURCE_CHAIN","review_target":"原件","review_instruction":"核对原件",'
-        '"priority":"MEDIUM"},null]',
+        '"priority":"MEDIUM"},"public_text":null}',
         ']}'
     )
 
@@ -793,34 +794,47 @@ def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_docume
     public_null = IncrementalVisibleJsonProjector((spec,))
     with pytest.raises(
         AgentStreamProjectionError,
-        match="public frame tuple must use a non-empty string slot",
+        match="public frame object must use non-empty public_text",
     ):
         public_null.feed(
             '{"schema_version":"evidence_turn_stream.v2","frames":'
-            '[[{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},null]]}'
+            '[{"header":{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},'
+            '"public_text":null}]}'
         )
 
     public_empty = IncrementalVisibleJsonProjector((spec,))
     with pytest.raises(
         AgentStreamProjectionError,
-        match="public frame tuple must use a non-empty string slot",
+        match="public frame object must use non-empty public_text",
     ):
         public_empty.feed(
             '{"schema_version":"evidence_turn_stream.v2","frames":'
-            '[[{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},""]]}'
+            '[{"header":{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},'
+            '"public_text":""}]}'
         )
 
     internal_string = IncrementalVisibleJsonProjector((spec,))
     with pytest.raises(
         AgentStreamProjectionError,
-        match="internal frame tuple must use a null slot",
+        match="internal frame object must use a null public_text",
     ):
         internal_string.feed(
             '{"schema_version":"evidence_turn_stream.v2","frames":'
-            '[[{"frame_sequence":1,"frame_type":"HUMAN_REVIEW_TASK",'
+            '[{"header":{"frame_sequence":1,"frame_type":"HUMAN_REVIEW_TASK",'
             '"evidence_id":"EVIDENCE_1","trigger_code":"SOURCE_CHAIN",'
             '"review_target":"原件","review_instruction":"核对原件",'
-            '"priority":"MEDIUM"},"不得公开"]]}'
+            '"priority":"MEDIUM"},"public_text":"不得公开"}]}'
+        )
+
+    public_first = IncrementalVisibleJsonProjector((spec,))
+    with pytest.raises(
+        AgentStreamProjectionError,
+        match="must begin with header",
+    ):
+        public_first.feed(
+            '{"schema_version":"evidence_turn_stream.v2","frames":['
+            '{"public_text":"不得先公开","header":'
+            '{"frame_sequence":1,"frame_type":"ROOM_WELCOME"}}]}'
         )
 
 

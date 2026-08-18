@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import re
 from typing import Any
 
@@ -91,7 +90,8 @@ def assemble_evidence_room_context_v2(
         "output_contract": {
             "schema_version": "evidence_turn_stream.v2",
             "frame_authority_schema": "evidence-turn-frame.v2",
-            "frame_wire": "[header, public_text|null]",
+            "frame_wire": '{"header":{...},"public_text":string|null}',
+            "frame_property_order": ["header", "public_text"],
             "allowed_frame_types": _allowed_frame_types(mode),
             "frame_order": _frame_order(mode),
             "max_public_text_chars": 100_000,

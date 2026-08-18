@@ -307,20 +307,20 @@ Source Unit ID 由 evidence ID、内容权威哈希、模态、位置/页面权�
 
 这里的 `evidence_turn_stream.v2` 是模型响应 Schema，不等同于浏览器传输协议 `agent-stream.v3`。模型 header 和跨服务事件都统一使用 `frame_sequence`；传输层不得把它当成 SSE 事件序号或 durable cursor。
 
-每个 frame 是一个固定长度为 2 的 tuple，而不是依赖 JSON 对象属性顺序：
+真实 Provider UAT 已证明其虽然接受 nested `prefixItems`/tuple strict Schema，却不能稳定生成该方言：合法输出两帧后把下一数组起始符 `[{` 写成第三帧公开字符串并以 `finish_reason=stop` 结束。因此模型 wire 改为只有两个属性的有序 frame object：
 
-```text
-[完整结构化 header, public_text 或 null]
+```json
+{"header": {"frame_sequence": 1, "frame_type": "ROOM_WELCOME"}, "public_text": "欢迎进入证据室。"}
 ```
 
-- 第一个 tuple 元素必须是完整 header 对象；
-- 第二个元素对公开 frame 必须是 JSON string，对内部 frame 必须是 `null`；
+- 每个 frame object 必须且只能按 `header`、`public_text` 顺序生成；
+- `header` 必须是完整对象；`public_text` 对公开 frame 必须是 JSON string，对内部 frame 必须是 `null`；
 - header 完整关闭后，后端先执行权威校验；
 - 公开 string 开始后，后端按 Provider 实际 delta 增量解码和输出，不等待 closing quote 或 frame 结束；
-- header 中包含模型业务语义，第二个元素只包含对应的公开自然语言，不另建一套绑定；
-- header 只放完成引用绑定所需的 ID、枚举、短理由和有限列表；长解释必须放在第二个元素的 `public_text` 中，避免 header 生成时间吞掉该 frame 的语义首包；
+- header 中包含模型业务语义，`public_text` 只包含对应的公开自然语言，不另建一套绑定；
+- header 只放完成引用绑定所需的 ID、枚举、短理由和有限列表；长解释必须放在 `public_text` 中，避免 header 生成时间吞掉该 frame 的语义首包；
 - `fact_bindings[].reason`、request reason 和 assessment limitations 分别设置严格短文本预算，超预算属于结构/预算错误，不做语义改写；
-- JSON Schema 使用 tuple/prefix-items 约束两元素的顺序和类型。若目标 Provider 的结构化输出方言不能可靠支持 tuple，实施前必须用 focused contract test 证明替代 wire format 仍保证“完整 header 在前、公开 string 在后”，不得退回依赖普通对象键顺序的安全假设。
+- Provider Schema 使用普通 object/array/discriminated-union 子集；增量扫描器独立强制首属性为 `header`、第二且最后属性为 `public_text`。若模型调换属性，扫描器在公开任何字符串前失败关闭，因此安全性不依赖普通对象键顺序猜测。
 
 模型结构化 header 不得输出以下服务端权威；该限制由 Schema 字段白名单执行，不扫描自由 `public_text`：
 
@@ -347,20 +347,20 @@ ROOM_WELCOME
 `ROOM_WELCOME` 负责最快首包：
 
 ```json
-[
-  {
+{
+  "header": {
     "frame_sequence": 1,
     "frame_type": "ROOM_WELCOME"
   },
-  "欢迎进入证据室。"
-]
+  "public_text": "欢迎进入证据室。"
+}
 ```
 
 `OPENING_ORIENTATION` 必须引用冻结矩阵中的案件特定 focus facts：
 
 ```json
-[
-  {
+{
+  "header": {
     "frame_sequence": 2,
     "frame_type": "OPENING_ORIENTATION",
     "focus_fact_ids": [
@@ -368,8 +368,8 @@ ROOM_WELCOME
       "FACT_LOGISTICS_DELAY"
     ]
   },
-  "我正在根据接待室冻结的次日达承诺和实际延迟情况梳理待证事项，接下来会逐项说明需要补充的材料及其用途。"
-]
+  "public_text": "我正在根据接待室冻结的次日达承诺和实际延迟情况梳理待证事项，接下来会逐项说明需要补充的材料及其用途。"
+}
 ```
 
 开场不得声称“已收到本批材料”，不得评估尚未提交的附件。欢迎语可以简短稳定，orientation 和后续 requests 必须来自当前冻结案情矩阵，不能退化为固定话术。
@@ -482,7 +482,7 @@ TEXT_FOLLOWUP_REPLY
 - `UNAVAILABLE`；
 - `REQUIRES_HUMAN_REVIEW`。
 
-模型不能仅凭文件内容输出“真实有效”。Assessment 的第二个 tuple 元素是面向用户的边界化说明，并按实际 delta 流式公开；右侧卡片消费同一 header。
+模型不能仅凭文件内容输出“真实有效”。Assessment 的 `public_text` 是面向用户的边界化说明，并按实际 delta 流式公开；右侧卡片消费同一 header。
 
 ### 9.3 `EVIDENCE_REQUEST`
 
@@ -495,11 +495,11 @@ Header 至少包括：
 - `reason`；
 - `priority`。
 
-第二个 tuple 元素是面向用户的具体补证要求。现有 `verification_suggestions` 合并到该 frame，不保留第二套建议结构。
+`public_text` 是面向用户的具体补证要求。现有 `verification_suggestions` 合并到该 frame，不保留第二套建议结构。
 
 ### 9.4 `HUMAN_REVIEW_TASK`
 
-只进入内部队列，tuple 第二项必须为 `null`。Header 至少包括：
+只进入内部队列，`public_text` 必须为 `null`。Header 至少包括：
 
 - `evidence_id`；
 - `observation_slots`；
@@ -554,9 +554,9 @@ Provider SSE delta.content
   -> 协议/ID/角色/附件/Source Unit/fact/顺序/预算校验
   -> 首个公开 frame 时持久化一次 attempt.public_output_started
   -> public_frame_start（瞬时）
-  -> 第二 tuple 元素 JSON string_prefix
+  -> public_text JSON string_prefix
   -> public_text_delta x N（瞬时，逐 Provider delta）
-  -> frame closing quote / tuple 完整
+  -> frame closing quote / object 完整
   -> 一次事务持久化完整 frame
   -> public_frame_committed（durable）
   -> 后续 frame
@@ -767,7 +767,7 @@ Header 通过后完全信任模型公开自然语言，不做前置或后置内�
 
 | 消费方 | 唯一来源 |
 |---|---|
-| 聊天框 | 所有 committed 公开 frame 的第二 tuple 元素按 `frame_sequence` 使用固定 `"\n\n"` 分隔符拼接 |
+| 聊天框 | 所有 committed 公开 frame 的 `public_text` 按 `frame_sequence` 使用固定 `"\n\n"` 分隔符拼接 |
 | observation 卡片 | `EVIDENCE_OBSERVATION` header |
 | assessment 卡片 | `EVIDENCE_ASSESSMENT` header |
 | 事实矩阵边 | observation 的 `fact_bindings` |
@@ -855,8 +855,8 @@ Token 治理应分别记录：系统提示、数字人提示、业务上下文�
 
 | 层 | 必须重构的合同 |
 |---|---|
-| Python 模型层 | mode-specific context/output schemas、Evidence prompt、tuple structured output |
-| Python 流层 | 动态 `frames[*][1]` string-prefix projector、V3 瞬时事件、frame buffer、frame commit client |
+| Python 模型层 | mode-specific context/output schemas、Evidence prompt、有序 frame-object structured output |
+| Python 流层 | 动态 `frames[*].public_text` string-prefix projector、V3 瞬时事件、frame buffer、frame commit client |
 | Python Graph 层 | `evidence-turn-result.v2`、新 checkpoint/state、frame-manifest terminal materializer |
 | Java 传输层 | `agent-stream.v3` DTO/enum/parser、瞬时 relay、active snapshot、durable cursor |
 | Java 持久化层 | attempt `public_output_started`、私有 frame authority、公开 frame projection、frame idempotency/hash |
@@ -871,10 +871,10 @@ Token 治理应分别记录：系统提示、数字人提示、业务上下文�
 
 1. 冻结新 graph/checkpoint/result/proposal/prompt/policy/stream 版本与新 activation manifest；
 2. 定义 `EvidenceRoomContextV2`、带 segmenter/normalization/catalog hash 的 Source Unit snapshot，以及模式专属 Frame Schema；
-3. 用目标 Provider 实际 structured-output 方言验证 tuple/prefix-items、header-first 和未闭合第二字符串的增量可见性；
+3. 用目标 Provider 实际 structured-output 方言验证普通 object/array/discriminated-union、header-first 和未闭合 `public_text` 的增量可见性；
 4. 增加“同一 Source Unit 绑定多个 facts”“header 后逐 delta”“自由 public text 不做语义拦截”的决定性 old-red；
 5. 重构 Evidence context assembler 和模式路由，消除重复矩阵、正文、旧证据全文和旧输出分区；
-6. 扩展增量解析器，支持有序动态 tuple 的 header-complete gate、JSON escape/Unicode 最小缓冲和 `delta_index`；
+6. 扩展增量解析器，支持有序 frame object 的 header-complete gate、强制 `public_text` 末属性、JSON escape/Unicode 最小缓冲和 `delta_index`；
 7. 建立 `agent-stream.v3` 瞬时 relay、attempt public-output marker、内存 frame buffer、frame-level 私有/公开事务和 durable cursor；
 8. 建立 `evidence-turn-result.v2`、proposal V2 和 observation graph 确定性派生器，移除 matrix patch、handoff 和 terminal reply 的第二语义源；
 9. 同步重构 Java V3 reader/DTO/visibility、frame store、proposal loader、正式提交与 final commit fence；
@@ -942,7 +942,7 @@ Token 治理应分别记录：系统提示、数字人提示、业务上下文�
 
 1. `PUBLIC_INTRO` 被取消，模式首帧分别为 `ROOM_WELCOME`、`MATERIAL_RECEIPT` 和 `TEXT_FOLLOWUP_REPLY`；
 2. opening 使用独立 `OPENING_ORIENTATION` 表达“正在根据冻结案情矩阵梳理并生成证据问询”；
-3. 公开 frame 使用 `[完整 header, public_text]`，先绑定后逐 delta 输出；
+3. 公开 frame 使用仅含有序 `header`、`public_text` 的 object，先绑定后逐 delta 输出；
 4. Source Unit 与 fact 解耦，一个来源通过 `fact_bindings` 显式关联多个事实；
 5. 模型语义不由后端正则或相似度二次解释；
 6. 正式矩阵、卡片、人工任务和庭审交接从同一 observation graph 派生；
@@ -957,4 +957,4 @@ Token 治理应分别记录：系统提示、数字人提示、业务上下文�
 15. 每份附件仍要求一项 assessment，但本版不强制每份附件产生 observation；
 16. 系统提示词和数字人提示词不在本次重构范围。
 
-如后续实现发现目标 Provider 无法支持本契约的 tuple 或 string-prefix 流，必须先形成可复现证据并进行机制级设计复核；不得用等待终态、前端模拟打字、静态固定回复、case-specific bypass、旧协议兼容层或放宽正式权威校验代替本设计。
+如后续实现发现目标 Provider 无法支持本契约的有序 frame object 或 string-prefix 流，必须先形成可复现证据并进行机制级设计复核；不得用等待终态、前端模拟打字、静态固定回复、case-specific bypass、旧协议兼容层或放宽正式权威校验代替本设计。

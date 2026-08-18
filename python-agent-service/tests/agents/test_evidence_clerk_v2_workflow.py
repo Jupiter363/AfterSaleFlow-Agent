@@ -92,7 +92,7 @@ def test_target_evidence_provider_prompt_requires_single_command_authority() -> 
     assert provider_request.agent_context.model_profile_id == "target-e2e.formal-evidence"
 
 
-def _opening_frames(request: EvidenceTurnRequest) -> list[list[object]]:
+def _opening_frames(request: EvidenceTurnRequest) -> list[dict[str, object]]:
     facts = [
         item["fact_id"]
         for item in assemble_evidence_room_context_v2(request).base.working_set.allowed_fact_targets
@@ -133,13 +133,22 @@ def _opening_frames(request: EvidenceTurnRequest) -> list[list[object]]:
             "remaining_core_fact_ids": facts,
         },
     ]
-    return [[header, f"本案第{header['frame_sequence']}帧。"] for header in headers]
+    return [
+        {
+            "header": header,
+            "public_text": f"本案第{header['frame_sequence']}帧。",
+        }
+        for header in headers
+    ]
 
 
 def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> None:
     schema = EvidenceRoomOpeningStreamV2.model_json_schema()
-    tuple_schema = schema["$defs"]["EvidenceRoomOpeningFrameTupleV2"]
-    header_schema = tuple_schema["prefixItems"][0]
+    frame_schema = schema["$defs"]["EvidenceRoomOpeningFrameObjectV2"]
+    assert list(frame_schema["properties"]) == ["header", "public_text"]
+    assert frame_schema["additionalProperties"] is False
+    assert set(frame_schema["required"]) == {"header", "public_text"}
+    header_schema = frame_schema["properties"]["header"]
 
     assert header_schema["discriminator"]["propertyName"] == "frame_type"
     mapping = header_schema["discriminator"]["mapping"]
@@ -149,36 +158,32 @@ def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> No
         "EVIDENCE_REQUEST",
         "ROOM_READINESS",
     }
-    assert tuple_schema["prefixItems"][1] == {
+    assert frame_schema["properties"]["public_text"] == {
         "maxLength": 100_000,
         "minLength": 1,
+        "title": "Public Text",
         "type": "string",
     }
-    assert "anyOf" not in tuple_schema
+    assert "prefixItems" not in json.dumps(schema, sort_keys=True)
 
     material_schema = EvidenceMaterialReviewStreamV2.model_json_schema()
-    material_tuple = material_schema["$defs"]["EvidenceMaterialReviewFrameTupleV2"]
-    public_branch = next(
-        branch
-        for branch in material_tuple["anyOf"]
-        if branch["prefixItems"][1].get("type") == "string"
-    )
-    internal_branch = next(
-        branch
-        for branch in material_tuple["anyOf"]
-        if branch["prefixItems"][1].get("type") == "null"
-    )
-    assert set(public_branch["prefixItems"][0]["discriminator"]["mapping"]) == {
+    public_branch = material_schema["$defs"][
+        "EvidenceMaterialReviewPublicFrameObjectV2"
+    ]
+    internal_branch = material_schema["$defs"]["EvidenceHumanReviewFrameObjectV2"]
+    assert list(public_branch["properties"]) == ["header", "public_text"]
+    assert set(public_branch["properties"]["header"]["discriminator"]["mapping"]) == {
         "MATERIAL_RECEIPT",
         "EVIDENCE_OBSERVATION",
         "EVIDENCE_ASSESSMENT",
         "EVIDENCE_REQUEST",
         "ROOM_READINESS",
     }
-    assert internal_branch["prefixItems"] == [
-        {"$ref": "#/$defs/EvidenceHumanReviewFrameHeaderV2"},
-        {"type": "null"},
-    ]
+    assert list(internal_branch["properties"]) == ["header", "public_text"]
+    assert internal_branch["properties"] == {
+        "header": {"$ref": "#/$defs/EvidenceHumanReviewFrameHeaderV2"},
+        "public_text": {"title": "Public Text", "type": "null"},
+    }
 
     welcome = schema["$defs"][mapping["ROOM_WELCOME"].rsplit("/", 1)[-1]]
     orientation = schema["$defs"][mapping["OPENING_ORIENTATION"].rsplit("/", 1)[-1]]
@@ -284,7 +289,9 @@ async def test_v2_workflow_releases_first_frame_before_terminal_json_and_is_sing
 
     observer.finalize_public_output("evidence_turn", "frames", result.room_utterance)
     assert runner.calls == 1
-    assert result.room_utterance == "\n\n".join(frame[1] for frame in frames)
+    assert result.room_utterance == "\n\n".join(
+        str(frame["public_text"]) for frame in frames
+    )
     assert result.frame_manifest_sha256
 
 
@@ -292,7 +299,8 @@ async def test_v2_workflow_releases_first_frame_before_terminal_json_and_is_sing
 async def test_v2_workflow_rejects_out_of_scope_focus_fact_before_public_text() -> None:
     request = EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
     frames = _opening_frames(request)
-    frames[1][0]["focus_fact_ids"] = ["FACT_NOT_IN_FROZEN_MATRIX"]
+    assert isinstance(frames[1]["header"], dict)
+    frames[1]["header"]["focus_fact_ids"] = ["FACT_NOT_IN_FROZEN_MATRIX"]
     stream = EvidenceRoomOpeningStreamV2.model_validate({"frames": frames})
     runner = _StreamingRunner(stream)
     policy = EvidenceV2PublicOutputPolicy()

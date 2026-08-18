@@ -1,8 +1,8 @@
 """Evidence-room v2 business frame contracts.
 
-The provider owns the natural-language bytes in the second tuple item.  These
-models only describe the small, source-bound header needed by the server to
-route, persist, replay and derive room projections.
+The provider owns each frame's ``public_text`` bytes.  The preceding nested
+``header`` is the small source-bound authority needed by the server to route,
+persist, replay and derive room projections.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    RootModel,
     TypeAdapter,
     field_serializer,
     model_validator,
@@ -228,28 +227,22 @@ EvidencePublicFrameHeaderV2 = Annotated[
     | EvidenceRoomReadinessFrameHeaderV2,
     Field(discriminator="frame_type"),
 ]
-EvidenceFrameWireV2 = (
-    tuple[EvidencePublicFrameHeaderV2, PublicText]
-    | tuple[EvidenceHumanReviewFrameHeaderV2, None]
-)
-
-
 def validate_evidence_frame_header_v2(value: Any) -> EvidenceFrameHeaderV2:
     return _EVIDENCE_FRAME_HEADER_ADAPTER.validate_python(value)
 
 
-class EvidenceFrameTupleV2(RootModel[EvidenceFrameWireV2]):
-    """Wire tuple: complete header first, then public text or null."""
+class EvidenceFrameObjectV2(EvidenceV2Model):
+    """Generic ordered frame object used only by the shared result model."""
 
-    root: EvidenceFrameWireV2
+    header: EvidenceFrameHeaderV2
+    public_text: PublicText | None
 
-    @property
-    def header(self) -> EvidenceFrameHeaderV2:
-        return self.root[0]
-
-    @property
-    def public_text(self) -> str | None:
-        return self.root[1]
+    @model_validator(mode="after")
+    def validate_public_slot(self) -> "EvidenceFrameObjectV2":
+        internal = self.header.frame_type == "HUMAN_REVIEW_TASK"
+        if internal != (self.public_text is None):
+            raise ValueError("frame public_text slot conflicts with frame type")
+        return self
 
 
 EvidenceRoomOpeningFrameHeaderV2 = Annotated[
@@ -261,20 +254,11 @@ EvidenceRoomOpeningFrameHeaderV2 = Annotated[
 ]
 
 
-class EvidenceRoomOpeningFrameTupleV2(
-    RootModel[tuple[EvidenceRoomOpeningFrameHeaderV2, PublicText]]
-):
-    """Opening wire tuple; every allowed frame is public."""
+class EvidenceRoomOpeningFrameObjectV2(EvidenceV2Model):
+    """Opening wire object; header is serialized before public_text."""
 
-    root: tuple[EvidenceRoomOpeningFrameHeaderV2, PublicText]
-
-    @property
-    def header(self) -> EvidenceFrameHeaderV2:
-        return self.root[0]
-
-    @property
-    def public_text(self) -> str:
-        return self.root[1]
+    header: EvidenceRoomOpeningFrameHeaderV2
+    public_text: PublicText
 
 
 EvidenceMaterialReviewPublicFrameHeaderV2 = Annotated[
@@ -285,26 +269,23 @@ EvidenceMaterialReviewPublicFrameHeaderV2 = Annotated[
     | EvidenceRoomReadinessFrameHeaderV2,
     Field(discriminator="frame_type"),
 ]
-EvidenceMaterialReviewFrameWireV2 = (
-    tuple[EvidenceMaterialReviewPublicFrameHeaderV2, PublicText]
-    | tuple[EvidenceHumanReviewFrameHeaderV2, None]
+class EvidenceMaterialReviewPublicFrameObjectV2(EvidenceV2Model):
+    """Material-review public branch with an explicit string slot."""
+
+    header: EvidenceMaterialReviewPublicFrameHeaderV2
+    public_text: PublicText
+
+
+class EvidenceHumanReviewFrameObjectV2(EvidenceV2Model):
+    """Material-review internal branch; no public bytes are permitted."""
+
+    header: EvidenceHumanReviewFrameHeaderV2
+    public_text: None
+
+
+EvidenceMaterialReviewFrameObjectV2 = (
+    EvidenceMaterialReviewPublicFrameObjectV2 | EvidenceHumanReviewFrameObjectV2
 )
-
-
-class EvidenceMaterialReviewFrameTupleV2(
-    RootModel[EvidenceMaterialReviewFrameWireV2]
-):
-    """Material-review tuple with one explicit internal-frame branch."""
-
-    root: EvidenceMaterialReviewFrameWireV2
-
-    @property
-    def header(self) -> EvidenceFrameHeaderV2:
-        return self.root[0]
-
-    @property
-    def public_text(self) -> str | None:
-        return self.root[1]
 
 
 EvidenceTextFollowupModeFrameHeaderV2 = Annotated[
@@ -315,25 +296,16 @@ EvidenceTextFollowupModeFrameHeaderV2 = Annotated[
 ]
 
 
-class EvidenceTextFollowupFrameTupleV2(
-    RootModel[tuple[EvidenceTextFollowupModeFrameHeaderV2, PublicText]]
-):
-    """Text-followup wire tuple; every allowed frame is public."""
+class EvidenceTextFollowupFrameObjectV2(EvidenceV2Model):
+    """Text-followup wire object; every allowed frame is public."""
 
-    root: tuple[EvidenceTextFollowupModeFrameHeaderV2, PublicText]
-
-    @property
-    def header(self) -> EvidenceFrameHeaderV2:
-        return self.root[0]
-
-    @property
-    def public_text(self) -> str:
-        return self.root[1]
+    header: EvidenceTextFollowupModeFrameHeaderV2
+    public_text: PublicText
 
 
 class EvidenceTurnStreamV2(EvidenceV2Model):
     schema_version: Literal["evidence_turn_stream.v2"] = "evidence_turn_stream.v2"
-    frames: list[EvidenceFrameTupleV2] = Field(min_length=1, max_length=128)
+    frames: list[EvidenceFrameObjectV2] = Field(min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def validate_sequence(self) -> "EvidenceTurnStreamV2":
@@ -348,7 +320,7 @@ class EvidenceTurnStreamV2(EvidenceV2Model):
 class EvidenceRoomOpeningStreamV2(EvidenceTurnStreamV2):
     """Opening-specific provider contract; cardinality is checked by the executor."""
 
-    frames: list[EvidenceRoomOpeningFrameTupleV2] = Field(
+    frames: list[EvidenceRoomOpeningFrameObjectV2] = Field(
         min_length=1, max_length=128
     )
 
@@ -356,7 +328,7 @@ class EvidenceRoomOpeningStreamV2(EvidenceTurnStreamV2):
 class EvidenceMaterialReviewStreamV2(EvidenceTurnStreamV2):
     """Attachment review-specific provider contract."""
 
-    frames: list[EvidenceMaterialReviewFrameTupleV2] = Field(
+    frames: list[EvidenceMaterialReviewFrameObjectV2] = Field(
         min_length=1, max_length=128
     )
 
@@ -364,7 +336,7 @@ class EvidenceMaterialReviewStreamV2(EvidenceTurnStreamV2):
 class EvidenceTextFollowupStreamV2(EvidenceTurnStreamV2):
     """Text-only follow-up provider contract."""
 
-    frames: list[EvidenceTextFollowupFrameTupleV2] = Field(
+    frames: list[EvidenceTextFollowupFrameObjectV2] = Field(
         min_length=1, max_length=128
     )
 
@@ -407,7 +379,7 @@ __all__ = [
     "CommittedEvidenceFrameV2",
     "EvidenceFactBindingV2",
     "EvidenceFrameHeaderV2",
-    "EvidenceFrameTupleV2",
+    "EvidenceFrameObjectV2",
     "EvidenceMaterialReviewStreamV2",
     "EvidenceRoomOpeningStreamV2",
     "EvidenceTextFollowupStreamV2",

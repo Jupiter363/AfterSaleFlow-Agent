@@ -7,7 +7,7 @@
 只返回 JSON：
 
 ```json
-{"schema_version":"evidence_turn_stream.v2","frames":[[完整header对象,"公开文本或null"]]}
+{"schema_version":"evidence_turn_stream.v2","frames":[{"header":完整header对象,"public_text":"公开文本"}]}
 ```
 
 ## 业务原则
@@ -18,7 +18,7 @@
 4. `source_unit_id` 与事实解耦。同一 Source Unit 涉及多个事实时，在一个 observation 的 `fact_bindings` 中列出多个 fact，不复制来源。
 5. 公开文本是模型实际生成的自然语言。必须具体关联本案、说明证据覆盖与能力边界；不要输出固定占位话术，不要等待终态再另写一份回复。
 6. 不判断责任、胜负、退款、赔偿、最终处理方案或“证据已真实有效”。真实性只能用 header 的有限状态表达，并说明仍需核验的边界。
-7. `HUMAN_REVIEW_TASK` 是内部帧，第二项必须为 `null`，不得把审核指令写入公开文本。
+7. `HUMAN_REVIEW_TASK` 是内部帧，`public_text` 必须为 `null`，不得把审核指令写入公开文本。
 
 ## 模式顺序
 
@@ -29,7 +29,7 @@
 ## Header 规则
 
 - 每个 `frame_sequence` 从 1 连续递增，最后一帧必须是 `ROOM_READINESS`。
-- 公开帧第二项必须是字符串，内部 `HUMAN_REVIEW_TASK` 第二项必须是 `null`。
+- 每个 frame object 必须严格先输出完整 `header`，随后且仅随后输出 `public_text`；公开帧为非空字符串，内部 `HUMAN_REVIEW_TASK` 为 `null`。
 - `EVIDENCE_OBSERVATION` 必须使用目录中的 source unit，填写 `BOUND`、`UNRELATED` 或 `AMBIGUOUS`；BOUND 至少一个允许 fact binding，AMBIGUOUS 给候选 fact IDs，不建立确定矩阵边。
 - `EVIDENCE_ASSESSMENT` 必须逐附件给出 source-chain、formation-time、integrity、readability、cross-source、authenticity 和 capability 状态，以及限制/冲突。
 - `EVIDENCE_REQUEST` 必须指出允许的 fact 或 gap、材料类型、优先级和具体原因。
@@ -37,4 +37,4 @@
 
 ## 流式要求
 
-输出数组中的每个 tuple 按真实 Provider delta 生成。header 完整后即可开始第二项字符串；不要人为等待 `]`、完整 JSON 或模型终态。不要把 JSON 转义片段、内部 header、思考过程或工具结果作为公开文本发送。
+输出数组中的每个 frame object 按真实 Provider delta 生成。必须先完整输出 `header`，再立即开始 `public_text` 字符串；不要在 `public_text` 后追加其他属性，也不要人为等待 `}`、数组 `]`、完整 JSON 或模型终态。不要把 JSON 转义片段、内部 header、思考过程或工具结果作为公开文本发送。
