@@ -1061,12 +1061,12 @@ class GatewayBackedGraphCommandStreamService:
 
         if next_event is None or not next_event.done():
             return False, None
+        error_site = _safe_prefetch_task_failure_site(next_event)
         try:
             event = next_event.result()
         except StopAsyncIteration:
             return False, GraphContractError("gateway stream ended without a terminal event")
         except BaseException as error:
-            error_site = _safe_prefetch_task_failure_site(next_event)
             if error_site is not None:
                 logger.error(
                     "graph_prefetch_source_failed error_type=%s error_site=%s:%s:%s",

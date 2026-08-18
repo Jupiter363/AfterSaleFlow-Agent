@@ -1486,13 +1486,16 @@ async def test_completed_prefetch_logs_only_the_code_owned_task_failure_site(
     namespace: dict[str, Any] = {"__name__": "pydantic.safe_prefetch_fixture"}
     exec(
         compile(
-            "async def fail():\n    raise KeyError('api_token=private')\n",
+            "async def fail():\n"
+            "    if False:\n"
+            "        yield None\n"
+            "    raise KeyError('api_token=private')\n",
             "C:/private/provider-payload.py",
             "exec",
         ),
         namespace,
     )
-    task = asyncio.create_task(namespace["fail"]())
+    task = asyncio.create_task(anext(namespace["fail"]()))
     await asyncio.gather(task, return_exceptions=True)
 
     terminal, error = (
@@ -1503,7 +1506,7 @@ async def test_completed_prefetch_logs_only_the_code_owned_task_failure_site(
     assert type(error) is KeyError
     assert caplog.messages == [
         "graph_prefetch_source_failed error_type=KeyError "
-        "error_site=pydantic.safe_prefetch_fixture:fail:2"
+        "error_site=pydantic.safe_prefetch_fixture:fail:4"
     ]
     assert "private" not in caplog.text
     assert "provider-payload" not in caplog.text
