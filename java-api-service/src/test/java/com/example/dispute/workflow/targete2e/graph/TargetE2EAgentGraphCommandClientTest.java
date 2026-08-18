@@ -36,7 +36,7 @@ class TargetE2EAgentGraphCommandClientTest {
             ExecuteAgentRunRequest.SCHEMA_VERSION,
             command.logicalRunId(),
             1,
-            "agent-stream.v2",
+            "agent-stream.v3",
             "d".repeat(64),
             null,
             false,
@@ -163,7 +163,7 @@ class TargetE2EAgentGraphCommandClientTest {
         ExecuteAgentRunRequest.SCHEMA_VERSION,
         command.logicalRunId(),
         1,
-        "agent-stream.v2",
+        "agent-stream.v3",
         "d".repeat(64),
         null,
         false,
@@ -190,7 +190,7 @@ class TargetE2EAgentGraphCommandClientTest {
       StreamEventType type,
       String value) {
     return new AgentStreamEvent(
-        "agent-stream.v2",
+        "agent-stream.v3",
         runId,
         attemptId,
         sequence,

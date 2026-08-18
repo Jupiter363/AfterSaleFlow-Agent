@@ -115,8 +115,10 @@ def test_stream_retries_only_before_any_visible_delta() -> None:
             raise TransientModelTransportError("lost")
 
     late = LateFailureTransport()
-    with pytest.raises(ModelStreamInterrupted):
+    with pytest.raises(ModelStreamInterrupted) as failure:
         list(_model(late, attempts=2).stream(_messages()))
+    assert failure.value.retryable is True
+    assert failure.value.safe_code == "MODEL_PROVIDER_STREAM_INTERRUPTED"
     assert late.stream_calls == 1
 
 
@@ -137,6 +139,27 @@ async def test_astream_uses_native_async_and_preserves_event_channel() -> None:
     assert any(governed_events_from_chunk(chunk) for chunk in chunks)
     documents = [chunk.content for chunk in chunks if chunk.content]
     assert documents == [Answer(answer="accepted").model_dump_json()]
+
+
+@pytest.mark.asyncio
+async def test_astream_marks_post_visible_provider_failure_for_outer_attempt() -> None:
+    class AsyncLateFailureTransport(RecordingTransport):
+        async def astream(self, request):
+            self.astream_calls += 1
+            self.requests.append(request)
+            yield ModelTransportVisibleDelta(field="answer", delta="partial")
+            raise TransientModelTransportError("provider connection closed")
+
+    transport = AsyncLateFailureTransport()
+
+    with pytest.raises(ModelStreamInterrupted) as failure:
+        async for _ in _model(transport, attempts=2).astream(_messages()):
+            pass
+
+    assert failure.value.retryable is True
+    assert failure.value.safe_code == "MODEL_PROVIDER_STREAM_INTERRUPTED"
+    assert transport.astream_calls == 1
+    assert transport.stream_calls == 0
 
 
 def test_stream_rejects_a_completed_result_from_an_unpinned_model() -> None:

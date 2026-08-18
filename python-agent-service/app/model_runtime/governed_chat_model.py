@@ -63,7 +63,24 @@ class ModelInvocationCancelled(RuntimeError):
 
 
 class ModelStreamInterrupted(RuntimeError):
-    pass
+    """A stream ended without one accepted model result.
+
+    ``retryable`` is deliberately false unless the failure came from the
+    transport's typed transient boundary.  Callers may then abort the current
+    public attempt and create a fresh outer attempt without ever retrying inside
+    a stream that has already exposed provider bytes.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        safe_code: str = "MODEL_STREAM_INTERRUPTED",
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.safe_code = safe_code
 
 
 class ModelRetryBudgetExhausted(RuntimeError):
@@ -298,7 +315,11 @@ class GovernedChatModel(BaseChatModel):
                     or attempts_used >= attempts_allowed
                     or not self._retry_possible()
                 ):
-                    raise ModelStreamInterrupted("governed model stream interrupted") from error
+                    raise ModelStreamInterrupted(
+                        "governed model provider stream interrupted",
+                        retryable=True,
+                        safe_code="MODEL_PROVIDER_STREAM_INTERRUPTED",
+                    ) from error
                 self._sync_backoff()
         raise ModelStreamInterrupted("governed model stream ended without a result")
 
@@ -368,7 +389,11 @@ class GovernedChatModel(BaseChatModel):
                     or attempts_used >= attempts_allowed
                     or not self._retry_possible()
                 ):
-                    raise ModelStreamInterrupted("governed model stream interrupted") from error
+                    raise ModelStreamInterrupted(
+                        "governed model provider stream interrupted",
+                        retryable=True,
+                        safe_code="MODEL_PROVIDER_STREAM_INTERRUPTED",
+                    ) from error
                 await self._async_backoff()
         raise ModelStreamInterrupted("governed model stream ended without a result")
 

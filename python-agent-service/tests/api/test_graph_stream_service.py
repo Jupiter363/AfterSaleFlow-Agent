@@ -59,6 +59,7 @@ from app.graph_runtime.persistence_models import GraphFenceContext, GraphGateway
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
 from app.llm import GovernedProviderRequest, LiteLlmProxyClient
+from app.model_runtime.governed_chat_model import ModelStreamInterrupted
 from app.model_runtime.transports import ModelTransportOutputError
 from app.security.invocation_envelope import VerifiedInvocation
 
@@ -1501,12 +1502,32 @@ async def test_prefetched_source_exception_is_propagated_on_the_next_read() -> N
             "MODEL_OUTPUT_INVALID",
         ),
         (
+            ModelStreamInterrupted(
+                "private incomplete provider stream",
+                retryable=True,
+                safe_code="MODEL_PROVIDER_STREAM_INTERRUPTED",
+            ),
+            "GRAPH_PROVIDER_STREAM_INTERRUPTED",
+            "RECOVERABLE_ATTEMPT",
+        ),
+        (
+            ModelStreamInterrupted("private deterministic stream failure"),
+            "GRAPH_STREAM_INTERRUPTED",
+            "STREAM_INTERRUPTED",
+        ),
+        (
             RuntimeError("private generic source detail"),
             "GRAPH_STREAM_INTERRUPTED",
             "STREAM_INTERRUPTED",
         ),
     ),
-    ids=("allowlisted", "unknown_fallback", "generic_unchanged"),
+    ids=(
+        "allowlisted",
+        "unknown_fallback",
+        "provider_stream_retryable",
+        "model_stream_nonretryable",
+        "generic_unchanged",
+    ),
 )
 async def test_preterminal_failure_persists_exact_safe_classification(
     failure: Exception,

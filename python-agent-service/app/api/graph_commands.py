@@ -13,7 +13,10 @@ import anyio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.api.graph_stream_service import _model_transport_output_error_code
+from app.api.graph_stream_service import (
+    _model_provider_stream_interruption_code,
+    _model_transport_output_error_code,
+)
 from app.api.graph_reconciliation_service import (
     GraphReconciliationService,
     TargetE2EReconciliationArtifacts,
@@ -944,6 +947,15 @@ async def _stream_ndjson(
             error_code=_model_transport_output_error_code(error),
         )
     except Exception as error:
+        provider_stream_code = _model_provider_stream_interruption_code(error)
+        if provider_stream_code is not None:
+            _log_safe_failure("graph provider stream interruption", error)
+            yield _encode_terminal_attempt_aborted(
+                codec,
+                validator,
+                reason_code=provider_stream_code,
+            )
+            return
         persistence_error = normalize_transient_persistence_error(error)
         if persistence_error is not None:
             _log_safe_failure("graph stream persistence", error)

@@ -52,6 +52,7 @@ from app.graph_runtime.target_e2e import (
     target_e2e_command_hash,
 )
 from app.model_runtime.transports import ModelTransportOutputError
+from app.model_runtime.governed_chat_model import ModelStreamInterrupted
 from app.security.invocation_envelope import (
     InvocationEnvelopeVerifier,
     ResolvedVerificationKey,
@@ -464,7 +465,7 @@ def _event(command: RoomGraphCommand, event_type: str, sequence: int) -> AgentSt
     else:
         raise AssertionError(event_type)
     return AgentStreamEvent(
-        schema_version="agent-stream.v2",
+        schema_version="agent-stream.v3",
         run_id=command.logical_run_id,
         attempt_id=command.attempt_id,
         sequence_no=sequence,
@@ -1146,6 +1147,20 @@ def test_attempt_aborted_is_a_valid_attempt_terminal_event() -> None:
             ),
             "error",
             {"error_code": "AGENT_OUTPUT_SCHEMA_INVALID", "retryable": False},
+        ),
+        (
+            ModelStreamInterrupted(
+                "private incomplete provider stream",
+                retryable=True,
+                safe_code="MODEL_PROVIDER_STREAM_INTERRUPTED",
+            ),
+            "attempt_aborted",
+            {"reason_code": "GRAPH_PROVIDER_STREAM_INTERRUPTED"},
+        ),
+        (
+            ModelStreamInterrupted("private deterministic stream failure"),
+            "error",
+            {"error_code": "GRAPH_STREAM_INTERNAL_ERROR", "retryable": False},
         ),
         (
             RuntimeError("private provider response"),

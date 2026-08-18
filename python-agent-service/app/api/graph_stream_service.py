@@ -35,6 +35,7 @@ from app.graph_runtime.provider_intent import GatewayProviderCallIntentRecorder
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
 from app.llm import AgentOutputSchemaError, bind_provider_call_intent_recorder
+from app.model_runtime.governed_chat_model import ModelStreamInterrupted
 from app.model_runtime.transports import ModelTransportOutputError
 from app.security.invocation_envelope import VerifiedInvocation
 
@@ -55,6 +56,9 @@ _MODEL_TRANSPORT_OUTPUT_ERROR_CODES = frozenset(
 )
 _MODEL_TRANSPORT_OUTPUT_ERROR_FALLBACK = "AGENT_OUTPUT_SCHEMA_INVALID"
 _MODEL_TRANSPORT_OUTPUT_ERROR_CLASSIFICATION = "MODEL_OUTPUT_INVALID"
+_MODEL_PROVIDER_STREAM_INTERRUPTED_CODE = "MODEL_PROVIDER_STREAM_INTERRUPTED"
+_GRAPH_PROVIDER_STREAM_INTERRUPTED_CODE = "GRAPH_PROVIDER_STREAM_INTERRUPTED"
+_MODEL_PROVIDER_STREAM_INTERRUPTED_CLASSIFICATION = "RECOVERABLE_ATTEMPT"
 _LEASE_OBSERVABILITY_EMPTY = "NONE"
 
 logger = logging.getLogger(__name__)
@@ -115,6 +119,18 @@ def _model_transport_output_error_code(
     if error.safe_code in _MODEL_TRANSPORT_OUTPUT_ERROR_CODES:
         return error.safe_code
     return _MODEL_TRANSPORT_OUTPUT_ERROR_FALLBACK
+
+
+def _model_provider_stream_interruption_code(error: BaseException) -> str | None:
+    """Expose only the exact reviewed transient provider-stream contract."""
+
+    if (
+        type(error) is ModelStreamInterrupted
+        and error.retryable is True
+        and error.safe_code == _MODEL_PROVIDER_STREAM_INTERRUPTED_CODE
+    ):
+        return _GRAPH_PROVIDER_STREAM_INTERRUPTED_CODE
+    return None
 
 
 class GraphRetainedCleanupError(GraphContractError):
@@ -1160,6 +1176,9 @@ class GatewayBackedGraphCommandStreamService:
         elif isinstance(error, (ModelTransportOutputError, AgentOutputSchemaError)):
             code = _model_transport_output_error_code(error)
             classification = _MODEL_TRANSPORT_OUTPUT_ERROR_CLASSIFICATION
+        elif (provider_code := _model_provider_stream_interruption_code(error)) is not None:
+            code = provider_code
+            classification = _MODEL_PROVIDER_STREAM_INTERRUPTED_CLASSIFICATION
         else:
             code = "GRAPH_STREAM_INTERRUPTED"
             classification = "STREAM_INTERRUPTED"
