@@ -80,9 +80,29 @@ TARGET_E2E_PROPOSAL_SOURCE_PATH = "/internal/graphs/target-e2e/commands/proposal
 _TERMINAL_EVENTS = frozenset({"attempt_aborted", "final", "error"})
 _STABLE_INTAKE_ERROR_CODE_PATTERN = re.compile(r"^INTAKE_[A-Z0-9_]{1,120}$")
 _SAFE_ERROR_SITE_MODULE_PATTERN = re.compile(
-    r"^app(?:\.[a-z_][a-z0-9_]*)+$"
+    r"^(?:app|asyncio|concurrent\.futures|langchain_core|langgraph|pydantic|pydantic_core)"
+    r"(?:\.[A-Za-z_][A-Za-z0-9_]*)*$"
 )
 _SAFE_ERROR_SITE_FUNCTION_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_SAFE_SCHEMA_KEY_ERROR_VALUES = frozenset(
+    {
+        "$defs",
+        "$ref",
+        "additionalProperties",
+        "anyOf",
+        "const",
+        "discriminator",
+        "frame_sequence",
+        "frame_type",
+        "items",
+        "mapping",
+        "oneOf",
+        "prefixItems",
+        "properties",
+        "required",
+        "type",
+    }
+)
 _NO_STORE_HEADERS: Mapping[str, str] = {
     "Cache-Control": "no-store, no-transform",
     "Pragma": "no-cache",
@@ -1220,6 +1240,16 @@ def _log_safe_failure(stage: str, error: Exception) -> None:
         return
     error_site = _safe_error_site(error)
     if error_site is not None:
+        error_key = _safe_schema_key_error_value(error)
+        if error_key is not None:
+            LOGGER.error(
+                "%s failed: error_type=%s error_site=%s:%s:%s error_key=%s",
+                stage,
+                type(error).__name__,
+                *error_site,
+                error_key,
+            )
+            return
         LOGGER.error(
             "%s failed: error_type=%s error_site=%s:%s:%s",
             stage,
@@ -1249,6 +1279,17 @@ def _safe_error_site(error: Exception) -> tuple[str, str, int] | None:
             candidate = (module_name, function_name, line_number)
         traceback = traceback.tb_next
     return candidate
+
+
+def _safe_schema_key_error_value(error: Exception) -> str | None:
+    if (
+        type(error) is KeyError
+        and len(error.args) == 1
+        and type(error.args[0]) is str
+        and error.args[0] in _SAFE_SCHEMA_KEY_ERROR_VALUES
+    ):
+        return error.args[0]
+    return None
 
 
 class _BodyTooLarge(ValueError):

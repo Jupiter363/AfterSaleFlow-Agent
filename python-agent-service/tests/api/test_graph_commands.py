@@ -307,6 +307,27 @@ def test_log_safe_failure_records_only_code_owned_error_site(
     assert "private" not in caplog.text
     assert "provider-payload" not in caplog.text
 
+    caplog.clear()
+    schema_namespace: dict[str, Any] = {"__name__": "pydantic.safe_fixture"}
+    exec(
+        compile(
+            "def fail():\n    raise KeyError('$ref')\n",
+            "C:/private/schema-payload.py",
+            "exec",
+        ),
+        schema_namespace,
+    )
+    try:
+        schema_namespace["fail"]()
+    except KeyError as error:
+        _log_safe_failure("graph stream iteration", error)
+
+    assert caplog.messages == [
+        "graph stream iteration failed: error_type=KeyError "
+        "error_site=pydantic.safe_fixture:fail:2 error_key=$ref"
+    ]
+    assert "schema-payload" not in caplog.text
+
 
 def test_log_safe_failure_records_only_trusted_closed_intake_executor_stage(
     caplog: pytest.LogCaptureFixture,
