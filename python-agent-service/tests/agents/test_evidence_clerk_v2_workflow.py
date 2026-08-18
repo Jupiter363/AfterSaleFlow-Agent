@@ -10,7 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agents.evidence_clerk.v2_contracts import EvidenceRoomOpeningStreamV2
+from app.agents.evidence_clerk.v2_contracts import (
+    EvidenceMaterialReviewStreamV2,
+    EvidenceRoomOpeningStreamV2,
+)
 from app.agents.evidence_clerk.v2_policy import EvidenceV2PublicOutputPolicy
 from app.agents.evidence_clerk.v2_workflow import EvidenceTurnWorkflowV2
 from app.harness.evidence_room_context_v2 import assemble_evidence_room_context_v2
@@ -135,35 +138,42 @@ def _opening_frames(request: EvidenceTurnRequest) -> list[list[object]]:
 
 def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> None:
     schema = EvidenceRoomOpeningStreamV2.model_json_schema()
-    tuple_schema = schema["$defs"]["EvidenceFrameTupleV2"]
-    public_branch = next(
-        branch
-        for branch in tuple_schema["anyOf"]
-        if branch["prefixItems"][1].get("type") == "string"
-    )
-    internal_branch = next(
-        branch
-        for branch in tuple_schema["anyOf"]
-        if branch["prefixItems"][1].get("type") == "null"
-    )
-    header_schema = public_branch["prefixItems"][0]
+    tuple_schema = schema["$defs"]["EvidenceRoomOpeningFrameTupleV2"]
+    header_schema = tuple_schema["prefixItems"][0]
 
     assert header_schema["discriminator"]["propertyName"] == "frame_type"
     mapping = header_schema["discriminator"]["mapping"]
     assert set(mapping) == {
         "ROOM_WELCOME",
         "OPENING_ORIENTATION",
+        "EVIDENCE_REQUEST",
+        "ROOM_READINESS",
+    }
+    assert tuple_schema["prefixItems"][1] == {
+        "maxLength": 100_000,
+        "minLength": 1,
+        "type": "string",
+    }
+    assert "anyOf" not in tuple_schema
+
+    material_schema = EvidenceMaterialReviewStreamV2.model_json_schema()
+    material_tuple = material_schema["$defs"]["EvidenceMaterialReviewFrameTupleV2"]
+    public_branch = next(
+        branch
+        for branch in material_tuple["anyOf"]
+        if branch["prefixItems"][1].get("type") == "string"
+    )
+    internal_branch = next(
+        branch
+        for branch in material_tuple["anyOf"]
+        if branch["prefixItems"][1].get("type") == "null"
+    )
+    assert set(public_branch["prefixItems"][0]["discriminator"]["mapping"]) == {
         "MATERIAL_RECEIPT",
-        "TEXT_FOLLOWUP_REPLY",
         "EVIDENCE_OBSERVATION",
         "EVIDENCE_ASSESSMENT",
         "EVIDENCE_REQUEST",
         "ROOM_READINESS",
-    }
-    assert public_branch["prefixItems"][1] == {
-        "maxLength": 100_000,
-        "minLength": 1,
-        "type": "string",
     }
     assert internal_branch["prefixItems"] == [
         {"$ref": "#/$defs/EvidenceHumanReviewFrameHeaderV2"},

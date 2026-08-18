@@ -252,6 +252,85 @@ class EvidenceFrameTupleV2(RootModel[EvidenceFrameWireV2]):
         return self.root[1]
 
 
+EvidenceRoomOpeningFrameHeaderV2 = Annotated[
+    EvidenceRoomWelcomeFrameHeaderV2
+    | EvidenceOpeningOrientationFrameHeaderV2
+    | EvidenceRequestFrameHeaderV2
+    | EvidenceRoomReadinessFrameHeaderV2,
+    Field(discriminator="frame_type"),
+]
+
+
+class EvidenceRoomOpeningFrameTupleV2(
+    RootModel[tuple[EvidenceRoomOpeningFrameHeaderV2, PublicText]]
+):
+    """Opening wire tuple; every allowed frame is public."""
+
+    root: tuple[EvidenceRoomOpeningFrameHeaderV2, PublicText]
+
+    @property
+    def header(self) -> EvidenceFrameHeaderV2:
+        return self.root[0]
+
+    @property
+    def public_text(self) -> str:
+        return self.root[1]
+
+
+EvidenceMaterialReviewPublicFrameHeaderV2 = Annotated[
+    EvidenceMaterialReceiptFrameHeaderV2
+    | EvidenceObservationFrameHeaderV2
+    | EvidenceAssessmentFrameHeaderV2
+    | EvidenceRequestFrameHeaderV2
+    | EvidenceRoomReadinessFrameHeaderV2,
+    Field(discriminator="frame_type"),
+]
+EvidenceMaterialReviewFrameWireV2 = (
+    tuple[EvidenceMaterialReviewPublicFrameHeaderV2, PublicText]
+    | tuple[EvidenceHumanReviewFrameHeaderV2, None]
+)
+
+
+class EvidenceMaterialReviewFrameTupleV2(
+    RootModel[EvidenceMaterialReviewFrameWireV2]
+):
+    """Material-review tuple with one explicit internal-frame branch."""
+
+    root: EvidenceMaterialReviewFrameWireV2
+
+    @property
+    def header(self) -> EvidenceFrameHeaderV2:
+        return self.root[0]
+
+    @property
+    def public_text(self) -> str | None:
+        return self.root[1]
+
+
+EvidenceTextFollowupModeFrameHeaderV2 = Annotated[
+    EvidenceTextFollowupFrameHeaderV2
+    | EvidenceRequestFrameHeaderV2
+    | EvidenceRoomReadinessFrameHeaderV2,
+    Field(discriminator="frame_type"),
+]
+
+
+class EvidenceTextFollowupFrameTupleV2(
+    RootModel[tuple[EvidenceTextFollowupModeFrameHeaderV2, PublicText]]
+):
+    """Text-followup wire tuple; every allowed frame is public."""
+
+    root: tuple[EvidenceTextFollowupModeFrameHeaderV2, PublicText]
+
+    @property
+    def header(self) -> EvidenceFrameHeaderV2:
+        return self.root[0]
+
+    @property
+    def public_text(self) -> str:
+        return self.root[1]
+
+
 class EvidenceTurnStreamV2(EvidenceV2Model):
     schema_version: Literal["evidence_turn_stream.v2"] = "evidence_turn_stream.v2"
     frames: list[EvidenceFrameTupleV2] = Field(min_length=1, max_length=128)
@@ -269,13 +348,25 @@ class EvidenceTurnStreamV2(EvidenceV2Model):
 class EvidenceRoomOpeningStreamV2(EvidenceTurnStreamV2):
     """Opening-specific provider contract; cardinality is checked by the executor."""
 
+    frames: list[EvidenceRoomOpeningFrameTupleV2] = Field(
+        min_length=1, max_length=128
+    )
+
 
 class EvidenceMaterialReviewStreamV2(EvidenceTurnStreamV2):
     """Attachment review-specific provider contract."""
 
+    frames: list[EvidenceMaterialReviewFrameTupleV2] = Field(
+        min_length=1, max_length=128
+    )
+
 
 class EvidenceTextFollowupStreamV2(EvidenceTurnStreamV2):
     """Text-only follow-up provider contract."""
+
+    frames: list[EvidenceTextFollowupFrameTupleV2] = Field(
+        min_length=1, max_length=128
+    )
 
 
 class CommittedEvidenceFrameV2(EvidenceV2Model):

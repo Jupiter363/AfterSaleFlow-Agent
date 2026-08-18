@@ -217,16 +217,7 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
     /** Relays a v3 in-flight frame event without advancing the durable SSE cursor. */
     @Override
     public void publish(AgentStreamEvent event) {
-        Objects.requireNonNull(event, "event");
-        if (!"agent-stream.v3".equals(event.schemaVersion())
-                || !Set.of(
-                                StreamEventType.PUBLIC_FRAME_START,
-                                StreamEventType.PUBLIC_TEXT_DELTA,
-                                StreamEventType.ACTIVE_FRAME_SNAPSHOT)
-                        .contains(event.eventType())) {
-            throw new IllegalArgumentException(
-                    "transient relay accepts only in-flight agent-stream.v3 frame events");
-        }
+        AgentRunTransientStreamPublisher.requireTransientV3(event);
         CopyOnWriteArrayList<Subscription> current = subscriptions.get(event.runId());
         if (current == null || current.isEmpty()) {
             return;
