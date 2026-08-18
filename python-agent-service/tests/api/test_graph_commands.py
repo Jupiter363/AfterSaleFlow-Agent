@@ -1541,6 +1541,93 @@ def test_stream_protocol_rejects_identity_sequence_payload_and_missing_terminal(
         validator.accept(_event(command, "final", 2))
 
 
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            "public_frame_start",
+            {
+                "frame_id": "frame-1",
+                "frame_sequence": 1,
+                "frame_type": "ROOM_WELCOME",
+                "public_header": {
+                    "frame_sequence": 1,
+                    "frame_type": "ROOM_WELCOME",
+                },
+            },
+        ),
+        (
+            "public_text_delta",
+            {
+                "frame_id": "frame-1",
+                "frame_sequence": 1,
+                "delta_index": 0,
+                "delta": "欢迎进入证据室",
+            },
+        ),
+        (
+            "active_frame_snapshot",
+            {
+                "frame_id": "frame-1",
+                "frame_sequence": 1,
+                "delta_index": 0,
+                "public_text": "欢迎进入证据室",
+            },
+        ),
+        (
+            "public_frame_committed",
+            {
+                "frame_id": "frame-1",
+                "frame_sequence": 1,
+                "durable_cursor": "v3:attempt-1:FRAME:1",
+                "header_sha256": "a" * 64,
+                "public_text_sha256": "b" * 64,
+                "frame_sha256": "c" * 64,
+                "public_text_chars": 8,
+            },
+        ),
+        (
+            "public_frame_interrupted",
+            {
+                "frame_id": "frame-1",
+                "frame_sequence": 1,
+                "durable_cursor": "v3:attempt-1:INTERRUPTED:1",
+                "reason_code": "PROVIDER_INTERRUPTED",
+                "public_text": "欢迎进入证据室",
+            },
+        ),
+    ],
+)
+def test_stream_protocol_accepts_contract_authorized_v3_frame_payloads(
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    command, _ = _command()
+    validator = AgentStreamProtocolValidator(
+        run_id=command.logical_run_id,
+        attempt_id=command.attempt_id,
+        audience=command.actor_scope.audience,
+    )
+    validator.accept(_event(command, "attempt_started", 0))
+
+    validator.accept(
+        AgentStreamEvent.model_validate(
+            {
+                "schema_version": "agent-stream.v3",
+                "run_id": command.logical_run_id,
+                "attempt_id": command.attempt_id,
+                "sequence_no": 1,
+                "event_type": event_type,
+                "audience": command.actor_scope.audience,
+                "occurred_at": datetime.now(timezone.utc),
+                "payload": payload,
+            }
+        )
+    )
+
+    assert validator.last_sequence == 1
+
+
 def test_stream_protocol_rejects_payload_siblings_and_python_reset() -> None:
     command, _ = _command()
     validator = AgentStreamProtocolValidator(

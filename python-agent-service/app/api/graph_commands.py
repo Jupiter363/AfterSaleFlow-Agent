@@ -23,6 +23,7 @@ from app.api.graph_reconciliation_service import (
 )
 from app.contracts.v1.codec import ContractCodec
 from app.contracts.v1.models import (
+    AGENT_STREAM_PAYLOAD_FIELDS,
     AgentStreamEvent,
     AgentStreamPayload,
     GraphReconcileResponse,
@@ -107,15 +108,6 @@ _NO_STORE_HEADERS: Mapping[str, str] = {
     "Cache-Control": "no-store, no-transform",
     "Pragma": "no-cache",
     "X-Content-Type-Options": "nosniff",
-}
-_REQUIRED_PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = {
-    "attempt_started": frozenset({"node"}),
-    "visible_delta": frozenset({"node", "field", "delta"}),
-    "usage": frozenset({"usage"}),
-    "attempt_aborted": frozenset({"reason_code"}),
-    "attempt_reset": frozenset({"reset_attempt_id", "reason_code"}),
-    "final": frozenset({"final_result_ref", "final_result_hash"}),
-    "error": frozenset({"error_code", "retryable"}),
 }
 LOGGER = logging.getLogger(__name__)
 _FORBIDDEN_BOOTSTRAP_HEADER = "x-aftersaleflow-target-e2e-activation"
@@ -252,9 +244,10 @@ class AgentStreamProtocolValidator:
     terminal: bool = False
 
     def accept(self, event: AgentStreamEvent) -> None:
+        expected_payload_fields = AGENT_STREAM_PAYLOAD_FIELDS.get(event.event_type)
         if (
             event.schema_version != "agent-stream.v3"
-            or event.event_type not in _REQUIRED_PAYLOAD_FIELDS
+            or expected_payload_fields is None
             or not isinstance(event.payload, AgentStreamPayload)
             or isinstance(event.sequence_no, bool)
             or not isinstance(event.sequence_no, int)
@@ -276,7 +269,7 @@ class AgentStreamProtocolValidator:
         elif event.event_type == "attempt_started":
             raise AgentStreamProtocolError("stream cannot contain another attempt_started event")
         present = frozenset(event.payload.model_dump(exclude_none=True))
-        if present != _REQUIRED_PAYLOAD_FIELDS[event.event_type]:
+        if present != expected_payload_fields:
             raise AgentStreamProtocolError("stream payload contains incompatible fields")
         if event.event_type == "attempt_reset":
             raise AgentStreamProtocolError(
