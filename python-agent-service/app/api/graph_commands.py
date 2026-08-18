@@ -46,6 +46,7 @@ from app.graph_runtime.errors import (
     IntakeExecutorDiagnosticStage,
     STABLE_INTAKE_GRAPH_CONTRACT_ERROR_CODES,
     normalize_transient_persistence_error,
+    stable_graph_contract_diagnostic_code,
 )
 from app.graph_runtime.identity import ThreadIdentity
 from app.graphs.intake.errors import IntakeGraphContractError
@@ -78,7 +79,6 @@ TARGET_E2E_RECONCILE_PATH = "/internal/graphs/target-e2e/commands/reconcile"
 TARGET_E2E_PROPOSAL_SOURCE_PATH = "/internal/graphs/target-e2e/commands/proposal-source"
 _TERMINAL_EVENTS = frozenset({"attempt_aborted", "final", "error"})
 _STABLE_INTAKE_ERROR_CODE_PATTERN = re.compile(r"^INTAKE_[A-Z0-9_]{1,120}$")
-_STABLE_GRAPH_CONTRACT_INTAKE_ERROR_CODES = STABLE_INTAKE_GRAPH_CONTRACT_ERROR_CODES
 _NO_STORE_HEADERS: Mapping[str, str] = {
     "Cache-Control": "no-store, no-transform",
     "Pragma": "no-cache",
@@ -1192,11 +1192,9 @@ def _log_safe_failure(stage: str, error: Exception) -> None:
             error_code = error.code
     elif (
         isinstance(error, GraphContractError)
-        and len(error.args) == 1
-        and isinstance(error.args[0], str)
-        and error.args[0] in _STABLE_GRAPH_CONTRACT_INTAKE_ERROR_CODES
+        and (diagnostic_code := stable_graph_contract_diagnostic_code(error)) is not None
     ):
-        error_code = error.args[0]
+        error_code = diagnostic_code
     if error_code is not None:
         LOGGER.error(
             "%s failed: error_type=%s error_code=%s",

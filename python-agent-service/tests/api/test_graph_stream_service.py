@@ -1562,6 +1562,47 @@ async def test_preterminal_failure_persists_exact_safe_classification(
 
 
 @pytest.mark.asyncio
+async def test_preterminal_evidence_contract_failure_persists_closed_diagnostic_code() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    captured_finishes: list[dict[str, Any]] = []
+
+    class CapturingGateway(_Gateway):
+        async def finish_execution_attempt(
+            self,
+            execution: GatewayExecution,
+            **kwargs: Any,
+        ) -> GatewayExecution:
+            del execution
+            captured_finishes.append(dict(kwargs))
+            return _execution(admission)
+
+    gateway = CapturingGateway(admission)
+    service, _ = await _service(gateway, _Executor())
+
+    await service._abort_preterminal(
+        _execution(admission),
+        GraphContractError("EVIDENCE_V2_OPENING_FRAME_ORDER_INVALID"),
+    )
+    await service._abort_preterminal(
+        _execution(admission),
+        GraphContractError("EVIDENCE_API_TOKEN_SECRET"),
+    )
+
+    assert captured_finishes == [
+        {
+            "status": AttemptStatus.FAILED,
+            "error_code": "EVIDENCE_V2_OPENING_FRAME_ORDER_INVALID",
+            "error_classification": "CONTRACT_REJECTED",
+        },
+        {
+            "status": AttemptStatus.FAILED,
+            "error_code": "GRAPH_STREAM_INTERRUPTED",
+            "error_classification": "STREAM_INTERRUPTED",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_terminal_reconciliation_release_does_not_surface_a_renewal_lease_loss() -> None:
     admission = _admission(AdmissionAction.ACQUIRE)
     execution = _execution(admission)

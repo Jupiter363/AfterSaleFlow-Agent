@@ -219,6 +219,23 @@ def test_log_safe_failure_records_closed_graph_contract_intake_code_without_muta
     assert error.code == original_public_code == "GRAPH_CONTRACT_REJECTED"
 
 
+def test_log_safe_failure_records_closed_evidence_diagnostic_without_public_mutation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    diagnostic_code = "EVIDENCE_V2_OPENING_FRAME_ORDER_INVALID"
+    error = GraphContractError(diagnostic_code)
+
+    _log_safe_failure("graph stream runtime", error)
+
+    assert caplog.messages == [
+        "graph stream runtime failed: "
+        "error_type=GraphContractError "
+        f"error_code={diagnostic_code}"
+    ]
+    assert error.args == (diagnostic_code,)
+    assert error.code == "GRAPH_CONTRACT_REJECTED"
+
+
 @pytest.mark.parametrize(
     "message",
     (

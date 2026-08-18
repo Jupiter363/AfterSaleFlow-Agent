@@ -21,6 +21,7 @@ from app.graph_runtime.errors import (
     GraphNewAgentAttemptRequiredError,
     GraphVersionUnavailableError,
     normalize_transient_persistence_error,
+    stable_graph_contract_diagnostic_code,
 )
 from app.graph_runtime.gateway import (
     AdmissionAction,
@@ -59,6 +60,7 @@ _MODEL_TRANSPORT_OUTPUT_ERROR_CLASSIFICATION = "MODEL_OUTPUT_INVALID"
 _MODEL_PROVIDER_STREAM_INTERRUPTED_CODE = "MODEL_PROVIDER_STREAM_INTERRUPTED"
 _GRAPH_PROVIDER_STREAM_INTERRUPTED_CODE = "GRAPH_PROVIDER_STREAM_INTERRUPTED"
 _MODEL_PROVIDER_STREAM_INTERRUPTED_CLASSIFICATION = "RECOVERABLE_ATTEMPT"
+_GRAPH_CONTRACT_ERROR_CLASSIFICATION = "CONTRACT_REJECTED"
 _LEASE_OBSERVABILITY_EMPTY = "NONE"
 
 logger = logging.getLogger(__name__)
@@ -1176,6 +1178,9 @@ class GatewayBackedGraphCommandStreamService:
         elif isinstance(error, (ModelTransportOutputError, AgentOutputSchemaError)):
             code = _model_transport_output_error_code(error)
             classification = _MODEL_TRANSPORT_OUTPUT_ERROR_CLASSIFICATION
+        elif (diagnostic_code := stable_graph_contract_diagnostic_code(error)) is not None:
+            code = diagnostic_code
+            classification = _GRAPH_CONTRACT_ERROR_CLASSIFICATION
         elif (provider_code := _model_provider_stream_interruption_code(error)) is not None:
             code = provider_code
             classification = _MODEL_PROVIDER_STREAM_INTERRUPTED_CLASSIFICATION
