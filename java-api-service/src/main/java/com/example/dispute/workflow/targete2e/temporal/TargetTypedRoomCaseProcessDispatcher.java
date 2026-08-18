@@ -81,7 +81,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     extends TargetTypedRoomCaseProcessWorkflow {
 
   private static final String TARGET_INTAKE_PROMPT_VERSION =
-      "all-rooms-prompt.target-e2e.v1";
+      "all-rooms-prompt.target-e2e.v2";
   private static final String TARGET_INTAKE_MODEL_PROFILE_ID =
       "target-e2e.contract-blocked";
   private static final String TARGET_INTAKE_POLICY_VERSION =

@@ -147,7 +147,7 @@ class TargetTypedRoomCaseProcessDispatcherTest {
     assertThat(first.graphVersion()).isEqualTo(TargetTypedRoomProtocol.GRAPH_VERSION);
     assertThat(first.checkpointSchemaVersion())
         .isEqualTo(TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION);
-    assertThat(first.promptVersion()).isEqualTo("all-rooms-prompt.target-e2e.v1");
+    assertThat(first.promptVersion()).isEqualTo("all-rooms-prompt.target-e2e.v2");
     assertThat(first.modelProfileId()).isEqualTo("target-e2e.contract-blocked");
     assertThat(first.policyVersion()).isEqualTo("all-rooms-policy.target-e2e.v1");
     assertThat(first.guardrailVersion()).isEqualTo("all-rooms-guardrail.target-e2e.v1");

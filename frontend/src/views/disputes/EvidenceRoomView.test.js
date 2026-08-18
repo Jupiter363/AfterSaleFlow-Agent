@@ -237,7 +237,7 @@ function targetTemporalProjection(count, overrides = {}) {
       graph_version: "target-e2e-graph.2026-08-18.1",
       checkpoint_schema_version: "target-e2e-checkpoint.v2",
       state_schema_version: "evidence-graph-state.v2",
-      prompt_version: "all-rooms-prompt.target-e2e.v1",
+      prompt_version: "all-rooms-prompt.target-e2e.v2",
       model_profile_id: "target-e2e.contract-blocked",
       assessment_output_schema_version: "evidence-item-assessment.v1",
       terminal_output_schema_version: "evidence-batch-proposal.v1",

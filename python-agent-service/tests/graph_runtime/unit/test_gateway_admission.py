@@ -228,7 +228,7 @@ def _target_e2e_command(
     actor_role: str = "USER",
     audience: str | None = None,
     room_type: str = "INTAKE",
-    graph_key: str = "all-rooms.target-e2e.v1",
+    graph_key: str = "all-rooms.target-e2e.v2",
     prompt_profile_id: str | None = None,
 ) -> RoomGraphCommand:
     payload = _command().model_dump(
@@ -241,8 +241,8 @@ def _target_e2e_command(
         {
             "room_type": room_type,
             "graph_key": graph_key,
-            "graph_version": "target-e2e-graph.2026-07-27.1",
-            "checkpoint_schema_version": "target-e2e-checkpoint.v1",
+            "graph_version": "target-e2e-graph.2026-08-18.1",
+            "checkpoint_schema_version": "target-e2e-checkpoint.v2",
             "actor_scope": {
                 **payload["actor_scope"],
                 "actor_role": actor_role,
@@ -254,7 +254,7 @@ def _target_e2e_command(
                     prompt_profile_id
                     or f"DISPUTE_INTAKE_OFFICER:{actor_role}:v1"
                 ),
-                "output_schema_version": "target-e2e-room-proposal-source.v1",
+                "output_schema_version": "target-e2e-room-proposal-source.v2",
             },
         }
     )
@@ -263,17 +263,17 @@ def _target_e2e_command(
     return RoomGraphCommand.model_validate(payload)
 
 
-def _target_e2e_registry(*, prompt_version: str = "all-rooms-prompt.target-e2e.v1") -> RegistryRecord:
+def _target_e2e_registry(*, prompt_version: str = "all-rooms-prompt.target-e2e.v2") -> RegistryRecord:
     record = _registry()
     return replace(
         record,
         binding=replace(
             record.binding,
-            graph_key="all-rooms.target-e2e.v1",
-            graph_version="target-e2e-graph.2026-07-27.1",
-            checkpoint_schema_version="target-e2e-checkpoint.v1",
+            graph_key="all-rooms.target-e2e.v2",
+            graph_version="target-e2e-graph.2026-08-18.1",
+            checkpoint_schema_version="target-e2e-checkpoint.v2",
             prompt_version=prompt_version,
-            output_schema_version="target-e2e-room-proposal-source.v1",
+            output_schema_version="target-e2e-room-proposal-source.v2",
         ),
         state=RegistryState.ACTIVE_CANDIDATE,
     )
@@ -335,7 +335,7 @@ def test_target_e2e_intake_accepts_only_the_matching_baseline_prompt_alias(
     ("command", "registry", "actual_profile", "execution_lane"),
     [
         (
-            _target_e2e_command(prompt_profile_id="all-rooms-prompt.target-e2e.v1"),
+            _target_e2e_command(prompt_profile_id="all-rooms-prompt.target-e2e.v2"),
             _target_e2e_registry(),
             None,
             GraphGatewayMode.TARGET_E2E_CANDIDATE,

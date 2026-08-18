@@ -26,6 +26,7 @@ from app.api.graph_stream_service import (
 from app.config import Settings
 from app.graph_runtime.persistence_models import GraphGatewayMode
 from app.graph_runtime.registry import VersionBinding
+from app.harness.prompt_composer import PromptResourceError
 from app.security.invocation_envelope import (
     InvocationEnvelopeError,
     TransportIdentity,
@@ -41,6 +42,18 @@ BASE_SETTINGS = {
     "java_service_secret": "test-java-service-secret",
     "python_agent_service_secret": "test-python-service-secret",
 }
+
+
+def test_target_e2e_prompt_resources_are_required_before_runtime_readiness() -> None:
+    graph_lifecycle._require_target_e2e_prompt_resources(
+        [SimpleNamespace(prompt_version="all-rooms-prompt.target-e2e.v2")]
+    )
+
+    with pytest.raises(PromptResourceError) as retired:
+        graph_lifecycle._require_target_e2e_prompt_resources(
+            [SimpleNamespace(prompt_version="all-rooms-prompt.target-e2e.v1")]
+        )
+    assert retired.value.code == "GRAPH_PROMPT_RESOURCE_UNAVAILABLE"
 
 
 def _settings(**overrides: Any) -> Settings:

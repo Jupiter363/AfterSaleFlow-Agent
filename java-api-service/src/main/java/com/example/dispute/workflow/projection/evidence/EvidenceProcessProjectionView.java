@@ -584,7 +584,7 @@ public record EvidenceProcessProjectionView(
                     "target checkpointSchemaVersion");
             requireEquals(
                     promptVersion,
-                    "all-rooms-prompt.target-e2e.v1",
+                    "all-rooms-prompt.target-e2e.v2",
                     "target promptVersion");
             requireEquals(
                     modelProfileId,
@@ -625,7 +625,7 @@ public record EvidenceProcessProjectionView(
                     && "target-e2e-graph.2026-08-18.1".equals(graphVersion)
                     && "target-e2e-checkpoint.v2".equals(checkpointSchemaVersion)
                     && "evidence-graph-state.v2".equals(stateSchemaVersion)
-                    && "all-rooms-prompt.target-e2e.v1".equals(promptVersion)
+                    && "all-rooms-prompt.target-e2e.v2".equals(promptVersion)
                     && "target-e2e.contract-blocked".equals(modelProfileId)
                     && "evidence-item-assessment.v1".equals(assessmentOutputSchemaVersion)
                     && "evidence-batch-proposal.v1".equals(terminalOutputSchemaVersion)

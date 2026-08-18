@@ -413,7 +413,7 @@
               "graph_version": {"const": "target-e2e-graph.2026-08-18.1"},
               "checkpoint_schema_version": {"const": "target-e2e-checkpoint.v2"},
               "state_schema_version": {"const": "evidence-graph-state.v2"},
-              "prompt_version": {"const": "all-rooms-prompt.target-e2e.v1"},
+              "prompt_version": {"const": "all-rooms-prompt.target-e2e.v2"},
               "model_profile_id": {"const": "target-e2e.contract-blocked"},
               "assessment_output_schema_version": {"const": "evidence-item-assessment.v1"},
               "terminal_output_schema_version": {"const": "evidence-batch-proposal.v1"},

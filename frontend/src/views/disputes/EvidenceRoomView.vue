@@ -172,7 +172,7 @@ const targetTemporalProjection = computed(() =>
   projectionVersionPins.value?.graph_version === "target-e2e-graph.2026-08-18.1" &&
   projectionVersionPins.value?.checkpoint_schema_version === "target-e2e-checkpoint.v2" &&
   projectionVersionPins.value?.state_schema_version === "evidence-graph-state.v2" &&
-  projectionVersionPins.value?.prompt_version === "all-rooms-prompt.target-e2e.v1" &&
+  projectionVersionPins.value?.prompt_version === "all-rooms-prompt.target-e2e.v2" &&
   projectionVersionPins.value?.model_profile_id === "target-e2e.contract-blocked" &&
   projectionVersionPins.value?.assessment_output_schema_version ===
     "evidence-item-assessment.v1" &&

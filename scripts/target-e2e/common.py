@@ -33,12 +33,13 @@ APPLICATION_IMAGE_KEYS = {"java", "python", "ocr", "frontend"}
 
 # The target-E2E release unit has one shared graph binding.  Keep the
 # protocol identity in this module so provisioning and run-context validation
-# cannot silently drift apart again.  The profile/policy identifiers remain
-# the existing approved target profiles; the graph/checkpoint/proposal
-# identities are the v2 cutover boundary.
+# cannot silently drift apart again.  The graph/checkpoint/prompt/proposal
+# identities are the v2 cutover boundary; policy identifiers remain the
+# existing approved target profiles.
 TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v2"
 TARGET_E2E_GRAPH_VERSION = "target-e2e-graph.2026-08-18.1"
 TARGET_E2E_CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v2"
+TARGET_E2E_PROMPT_VERSION = "all-rooms-prompt.target-e2e.v2"
 TARGET_E2E_OUTPUT_SCHEMA_VERSION = "target-e2e-room-proposal-source.v2"
 TARGET_E2E_TOOL_POLICY_VERSION = "tools.none.v1"
 TARGET_E2E_ALLOWED_ROOM_TYPES = ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]

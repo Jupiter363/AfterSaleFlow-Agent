@@ -1306,7 +1306,7 @@ class IntakeRoomWorkflowActivityTest {
         "control-build-p9",
         "2.0.0",
         "intake-checkpoint.v2",
-        "all-rooms-prompt.target-e2e.v1",
+        "all-rooms-prompt.target-e2e.v2",
         "target-e2e.contract-blocked",
         "target-e2e-intake-output.v1",
         "all-rooms-policy.target-e2e.v1",

@@ -45,6 +45,7 @@ from app.graph_runtime.errors import (
 )
 from app.graph_runtime import intake_executor as intake_executor_module
 from app.graphs.intake.errors import IntakeGraphContractError
+from app.harness.prompt_composer import PromptResourceError
 from app.graph_runtime.identity import ActorScopeBinding, RoomType, ThreadIdentity
 from app.graph_runtime.target_e2e import (
     TargetE2EGraphCommandEnvelope,
@@ -1242,6 +1243,35 @@ def test_evidence_invocation_contract_failure_keeps_stable_diagnostic_code() -> 
         "retryable": False,
     }
     assert "private Evidence runner signature detail" not in response.text
+    assert service.closed is True
+
+
+def test_prompt_resource_failure_keeps_stable_diagnostic_code() -> None:
+    command, instance = _command()
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    service = FakeStreamService(
+        (_event(command, "attempt_started", 0),),
+        failure_after=PromptResourceError("private prompt path detail"),
+    )
+    client = _client(command=command, private_key=private_key, service=service)
+
+    response = client.post(
+        "/internal/graphs/commands/stream",
+        content=json.dumps(instance),
+        headers={
+            "Authorization": f"Bearer {_token(command, private_key)}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert [event["event_type"] for event in events] == ["attempt_started", "error"]
+    assert events[-1]["payload"] == {
+        "error_code": "GRAPH_PROMPT_RESOURCE_UNAVAILABLE",
+        "retryable": False,
+    }
+    assert "private prompt path detail" not in response.text
     assert service.closed is True
 
 

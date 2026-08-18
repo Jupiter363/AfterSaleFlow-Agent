@@ -243,7 +243,7 @@ projection_compatibility:
     real_case_shadow_allowed: false
     graph_version: target-e2e-graph.2026-08-18.1
     checkpoint_schema_version: target-e2e-checkpoint.v2
-    prompt_version: all-rooms-prompt.target-e2e.v1
+    prompt_version: all-rooms-prompt.target-e2e.v2
     model_profile_id: target-e2e.contract-blocked
     policy_version: all-rooms-policy.target-e2e.v1
     guardrail_version: all-rooms-guardrail.target-e2e.v1

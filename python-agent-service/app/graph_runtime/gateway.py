@@ -106,7 +106,7 @@ _CONTROL_PLANE_RETRY_INITIAL_SECONDS: Final[float] = 0.05
 _CONTROL_PLANE_RETRY_MAX_SECONDS: Final[float] = 0.2
 _CONTROL_PLANE_LEASE_SAFETY_MARGIN: Final[timedelta] = timedelta(seconds=2)
 _TARGET_E2E_GRAPH_KEY: Final[str] = "all-rooms.target-e2e.v2"
-_TARGET_E2E_LEGACY_PROMPT_VERSION: Final[str] = "all-rooms-prompt.target-e2e.v1"
+_TARGET_E2E_ROOM_PROMPT_VERSION: Final[str] = "all-rooms-prompt.target-e2e.v2"
 _TARGET_E2E_INTAKE_ROLES: Final[frozenset[str]] = frozenset({"USER", "MERCHANT"})
 _LEASE_OBSERVABILITY_EMPTY: Final[str] = "NONE"
 
@@ -1712,11 +1712,11 @@ class GraphCommandGateway:
         actual_profile: CommandProfileBinding,
         execution_lane: GraphGatewayMode,
     ) -> None:
-        """Allow only the frozen candidate Intake prompt alias.
+        """Allow only the frozen candidate Intake role-profile alias.
 
         The durable command and its signed profile continue to carry the actual
         role-specific PromptComposer ID.  The exception exists solely because the
-        candidate all-room registry row is pinned to the older room-level prompt.
+        candidate all-room registry row is pinned to the room-level bundle version.
         """
 
         binding = registry.binding
@@ -1730,7 +1730,7 @@ class GraphCommandGateway:
         )
         if is_target_intake_candidate:
             if (
-                binding.prompt_version == _TARGET_E2E_LEGACY_PROMPT_VERSION
+                binding.prompt_version == _TARGET_E2E_ROOM_PROMPT_VERSION
                 and role in _TARGET_E2E_INTAKE_ROLES
                 and audience == role
                 and actual_profile

@@ -49,6 +49,7 @@ from app.graph_runtime.errors import (
 )
 from app.graph_runtime.identity import ThreadIdentity
 from app.graphs.intake.errors import IntakeGraphContractError
+from app.harness.prompt_composer import PromptResourceError
 from app.llm import AgentOutputSchemaError
 from app.model_runtime.transports import ModelTransportOutputError
 from app.graph_runtime.target_e2e import (
@@ -945,6 +946,13 @@ async def _stream_ndjson(
             codec,
             validator,
             error_code=_model_transport_output_error_code(error),
+        )
+    except PromptResourceError as error:
+        _log_safe_failure("graph prompt resource", error)
+        yield _encode_terminal_error(
+            codec,
+            validator,
+            error_code=PromptResourceError.code,
         )
     except Exception as error:
         provider_stream_code = _model_provider_stream_interruption_code(error)

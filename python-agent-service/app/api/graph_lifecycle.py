@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -79,6 +79,10 @@ from app.graph_runtime.target_e2e_lifecycle import (
     TargetE2ELifecycleReconciliation,
     VerifiedTargetE2ELifecycleReceipt,
 )
+from app.harness.prompt_composer import (
+    PromptRepository,
+    TARGET_E2E_PROMPT_BUNDLE_NODES,
+)
 from app.security.graph_runtime import (
     GraphSecurityRuntime,
     _open_for_lifecycle as _open_graph_security_runtime_for_lifecycle,
@@ -148,6 +152,23 @@ def _shadow_bulkhead_config() -> PostgresBulkheadConfig:
         wait_timeout_seconds=_SHADOW_BULKHEAD_WAIT_TIMEOUT_SECONDS,
         poll_interval_seconds=_SHADOW_BULKHEAD_POLL_INTERVAL_SECONDS,
     )
+
+
+def _require_target_e2e_prompt_resources(
+    configured_bindings: Iterable[Any],
+) -> None:
+    """Fail startup before activation registration when its Prompt bundle is incomplete."""
+
+    prompt_repository = PromptRepository()
+    observed = False
+    for configured in configured_bindings:
+        observed = True
+        prompt_repository.require_prompt_bundle(
+            configured.prompt_version,
+            required_node_names=TARGET_E2E_PROMPT_BUNDLE_NODES,
+        )
+    if not observed:
+        raise ValueError("target-E2E Prompt readiness requires an exact binding")
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +485,9 @@ class GraphApplicationRuntime:
                 context = settings.graph_target_e2e_runtime_context
                 if context is None or not settings.graph_target_e2e_bindings:
                     raise ValueError("target-E2E runtime projection is incomplete")
+                _require_target_e2e_prompt_resources(
+                    settings.graph_target_e2e_bindings
+                )
                 authority = TargetE2ERuntimeAuthority.from_context(
                     context,
                     settings.graph_target_e2e_bindings,

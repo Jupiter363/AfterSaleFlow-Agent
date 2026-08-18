@@ -161,7 +161,7 @@ class TargetEvidenceFinalizationRequestResolverTest {
             321),
         new RoomGraphCommand.InvocationContext(
             "all-rooms-agent.target-e2e.v1",
-            "all-rooms-prompt.target-e2e.v1",
+            "all-rooms-prompt.target-e2e.v2",
             "target-e2e.contract-blocked",
             "target-e2e-room-proposal-source.v2",
             "all-rooms-policy.target-e2e.v1",

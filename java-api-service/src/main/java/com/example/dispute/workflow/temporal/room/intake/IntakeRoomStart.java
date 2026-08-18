@@ -28,7 +28,7 @@ public record IntakeRoomStart(
     IntakeRoomCarryState carryState) {
 
   private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
-  private static final String TARGET_PROMPT_VERSION = "all-rooms-prompt.target-e2e.v1";
+  private static final String TARGET_PROMPT_VERSION = "all-rooms-prompt.target-e2e.v2";
   private static final String TARGET_MODEL_PROFILE_ID = "target-e2e.contract-blocked";
   private static final String TARGET_OUTPUT_SCHEMA_VERSION = "target-e2e-intake-output.v1";
   private static final String TARGET_POLICY_VERSION = "all-rooms-policy.target-e2e.v1";

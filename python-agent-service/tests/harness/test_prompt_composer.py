@@ -2,7 +2,59 @@
 
 from pathlib import Path
 
-from app.harness.prompt_composer import PromptComposer, PromptRepository
+import pytest
+
+from app.harness.prompt_composer import (
+    PromptComposer,
+    PromptRepository,
+    PromptResourceError,
+    TARGET_E2E_PROMPT_BUNDLE_NODES,
+)
+
+
+def test_target_e2e_v2_prompt_bundle_resolves_evidence_contract() -> None:
+    repository = PromptRepository()
+
+    system_prompt = repository.render_system_prompt(
+        "evidence_turn",
+        prompt_profile_id="all-rooms-prompt.target-e2e.v2",
+        trusted_agent_context={
+            "case_id": "CASE_PROMPT_BUNDLE",
+            "room_type": "EVIDENCE",
+            "actor_id": "user-local",
+            "actor_role": "USER",
+            "agent_key": "all-rooms-agent.target-e2e.v1",
+            "agent_invocation_id": "ATTEMPT_PROMPT_BUNDLE",
+            "agent_session_id": "SESSION_PROMPT_BUNDLE",
+            "scope_type": "EVIDENCE_PARTY_PRIVATE",
+            "allowed_actor_ids": ["user-local"],
+            "allowed_actor_roles": ["USER"],
+            "prompt_profile_id": "all-rooms-prompt.target-e2e.v2",
+        },
+    )
+
+    assert "证据室 v2 业务输出合同" in system_prompt
+    assert '"prompt_profile_id":"all-rooms-prompt.target-e2e.v2"' in system_prompt
+
+    resolved = repository.require_prompt_bundle(
+        "all-rooms-prompt.target-e2e.v2",
+        required_node_names=TARGET_E2E_PROMPT_BUNDLE_NODES,
+    )
+    assert len(resolved) == len(TARGET_E2E_PROMPT_BUNDLE_NODES) == 9
+    assert Path("app/agents/prompts/evidence_clerk/evidence_turn_v2.md") in resolved
+
+    with pytest.raises(PromptResourceError) as retired:
+        repository.require_prompt_bundle(
+            "all-rooms-prompt.target-e2e.v1",
+            required_node_names=TARGET_E2E_PROMPT_BUNDLE_NODES,
+        )
+    assert retired.value.code == "GRAPH_PROMPT_RESOURCE_UNAVAILABLE"
+
+    with pytest.raises(PromptResourceError):
+        repository.render_system_prompt(
+            "target_intake_cognition",
+            prompt_profile_id="all-rooms-prompt.target-e2e.v2",
+        )
 
 
 # 所属模块：Agent Harness > test_prompt_composer；函数角色：回归测试用例。

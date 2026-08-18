@@ -1,6 +1,6 @@
 {
   "schema_version": "evidence-process-projection.v1",
-  "projection_hash": "47b505669b2c9214b05af9894f6d788f068a592ef3caa5ecdbe105d94dc0d8cf",
+  "projection_hash": "d9ac28a0f06db62dcf0c13dc72f4b06f52b239ccec354f7ba4a0e38ff4e77c2e",
   "projection_state": "AVAILABLE",
   "tenant_surrogate": "legacy-default",
   "case_id": "CASE_P9_EXPLICIT_001",
@@ -63,7 +63,7 @@
     "graph_version": "target-e2e-graph.2026-08-18.1",
     "checkpoint_schema_version": "target-e2e-checkpoint.v2",
     "state_schema_version": "evidence-graph-state.v2",
-    "prompt_version": "all-rooms-prompt.target-e2e.v1",
+    "prompt_version": "all-rooms-prompt.target-e2e.v2",
     "model_profile_id": "target-e2e.contract-blocked",
     "assessment_output_schema_version": "evidence-item-assessment.v1",
     "terminal_output_schema_version": "evidence-batch-proposal.v1",

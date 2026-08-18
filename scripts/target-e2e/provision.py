@@ -732,7 +732,7 @@ def _target_binding(candidate: str) -> tuple[dict[str, Any], str]:
         "command_schema_version": "room-graph-command.v1",
         "result_schema_version": "room-graph-result.v1",
         "agent_profile_id": "all-rooms-agent.target-e2e.v1",
-        "prompt_version": "all-rooms-prompt.target-e2e.v1",
+        "prompt_version": common.TARGET_E2E_PROMPT_VERSION,
         "model_profile_id": "target-e2e.contract-blocked",
         "output_schema_version": common.TARGET_E2E_OUTPUT_SCHEMA_VERSION,
         "policy_version": "all-rooms-policy.target-e2e.v1",

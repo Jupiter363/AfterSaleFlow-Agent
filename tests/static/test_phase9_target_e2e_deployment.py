@@ -170,7 +170,7 @@ def _run_context(now: dt.datetime) -> dict[str, Any]:
                     "command_schema_version": "room-graph-command.v1",
                     "result_schema_version": "room-graph-result.v1",
                     "agent_profile_id": "all-rooms-agent.target-e2e.v1",
-                    "prompt_version": "all-rooms-prompt.target-e2e.v1",
+                    "prompt_version": "all-rooms-prompt.target-e2e.v2",
                     "model_profile_id": "target-e2e.contract-blocked",
                     "output_schema_version": "target-e2e-room-proposal-source.v2",
                     "policy_version": "all-rooms-policy.target-e2e.v1",

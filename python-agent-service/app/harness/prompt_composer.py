@@ -4,9 +4,31 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
+
+
+TARGET_E2E_PROMPT_VERSION = "all-rooms-prompt.target-e2e.v2"
+TARGET_E2E_PROMPT_BUNDLE_NODES = (
+    "evidence_turn",
+    "hearing_intake_questions",
+    "hearing_intake_synthesis",
+    "hearing_evidence_requests",
+    "hearing_evidence_file_assessment",
+    "hearing_evidence_synthesis",
+    "hearing_judge_v1",
+    "hearing_jury_review",
+    "hearing_judge_v2",
+)
+
+
+class PromptResourceError(FileNotFoundError):
+    """A versioned Prompt bundle is absent, unreadable, or bound to the wrong node."""
+
+    code = "GRAPH_PROMPT_RESOURCE_UNAVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -121,6 +143,12 @@ class PromptComposer:
         "business_code_localization.md",
         "case_narration_rules.md",
         "json_output_rules.md",
+    )
+
+    VERSIONED_PROMPT_BUNDLES: Mapping[str, frozenset[str]] = MappingProxyType(
+        {
+            TARGET_E2E_PROMPT_VERSION: frozenset(TARGET_E2E_PROMPT_BUNDLE_NODES),
+        }
     )
 
     # 所属模块：Agent Harness > Prompt 仓库 > 模板根目录初始化。
@@ -251,6 +279,37 @@ class PromptComposer:
             allow_profile_fallback=allow_profile_fallback,
         ).relative_to(self._app_root.parent)
 
+    def require_prompt_bundle(
+        self,
+        prompt_profile_id: str,
+        *,
+        required_node_names: frozenset[str] | tuple[str, ...],
+    ) -> tuple[Path, ...]:
+        """Read every deployment-required template before Graph becomes ready."""
+
+        bundle_nodes = self.VERSIONED_PROMPT_BUNDLES.get(prompt_profile_id)
+        requested = tuple(required_node_names)
+        if (
+            bundle_nodes is None
+            or not requested
+            or len(requested) != len(set(requested))
+            or any(node_name not in bundle_nodes for node_name in requested)
+        ):
+            raise PromptResourceError(
+                f"prompt bundle is not registered for the required nodes: {prompt_profile_id}"
+            )
+        for filename in self.COMMON_FRAGMENT_FILES:
+            self._read_required(self._harness_prompt_dir / filename)
+        resolved: list[Path] = []
+        for node_name in requested:
+            path = self._absolute_template_path(
+                node_name,
+                prompt_profile_id=prompt_profile_id,
+            )
+            self._read_required(path)
+            resolved.append(path.relative_to(self._app_root.parent))
+        return tuple(resolved)
+
     # 所属模块：Agent Harness > Prompt 仓库 > 节点/Profile 模板解析。
     # 具体功能：`_absolute_template_path` 先由 NODE_TEMPLATES 白名单定位基础模板；有 profile 时只接受约定命名的覆盖文件，并按显式参数决定缺失时回退还是报错。
     # 上下游：上游是 system_prompt 渲染和路径查询；下游是 `_profile_template_path` 与 `_read_required`。
@@ -271,12 +330,24 @@ class PromptComposer:
         if not prompt_profile_id:
             return base_path
 
+        bundle_nodes = self.VERSIONED_PROMPT_BUNDLES.get(prompt_profile_id)
+        if bundle_nodes is not None:
+            if node_name not in bundle_nodes:
+                raise PromptResourceError(
+                    f"prompt bundle does not authorize node {node_name}: {prompt_profile_id}"
+                )
+            return base_path
+        if prompt_profile_id.startswith("all-rooms-prompt.target-e2e."):
+            raise PromptResourceError(
+                f"target-E2E prompt bundle is not registered: {prompt_profile_id}"
+            )
+
         profile_path = self._profile_template_path(base_path, prompt_profile_id)
         if profile_path.exists():
             return profile_path
         if allow_profile_fallback:
             return base_path
-        raise FileNotFoundError(f"profile prompt template not found: {profile_path}")
+        raise PromptResourceError(f"profile prompt template not found: {profile_path}")
 
     # 所属模块：Agent Harness > Prompt 仓库 > Profile ID 到文件名映射。
     # 具体功能：`_profile_template_path` 从如 `prompt:user:v1` 的 ID 取第二段角色名，规范成小写后生成 `base.user.md` 形式的同目录文件名。
@@ -308,8 +379,8 @@ class PromptComposer:
         try:
             source = path.read_text(encoding="utf-8")
             return PromptComposer._markdown_to_plain_text(source)
-        except FileNotFoundError as exception:
-            raise FileNotFoundError(f"prompt template not found: {path}") from exception
+        except (OSError, UnicodeError) as exception:
+            raise PromptResourceError(f"prompt template unavailable: {path}") from exception
 
     @staticmethod
     def _markdown_to_plain_text(source: str) -> str:

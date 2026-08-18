@@ -176,9 +176,9 @@ class EvidenceRoomControllerTest {
                         EvidenceProcessProjectionView.Recovery.none(),
                         EvidenceProcessProjectionView.VersionPins.target(
                                 "p9-control-build",
-                                "target-e2e-graph.2026-07-27.1",
-                                "target-e2e-checkpoint.v1",
-                                "all-rooms-prompt.target-e2e.v1",
+                                "target-e2e-graph.2026-08-18.1",
+                                "target-e2e-checkpoint.v2",
+                                "all-rooms-prompt.target-e2e.v2",
                                 "target-e2e.contract-blocked",
                                 "all-rooms-policy.target-e2e.v1",
                                 "all-rooms-guardrail.target-e2e.v1",
