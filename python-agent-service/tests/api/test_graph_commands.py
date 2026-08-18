@@ -282,6 +282,32 @@ def test_log_safe_failure_omits_unstable_error_messages(
     assert message not in caplog.text
 
 
+def test_log_safe_failure_records_only_code_owned_error_site(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    namespace: dict[str, Any] = {"__name__": "app.safe_diagnostic_fixture"}
+    exec(
+        compile(
+            "def fail():\n    raise KeyError('api_token=private')\n",
+            "C:/private/provider-payload.py",
+            "exec",
+        ),
+        namespace,
+    )
+    try:
+        namespace["fail"]()
+    except KeyError as error:
+        _log_safe_failure("graph stream iteration", error)
+
+    assert len(caplog.messages) == 1
+    assert caplog.messages[0].startswith(
+        "graph stream iteration failed: error_type=KeyError "
+        "error_site=app.safe_diagnostic_fixture:fail:"
+    )
+    assert "private" not in caplog.text
+    assert "provider-payload" not in caplog.text
+
+
 def test_log_safe_failure_records_only_trusted_closed_intake_executor_stage(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

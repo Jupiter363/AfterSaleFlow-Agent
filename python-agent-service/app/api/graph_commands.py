@@ -79,6 +79,10 @@ TARGET_E2E_RECONCILE_PATH = "/internal/graphs/target-e2e/commands/reconcile"
 TARGET_E2E_PROPOSAL_SOURCE_PATH = "/internal/graphs/target-e2e/commands/proposal-source"
 _TERMINAL_EVENTS = frozenset({"attempt_aborted", "final", "error"})
 _STABLE_INTAKE_ERROR_CODE_PATTERN = re.compile(r"^INTAKE_[A-Z0-9_]{1,120}$")
+_SAFE_ERROR_SITE_MODULE_PATTERN = re.compile(
+    r"^app(?:\.[a-z_][a-z0-9_]*)+$"
+)
+_SAFE_ERROR_SITE_FUNCTION_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _NO_STORE_HEADERS: Mapping[str, str] = {
     "Cache-Control": "no-store, no-transform",
     "Pragma": "no-cache",
@@ -1214,7 +1218,37 @@ def _log_safe_failure(stage: str, error: Exception) -> None:
             error.diagnostic_stage.value,
         )
         return
+    error_site = _safe_error_site(error)
+    if error_site is not None:
+        LOGGER.error(
+            "%s failed: error_type=%s error_site=%s:%s:%s",
+            stage,
+            type(error).__name__,
+            *error_site,
+        )
+        return
     LOGGER.error("%s failed: error_type=%s", stage, type(error).__name__)
+
+
+def _safe_error_site(error: Exception) -> tuple[str, str, int] | None:
+    """Return the deepest code-owned traceback coordinate without exception data."""
+
+    candidate: tuple[str, str, int] | None = None
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        module_name = frame.f_globals.get("__name__")
+        function_name = frame.f_code.co_name
+        line_number = traceback.tb_lineno
+        if (
+            isinstance(module_name, str)
+            and _SAFE_ERROR_SITE_MODULE_PATTERN.fullmatch(module_name) is not None
+            and _SAFE_ERROR_SITE_FUNCTION_PATTERN.fullmatch(function_name) is not None
+            and 1 <= line_number <= 10_000_000
+        ):
+            candidate = (module_name, function_name, line_number)
+        traceback = traceback.tb_next
+    return candidate
 
 
 class _BodyTooLarge(ValueError):
