@@ -30,7 +30,7 @@ Identifier = Annotated[
 ]
 ShortText = Annotated[str, Field(min_length=1, max_length=1_000)]
 ReasonText = Annotated[str, Field(min_length=1, max_length=500)]
-PublicText = Annotated[str, Field(max_length=100_000)]
+PublicText = Annotated[str, Field(min_length=1, max_length=100_000)]
 
 FrameType = Literal[
     "ROOM_WELCOME",
@@ -217,25 +217,31 @@ EvidenceFrameHeaderV2 = Annotated[
 ]
 _EVIDENCE_FRAME_HEADER_ADAPTER = TypeAdapter(EvidenceFrameHeaderV2)
 
+EvidencePublicFrameHeaderV2 = Annotated[
+    EvidenceRoomWelcomeFrameHeaderV2
+    | EvidenceOpeningOrientationFrameHeaderV2
+    | EvidenceMaterialReceiptFrameHeaderV2
+    | EvidenceTextFollowupFrameHeaderV2
+    | EvidenceObservationFrameHeaderV2
+    | EvidenceAssessmentFrameHeaderV2
+    | EvidenceRequestFrameHeaderV2
+    | EvidenceRoomReadinessFrameHeaderV2,
+    Field(discriminator="frame_type"),
+]
+EvidenceFrameWireV2 = (
+    tuple[EvidencePublicFrameHeaderV2, PublicText]
+    | tuple[EvidenceHumanReviewFrameHeaderV2, None]
+)
+
 
 def validate_evidence_frame_header_v2(value: Any) -> EvidenceFrameHeaderV2:
     return _EVIDENCE_FRAME_HEADER_ADAPTER.validate_python(value)
 
 
-class EvidenceFrameTupleV2(RootModel[tuple[EvidenceFrameHeaderV2, str | None]]):
+class EvidenceFrameTupleV2(RootModel[EvidenceFrameWireV2]):
     """Wire tuple: complete header first, then public text or null."""
 
-    root: tuple[EvidenceFrameHeaderV2, str | None]
-
-    @model_validator(mode="after")
-    def validate_public_slot(self) -> "EvidenceFrameTupleV2":
-        header, public_text = self.root
-        internal = header.frame_type == "HUMAN_REVIEW_TASK"
-        if internal and public_text is not None:
-            raise ValueError("human review frame cannot carry public text")
-        if not internal and public_text is None:
-            raise ValueError("public frame requires a string text slot")
-        return self
+    root: EvidenceFrameWireV2
 
     @property
     def header(self) -> EvidenceFrameHeaderV2:

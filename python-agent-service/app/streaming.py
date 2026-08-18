@@ -1759,7 +1759,12 @@ def _find_incremental_json_frame_tuples(
 
         token = document[value_start]
         value_end = value_start
+        internal_frame = frame_type == "HUMAN_REVIEW_TASK"
         if token == '"':
+            if internal_frame:
+                raise AgentStreamProjectionError(
+                    "internal frame tuple must use a null slot"
+                )
             public_text, value_end, text_complete = _decode_json_string(
                 document,
                 value_start,
@@ -1781,7 +1786,15 @@ def _find_incremental_json_frame_tuples(
                 )
                 frames.append(frame)
                 return tuple(frames)
+            if not public_text:
+                raise AgentStreamProjectionError(
+                    "public frame tuple must use a non-empty string slot"
+                )
         elif token == "n":
+            if not internal_frame:
+                raise AgentStreamProjectionError(
+                    "public frame tuple must use a non-empty string slot"
+                )
             remaining = document[value_start:]
             if len(remaining) < 4:
                 if not "null".startswith(remaining):

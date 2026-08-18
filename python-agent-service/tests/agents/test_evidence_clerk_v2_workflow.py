@@ -136,7 +136,17 @@ def _opening_frames(request: EvidenceTurnRequest) -> list[list[object]]:
 def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> None:
     schema = EvidenceRoomOpeningStreamV2.model_json_schema()
     tuple_schema = schema["$defs"]["EvidenceFrameTupleV2"]
-    header_schema = tuple_schema["prefixItems"][0]
+    public_branch = next(
+        branch
+        for branch in tuple_schema["anyOf"]
+        if branch["prefixItems"][1].get("type") == "string"
+    )
+    internal_branch = next(
+        branch
+        for branch in tuple_schema["anyOf"]
+        if branch["prefixItems"][1].get("type") == "null"
+    )
+    header_schema = public_branch["prefixItems"][0]
 
     assert header_schema["discriminator"]["propertyName"] == "frame_type"
     mapping = header_schema["discriminator"]["mapping"]
@@ -148,9 +158,17 @@ def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> No
         "EVIDENCE_OBSERVATION",
         "EVIDENCE_ASSESSMENT",
         "EVIDENCE_REQUEST",
-        "HUMAN_REVIEW_TASK",
         "ROOM_READINESS",
     }
+    assert public_branch["prefixItems"][1] == {
+        "maxLength": 100_000,
+        "minLength": 1,
+        "type": "string",
+    }
+    assert internal_branch["prefixItems"] == [
+        {"$ref": "#/$defs/EvidenceHumanReviewFrameHeaderV2"},
+        {"type": "null"},
+    ]
 
     welcome = schema["$defs"][mapping["ROOM_WELCOME"].rsplit("/", 1)[-1]]
     orientation = schema["$defs"][mapping["OPENING_ORIENTATION"].rsplit("/", 1)[-1]]

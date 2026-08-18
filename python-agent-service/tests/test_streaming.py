@@ -790,6 +790,39 @@ def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_docume
     ]
     assert emitted[4] == []
 
+    public_null = IncrementalVisibleJsonProjector((spec,))
+    with pytest.raises(
+        AgentStreamProjectionError,
+        match="public frame tuple must use a non-empty string slot",
+    ):
+        public_null.feed(
+            '{"schema_version":"evidence_turn_stream.v2","frames":'
+            '[[{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},null]]}'
+        )
+
+    public_empty = IncrementalVisibleJsonProjector((spec,))
+    with pytest.raises(
+        AgentStreamProjectionError,
+        match="public frame tuple must use a non-empty string slot",
+    ):
+        public_empty.feed(
+            '{"schema_version":"evidence_turn_stream.v2","frames":'
+            '[[{"frame_sequence":1,"frame_type":"ROOM_WELCOME"},""]]}'
+        )
+
+    internal_string = IncrementalVisibleJsonProjector((spec,))
+    with pytest.raises(
+        AgentStreamProjectionError,
+        match="internal frame tuple must use a null slot",
+    ):
+        internal_string.feed(
+            '{"schema_version":"evidence_turn_stream.v2","frames":'
+            '[[{"frame_sequence":1,"frame_type":"HUMAN_REVIEW_TASK",'
+            '"evidence_id":"EVIDENCE_1","trigger_code":"SOURCE_CHAIN",'
+            '"review_target":"原件","review_instruction":"核对原件",'
+            '"priority":"MEDIUM"},"不得公开"]]}'
+        )
+
 
 def test_evidence_v2_public_policy_keeps_model_text_and_frame_identity() -> None:
     from app.agents.evidence_clerk.v2_policy import EvidenceV2PublicOutputPolicy
