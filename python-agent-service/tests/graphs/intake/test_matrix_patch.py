@@ -934,6 +934,28 @@ def test_fresh_delta_allows_distinct_new_rows_with_same_coarse_target(
     validate_matrix_patch(state, patch)
 
 
+def test_followup_delta_allows_explicit_new_row_with_carried_fact_coarse_target(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    _, _, state = _initiator_followup_state(bindings, version_pins, snapshot)
+    patch = _initiator_followup_delta()
+    added = {
+        **patch["fact_rows"][0],
+        "fact_key": "NEW_DAMAGE_TEST_CONTEXT",
+        "position_summary": "The initiator separately reports a third-party damage assessment.",
+        "asserted_value": "third-party assessment",
+        "source_scope": "CURRENT_SOURCE",
+    }
+    patch["fact_rows"].insert(0, added)
+    patch["summary_source_fact_keys"].insert(0, added["fact_key"])
+
+    validate_matrix_patch(state, patch)
+    patch["fact_rows"].reverse()
+    validate_matrix_patch(state, patch)
+
+
 def test_fresh_delta_same_coarse_target_conflict_remains_rejected(
     bindings,
     version_pins,

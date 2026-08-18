@@ -9,9 +9,10 @@ from typing import Any, NoReturn, cast
 
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting, canonicalize
 from app.agents.dispute_intake_officer.case_fact_matrix import (
+    _explicit_previous_fact_bindings,
     _fact_collision_digest,
     _fact_collision_is_conflicting,
-    _new_fact_collision_groups,
+    _new_fact_resolution_plan,
     finalize_case_fact_matrix,
     validate_case_fact_matrix_content_hash,
 )
@@ -830,29 +831,34 @@ def validate_matrix_patch(
     resolved_by_key: dict[str, tuple[str, bytes | str]] = {}
     resolved: set[tuple[str, bytes | str]] = set()
     rows = matrix_patch["fact_rows"]
-    new_collision_groups = _new_fact_collision_groups(
-        rows,
-        previous_ids_by_fingerprint=previous_by_fingerprint,
-    )
-    for fingerprint, items in new_collision_groups.items():
-        if _fact_collision_is_conflicting(items):
+    try:
+        explicit_previous_bindings = _explicit_previous_fact_bindings(
+            rows,
+            previous_rows=previous_by_id,
+            previous_ids_by_fingerprint=previous_by_fingerprint,
+        )
+        new_previous_bindings, genuinely_new_groups = _new_fact_resolution_plan(
+            rows,
+            previous_ids_by_fingerprint=previous_by_fingerprint,
+            explicitly_bound_previous_ids=set(explicit_previous_bindings.values()),
+        )
+    except AgentOutputSchemaError as error:
+        error_code = (
+            "INTAKE_MATRIX_FACT_UNKNOWN"
+            if error.safe_code == "INTAKE_MATRIX_FACT_UNKNOWN"
+            else "INTAKE_MATRIX_FACT_ID_CONFLICT"
+        )
+        raise IntakeGraphContractError(error_code) from error
+    for fingerprint, items in genuinely_new_groups.items():
+        if len(items) > 1 and _fact_collision_is_conflicting(items):
             raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
     for row in rows:
         fact_key = row["fact_key"]
         fingerprint = _matrix_row_fingerprint(row)
         prior: Mapping[str, Any] | None
         if fact_key.startswith("FACT_"):
-            prior = previous_by_id.get(fact_key)
-            if prior is None:
-                corrected_fact_id = _unique_fact_id_for_fingerprint(
-                    previous_by_fingerprint,
-                    fingerprint,
-                )
-                if corrected_fact_id is None:
-                    raise IntakeGraphContractError("INTAKE_MATRIX_FACT_UNKNOWN")
-                prior = previous_by_id[corrected_fact_id]
-            else:
-                corrected_fact_id = fact_key
+            corrected_fact_id = explicit_previous_bindings[fact_key]
+            prior = previous_by_id[corrected_fact_id]
             if not _matches_matrix_binding(row, prior):
                 raise IntakeGraphContractError("INTAKE_MATRIX_FACT_REBOUND")
             if row["materiality"] != prior.get("materiality"):
@@ -861,10 +867,7 @@ def validate_matrix_patch(
         else:
             if row["source_scope"] == "PREVIOUS_MATRIX":
                 raise IntakeGraphContractError("INTAKE_MATRIX_SOURCE_SCOPE_INVALID")
-            prior_id = _unique_fact_id_for_fingerprint(
-                previous_by_fingerprint,
-                fingerprint,
-            )
+            prior_id = new_previous_bindings.get(fact_key)
             if prior_id is not None:
                 prior = previous_by_id[prior_id]
                 if not _matches_matrix_binding(row, prior):
@@ -875,8 +878,8 @@ def validate_matrix_patch(
             else:
                 prior = None
                 resolution_identity: str = fingerprint
-                collision_items = new_collision_groups.get(fingerprint, ())
-                if len(collision_items) > 1:
+                collision_items = genuinely_new_groups[fingerprint]
+                if previous_by_fingerprint.get(fingerprint) or len(collision_items) > 1:
                     resolution_identity += ":" + _fact_collision_digest(row)
                 resolution = ("NEW", resolution_identity)
 
