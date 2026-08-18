@@ -25,6 +25,7 @@ from app.graph_runtime.errors import (
     GraphPermitUnavailableError,
 )
 from app.graph_runtime.identity import _identifier
+from app.graph_runtime.transaction_boundary import run_postgres_transaction
 
 
 _MAX_WAIT_SECONDS: Final = 30.0
@@ -286,108 +287,117 @@ class PostgresGraphFanoutBulkhead:
         checks: dict[str, bool] = {}
         try:
             async with asyncio.timeout(self._config.acquire_timeout_seconds):
-                async with self._pool.connection(
-                    timeout=self._config.acquire_timeout_seconds
-                ) as connection:
-                    async with connection.transaction():
-                        await connection.execute("set transaction read only")
-                        config = await self._fetchone(
-                            connection,
-                            """
-                            select enabled, room_limit, tenant_limit, global_limit,
-                                   room_queue_limit, tenant_queue_limit, global_queue_limit,
-                                   permit_lease_seconds
-                              from agent_graph_fanout_config
-                             where config_key = 'signed-synthetic'
-                            """,
+                async def readiness_transaction(
+                    connection: Any,
+                ) -> PostgresBulkheadReadinessReport | None:
+                    await connection.execute("set transaction read only")
+                    config = await self._fetchone(
+                        connection,
+                        """
+                        select enabled, room_limit, tenant_limit, global_limit,
+                               room_queue_limit, tenant_queue_limit, global_queue_limit,
+                               permit_lease_seconds
+                          from agent_graph_fanout_config
+                         where config_key = 'signed-synthetic'
+                        """,
+                    )
+                    checks["configuration"] = bool(
+                        config
+                        and config["enabled"]
+                        and (
+                            config["room_limit"],
+                            config["tenant_limit"],
+                            config["global_limit"],
+                            config["room_queue_limit"],
+                            config["tenant_queue_limit"],
+                            config["global_queue_limit"],
+                            config["permit_lease_seconds"],
                         )
-                        checks["configuration"] = bool(
-                            config
-                            and config["enabled"]
-                            and (
-                                config["room_limit"],
-                                config["tenant_limit"],
-                                config["global_limit"],
-                                config["room_queue_limit"],
-                                config["tenant_queue_limit"],
-                                config["global_queue_limit"],
-                                config["permit_lease_seconds"],
-                            )
-                            == (
-                                self._config.room_limit,
-                                self._config.tenant_limit,
-                                self._config.global_limit,
-                                self._config.room_queue_limit,
-                                self._config.tenant_queue_limit,
-                                self._config.global_queue_limit,
-                                self._config.permit_lease_seconds,
-                            )
+                        == (
+                            self._config.room_limit,
+                            self._config.tenant_limit,
+                            self._config.global_limit,
+                            self._config.room_queue_limit,
+                            self._config.tenant_queue_limit,
+                            self._config.global_queue_limit,
+                            self._config.permit_lease_seconds,
                         )
-                        if not checks["configuration"]:
-                            return PostgresBulkheadReadinessReport(
-                                False, "GRAPH_BULKHEAD_CONFIGURATION_MISMATCH", checks
-                            )
-                        routines = await self._fetchone(
-                            connection,
-                            """
-                            select count(*) = 5 as complete
-                              from pg_proc procedure
-                              join pg_namespace namespace on namespace.oid = procedure.pronamespace
-                             where namespace.nspname = current_schema()
-                               and procedure.proname = any(%s::text[])
-                            """,
-                            (
-                                [
-                                    "agent_graph_acquire_fanout_permit",
-                                    "agent_graph_renew_fanout_permit",
-                                    "agent_graph_finish_fanout_permit",
-                                    "agent_graph_cancel_or_release_fanout_permit",
-                                    "agent_graph_validate_fanout_recovery",
-                                ],
-                            ),
+                    )
+                    if not checks["configuration"]:
+                        return PostgresBulkheadReadinessReport(
+                            False, "GRAPH_BULKHEAD_CONFIGURATION_MISMATCH", checks
                         )
-                        checks["routines"] = bool(routines and routines["complete"])
-                        if not checks["routines"]:
-                            return PostgresBulkheadReadinessReport(
-                                False, "GRAPH_BULKHEAD_ROUTINE_MISSING", checks
-                            )
-                        consistency = await self._fetchone(
-                            connection,
-                            """
-                            select not exists (
-                                select 1 from agent_graph_fanout_permit permit
-                                 where permit.status = 'GRANTED'
-                                   and permit.lease_expires_at > clock_timestamp()
-                                   and not exists (
-                                       select 1 from agent_graph_lease lease
-                                        where lease.thread_id = permit.thread_id
-                                          and lease.command_id = permit.command_id
-                                          and lease.owner_id = permit.graph_lease_owner_id
-                                          and lease.fencing_token
-                                              = permit.graph_lease_fencing_token
-                                          and lease.released_at is null
-                                          and lease.cancelled_at is null
-                                          and lease.lease_expires_at
-                                              >= permit.lease_expires_at
-                                   )
-                            ) and not exists (
-                                select 1 from agent_graph_fanout_permit permit
-                                 where permit.status = 'QUEUED'
-                                   and permit.wait_deadline_at > clock_timestamp()
-                                   and not exists (
-                                       select 1 from agent_graph_fanout_tenant_turn tenant_turn
-                                        where tenant_turn.tenant_key = permit.tenant_key
-                                   )
-                            ) as consistent
-                            """,
+                    routines = await self._fetchone(
+                        connection,
+                        """
+                        select count(*) = 5 as complete
+                          from pg_proc procedure
+                          join pg_namespace namespace on namespace.oid = procedure.pronamespace
+                         where namespace.nspname = current_schema()
+                           and procedure.proname = any(%s::text[])
+                        """,
+                        (
+                            [
+                                "agent_graph_acquire_fanout_permit",
+                                "agent_graph_renew_fanout_permit",
+                                "agent_graph_finish_fanout_permit",
+                                "agent_graph_cancel_or_release_fanout_permit",
+                                "agent_graph_validate_fanout_recovery",
+                            ],
+                        ),
+                    )
+                    checks["routines"] = bool(routines and routines["complete"])
+                    if not checks["routines"]:
+                        return PostgresBulkheadReadinessReport(
+                            False, "GRAPH_BULKHEAD_ROUTINE_MISSING", checks
                         )
-                        checks["active_graph_leases"] = bool(
-                            consistency and consistency["consistent"]
+                    consistency = await self._fetchone(
+                        connection,
+                        """
+                        select not exists (
+                            select 1 from agent_graph_fanout_permit permit
+                             where permit.status = 'GRANTED'
+                               and permit.lease_expires_at > clock_timestamp()
+                               and not exists (
+                                   select 1 from agent_graph_lease lease
+                                    where lease.thread_id = permit.thread_id
+                                      and lease.command_id = permit.command_id
+                                      and lease.owner_id = permit.graph_lease_owner_id
+                                      and lease.fencing_token
+                                          = permit.graph_lease_fencing_token
+                                      and lease.released_at is null
+                                      and lease.cancelled_at is null
+                                      and lease.lease_expires_at
+                                          >= permit.lease_expires_at
+                               )
+                        ) and not exists (
+                            select 1 from agent_graph_fanout_permit permit
+                             where permit.status = 'QUEUED'
+                               and permit.wait_deadline_at > clock_timestamp()
+                               and not exists (
+                                   select 1 from agent_graph_fanout_tenant_turn tenant_turn
+                                    where tenant_turn.tenant_key = permit.tenant_key
+                               )
+                        ) as consistent
+                        """,
+                    )
+                    checks["active_graph_leases"] = bool(
+                        consistency and consistency["consistent"]
+                    )
+                    if not checks["active_graph_leases"]:
+                        return PostgresBulkheadReadinessReport(
+                            False, "GRAPH_BULKHEAD_FENCE_INCONSISTENT", checks
                         )
-                        if not checks["active_graph_leases"]:
-                            return PostgresBulkheadReadinessReport(
-                                False, "GRAPH_BULKHEAD_FENCE_INCONSISTENT", checks
-                            )
+                    return None
+
+                result = await run_postgres_transaction(
+                    self._pool,
+                    timeout=self._config.acquire_timeout_seconds,
+                    operation=readiness_transaction,
+                    operation_name="bulkhead readiness",
+                )
+                if result is not None:
+                    return result
         except TimeoutError:
             return PostgresBulkheadReadinessReport(False, "GRAPH_BULKHEAD_READINESS_TIMEOUT", checks)
         except Exception:
@@ -644,11 +654,15 @@ class PostgresGraphFanoutBulkhead:
 
     async def _call_record(self, query: str, params: tuple[Any, ...]) -> PostgresPermitRecord:
         try:
-            async with self._pool.connection(
-                timeout=self._config.acquire_timeout_seconds
-            ) as connection:
-                async with connection.transaction():
-                    row = await self._fetchone(connection, query, params)
+            async def record_transaction(connection: Any) -> Mapping[str, Any] | None:
+                return await self._fetchone(connection, query, params)
+
+            row = await run_postgres_transaction(
+                self._pool,
+                timeout=self._config.acquire_timeout_seconds,
+                operation=record_transaction,
+                operation_name="bulkhead record",
+            )
         except Exception as error:
             _raise_mapped_database_error(error)
         if row is None:

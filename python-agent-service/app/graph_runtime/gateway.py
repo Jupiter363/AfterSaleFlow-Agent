@@ -48,6 +48,7 @@ from app.graph_runtime.ledger import (
     AttemptStatus,
     CommandBinding,
     CommandRecord,
+    CommandRegistration,
     CommandStatus,
     InvocationNonce,
     PostgresCommandLedger,
@@ -66,6 +67,7 @@ from app.graph_runtime.target_e2e import (
     TargetE2ERuntimeAuthority,
     VerifiedTargetE2EInvocation,
 )
+from app.graph_runtime.transaction_boundary import run_postgres_transaction
 from app.security.invocation_envelope import (
     ReconciliationClaims,
     VerifiedInvocation,
@@ -326,84 +328,87 @@ class GraphCommandGateway:
             self._require_command_thread(command, expected_thread)
             await self._input_authorizer.authorize(command=command, thread=expected_thread)
             nonce = InvocationNonce.from_verified_invocation(verified_invocation)
-            async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-                async with connection.transaction():
-                    registry = await self._registry.load(
+            async def admit_transaction(
+                connection: Any,
+            ) -> tuple[RegistryRecord, CommandBinding, ThreadRecord, CommandRegistration]:
+                registry = await self._registry.load(
+                    connection,
+                    graph_key=command.graph_key,
+                    graph_version=command.graph_version,
+                    checkpoint_schema_version=command.checkpoint_schema_version,
+                )
+                version = registry.binding
+                self._require_registry_profile_binding(command, verified_invocation, registry)
+                binding = CommandBinding.from_command(
+                    command,
+                    tool_policy_version=version.tool_policy_version,
+                    execution_lane=execution_lane,
+                    activation_id=activation_id,
+                    room_fencing_token=(
+                        verified_invocation.room_fencing_token
+                        if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
+                        else None
+                    ),
+                    command_hash=(
+                        verified_invocation.command_hash
+                        if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
+                        else None
+                    ),
+                    command_envelope_hash=(
+                        verified_invocation.command_envelope_hash
+                        if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
+                        else None
+                    ),
+                )
+                self._require_registry_command_profile(
+                    command=command,
+                    registry=registry,
+                    actual_profile=binding.profile,
+                    execution_lane=execution_lane,
+                )
+                if candidate_authority is not None:
+                    if not isinstance(verified_invocation, VerifiedTargetE2EInvocation):
+                        raise GraphThreadBindingError("TARGET_E2E_CREDENTIAL_REQUIRED")
+                    await self._target_room_authority.advance(
                         connection,
-                        graph_key=command.graph_key,
-                        graph_version=command.graph_version,
-                        checkpoint_schema_version=command.checkpoint_schema_version,
-                    )
-                    version = registry.binding
-                    self._require_registry_profile_binding(command, verified_invocation, registry)
-                    binding = CommandBinding.from_command(
-                        command,
-                        tool_policy_version=version.tool_policy_version,
-                        execution_lane=execution_lane,
-                        activation_id=activation_id,
-                        room_fencing_token=(
-                            verified_invocation.room_fencing_token
-                            if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
-                            else None
-                        ),
-                        command_hash=(
-                            verified_invocation.command_hash
-                            if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
-                            else None
-                        ),
-                        command_envelope_hash=(
-                            verified_invocation.command_envelope_hash
-                            if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
-                            else None
-                        ),
-                    )
-                    self._require_registry_command_profile(
+                        authority=candidate_authority,
                         command=command,
-                        registry=registry,
-                        actual_profile=binding.profile,
-                        execution_lane=execution_lane,
+                        room_fencing_token=verified_invocation.room_fencing_token,
+                        command_hash=verified_invocation.command_hash,
+                        command_envelope_hash=verified_invocation.command_envelope_hash,
                     )
-                    if candidate_authority is not None:
-                        if not isinstance(
-                            verified_invocation,
-                            VerifiedTargetE2EInvocation,
-                        ):
-                            raise GraphThreadBindingError("TARGET_E2E_CREDENTIAL_REQUIRED")
-                        await self._target_room_authority.advance(
-                            connection,
-                            authority=candidate_authority,
-                            command=command,
-                            room_fencing_token=verified_invocation.room_fencing_token,
-                            command_hash=verified_invocation.command_hash,
-                            command_envelope_hash=(verified_invocation.command_envelope_hash),
-                        )
-                        await self._target_synthetic_cases.reserve(
-                            connection,
-                            authority=candidate_authority,
-                            case_id=command.case_id,
-                        )
-                    thread = await self._threads.ensure_registered(connection, expected_thread)
-                    registration = await self._ledger.register_with_nonce(
+                    await self._target_synthetic_cases.reserve(
                         connection,
-                        binding=binding,
-                        nonce=nonce,
+                        authority=candidate_authority,
+                        case_id=command.case_id,
                     )
-                    if registration.created:
-                        if execution_lane is GraphGatewayMode.SHADOW:
-                            registry.require_new_shadow_command()
-                        else:
-                            registry.require_new_candidate_command()
+                thread = await self._threads.ensure_registered(connection, expected_thread)
+                registration = await self._ledger.register_with_nonce(
+                    connection,
+                    binding=binding,
+                    nonce=nonce,
+                )
+                if registration.created:
+                    if execution_lane is GraphGatewayMode.SHADOW:
+                        registry.require_new_shadow_command()
                     else:
-                        registry.require_thread_restore()
-                    if (
-                        registration.command.status
-                        in {
-                            CommandStatus.REGISTERED,
-                            CommandStatus.EXECUTING,
-                        }
-                        and thread.lifecycle is not ThreadLifecycle.ACTIVE
-                    ):
-                        raise GraphThreadBindingError("GRAPH_THREAD_NOT_ACTIVE")
+                        registry.require_new_candidate_command()
+                else:
+                    registry.require_thread_restore()
+                if (
+                    registration.command.status
+                    in {CommandStatus.REGISTERED, CommandStatus.EXECUTING}
+                    and thread.lifecycle is not ThreadLifecycle.ACTIVE
+                ):
+                    raise GraphThreadBindingError("GRAPH_THREAD_NOT_ACTIVE")
+                return registry, binding, thread, registration
+
+            registry, binding, thread, registration = await run_postgres_transaction(
+                self._pool,
+                timeout=self._acquire_timeout_seconds,
+                operation=admit_transaction,
+                operation_name="admit command",
+            )
             action = self._admission_action(registration.command.status)
             admission = GatewayAdmission(
                 command=command,
@@ -447,60 +452,75 @@ class GraphCommandGateway:
             raise GraphContractError("admission is not executable")
         if attempt_id != admission.command.attempt_id:
             raise GraphContractError("execution attempt differs from the signed command")
-        async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-            async with connection.transaction():
-                acquisition = await self._leases.acquire(
-                    connection,
-                    thread_id=admission.binding.thread_id,
-                    command_id=admission.binding.command_id,
-                    owner_id=owner_id,
+        acquisition: Any = None
+        current: Any = None
+        attempt: Any = None
+        lease: Any = None
+        thread_record: Any = None
+
+        async def acquire_transaction(connection: Any) -> None:
+            nonlocal acquisition, current, attempt, lease, thread_record
+            acquisition = await self._leases.acquire(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+                owner_id=owner_id,
+            )
+            if acquisition.kind is LeaseAcquisitionKind.IDEMPOTENT:
+                raise GraphNewAgentAttemptRequiredError(
+                    "an existing lease cannot start the public AgentRun attempt again"
                 )
-                if acquisition.kind is LeaseAcquisitionKind.IDEMPOTENT:
-                    raise GraphNewAgentAttemptRequiredError(
-                        "an existing lease cannot start the public AgentRun attempt again"
-                    )
-                if acquisition.kind is LeaseAcquisitionKind.TAKEOVER:
-                    await self._resolve_displaced_execution(
-                        connection,
-                        acquisition=acquisition,
-                        next_binding=admission.binding,
-                    )
-                current = await self._ledger.load(
+            if acquisition.kind is LeaseAcquisitionKind.TAKEOVER:
+                await self._resolve_displaced_execution(
                     connection,
-                    thread_id=admission.binding.thread_id,
-                    command_id=admission.binding.command_id,
+                    acquisition=acquisition,
+                    next_binding=admission.binding,
                 )
-                self._ledger.require_same_binding(current.binding, admission.binding)
-                candidate = await self._ledger.latest_attempt(
-                    connection,
-                    thread_id=admission.binding.thread_id,
-                    command_id=admission.binding.command_id,
+            current = await self._ledger.load(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            self._ledger.require_same_binding(current.binding, admission.binding)
+            candidate = await self._ledger.latest_attempt(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            if current.status is not CommandStatus.REGISTERED or candidate is not None:
+                raise GraphNewAgentAttemptRequiredError(
+                    "a public AgentRun attempt can execute its Graph command only once"
                 )
-                if current.status is not CommandStatus.REGISTERED or candidate is not None:
-                    raise GraphNewAgentAttemptRequiredError(
-                        "a public AgentRun attempt can execute its Graph command only once"
-                    )
-                thread_record = await self._threads.require_binding(
-                    connection,
-                    admission.thread,
-                )
-                if thread_record.lifecycle is not ThreadLifecycle.ACTIVE:
-                    raise GraphThreadBindingError("GRAPH_THREAD_NOT_ACTIVE")
-                current, attempt = await self._ledger.begin_attempt(
-                    connection,
-                    binding=admission.binding,
-                    attempt_id=attempt_id,
-                    owner_id=owner_id,
-                    fencing_token=acquisition.lease.fencing_token,
-                )
-                lease = await self._leases.renew(
-                    connection,
-                    thread_id=admission.binding.thread_id,
-                    command_id=admission.binding.command_id,
-                    owner_id=owner_id,
-                    fencing_token=acquisition.lease.fencing_token,
-                    command_deadline_at=admission.command.deadline_at,
-                )
+            thread_record = await self._threads.require_binding(
+                connection,
+                admission.thread,
+            )
+            if thread_record.lifecycle is not ThreadLifecycle.ACTIVE:
+                raise GraphThreadBindingError("GRAPH_THREAD_NOT_ACTIVE")
+            current, attempt = await self._ledger.begin_attempt(
+                connection,
+                binding=admission.binding,
+                attempt_id=attempt_id,
+                owner_id=owner_id,
+                fencing_token=acquisition.lease.fencing_token,
+            )
+            lease = await self._leases.renew(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+                owner_id=owner_id,
+                fencing_token=acquisition.lease.fencing_token,
+                command_deadline_at=admission.command.deadline_at,
+            )
+
+        await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=acquire_transaction,
+            operation_name="acquire execution",
+        )
+        if acquisition is None or current is None or attempt is None or lease is None or thread_record is None:
+            raise GraphContractError("acquire transaction returned incomplete execution")
         fence = GraphFenceContext(
             thread_id=admission.binding.thread_id,
             command_id=admission.binding.command_id,
@@ -654,39 +674,48 @@ class GraphCommandGateway:
             self._require_reconciliation_binding(command, verified_reconciliation)
             self._require_command_thread(command, expected_thread)
             nonce = InvocationNonce.from_verified_invocation(verified_reconciliation)
-            async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-                async with connection.transaction():
-                    await self._threads.require_binding(connection, expected_thread)
-                    registry = await self._registry.require_thread_restore(
-                        connection,
-                        graph_key=command.graph_key,
-                        graph_version=command.graph_version,
-                        checkpoint_schema_version=command.checkpoint_schema_version,
-                    )
-                    self._require_registry_profile_binding(
-                        command, verified_reconciliation, registry
-                    )
-                    binding = CommandBinding.from_command(
-                        command,
-                        tool_policy_version=registry.binding.tool_policy_version,
-                    )
-                    self._require_registry_command_profile(
-                        command=command,
-                        registry=registry,
-                        actual_profile=binding.profile,
-                        execution_lane=binding.execution_lane,
-                    )
-                    existing = await self._ledger.consume_nonce_for_existing(
-                        connection,
-                        binding=binding,
-                        nonce=nonce,
-                    )
-                    disposition = self._reconciliation_disposition(existing.status)
-                    completed, result = await self._recovery.reconcile_terminal(
-                        connection,
-                        binding=binding,
-                        owner_id=owner_id,
-                    )
+            async def reconcile_transaction(
+                connection: Any,
+            ) -> tuple[RegistryRecord, CommandBinding, ReconciliationDisposition, Any, Any]:
+                await self._threads.require_binding(connection, expected_thread)
+                registry = await self._registry.require_thread_restore(
+                    connection,
+                    graph_key=command.graph_key,
+                    graph_version=command.graph_version,
+                    checkpoint_schema_version=command.checkpoint_schema_version,
+                )
+                self._require_registry_profile_binding(
+                    command, verified_reconciliation, registry
+                )
+                binding = CommandBinding.from_command(
+                    command,
+                    tool_policy_version=registry.binding.tool_policy_version,
+                )
+                self._require_registry_command_profile(
+                    command=command,
+                    registry=registry,
+                    actual_profile=binding.profile,
+                    execution_lane=binding.execution_lane,
+                )
+                existing = await self._ledger.consume_nonce_for_existing(
+                    connection,
+                    binding=binding,
+                    nonce=nonce,
+                )
+                disposition = self._reconciliation_disposition(existing.status)
+                completed, result = await self._recovery.reconcile_terminal(
+                    connection,
+                    binding=binding,
+                    owner_id=owner_id,
+                )
+                return registry, binding, disposition, completed, result
+
+            registry, binding, disposition, completed, result = await run_postgres_transaction(
+                self._pool,
+                timeout=self._acquire_timeout_seconds,
+                operation=reconcile_transaction,
+                operation_name="reconcile command",
+            )
             reconciliation = GraphReconciliation(
                 disposition=disposition,
                 command=completed,
@@ -739,41 +768,48 @@ class GraphCommandGateway:
             raise GraphThreadBindingError("TARGET_E2E_CREDENTIAL_REQUIRED")
         self._require_invocation_binding(command, verified_invocation)
         self._require_command_thread(command, expected_thread)
-        async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-            async with connection.transaction():
-                await self._threads.require_binding(connection, expected_thread)
-                registry = await self._registry.require_thread_restore(
-                    connection,
-                    graph_key=command.graph_key,
-                    graph_version=command.graph_version,
-                    checkpoint_schema_version=command.checkpoint_schema_version,
-                )
-                self._require_registry_profile_binding(
-                    command,
-                    verified_invocation,
-                    registry,
-                )
-                binding = CommandBinding.from_command(
-                    command,
-                    tool_policy_version=registry.binding.tool_policy_version,
-                    execution_lane=lane,
-                    activation_id=activation_id,
-                    room_fencing_token=verified_invocation.room_fencing_token,
-                    command_hash=verified_invocation.command_hash,
-                    command_envelope_hash=verified_invocation.command_envelope_hash,
-                )
-                self._require_registry_command_profile(
-                    command=command,
-                    registry=registry,
-                    actual_profile=binding.profile,
-                    execution_lane=lane,
-                )
-                _, result = await self._ledger.load_candidate_reconciliation_proof(
-                    connection,
-                    binding=binding,
-                    issuer=verified_invocation.claims.iss,
-                    key_id=verified_invocation.key_id,
-                )
+        async def candidate_reconcile_transaction(connection: Any) -> ResultRecord:
+            await self._threads.require_binding(connection, expected_thread)
+            registry = await self._registry.require_thread_restore(
+                connection,
+                graph_key=command.graph_key,
+                graph_version=command.graph_version,
+                checkpoint_schema_version=command.checkpoint_schema_version,
+            )
+            self._require_registry_profile_binding(
+                command,
+                verified_invocation,
+                registry,
+            )
+            binding = CommandBinding.from_command(
+                command,
+                tool_policy_version=registry.binding.tool_policy_version,
+                execution_lane=lane,
+                activation_id=activation_id,
+                room_fencing_token=verified_invocation.room_fencing_token,
+                command_hash=verified_invocation.command_hash,
+                command_envelope_hash=verified_invocation.command_envelope_hash,
+            )
+            self._require_registry_command_profile(
+                command=command,
+                registry=registry,
+                actual_profile=binding.profile,
+                execution_lane=lane,
+            )
+            _, result = await self._ledger.load_candidate_reconciliation_proof(
+                connection,
+                binding=binding,
+                issuer=verified_invocation.claims.iss,
+                key_id=verified_invocation.key_id,
+            )
+            return result
+
+        result = await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=candidate_reconcile_transaction,
+            operation_name="reconcile candidate command",
+        )
         return result
 
     @staticmethod
@@ -905,7 +941,6 @@ class GraphCommandGateway:
 
         async def renew() -> LeaseRecord:
             operation_stage = "CONTROL_POOL_ACQUIRE"
-            operation_failure: BaseException | None = None
             failure_logged = False
             lease: LeaseRecord | None = None
             _log_lease_renewal_stage(
@@ -915,11 +950,9 @@ class GraphCommandGateway:
                 started_at=started_at,
             )
             try:
-                pool_connection = self._pool.connection(
-                    timeout=self._acquire_timeout_seconds
-                )
-                try:
-                    async with pool_connection as connection:
+                def transaction_stage(stage: str) -> None:
+                    nonlocal operation_stage
+                    if stage == "POOL_ACQUIRED":
                         _log_lease_renewal_stage(
                             "graph_lease_renewal_stage_succeeded",
                             execution=execution,
@@ -933,121 +966,22 @@ class GraphCommandGateway:
                             operation_stage=operation_stage,
                             started_at=started_at,
                         )
-                        transaction = connection.transaction()
-                        try:
-                            async with transaction:
-                                _log_lease_renewal_stage(
-                                    "graph_lease_renewal_stage_succeeded",
-                                    execution=execution,
-                                    operation_stage=operation_stage,
-                                    started_at=started_at,
-                                )
-                                operation_stage = "LEASE_SQL"
-                                _log_lease_renewal_stage(
-                                    "graph_lease_renewal_stage_started",
-                                    execution=execution,
-                                    operation_stage=operation_stage,
-                                    started_at=started_at,
-                                )
-                                try:
-                                    lease = await self._leases.renew(
-                                        connection,
-                                        thread_id=execution.fence.thread_id,
-                                        command_id=execution.fence.command_id,
-                                        owner_id=execution.fence.owner_id,
-                                        fencing_token=execution.fence.fencing_token,
-                                        command_deadline_at=(
-                                            execution.admission.command.deadline_at
-                                        ),
-                                    )
-                                except BaseException as error:
-                                    operation_failure = error
-                                    failure_logged = True
-                                    _log_lease_renewal_stage(
-                                        (
-                                            "graph_lease_renewal_stage_cancelled"
-                                            if isinstance(error, asyncio.CancelledError)
-                                            else "graph_lease_renewal_stage_failed"
-                                        ),
-                                        execution=execution,
-                                        operation_stage=operation_stage,
-                                        started_at=started_at,
-                                        error=error,
-                                    )
-                                    operation_stage = "TRANSACTION_ROLLBACK"
-                                    _log_lease_renewal_stage(
-                                        "graph_lease_renewal_stage_started",
-                                        execution=execution,
-                                        operation_stage=operation_stage,
-                                        started_at=started_at,
-                                    )
-                                    raise
-                                _log_lease_renewal_stage(
-                                    "graph_lease_renewal_stage_succeeded",
-                                    execution=execution,
-                                    operation_stage=operation_stage,
-                                    started_at=started_at,
-                                    output_lease=lease,
-                                )
-                                operation_stage = "TRANSACTION_COMMIT"
-                                _log_lease_renewal_stage(
-                                    "graph_lease_renewal_stage_started",
-                                    execution=execution,
-                                    operation_stage=operation_stage,
-                                    started_at=started_at,
-                                    output_lease=lease,
-                                )
-                            _log_lease_renewal_stage(
-                                "graph_lease_renewal_stage_succeeded",
-                                execution=execution,
-                                operation_stage=operation_stage,
-                                    started_at=started_at,
-                                    output_lease=lease,
-                                )
-                        except BaseException as error:
-                            if operation_failure is error:
-                                _log_lease_renewal_stage(
-                                    "graph_lease_renewal_stage_succeeded",
-                                    execution=execution,
-                                    operation_stage=operation_stage,
-                                    started_at=started_at,
-                                    output_lease=lease,
-                                )
-                            else:
-                                operation_failure = error
-                                failure_logged = True
-                                _log_lease_renewal_stage(
-                                    (
-                                        "graph_lease_renewal_stage_cancelled"
-                                        if isinstance(error, asyncio.CancelledError)
-                                        else "graph_lease_renewal_stage_failed"
-                                    ),
-                                    execution=execution,
-                                    operation_stage=operation_stage,
-                                    started_at=started_at,
-                                    output_lease=lease,
-                                    error=error,
-                                )
-                            raise
-                        else:
-                            _log_lease_renewal_stage(
-                                "graph_lease_renewal_stage_succeeded",
-                                execution=execution,
-                                operation_stage=operation_stage,
-                                started_at=started_at,
-                                output_lease=lease,
-                            )
-                        finally:
-                            operation_stage = "CONTROL_POOL_RELEASE"
-                            _log_lease_renewal_stage(
-                                "graph_lease_renewal_stage_started",
-                                execution=execution,
-                                operation_stage=operation_stage,
-                                started_at=started_at,
-                                output_lease=lease,
-                            )
-                except BaseException as error:
-                    if operation_failure is error:
+                    elif stage == "TRANSACTION_ENTERED":
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_succeeded",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                        )
+                    elif stage == "TRANSACTION_ROLLBACK_STARTED":
+                        operation_stage = "TRANSACTION_ROLLBACK"
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_started",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                        )
+                    elif stage == "TRANSACTION_ROLLBACK_SUCCEEDED":
                         _log_lease_renewal_stage(
                             "graph_lease_renewal_stage_succeeded",
                             execution=execution,
@@ -1055,7 +989,78 @@ class GraphCommandGateway:
                             started_at=started_at,
                             output_lease=lease,
                         )
-                    else:
+                    elif stage == "TRANSACTION_ROLLBACK_FAILED":
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_failed",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                            output_lease=lease,
+                        )
+                    elif stage == "TRANSACTION_COMMIT_STARTED":
+                        operation_stage = "TRANSACTION_COMMIT"
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_started",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                            output_lease=lease,
+                        )
+                    elif stage == "TRANSACTION_COMMIT_SUCCEEDED":
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_succeeded",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                            output_lease=lease,
+                        )
+                    elif stage == "TRANSACTION_COMMIT_FAILED":
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_failed",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                            output_lease=lease,
+                        )
+                    elif stage == "POOL_RELEASE_SUCCEEDED":
+                        operation_stage = "CONTROL_POOL_RELEASE"
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_succeeded",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                            output_lease=lease,
+                        )
+                    elif stage == "POOL_RELEASE_FAILED":
+                        operation_stage = "CONTROL_POOL_RELEASE"
+                        _log_lease_renewal_stage(
+                            "graph_lease_renewal_stage_failed",
+                            execution=execution,
+                            operation_stage=operation_stage,
+                            started_at=started_at,
+                            output_lease=lease,
+                        )
+
+                async def renew_transaction(connection: Any) -> LeaseRecord:
+                    nonlocal operation_stage
+                    operation_stage = "LEASE_SQL"
+                    _log_lease_renewal_stage(
+                        "graph_lease_renewal_stage_started",
+                        execution=execution,
+                        operation_stage=operation_stage,
+                        started_at=started_at,
+                    )
+                    try:
+                        lease = await self._leases.renew(
+                            connection,
+                            thread_id=execution.fence.thread_id,
+                            command_id=execution.fence.command_id,
+                            owner_id=execution.fence.owner_id,
+                            fencing_token=execution.fence.fencing_token,
+                            command_deadline_at=execution.admission.command.deadline_at,
+                        )
+                    except BaseException as error:
+                        nonlocal failure_logged
                         failure_logged = True
                         _log_lease_renewal_stage(
                             (
@@ -1066,11 +1071,9 @@ class GraphCommandGateway:
                             execution=execution,
                             operation_stage=operation_stage,
                             started_at=started_at,
-                            output_lease=lease,
                             error=error,
                         )
-                    raise
-                else:
+                        raise
                     _log_lease_renewal_stage(
                         "graph_lease_renewal_stage_succeeded",
                         execution=execution,
@@ -1078,6 +1081,38 @@ class GraphCommandGateway:
                         started_at=started_at,
                         output_lease=lease,
                     )
+                    operation_stage = "TRANSACTION_COMMIT"
+                    _log_lease_renewal_stage(
+                        "graph_lease_renewal_stage_started",
+                        execution=execution,
+                        operation_stage=operation_stage,
+                        started_at=started_at,
+                        output_lease=lease,
+                    )
+                    return lease
+
+                lease = await run_postgres_transaction(
+                    self._pool,
+                    timeout=self._acquire_timeout_seconds,
+                    operation=renew_transaction,
+                    operation_name="lease renewal",
+                    stage_callback=transaction_stage,
+                )
+                _log_lease_renewal_stage(
+                    "graph_lease_renewal_stage_succeeded",
+                    execution=execution,
+                    operation_stage=operation_stage,
+                    started_at=started_at,
+                    output_lease=lease,
+                )
+                operation_stage = "CONTROL_POOL_RELEASE"
+                _log_lease_renewal_stage(
+                    "graph_lease_renewal_stage_started",
+                    execution=execution,
+                    operation_stage=operation_stage,
+                    started_at=started_at,
+                    output_lease=lease,
+                )
                 if lease is None:
                     raise GraphContractError("lease renewal returned no lease")
                 return lease
@@ -1163,16 +1198,24 @@ class GraphCommandGateway:
 
         async def record() -> AttemptRecord:
             nonlocal provider_intent_started
-            async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-                async with connection.transaction():
-                    # PROVIDER_CALL_SQL increments provider_call_count.  If the
-                    # connection breaks after this point, commit status is ambiguous
-                    # and retrying could record two intents for one HTTP request.
-                    provider_intent_started = True
-                    return await self._ledger.record_provider_call(
-                        connection,
-                        execution.attempt,
-                    )
+
+            async def record_transaction(connection: Any) -> AttemptRecord:
+                # PROVIDER_CALL_SQL increments provider_call_count.  If the
+                # connection breaks after this point, commit status is ambiguous
+                # and retrying could record two intents for one HTTP request.
+                nonlocal provider_intent_started
+                provider_intent_started = True
+                return await self._ledger.record_provider_call(
+                    connection,
+                    execution.attempt,
+                )
+
+            return await run_postgres_transaction(
+                self._pool,
+                timeout=self._acquire_timeout_seconds,
+                operation=record_transaction,
+                operation_name="provider intent",
+            )
 
         attempt = await self._retry_control_plane_operation(
             execution,
@@ -1198,25 +1241,74 @@ class GraphCommandGateway:
 
         async def finish_once() -> GatewayExecution:
             nonlocal mutation_started
-            async with self._pool.connection(
-                timeout=self._acquire_timeout_seconds
-            ) as connection:
-                async with connection.transaction():
-                    current = await self._ledger.load(
+            command: CommandRecord | None = None
+            attempt: AttemptRecord | None = None
+            lease: LeaseRecord | None = None
+
+            async def finish_transaction(connection: Any) -> None:
+                nonlocal command, attempt, lease, mutation_started
+                current = await self._ledger.load(
+                    connection,
+                    thread_id=execution.admission.binding.thread_id,
+                    command_id=execution.admission.binding.command_id,
+                )
+                self._ledger.require_same_binding(
+                    current.binding,
+                    execution.admission.binding,
+                )
+                durable_attempt = await self._ledger.latest_attempt(
+                    connection,
+                    thread_id=execution.admission.binding.thread_id,
+                    command_id=execution.admission.binding.command_id,
+                )
+                replay = self._completed_attempt_abort_adoption(
+                    execution,
+                    command=current,
+                    attempt=durable_attempt,
+                    status=status,
+                    error_code=error_code,
+                    error_classification=error_classification,
+                )
+                if replay is not None:
+                    command, attempt = replay
+                    lease = execution.lease
+                    return
+                try:
+                    lease = await self._leases.cancel(
                         connection,
-                        thread_id=execution.admission.binding.thread_id,
-                        command_id=execution.admission.binding.command_id,
+                        thread_id=execution.fence.thread_id,
+                        active_command_id=execution.fence.command_id,
+                        expected_fencing_token=execution.fence.fencing_token,
+                        cancellation_command_id=execution.fence.command_id,
                     )
-                    self._ledger.require_same_binding(
-                        current.binding,
-                        execution.admission.binding,
-                    )
+                except Exception as error:
+                    # PostgreSQL lock timeout is proven pre-mutation and may
+                    # take the normal bounded retry.  Any other failure after
+                    # issuing CANCEL_SQL has ambiguous commit authority; the
+                    # next attempt must first adopt exact durable terminal state.
+                    if type(error) is not psycopg_errors.LockNotAvailable:
+                        mutation_started = True
+                    raise
+                mutation_started = True
+                current = await self._ledger.load(
+                    connection,
+                    thread_id=execution.admission.binding.thread_id,
+                    command_id=execution.admission.binding.command_id,
+                )
+                self._ledger.require_same_binding(
+                    current.binding,
+                    execution.admission.binding,
+                )
+                if current.status in {
+                    CommandStatus.RESULT_CHECKPOINTED,
+                    CommandStatus.COMPLETED,
+                }:
                     durable_attempt = await self._ledger.latest_attempt(
                         connection,
                         thread_id=execution.admission.binding.thread_id,
                         command_id=execution.admission.binding.command_id,
                     )
-                    replay = self._completed_attempt_abort_adoption(
+                    adopted = self._completed_attempt_abort_adoption(
                         execution,
                         command=current,
                         attempt=durable_attempt,
@@ -1224,78 +1316,40 @@ class GraphCommandGateway:
                         error_code=error_code,
                         error_classification=error_classification,
                     )
-                    if replay is not None:
-                        command, attempt = replay
-                        lease = execution.lease
-                    else:
-                        try:
-                            lease = await self._leases.cancel(
-                                connection,
-                                thread_id=execution.fence.thread_id,
-                                active_command_id=execution.fence.command_id,
-                                expected_fencing_token=execution.fence.fencing_token,
-                                cancellation_command_id=execution.fence.command_id,
-                            )
-                        except Exception as error:
-                            # PostgreSQL lock timeout is proven pre-mutation and may
-                            # take the normal bounded retry.  Any other failure after
-                            # issuing CANCEL_SQL has ambiguous commit authority; the
-                            # next attempt must first adopt exact durable terminal state.
-                            if type(error) is not psycopg_errors.LockNotAvailable:
-                                mutation_started = True
-                            raise
-                        mutation_started = True
-                        current = await self._ledger.load(
-                            connection,
-                            thread_id=execution.admission.binding.thread_id,
-                            command_id=execution.admission.binding.command_id,
+                    if adopted is None:
+                        raise GraphCommandStateError(
+                            "durable result could not be adopted during cleanup"
                         )
-                        self._ledger.require_same_binding(
-                            current.binding,
-                            execution.admission.binding,
-                        )
-                        if current.status in {
-                            CommandStatus.RESULT_CHECKPOINTED,
-                            CommandStatus.COMPLETED,
-                        }:
-                            durable_attempt = await self._ledger.latest_attempt(
-                                connection,
-                                thread_id=execution.admission.binding.thread_id,
-                                command_id=execution.admission.binding.command_id,
-                            )
-                            adopted = self._completed_attempt_abort_adoption(
-                                execution,
-                                command=current,
-                                attempt=durable_attempt,
-                                status=status,
-                                error_code=error_code,
-                                error_classification=error_classification,
-                            )
-                            if adopted is None:
-                                raise GraphCommandStateError(
-                                    "durable result could not be adopted during cleanup"
-                                )
-                            command, attempt = adopted
-                        else:
-                            command_status = (
-                                CommandStatus.CANCELLED
-                                if status is AttemptStatus.CANCELLED
-                                else CommandStatus.ABORTED
-                            )
-                            command = await self._ledger.terminate(
-                                connection,
-                                binding=execution.admission.binding,
-                                status=command_status,
-                                error_code=error_code,
-                                error_classification=error_classification,
-                            )
-                            attempt = await self._ledger.finish_attempt(
-                                connection,
-                                execution.attempt,
-                                status=status,
-                                error_code=error_code,
-                                error_classification=error_classification,
-                            )
+                    command, attempt = adopted
+                else:
+                    command_status = (
+                        CommandStatus.CANCELLED
+                        if status is AttemptStatus.CANCELLED
+                        else CommandStatus.ABORTED
+                    )
+                    command = await self._ledger.terminate(
+                        connection,
+                        binding=execution.admission.binding,
+                        status=command_status,
+                        error_code=error_code,
+                        error_classification=error_classification,
+                    )
+                    attempt = await self._ledger.finish_attempt(
+                        connection,
+                        execution.attempt,
+                        status=status,
+                        error_code=error_code,
+                        error_classification=error_classification,
+                    )
+
+            await run_postgres_transaction(
+                self._pool,
+                timeout=self._acquire_timeout_seconds,
+                operation=finish_transaction,
+                operation_name="finish execution attempt",
+            )
+            if command is None or attempt is None or lease is None:
+                raise GraphContractError("finish transaction returned no durable attempt")
             admission = replace(
                 execution.admission,
                 record=command,
@@ -1406,12 +1460,19 @@ class GraphCommandGateway:
         admission: GatewayAdmission,
     ) -> RecoveryDecision:
         self._require_shadow()
-        async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-            async with connection.transaction():
-                return await self._recovery.inspect(
-                    connection,
-                    binding=admission.binding,
-                )
+
+        async def inspect_transaction(connection: Any) -> RecoveryDecision:
+            return await self._recovery.inspect(
+                connection,
+                binding=admission.binding,
+            )
+
+        return await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=inspect_transaction,
+            operation_name="inspect recovery",
+        )
 
     async def reconcile_terminal(
         self,
@@ -1421,18 +1482,25 @@ class GraphCommandGateway:
         durable_terminal_signal: asyncio.Event | None = None,
     ) -> tuple[CommandRecord, ResultRecord]:
         self._require_shadow()
-        async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-            async with connection.transaction():
-                completed, result = await self._recovery.reconcile_terminal(
-                    connection,
-                    binding=admission.binding,
-                    owner_id=owner_id,
-                )
-            # The transaction has committed and released its durable lease before
-            # audit delivery can block.  Wake stream renewal immediately so a valid
-            # post-terminal renew failure is never treated as a live-command abort.
-            if durable_terminal_signal is not None:
-                durable_terminal_signal.set()
+
+        async def reconcile_transaction(connection: Any) -> tuple[CommandRecord, ResultRecord]:
+            return await self._recovery.reconcile_terminal(
+                connection,
+                binding=admission.binding,
+                owner_id=owner_id,
+            )
+
+        completed, result = await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=reconcile_transaction,
+            operation_name="reconcile terminal",
+        )
+        # The transaction has committed and released its durable lease before
+        # audit delivery can block.  Wake stream renewal immediately so a valid
+        # post-terminal renew failure is never treated as a live-command abort.
+        if durable_terminal_signal is not None:
+            durable_terminal_signal.set()
         await self._emit(
             admission,
             event_type="graph.command.reconciled",
@@ -1445,9 +1513,16 @@ class GraphCommandGateway:
         """Return JWKS ``kid`` values retained by nonterminal durable commands."""
 
         self._require_shadow()
-        async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-            async with connection.transaction():
-                return await self._ledger.referenced_verification_key_ids(connection)
+
+        async def key_ids_transaction(connection: Any) -> frozenset[str]:
+            return await self._ledger.referenced_verification_key_ids(connection)
+
+        return await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=key_ids_transaction,
+            operation_name="referenced verification keys",
+        )
 
     async def execute_stream(
         self,
