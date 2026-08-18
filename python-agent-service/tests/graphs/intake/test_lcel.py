@@ -31,6 +31,7 @@ from app.agents.dispute_intake_officer.schemas import (
     IntakeFreshFormOpeningLlmOutput,
     IntakeRemarkAcknowledgementLlmOutput,
     IntakeRespondentOpeningLlmOutput,
+    IntakeRespondentRoomLlmOutputV3,
     IntakeRespondentSubstantiveLlmOutput,
     intake_case_detail_output_type,
     materialize_intake_case_detail_output,
@@ -78,6 +79,7 @@ from app.graphs.intake.lcel import (
     _generation_parts as _production_generation_parts,
     _generation_parts_with_baseline_context,
     _intake_response_message_id,
+    _iter_runnable_nodes as _production_iter_runnable_nodes,
     _is_vetted_intake_model_runnable,
     _normalize_model_dispute_core_state,
     _normalize_model_matrix_fact_keys,
@@ -125,6 +127,7 @@ from app.model_runtime.transports import (
 )
 from app.model_runtime.callbacks import governed_events_from_chunk
 from app.streaming import IncrementalVisibleJsonProjector
+from tests.agents.intake_v3_fixture import intake_initiator_v3_payload
 
 
 _BASELINE_PROMPT_PROFILE = "DISPUTE_INTAKE_OFFICER:USER:v1"
@@ -483,6 +486,244 @@ def test_system_prompt_is_the_role_scoped_baseline_intake_contract() -> None:
     assert "IntakeCognitionDraft" not in system_prompt
     assert "dossier_patch、matrix_patch、readiness" not in system_prompt
     assert context.prompt_profile_id in system_prompt
+
+
+def test_respondent_router_binds_dynamic_frozen_claim_schema_to_model_and_parser(
+    bindings,
+    version_pins,
+) -> None:
+    case_id = bindings["private"]["case_id"]
+    agent_session_id = bindings["private"]["agent_session_id"]
+    merchant_bindings = copy.deepcopy(bindings)
+    merchant_bindings["private"]["audience"] = "MERCHANT"
+    merchant_bindings["command"].update(
+        command_id="COMMAND_RESPONDENT_DYNAMIC_SCHEMA",
+        logical_run_id="RUN_RESPONDENT_DYNAMIC_SCHEMA",
+        attempt_id="ATTEMPT_RESPONDENT_DYNAMIC_SCHEMA_1",
+    )
+    merchant_context = _agent_context(
+        role="MERCHANT",
+        case_id=case_id,
+        agent_session_id=agent_session_id,
+        invocation_id="ATTEMPT_RESPONDENT_DYNAMIC_SCHEMA_1",
+    )
+    frozen_claim = {
+        "initiator_role": "USER",
+        "requested_resolution": "REPLACE_OR_REPAIR",
+        "requested_amount": None,
+        "requested_items": "同型号商品",
+        "request_reason": "核心性能未达到宣传标准，要求退货退款并核验宣传参数依据。",
+        "normalized_statement": "用户要求核验宣传参数，并对存在性能问题的商品换货或维修。",
+    }
+    previous_detail = {
+        "schema_version": "intake_case_detail.v1",
+        "claim_resolution": copy.deepcopy(frozen_claim),
+        "case_fact_matrix": {
+            "schema_version": "case_fact_matrix.v2",
+            "party_map": {
+                "initiator_role": "USER",
+                "respondent_role": "MERCHANT",
+            },
+            "fact_rows": [{"fact_id": "FACT_PERFORMANCE_STANDARD"}],
+        },
+    }
+    current_text = (
+        "我方确认此前仅提供远程排障；同型号有库存优先换货，"
+        "无库存则维修，没有其他异议或交接备注。"
+    )
+    event_hash = "d" * 64
+    merchant_state = new_intake_graph_state(
+        bindings=merchant_bindings,
+        version_pins=copy.deepcopy(version_pins),
+    )
+    merchant_state.update(
+        {
+            "route": "message",
+            "memory_summary": json.dumps(
+                {
+                    "authorized_initial_case_facts": {
+                        "form_source": "EXTERNAL_IMPORT",
+                        "form_description": "用户反馈商品核心性能未达到宣传标准。",
+                        "initiator_role": "USER",
+                    },
+                    "initiator_statement_transcript": [],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "dossier_draft": copy.deepcopy(previous_detail),
+            "baseline_previous_case_detail": copy.deepcopy(previous_detail),
+            "initial_snapshot_ref": "SNAPSHOT_RESPONDENT_DYNAMIC_SCHEMA",
+            "initial_snapshot_hash": "a" * 64,
+            "initial_domain_revision": 1,
+            "messages": {
+                "MESSAGE_RESPONDENT_DYNAMIC_SCHEMA": {
+                    "message_id": "MESSAGE_RESPONDENT_DYNAMIC_SCHEMA",
+                    "role": "HUMAN",
+                    "audience": "MERCHANT",
+                    "content": current_text,
+                    "sequence": 3,
+                    "source_hash": event_hash,
+                }
+            },
+            "last_event_ref": "EVENT_RESPONDENT_DYNAMIC_SCHEMA",
+            "last_event_hash": event_hash,
+            "last_event_sequence": 3,
+            "result_json": None,
+        }
+    )
+    merchant_request = build_intake_baseline_request(
+        merchant_state,
+        agent_context=merchant_context,
+    )
+    dynamic_output_type = intake_case_detail_output_type(merchant_request)
+    assert dynamic_output_type is not IntakeRespondentRoomLlmOutputV3
+    assert issubclass(dynamic_output_type, IntakeRespondentRoomLlmOutputV3)
+
+    provider_payload = intake_initiator_v3_payload(
+        room_utterance="已记录商家的检测、换货和维修方案，可以确认提交。",
+        total_score=100,
+        conversation_action="ACK_NO_REMARK",
+        nice_to_have_gaps=(),
+    )
+    matrix = provider_payload["ordered_sections"][0]["value"]
+    matrix["fact_rows"] = [
+        {
+            "fact_key": "NEW_MERCHANT_SOLUTION",
+            "category": "AFTER_SALES",
+            "fact_target": "商家提出的检测、换货和维修方案",
+            "materiality": "CORE",
+            "stance": "CONFIRM",
+            "position_summary": "商家同意先检测，并按库存情况换货或维修。",
+            "asserted_value": "检测后有库存换货、无库存维修",
+            "source_scope": "CURRENT_SOURCE",
+        }
+    ]
+    matrix["summary_source_fact_keys"] = ["NEW_MERCHANT_SOLUTION"]
+    matrix["respondent_claim"] = {
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position_summary": "商家提出检测后按库存情况换货或维修。",
+        "alternative_proposal": "同型号有库存优先换货，无库存则维修。",
+        "source_binding": {
+            "schema_version": "respondent-claim-binding.v1",
+            "binding_kind": "CURRENT_ACTOR_DIRECT",
+            "subject_role": "MERCHANT",
+            "source_quote": "同型号有库存优先换货，无库存则维修",
+            "linked_fact_keys": ["NEW_MERCHANT_SOLUTION"],
+        },
+    }
+    claim_and_response = provider_payload["ordered_sections"][3]["value"]
+    claim_and_response["claim_resolution"] = copy.deepcopy(frozen_claim)
+    claim_and_response["respondent_attitude"] = {
+        "respondent_role": "MERCHANT",
+        "source_attribution": "RESPONDENT_DIRECT",
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position": "商家提出检测后按库存情况换货或维修。",
+        "alternative_proposal": "同型号有库存优先换货，无库存则维修。",
+    }
+    dynamic_output_type.model_validate(provider_payload)
+    altered_claim_payload = copy.deepcopy(provider_payload)
+    altered_claim_payload["ordered_sections"][3]["value"]["claim_resolution"][
+        "request_reason"
+    ] = "核心性能未达到宣传标准"
+    with pytest.raises(ValueError):
+        dynamic_output_type.model_validate(altered_claim_payload)
+
+    transport = RawBaselineIntakeTransport(provider_payload)
+    merchant_policy = _policy().model_copy(
+        update={
+            "invocation_id": merchant_context.agent_invocation_id,
+            "trusted_system_sha256": system_prompt_sha256(
+                _trusted_system_prompt(merchant_context)
+            ),
+        }
+    )
+    node = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=merchant_policy,
+        agent_context=merchant_context,
+    )
+    assert _is_vetted_intake_model_runnable(node.runnable)
+    first_flow = node.model_router._select_flow(merchant_state)
+    replay_flow = node.model_router._select_flow(copy.deepcopy(merchant_state))
+
+    def selected_contracts(flow):
+        nodes = list(_production_iter_runnable_nodes(flow))
+        models = [value for value in nodes if isinstance(value, GovernedChatModel)]
+        parsers = [
+            value for value in nodes if isinstance(value, PydanticOutputParser)
+        ]
+        assert len(models) == 1
+        assert len(parsers) == 1
+        return models[0]._output_type, parsers[0].pydantic_object
+
+    first_model_type, first_parser_type = selected_contracts(first_flow)
+    replay_model_type, replay_parser_type = selected_contracts(replay_flow)
+    assert first_model_type is dynamic_output_type
+    assert first_parser_type is dynamic_output_type
+    assert replay_model_type is dynamic_output_type
+    assert replay_parser_type is dynamic_output_type
+    assert replay_model_type.model_json_schema() == first_model_type.model_json_schema()
+
+    generation = first_flow.invoke(merchant_state)
+    assert transport.generate_calls == 1
+    assert transport.requests[0].output_type is dynamic_output_type
+    assert type(generation["draft"]) is dynamic_output_type
+    assert node.respondent_substantive_model._output_type is (
+        IntakeRespondentRoomLlmOutputV3
+    )
+    assert node.respondent_substantive_parser.pydantic_object is (
+        IntakeRespondentRoomLlmOutputV3
+    )
+    assert _is_vetted_intake_model_runnable(node.runnable)
+
+    base_authority_state = copy.deepcopy(merchant_state)
+    base_authority_state["dossier_draft"]["claim_resolution"].pop(
+        "normalized_statement"
+    )
+    base_authority_state["baseline_previous_case_detail"]["claim_resolution"].pop(
+        "normalized_statement"
+    )
+    assert node.model_router._select_flow(base_authority_state) is (
+        node.model_router._respondent_substantive_flow
+    )
+
+    user_bindings = copy.deepcopy(bindings)
+    user_bindings["command"].update(
+        command_id="COMMAND_INITIATOR_ADJACENT",
+        logical_run_id="RUN_INITIATOR_ADJACENT",
+        attempt_id="ATTEMPT_INITIATOR_ADJACENT_1",
+    )
+    user_context = _agent_context(
+        role="USER",
+        case_id=case_id,
+        agent_session_id=agent_session_id,
+        invocation_id="ATTEMPT_INITIATOR_ADJACENT_1",
+    )
+    user_state = copy.deepcopy(merchant_state)
+    user_state["bindings"] = user_bindings
+    user_state["messages"]["MESSAGE_RESPONDENT_DYNAMIC_SCHEMA"].update(
+        audience="USER",
+        content="我方补充商品核心性能未达到宣传标准。",
+    )
+    user_node = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy().model_copy(
+            update={
+                "invocation_id": user_context.agent_invocation_id,
+                "trusted_system_sha256": system_prompt_sha256(
+                    _trusted_system_prompt(user_context)
+                ),
+            }
+        ),
+        agent_context=user_context,
+    )
+    assert user_node.model_router._select_flow(user_state) is (
+        user_node.model_router._default_flow
+    )
 
 
 def test_ai_message_id_is_retry_stable_but_unique_across_source_turns() -> None:

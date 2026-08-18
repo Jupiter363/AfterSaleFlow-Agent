@@ -278,6 +278,11 @@ class IntakeRouteModelRunnable(
         self,
         *,
         agent_context: AgentInvocationContext,
+        respondent_substantive_lens: StateLens[
+            IntakeGraphStateV2, IntakePromptInput
+        ],
+        respondent_substantive_prompt: ChatPromptTemplate,
+        respondent_substantive_model: GovernedChatModel,
         default_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]],
         fresh_form_opening_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]],
         remark_acknowledgement_flow: Runnable[
@@ -290,6 +295,9 @@ class IntakeRouteModelRunnable(
     ) -> None:
         self.name = "intake_lcel.route_model"
         self._agent_context = agent_context
+        self._respondent_substantive_lens = respondent_substantive_lens
+        self._respondent_substantive_prompt = respondent_substantive_prompt
+        self._respondent_substantive_model = respondent_substantive_model
         self._default_flow = default_flow
         self._fresh_form_opening_flow = fresh_form_opening_flow
         self._remark_acknowledgement_flow = remark_acknowledgement_flow
@@ -350,25 +358,55 @@ class IntakeRouteModelRunnable(
                 state,
                 agent_context=self._agent_context,
             )
+            output_type = intake_case_detail_output_type(request)
             if (
-                intake_case_detail_output_type(request)
-                is IntakeInitiatorRoomLlmOutputV3
+                output_type is IntakeInitiatorRoomLlmOutputV3
                 and request.initial_case_facts is not None
                 and request.current_user_message is None
             ):
                 return self._fresh_form_opening_flow
-            if (
-                intake_case_detail_output_type(request)
-                is IntakeRemarkAcknowledgementLlmOutput
-            ):
+            if output_type is IntakeRemarkAcknowledgementLlmOutput:
                 return self._remark_acknowledgement_flow
-            if (
-                intake_case_detail_output_type(request)
-                is IntakeRespondentRoomLlmOutputV3
-            ):
-                return self._respondent_substantive_flow
+            if issubclass(output_type, IntakeRespondentRoomLlmOutputV3):
+                return self._respondent_substantive_flow_for(output_type)
             return self._default_flow
         raise IntakeGraphContractError("INTAKE_LCEL_ROUTE_INVALID")
+
+    def _respondent_substantive_flow_for(
+        self,
+        output_type: type[IntakeRespondentRoomLlmOutputV3],
+    ) -> Runnable[IntakeGraphStateV2, Mapping[str, Any]]:
+        """Bind the respondent flow to this turn's frozen cross-party claim schema.
+
+        Frozen claim values are request authority, so their Pydantic model is built per
+        exact request.  A shared model instance cannot be mutated safely because two
+        respondent turns may run concurrently with different claim literals.
+        """
+
+        if output_type is IntakeRespondentRoomLlmOutputV3:
+            return self._respondent_substantive_flow
+        template = self._respondent_substantive_model
+        dynamic_model = GovernedChatModel(
+            transport=template._transport,
+            output_type=output_type,
+            profile=template.profile,
+            policy=template.policy,
+            visible_fields=template._visible_fields,
+            user_content_parts=template._user_content_parts,
+            cancellation_probe=template._cancelled,
+            clock=template._clock,
+        )
+        dynamic_parser = PydanticOutputParser(pydantic_object=output_type)
+        parsed_generation = RunnableParallel(
+            message=RunnablePassthrough(),
+            draft=dynamic_parser,
+        )
+        return (
+            self._respondent_substantive_lens
+            | self._respondent_substantive_prompt
+            | dynamic_model
+            | parsed_generation
+        )
 
 
 def _iter_runnable_nodes(runnable: Runnable) -> Iterator[Runnable]:
@@ -1328,6 +1366,11 @@ class _IntakeComponentSeal:
     model_router_name: str
     model_router_agent_context: AgentInvocationContext
     model_router_agent_context_snapshot: AgentInvocationContext
+    model_router_respondent_substantive_lens: StateLens[
+        IntakeGraphStateV2, IntakePromptInput
+    ]
+    model_router_respondent_substantive_prompt: ChatPromptTemplate
+    model_router_respondent_substantive_model: GovernedChatModel
     model_router_default_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]]
     model_router_fresh_form_opening_flow: Runnable[
         IntakeGraphStateV2, Mapping[str, Any]
@@ -1495,7 +1538,7 @@ def _seal_intake_components(
         (remark_acknowledgement_parser, parser_behavior_methods),
         (respondent_substantive_parser, parser_behavior_methods),
         (respondent_opening_parser, parser_behavior_methods),
-        (model_router, ("_select_flow",)),
+        (model_router, ("_select_flow", "_respondent_substantive_flow_for")),
         (model._transport, ("generate", "agenerate", "stream", "astream")),
         (fresh_form_opening_model._transport, ("generate", "agenerate", "stream", "astream")),
         (
@@ -1600,6 +1643,15 @@ def _seal_intake_components(
         model_router_name=model_router.name,
         model_router_agent_context=model_router._agent_context,
         model_router_agent_context_snapshot=deepcopy(model_router._agent_context),
+        model_router_respondent_substantive_lens=(
+            model_router._respondent_substantive_lens
+        ),
+        model_router_respondent_substantive_prompt=(
+            model_router._respondent_substantive_prompt
+        ),
+        model_router_respondent_substantive_model=(
+            model_router._respondent_substantive_model
+        ),
         model_router_default_flow=model_router._default_flow,
         model_router_fresh_form_opening_flow=(
             model_router._fresh_form_opening_flow
@@ -1892,6 +1944,12 @@ def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
         model_router.name != seal.model_router_name
         or model_router._agent_context is not seal.model_router_agent_context
         or model_router._agent_context != seal.model_router_agent_context_snapshot
+        or model_router._respondent_substantive_lens
+        is not seal.model_router_respondent_substantive_lens
+        or model_router._respondent_substantive_prompt
+        is not seal.model_router_respondent_substantive_prompt
+        or model_router._respondent_substantive_model
+        is not seal.model_router_respondent_substantive_model
         or model_router._default_flow is not seal.model_router_default_flow
         or model_router._fresh_form_opening_flow
         is not seal.model_router_fresh_form_opening_flow
@@ -2100,6 +2158,9 @@ def build_intake_model_node(
     )
     model_router = IntakeRouteModelRunnable(
         agent_context=agent_context,
+        respondent_substantive_lens=lens,
+        respondent_substantive_prompt=prompt,
+        respondent_substantive_model=respondent_substantive_model,
         default_flow=cast(
             Runnable[IntakeGraphStateV2, Mapping[str, Any]],
             default_model_flow,
