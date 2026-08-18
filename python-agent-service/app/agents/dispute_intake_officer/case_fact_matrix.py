@@ -103,15 +103,27 @@ def finalize_case_fact_matrix(
     previous_rows = {
         row.fact_id: row for row in (previous.fact_rows if previous is not None else [])
     }
-    previous_fingerprints = {
-        _fact_fingerprint(row.category, row.fact_target): row.fact_id
-        for row in previous_rows.values()
-    }
     previous_ids_by_fingerprint: dict[str, list[str]] = {}
     for row in previous_rows.values():
         previous_ids_by_fingerprint.setdefault(
             _fact_fingerprint(row.category, row.fact_target), []
         ).append(row.fact_id)
+    previous_fingerprints = {
+        fingerprint: matches[0]
+        for fingerprint, matches in previous_ids_by_fingerprint.items()
+        if len(matches) == 1
+    }
+    new_collision_groups = _new_fact_collision_groups(
+        resolved_delta.fact_rows,
+        previous_ids_by_fingerprint=previous_ids_by_fingerprint,
+    )
+    for fingerprint, items in new_collision_groups.items():
+        if _fact_collision_is_conflicting(items):
+            _schema_error(
+                "new matrix facts share an identity but carry conflicting positions: "
+                + fingerprint,
+                safe_code="INTAKE_MATRIX_FACT_DUPLICATE",
+            )
     referenced_previous: set[str] = set()
     resolved_ids: dict[str, str] = {}
     corrected_fact_keys: dict[str, str] = {}
@@ -156,13 +168,30 @@ def finalize_case_fact_matrix(
                 )
         else:
             fingerprint = _fact_fingerprint(item.category, item.fact_target)
+            prior_matches = previous_ids_by_fingerprint.get(fingerprint, [])
+            if len(prior_matches) > 1:
+                _schema_error(
+                    "case matrix delta cannot uniquely resolve existing fact "
+                    + fingerprint,
+                    safe_code="INTAKE_MATRIX_FACT_AMBIGUOUS",
+                )
             reused = previous_fingerprints.get(fingerprint)
             if reused is not None:
                 fact_id = reused
                 previous_row = previous_rows[reused]
                 referenced_previous.add(reused)
             else:
-                fact_id = _stable_fact_id(request.case_id, item.category, item.fact_target)
+                collision_items = new_collision_groups.get(fingerprint, ())
+                fact_id = _stable_fact_id(
+                    request.case_id,
+                    item.category,
+                    item.fact_target,
+                    discriminator=(
+                        _fact_collision_digest(item)
+                        if len(collision_items) > 1
+                        else None
+                    ),
+                )
         if fact_id in seen:
             _schema_error(
                 f"case matrix delta resolves duplicate fact {fact_id}",
@@ -1140,8 +1169,113 @@ def _not_addressed_position() -> dict[str, Any]:
     }
 
 
-def _stable_fact_id(case_id: str, category: Any, target: str) -> str:
-    return "FACT_INTAKE_" + _digest(case_id, str(category), _normalize(target))[:20].upper()
+def _stable_fact_id(
+    case_id: str,
+    category: Any,
+    target: str,
+    *,
+    discriminator: str | None = None,
+) -> str:
+    parts = [case_id, str(category), _normalize(target)]
+    if discriminator is not None:
+        parts.append(discriminator)
+    return "FACT_INTAKE_" + _digest(*parts)[:20].upper()
+
+
+def _new_fact_collision_groups(
+    rows: Any,
+    *,
+    previous_ids_by_fingerprint: Mapping[str, Any],
+) -> dict[str, tuple[Any, ...]]:
+    """Group only genuinely new rows whose coarse binding key collides.
+
+    ``category + fact_target`` remains the compatibility key for carrying a
+    frozen fact.  A fresh proposal can, however, contain two atomic facts that
+    accidentally reuse a broad target (for example an order reference).  Those
+    rows are still distinct when their proposal semantics differ, so the
+    reducer gives them deterministic collision identities instead of discarding
+    one or rejecting the whole opening.  Existing frozen rows are deliberately
+    excluded: an ambiguous historical binding must remain fail closed.
+    """
+
+    grouped: dict[str, list[Any]] = {}
+    for row in rows:
+        fact_key = (
+            row.get("fact_key")
+            if isinstance(row, Mapping)
+            else getattr(row, "fact_key", None)
+        )
+        if not isinstance(fact_key, str) or not fact_key.startswith("NEW_"):
+            continue
+        category = (
+            row.get("category")
+            if isinstance(row, Mapping)
+            else getattr(row, "category", "")
+        )
+        fact_target = (
+            row.get("fact_target")
+            if isinstance(row, Mapping)
+            else getattr(row, "fact_target", "")
+        )
+        fingerprint = _fact_fingerprint(
+            category,
+            fact_target,
+        )
+        if previous_ids_by_fingerprint.get(fingerprint):
+            continue
+        grouped.setdefault(fingerprint, []).append(row)
+    return {
+        fingerprint: tuple(items)
+        for fingerprint, items in grouped.items()
+        if len(items) > 1
+    }
+
+
+def _fact_collision_signature(row: Any) -> tuple[str, ...]:
+    """Return the proposal-local semantic identity, excluding its temporary key."""
+
+    def value(name: str) -> Any:
+        if isinstance(row, Mapping):
+            return row.get(name)
+        return getattr(row, name, None)
+
+    return (
+        _normalize(str(value("materiality") or "")),
+        _normalize(str(value("stance") or "")),
+        _normalize(str(value("position_summary") or "")),
+        _normalize_value(value("asserted_value")),
+        _normalize(str(value("source_scope") or "")),
+        _normalize(str(value("agreed_statement") or "")),
+        _normalize(str(value("conflict_summary") or "")),
+    )
+
+
+def _fact_collision_digest(row: Any) -> str:
+    return _hash_json(_fact_collision_signature(row))
+
+
+def _fact_collision_is_conflicting(rows: tuple[Any, ...]) -> bool:
+    """Reject explicit contradictory positions instead of splitting them."""
+
+    def value(row: Any, name: str) -> Any:
+        if isinstance(row, Mapping):
+            return row.get(name)
+        return getattr(row, name, None)
+
+    stances = {
+        str(value(row, "stance"))
+        for row in rows
+        if str(value(row, "stance"))
+        not in {"", "UNKNOWN", "NOT_ADDRESSED"}
+    }
+    if len(stances) > 1:
+        return True
+    asserted_values = {
+        _normalize_value(value(row, "asserted_value"))
+        for row in rows
+        if _normalize_value(value(row, "asserted_value"))
+    }
+    return len(asserted_values) > 1
 
 
 def _fact_fingerprint(category: Any, target: str) -> str:

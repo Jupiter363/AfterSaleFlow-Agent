@@ -899,6 +899,73 @@ def test_initiator_followup_allows_not_addressed_previous_only_carrier(
     validate_matrix_patch(state, patch)
 
 
+def test_fresh_delta_allows_distinct_new_rows_with_same_coarse_target(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    _, _, state = _initiator_opening_state(
+        bindings,
+        version_pins,
+        snapshot,
+        initiator_role="USER",
+    )
+    patch = _initiator_opening_delta()
+    patch["fact_rows"] = [
+        {
+            **patch["fact_rows"][0],
+            "fact_key": "NEW_RECEIVED_PRODUCT",
+            "fact_target": "ORDER_COARSE_TARGET",
+            "position_summary": "实际收到商品为白色基础型号。",
+        },
+        {
+            **patch["fact_rows"][0],
+            "fact_key": "NEW_ACTIVATION_STATUS",
+            "fact_target": "ORDER_COARSE_TARGET",
+            "materiality": "SUPPORTING",
+            "position_summary": "商品尚未激活使用。",
+        },
+    ]
+    patch["summary_source_fact_keys"] = [
+        "NEW_RECEIVED_PRODUCT",
+        "NEW_ACTIVATION_STATUS",
+    ]
+
+    validate_matrix_patch(state, patch)
+
+
+def test_fresh_delta_same_coarse_target_conflict_remains_rejected(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    _, _, state = _initiator_opening_state(
+        bindings,
+        version_pins,
+        snapshot,
+        initiator_role="USER",
+    )
+    patch = _initiator_opening_delta()
+    patch["fact_rows"] = [
+        {
+            **patch["fact_rows"][0],
+            "fact_key": "NEW_CONFIRM",
+            "fact_target": "ORDER_COARSE_TARGET",
+            "stance": "CONFIRM",
+        },
+        {
+            **patch["fact_rows"][0],
+            "fact_key": "NEW_DENY",
+            "fact_target": "ORDER_COARSE_TARGET",
+            "stance": "DENY",
+        },
+    ]
+    patch["summary_source_fact_keys"] = ["NEW_CONFIRM", "NEW_DENY"]
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_FACT_ID_CONFLICT"):
+        validate_matrix_patch(state, patch)
+
+
 def test_initiator_followup_accepts_unknown_stance_and_null_asserted_value(
     bindings,
     version_pins,

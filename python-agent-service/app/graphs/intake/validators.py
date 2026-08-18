@@ -9,6 +9,9 @@ from typing import Any, NoReturn, cast
 
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting, canonicalize
 from app.agents.dispute_intake_officer.case_fact_matrix import (
+    _fact_collision_digest,
+    _fact_collision_is_conflicting,
+    _new_fact_collision_groups,
     finalize_case_fact_matrix,
     validate_case_fact_matrix_content_hash,
 )
@@ -827,6 +830,13 @@ def validate_matrix_patch(
     resolved_by_key: dict[str, tuple[str, bytes | str]] = {}
     resolved: set[tuple[str, bytes | str]] = set()
     rows = matrix_patch["fact_rows"]
+    new_collision_groups = _new_fact_collision_groups(
+        rows,
+        previous_ids_by_fingerprint=previous_by_fingerprint,
+    )
+    for fingerprint, items in new_collision_groups.items():
+        if _fact_collision_is_conflicting(items):
+            raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
     for row in rows:
         fact_key = row["fact_key"]
         fingerprint = _matrix_row_fingerprint(row)
@@ -864,7 +874,11 @@ def validate_matrix_patch(
                 resolution = ("FACT", prior_id)
             else:
                 prior = None
-                resolution = ("NEW", fingerprint)
+                resolution_identity: str = fingerprint
+                collision_items = new_collision_groups.get(fingerprint, ())
+                if len(collision_items) > 1:
+                    resolution_identity += ":" + _fact_collision_digest(row)
+                resolution = ("NEW", resolution_identity)
 
         if resolution in resolved:
             raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")

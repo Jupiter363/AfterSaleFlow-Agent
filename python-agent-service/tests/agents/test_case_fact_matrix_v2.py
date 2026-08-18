@@ -383,6 +383,122 @@ def test_delta_normalizes_recoverable_provider_key_cardinality_without_merging_c
         )
 
 
+def test_fresh_same_target_rows_get_deterministic_collision_ids_without_merging_facts() -> None:
+    case_id = "CASE_matrix_target_collision"
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "FORM_SUBMISSION",
+            "initial_case_facts": {
+                "form_source": "FORM_SUBMISSION",
+                "form_description": "用户称订单约定黑色大容量手机，实际收到白色基础型号且未激活。",
+                "order_reference": "ORDER_COLLISION_01",
+                "initiator_role": "USER",
+            },
+            "agent_context": _context(case_id, "USER", "user-local"),
+        }
+    )
+    delta = CaseFactMatrixDeltaV2.model_validate(
+        {
+            "fact_rows": [
+                {
+                    "fact_key": "NEW_RECEIVED_PRODUCT",
+                    "category": "PRODUCT_STATE",
+                    "fact_target": "ORDER_COLLISION_01",
+                    "materiality": "CORE",
+                    "stance": "CONFIRM",
+                    "position_summary": "实际收到商品为白色基础型号手机。",
+                    "source_scope": "CURRENT_SOURCE",
+                },
+                {
+                    "fact_key": "NEW_ACTIVATION_STATUS",
+                    "category": "PRODUCT_STATE",
+                    "fact_target": "ORDER_COLLISION_01",
+                    "materiality": "SUPPORTING",
+                    "stance": "CONFIRM",
+                    "position_summary": "商品尚未激活使用。",
+                    "source_scope": "CURRENT_SOURCE",
+                },
+            ],
+            "summary_source_fact_keys": [
+                "NEW_RECEIVED_PRODUCT",
+                "NEW_ACTIVATION_STATUS",
+            ],
+        }
+    )
+
+    first = finalize_case_fact_matrix(
+        request=request,
+        case_detail=_detail("订单商品与实际收到商品规格不一致，且商品尚未激活。"),
+        delta=delta,
+    )
+    replay = finalize_case_fact_matrix(
+        request=request,
+        case_detail=_detail("订单商品与实际收到商品规格不一致，且商品尚未激活。"),
+        delta=delta,
+    )
+
+    assert len(first.fact_rows) == 2
+    assert len({row.fact_id for row in first.fact_rows}) == 2
+    assert first.model_dump(mode="json") == replay.model_dump(mode="json")
+
+
+def test_fresh_same_target_conflicting_positions_remain_fail_closed() -> None:
+    case_id = "CASE_matrix_target_conflict"
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "FORM_SUBMISSION",
+            "initial_case_facts": {
+                "form_source": "FORM_SUBMISSION",
+                "form_description": "订单事实存在相互矛盾的当前陈述。",
+                "order_reference": "ORDER_CONFLICT_01",
+                "initiator_role": "USER",
+            },
+            "agent_context": _context(case_id, "USER", "user-local"),
+        }
+    )
+    delta = CaseFactMatrixDeltaV2.model_validate(
+        {
+            "fact_rows": [
+                {
+                    "fact_key": "NEW_CONFLICT_CONFIRM",
+                    "category": "PRODUCT_STATE",
+                    "fact_target": "ORDER_CONFLICT_01",
+                    "materiality": "CORE",
+                    "stance": "CONFIRM",
+                    "position_summary": "当前来源确认该状态。",
+                    "source_scope": "CURRENT_SOURCE",
+                },
+                {
+                    "fact_key": "NEW_CONFLICT_DENY",
+                    "category": "PRODUCT_STATE",
+                    "fact_target": "ORDER_CONFLICT_01",
+                    "materiality": "CORE",
+                    "stance": "DENY",
+                    "position_summary": "当前来源否认该状态。",
+                    "source_scope": "CURRENT_SOURCE",
+                },
+            ],
+            "summary_source_fact_keys": [
+                "NEW_CONFLICT_CONFIRM",
+                "NEW_CONFLICT_DENY",
+            ],
+        }
+    )
+
+    with pytest.raises(AgentOutputSchemaError) as failure:
+        finalize_case_fact_matrix(
+            request=request,
+            case_detail=_detail("当前来源对同一状态给出矛盾陈述。"),
+            delta=delta,
+        )
+
+    assert failure.value.safe_code == "INTAKE_MATRIX_FACT_DUPLICATE"
+
+
 def _java_jcs_previous_matrix(case_id: str, *, requested_amount: int | None):
     previous = _single_fact_initiator_matrix(case_id).model_dump(mode="json")
     initiator_claim = previous["claims"]["initiator_claim"]
