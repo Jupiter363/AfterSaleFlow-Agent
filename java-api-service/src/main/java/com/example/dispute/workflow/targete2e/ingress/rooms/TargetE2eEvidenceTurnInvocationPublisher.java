@@ -76,7 +76,9 @@ public final class TargetE2eEvidenceTurnInvocationPublisher {
         invocation.put("actor_id", outerCommand.actorScope().actorId());
         invocation.put("actor_role", outerCommand.actorScope().actorRole().name());
         invocation.put("actor_scope_hash", actorScopeHash);
-        invocation.set("evidence_turn_request", mapper.valueToTree(evidenceTurnCommand));
+        invocation.set(
+                "evidence_turn_request",
+                bindPromptAuthority(outerCommand, evidenceTurnCommand));
         String invocationHash = ContractJson.sha256Hex(invocation);
         invocation.put("invocation_hash", invocationHash);
         String artifactId = "target-evidence-turn-invocation:" + invocationHash.substring(0, 32);
@@ -84,6 +86,27 @@ public final class TargetE2eEvidenceTurnInvocationPublisher {
                 publisher.publishCanonical(artifactId, "EVIDENCE", invocation),
                 actorScopeHash,
                 invocationHash);
+    }
+
+    private ObjectNode bindPromptAuthority(
+            RoomGraphCommand outerCommand,
+            EvidenceAgentTurnCommand evidenceTurnCommand) {
+        ObjectNode request = mapper.valueToTree(evidenceTurnCommand);
+        JsonNode rawAgentContext = request.get("agent_context");
+        if (!(rawAgentContext instanceof ObjectNode agentContext)) {
+            throw new IllegalArgumentException(
+                    "formal Evidence turn does not contain an agent context");
+        }
+        JsonNode rawContextEnvelope = request.get("context_envelope");
+        if (!(rawContextEnvelope instanceof ObjectNode contextEnvelope)
+                || !(contextEnvelope.get("actor_snapshot") instanceof ObjectNode actorSnapshot)) {
+            throw new IllegalArgumentException(
+                    "formal Evidence turn does not contain an actor snapshot");
+        }
+        String promptProfileId = outerCommand.invocationContext().promptProfileId();
+        agentContext.put("prompt_profile_id", promptProfileId);
+        actorSnapshot.put("prompt_profile_id", promptProfileId);
+        return request;
     }
 
     public void bind(Authority authority, RoomGraphCommand command, Published published) {

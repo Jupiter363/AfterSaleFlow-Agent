@@ -153,6 +153,7 @@ _FORMAL_EVIDENCE_RESULT_FIELDS = frozenset(
 )
 _INTERNAL_EVIDENCE_RESULT_FIELDS = frozenset({"evidence_requests", "non_final"})
 _PROVIDER_GOVERNED_AGENT_CONTEXT_FIELDS = (
+    "prompt_profile_id",
     "model_profile_id",
     "output_schema_version",
     "policy_version",
@@ -1154,6 +1155,7 @@ class CompiledEvidenceTurnExecutor:
         context_document = context.model_dump(mode="python")
         context_document.update(
             {
+                "prompt_profile_id": invocation.prompt_profile_id,
                 "model_profile_id": invocation.model_profile_id,
                 "output_schema_version": invocation.output_schema_version,
                 "policy_version": invocation.policy_version,

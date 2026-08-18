@@ -200,6 +200,15 @@ class CanonicalTargetRoomCommandMaterializerTest {
         assertThat(invocation.path("evidence_turn_request").path("agent_context")
                         .path("agent_session_id").asText())
                 .isEqualTo("agent-session-private-1");
+        assertThat(clerkTurn.agentContext().promptProfileId()).isEqualTo("evidence-clerk");
+        assertThat(invocation.path("evidence_turn_request").path("agent_context")
+                        .path("prompt_profile_id").asText())
+                .isEqualTo(materials.getAllValues().get(0).request().command()
+                        .invocationContext().promptProfileId());
+        assertThat(invocation.path("evidence_turn_request").path("context_envelope")
+                        .path("actor_snapshot").path("prompt_profile_id").asText())
+                .isEqualTo(materials.getAllValues().get(0).request().command()
+                        .invocationContext().promptProfileId());
         ObjectNode preimage = invocation.deepCopy();
         String invocationHash = preimage.remove("invocation_hash").asText();
         assertThat(invocationHash).isEqualTo(ContractJson.sha256Hex(preimage));
@@ -463,6 +472,14 @@ class CanonicalTargetRoomCommandMaterializerTest {
         assertThat(material.evidenceAgentTurnCommand().contextEnvelope().currentEvent().attachmentRefs())
                 .isEmpty();
         assertThat(objects).hasSize(1);
+        ObjectNode invocation = (ObjectNode) MAPPER.readTree(objects.values().iterator().next());
+        String promptProfileId = material.request().command().invocationContext().promptProfileId();
+        assertThat(invocation.path("evidence_turn_request").path("agent_context")
+                        .path("prompt_profile_id").asText())
+                .isEqualTo(promptProfileId);
+        assertThat(invocation.path("evidence_turn_request").path("context_envelope")
+                        .path("actor_snapshot").path("prompt_profile_id").asText())
+                .isEqualTo(promptProfileId);
         verify(syntheticManifest, never()).publish(any());
 
         org.mockito.Mockito.clearInvocations(ledger, evidence);

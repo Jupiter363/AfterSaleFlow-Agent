@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,7 +19,11 @@ from app.harness.model_runner import (
     HarnessStreamCompleted,
     HarnessStreamDelta,
 )
-from app.graph_runtime.evidence_turn_executor import _EvidencePreviewBridge
+from app.contracts.v1.models import InvocationContext, RetryBudget
+from app.graph_runtime.evidence_turn_executor import (
+    CompiledEvidenceTurnExecutor,
+    _EvidencePreviewBridge,
+)
 from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.executor import TargetE2ESpecializedRoomProviderFactory
 from app.graph_runtime.production_bindings import _build_target_e2e_evidence_workflow
@@ -26,6 +32,61 @@ from app.streaming import AgentStreamObserver, bind_stream_observer
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_evidence_clerk_turn import _java_evidence_opening_command_payload  # noqa: E402
+
+
+def _provider_binding_execution(prompt_profile_id: str) -> SimpleNamespace:
+    invocation = InvocationContext(
+        agent_profile_id="all-rooms-agent.target-e2e.v1",
+        prompt_profile_id=prompt_profile_id,
+        model_profile_id="target-e2e.formal-evidence",
+        output_schema_version="target-e2e-room-proposal-source.v2",
+        policy_version="target-e2e.proposal-only.v1",
+        guardrail_version="evidence-guardrail.v1",
+        tool_capabilities=(),
+        envelope_key_id="JAVA_GRAPH_COMMAND_ES256_TEST",
+        envelope_nonce="NONCE_EVIDENCE_PROMPT_BINDING_TEST",
+    )
+    command = SimpleNamespace(
+        invocation_context=invocation,
+        retry_budget=RetryBudget(
+            provider_attempts_remaining=1,
+            activity_attempts_remaining=1,
+            repairs_remaining=0,
+        ),
+        deadline_at=datetime(2026, 8, 19, tzinfo=timezone.utc),
+        traceparent="00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+    )
+    return SimpleNamespace(admission=SimpleNamespace(command=command))
+
+
+def test_target_evidence_provider_prompt_requires_single_command_authority() -> None:
+    prompt_version = "all-rooms-prompt.target-e2e.v2"
+    execution = _provider_binding_execution(prompt_version)
+    legacy_document = _java_evidence_opening_command_payload()
+    legacy_request = EvidenceTurnRequest.model_validate(legacy_document)
+    assert legacy_request.agent_context.prompt_profile_id == "EVIDENCE_CLERK:USER:v1"
+
+    with pytest.raises(
+        GraphContractError,
+        match="EVIDENCE_TURN_MODEL_INVOCATION_BINDING_INVALID",
+    ):
+        CompiledEvidenceTurnExecutor._provider_governed_request(
+            execution,
+            legacy_request,
+        )
+
+    bound_document = _java_evidence_opening_command_payload()
+    bound_document["agent_context"]["prompt_profile_id"] = prompt_version
+    bound_document["context_envelope"]["actor_snapshot"]["prompt_profile_id"] = prompt_version
+    bound_request = EvidenceTurnRequest.model_validate(bound_document)
+    provider_request = CompiledEvidenceTurnExecutor._provider_governed_request(
+        execution,
+        bound_request,
+    )
+
+    assert provider_request.agent_context.prompt_profile_id == prompt_version
+    assert bound_request.agent_context.model_profile_id is None
+    assert provider_request.agent_context.model_profile_id == "target-e2e.formal-evidence"
 
 
 def _opening_frames(request: EvidenceTurnRequest) -> list[list[object]]:
