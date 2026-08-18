@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.agents.evidence_clerk.v2_contracts import EvidenceFrameHeaderV2
+from app.agents.evidence_clerk.v2_contracts import (
+    EvidenceFrameHeaderV2,
+    validate_evidence_frame_header_v2,
+)
 from app.graph_runtime.errors import GraphContractError
 
 
@@ -168,7 +171,7 @@ class EvidenceV2PublicOutputPolicy:
         if sequence != len(self._frames) + 1:
             raise GraphContractError("EVIDENCE_V2_FRAME_SEQUENCE_INVALID")
         try:
-            header = EvidenceFrameHeaderV2.model_validate(raw_header)
+            header = validate_evidence_frame_header_v2(raw_header)
         except ValueError as error:
             raise GraphContractError("EVIDENCE_V2_FRAME_HEADER_INVALID") from error
         if header.frame_sequence != sequence:

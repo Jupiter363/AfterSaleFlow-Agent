@@ -133,6 +133,43 @@ def _opening_frames(request: EvidenceTurnRequest) -> list[list[object]]:
     return [[header, f"本案第{header['frame_sequence']}帧。"] for header in headers]
 
 
+def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> None:
+    schema = EvidenceRoomOpeningStreamV2.model_json_schema()
+    tuple_schema = schema["$defs"]["EvidenceFrameTupleV2"]
+    header_schema = tuple_schema["prefixItems"][0]
+
+    assert header_schema["discriminator"]["propertyName"] == "frame_type"
+    mapping = header_schema["discriminator"]["mapping"]
+    assert set(mapping) == {
+        "ROOM_WELCOME",
+        "OPENING_ORIENTATION",
+        "MATERIAL_RECEIPT",
+        "TEXT_FOLLOWUP_REPLY",
+        "EVIDENCE_OBSERVATION",
+        "EVIDENCE_ASSESSMENT",
+        "EVIDENCE_REQUEST",
+        "HUMAN_REVIEW_TASK",
+        "ROOM_READINESS",
+    }
+
+    welcome = schema["$defs"][mapping["ROOM_WELCOME"].rsplit("/", 1)[-1]]
+    orientation = schema["$defs"][mapping["OPENING_ORIENTATION"].rsplit("/", 1)[-1]]
+    assert welcome["additionalProperties"] is False
+    assert set(welcome["properties"]) == {"frame_sequence", "frame_type"}
+    assert set(welcome["required"]) == {"frame_sequence", "frame_type"}
+    assert orientation["additionalProperties"] is False
+    assert set(orientation["properties"]) == {
+        "frame_sequence",
+        "frame_type",
+        "focus_fact_ids",
+    }
+    assert set(orientation["required"]) == {
+        "frame_sequence",
+        "frame_type",
+        "focus_fact_ids",
+    }
+
+
 def _event(kind: str, sequence: int, **values: object) -> str:
     return json.dumps(
         {"kind": kind, "frame_sequence": sequence, **values},
