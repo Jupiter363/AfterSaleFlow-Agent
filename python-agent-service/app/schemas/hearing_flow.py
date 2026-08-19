@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
+from app.contracts.v1.codec import canonical_sha256
 from app.schemas.intake_case_matrix import FactCategory, FactMateriality, FactStance
 from app.schemas.case_fact_matrix import CaseFactMatrixV2
 from app.schemas.models import Confidence, Identifier, LongText, ShortText, StrictModel
@@ -996,11 +995,4 @@ class HearingJudgeV2Result(StrictModel):
 def content_hash(value: StrictModel | dict[str, Any], *, hash_field: str) -> str:
     payload = value.model_dump(mode="json") if isinstance(value, StrictModel) else dict(value)
     payload.pop(hash_field, None)
-    return hashlib.sha256(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    return canonical_sha256(payload)

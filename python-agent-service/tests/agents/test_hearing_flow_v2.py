@@ -43,14 +43,7 @@ from app.schemas import (
 def _hash_payload(value: dict[str, object], field: str = "content_hash") -> str:
     payload = dict(value)
     payload.pop(field, None)
-    return hashlib.sha256(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(canonicalize(payload)).hexdigest()
 
 
 def _case_matrix() -> CaseFactMatrixV2:
@@ -427,6 +420,43 @@ class ParallelEvidenceRunner(QueueRunner):
             if join_first_wave:
                 self.assessment_barrier.wait(timeout=2)
         return super().invoke_structured(**kwargs)
+
+
+def test_intake_questions_accepts_java_canonical_hash_for_whole_number_amount() -> None:
+    matrix_payload = _prehearing_case_matrix().model_dump(mode="json")
+    matrix_payload["claims"]["initiator_claim"]["requested_amount"] = 11_899
+    matrix_payload["content_hash"] = _hash_payload(matrix_payload)
+    matrix = CaseFactMatrixV2.model_validate(matrix_payload)
+    request = HearingIntakeQuestionsRequest.model_validate(
+        {
+            **_base("INTAKE_QUESTIONS", 4),
+            "case_fact_matrix": matrix,
+            "max_questions": 5,
+        }
+    )
+    runner = QueueRunner(
+        {
+            "hearing_intake_questions": {
+                "questions": [
+                    {
+                        "fact_ids": ["FACT_DELIVERY"],
+                        "issue_statement": "请双方说明商品性能宣传标准与实测条件。",
+                        "party_prompts": {
+                            "USER": "请说明实测条件、结果及宣传页面依据。",
+                            "MERCHANT": "请说明宣传标准、适用工况及检测依据。",
+                        },
+                    }
+                ],
+                "public_message": "现围绕商品性能争议向双方发问。",
+            }
+        }
+    )
+
+    result = HearingFlowWorkflows(runner).intake_questions(request)
+
+    assert request.case_fact_matrix.claims.initiator_claim.requested_amount == 11_899.0
+    assert result.questions[0].fact_ids == ["FACT_DELIVERY"]
+    assert [call["node_name"] for call in runner.calls] == ["hearing_intake_questions"]
 
 
 def test_target_e2e_hearing_v2_invocation_uses_governed_case_specific_model_output() -> None:
