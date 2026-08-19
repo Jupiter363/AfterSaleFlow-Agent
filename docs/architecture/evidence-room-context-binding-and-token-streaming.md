@@ -189,6 +189,8 @@ case_id + room_epoch + actor_id + actor_role + command_id
 }
 ```
 
+模型可见矩阵是完整 `case_fact_matrix.v2` 的确定性业务投影：保留案件概览、双方请求/态度、逐事实立场与直接/转述来源类型、冲突、重要性、覆盖状态和事实关系；`content_hash`、`matrix_id`、`parent_ref`、`generation_ref`、原始 `source_refs` 与可从事实行重建的索引只留在服务端冻结 authority，不重复占用模型上下文。完整矩阵仍用于 ID、角色、来源、顺序、幂等和终态校验，模型投影不能扩大或替代该权威。
+
 `initial_case_facts` 已由表单和接待室正式过程折叠进冻结矩阵，不在证据室重新生成或作为另一份重复上下文。
 
 ### 5.6 `current_evidence_batch`
@@ -807,6 +809,7 @@ Header 通过后完全信任模型公开自然语言，不做前置或后置内�
 - 历史证据只传正式结构化摘要；
 - 私有消息使用最小必要窗口；
 - 使用 mode-specific schema，避免向 opening 传入 assessment/review-task 全量合同；
+- Provider JSON Schema 移除自动生成且不参与约束的展示 `title`，保留类型、枚举、判别联合、顺序和预算；
 - Source Unit 和公开帧分别设置单项与总预算；
 - 大文件不得静默截断；
 - 超预算时必须显式设置 `context_coverage=PARTIAL` 和 Source Unit coverage，要求拆分、受控检索或人工复核；

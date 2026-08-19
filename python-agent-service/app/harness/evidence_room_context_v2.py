@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import re
 from typing import Any
@@ -208,12 +209,73 @@ def _frozen_matrix(base: AssembledEvidenceContext) -> dict[str, Any]:
     dossier = base.working_set.case_intake_dossier
     matrix = dossier.get("case_fact_matrix") or dossier.get("fact_matrix")
     if isinstance(matrix, dict) and matrix.get("schema_version"):
+        if matrix.get("schema_version") == "case_fact_matrix.v2":
+            return _model_matrix_projection(matrix)
         return matrix
     return {
         "schema_version": "case_fact_matrix.v2",
         "matrix_kind": "BILATERAL_FROZEN",
         "facts": list(base.working_set.allowed_fact_targets),
         "content_hash": canonical_sha256(base.working_set.allowed_fact_targets),
+    }
+
+
+def _model_matrix_projection(matrix: dict[str, Any]) -> dict[str, Any]:
+    """Keep frozen business semantics while omitting server-only audit material."""
+
+    claims = matrix["claims"]
+    fact_rows = matrix["fact_rows"]
+    relationships = matrix.get("fact_relationships", [])
+    return {
+        "schema_version": "evidence_case_matrix_context.v2",
+        "source_schema_version": matrix["schema_version"],
+        "matrix_version": matrix["matrix_version"],
+        "matrix_kind": matrix["matrix_kind"],
+        "party_map": copy.deepcopy(matrix["party_map"]),
+        "case_overview": copy.deepcopy(matrix["case_overview"]),
+        "claims": {
+            name: (
+                {
+                    key: copy.deepcopy(value)
+                    for key, value in claim.items()
+                    if key != "source_refs"
+                }
+                if isinstance(claim, dict)
+                else claim
+            )
+            for name, claim in claims.items()
+        },
+        "fact_rows": [_model_fact_row(row) for row in fact_rows],
+        "fact_relationships": [
+            {
+                key: copy.deepcopy(value)
+                for key, value in relationship.items()
+                if key != "source_refs"
+            }
+            for relationship in relationships
+        ],
+    }
+
+
+def _model_fact_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "fact_id": row["fact_id"],
+        "category": row["category"],
+        "fact_target": row["fact_target"],
+        "materiality": row["materiality"],
+        "introduced_stage": row["origin"]["introduced_stage"],
+        "positions": {
+            role: {
+                key: copy.deepcopy(value)
+                for key, value in row["positions"][role].items()
+                if key != "source_refs"
+            }
+            for role in ("USER", "MERCHANT")
+        },
+        "party_alignment": copy.deepcopy(row["party_alignment"]),
+        "requires_resolution": row["requires_resolution"],
+        "truth_status": row["truth_status"],
+        "evidence_coverage_status": row["evidence_coverage_status"],
     }
 
 

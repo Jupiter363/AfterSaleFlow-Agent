@@ -38,6 +38,7 @@ from app.streaming import AgentStreamObserver, bind_stream_observer
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_evidence_clerk_turn import (  # noqa: E402
+    _freeze_bound_evidence_turn_payload,
     _java_evidence_opening_command_payload,
     _java_evidence_turn_command_payload,
 )
@@ -307,6 +308,68 @@ def test_v2_provider_schema_binds_frozen_invocation_authority_ids() -> None:
     assert material_defs["EvidenceRoomReadinessFrameHeaderV2"]["properties"][
         "remaining_core_fact_ids"
     ]["items"]["enum"] == material_fact_ids
+
+
+def test_v2_provider_context_keeps_semantics_without_audit_metadata() -> None:
+    request = EvidenceTurnRequest.model_validate(_freeze_bound_evidence_turn_payload())
+    assembled = assemble_evidence_room_context_v2(request)
+    assert request.context_envelope.frozen_submission is not None
+    frozen = request.context_envelope.frozen_submission.matrix
+    projected = assembled.payload["frozen_case_matrix"]
+
+    assert projected["schema_version"] == "evidence_case_matrix_context.v2"
+    assert projected["source_schema_version"] == "case_fact_matrix.v2"
+    assert projected["matrix_version"] == frozen["matrix_version"]
+    assert projected["matrix_kind"] == frozen["matrix_kind"]
+    assert projected["party_map"] == frozen["party_map"]
+    assert projected["case_overview"] == frozen["case_overview"]
+    assert [item["fact_id"] for item in projected["fact_rows"]] == [
+        item["fact_id"] for item in frozen["fact_rows"]
+    ]
+    assert projected["claims"]["respondent_direct"]["attitude"] == (
+        frozen["claims"]["respondent_direct"]["attitude"]
+    )
+    for projected_row, frozen_row in zip(
+        projected["fact_rows"],
+        frozen["fact_rows"],
+        strict=True,
+    ):
+        assert projected_row["introduced_stage"] == frozen_row["origin"][
+            "introduced_stage"
+        ]
+        assert projected_row["party_alignment"] == frozen_row["party_alignment"]
+        for role in ("USER", "MERCHANT"):
+            assert projected_row["positions"][role] == {
+                key: value
+                for key, value in frozen_row["positions"][role].items()
+                if key != "source_refs"
+            }
+
+    serialized = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    for forbidden in (
+        "content_hash",
+        "fact_indexes",
+        "generation_ref",
+        "matrix_id",
+        "parent_ref",
+        "source_refs",
+    ):
+        assert forbidden not in serialized
+    assert assembled.base.working_set.case_intake_dossier["case_fact_matrix"] == frozen
+
+
+def test_v2_authority_bound_schema_omits_only_nonsemantic_titles() -> None:
+    request = EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
+    assembled = assemble_evidence_room_context_v2(request)
+    base_schema = EvidenceRoomOpeningStreamV2.model_json_schema()
+    bound_schema = _authority_bound_output_type(
+        EvidenceRoomOpeningStreamV2,
+        assembled,
+    ).model_json_schema()
+
+    assert '"title"' in json.dumps(base_schema, separators=(",", ":"))
+    assert '"title"' not in json.dumps(bound_schema, separators=(",", ":"))
+    assert '"description"' in json.dumps(bound_schema, separators=(",", ":"))
 
 
 def _event(kind: str, sequence: int, **values: object) -> str:

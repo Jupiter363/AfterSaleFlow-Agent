@@ -215,6 +215,8 @@ def _authority_bound_output_type(
         ) < 1:
             raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
 
+    _strip_schema_titles(schema)
+
     bound_schema = deepcopy(schema)
 
     class AuthorityBoundEvidenceTurnStream(output_type):
@@ -273,6 +275,18 @@ def _bind_schema_enum(
                 array_items=array_items,
             )
     return bound
+
+
+def _strip_schema_titles(value: Any) -> None:
+    """Remove generated display labels without weakening provider constraints."""
+
+    if isinstance(value, dict):
+        value.pop("title", None)
+        for nested in value.values():
+            _strip_schema_titles(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _strip_schema_titles(nested)
 
 
 def _validate_v2_frames(
