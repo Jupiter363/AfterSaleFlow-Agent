@@ -17,7 +17,11 @@ import java.time.Instant;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
+import org.springframework.core.task.SyncTaskExecutor;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.listener.RedisMessageListenerContainer;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class RedisAgentRunTransientStreamRelayTest {
 
@@ -53,6 +57,21 @@ class RedisAgentRunTransientStreamRelayTest {
                                 .getAnnotation(ConditionalOnWebApplication.class)
                                 .type())
                 .isEqualTo(ConditionalOnWebApplication.Type.SERVLET);
+    }
+
+    @Test
+    void transientSubscriptionSerializesProviderEventsInPublisherOrder() {
+        RedisConnectionFactory connectionFactory = mock(RedisConnectionFactory.class);
+        AgentRunStreamEventService eventService = mock(AgentRunStreamEventService.class);
+        RedisAgentRunTransientStreamSubscriber subscriber =
+                new RedisAgentRunTransientStreamSubscriber(objectMapper, eventService);
+
+        RedisMessageListenerContainer container =
+                new AgentRunTransientStreamSubscriptionConfiguration()
+                        .agentRunTransientStreamSubscription(connectionFactory, subscriber);
+
+        assertThat(ReflectionTestUtils.getField(container, "taskExecutor"))
+                .isInstanceOf(SyncTaskExecutor.class);
     }
 
     private static AgentStreamEvent delta() {
