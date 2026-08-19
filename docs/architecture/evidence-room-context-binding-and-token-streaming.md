@@ -325,6 +325,7 @@ Source Unit ID 由 evidence ID、内容权威哈希、模态、位置/页面权�
 - header 只放完成引用绑定所需的 ID、枚举、短理由和有限列表；长解释必须放在 `public_text` 中，避免 header 生成时间吞掉该 frame 的语义首包；
 - `fact_bindings[].reason`、request reason 和 assessment limitations 分别设置严格短文本预算，超预算属于结构/预算错误，不做语义改写；
 - Provider Schema 使用普通 object/array/discriminated-union 子集；增量扫描器独立强制首属性为 `header`、第二且最后属性为 `public_text`。若模型调换属性，扫描器在公开任何字符串前失败关闭，因此安全性不依赖普通对象键顺序猜测。
+- 每次模型调用前，服务端必须从本次已冻结 invocation 权威生成一次 mode-specific Provider Schema：所有 `fact_id`/fact-ID 数组的 `enum` 精确等于当前冻结矩阵 ID，`evidence_id` 精确等于当前批次附件，`source_unit_id` 精确等于当前 Source Unit 目录。静态 Identifier 格式 Schema 只定义字符形状，不能代替本次调用的成员范围；Pydantic 终态校验和 Header 到达时的权威校验仍保留为独立 fail-closed 边界。
 
 模型结构化 header 不得输出以下服务端权威；该限制由 Schema 字段白名单执行，不扫描自由 `public_text`：
 
@@ -711,7 +712,8 @@ Frame 事务失败时，已经显示的文字仍保留为 provisional，本轮�
 - Source Unit 唯一且 span/page/asset binding 合法；
 - 冻结矩阵版本和 fact IDs 完整；
 - 当前上下文没有静默截断；
-- mode-specific output schema 已被目标 Provider 接受。
+- mode-specific output schema 已被目标 Provider 接受；
+- Provider 可见 Schema 中的 fact、attachment 和 Source Unit 枚举与本次冻结 invocation 逐项、顺序一致，不能只暴露通用 Identifier pattern。
 
 ### 11.2 Header 到达时
 

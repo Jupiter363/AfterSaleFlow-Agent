@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 from typing import Any
@@ -58,7 +59,10 @@ class EvidenceTurnWorkflowV2:
         mode = assembled.payload["turn_contract"]["turn_mode"]
         if mode == "REENTRY_REPLAY":
             raise GraphContractError("EVIDENCE_V2_REENTRY_REQUIRES_DURABLE_REPLAY")
-        output_type = _output_type_for_mode(mode)
+        output_type = _authority_bound_output_type(
+            _output_type_for_mode(mode),
+            assembled,
+        )
         context_pack = build_context_pack(
             "evidence_turn",
             {"evidence_room_context_v2": assembled.payload},
@@ -144,6 +148,131 @@ def _output_type_for_mode(mode: str) -> type[EvidenceTurnStreamV2]:
     if mode == "TEXT_FOLLOWUP":
         return EvidenceTextFollowupStreamV2
     raise GraphContractError("EVIDENCE_V2_TURN_MODE_INVALID")
+
+
+def _authority_bound_output_type(
+    output_type: type[EvidenceTurnStreamV2],
+    assembled: AssembledEvidenceRoomContextV2,
+) -> type[EvidenceTurnStreamV2]:
+    """Narrow provider-visible identifier fields to this frozen invocation."""
+
+    schema = deepcopy(output_type.model_json_schema())
+    mode = str(assembled.payload["turn_contract"]["turn_mode"])
+    fact_ids = _unique_authority_ids(
+        item["fact_id"]
+        for item in assembled.base.working_set.allowed_fact_targets
+    )
+    attachment_ids = _unique_authority_ids(
+        assembled.base.raw_envelope.current_event.attachment_refs
+    )
+    source_unit_ids = _unique_authority_ids(
+        item["source_unit_id"] for item in assembled.source_units
+    )
+    if not fact_ids:
+        raise GraphContractError("EVIDENCE_V2_FACT_AUTHORITY_EMPTY")
+
+    required_fact_arrays = {
+        "ROOM_OPENING": ("focus_fact_ids", "target_fact_ids", "remaining_core_fact_ids"),
+        "MATERIAL_REVIEW": (
+            "candidate_fact_ids",
+            "target_fact_ids",
+            "remaining_core_fact_ids",
+        ),
+        "TEXT_FOLLOWUP": ("target_fact_ids", "remaining_core_fact_ids"),
+    }.get(mode)
+    if required_fact_arrays is None:
+        raise GraphContractError("EVIDENCE_V2_TURN_MODE_INVALID")
+    for property_name in required_fact_arrays:
+        if _bind_schema_enum(
+            schema,
+            property_name,
+            fact_ids,
+            array_items=True,
+        ) < 1:
+            raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
+    if mode == "MATERIAL_REVIEW":
+        if not attachment_ids:
+            raise GraphContractError("EVIDENCE_V2_ATTACHMENT_AUTHORITY_EMPTY")
+        if _bind_schema_enum(
+            schema,
+            "evidence_id",
+            attachment_ids,
+            array_items=False,
+        ) < 1:
+            raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
+        if _bind_schema_enum(
+            schema,
+            "fact_id",
+            fact_ids,
+            array_items=False,
+        ) < 1:
+            raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
+        if source_unit_ids and _bind_schema_enum(
+            schema,
+            "source_unit_id",
+            source_unit_ids,
+            array_items=False,
+        ) < 1:
+            raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
+
+    bound_schema = deepcopy(schema)
+
+    class AuthorityBoundEvidenceTurnStream(output_type):
+        @classmethod
+        def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            del cls, args, kwargs
+            return deepcopy(bound_schema)
+
+    AuthorityBoundEvidenceTurnStream.__name__ = output_type.__name__
+    AuthorityBoundEvidenceTurnStream.__qualname__ = output_type.__qualname__
+    return AuthorityBoundEvidenceTurnStream
+
+
+def _unique_authority_ids(values: Any) -> tuple[str, ...]:
+    unique: dict[str, None] = {}
+    for value in values:
+        identifier = str(value)
+        if not identifier:
+            raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
+        unique.setdefault(identifier, None)
+    return tuple(unique)
+
+
+def _bind_schema_enum(
+    value: Any,
+    property_name: str,
+    allowed_values: tuple[str, ...],
+    *,
+    array_items: bool,
+) -> int:
+    """Bind every matching output-schema property without guessing def names."""
+
+    bound = 0
+    if isinstance(value, dict):
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            property_schema = properties.get(property_name)
+            if isinstance(property_schema, dict):
+                target = property_schema.get("items") if array_items else property_schema
+                if isinstance(target, dict):
+                    target["enum"] = list(allowed_values)
+                    bound += 1
+        for nested in value.values():
+            bound += _bind_schema_enum(
+                nested,
+                property_name,
+                allowed_values,
+                array_items=array_items,
+            )
+    elif isinstance(value, list):
+        for nested in value:
+            bound += _bind_schema_enum(
+                nested,
+                property_name,
+                allowed_values,
+                array_items=array_items,
+            )
+    return bound
 
 
 def _validate_v2_frames(

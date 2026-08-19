@@ -15,7 +15,10 @@ from app.agents.evidence_clerk.v2_contracts import (
     EvidenceRoomOpeningStreamV2,
 )
 from app.agents.evidence_clerk.v2_policy import EvidenceV2PublicOutputPolicy
-from app.agents.evidence_clerk.v2_workflow import EvidenceTurnWorkflowV2
+from app.agents.evidence_clerk.v2_workflow import (
+    EvidenceTurnWorkflowV2,
+    _authority_bound_output_type,
+)
 from app.harness.evidence_room_context_v2 import assemble_evidence_room_context_v2
 from app.harness.model_runner import (
     HarnessGeneration,
@@ -208,6 +211,102 @@ def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> No
         "frame_type",
         "focus_fact_ids",
     }
+
+
+def test_v2_provider_schema_binds_frozen_invocation_authority_ids() -> None:
+    opening_request = EvidenceTurnRequest.model_validate(
+        _java_evidence_opening_command_payload()
+    )
+    opening = assemble_evidence_room_context_v2(opening_request)
+    opening_fact_ids = [
+        item["fact_id"] for item in opening.base.working_set.allowed_fact_targets
+    ]
+    opening_schema = _authority_bound_output_type(
+        EvidenceRoomOpeningStreamV2,
+        opening,
+    ).model_json_schema()
+
+    opening_defs = opening_schema["$defs"]
+    assert opening_defs["EvidenceOpeningOrientationFrameHeaderV2"]["properties"][
+        "focus_fact_ids"
+    ]["items"]["enum"] == opening_fact_ids
+    assert opening_defs["EvidenceRequestFrameHeaderV2"]["properties"][
+        "target_fact_ids"
+    ]["items"]["enum"] == opening_fact_ids
+    assert opening_defs["EvidenceRoomReadinessFrameHeaderV2"]["properties"][
+        "remaining_core_fact_ids"
+    ]["items"]["enum"] == opening_fact_ids
+    assert "enum" not in (
+        EvidenceRoomOpeningStreamV2.model_json_schema()["$defs"]
+        ["EvidenceOpeningOrientationFrameHeaderV2"]["properties"]
+        ["focus_fact_ids"]["items"]
+    )
+
+    material_document = _java_evidence_turn_command_payload()
+    visible = material_document["context_envelope"]["visible_evidence"][0]
+    parsed_text = "物流记录显示该包裹已于约定时间交付。"
+    file_sha256 = "a" * 64
+    parsed_content_sha256 = hashlib.sha256(parsed_text.encode("utf-8")).hexdigest()
+    visible.update(
+        {
+            "content_type": "text/markdown",
+            "file_hash": file_sha256,
+            "parsed_text": parsed_text,
+            "parse_status": "SUCCEEDED",
+        }
+    )
+    material_document["context_envelope"]["evidence_content_authorities"] = [
+        {
+            "schema_version": "evidence_content_authority.v1",
+            "case_id": material_document["context_envelope"]["case_snapshot"][
+                "case_id"
+            ],
+            "evidence_id": visible["evidence_id"],
+            "file_sha256": file_sha256,
+            "content_type": "text/markdown",
+            "parser_version": "PARSER_SCHEMA_BINDING_TEST_V1",
+            "parsed_content_sha256": parsed_content_sha256,
+            "parsed_text": parsed_text,
+            "parsed_byte_length": len(parsed_text.encode("utf-8")),
+            "completed_at": "2026-08-19T10:00:00+08:00",
+            "status": "SUCCEEDED",
+        }
+    ]
+    material_request = EvidenceTurnRequest.model_validate(material_document)
+    material = assemble_evidence_room_context_v2(material_request)
+    material_fact_ids = [
+        item["fact_id"] for item in material.base.working_set.allowed_fact_targets
+    ]
+    attachment_ids = list(material.base.raw_envelope.current_event.attachment_refs)
+    source_unit_ids = [item["source_unit_id"] for item in material.source_units]
+    assert source_unit_ids
+
+    material_schema = _authority_bound_output_type(
+        EvidenceMaterialReviewStreamV2,
+        material,
+    ).model_json_schema()
+    material_defs = material_schema["$defs"]
+    assert material_defs["EvidenceObservationFrameHeaderV2"]["properties"][
+        "source_unit_id"
+    ]["enum"] == source_unit_ids
+    assert material_defs["EvidenceObservationFrameHeaderV2"]["properties"][
+        "candidate_fact_ids"
+    ]["items"]["enum"] == material_fact_ids
+    assert material_defs["EvidenceFactBindingV2"]["properties"]["fact_id"][
+        "enum"
+    ] == material_fact_ids
+    assert material_defs["EvidenceAssessmentFrameHeaderV2"]["properties"][
+        "evidence_id"
+    ]["enum"] == attachment_ids
+    assert material_defs["EvidenceHumanReviewFrameHeaderV2"]["properties"][
+        "evidence_id"
+    ]["enum"] == attachment_ids
+    assert material_defs["EvidenceRequestFrameHeaderV2"]["properties"][
+        "target_fact_ids"
+    ]["items"]["enum"] == material_fact_ids
+    assert material_defs["EvidenceRoomReadinessFrameHeaderV2"]["properties"][
+        "remaining_core_fact_ids"
+    ]["items"]["enum"] == material_fact_ids
 
 
 def _event(kind: str, sequence: int, **values: object) -> str:
