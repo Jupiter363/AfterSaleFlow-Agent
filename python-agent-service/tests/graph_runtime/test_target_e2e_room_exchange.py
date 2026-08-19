@@ -79,6 +79,51 @@ async def test_exchange_posts_canonical_json_only_to_the_fixed_java_path() -> No
 
 
 @pytest.mark.asyncio
+async def test_exchange_reuses_one_lifecycle_owned_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[httpx.AsyncClient] = []
+    real_client = httpx.AsyncClient
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"receipt":"accepted"}',
+        )
+
+    def build_client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        client = real_client(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(httpx, "AsyncClient", build_client)
+    exchange = JavaTargetE2ERoomExchange(
+        java_api_service_url="https://java.internal",
+        java_service_secret=_SECRET,
+        transport=httpx.MockTransport(handler),
+    )
+
+    await exchange.aopen()
+    for value in (1, 2):
+        assert await exchange._post(  # noqa: SLF001
+            TARGET_E2E_ROOM_OBJECT_LOAD_PATH,
+            {"value": value},
+            maximum_bytes=256,
+        ) == {"receipt": "accepted"}
+
+    assert len(created) == 1
+    await exchange.aclose()
+    assert created[0].is_closed
+    with pytest.raises(GraphContractError, match="TARGET_E2E_ROOM_EXCHANGE_CLOSED"):
+        await exchange._post(  # noqa: SLF001
+            TARGET_E2E_ROOM_OBJECT_LOAD_PATH,
+            {"value": 3},
+            maximum_bytes=256,
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("response", "maximum_bytes", "error_code"),
     [

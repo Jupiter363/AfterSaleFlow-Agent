@@ -75,6 +75,7 @@ from app.graph_runtime.target_e2e_composite import (
 from app.graph_runtime.target_e2e_room_adapters import (
     build_target_e2e_intake_provider,
 )
+from app.graph_runtime.target_e2e_room_exchange import JavaTargetE2ERoomExchange
 from app.graph_runtime.topology import build_shadow_kernel_graph
 from app.harness.evidence_asset_loader import EvidenceAssetLoader
 from app.harness.model_runner import HarnessModelRunner
@@ -236,6 +237,7 @@ def build_graph_runtime_bindings(
     target_e2e_specialized_provider_factory: (
         Callable[[GraphExecutorKernel], Iterable[TargetE2ERoomProvider]] | None
     ) = None,
+    target_e2e_room_exchange: JavaTargetE2ERoomExchange | None = None,
 ) -> GraphRuntimeBindings:
     """Build non-overridable exact bindings from validated deployment settings."""
 
@@ -288,18 +290,29 @@ def build_graph_runtime_bindings(
             hearing_workflow = _build_target_e2e_hearing_workflow(structured_client)
 
     async def open_http_resources() -> None:
-        if intake_exchange is not None:
-            await intake_exchange.aopen()
-        if structured_client is not None:
-            await structured_client.aopen()
+        if target_e2e_room_exchange is not None:
+            await target_e2e_room_exchange.aopen()
+        try:
+            if intake_exchange is not None:
+                await intake_exchange.aopen()
+            if structured_client is not None:
+                await structured_client.aopen()
+        except BaseException:
+            if target_e2e_room_exchange is not None:
+                await target_e2e_room_exchange.aclose()
+            raise
 
     async def close_http_resources() -> None:
         try:
-            if intake_exchange is not None:
-                await intake_exchange.aclose()
+            try:
+                if intake_exchange is not None:
+                    await intake_exchange.aclose()
+            finally:
+                if structured_client is not None:
+                    await structured_client.aclose()
         finally:
-            if structured_client is not None:
-                await structured_client.aclose()
+            if target_e2e_room_exchange is not None:
+                await target_e2e_room_exchange.aclose()
 
     def executor_registry_factory(
         kernel: GraphExecutorKernel,
@@ -389,12 +402,20 @@ def build_graph_runtime_bindings(
         executor_registry_factory=executor_registry_factory,
         resource_opener=(
             open_http_resources
-            if structured_client is not None or intake_exchange is not None
+            if (
+                structured_client is not None
+                or intake_exchange is not None
+                or target_e2e_room_exchange is not None
+            )
             else None
         ),
         resource_closer=(
             close_http_resources
-            if structured_client is not None or intake_exchange is not None
+            if (
+                structured_client is not None
+                or intake_exchange is not None
+                or target_e2e_room_exchange is not None
+            )
             else None
         ),
         intake_infrastructure_preparer=(

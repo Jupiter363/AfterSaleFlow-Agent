@@ -369,6 +369,7 @@ def test_target_e2e_bindings_are_assembled_from_the_open_security_runtime(
     def build_bindings(settings: Settings, **kwargs: Any) -> GraphRuntimeBindings:
         captured["settings"] = settings
         captured["provider_factory"] = kwargs["target_e2e_specialized_provider_factory"]
+        captured["lifecycle_room_exchange"] = kwargs["target_e2e_room_exchange"]
         return expected
 
     monkeypatch.setattr(graph_lifecycle, "GraphSecurityRuntime", SecurityRuntime)
@@ -386,6 +387,7 @@ def test_target_e2e_bindings_are_assembled_from_the_open_security_runtime(
     assert captured["security_runtime"] is runtime
     assert captured["provider_factory"] is not None
     assert captured["room_exchange"]._origin == "http://java-api-service:8080"
+    assert captured["lifecycle_room_exchange"] is captured["room_exchange"]
 
 
 @pytest.mark.asyncio

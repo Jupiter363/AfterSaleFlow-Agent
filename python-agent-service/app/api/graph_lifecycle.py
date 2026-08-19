@@ -762,6 +762,7 @@ def _build_target_e2e_runtime_bindings(
     return build_graph_runtime_bindings(
         settings,
         target_e2e_specialized_provider_factory=provider_factory,
+        target_e2e_room_exchange=room_exchange,
     )
 
 

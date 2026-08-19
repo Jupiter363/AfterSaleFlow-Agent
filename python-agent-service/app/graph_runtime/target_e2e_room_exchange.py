@@ -9,6 +9,7 @@ resolves an object reference or stores a proposal.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 from collections.abc import Mapping
@@ -114,6 +115,73 @@ class JavaTargetE2ERoomExchange:
         self._secret = java_service_secret
         self._timeout = timeout_seconds
         self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+        self._lifecycle = asyncio.Condition()
+        self._active_requests = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._closing = False
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
+
+    async def aopen(self) -> None:
+        """Construct the process-lifetime transport before accepting commands."""
+
+        async with self._lifecycle:
+            if self._closing or self._closed:
+                raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_CLOSED")
+            if self._client is None:
+                self._client = self._build_client()
+
+    async def aclose(self) -> None:
+        """Drain active exchanges and close the shared transport exactly once."""
+
+        async with self._lifecycle:
+            if self._close_task is None:
+                self._closing = True
+                self._close_task = asyncio.create_task(self._close_when_idle())
+            close_task = self._close_task
+        assert close_task is not None
+        await asyncio.shield(close_task)
+
+    async def _close_when_idle(self) -> None:
+        try:
+            await self._idle.wait()
+            client = self._client
+            if client is not None:
+                await client.aclose()
+        finally:
+            async with self._lifecycle:
+                self._closed = True
+                self._closing = False
+                self._lifecycle.notify_all()
+
+    async def _borrow_client(self) -> httpx.AsyncClient:
+        async with self._lifecycle:
+            if self._closing or self._closed:
+                raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_CLOSED")
+            client = self._client
+            if client is None:
+                # Direct consumers remain usable outside the application lifecycle.
+                client = self._build_client()
+                self._client = client
+            if self._active_requests == 0:
+                self._idle.clear()
+            self._active_requests += 1
+            return client
+
+    def _build_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=self._origin,
+            timeout=self._timeout,
+            transport=self._transport,
+            follow_redirects=False,
+        )
+
+    def _return_client(self) -> None:
+        self._active_requests -= 1
+        if self._active_requests == 0:
+            self._idle.set()
 
     def for_execution(self, execution: GatewayExecution) -> TargetE2EImmutableObjectStore:
         return _ScopedJavaTargetE2ERoomExchange(self, _authority(execution))
@@ -133,35 +201,42 @@ class JavaTargetE2ERoomExchange:
             "Content-Type": "application/json",
             "X-Service-Secret": self._secret,
         }
+        client = await self._borrow_client()
         try:
-            async with httpx.AsyncClient(
-                base_url=self._origin,
-                timeout=self._timeout,
-                transport=self._transport,
-                follow_redirects=False,
-            ) as client:
+            try:
                 response = await client.post(
                     path,
                     headers=headers,
                     content=canonicalize(dict(payload)),
                 )
-        except httpx.HTTPError as error:
-            raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_TRANSPORT_FAILED") from error
-        if response.status_code != 200:
-            raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_REJECTED")
-        if response.headers.get("content-encoding", "identity").lower() != "identity":
-            raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_CONTENT_ENCODING_INVALID")
-        if response.headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
-            raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_MEDIA_TYPE_INVALID")
-        if len(response.content) > maximum_bytes:
-            raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_RESPONSE_TOO_LARGE")
-        try:
-            value = json.loads(response.content, object_pairs_hook=_unique_object)
-        except (UnicodeDecodeError, ValueError) as error:
-            raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_RESPONSE_INVALID") from error
-        if not isinstance(value, dict):
-            raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_RESPONSE_INVALID")
-        return cast(dict[str, Any], value)
+            except httpx.HTTPError as error:
+                raise GraphContractError(
+                    "TARGET_E2E_ROOM_EXCHANGE_TRANSPORT_FAILED"
+                ) from error
+            if response.status_code != 200:
+                raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_REJECTED")
+            if response.headers.get("content-encoding", "identity").lower() != "identity":
+                raise GraphContractError(
+                    "TARGET_E2E_ROOM_EXCHANGE_CONTENT_ENCODING_INVALID"
+                )
+            if (
+                response.headers.get("content-type", "").split(";", 1)[0].lower()
+                != "application/json"
+            ):
+                raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_MEDIA_TYPE_INVALID")
+            if len(response.content) > maximum_bytes:
+                raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_RESPONSE_TOO_LARGE")
+            try:
+                value = json.loads(response.content, object_pairs_hook=_unique_object)
+            except (UnicodeDecodeError, ValueError) as error:
+                raise GraphContractError(
+                    "TARGET_E2E_ROOM_EXCHANGE_RESPONSE_INVALID"
+                ) from error
+            if not isinstance(value, dict):
+                raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_RESPONSE_INVALID")
+            return cast(dict[str, Any], value)
+        finally:
+            self._return_client()
 
 
 class DeterministicTargetE2EHearingInvocationDecoder:
