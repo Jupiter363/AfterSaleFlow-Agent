@@ -44,7 +44,7 @@ from app.graphs.hearing.contracts import (
     HearingTargetE2EOperationBinding,
 )
 from app.graphs.hearing.errors import HearingGraphContractError
-from app.graphs.hearing.graph import _build_family
+from app.graphs.hearing.graph import _build_async_family
 from app.graphs.hearing.runtime import validate_hearing_recovery_state
 from app.graphs.hearing.state import (
     MAX_HEARING_PROPOSAL_BYTES,
@@ -665,7 +665,9 @@ def build_target_e2e_hearing_runtime_bundle(
             "scope_binding": scope_binding,
         }
     )
-    graph = _build_family(registration.identity).compile(checkpointer=checkpointer)
+    graph = _build_async_family(registration.identity).compile(
+        checkpointer=checkpointer
+    )
     if graph.checkpointer is not checkpointer:
         raise HearingGraphContractError("HEARING_TARGET_CHECKPOINTER_BINDING_INVALID")
     return HearingTargetE2ERuntimeBundle(

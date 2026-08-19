@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -187,6 +188,30 @@ def assess_evidence_item(
     return {"work_results": {key: payload}}
 
 
+async def aassess_evidence_item(
+    state: Mapping[str, Any],
+    runtime: Runtime[HearingGraphInvocation],
+) -> dict[str, Any]:
+    key = state.get("work_item_key")
+    if not isinstance(key, str) or _STABLE_KEY.fullmatch(key) is None:
+        raise HearingGraphContractError("HEARING_EVIDENCE_SEND_KEY_INVALID")
+    assessor = runtime.context.execute_work_item
+    if not callable(assessor):
+        raise HearingGraphContractError("HEARING_EVIDENCE_ASSESSOR_REQUIRED")
+    result = assessor(runtime.context.request, key)
+    if inspect.isawaitable(result):
+        result = await result
+    if not isinstance(result, BaseModel):
+        raise HearingGraphContractError("HEARING_EVIDENCE_RESULT_NOT_TYPED")
+    payload = result.model_dump(mode="json")
+    if payload.get("evidence_id") != key:
+        raise HearingGraphContractError("HEARING_EVIDENCE_RESULT_KEY_MISMATCH")
+    encoded = _canonical_json_bytes(payload)
+    if len(encoded) > MAX_HEARING_WORK_RESULT_BYTES:
+        raise HearingGraphContractError("HEARING_EVIDENCE_RESULT_TOO_LARGE")
+    return {"work_results": {key: payload}}
+
+
 def keyed_evidence_fan_in(state: HearingGraphStateV1) -> dict[str, Any]:
     wave = state.get("in_flight_keys")
     results = state.get("work_results")
@@ -228,6 +253,29 @@ def complete_evidence_synthesis(
     return _proposal_update(result)
 
 
+async def acomplete_evidence_synthesis(
+    state: HearingGraphStateV1,
+    runtime: Runtime[HearingGraphInvocation],
+) -> dict[str, Any]:
+    ordered = state.get("ordered_work_item_keys")
+    results = state.get("work_results")
+    if (
+        not isinstance(ordered, list)
+        or not isinstance(results, dict)
+        or list(results) != ordered
+        or state.get("next_dispatch_index") != len(ordered)
+        or state.get("in_flight_keys") != []
+    ):
+        raise HearingGraphContractError("HEARING_EVIDENCE_COVERAGE_INCOMPLETE")
+    projector = runtime.context.execute_with_work_results
+    if not callable(projector):
+        raise HearingGraphContractError("HEARING_EVIDENCE_PROJECTOR_REQUIRED")
+    result = projector(runtime.context.request, results)
+    if inspect.isawaitable(result):
+        result = await result
+    return _proposal_update(result)
+
+
 def execute_operation(
     state: HearingGraphStateV1,
     runtime: Runtime[HearingGraphInvocation],
@@ -239,6 +287,22 @@ def execute_operation(
     ):
         raise HearingGraphContractError("HEARING_ROUTED_OPERATION_MISMATCH")
     result = runtime.context.execute(runtime.context.request)
+    return _proposal_update(result)
+
+
+async def aexecute_operation(
+    state: HearingGraphStateV1,
+    runtime: Runtime[HearingGraphInvocation],
+    *,
+    expected_operation: HearingOperation,
+) -> dict[str, Any]:
+    if state.get("operation") != expected_operation.value or state.get("route") != (
+        expected_operation.value
+    ):
+        raise HearingGraphContractError("HEARING_ROUTED_OPERATION_MISMATCH")
+    result = runtime.context.execute(runtime.context.request)
+    if inspect.isawaitable(result):
+        result = await result
     return _proposal_update(result)
 
 

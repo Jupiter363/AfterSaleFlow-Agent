@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
@@ -94,11 +94,17 @@ class HearingGraphInvocation:
     """Ephemeral input; request bodies and injected executors never enter graph state."""
 
     request: BaseModel
-    execute: Callable[[BaseModel], BaseModel]
+    execute: Callable[[BaseModel], BaseModel | Awaitable[BaseModel]]
     plan_work_items: Callable[[BaseModel], Sequence[str]] | None = None
-    execute_work_item: Callable[[BaseModel, str], BaseModel] | None = None
+    execute_work_item: (
+        Callable[[BaseModel, str], BaseModel | Awaitable[BaseModel]] | None
+    ) = None
     execute_with_work_results: (
-        Callable[[BaseModel, Mapping[str, Mapping[str, Any]]], BaseModel] | None
+        Callable[
+            [BaseModel, Mapping[str, Mapping[str, Any]]],
+            BaseModel | Awaitable[BaseModel],
+        ]
+        | None
     ) = None
 
 

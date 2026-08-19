@@ -67,7 +67,12 @@ from app.graphs.hearing.target_e2e import (
 )
 from app.harness.model_runner import HarnessModelRunner
 from app.harness.prompt_composer import PromptRepository
-from app.llm import AgentOutputSchemaError, LiteLlmProxyClient
+from app.llm import (
+    AgentOutputSchemaError,
+    LiteLlmProxyClient,
+    ProviderCallIntent,
+    bind_provider_call_intent_recorder,
+)
 from app.model_runtime.transports import ModelTransportOutputError
 from app.schemas import (
     CaseFactMatrixV2,
@@ -548,6 +553,28 @@ def test_all_target_model_nodes_keep_prompt_pipe_model_pipe_parser_flow() -> Non
     }
 
 
+def test_target_workflow_binds_every_hearing_operation_to_async_execution() -> None:
+    workflows = HearingFlowWorkflows(model_runner=None)
+
+    for operation in HearingOperation:
+        binding = HEARING_TARGET_E2E_OPERATION_BINDINGS[operation]
+        request = _Request(
+            stage_code=binding.request_stage_code,
+            stage_sequence=1,
+        )
+        invocation = workflows.target_e2e_invocation(operation, request)
+
+        assert inspect.iscoroutinefunction(invocation.execute)
+        if operation is HearingOperation.EVIDENCE_SYNTHESIS:
+            assert callable(invocation.plan_work_items)
+            assert inspect.iscoroutinefunction(invocation.execute_work_item)
+            assert inspect.iscoroutinefunction(invocation.execute_with_work_results)
+        else:
+            assert invocation.plan_work_items is None
+            assert invocation.execute_work_item is None
+            assert invocation.execute_with_work_results is None
+
+
 def test_composite_provider_exports_exact_hearing_room_and_stream_seam() -> None:
     execution, _ = _execution(HearingOperation.INTAKE_QUESTIONS)
 
@@ -833,11 +860,33 @@ def test_hearing_intake_closed_world_fact_violation_repairs_once_and_replays_exa
         run_id="RUN_hearing_semantic_repair",
         publish=published.append,
     )
-    with bind_stream_observer(observer):
+
+    class _AsyncOnlyProviderIntentRecorder:
+        def __init__(self) -> None:
+            self.async_intents: list[ProviderCallIntent] = []
+            self.sync_calls = 0
+
+        def record_provider_call(self, _intent: ProviderCallIntent) -> None:
+            self.sync_calls += 1
+            raise AssertionError("Target Hearing used the forbidden sync provider path")
+
+        async def arecord_provider_call(self, intent: ProviderCallIntent) -> None:
+            self.async_intents.append(intent)
+
+    recorder = _AsyncOnlyProviderIntentRecorder()
+    with (
+        bind_provider_call_intent_recorder(recorder),
+        bind_stream_observer(observer),
+    ):
         first = asyncio.run(adapter.execute(execution))
     replay = asyncio.run(adapter.execute(execution))
 
     assert len(provider_calls) == 2
+    assert recorder.sync_calls == 0
+    assert [intent.node_name for intent in recorder.async_intents] == [
+        "hearing_intake_questions",
+        "hearing_intake_questions",
+    ]
     assert "response_format" in provider_calls[0]
     assert "response_format" not in provider_calls[1]
     assert provider_calls[0]["response_format"]["json_schema"]["schema"] == (

@@ -13,6 +13,9 @@ from app.graphs.hearing.contracts import (
     HearingOperation,
 )
 from app.graphs.hearing.nodes import (
+    aassess_evidence_item,
+    acomplete_evidence_synthesis,
+    aexecute_operation,
     assess_evidence_item,
     complete_evidence_synthesis,
     dispatch_evidence_wave,
@@ -26,7 +29,11 @@ from app.graphs.hearing.nodes import (
 from app.graphs.hearing.state import HearingGraphInvocation, HearingGraphStateV1
 
 
-def _build_family(identity: HearingGraphIdentity) -> StateGraph:
+def _build_family(
+    identity: HearingGraphIdentity,
+    *,
+    async_execution: bool = False,
+) -> StateGraph:
     builder = StateGraph(HearingGraphStateV1, context_schema=HearingGraphInvocation)
     builder.add_node(
         "validate_and_route",
@@ -37,16 +44,29 @@ def _build_family(identity: HearingGraphIdentity) -> StateGraph:
             continue
         builder.add_node(
             operation.value,
-            partial(execute_operation, expected_operation=operation),
+            partial(
+                aexecute_operation if async_execution else execute_operation,
+                expected_operation=operation,
+            ),
         )
     builder.add_node("project_proposal", project_proposal)
 
     if HearingOperation.EVIDENCE_SYNTHESIS in identity.operations:
         builder.add_node("plan_evidence_work", plan_evidence_work)
         builder.add_node("plan_evidence_wave", plan_evidence_wave)
-        builder.add_node("assess_evidence_item", assess_evidence_item)
+        builder.add_node(
+            "assess_evidence_item",
+            aassess_evidence_item if async_execution else assess_evidence_item,
+        )
         builder.add_node("keyed_evidence_fan_in", keyed_evidence_fan_in)
-        builder.add_node("complete_evidence_synthesis", complete_evidence_synthesis)
+        builder.add_node(
+            "complete_evidence_synthesis",
+            (
+                acomplete_evidence_synthesis
+                if async_execution
+                else complete_evidence_synthesis
+            ),
+        )
 
     builder.add_edge(START, "validate_and_route")
     builder.add_conditional_edges(
@@ -74,6 +94,10 @@ def _build_family(identity: HearingGraphIdentity) -> StateGraph:
         builder.add_edge("complete_evidence_synthesis", "project_proposal")
     builder.add_edge("project_proposal", END)
     return builder
+
+
+def _build_async_family(identity: HearingGraphIdentity) -> StateGraph:
+    return _build_family(identity, async_execution=True)
 
 
 def build_hearing_intake_v1_graph() -> StateGraph:

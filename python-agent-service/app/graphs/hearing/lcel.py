@@ -63,6 +63,29 @@ class GovernedHearingModelAdapter(Runnable[PromptValue, AIMessage], Generic[TOut
         **kwargs: Any,
     ) -> AIMessage:
         del config, kwargs
+        invocation = self._invocation(input)
+        generation = self._model_runner.invoke_structured(**invocation)
+        value = self.output_type.model_validate(generation.value)
+        return AIMessage(content=value.model_dump_json())
+
+    async def ainvoke(
+        self,
+        input: PromptValue,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del config, kwargs
+        invocation = self._invocation(input)
+        ainvoke_structured = getattr(
+            self._model_runner, "ainvoke_structured", None
+        )
+        if not callable(ainvoke_structured):
+            raise HearingLcelContractError("HEARING_ASYNC_MODEL_RUNNER_UNAVAILABLE")
+        generation = await ainvoke_structured(**invocation)
+        value = self.output_type.model_validate(generation.value)
+        return AIMessage(content=value.model_dump_json())
+
+    def _invocation(self, input: PromptValue) -> dict[str, Any]:
         if not isinstance(input, ChatPromptValue):
             raise HearingLcelContractError("HEARING_PROMPT_VALUE_INVALID")
         messages = input.to_messages()
@@ -87,11 +110,7 @@ class GovernedHearingModelAdapter(Runnable[PromptValue, AIMessage], Generic[TOut
         }
         if self.semantic_validator is not None:
             invocation["semantic_validator"] = self.semantic_validator
-        generation = self._model_runner.invoke_structured(
-            **invocation,
-        )
-        value = self.output_type.model_validate(generation.value)
-        return AIMessage(content=value.model_dump_json())
+        return invocation
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +187,33 @@ def invoke_hearing_lcel(
         separators=(",", ":"),
     )
     result = flow.runnable.invoke(
+        {"case_data_json": encoded},
+        config={"tags": ["governed-lcel", "hearing", node_name]},
+    )
+    return output_type.model_validate(result)
+
+
+async def ainvoke_hearing_lcel(
+    *,
+    model_runner: Any,
+    node_name: str,
+    case_data: dict[str, Any],
+    output_type: type[TOutput],
+    semantic_validator: Callable[[TOutput], TOutput] | None = None,
+) -> TOutput:
+    flow = build_hearing_lcel(
+        model_runner=model_runner,
+        node_name=node_name,
+        output_type=output_type,
+        semantic_validator=semantic_validator,
+    )
+    encoded = json.dumps(
+        case_data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    result = await flow.runnable.ainvoke(
         {"case_data_json": encoded},
         config={"tags": ["governed-lcel", "hearing", node_name]},
     )

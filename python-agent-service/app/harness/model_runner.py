@@ -245,6 +245,7 @@ class HarnessModelRunner:
         agent_context: AgentInvocationContext | None = None,
         prompt_profile_id: str | None = None,
         evidence_assets: LoadedEvidenceAssets | None = None,
+        semantic_validator: Callable[[T], T] | None = None,
     ) -> HarnessGeneration[T]:
         """Execute one governed structured invocation on the native async model path."""
 
@@ -253,7 +254,7 @@ class HarnessModelRunner:
         # the one-call contract while allowing the observer to receive the
         # explicitly whitelisted fields before the terminal JSON document.
         observer = current_stream_observer()
-        if observer is not None:
+        if observer is not None and semantic_validator is None:
             visible_fields = observer.visible_fields_for(node_name)
             if visible_fields:
                 generation: HarnessGeneration[T] | None = None
@@ -288,10 +289,13 @@ class HarnessModelRunner:
             if evidence_assets is not None
             else ()
         )
+        governed_output_type = _semantic_output_type(
+            output_type, semantic_validator
+        )
         prepared = self._prepare(
             node_name=node_name,
             case_data=case_data,
-            output_type=output_type,
+            output_type=governed_output_type,
             context_sections=context_sections,
             context_pack=context_pack,
             max_input_tokens=max_input_tokens,
@@ -300,17 +304,30 @@ class HarnessModelRunner:
         )
         built = self._build_node(
             node_name=node_name,
-            output_type=output_type,
+            output_type=governed_output_type,
             prepared=prepared,
             visible_fields=(),
             user_content_parts=user_content_parts,
+            semantic_repair=semantic_validator is not None,
         )
         capture = InvocationMetadataCapture()
         state = {"human_prompt": prepared.user_prompt}
-        patch = await built.runnable.ainvoke(
-            state,
-            config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
-        )
+        if semantic_validator is not None and observer is not None:
+            observer.raise_if_cancelled()
+            with bind_stream_observer(cast(Any, None)):
+                patch = await built.runnable.ainvoke(
+                    state,
+                    config={
+                        "callbacks": [capture],
+                        "tags": ["governed-lcel", node_name],
+                    },
+                )
+            observer.raise_if_cancelled()
+        else:
+            patch = await built.runnable.ainvoke(
+                state,
+                config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
+            )
         value = output_type.model_validate(patch["value"])
         messages = tuple(built.prompt.invoke(state).messages)
         metadata = capture.metadata
@@ -325,6 +342,12 @@ class HarnessModelRunner:
         observer = current_stream_observer()
         if observer is not None:
             observer.raise_if_cancelled()
+            if semantic_validator is not None:
+                projector = IncrementalVisibleJsonProjector(
+                    observer.visible_fields_for(node_name)
+                )
+                for field, delta in projector.feed(value.model_dump_json()):
+                    observer.visible_delta(node_name, field, delta)
             observer.usage(
                 node_name=node_name,
                 model=generation.model,
