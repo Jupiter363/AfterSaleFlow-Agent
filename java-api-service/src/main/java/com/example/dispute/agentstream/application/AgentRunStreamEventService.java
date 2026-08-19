@@ -32,6 +32,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -231,6 +232,9 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
                         throw new IllegalStateException(
                                 "transient v3 event differs from persisted run authority");
                     }
+                    if (!subscription.acceptTransient(event)) {
+                        continue;
+                    }
                     subscription.emitter().send(
                             SseEmitter.event()
                                     .name(event.eventType().wireValue())
@@ -357,6 +361,7 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
             return false;
         }
         try {
+            subscription.observeDurable(event);
             subscription.emitter().send(
                     SseEmitter.event()
                             .id(event.cursor())
@@ -918,6 +923,7 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
     private static final class Subscription {
         private final AuthenticatedActor actor;
         private final SseEmitter emitter;
+        private final Map<String, AttemptDelivery> transientAttempts = new HashMap<>();
         private AgentRunStreamCursor cursor;
 
         private Subscription(
@@ -943,6 +949,146 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
 
         private void cursor(AgentRunStreamCursor cursor) {
             this.cursor = cursor;
+        }
+
+        private boolean acceptTransient(AgentStreamEvent event) {
+            AttemptDelivery attempt = transientAttempts.get(event.attemptId());
+            return attempt != null && attempt.durableVisible && attempt.accept(event);
+        }
+
+        private void observeDurable(AgentRunEventView event) {
+            if (!"agent-stream.v3".equals(event.schemaVersion()) || event.cursor() == null) {
+                return;
+            }
+            AttemptDelivery attempt = transientAttempts.computeIfAbsent(
+                    event.attemptId(), ignored -> new AttemptDelivery());
+            if ("attempt_started".equals(event.type()) || "attempt_reset".equals(event.type())) {
+                attempt.durableVisible = true;
+                return;
+            }
+            if (Set.of(
+                            "public_frame_start",
+                            "active_frame_snapshot",
+                            "public_frame_committed",
+                            "public_frame_interrupted")
+                    .contains(event.type())) {
+                JsonNode payload = event.payload();
+                String frameId = textOrNull(payload == null ? null : payload.get("frame_id"));
+                Long frameSequence = longOrNull(
+                        payload == null ? null : payload.get("frame_sequence"));
+                Long deltaIndex = longOrNull(payload == null ? null : payload.get("delta_index"));
+                if (frameId != null
+                        && frameSequence != null
+                        && frameSequence > 0
+                        && frameSequence <= Integer.MAX_VALUE) {
+                    attempt.observeDurableFrame(
+                            event.type(),
+                            frameId,
+                            frameSequence.intValue(),
+                            deltaIndex == null || deltaIndex > Integer.MAX_VALUE
+                                    ? null
+                                    : deltaIndex.intValue());
+                }
+            }
+        }
+    }
+
+    /** Per-attempt delivery state keeps lossy cross-process previews safe for strict consumers. */
+    private static final class AttemptDelivery {
+        private final Map<Integer, FrameDelivery> frames = new HashMap<>();
+        private boolean durableVisible;
+        private long nextFrameSequence = 1;
+
+        private boolean accept(AgentStreamEvent event) {
+            AgentStreamEvent.Payload payload = event.payload();
+            int sequence = payload.frameSequence();
+            if (event.eventType() == StreamEventType.PUBLIC_FRAME_START) {
+                FrameDelivery existing = frames.get(sequence);
+                if (existing != null) {
+                    return false;
+                }
+                boolean deliverable = sequence == nextFrameSequence;
+                FrameDelivery created = new FrameDelivery(payload.frameId(), deliverable);
+                frames.put(sequence, created);
+                if (deliverable) {
+                    nextFrameSequence++;
+                }
+                return deliverable;
+            }
+            FrameDelivery frame = frames.get(sequence);
+            if (frame == null || !frame.frameId.equals(payload.frameId())) {
+                return false;
+            }
+            return switch (event.eventType()) {
+                case PUBLIC_TEXT_DELTA -> frame.acceptDelta(payload.deltaIndex());
+                case ACTIVE_FRAME_SNAPSHOT -> frame.acceptSnapshot(payload.deltaIndex());
+                default -> false;
+            };
+        }
+
+        private void observeDurableFrame(
+                String eventType, String frameId, int frameSequence, Integer deltaIndex) {
+            FrameDelivery frame = frames.get(frameSequence);
+            if (frame == null || !frame.frameId.equals(frameId)) {
+                frame = new FrameDelivery(frameId, false);
+                frames.put(frameSequence, frame);
+            }
+            nextFrameSequence = Math.max(nextFrameSequence, (long) frameSequence + 1L);
+            if ("public_frame_start".equals(eventType)) {
+                frame.durableStarted = true;
+                return;
+            }
+            if ("active_frame_snapshot".equals(eventType)) {
+                frame.durableStarted = true;
+                frame.desynchronized = false;
+                if (deltaIndex != null) {
+                    frame.nextDeltaIndex = Math.max(frame.nextDeltaIndex, deltaIndex);
+                }
+                return;
+            }
+            frame.durableStarted = true;
+            frame.terminal = true;
+        }
+    }
+
+    private static final class FrameDelivery {
+        private final String frameId;
+        private final boolean deliverable;
+        private int nextDeltaIndex;
+        private boolean desynchronized;
+        private boolean durableStarted;
+        private boolean terminal;
+
+        private FrameDelivery(String frameId, boolean deliverable) {
+            this.frameId = frameId;
+            this.deliverable = deliverable;
+        }
+
+        private boolean acceptDelta(Integer deltaIndex) {
+            if (!deliverable || durableStarted || terminal || desynchronized || deltaIndex == null) {
+                return false;
+            }
+            if (deltaIndex < nextDeltaIndex) {
+                return false;
+            }
+            if (deltaIndex > nextDeltaIndex) {
+                desynchronized = true;
+                return false;
+            }
+            nextDeltaIndex++;
+            return true;
+        }
+
+        private boolean acceptSnapshot(Integer deltaIndex) {
+            if (!deliverable || durableStarted || terminal || deltaIndex == null) {
+                return false;
+            }
+            if (deltaIndex < nextDeltaIndex) {
+                return false;
+            }
+            nextDeltaIndex = deltaIndex;
+            desynchronized = false;
+            return true;
         }
     }
 

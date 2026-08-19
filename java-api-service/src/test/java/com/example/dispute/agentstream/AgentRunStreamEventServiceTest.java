@@ -15,6 +15,7 @@ import static org.mockito.Mockito.when;
 import static org.mockito.ArgumentMatchers.any;
 
 import com.example.dispute.agentstream.application.AgentRunStreamEventService;
+import com.example.dispute.agentstream.application.AgentRunEventView;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventEntity;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventRepository;
 import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeup;
@@ -43,6 +44,7 @@ import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
@@ -50,7 +52,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.LongStream;
 import org.springframework.data.domain.Pageable;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.DataWithMediaType;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -221,6 +226,98 @@ class AgentRunStreamEventServiceTest {
         assertThat(replay.get(2).resetAttemptId()).isEqualTo(firstAttemptId);
         assertThat(replay.get(3).delta()).isEqualTo("new");
         assertThat(replay.get(3).audience()).isEqualTo("USER");
+    }
+
+    @Test
+    void suppressesTransientDeltaGapsUntilDurableFrameSnapshot() throws Exception {
+        AgentRunEntity run = v2Run();
+        AuthenticatedActor actor = allowV2(run);
+        String attemptId = "ATTEMPT_TRANSIENT_GAP";
+        AgentRunAttemptEntity attempt = v2Attempt(1, attemptId);
+        String frameId = "EFRM_TRANSIENT_GAP";
+        var header = objectMapper.createObjectNode()
+                .put("frame_sequence", 1)
+                .put("frame_type", "MATERIAL_RECEIPT");
+        AgentRunStreamEventEntity attemptStarted = v2Event(
+                run.getId(),
+                attemptId,
+                0,
+                StreamEventType.ATTEMPT_STARTED,
+                emptyV2Payload());
+        AgentRunStreamEventEntity durableStart = v2Event(
+                run.getId(),
+                attemptId,
+                1,
+                StreamEventType.PUBLIC_FRAME_START,
+                framePayload(frameId, 1, "MATERIAL_RECEIPT", header, null, null, null));
+        AgentRunStreamEventEntity durableSnapshot = v2Event(
+                run.getId(),
+                attemptId,
+                2,
+                StreamEventType.ACTIVE_FRAME_SNAPSHOT,
+                framePayload(frameId, 1, null, null, 3, null, "甲乙丙"));
+        AgentRunStreamEventEntity durableCommit = v2Event(
+                run.getId(),
+                attemptId,
+                3,
+                StreamEventType.PUBLIC_FRAME_COMMITTED,
+                committedFramePayload(frameId, 1));
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2Event(run.getId(), attemptId, 0L))
+                .thenReturn(Optional.of(attemptStarted));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attemptId),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(attemptStarted));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attemptId),
+                        org.mockito.ArgumentMatchers.eq(0L),
+                        any()))
+                .thenReturn(List.of(durableStart, durableSnapshot, durableCommit));
+
+        SseEmitter emitter = service.subscribe(run.getId(), "-1", actor);
+        service.publish(transientFrameEvent(
+                run.getId(),
+                attemptId,
+                1,
+                StreamEventType.PUBLIC_FRAME_START,
+                framePayload(frameId, 1, "MATERIAL_RECEIPT", header, null, null, null)));
+        service.publish(transientFrameEvent(
+                run.getId(),
+                attemptId,
+                2,
+                StreamEventType.PUBLIC_TEXT_DELTA,
+                framePayload(frameId, 1, null, null, 0, "甲", null)));
+        AgentStreamEvent skippedGap = transientFrameEvent(
+                run.getId(),
+                attemptId,
+                3,
+                StreamEventType.PUBLIC_TEXT_DELTA,
+                framePayload(frameId, 1, null, null, 2, "丙", null));
+        service.publish(skippedGap);
+        service.wakeUp(run.getId());
+        service.publish(skippedGap);
+
+        @SuppressWarnings("unchecked")
+        Set<DataWithMediaType> earlyEvents =
+                (Set<DataWithMediaType>) ReflectionTestUtils.getField(emitter, "earlySendAttempts");
+        assertThat(earlyEvents)
+                .isNotNull()
+                .extracting(DataWithMediaType::getData)
+                .filteredOn(AgentRunEventView.class::isInstance)
+                .map(AgentRunEventView.class::cast)
+                .extracting(AgentRunEventView::type)
+                .containsExactly(
+                        "attempt_started",
+                        "public_frame_start",
+                        "public_text_delta",
+                        "public_frame_start",
+                        "active_frame_snapshot",
+                        "public_frame_committed");
     }
 
     @Test
@@ -990,6 +1087,81 @@ class AgentRunStreamEventServiceTest {
             AgentStreamEvent.Payload payload) throws Exception {
         return v2Event(
                 runId, attemptId, sequence, eventType, Audience.USER, payload);
+    }
+
+    private AgentStreamEvent transientFrameEvent(
+            String runId,
+            String attemptId,
+            long sequence,
+            StreamEventType eventType,
+            AgentStreamEvent.Payload payload) {
+        return new AgentStreamEvent(
+                "agent-stream.v3",
+                runId,
+                attemptId,
+                sequence,
+                eventType,
+                Audience.USER,
+                Instant.parse("2026-07-19T01:00:00Z").plusSeconds(sequence),
+                payload);
+    }
+
+    private static AgentStreamEvent.Payload framePayload(
+            String frameId,
+            int frameSequence,
+            String frameType,
+            com.fasterxml.jackson.databind.JsonNode publicHeader,
+            Integer deltaIndex,
+            String delta,
+            String publicText) {
+        return new AgentStreamEvent.Payload(
+                null,
+                null,
+                delta,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                frameId,
+                frameSequence,
+                frameType,
+                publicHeader,
+                deltaIndex,
+                publicText,
+                null,
+                null,
+                null,
+                null,
+                null);
+    }
+
+    private static AgentStreamEvent.Payload committedFramePayload(
+            String frameId, int frameSequence) {
+        return new AgentStreamEvent.Payload(
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                frameId,
+                frameSequence,
+                null,
+                null,
+                null,
+                null,
+                "v3:ATTEMPT_TRANSIENT_GAP:FRAME:1",
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
+                3);
     }
 
     private AgentRunStreamEventEntity v2Event(
