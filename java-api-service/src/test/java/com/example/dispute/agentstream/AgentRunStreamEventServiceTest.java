@@ -9,6 +9,7 @@ package com.example.dispute.agentstream;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -318,6 +319,81 @@ class AgentRunStreamEventServiceTest {
                         "public_frame_start",
                         "active_frame_snapshot",
                         "public_frame_committed");
+    }
+
+    @Test
+    void reannouncedFrameRecoversLateAttemptVisibilityWithoutPerDeltaAuthorityQueries()
+            throws Exception {
+        AgentRunEntity run = v2Run();
+        AuthenticatedActor actor = allowV2(run);
+        String attemptId = "ATTEMPT_LATE_TRANSIENT_START";
+        AgentRunAttemptEntity attempt = v2Attempt(1, attemptId);
+        String frameId = "EFRM_LATE_TRANSIENT_START";
+        var header = objectMapper.createObjectNode()
+                .put("frame_sequence", 1)
+                .put("frame_type", "MATERIAL_RECEIPT");
+        AgentRunStreamEventEntity attemptStarted = v2Event(
+                run.getId(),
+                attemptId,
+                0,
+                StreamEventType.ATTEMPT_STARTED,
+                emptyV2Payload());
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attemptId),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(), List.of(attemptStarted));
+
+        SseEmitter emitter = service.subscribe(run.getId(), "-1", actor);
+        AgentStreamEvent start = transientFrameEvent(
+                run.getId(),
+                attemptId,
+                1,
+                StreamEventType.PUBLIC_FRAME_START,
+                framePayload(frameId, 1, "MATERIAL_RECEIPT", header, null, null, null));
+        service.publish(start);
+        service.wakeUp(run.getId());
+        service.publish(start);
+        service.publish(new AgentStreamEvent(
+                "agent-stream.v3",
+                run.getId(),
+                attemptId,
+                2,
+                StreamEventType.PUBLIC_TEXT_DELTA,
+                Audience.MERCHANT,
+                Instant.parse("2026-07-19T01:00:02Z"),
+                framePayload(frameId, 1, null, null, 0, "不得跨受众公开", null)));
+        service.publish(transientFrameEvent(
+                run.getId(),
+                attemptId,
+                2,
+                StreamEventType.PUBLIC_TEXT_DELTA,
+                framePayload(frameId, 1, null, null, 0, "甲", null)));
+        service.publish(transientFrameEvent(
+                run.getId(),
+                attemptId,
+                3,
+                StreamEventType.PUBLIC_TEXT_DELTA,
+                framePayload(frameId, 1, null, null, 1, "乙", null)));
+
+        @SuppressWarnings("unchecked")
+        Set<DataWithMediaType> earlyEvents =
+                (Set<DataWithMediaType>) ReflectionTestUtils.getField(emitter, "earlySendAttempts");
+        assertThat(earlyEvents)
+                .isNotNull()
+                .extracting(DataWithMediaType::getData)
+                .filteredOn(AgentRunEventView.class::isInstance)
+                .map(AgentRunEventView.class::cast)
+                .extracting(AgentRunEventView::type)
+                .containsExactly(
+                        "attempt_started",
+                        "public_frame_start",
+                        "public_text_delta",
+                        "public_text_delta");
+        verify(runRepository, times(4)).findById(run.getId());
     }
 
     @Test

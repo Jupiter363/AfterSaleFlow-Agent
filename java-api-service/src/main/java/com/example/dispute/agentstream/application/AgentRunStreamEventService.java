@@ -226,11 +226,20 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
         for (Subscription subscription : current) {
             synchronized (subscription) {
                 try {
-                    AgentRunEntity run = requireVisibleRun(event.runId(), subscription.actor());
-                    if (protocol(run) != AgentRunProtocol.V3
-                            || event.audience() != requireV2Audience(run)) {
-                        throw new IllegalStateException(
-                                "transient v3 event differs from persisted run authority");
+                    if (event.eventType() == StreamEventType.PUBLIC_FRAME_START) {
+                        if (!subscription.canStartTransient(event)) {
+                            continue;
+                        }
+                        // Authorization is frozen for one bounded public frame. Later deltas can
+                        // only enter through this exact accepted frame identity and audience, so
+                        // they do not repeat database/session reads for every provider token.
+                        AgentRunEntity run =
+                                requireVisibleRun(event.runId(), subscription.actor());
+                        if (protocol(run) != AgentRunProtocol.V3
+                                || event.audience() != requireV2Audience(run)) {
+                            throw new IllegalStateException(
+                                    "transient v3 event differs from persisted run authority");
+                        }
                     }
                     if (!subscription.acceptTransient(event)) {
                         continue;
@@ -956,6 +965,11 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
             return attempt != null && attempt.durableVisible && attempt.accept(event);
         }
 
+        private boolean canStartTransient(AgentStreamEvent event) {
+            AttemptDelivery attempt = transientAttempts.get(event.attemptId());
+            return attempt != null && attempt.canStart(event);
+        }
+
         private void observeDurable(AgentRunEventView event) {
             if (!"agent-stream.v3".equals(event.schemaVersion()) || event.cursor() == null) {
                 return;
@@ -999,24 +1013,32 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
         private boolean durableVisible;
         private long nextFrameSequence = 1;
 
+        private boolean canStart(AgentStreamEvent event) {
+            if (!durableVisible
+                    || event.eventType() != StreamEventType.PUBLIC_FRAME_START) {
+                return false;
+            }
+            int sequence = event.payload().frameSequence();
+            return sequence == nextFrameSequence && !frames.containsKey(sequence);
+        }
+
         private boolean accept(AgentStreamEvent event) {
             AgentStreamEvent.Payload payload = event.payload();
             int sequence = payload.frameSequence();
             if (event.eventType() == StreamEventType.PUBLIC_FRAME_START) {
-                FrameDelivery existing = frames.get(sequence);
-                if (existing != null) {
+                if (!canStart(event)) {
                     return false;
                 }
-                boolean deliverable = sequence == nextFrameSequence;
-                FrameDelivery created = new FrameDelivery(payload.frameId(), deliverable);
+                FrameDelivery created =
+                        new FrameDelivery(payload.frameId(), true, event.audience());
                 frames.put(sequence, created);
-                if (deliverable) {
-                    nextFrameSequence++;
-                }
-                return deliverable;
+                nextFrameSequence++;
+                return true;
             }
             FrameDelivery frame = frames.get(sequence);
-            if (frame == null || !frame.frameId.equals(payload.frameId())) {
+            if (frame == null
+                    || !frame.frameId.equals(payload.frameId())
+                    || frame.audience != event.audience()) {
                 return false;
             }
             return switch (event.eventType()) {
@@ -1030,7 +1052,7 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
                 String eventType, String frameId, int frameSequence, Integer deltaIndex) {
             FrameDelivery frame = frames.get(frameSequence);
             if (frame == null || !frame.frameId.equals(frameId)) {
-                frame = new FrameDelivery(frameId, false);
+                frame = new FrameDelivery(frameId, false, null);
                 frames.put(frameSequence, frame);
             }
             nextFrameSequence = Math.max(nextFrameSequence, (long) frameSequence + 1L);
@@ -1054,14 +1076,16 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
     private static final class FrameDelivery {
         private final String frameId;
         private final boolean deliverable;
+        private final Audience audience;
         private int nextDeltaIndex;
         private boolean desynchronized;
         private boolean durableStarted;
         private boolean terminal;
 
-        private FrameDelivery(String frameId, boolean deliverable) {
+        private FrameDelivery(String frameId, boolean deliverable, Audience audience) {
             this.frameId = frameId;
             this.deliverable = deliverable;
+            this.audience = audience;
         }
 
         private boolean acceptDelta(Integer deltaIndex) {

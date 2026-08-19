@@ -122,12 +122,18 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                                     v3Frames.append(publicEvent);
                                     state.accept(candidate);
                                     state.observeTransientPublicOutput();
+                                    // Redis Pub/Sub is intentionally transient. Reannounce the
+                                    // immutable frame authority before every provider delta so a
+                                    // subscriber that missed the first announcement can resume
+                                    // without waiting for the completed durable frame.
+                                    transientPublisher.publish(v3Frames.startEvent());
                                     transientPublisher.publish(publicEvent);
                                 }
                                 case ACTIVE_FRAME_SNAPSHOT -> {
                                     v3Frames.snapshot(publicEvent);
                                     state.accept(candidate);
                                     state.observeTransientPublicOutput();
+                                    transientPublisher.publish(v3Frames.startEvent());
                                     transientPublisher.publish(publicEvent);
                                 }
                                 case PUBLIC_FRAME_COMMITTED, PUBLIC_FRAME_INTERRUPTED -> {
@@ -706,6 +712,13 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             text.setLength(0);
             text.append(event.payload().publicText());
             nextDeltaIndex = event.payload().deltaIndex();
+        }
+
+        private AgentStreamEvent startEvent() {
+            if (start == null) {
+                throw invalid("public frame start is unavailable");
+            }
+            return start;
         }
 
         private List<AgentStreamEvent> finish(

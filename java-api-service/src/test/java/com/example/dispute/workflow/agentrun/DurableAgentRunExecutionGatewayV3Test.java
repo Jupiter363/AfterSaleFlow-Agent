@@ -103,8 +103,11 @@ class DurableAgentRunExecutionGatewayV3Test {
         assertThat(transientEvents).extracting(AgentStreamEvent::eventType)
                 .containsExactly(
                         StreamEventType.PUBLIC_FRAME_START,
+                        StreamEventType.PUBLIC_FRAME_START,
                         StreamEventType.PUBLIC_TEXT_DELTA,
+                        StreamEventType.PUBLIC_FRAME_START,
                         StreamEventType.PUBLIC_TEXT_DELTA,
+                        StreamEventType.PUBLIC_FRAME_START,
                         StreamEventType.PUBLIC_FRAME_START,
                         StreamEventType.PUBLIC_TEXT_DELTA);
         assertThat(store.batches).hasSize(3);
