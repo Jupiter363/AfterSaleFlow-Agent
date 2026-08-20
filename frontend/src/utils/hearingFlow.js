@@ -26,7 +26,6 @@ export const HEARING_FLOW_GROUPS = Object.freeze([
   "证据核验",
   "卷宗冻结",
   "裁决评审",
-  "人工审核",
 ]);
 
 export function normalizeHearingFlowStage(value) {

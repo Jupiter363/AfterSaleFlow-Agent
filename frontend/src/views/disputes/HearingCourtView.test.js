@@ -71,20 +71,21 @@ const hearing = {
     party_statuses: { USER: "PENDING", MERCHANT: "PENDING" },
   },
   question_set: {
-    schema_version: "hearing_question_set.v1",
+    schema_version: "hearing_question_set.v4",
     question_set_id: "HEARING_QUESTION_SET_1",
+    question_set_hash: "a".repeat(64),
+    formal_issue_catalog_hash: "b".repeat(64),
     questions: [
       {
         question_id: "HEARING_QUESTION_USER_1",
-        target_party: "USER",
+        issue_id: "HEARING_ISSUE_1",
+        target_roles: ["USER", "MERCHANT"],
         fact_ids: ["FACT_INTAKE_001"],
         question_text: "请说明发现未收到商品的具体时间，以及当时核对了哪些位置。",
-      },
-      {
-        question_id: "HEARING_QUESTION_MERCHANT_1",
-        target_party: "MERCHANT",
-        fact_ids: ["FACT_INTAKE_001"],
-        question_text: "请说明发货、物流交接及签收凭证的形成过程。",
+        party_prompts: {
+          USER: "请说明发现未收到商品的时间及已核对的位置。",
+          MERCHANT: "请说明发货、物流交接及签收凭证的形成过程。",
+        },
       },
     ],
   },
@@ -312,7 +313,12 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).not.toContain("等待开庭消息");
     expect(wrapper.text()).not.toContain("暂无已提交证据");
     expect(wrapper.find("[data-answer-bundle-form]").exists()).toBe(false);
-    expect(wrapper.get("[data-stage-input-locked]").text()).toContain("资料装载");
+    const lockedStatus = wrapper.get("[data-stage-input-locked]");
+    expect(lockedStatus.text()).toContain("资料装载");
+    expect(lockedStatus.classes()).toContain("stage-input-bar__sealed-status--locked");
+    expect(lockedStatus.attributes("role")).toBe("status");
+    expect(lockedStatus.get("[data-stage-lock-icon]").text()).toContain("🔒");
+    expect(lockedStatus.get("[data-stage-lock-icon]").attributes("aria-hidden")).toBe("true");
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -324,7 +330,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).toContain("AI 法官");
     expect(wrapper.text()).toContain("AI 评审员");
     const statusDock = wrapper.get("[data-hearing-stage-dock]");
-    expect(statusDock.text()).toContain("当前庭审状态");
+    expect(statusDock.text()).toContain("当前阶段");
     expect(statusDock.text()).toContain("双方回答");
     expect(statusDock.text()).not.toContain("HEARING STAGE DOCK");
     expect(statusDock.classes()).toContain("hearing-stage-dock--fixed-dashboard");
@@ -336,7 +342,7 @@ describe("HearingCourtView", () => {
     expect(statusDock.find(".hearing-stage-dock__copy").classes()).toContain(
       "hearing-stage-dock__copy--breathing",
     );
-    expect(wrapper.get("[data-hearing-stage-clock]").classes()).toContain(
+    expect(wrapper.get("[data-hearing-stage-clock]").classes()).not.toContain(
       "hearing-stage-dock__clock--centered",
     );
     expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("共享提交时间");
@@ -345,27 +351,32 @@ describe("HearingCourtView", () => {
     expect(wrapper.find("[data-hearing-progress-track]").exists()).toBe(true);
     expect(wrapper.find("[data-hearing-status-strip]").exists()).toBe(false);
     const progressItems = wrapper.findAll("[data-stage-progress-item]");
-    expect(progressItems).toHaveLength(6);
+    expect(progressItems).toHaveLength(5);
+    expect(progressItems.map((item) => item.attributes("data-stage-number"))).toEqual([
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+    ]);
     expect(progressItems[0].attributes("data-stage-progress-state")).toBe("complete");
     expect(progressItems[1].attributes("data-stage-progress-state")).toBe("active");
     expect(progressItems[2].attributes("data-stage-progress-state")).toBe("pending");
     expect(progressItems[0].attributes("data-stage-connector-state")).toBe("complete");
     expect(progressItems[1].attributes("data-stage-connector-state")).toBe("pending");
-    expect(progressItems[0].find("[data-stage-active-spinner]").exists()).toBe(false);
-    expect(progressItems[1].find("[data-stage-active-spinner]").exists()).toBe(true);
-    expect(progressItems[2].find("[data-stage-active-spinner]").exists()).toBe(false);
+    expect(statusDock.find("[data-stage-active-spinner]").exists()).toBe(false);
     expect(progressItems[0].find(".stage-progress-board__number").exists()).toBe(false);
     expect(progressItems[1].find(".stage-progress-board__number").exists()).toBe(false);
     expect(progressItems[2].find(".stage-progress-board__number").exists()).toBe(false);
-    expect(progressItems[0].get("b").text()).toBe("");
-    expect(progressItems[1].get("b").text()).toBe("");
-    expect(progressItems[2].get("b").text()).toBe("");
+    expect(progressItems[0].get("b").text()).toBe("✓");
+    expect(progressItems[1].get("b").text()).toBe("2");
+    expect(progressItems[2].get("b").text()).toBe("3");
     expect(progressItems[0].get(".stage-progress-board__label").text()).toBe("案情交接");
     expect(progressItems[1].get(".stage-progress-board__label").text()).toBe("案情澄清");
     expect(progressItems[2].get(".stage-progress-board__label").text()).toBe("证据核验");
-    expect(progressItems[0].get(".stage-progress-board__status").text()).toBe("已完成");
+    expect(progressItems[0].find(".stage-progress-board__status").exists()).toBe(false);
     expect(progressItems[1].get(".stage-progress-board__status").text()).toBe("进行中");
-    expect(progressItems[2].get(".stage-progress-board__status").text()).toBe("未开始");
+    expect(progressItems[2].find(".stage-progress-board__status").exists()).toBe(false);
     expect(statusDock.find('[data-hearing-status-chip="USER"]').exists()).toBe(false);
     expect(statusDock.find('[data-hearing-status-chip="MERCHANT"]').exists()).toBe(false);
     expect(statusDock.text()).not.toContain("时间/封存");
@@ -387,9 +398,14 @@ describe("HearingCourtView", () => {
       },
     });
 
-    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("当前阶段");
-    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("双方回答");
-    expect(wrapper.get("[data-hearing-stage-clock]").text()).not.toContain("20:00");
+    const statusDock = wrapper.get("[data-hearing-stage-dock]");
+    const stageClock = statusDock.get("[data-hearing-stage-clock]");
+    expect(stageClock.text()).toContain("庭审进度");
+    expect(stageClock.text()).toContain("2 / 5");
+    expect(stageClock.text()).not.toContain("20:00");
+    expect(stageClock.classes()).not.toContain("hearing-stage-dock__clock--primary");
+    expect(statusDock.get(".hearing-stage-dock__copy").text()).toContain("双方回答");
+    expect(statusDock.text().match(/双方回答/g)).toHaveLength(1);
   });
 
   it("keeps the total hearing countdown anchored to the case deadline after refresh", async () => {
@@ -473,7 +489,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.get('[data-court-message="merchant"]').classes()).toContain("court-message--party-statement-card");
     expect(wrapper.get('[data-court-message="merchant"]').classes()).toContain("court-message--soft-party-card");
     expect(wrapper.get('[data-court-message="merchant"]').classes()).toContain("court-message--flexible-height-card");
-    expect(wrapper.get("[data-stage-input-bar]").text()).toContain(
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "当前阶段提交台",
     );
     expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
@@ -487,7 +503,7 @@ describe("HearingCourtView", () => {
     );
     const inputHeader = wrapper.get("[data-stage-input-header]");
     const inputComposer = wrapper.get("[data-answer-bundle-form]");
-    expect(inputHeader.text()).toContain("当前阶段提交台");
+    expect(inputHeader.text()).not.toContain("当前阶段提交台");
     expect(inputHeader.text()).toContain("用户提交");
     expect(inputHeader.text()).toContain("商家提交");
     expect(inputHeader.text()).not.toContain("确认或说明异议");
@@ -503,7 +519,7 @@ describe("HearingCourtView", () => {
       "stage-input-bar--fixed-dock",
     );
     expect(wrapper.get("[data-stage-input-bar]").text()).toContain(
-      "提交本方陈述",
+      "提交本方回答",
     );
     expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "一次提交全部回答",
@@ -608,6 +624,81 @@ describe("HearingCourtView", () => {
     expect(juryCard.text()).toContain("评审复核报告");
     expect(juryCard.text()).toContain("正在复核草案中的事实、证据与遗漏风险");
     expect(juryCard.text()).toContain("实时生成中");
+  });
+
+  it("renders every durable public frame from one agent run inside one courtroom bubble", async () => {
+    const runId = "AGENT_RUN_INTAKE_QUESTIONS_GROUPED";
+    const frameTexts = [
+      "庭前案情已装载，现开始说明本轮核对范围。",
+      "请双方说明自动续费提示的展示方式。",
+      "请双方说明新周期服务是否实际使用。",
+      "请双方说明售后处理经过与当前方案。",
+    ];
+    const { wrapper } = await mountView({
+      initialMessages: frameTexts.map((messageText, index) => ({
+        id: `MESSAGE_INTAKE_FRAME_${index + 1}`,
+        sequence_no: index + 1,
+        sender_role: "INTAKE_OFFICER",
+        message_type: "AGENT_MESSAGE",
+        message_text: messageText,
+        agent_run_id: runId,
+        created_at: "2026-07-03T12:01:00+08:00",
+      })),
+    });
+
+    const groupedBubble = wrapper.get(
+      `[data-court-message-id="agent-run:${runId}"]`,
+    );
+    expect(groupedBubble.attributes("data-agent-run-id")).toBe(runId);
+    expect(groupedBubble.attributes("data-run-message-count")).toBe("4");
+    expect(wrapper.findAll(`[data-agent-run-id="${runId}"]`)).toHaveLength(1);
+    frameTexts.forEach((text) => expect(groupedBubble.text()).toContain(text));
+    expect(groupedBubble.find("p").text()).toBe(frameTexts.join("\n\n"));
+  });
+
+  it("keeps one stable streaming bubble while an intake run advances across public frames", async () => {
+    const runId = "AGENT_RUN_INTAKE_STREAM_GROUPED";
+    agentStreamStore.runs[runId] = {
+      runId,
+      caseId: "CASE_HEARING_1",
+      roomType: "HEARING",
+      operation: "HEARING_INTAKE_QUESTIONS",
+      actorId: "user-local",
+      actorRole: "USER",
+      agentLabel: "案情接待官",
+      senderRole: "INTAKE_OFFICER",
+      status: "STREAMING",
+      activeCardKey: "question-2",
+      cardOrder: ["intro", "question-1", "question-2"],
+      cards: {
+        intro: {
+          key: "intro",
+          senderRole: "INTAKE_OFFICER",
+          content: "庭前案情已装载。",
+        },
+        "question-1": {
+          key: "question-1",
+          senderRole: "INTAKE_OFFICER",
+          content: "请说明提示显著性。",
+        },
+        "question-2": {
+          key: "question-2",
+          senderRole: "INTAKE_OFFICER",
+          content: "请说明服务使用情况",
+        },
+      },
+      startedAt: 1,
+    };
+
+    const { wrapper } = await mountView();
+    const groupedBubble = wrapper.get(`[data-court-message-id="agent-run:${runId}"]`);
+    expect(wrapper.findAll(`[data-agent-run-id="${runId}"]`)).toHaveLength(1);
+    expect(groupedBubble.attributes("data-agent-stream-card")).toBe("unified");
+    expect(groupedBubble.attributes("data-run-message-count")).toBe("3");
+    expect(groupedBubble.attributes("aria-live")).toBe("polite");
+    expect(groupedBubble.text()).toContain("庭前案情已装载。");
+    expect(groupedBubble.text()).toContain("请说明提示显著性。");
+    expect(groupedBubble.text()).toContain("请说明服务使用情况");
   });
 
   it("maps internal evidence ids and normalizes mixed sentence punctuation in judge copy", async () => {
@@ -894,7 +985,11 @@ describe("HearingCourtView", () => {
     expect(missingTranscript.text()).not.toContain("请围绕正式问题逐项陈述");
     const missingTextarea = missing.wrapper.get('[data-party-statement-form] textarea');
     await missingTextarea.setValue("在正式问题记录同步前不得提交这段陈述。");
-    expect(missingTextarea.element.disabled).toBe(true);
+    expect(missingTextarea.element.disabled).toBe(false);
+    expect(missingTextarea.element.value).toBe("在正式问题记录同步前不得提交这段陈述。");
+    expect(missing.wrapper.get("[data-hearing-answer-sync-note]").text()).toContain(
+      "可先填写",
+    );
     expect(missing.wrapper.get("[data-submit-party-statement]").element.disabled).toBe(true);
     await missing.wrapper.get("[data-submit-party-statement]").trigger("click");
     expect(submitAnswersAction).not.toHaveBeenCalled();
@@ -1059,22 +1154,89 @@ describe("HearingCourtView", () => {
       "height: clamp(720px, calc(100dvh - 150px), 820px);",
     );
     expect(componentSource).toContain(
-      "grid-template-rows: 122px minmax(0, 1fr) 154px;",
+      "grid-template-rows: 128px minmax(0, 1fr) 154px;",
     );
     expect(componentSource).toMatch(
-      /\.courtroom-center--without-input\s*{\s*grid-template-rows:\s*122px minmax\(0, 1fr\);/,
+      /\.courtroom-center--without-input\s*{\s*grid-template-rows:\s*128px minmax\(0, 1fr\);/,
     );
     expect(componentSource).toContain("min-height: 720px;");
     expect(componentSource).toContain("max-height: 820px;");
   });
 
+  it("integrates the stage header and input dock into the courtroom card without nested shells", async () => {
+    const { wrapper } = await mountView();
+    const courtroom = wrapper.get(".courtroom-center");
+    const statusDock = wrapper.get("[data-hearing-stage-dock]");
+    const inputDock = wrapper.get("[data-stage-input-bar]");
+
+    expect(statusDock.element.parentElement).toBe(courtroom.element);
+    expect(inputDock.element.parentElement).toBe(courtroom.element);
+    expect(componentSource).toMatch(
+      /\.courtroom-center\s*{[\s\S]*?gap:\s*0;[\s\S]*?padding:\s*0 16px;[\s\S]*?border-radius:\s*30px;/,
+    );
+    expect(componentSource).toMatch(
+      /\.hearing-stage-dock\s*{[\s\S]*?width:\s*calc\(100% \+ 32px\);[\s\S]*?margin:\s*0 -16px;[\s\S]*?background:\s*linear-gradient\([\s\S]*?#fff7e8[\s\S]*?#f4fbff[\s\S]*?#edf9f5[\s\S]*?#f7f2ff[\s\S]*?\);[\s\S]*?border:\s*0;[\s\S]*?border-bottom:\s*1px solid #cfdee8;[\s\S]*?border-radius:\s*0;[\s\S]*?box-shadow:\s*none;/,
+    );
+    expect(componentSource).toMatch(
+      /\.hearing-stage-dock\s*{[\s\S]*?height:\s*128px;[\s\S]*?padding:\s*20px 30px 10px;/,
+    );
+    expect(componentSource).toMatch(
+      /\.hearing-stage-dock__copy\s*{[\s\S]*?padding-left:\s*0;[\s\S]*?border-left:\s*0;/,
+    );
+    expect(componentSource).toMatch(
+      /\.stage-progress-board__item--active div\s*{\s*background:\s*transparent;\s*border:\s*0;/,
+    );
+    expect(componentSource).toMatch(
+      /\[data-stage-number="1"\][\s\S]*?--stage-complete-color:\s*#df7733;[\s\S]*?\[data-stage-number="2"\][\s\S]*?--stage-complete-color:\s*#587fd4;[\s\S]*?\[data-stage-number="3"\][\s\S]*?--stage-complete-color:\s*#2ea087;/,
+    );
+    expect(componentSource).toMatch(
+      /data-stage-connector-state="complete"\][^}]*background:\s*linear-gradient\(/,
+    );
+    expect(componentSource).toMatch(
+      /\.stage-progress-board__item b\s*{[\s\S]*?width:\s*20px;[\s\S]*?height:\s*20px;[\s\S]*?border-radius:\s*8px;/,
+    );
+    expect(componentSource).toMatch(
+      /\.stage-progress-board__item--complete \.stage-progress-board__marker-text\s*{[\s\S]*?font-size:\s*12px;[\s\S]*?rotate\(-6deg\);/,
+    );
+    expect(componentSource).toMatch(
+      /\.court-transcript\s*{[\s\S]*?padding:\s*0;[\s\S]*?background:\s*transparent;[\s\S]*?border:\s*0;/,
+    );
+    expect(componentSource).toMatch(
+      /\.court-transcript__messages\s*{[\s\S]*?padding:\s*0 4px 10px;/,
+    );
+    expect(componentSource).toMatch(
+      /\.court-system-notice \+ \.court-message\s*{\s*margin-top:\s*-8px;/,
+    );
+    expect(componentSource).toMatch(
+      /@container hearing-court \(max-width: 1219px\)[\s\S]*?\.evidence-drawer-launchers\s*{[\s\S]*?top:\s*128px;/,
+    );
+    expect(componentSource).toMatch(
+      /\.stage-input-bar\s*{[\s\S]*?width:\s*calc\(100% \+ 32px\);[\s\S]*?margin:\s*0 -16px;[\s\S]*?border:\s*0;[\s\S]*?border-top:\s*1px solid #d5e2eb;[\s\S]*?border-radius:\s*0;[\s\S]*?box-shadow:\s*none;/,
+    );
+    expect(componentSource).toMatch(
+      /\.stage-input-bar--fixed-dock \.stage-input-bar__body\s*{[\s\S]*?grid-template-rows:\s*1fr;/,
+    );
+    expect(componentSource).toMatch(
+      /\.stage-input-bar--fixed-dock \.stage-input-bar__body--with-header\s*{\s*grid-template-rows:\s*24px 1fr;/,
+    );
+    expect(componentSource).toMatch(
+      /\.stage-input-bar__sealed-status,[\s\S]*?\.stage-input-bar__final-status\s*{[\s\S]*?background:\s*transparent;[\s\S]*?border:\s*0;[\s\S]*?border-radius:\s*0;/,
+    );
+    expect(componentSource).toMatch(
+      /\.stage-input-bar__sealed-status--locked\s*{[\s\S]*?display:\s*grid;[\s\S]*?place-content:\s*center;[\s\S]*?justify-items:\s*center;[\s\S]*?text-align:\s*center;/,
+    );
+    expect(componentSource).toMatch(
+      /\.stage-input-bar__sealed-status--locked > \.stage-input-bar__lock-mark\s*{[\s\S]*?color:\s*#a95f00;[\s\S]*?background:\s*linear-gradient\(145deg, #fff6cf 0%, #ffdc83 100%\);[\s\S]*?border-color:\s*#edbc45;[\s\S]*?letter-spacing:\s*0;/,
+    );
+  });
+
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("keeps all six hearing flow groups horizontally scrollable at the narrow breakpoint", async () => {
+  it("keeps all five hearing flow groups horizontally scrollable at the narrow breakpoint", async () => {
     const { wrapper } = await mountView();
 
-    expect(wrapper.findAll("[data-stage-progress-item]")).toHaveLength(6);
+    expect(wrapper.findAll("[data-stage-progress-item]")).toHaveLength(5);
     expect(componentSource).toContain(
-      "grid-template-columns: repeat(6, minmax(82px, 1fr));",
+      "grid-template-columns: repeat(5, minmax(82px, 1fr));",
     );
     expect(componentSource).not.toMatch(
       /\.stage-progress-board\s*{[^}]*grid-template-columns:\s*1fr/,
@@ -1579,7 +1741,7 @@ describe("HearingCourtView", () => {
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("submits one natural-language party statement and then locks the party input", async () => {
+  it("submits one issue-bound V4 answer and then locks the party input", async () => {
     const submitAnswersAction = vi.fn().mockResolvedValue({
       participant_role: "USER",
       submission_status: "SUBMITTED",
@@ -1588,26 +1750,22 @@ describe("HearingCourtView", () => {
       submitAnswersAction,
       initialHearing: {
         ...hearing,
-        issue_set: {
-          schema_version: "hearing_issue_set.v1",
-          issue_set_id: "HEARING_ISSUE_SET_1",
-          issues: [
+        question_set: {
+          schema_version: "hearing_question_set.v4",
+          question_set_id: "HEARING_QUESTION_SET_BOUND",
+          question_set_hash: "1".repeat(64),
+          formal_issue_catalog_hash: "2".repeat(64),
+          questions: [
             {
+              question_id: "HEARING_QUESTION_BOUND_1",
               issue_id: "HEARING_ISSUE_1",
-              issue_statement: "商品是否实际投递至约定位置",
+              question_text: "商品是否实际投递至约定位置",
+              target_roles: ["USER", "MERCHANT"],
               fact_ids: ["FACT_INTAKE_001"],
-              party_prompts: [
-                {
-                  target_participant_id: "user-local",
-                  role_snapshot: "USER",
-                  prompt_text: "请说明你核对过的收货位置和记录。",
-                },
-                {
-                  target_participant_id: "merchant-local",
-                  role_snapshot: "MERCHANT",
-                  prompt_text: "请说明物流交接和签收凭证。",
-                },
-              ],
+              party_prompts: {
+                USER: "请说明你核对过的收货位置和记录。",
+                MERCHANT: "请说明物流交接和签收凭证。",
+              },
             },
           ],
         },
@@ -1629,14 +1787,23 @@ describe("HearingCourtView", () => {
     await flushPromises();
 
     expect(submitAnswersAction).toHaveBeenCalledWith({
-      schema_version: "hearing_party_statement.v1",
-      issue_set_id: "HEARING_ISSUE_SET_1",
-      statement_text: "我在签收通知到达后立即核对了门口、前台和监控记录。",
-      source_message_ids: [],
+      schema_version: "hearing_answer_bundle.v4",
+      question_set_id: "HEARING_QUESTION_SET_BOUND",
+      question_set_hash: "1".repeat(64),
+      formal_issue_catalog_hash: "2".repeat(64),
+      answers: [
+        {
+          question_id: "HEARING_QUESTION_BOUND_1",
+          issue_id: "HEARING_ISSUE_1",
+          answer_text: "我在签收通知到达后立即核对了门口、前台和监控记录。",
+        },
+      ],
+      source_message_ids: ["MESSAGE_INTAKE_QUESTION_REAL"],
     });
     expect(wrapper.get("[data-stage-input-submitted]").text()).toContain(
-      "本阶段材料已提交",
+      "本方回答已提交",
     );
+    expect(wrapper.get("[data-stage-input-submitted]").text()).toContain("输入已关闭");
     expect(wrapper.find("[data-party-statement-form]").exists()).toBe(false);
   });
 
@@ -1672,6 +1839,7 @@ describe("HearingCourtView", () => {
     expect(Array.from(rail.element.children).indexOf(notice.element)).toBeLessThan(
       Array.from(rail.element.children).indexOf(judgeCard.element),
     );
+    expect(notice.element.nextElementSibling).toBe(judgeCard.element);
     expect(judgeCard.text()).toContain("主审法官");
   });
 
@@ -1763,13 +1931,12 @@ describe("HearingCourtView", () => {
     ).toBe(true);
   });
 
-  it("uses the formal statement endpoint when no submit action is injected", async () => {
-    const submitStatement = vi.spyOn(hearingApi, "submitStatement").mockResolvedValue({
+  it("uses the V4 answer endpoint when no submit action is injected", async () => {
+    const submitAnswers = vi.spyOn(hearingApi, "submitAnswers").mockResolvedValue({
       participant_id: "user-local",
       participant_role: "USER",
       submission_status: "SUBMITTED",
     });
-    const submitAnswers = vi.spyOn(hearingApi, "submitAnswers");
     vi.spyOn(hearingApi, "hearing").mockResolvedValue({
       ...hearing,
       status: {
@@ -1799,17 +1966,24 @@ describe("HearingCourtView", () => {
     await wrapper.get("[data-submit-party-statement]").trigger("click");
     await flushPromises();
 
-    expect(submitStatement).toHaveBeenCalledWith(
+    expect(submitAnswers).toHaveBeenCalledWith(
       { id: "user-local", role: "USER", label: expect.any(String) },
       "CASE_HEARING_1",
       {
-        schema_version: "hearing_party_statement.v1",
-        issue_set_id: "HEARING_QUESTION_SET_1",
-        statement_text: "A complete natural-language statement.",
-        source_message_ids: [],
+        schema_version: "hearing_answer_bundle.v4",
+        question_set_id: "HEARING_QUESTION_SET_1",
+        question_set_hash: "a".repeat(64),
+        formal_issue_catalog_hash: "b".repeat(64),
+        answers: [
+          {
+            question_id: "HEARING_QUESTION_USER_1",
+            issue_id: "HEARING_ISSUE_1",
+            answer_text: "A complete natural-language statement.",
+          },
+        ],
+        source_message_ids: ["MESSAGE_INTAKE_QUESTION_REAL"],
       },
     );
-    expect(submitAnswers).not.toHaveBeenCalled();
   });
 
   it("uses the role-keyed party prompt emitted by the hearing agent", async () => {
@@ -1817,8 +1991,10 @@ describe("HearingCourtView", () => {
       initialHearing: {
         ...hearing,
         question_set: {
-          schema_version: "hearing_question_set.v1",
+          schema_version: "hearing_question_set.v4",
           question_set_id: "HEARING_ISSUE_SET_ROLE_PROMPTS",
+          question_set_hash: "c".repeat(64),
+          formal_issue_catalog_hash: "d".repeat(64),
           questions: [
             {
               question_id: "HEARING_ISSUE_DELIVERY",
@@ -1846,7 +2022,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).not.toContain("请说明物流交接和签收凭证。");
   });
 
-  it("allows a statement when the shared issue set has no prompt for the current party", async () => {
+  it("requires and submits one bound answer for every V4 issue", async () => {
     const submitAnswersAction = vi.fn().mockResolvedValue({
       participant_role: "USER",
       submission_status: "SUBMITTED",
@@ -1856,37 +2032,78 @@ describe("HearingCourtView", () => {
       initialHearing: {
         ...hearing,
         question_set: {
-          schema_version: "hearing_question_set.v1",
-          question_set_id: "HEARING_QUESTION_SET_MERCHANT_ONLY",
+          schema_version: "hearing_question_set.v4",
+          question_set_id: "HEARING_QUESTION_SET_MULTI",
+          question_set_hash: "e".repeat(64),
+          formal_issue_catalog_hash: "f".repeat(64),
           questions: [
             {
-              question_id: "HEARING_QUESTION_MERCHANT_ONLY",
-              target_party: "MERCHANT",
-              question_text: "请商家说明物流交接过程。",
+              question_id: "HEARING_QUESTION_MULTI_1",
+              issue_id: "HEARING_ISSUE_MULTI_1",
+              target_roles: ["USER", "MERCHANT"],
+              fact_ids: ["FACT_INTAKE_001"],
+              question_text: "请双方说明物流交接过程。",
+              party_prompts: {
+                USER: "请说明收货位置。",
+                MERCHANT: "请说明交接记录。",
+              },
+            },
+            {
+              question_id: "HEARING_QUESTION_MULTI_2",
+              issue_id: "HEARING_ISSUE_MULTI_2",
+              target_roles: ["USER", "MERCHANT"],
+              fact_ids: ["FACT_INTAKE_002"],
+              question_text: "请双方说明当前处理方案。",
+              party_prompts: {
+                USER: "请说明当前诉求。",
+                MERCHANT: "请说明当前方案。",
+              },
             },
           ],
         },
       },
     });
 
-    expect(wrapper.get("[data-hearing-party-prompt-empty]").text()).toContain(
-      "当前没有本方定向提示",
-    );
-    await wrapper
-      .get('[data-party-statement-form] textarea')
-      .setValue("我方仍希望说明未实际收到商品，并请求核对投递位置。");
+    const answers = wrapper.findAll("[data-hearing-answer]");
+    expect(answers).toHaveLength(2);
+    await answers[0].setValue("第一项回答：我方未实际收到商品。");
+    expect(wrapper.get("[data-submit-party-statement]").attributes("disabled")).toBeDefined();
+    await answers[1].setValue("第二项回答：我方维持退款诉求。");
     await wrapper.get("[data-submit-party-statement]").trigger("click");
     await flushPromises();
 
     expect(submitAnswersAction).toHaveBeenCalledWith({
-      schema_version: "hearing_party_statement.v1",
-      issue_set_id: "HEARING_QUESTION_SET_MERCHANT_ONLY",
-      statement_text: "我方仍希望说明未实际收到商品，并请求核对投递位置。",
-      source_message_ids: [],
+      schema_version: "hearing_answer_bundle.v4",
+      question_set_id: "HEARING_QUESTION_SET_MULTI",
+      question_set_hash: "e".repeat(64),
+      formal_issue_catalog_hash: "f".repeat(64),
+      answers: [
+        {
+          question_id: "HEARING_QUESTION_MULTI_1",
+          issue_id: "HEARING_ISSUE_MULTI_1",
+          answer_text: "第一项回答：我方未实际收到商品。",
+        },
+        {
+          question_id: "HEARING_QUESTION_MULTI_2",
+          issue_id: "HEARING_ISSUE_MULTI_2",
+          answer_text: "第二项回答：我方维持退款诉求。",
+        },
+      ],
+      source_message_ids: ["MESSAGE_INTAKE_QUESTION_REAL"],
     });
   });
 
   it("withholds the counterparty raw statement until both parties are terminal", async () => {
+    const userStatement = {
+      id: "MESSAGE_USER_PRIVATE_STATEMENT",
+      sequence_no: 8,
+      sender_role: "USER",
+      sender_id: "user-local",
+      message_type: "PARTY_TEXT",
+      message_source: "PARTY_ACTION",
+      message_text: "用户提交的完整知情提示陈述。",
+      created_at: "2026-07-03T12:08:00+08:00",
+    };
     const merchantStatement = {
       id: "MESSAGE_MERCHANT_PRIVATE_STATEMENT",
       sequence_no: 9,
@@ -1905,10 +2122,11 @@ describe("HearingCourtView", () => {
           party_statuses: { USER: "PENDING", MERCHANT: "SUBMITTED" },
         },
       },
-      initialMessages: [...courtMessages, merchantStatement],
+      initialMessages: [...courtMessages, userStatement, merchantStatement],
     });
 
     expect(pending.wrapper.text()).not.toContain("商家尚未公开的完整责任陈述。");
+    expect(pending.wrapper.text()).toContain("用户提交的完整知情提示陈述。");
     expect(
       pending.wrapper.find('[data-court-message-id="MESSAGE_MERCHANT_PRIVATE_STATEMENT"]').exists(),
     ).toBe(false);
@@ -1921,10 +2139,17 @@ describe("HearingCourtView", () => {
           party_statuses: { USER: "SUBMITTED", MERCHANT: "SUBMITTED" },
         },
       },
-      initialMessages: [...courtMessages, merchantStatement],
+      initialMessages: [...courtMessages, userStatement, merchantStatement],
     });
 
     expect(terminal.wrapper.text()).toContain("商家尚未公开的完整责任陈述。");
+    expect(terminal.wrapper.text()).toContain("用户提交的完整知情提示陈述。");
+    expect(
+      terminal.wrapper.find('[data-court-message-id="MESSAGE_USER_PRIVATE_STATEMENT"]').exists(),
+    ).toBe(true);
+    expect(
+      terminal.wrapper.find('[data-court-message-id="MESSAGE_MERCHANT_PRIVATE_STATEMENT"]').exists(),
+    ).toBe(true);
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -1941,7 +2166,8 @@ describe("HearingCourtView", () => {
     });
 
     expect(wrapper.find("[data-submit-answer-bundle]").exists()).toBe(false);
-    expect(wrapper.get("[data-stage-input-submitted]").text()).toContain("等待对方提交");
+    expect(wrapper.get("[data-stage-input-submitted]").text()).toContain("请等待对方提交");
+    expect(wrapper.get("[data-stage-input-submitted]").text()).toContain("输入已关闭");
     expect(wrapper.text()).toContain("已提交，等待用户");
   });
 
@@ -2013,7 +2239,12 @@ describe("HearingCourtView", () => {
     expect(statusDock.text()).toContain("本庭休庭，等待人工审核");
     expect(statusDock.text()).not.toContain("平台终审");
     expect(statusDock.text()).not.toContain("进入平台终审，等待审核员确认最终结果");
-    expect(statusDock.get("[data-hearing-stage-clock]").text()).toContain("当前阶段");
+    expect(statusDock.get("[data-hearing-stage-clock]").text()).toContain("庭审进度");
+    expect(statusDock.get("[data-hearing-stage-clock]").text()).toContain("5 / 5");
+    expect(statusDock.findAll("[data-stage-progress-item]")).toHaveLength(5);
+    expect(statusDock.get("[data-hearing-progress-track]").text()).not.toContain(
+      "人工审核",
+    );
     expect(statusDock.get("[data-hearing-stage-clock]").text()).not.toContain("00:00");
     expect(wrapper.find("[data-hearing-progress-track]").classes()).toContain(
       "stage-progress-board--timeline",
@@ -2430,7 +2661,8 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-complete-hearing-hint]").text()).toContain(
       "法官仅基于已冻结庭审卷宗生成 V1",
     );
-    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("法官草案 V1");
+    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("法官正在生成 V1 草案");
+    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("5 / 5");
     expect(wrapper.get("[data-hearing-stage-clock]").text()).not.toContain("00:00");
 
     await button.trigger("click");

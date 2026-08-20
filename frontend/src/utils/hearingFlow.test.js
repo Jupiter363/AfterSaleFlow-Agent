@@ -10,12 +10,13 @@ import {
 } from "./hearingFlow";
 
 describe("hearing flow v2", () => {
-  it("keeps all fifteen stages in the same six presentation groups", () => {
+  it("keeps all fifteen states while limiting hearing progress to five groups", () => {
     expect(HEARING_FLOW_STAGES).toHaveLength(15);
     expect(new Set(HEARING_FLOW_STAGES.map((stage) => stage.code)).size).toBe(15);
-    expect(HEARING_FLOW_GROUPS).toHaveLength(6);
-    expect(new Set(HEARING_FLOW_STAGES.map((stage) => stage.group))).toEqual(
-      new Set(HEARING_FLOW_GROUPS),
+    expect(HEARING_FLOW_GROUPS).toHaveLength(5);
+    expect(HEARING_FLOW_GROUPS).not.toContain("人工审核");
+    expect(HEARING_FLOW_STAGES.map((stage) => stage.code)).toContain(
+      "HUMAN_REVIEW_OPEN",
     );
   });
 
@@ -47,8 +48,14 @@ describe("hearing flow v2", () => {
       "active",
       "pending",
       "pending",
-      "pending",
     ]);
+  });
+
+  it("completes hearing progress before the post-hearing human-review handoff", () => {
+    const progress = hearingFlowProgress("HUMAN_REVIEW_OPEN");
+    expect(progress).toHaveLength(5);
+    expect(progress.map((item) => item.label)).not.toContain("人工审核");
+    expect(progress.every((item) => item.tone === "complete")).toBe(true);
   });
 
   it("limits party input and judge calls to their declared stages", () => {

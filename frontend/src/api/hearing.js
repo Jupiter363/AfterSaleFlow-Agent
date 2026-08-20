@@ -15,11 +15,6 @@ export const hearingApi = {
       method: "POST",
       body: JSON.stringify(command),
     }),
-  submitStatement: (actor, caseId, command) =>
-    apiRequest(`/disputes/${caseId}/hearing/statements`, actor, {
-      method: "POST",
-      body: JSON.stringify(command),
-    }),
   submitEvidenceBatch: (actor, caseId, command) =>
     apiRequest(`/disputes/${caseId}/hearing/evidence-batches`, actor, {
       method: "POST",

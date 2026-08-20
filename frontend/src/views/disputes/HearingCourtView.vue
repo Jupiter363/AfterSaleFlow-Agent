@@ -38,6 +38,7 @@ import {
   clearAgentStreams,
   consumeAgentRun,
   durableMessagesOutsideActiveStreams,
+  messageAgentRunId,
   streamCardsForRun,
   visibleAgentStreams,
 } from "../../stores/agentStream";
@@ -103,7 +104,7 @@ const courtLedgerTrigger = ref(null);
 const courtLedgerDrawer = ref(null);
 const courtLedgerCloseButton = ref(null);
 const proposalText = ref("");
-const statementText = ref("");
+const answerTexts = reactive({});
 const proposing = ref(false);
 const supplementing = ref(false);
 const checkingDraftStatus = ref(false);
@@ -283,12 +284,23 @@ function transcriptWatermark(source) {
 const formalQuestionSetReady = computed(() => {
   const value = issueSet.value;
   const schema = String(value?.schema_version || value?.schemaVersion || "");
-  const entries = value?.questions || value?.issues;
+  const entries = value?.questions;
+  const setId = value?.question_set_id || value?.questionSetId;
+  const setHash = value?.question_set_hash || value?.questionSetHash;
+  const catalogHash =
+    value?.formal_issue_catalog_hash || value?.formalIssueCatalogHash;
   return (
-    Boolean(activeIssueSetId.value) &&
-    ["hearing_question_set.v1", "hearing_issue_set.v1"].includes(schema) &&
+    schema === "hearing_question_set.v4" &&
+    Boolean(setId) &&
+    /^[a-f0-9]{64}$/u.test(String(setHash || "")) &&
+    /^[a-f0-9]{64}$/u.test(String(catalogHash || "")) &&
     Array.isArray(entries) &&
-    entries.length > 0
+    entries.length > 0 &&
+    entries.every(
+      (entry) =>
+        Boolean(entry?.question_id || entry?.questionId) &&
+        Boolean(entry?.issue_id || entry?.issueId),
+    )
   );
 });
 
@@ -470,6 +482,21 @@ function currentActorIssuePrompt(value) {
 }
 
 const issueGuidanceItems = computed(() => {
+  if (formalQuestionSetReady.value) {
+    return (questionSet.value?.questions || []).map((question, index) => ({
+      id: question.issue_id || question.issueId,
+      questionId: question.question_id || question.questionId,
+      issueId: question.issue_id || question.issueId,
+      statement:
+        question.question_text ||
+        question.questionText ||
+        question.issue_baseline?.issue_statement ||
+        question.issueBaseline?.issueStatement ||
+        `争议点 ${index + 1}`,
+      prompt: currentActorIssuePrompt(question),
+      factCount: (question.fact_ids || question.factIds || []).length,
+    }));
+  }
   const explicitIssues = issueSet.value?.issues || [];
   if (explicitIssues.length) {
     return explicitIssues.map((issue, index) => {
@@ -913,7 +940,13 @@ const leftEvidenceItems = computed(() =>
 const rightEvidenceItems = computed(() =>
   evidenceItemsForRole(rightEvidenceRail.value.role),
 );
-const statementComplete = computed(() => Boolean(statementText.value.trim()));
+const statementComplete = computed(
+  () =>
+    issueGuidanceItems.value.length > 0 &&
+    issueGuidanceItems.value.every((issue) =>
+      Boolean(String(answerTexts[issue.questionId] || "").trim()),
+    ),
+);
 const stageDockMode = computed(() => {
   if (reviewHandoffVisible.value) return "handoff";
   if (flowStageCode.value === "DOSSIER_FREEZING") return "sealed";
@@ -974,13 +1007,29 @@ function formatStageClock(deadlineAt) {
       : [minutes, seconds];
   return parts.map((value) => String(value).padStart(2, "0")).join(":");
 }
-const stageDockClock = computed(() => {
-  if (isPartyInputStage(flowStageCode.value) && activeStageDeadline.value) {
+const hasStageDeadlineClock = computed(
+  () => isPartyInputStage(flowStageCode.value) && Boolean(activeStageDeadline.value),
+);
+const stageProgressItems = computed(() => hearingFlowProgress(flowStageCode.value));
+const stageProgressPosition = computed(() => {
+  const activeIndex = stageProgressItems.value.findIndex((item) => item.tone === "active");
+  if (activeIndex >= 0) {
+    return activeIndex + 1;
+  }
+  const completedCount = stageProgressItems.value.filter(
+    (item) => item.tone === "complete",
+  ).length;
+  return Math.max(1, Math.min(completedCount, stageProgressItems.value.length));
+});
+const stageDockMeta = computed(() => {
+  if (hasStageDeadlineClock.value) {
     return { label: "共享提交时间：", value: formatStageClock(activeStageDeadline.value) };
   }
-  return { label: "当前阶段：", value: flowStageMeta.value?.label || "准备中" };
+  return {
+    label: "庭审进度",
+    value: `${stageProgressPosition.value} / ${stageProgressItems.value.length}`,
+  };
 });
-const stageProgressItems = computed(() => hearingFlowProgress(flowStageCode.value));
 const partySubmissionStatuses = computed(() =>
   [
     { role: "USER", label: "用户提交" },
@@ -1018,8 +1067,40 @@ function streamCardBadge(card, senderRole) {
   return transcriptBadgeForRole(senderRole);
 }
 
-const liveTranscriptItems = computed(() =>
-  [...hearingTranscriptMessages.value]
+function canGroupAgentTranscriptMessage(message) {
+  const senderRole = messageSenderRole(message);
+  return (
+    Boolean(messageAgentRunId(message)) &&
+    !["USER", "MERCHANT", "SYSTEM"].includes(String(senderRole).toUpperCase())
+  );
+}
+
+function groupedDurableTranscriptMessages(sourceMessages) {
+  return sourceMessages.reduce((groups, message) => {
+    const runId = messageAgentRunId(message);
+    const senderRole = messageSenderRole(message);
+    const previous = groups.at(-1);
+    if (
+      canGroupAgentTranscriptMessage(message) &&
+      previous?.groupable &&
+      previous.runId === runId &&
+      previous.senderRole === senderRole
+    ) {
+      previous.messages.push(message);
+      return groups;
+    }
+    groups.push({
+      groupable: canGroupAgentTranscriptMessage(message),
+      runId,
+      senderRole,
+      messages: [message],
+    });
+    return groups;
+  }, []);
+}
+
+const liveTranscriptItems = computed(() => {
+  const visibleMessages = [...hearingTranscriptMessages.value]
     .sort(
       (left, right) =>
         (messageSequence(left) || Number.MAX_SAFE_INTEGER) -
@@ -1030,56 +1111,74 @@ const liveTranscriptItems = computed(() =>
         !isSystemAuditOnlyMessage(message) &&
         !isCounterpartyStatementWithheld(message),
     )
-    .map((message, index) => {
-      const rawText = message.message_text || message.text || message.content || "";
-      if (!rawText) return null;
-      const type = messageType(message);
-      const text = transcriptTextForMessage(message);
-      const senderRole = message.sender_role || message.senderRole || "";
-      return {
-        id: message.id || `live-message-${message.sequence_no || index}`,
-        type: transcriptTypeForRole(senderRole),
-        speaker: transcriptSpeakerForRole(senderRole),
-        speakerIdentity: transcriptProfileForRole(senderRole).identity || "",
-        speakerName: transcriptProfileForRole(senderRole).name || "",
-        senderRole,
-        badge: transcriptBadgeForMessage(message),
-        time: transcriptTime(message.created_at || message.createdAt),
-        text,
-        riskLevel: juryRiskLabel(messagePayload(message)?.risk_level),
-        confidenceScore: juryConfidenceLabel(messagePayload(message)?.confidence_score),
-        isFormalJuryReport: type === "JURY_REVIEW_REPORT",
-      };
-    })
-    .filter(Boolean),
-);
+    .filter((message) => Boolean(rawMessageText(message)));
+
+  return groupedDurableTranscriptMessages(visibleMessages).map((group, index) => {
+    const [firstMessage] = group.messages;
+    const lastMessage = group.messages.at(-1);
+    const type = messageType(firstMessage);
+    const senderRole = group.senderRole;
+    const text = group.messages
+      .map((message) => transcriptTextForMessage(message))
+      .filter(Boolean)
+      .join("\n\n");
+    return {
+      id:
+        group.groupable && group.runId
+          ? `agent-run:${group.runId}`
+          : firstMessage.id || `live-message-${messageSequence(firstMessage) || index}`,
+      type: transcriptTypeForRole(senderRole),
+      speaker: transcriptSpeakerForRole(senderRole),
+      speakerIdentity: transcriptProfileForRole(senderRole).identity || "",
+      speakerName: transcriptProfileForRole(senderRole).name || "",
+      senderRole,
+      badge: transcriptBadgeForMessage(firstMessage),
+      time: transcriptTime(firstMessage.created_at || firstMessage.createdAt),
+      text,
+      riskLevel: juryRiskLabel(messagePayload(lastMessage)?.risk_level),
+      confidenceScore: juryConfidenceLabel(messagePayload(lastMessage)?.confidence_score),
+      isFormalJuryReport: group.messages.some(
+        (message) => messageType(message) === "JURY_REVIEW_REPORT",
+      ),
+      runId: group.runId || "",
+      messageCount: group.messages.length,
+    };
+  });
+});
 const streamingTranscriptItems = computed(() =>
-  visibleHearingStreamingRuns.value.flatMap((run) =>
-    visibleStreamCardsForRun(run).map((card) => {
-      const senderRole = card.senderRole || run.senderRole || "JUDGE";
-      const profile = transcriptProfileForRole(senderRole);
-      const type = profile.type;
-      return {
-        id: `stream-${run.runId}-${card.key}`,
-        type,
-        speaker: transcriptSpeakerForRole(senderRole),
-        speakerIdentity: card.identity || profile.identity || "",
-        speakerName: card.name || profile.name || "",
-        senderRole,
-        badge: streamCardBadge(card, senderRole),
-        time: streamCardStatusLabel(run, card),
-        text: card.content || "",
-        riskLevel: type === "jury" ? "分析中" : "",
-        confidenceScore: type === "jury" ? "生成中" : "",
-        isFormalJuryReport: false,
-        isStreaming: true,
-        streamActive: run.activeCardKey === card.key,
-        runId: run.runId,
-        streamCardKey: card.key,
-        streamStatus: run.status,
-      };
-    }),
-  ),
+  visibleHearingStreamingRuns.value.map((run) => {
+    const cards = visibleStreamCardsForRun(run);
+    const activeCard =
+      cards.find((card) => card.key === run.activeCardKey) || cards.at(-1) || {};
+    const firstCard = cards[0] || activeCard;
+    const senderRole =
+      activeCard.senderRole || firstCard.senderRole || run.senderRole || "JUDGE";
+    const profile = transcriptProfileForRole(senderRole);
+    const type = profile.type;
+    return {
+      id: `agent-run:${run.runId}`,
+      type,
+      speaker: transcriptSpeakerForRole(senderRole),
+      speakerIdentity: activeCard.identity || firstCard.identity || profile.identity || "",
+      speakerName: activeCard.name || firstCard.name || profile.name || "",
+      senderRole,
+      badge: streamCardBadge(firstCard, senderRole),
+      time: streamCardStatusLabel(run, activeCard),
+      text: cards
+        .map((card) => card.content || "")
+        .filter(Boolean)
+        .join("\n\n"),
+      riskLevel: type === "jury" ? "分析中" : "",
+      confidenceScore: type === "jury" ? "生成中" : "",
+      isFormalJuryReport: false,
+      isStreaming: true,
+      streamActive: Boolean(run.activeCardKey),
+      runId: run.runId,
+      streamCardKey: cards.length === 1 ? firstCard.key : "unified",
+      streamStatus: run.status,
+      messageCount: cards.length,
+    };
+  }),
 );
 const courtTranscriptItems = computed(() => [
   ...liveTranscriptItems.value,
@@ -1408,9 +1507,9 @@ function isPartyStatementMessage(message) {
     message?.action_type || message?.actionType || "",
   ).toUpperCase();
   return (
-    ["PARTY_STATEMENT", "HEARING_PARTY_STATEMENT"].includes(type) ||
-    schema === "hearing_party_statement.v1" ||
-    actionType === "PARTY_STATEMENT" ||
+    ["ANSWER_BUNDLE", "HEARING_ANSWER_BUNDLE"].includes(type) ||
+    schema === "hearing_answer_bundle.v4" ||
+    actionType === "ANSWER_BUNDLE" ||
     (type === "PARTY_TEXT" && source === "PARTY_ACTION")
   );
 }
@@ -2440,17 +2539,31 @@ async function submitPartyStatement() {
   submittingAnswers.value = true;
   error.value = "";
   agentState.value = "THINKING";
+  const sourceMessageId = firstBoundText(
+    [boundQuestionTranscriptMessage.value],
+    ["id", "message_id", "messageId"],
+  );
   const command = {
-    schema_version: "hearing_party_statement.v1",
-    issue_set_id: activeIssueSetId.value,
-    statement_text: statementText.value.trim(),
-    source_message_ids: [],
+    schema_version: "hearing_answer_bundle.v4",
+    question_set_id:
+      questionSet.value.question_set_id || questionSet.value.questionSetId,
+    question_set_hash:
+      questionSet.value.question_set_hash || questionSet.value.questionSetHash,
+    formal_issue_catalog_hash:
+      questionSet.value.formal_issue_catalog_hash ||
+      questionSet.value.formalIssueCatalogHash,
+    answers: issueGuidanceItems.value.map((issue) => ({
+      question_id: issue.questionId,
+      issue_id: issue.issueId,
+      answer_text: String(answerTexts[issue.questionId] || "").trim(),
+    })),
+    source_message_ids: sourceMessageId ? [sourceMessageId] : [],
   };
 
   try {
     const result = props.submitAnswersAction
       ? await props.submitAnswersAction(command)
-      : await hearingApi.submitStatement(actorSnapshot, caseId.value, command);
+      : await hearingApi.submitAnswers(actorSnapshot, caseId.value, command);
     const roomMessage = resultRoomMessage(result);
     if (roomMessage) upsertRoomMessage(roomMessage);
     if (!props.submitAnswersAction) {
@@ -2467,6 +2580,9 @@ async function submitPartyStatement() {
           ),
         },
       };
+    }
+    for (const issue of issueGuidanceItems.value) {
+      answerTexts[issue.questionId] = "";
     }
     agentState.value = "SPEAKING";
   } catch (failure) {
@@ -3098,13 +3214,18 @@ onBeforeUnmount(() => {
           data-hearing-stage-dock
         >
           <header class="hearing-stage-dock__header">
-            <div class="hearing-stage-dock__copy hearing-stage-dock__copy--stacked hearing-stage-dock__copy--breathing">
-              <span>当前庭审状态</span>
+            <div
+              class="hearing-stage-dock__copy hearing-stage-dock__copy--stacked hearing-stage-dock__copy--breathing"
+            >
+              <span>当前阶段</span>
               <h2>{{ stageDockTitle }}</h2>
             </div>
-            <div class="hearing-stage-dock__clock hearing-stage-dock__clock--centered" data-hearing-stage-clock>
-              <span>{{ stageDockClock.label }}</span>
-              <strong>{{ stageDockClock.value }}</strong>
+            <div
+              class="hearing-stage-dock__clock"
+              data-hearing-stage-clock
+            >
+              <span>{{ stageDockMeta.label }}</span>
+              <strong>{{ stageDockMeta.value }}</strong>
             </div>
           </header>
 
@@ -3118,20 +3239,20 @@ onBeforeUnmount(() => {
               class="stage-progress-board__item"
               :class="`stage-progress-board__item--${item.tone}`"
               data-stage-progress-item
+              :data-stage-number="item.number"
               :data-stage-progress-state="item.tone"
               :data-stage-connector-state="item.connectorTone"
             >
               <b :aria-label="`${item.label}：${item.status}`">
-                <span
-                  v-if="item.tone === 'active'"
-                  class="stage-progress-board__active-spinner"
-                  data-stage-active-spinner
-                  aria-hidden="true"
-                ></span>
+                <span class="stage-progress-board__marker-text" aria-hidden="true">
+                  {{ item.tone === "complete" ? "✓" : item.number }}
+                </span>
               </b>
               <div>
                 <span class="stage-progress-board__label">{{ item.label }}</span>
-                <em class="stage-progress-board__status">{{ item.status }}</em>
+                <em v-if="item.tone === 'active'" class="stage-progress-board__status">
+                  {{ item.status }}
+                </em>
               </div>
             </article>
           </div>
@@ -3174,7 +3295,8 @@ onBeforeUnmount(() => {
                 :data-court-message-id="item.id"
                 :data-long-transcript="isLongTranscript(item)"
                 :data-streaming="item.isStreaming ? 'true' : undefined"
-                :data-agent-run-id="item.isStreaming ? item.runId : undefined"
+                :data-agent-run-id="item.runId || undefined"
+                :data-run-message-count="item.messageCount > 1 ? item.messageCount : undefined"
                 :data-agent-stream-card="item.isStreaming ? item.streamCardKey : undefined"
                 :data-agent-stream-status="item.isStreaming ? item.streamStatus : undefined"
                 :data-agent-streaming-message="item.isStreaming ? 'true' : undefined"
@@ -3254,13 +3376,16 @@ onBeforeUnmount(() => {
         </section>
 
         <section v-if="isCaseParty" class="stage-input-bar stage-input-bar--fixed-dock" data-stage-input-bar>
-          <div class="stage-input-bar__body">
-            <header class="stage-input-bar__header" data-stage-input-header>
-              <div>
-                <h3>当前阶段提交台</h3>
-              </div>
+          <div
+            class="stage-input-bar__body"
+            :class="{ 'stage-input-bar__body--with-header': isPartyInputStage(flowStageCode) }"
+          >
+            <header
+              v-if="isPartyInputStage(flowStageCode)"
+              class="stage-input-bar__header"
+              data-stage-input-header
+            >
               <div
-                v-if="isPartyInputStage(flowStageCode)"
                 class="stage-input-bar__party-statuses"
                 data-stage-input-party-statuses
               >
@@ -3304,13 +3429,14 @@ onBeforeUnmount(() => {
               data-stage-input-composer
               data-answer-bundle-form
               data-party-statement-form
+              :data-current-party-role="role"
               @submit.prevent="submitPartyStatement"
             >
               <div class="hearing-statement-workspace">
                 <section class="hearing-issue-guidance" data-hearing-issue-guidance>
                   <header>
-                    <strong>争议焦点</strong>
-                    <small>{{ issueGuidanceItems.length }} 项</small>
+                    <strong>{{ role === "MERCHANT" ? "商家回答" : "用户回答" }}</strong>
+                    <small>{{ issueGuidanceItems.length }} 个争议焦点</small>
                   </header>
                   <div class="hearing-issue-guidance__list">
                     <article
@@ -3321,7 +3447,27 @@ onBeforeUnmount(() => {
                       <span>焦点 {{ index + 1 }}</span>
                       <strong>{{ issue.statement }}</strong>
                       <p v-if="issue.prompt" data-hearing-party-prompt>{{ issue.prompt }}</p>
-                    </article>
+                       <label class="hearing-party-statement-composer">
+                         <span>针对焦点 {{ index + 1 }} 的回答</span>
+                         <textarea
+                           v-model="answerTexts[issue.questionId]"
+                           :disabled="submittingAnswers"
+                           rows="3"
+                           maxlength="2000"
+                          :aria-label="`焦点 ${index + 1} 的本方回答`"
+                          :data-hearing-answer-question-id="issue.questionId"
+                          data-hearing-answer
+                          placeholder="请直接回答本争议点；如立场未变，也请明确写明沿用原立场及理由。"
+                        ></textarea>
+                      </label>
+                     </article>
+                    <p
+                      v-if="issueGuidanceItems.length && !canSubmitAnswers"
+                      class="hearing-issue-guidance__sync-note"
+                      data-hearing-answer-sync-note
+                    >
+                      问题集正在完成正式绑定；可先填写，绑定完成后即可一次提交。
+                    </p>
                     <p
                       v-if="!issueGuidanceItems.length"
                       class="hearing-issue-guidance__empty"
@@ -3331,18 +3477,9 @@ onBeforeUnmount(() => {
                     </p>
                   </div>
                 </section>
-                <label class="hearing-party-statement-composer">
-                  <span>本方完整陈述</span>
-                  <textarea
-                    v-model="statementText"
-                    :disabled="!canSubmitAnswers || submittingAnswers"
-                    rows="3"
-                    aria-label="本方完整陈述"
-                    placeholder="请用自己的话说明争议事实、责任判断和期望的处理方式。"
-                  ></textarea>
-                </label>
               </div>
               <div class="stage-input-bar__submit-column">
+                <p>提交后本方输入关闭；待另一方提交后，双方陈述统一公开。</p>
                 <button
                   type="button"
                   class="stage-input-bar__submit"
@@ -3351,7 +3488,7 @@ onBeforeUnmount(() => {
                   :disabled="submittingAnswers || !statementComplete || !canSubmitAnswers"
                   @click="submitPartyStatement()"
                 >
-                  {{ submittingAnswers ? "正在提交…" : "提交本方陈述" }}
+                  {{ submittingAnswers ? "正在提交…" : "提交本方回答" }}
                 </button>
               </div>
             </form>
@@ -3389,16 +3526,22 @@ onBeforeUnmount(() => {
             >
               <span>✓</span>
               <div>
-                <strong>本阶段材料已提交</strong>
-                <small>等待对方提交或共享截止时间到达后，系统会统一封存并推进。</small>
+                <strong>{{ allPartiesStageTerminal ? "双方回答已提交" : "本方回答已提交" }}</strong>
+                <small v-if="allPartiesStageTerminal">系统正在统一公开双方陈述并整理本轮案情。</small>
+                <small v-else>输入已关闭，请等待对方提交；双方到齐后系统会统一公开两方陈述并推进。</small>
               </div>
             </div>
             <div
               v-else
-              class="stage-input-bar__sealed-status"
+              class="stage-input-bar__sealed-status stage-input-bar__sealed-status--locked"
               data-stage-input-locked
+              role="status"
             >
-              <span>·</span>
+              <span
+                class="stage-input-bar__lock-mark"
+                data-stage-lock-icon
+                aria-hidden="true"
+              >&#x1F512;&#xFE0E;</span>
               <div>
                 <strong>{{ flowStageMeta?.label || "系统处理中" }}</strong>
                 <small>{{ stageDockBody }}</small>
@@ -4362,176 +4505,121 @@ onBeforeUnmount(() => {
   position: relative;
   grid-column: 2;
   display: grid;
-  grid-template-rows: 122px minmax(0, 1fr) 154px;
-  gap: 10px;
+  grid-template-rows: 128px minmax(0, 1fr) 154px;
+  gap: 0;
   height: 100%;
   overflow: hidden;
-  padding: 14px 16px;
+  padding: 0 16px;
   border-radius: 30px;
 }
 .courtroom-center--without-input {
-  grid-template-rows: 122px minmax(0, 1fr);
+  grid-template-rows: 128px minmax(0, 1fr);
 }
 .courtroom-center--compact-stage {
   align-content: stretch;
 }
 .hearing-stage-dock {
+  --stage-accent: #4f98bd;
   box-sizing: border-box;
   position: relative;
   display: grid;
-  grid-template-rows: 46px 56px;
+  grid-template-rows: 42px 56px;
   gap: 0;
-  width: 100%;
-  height: 122px;
-  min-height: 122px;
-  max-height: 122px;
-  padding: 7px 16px 7px;
+  width: calc(100% + 32px);
+  height: 128px;
+  min-height: 128px;
+  max-height: 128px;
+  padding: 20px 30px 10px;
+  margin: 0 -16px;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 7% 0, #fff3cf 0 15%, transparent 16%),
-    radial-gradient(circle at 95% 12%, #c9f2ff85 0 14%, transparent 15%),
-    linear-gradient(135deg, #fffdf8 0%, #f4fbff 48%, #fff8ef 100%);
-  border: 1px solid #d9e8f4;
-  border-radius: 26px;
-  box-shadow:
-    inset 0 1px 0 #fff,
-    0 18px 38px #4f6d8d14;
+  background: linear-gradient(
+    112deg,
+    #fff7e8 0%,
+    #f4fbff 32%,
+    #edf9f5 66%,
+    #f7f2ff 100%
+  );
+  border: 0;
+  border-bottom: 1px solid #cfdee8;
+  border-radius: 0;
+  box-shadow: none;
 }
 .hearing-stage-dock--fixed-dashboard { flex: 0 0 auto; }
-.hearing-stage-dock::before {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  content: "";
-  background:
-    linear-gradient(110deg, transparent 0 9%, #ffffff92 10% 13%, transparent 14% 100%),
-    linear-gradient(180deg, #ffffffb8 0%, transparent 54%);
-  opacity: .9;
-}
-.hearing-stage-dock::after {
-  position: absolute;
-  right: 16px;
-  bottom: 20px;
-  width: 96px;
-  height: 96px;
-  pointer-events: none;
-  content: "";
-  background:
-    radial-gradient(circle, #ffffff00 0 44%, #8bd7ff2e 45% 47%, transparent 48%),
-    radial-gradient(circle, #ffd88922 0 30%, transparent 31%);
-}
-.hearing-stage-dock--waiting {
-  background:
-    radial-gradient(circle at 7% 0, #f1e9ff 0 15%, transparent 16%),
-    radial-gradient(circle at 94% 10%, #d7f4ff8a 0 14%, transparent 15%),
-    linear-gradient(135deg, #ffffff 0%, #f7f3ff 48%, #eefaff 100%);
-}
-.hearing-stage-dock--sealed,
-.hearing-stage-dock--handoff {
-  background:
-    radial-gradient(circle at 7% 0, #ffe4ad 0 15%, transparent 16%),
-    radial-gradient(circle at 94% 10%, #d7f4ff8a 0 14%, transparent 15%),
-    linear-gradient(135deg, #fff9ec 0%, #f2fbff 52%, #f6f0ff 100%);
-  border-color: #f0d7a7;
-}
 .hearing-stage-dock__header {
   position: relative;
-  z-index: 2;
   display: flex;
   justify-content: space-between;
-  gap: 16px;
-  align-items: flex-start;
+  gap: 12px;
+  align-items: center;
   min-width: 0;
   min-height: 0;
-  height: 46px;
+  height: 42px;
 }
 .hearing-stage-dock__copy {
-  position: relative;
-  z-index: 1;
   min-width: 0;
+  padding-left: 0;
+  border-left: 0;
   max-width: min(520px, calc(100% - 170px));
 }
 .hearing-stage-dock__copy--stacked {
   display: grid;
-  gap: 1px;
-  align-content: start;
+  gap: 2px;
+  align-content: center;
   max-width: min(610px, calc(100% - 170px));
 }
 .hearing-stage-dock__copy--breathing {
-  gap: 8px;
+  gap: 3px;
 }
 .hearing-stage-dock__copy span {
-  color: #7590ad;
+  color: #5c768a;
   font-size: 10px;
   line-height: 1;
   font-weight: 900;
-  letter-spacing: .14em;
+  letter-spacing: .08em;
 }
 .hearing-stage-dock__copy h2 {
   display: block;
   overflow: hidden;
   margin: 0;
-  color: #30415c;
+  color: #315a76;
   font-size: 18px;
-  line-height: 1.12;
+  line-height: 1.1;
+  font-weight: 900;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .hearing-stage-dock__clock {
-  position: relative;
-  z-index: 2;
   display: grid;
-  gap: 2px;
+  gap: 1px;
   justify-items: end;
-  padding-top: 0;
+  min-width: 88px;
+  padding-left: 14px;
+  border-left: 1px solid #e1e8ee;
+  text-align: right;
   white-space: nowrap;
 }
-.hearing-stage-dock__clock--centered {
-  justify-items: center;
-  text-align: center;
-}
 .hearing-stage-dock__clock span {
-  color: #8ca0b8;
+  color: #5d7689;
   font-size: 10px;
   font-weight: 900;
-  letter-spacing: .08em;
+  letter-spacing: .05em;
 }
 .hearing-stage-dock__clock strong {
-  color: #1598d5;
-  font-size: 21px;
+  color: var(--stage-accent);
+  font-size: 18px;
   line-height: 1;
   letter-spacing: .02em;
-}
-.hearing-stage-dock--waiting .hearing-stage-dock__badge {
-  color: #7d5cc5;
-  background: linear-gradient(135deg, #f1ebff, #ffffffd9);
-  border-color: #dfd3ff;
-}
-.hearing-stage-dock--waiting .hearing-stage-dock__badge::before {
-  background: #afa1ff;
-  box-shadow: 0 0 0 5px #afa1ff24;
-}
-.hearing-stage-dock--sealed .hearing-stage-dock__badge,
-.hearing-stage-dock--handoff .hearing-stage-dock__badge {
-  color: #9a6a18;
-  background: linear-gradient(135deg, #fff3d5, #ffffffd9);
-  border-color: #efd5a2;
-}
-.hearing-stage-dock--sealed .hearing-stage-dock__badge::before,
-.hearing-stage-dock--handoff .hearing-stage-dock__badge::before {
-  background: #78d9bd;
-  box-shadow: 0 0 0 5px #78d9bd24;
+  font-variant-numeric: tabular-nums;
 }
 .stage-progress-board {
   position: relative;
-  z-index: 3;
   display: grid;
-  grid-template-columns: repeat(6, minmax(82px, 1fr));
+  grid-template-columns: repeat(5, minmax(82px, 1fr));
   gap: 0;
   align-self: end;
-  align-items: end;
+  align-items: start;
   height: 56px;
-  padding: 2px 18px 0;
+  padding: 8px 6px 0;
   overflow-x: auto;
   overflow-y: hidden;
   background: transparent;
@@ -4540,16 +4628,18 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 .stage-progress-board__item {
+  --stage-complete-color: #4d9385;
+  --stage-next-color: #367b9f;
   position: relative;
   display: grid;
   justify-items: center;
-  gap: 6px;
+  gap: 5px;
   align-items: start;
   min-width: 0;
-  height: 50px;
+  height: 48px;
   padding: 0;
   overflow: visible;
-  color: #91a0b4;
+  color: #7f90a0;
   background: transparent;
   border: 0;
   border-radius: 0;
@@ -4559,17 +4649,21 @@ onBeforeUnmount(() => {
 }
 .stage-progress-board__item::after {
   position: absolute;
-  top: 7px;
-  left: calc(50% + 11px);
-  right: calc(-50% + 11px);
+  top: 10px;
+  left: calc(50% + 14px);
+  right: calc(-50% + 14px);
   z-index: 0;
-  height: 2px;
+  height: 1px;
   content: "";
-  background: #d8e3ec;
+  background: #dddbe7;
   border-radius: 999px;
 }
 .stage-progress-board__item[data-stage-connector-state="complete"]::after {
-  background: linear-gradient(90deg, #78d9bd, #59c6a4);
+  background: linear-gradient(
+    90deg,
+    var(--stage-complete-color),
+    var(--stage-next-color)
+  );
 }
 .stage-progress-board__item[data-stage-connector-state="none"]::after {
   display: none;
@@ -4578,98 +4672,116 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 2;
   display: grid;
-  width: 16px;
-  height: 16px;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
   place-items: center;
-  color: #fff;
-  background: #9fb2c7;
-  border: 0;
-  border-radius: 50%;
-  box-shadow: 0 6px 14px #6c87a114;
+  color: #8c86a0;
+  background: #f6f3fa;
+  border: 1px solid #d7d1e4;
+  border-radius: 8px;
+  box-shadow: none;
+}
+.stage-progress-board__marker-text {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 900;
 }
 .stage-progress-board__item div {
   display: flex;
   flex-wrap: nowrap;
-  gap: 6px;
+  gap: 5px;
   align-items: center;
   justify-content: center;
   min-width: 0;
   max-width: 100%;
+  padding: 3px 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   white-space: nowrap;
 }
 .stage-progress-board__label {
   min-width: 0;
   overflow: hidden;
-  color: #34455e;
+  color: #567082;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .stage-progress-board__status {
   flex: 0 0 auto;
-  color: #8a98ad;
+  color: var(--stage-accent);
   font-size: 9px;
   font-style: normal;
   font-weight: 900;
   letter-spacing: .04em;
 }
 .stage-progress-board__item--complete {
-  color: #4c6f65;
+  color: #567082;
 }
 .stage-progress-board__item--complete b {
-  background: linear-gradient(135deg, #a8ded1, #78cbb6);
-  box-shadow: 0 0 0 4px #a8ded124, 0 8px 16px #78cbb61a;
+  color: #ffffff;
+  background: var(--stage-complete-color);
+  border-color: rgb(255 255 255 / .46);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .46),
+    0 2px 4px rgb(72 92 112 / .16);
 }
-.stage-progress-board__item--complete .stage-progress-board__status {
-  color: #5f9f8e;
+.stage-progress-board__item--complete .stage-progress-board__marker-text {
+  display: block;
+  font-family: "Arial Rounded MT Bold", "Microsoft YaHei UI", sans-serif;
+  font-size: 12px;
+  transform: translateY(-.5px) rotate(-6deg);
+}
+.stage-progress-board__item[data-stage-number="1"] {
+  --stage-complete-color: #df7733;
+  --stage-next-color: #587fd4;
+}
+.stage-progress-board__item[data-stage-number="2"] {
+  --stage-complete-color: #587fd4;
+  --stage-next-color: #2ea087;
+}
+.stage-progress-board__item[data-stage-number="3"] {
+  --stage-complete-color: #2ea087;
+  --stage-next-color: #2d84b7;
+}
+.stage-progress-board__item[data-stage-number="4"] {
+  --stage-complete-color: #6674cf;
+  --stage-next-color: #a15aae;
+}
+.stage-progress-board__item[data-stage-number="5"] {
+  --stage-complete-color: #a15aae;
+  --stage-next-color: #a15aae;
 }
 .stage-progress-board__item--active {
-  color: #34455e;
+  color: #315e78;
 }
 .stage-progress-board__item--active b {
-  color: #128ec4;
-  background: #edf8ff;
-  box-shadow: 0 0 0 4px #e7f5ff, 0 8px 16px #4eb9e51a;
+  color: #ffffff;
+  background: #2d84b7;
+  border-color: #2d84b7;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .28);
 }
-.stage-progress-board__active-spinner {
-  position: absolute;
-  inset: 3px;
-  z-index: 1;
-  box-sizing: border-box;
-  background: #edf8ff;
-  border: 1.5px solid #bfe6f8;
-  border-top-color: #4eb9e5;
-  border-radius: 50%;
-  animation: court-progress-inner-spin .82s linear infinite;
+.stage-progress-board__item--active div {
+  background: transparent;
+  border: 0;
 }
-.stage-progress-board__active-spinner::after {
-  position: absolute;
-  top: -2px;
-  left: 50%;
-  width: 3px;
-  height: 3px;
-  content: "";
-  background: #4eb9e5;
-  border-radius: 50%;
-  box-shadow: 0 0 0 2px #4eb9e526;
-  transform: translateX(-50%);
+.stage-progress-board__item--active .stage-progress-board__label {
+  color: #315e78;
 }
 .stage-progress-board__item--active .stage-progress-board__status {
-  color: #3f9fc9;
+  color: #2f7192;
 }
 .stage-progress-board__item--pending {
-  color: #9d7580;
+  color: #948da4;
 }
 .stage-progress-board__item--pending b {
-  background: linear-gradient(135deg, #e8c6cf, #d9aebb);
-  box-shadow: 0 0 0 4px #e8c6cf22, 0 8px 16px #d9aebb18;
+  color: #755f86;
+  background: #f7effb;
+  border-color: #cdbde2;
 }
-.stage-progress-board__item--pending .stage-progress-board__status {
-  color: #a97987;
-}
-@keyframes court-progress-inner-spin {
-  to {
-    transform: rotate(360deg);
-  }
+.stage-progress-board__item--pending .stage-progress-board__label {
+  color: #6f697b;
 }
 .hearing-stage-dock__status-grid {
   position: relative;
@@ -4788,6 +4900,7 @@ onBeforeUnmount(() => {
 .court-transcript {
   min-height: 0;
   height: 100%;
+  padding: 0;
   overflow: hidden;
   background: transparent;
   border: 0;
@@ -4799,7 +4912,7 @@ onBeforeUnmount(() => {
   gap: 20px;
   align-items: stretch;
   height: 100%;
-  padding: 2px 4px 10px;
+  padding: 0 4px 10px;
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -4942,6 +5055,9 @@ onBeforeUnmount(() => {
   font-size: 11px;
   line-height: 1.5;
   text-align: center;
+}
+.court-system-notice + .court-message {
+  margin-top: -8px;
 }
 .court-system-notice time {
   flex: 0 0 auto;
@@ -5211,15 +5327,17 @@ onBeforeUnmount(() => {
   font-style: normal;
 }
 .stage-input-bar {
+  box-sizing: border-box;
   display: grid;
   gap: 9px;
-  padding: 14px 16px 10px;
-  background:
-    radial-gradient(circle at 8% 0, #fff5c5 0 14%, transparent 15%),
-    linear-gradient(135deg, #fff, #f2fbff 48%, #fff4f8);
-  border: 1px solid #dfe8f2;
-  border-radius: 24px;
-  box-shadow: inset 0 1px 0 #fff, 0 14px 34px #5b769216;
+  width: calc(100% + 32px);
+  padding: 10px 20px 12px;
+  margin: 0 -16px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f7fbff 100%);
+  border: 0;
+  border-top: 1px solid #d5e2eb;
+  border-radius: 0;
+  box-shadow: none;
 }
 .stage-input-bar--fixed-dock {
   box-sizing: border-box;
@@ -5233,19 +5351,18 @@ onBeforeUnmount(() => {
 }
 .stage-input-bar--fixed-dock .stage-input-bar__body {
   display: grid;
-  grid-template-rows: 24px 1fr;
+  grid-template-rows: 1fr;
   height: 100%;
   min-height: 0;
 }
+.stage-input-bar--fixed-dock .stage-input-bar__body--with-header {
+  grid-template-rows: 24px 1fr;
+}
 .stage-input-bar__header {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 14px;
   align-items: center;
-}
-.stage-input-bar h3 {
-  margin: 0;
-  color: #34455e;
 }
 .stage-input-bar__party-statuses {
   display: flex;
@@ -5311,11 +5428,15 @@ onBeforeUnmount(() => {
   align-items: center;
   min-height: 82px;
   margin-top: 8px;
-  padding: 16px 18px;
+  padding: 12px 4px;
   color: #31445d;
-  background: linear-gradient(135deg, #f8fbff, #eef7ff);
-  border: 1px solid #dce7f3;
-  border-radius: 18px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+.stage-input-bar__body:not(.stage-input-bar__body--with-header) .stage-input-bar__sealed-status,
+.stage-input-bar__body:not(.stage-input-bar__body--with-header) .stage-input-bar__final-status {
+  margin-top: 0;
 }
 .stage-input-bar__sealed-status > span,
 .stage-input-bar__final-status > span {
@@ -5342,6 +5463,41 @@ onBeforeUnmount(() => {
   color: #7d8ba0;
   font-size: 11px;
   font-weight: 700;
+}
+.stage-input-bar__sealed-status--locked {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+  place-content: center;
+  justify-items: center;
+  width: 100%;
+  text-align: center;
+}
+.stage-input-bar__sealed-status--locked > .stage-input-bar__lock-mark {
+  width: 36px;
+  height: 36px;
+  color: #a95f00;
+  background: linear-gradient(145deg, #fff6cf 0%, #ffdc83 100%);
+  border-color: #edbc45;
+  box-shadow:
+    0 4px 12px #d99b2b24,
+    inset 0 1px 0 #ffffffd9;
+  font-family: "Segoe UI Symbol", "Arial Unicode MS", sans-serif;
+  font-size: 17px;
+  font-variant-emoji: text;
+  letter-spacing: 0;
+  line-height: 1;
+}
+.stage-input-bar__sealed-status--locked > div {
+  display: grid;
+  gap: 3px;
+  justify-items: center;
+  min-width: 0;
+}
+.stage-input-bar__sealed-status--locked small {
+  max-width: 560px;
+  margin-top: 0;
+  line-height: 1.5;
 }
 .stage-input-bar__composer textarea {
   box-sizing: border-box;
@@ -5566,7 +5722,7 @@ onBeforeUnmount(() => {
 }
 .hearing-statement-workspace {
   display: grid;
-  grid-template-columns: minmax(190px, .8fr) minmax(250px, 1.2fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   height: 94px;
   min-width: 0;
@@ -5576,8 +5732,7 @@ onBeforeUnmount(() => {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 4px;
   min-width: 0;
-  padding-right: 10px;
-  border-right: 1px solid #dce7f3;
+  padding-right: 2px;
 }
 .hearing-issue-guidance > header {
   display: flex;
@@ -5596,9 +5751,11 @@ onBeforeUnmount(() => {
 .hearing-issue-guidance__list article {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 2px 6px;
-  padding-bottom: 5px;
-  border-bottom: 1px solid #e5edf5;
+  gap: 4px 8px;
+  padding: 8px 9px 9px;
+  background: #fbfdff;
+  border: 1px solid #dfe9f4;
+  border-radius: 10px;
 }
 .hearing-issue-guidance__list article > span {
   color: #2187ad;
@@ -5618,6 +5775,16 @@ onBeforeUnmount(() => {
   font-size: 10px;
   line-height: 1.35;
 }
+.hearing-issue-guidance__sync-note {
+  padding: 7px 9px;
+  margin: 0;
+  color: #7a6a49;
+  background: #fff9ea;
+  border: 1px solid #f0e1bb;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 1.45;
+}
 .hearing-issue-guidance__empty {
   margin: 12px 0 0;
   color: #7d8ba0;
@@ -5625,6 +5792,7 @@ onBeforeUnmount(() => {
 }
 .hearing-party-statement-composer {
   display: grid;
+  grid-column: 1 / -1;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 4px;
   min-width: 0;
@@ -5635,11 +5803,13 @@ onBeforeUnmount(() => {
   font-weight: 900;
 }
 .stage-input-bar--fixed-dock .hearing-party-statement-composer textarea {
-  height: 76px;
-  min-height: 76px;
-  max-height: 76px;
+  height: 68px;
+  min-height: 68px;
+  max-height: 68px;
   padding: 9px 11px;
-  border-radius: 6px;
+  background: #fff;
+  border-color: #cfddeb;
+  border-radius: 9px;
 }
 .hearing-evidence-request-panel {
   display: grid;
@@ -5908,7 +6078,7 @@ onBeforeUnmount(() => {
   }
   .evidence-drawer-launchers {
     position: absolute;
-    top: 136px;
+    top: 128px;
     right: 10px;
     left: 10px;
     z-index: 20;
@@ -6016,8 +6186,8 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
   .hearing-stage-dock {
-    padding-right: 10px;
-    padding-left: 10px;
+    padding-right: 20px;
+    padding-left: 20px;
   }
   .hearing-stage-dock__copy--stacked {
     max-width: calc(100% - 112px);
@@ -6029,7 +6199,7 @@ onBeforeUnmount(() => {
     font-size: 17px;
   }
   .stage-progress-board {
-    grid-template-columns: repeat(6, minmax(88px, 1fr));
+    grid-template-columns: repeat(5, minmax(88px, 1fr));
     padding-right: 4px;
     padding-left: 4px;
   }
@@ -6052,9 +6222,6 @@ onBeforeUnmount(() => {
   }
   .stage-input-bar__header {
     gap: 8px;
-  }
-  .stage-input-bar h3 {
-    font-size: 14px;
   }
   .stage-input-bar__party-statuses {
     gap: 4px;
