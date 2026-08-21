@@ -25,6 +25,8 @@ const packet = {
   remedy: { id: "REMEDY_1", actions: [{ type: "REFUND", amount: 299 }] },
   risk_flags: ["HIGH_VALUE", "SIGNATURE_MISMATCH"],
   status: "FROZEN",
+  action_hash: "ACTION_HASH_1",
+  agent_run_refs: ["AGENT_RUN_1", "AGENT_RUN_2", "AGENT_RUN_3"],
 };
 
 // 业务位置：【前端审核工作台】mountView：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
@@ -114,10 +116,48 @@ describe("ReviewWorkbenchView", () => {
     expect(wrapper.get(".review-triple-layout").findAll("[data-review-operation-column]")).toHaveLength(1);
     expect(chatColumn.find("[data-room-message]").exists()).toBe(true);
     expect(chatColumn.find("[data-review-reason]").exists()).toBe(false);
-    expect(materialColumn.findAll('[role="tab"]')).toHaveLength(3);
+    expect(materialColumn.findAll('[role="tab"]')).toHaveLength(4);
     expect(materialColumn.find("[data-review-reason]").exists()).toBe(false);
-    expect(operationColumn.find(".review-case-strip").exists()).toBe(true);
-    expect(operationColumn.find(".review-risk-strip").exists()).toBe(true);
+    const auditTab = materialColumn.get("#review-tab-audit");
+    const auditPanel = materialColumn.get("[data-review-audit-panel]");
+    expect(auditTab.text()).toBe("版本与审计");
+    expect(auditPanel.isVisible()).toBe(false);
+    expect(wrapper.find(".review-triple-layout > .review-audit").exists()).toBe(false);
+    await auditTab.trigger("click");
+    await flushPromises();
+    expect(auditTab.attributes("aria-selected")).toBe("true");
+    const visibleAuditPanel = materialColumn.get("[data-review-audit-panel]");
+    expect(visibleAuditPanel.attributes("style")).toBe("");
+    expect(materialColumn.get("#review-panel-overview").attributes("style")).toContain(
+      "display: none",
+    );
+    expect(visibleAuditPanel.text()).toContain("冻结版本与审计信息");
+    expect(visibleAuditPanel.text()).toContain("审核包v3");
+    expect(visibleAuditPanel.get("[data-review-version-ledger]").exists()).toBe(true);
+    expect(visibleAuditPanel.findAll("[data-review-version-group]")).toHaveLength(3);
+    expect(
+      visibleAuditPanel.findAll("[data-review-version-group]").map((group) => group.text()),
+    ).toEqual([
+      expect.stringContaining("案件材料"),
+      expect.stringContaining("裁决链路"),
+      expect.stringContaining("运行基线"),
+    ]);
+    expect(visibleAuditPanel.findAll("[data-review-version-entry]")).toHaveLength(11);
+    const auditIdentifiers = visibleAuditPanel.get("[data-review-audit-identifiers]");
+    expect(auditIdentifiers.findAll("[data-review-identifier-row]")).toHaveLength(4);
+    expect(auditIdentifiers.text()).toContain("审核包 IDPACKET_1");
+    expect(auditIdentifiers.get("[data-review-agent-run-count]").text()).toBe("3 条记录");
+    expect(auditIdentifiers.findAll("[data-review-agent-run-id]")).toHaveLength(3);
+    const caseStrip = operationColumn.get("[data-review-case-strip]");
+    expect(caseStrip.get("[data-review-case-identity]").text()).toContain("当前终审案件");
+    expect(caseStrip.get("[data-review-case-title]").text()).toBe("签收未收到争议");
+    expect(caseStrip.get("[data-review-case-baseline]").text()).toContain("冻结审核包 v3");
+    const riskPanel = operationColumn.get("[data-review-risk-panel]");
+    expect(riskPanel.get("[data-review-risk-count]").text()).toBe("2 项待核验");
+    expect(riskPanel.findAll("[data-review-risk-item]")).toHaveLength(2);
+    expect(
+      riskPanel.findAll("[data-review-risk-item]").map((item) => item.text()),
+    ).toEqual(["01高金额案件", "02签收信息不一致"]);
     expect(operationColumn.find("[data-review-reason]").exists()).toBe(true);
     expect(operationColumn.findAll("[data-decision]")).toHaveLength(5);
     expect(
@@ -139,10 +179,55 @@ describe("ReviewWorkbenchView", () => {
     expect(wrapper.get("[data-claims-card]").text()).not.toContain("{");
     expect(wrapper.findAll("[data-review-decisions]")).toHaveLength(1);
     expect(wrapper.findAll("[data-review-reason]")).toHaveLength(1);
-    const readableWorkspace = [chatColumn, materialColumn, operationColumn]
-      .map((column) => column.text())
+    const readableMaterial = ["overview", "evidence", "draft"]
+      .map((section) => materialColumn.get(`#review-panel-${section}`).text())
       .join(" ");
+    const readableWorkspace = [
+      chatColumn.text(),
+      readableMaterial,
+      operationColumn.text(),
+    ].join(" ");
     expect(readableWorkspace).not.toMatch(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/);
+  });
+
+  it("renders long machine-prefixed risks as a readable review checklist", async () => {
+    const { wrapper } = await mountView({
+      initialPacket: {
+        ...packet,
+        risk_flags: [
+          "logistics_status_verification_critical: 需人工确认物流实际状态，核实用户标签收货的真实性。",
+          "detection_report_verification: 需人工核验用户提供的第三方检测报告（EVIDENCE_52a7dfd93ad74ab6bf96947964c8dd7f）原件。",
+        ],
+      },
+    });
+
+    const riskPanel = wrapper.get("[data-review-risk-panel]");
+    const riskItems = riskPanel.findAll("[data-review-risk-item]");
+    expect(riskItems).toHaveLength(2);
+    expect(riskPanel.text()).not.toContain("logistics_status_verification_critical");
+    expect(riskPanel.text()).not.toContain("detection_report_verification");
+    expect(riskPanel.text()).not.toContain("EVIDENCE_52a7dfd93ad74ab6bf96947964c8dd7f");
+    expect(riskItems[0].attributes("data-risk-code")).toBe(
+      "logistics_status_verification_critical",
+    );
+    expect(riskItems[0].text()).toContain("需人工确认物流实际状态");
+    expect(riskItems[1].text()).toContain("证据材料");
+  });
+
+  it("preserves standards and product identifiers inside natural-language risks", async () => {
+    const { wrapper } = await mountView({
+      initialPacket: {
+        ...packet,
+        risk_flags: [
+          "需核验检测过程是否符合GB/T 18801-2022标准，并确认型号KJ500F-A01。",
+        ],
+      },
+    });
+
+    const riskPanel = wrapper.get("[data-review-risk-panel]");
+    expect(riskPanel.text()).toContain("GB/T 18801-2022");
+    expect(riskPanel.text()).toContain("KJ500F-A01");
+    expect(riskPanel.text()).not.toContain("待人工确认/待人工确认");
   });
 
   it("claims an unassigned pending task before letting reviewer-local decide from a direct workbench route", async () => {
@@ -254,13 +339,14 @@ describe("ReviewWorkbenchView", () => {
       },
     });
 
-    const readableWorkspace = [
-      wrapper.get("[data-review-chat-column]"),
-      wrapper.get("[data-review-material-column]"),
-      wrapper.get("[data-review-operation-column]"),
-    ]
-      .map((column) => column.text())
+    const readableMaterial = ["overview", "evidence", "draft"]
+      .map((section) => wrapper.get(`#review-panel-${section}`).text())
       .join(" ");
+    const readableWorkspace = [
+      wrapper.get("[data-review-chat-column]").text(),
+      readableMaterial,
+      wrapper.get("[data-review-operation-column]").text(),
+    ].join(" ");
 
     expect(readableWorkspace).toContain("退货退款");
     expect(readableWorkspace).toContain("完整庭审");

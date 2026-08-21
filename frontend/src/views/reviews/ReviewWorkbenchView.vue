@@ -155,6 +155,7 @@ const reviewSections = [
   { value: "overview", label: "案件概览" },
   { value: "evidence", label: "证据与规则" },
   { value: "draft", label: "草案与执行" },
+  { value: "audit", label: "版本与审计" },
 ];
 const explanationPrompts = [
   "请概括这个案件的核心争议",
@@ -621,18 +622,49 @@ function enumLabel(value, labels = {}) {
   return labels[text] || commonValueLabels[text] || mapReviewTokens(text);
 }
 
+function reviewRiskEntry(value) {
+  const structured = value && typeof value === "object" ? value : null;
+  let code = firstText(
+    structured?.code,
+    structured?.type,
+    structured?.risk_code,
+    structured?.id,
+  );
+  let label = firstText(
+    structured?.label,
+    structured?.message,
+    structured?.description,
+    typeof value === "string" ? value : "",
+  );
+  const prefixedLabel = label.match(
+    /^([A-Za-z][A-Za-z0-9_-]*)\s*[:：]\s*([\s\S]+)$/u,
+  );
+  if (prefixedLabel) {
+    code ||= prefixedLabel[1];
+    label = prefixedLabel[2].trim();
+  }
+  code ||= label;
+  const codeOnly = /^[A-Za-z][A-Za-z0-9_-]*$/u.test(label);
+  if (!label) {
+    label = "待人工确认";
+  } else if (label === code && codeOnly) {
+    const localized = enumLabel(code, riskFlagLabels);
+    label = localized === code
+      ? fallbackEnumLabel(code.toUpperCase().replaceAll("-", "_"))
+      : localized;
+  }
+  return {
+    code,
+    label: replaceEvidenceReferences(label) || "待人工确认",
+  };
+}
+
 function riskLabel(risk) {
   return enumLabel(risk, riskLabels) || "未评估";
 }
 
 function packetStatusLabel(status) {
   return enumLabel(status, packetStatusLabels) || "未知";
-}
-
-function shortIdentifier(value, visible = 18) {
-  const text = String(value || "");
-  if (text.length <= visible) return text;
-  return `${text.slice(0, 9)}…${text.slice(-6)}`;
 }
 
 function claimEntries(claims) {
@@ -994,10 +1026,7 @@ const findings = computed(() => findingEntries(packet.value?.draft));
 const actions = computed(() => remedyActions(packet.value?.remedy));
 const notifications = computed(() => notificationEntries(packet.value?.remedy));
 const reviewRisks = computed(() => {
-  const risks = listEntries(packet.value?.risk_flags).map((code) => ({
-    code,
-    label: enumLabel(code, riskFlagLabels),
-  }));
+  const risks = listEntries(packet.value?.risk_flags).map(reviewRiskEntry);
   const safetyRisk = packet.value?.claims?.risk_assessment?.safety_risk;
   if (safetyRisk === "HIGH" || safetyRisk === "CRITICAL") {
     risks.push({
@@ -1019,19 +1048,37 @@ const reviewMetrics = computed(() => ({
   missingEvidence: evidence.value.filter((row) => row.missing).length,
   actions: actions.value.length,
 }));
-const auditEntries = computed(() => [
-  ["审核包", `v${packet.value?.packet_version ?? "-"}`],
-  ["案件快照", `v${packet.value?.case_version ?? "-"}`],
-  ["证据卷", `v${packet.value?.dossier_version ?? "-"}`],
-  ["争点", `v${packet.value?.issue_version ?? "-"}`],
-  ["裁决草案", `v${packet.value?.adjudication_draft_version ?? "-"}`],
-  ["评议报告", `v${packet.value?.deliberation_report_version ?? "-"}`],
-  ["执行方案", `v${packet.value?.remedy_plan_version ?? "-"}`],
-  ["规则集", packet.value?.ruleset_version || "-"],
-  ["提示词", packet.value?.prompt_version || "-"],
-  ["技能", packet.value?.skill_version || "-"],
-  ["角色配置", packet.value?.profile_version || "-"],
+const auditVersionGroups = computed(() => [
+  {
+    label: "案件材料",
+    entries: [
+      ["审核包", `v${packet.value?.packet_version ?? "-"}`],
+      ["案件快照", `v${packet.value?.case_version ?? "-"}`],
+      ["证据卷", `v${packet.value?.dossier_version ?? "-"}`],
+      ["争点", `v${packet.value?.issue_version ?? "-"}`],
+    ],
+  },
+  {
+    label: "裁决链路",
+    entries: [
+      ["裁决草案", `v${packet.value?.adjudication_draft_version ?? "-"}`],
+      ["评议报告", `v${packet.value?.deliberation_report_version ?? "-"}`],
+      ["执行方案", `v${packet.value?.remedy_plan_version ?? "-"}`],
+    ],
+  },
+  {
+    label: "运行基线",
+    entries: [
+      ["规则集", packet.value?.ruleset_version || "-"],
+      ["提示词", packet.value?.prompt_version || "-"],
+      ["技能", packet.value?.skill_version || "-"],
+      ["角色配置", packet.value?.profile_version || "-"],
+    ],
+  },
 ]);
+const auditEntryCount = computed(() =>
+  auditVersionGroups.value.reduce((total, group) => total + group.entries.length, 0),
+);
 const pendingDecisionLabel = computed(
   () => decisionLabels[pendingDecision.value] || pendingDecision.value,
 );
@@ -1547,8 +1594,14 @@ onBeforeUnmount(() => {
           </header>
 
           <div class="review-operation-room__scroll">
-            <section class="review-case-strip" aria-label="当前终审案件">
-              <div class="review-case-strip__identity">
+            <section
+              class="review-case-strip"
+              data-review-case-strip
+              aria-label="当前终审案件"
+            >
+              <div class="review-case-strip__identity" data-review-case-identity>
+                <span>当前终审案件</span>
+                <strong data-review-case-title>{{ caseTitle }}</strong>
                 <div class="review-workbench__badges">
                   <span class="status-badge" data-packet-status>
                     {{ packetStatusLabel(packet.status) }}
@@ -1561,21 +1614,42 @@ onBeforeUnmount(() => {
                   </span>
                   <span v-if="caseRoute" class="route-badge">{{ caseRoute }}</span>
                 </div>
-                <strong>{{ caseTitle }}</strong>
-                <span>当前终审案件</span>
               </div>
-              <div class="review-case-strip__version">
-                <span>当前核验基线</span>
-                <strong>冻结审核包 v{{ packet.packet_version }}</strong>
+              <div class="review-case-strip__version" data-review-case-baseline>
+                <div>
+                  <span>当前核验基线</span>
+                  <strong>冻结审核包 v{{ packet.packet_version }}</strong>
+                </div>
                 <small>所有决定仅作用于本冻结版本</small>
               </div>
             </section>
 
-            <section v-if="reviewRisks.length" class="review-risk-strip" aria-label="审核风险">
-              <strong>重点复核</strong>
-              <span v-for="risk in reviewRisks" :key="risk.code" :title="risk.label">
-                {{ risk.label }}
-              </span>
+            <section
+              v-if="reviewRisks.length"
+              class="review-risk-strip"
+              data-review-risk-panel
+              aria-labelledby="review-risk-title"
+            >
+              <header class="review-risk-strip__header">
+                <div>
+                  <strong id="review-risk-title">重点复核</strong>
+                  <small>提交最终决定前逐项确认</small>
+                </div>
+                <span data-review-risk-count>{{ reviewRisks.length }} 项待核验</span>
+              </header>
+              <ol class="review-risk-strip__list">
+                <li
+                  v-for="(risk, index) in reviewRisks"
+                  :key="risk.code"
+                  :data-risk-code="risk.code"
+                  data-review-risk-item
+                >
+                  <span class="review-risk-strip__index" aria-hidden="true">
+                    {{ String(index + 1).padStart(2, "0") }}
+                  </span>
+                  <p>{{ risk.label }}</p>
+                </li>
+              </ol>
             </section>
 
             <section class="decision-panel">
@@ -1679,50 +1753,18 @@ onBeforeUnmount(() => {
         </aside>
       </div>
 
-      <details class="review-audit">
-        <summary>
-          <span>冻结版本与审计信息</span>
-          <small>{{ shortIdentifier(packet.action_hash, 22) }}</small>
-        </summary>
-        <div class="review-audit__content">
-          <dl class="review-audit__versions">
-            <div v-for="[label, value] in auditEntries" :key="label">
-              <dt>{{ label }}</dt>
-              <dd>{{ value }}</dd>
-            </div>
-          </dl>
-          <dl class="review-audit__identifiers">
-            <div>
-              <dt>审核包 ID</dt>
-              <dd><code>{{ packet.id }}</code></dd>
-            </div>
-            <div>
-              <dt>执行方案 ID</dt>
-              <dd><code>{{ packet.plan_id }}</code></dd>
-            </div>
-            <div>
-              <dt>执行哈希</dt>
-              <dd><code>{{ packet.action_hash }}</code></dd>
-            </div>
-            <div v-if="listEntries(packet.agent_run_refs).length">
-              <dt>智能体运行记录</dt>
-              <dd>
-                <code v-for="run in listEntries(packet.agent_run_refs)" :key="run">
-                  {{ run }}
-                </code>
-              </dd>
-            </div>
-          </dl>
-        </div>
-      </details>
-
       <div class="review-workbench__workspace">
         <section
           class="review-document"
           data-review-material-column
           aria-label="冻结审核材料"
         >
-          <nav class="review-tabs" role="tablist" aria-label="审核材料分类">
+          <nav
+            class="review-tabs"
+            data-review-material-tabs
+            role="tablist"
+            aria-label="审核材料分类"
+          >
             <button
               v-for="section in reviewSections"
               :id="`review-tab-${section.value}`"
@@ -2069,6 +2111,99 @@ onBeforeUnmount(() => {
               </ul>
             </section>
           </section>
+
+          <section
+            v-show="activeSection === 'audit'"
+            id="review-panel-audit"
+            class="review-panel review-panel--audit"
+            data-review-audit-panel
+            role="tabpanel"
+            aria-labelledby="review-tab-audit"
+          >
+            <header class="review-panel__header">
+              <div>
+                <span>04</span>
+                <div>
+                  <h2>冻结版本与审计信息</h2>
+                  <p>核对冻结材料版本链和不可变执行标识。</p>
+                </div>
+              </div>
+            </header>
+
+            <div class="review-audit__content">
+              <section class="review-audit__group" aria-labelledby="review-audit-versions-title">
+                <header>
+                  <h3 id="review-audit-versions-title">冻结版本链</h3>
+                  <span>{{ auditEntryCount }} 项</span>
+                </header>
+                <div class="review-audit__versions" data-review-version-ledger>
+                  <section
+                    v-for="group in auditVersionGroups"
+                    :key="group.label"
+                    class="review-audit__version-group"
+                    data-review-version-group
+                  >
+                    <header>
+                      <h4>{{ group.label }}</h4>
+                      <span>{{ group.entries.length }} 项</span>
+                    </header>
+                    <dl>
+                      <div
+                        v-for="[label, value] in group.entries"
+                        :key="label"
+                        data-review-version-entry
+                      >
+                        <dt>{{ label }}</dt>
+                        <dd>{{ value }}</dd>
+                      </div>
+                    </dl>
+                  </section>
+                </div>
+              </section>
+
+              <section class="review-audit__group" aria-labelledby="review-audit-identifiers-title">
+                <header>
+                  <h3 id="review-audit-identifiers-title">审计标识</h3>
+                  <span>只读</span>
+                </header>
+                <dl class="review-audit__identifiers" data-review-audit-identifiers>
+                  <div data-review-identifier-row>
+                    <dt>审核包 ID</dt>
+                    <dd><code>{{ packet.id }}</code></dd>
+                  </div>
+                  <div data-review-identifier-row>
+                    <dt>执行方案 ID</dt>
+                    <dd><code>{{ packet.plan_id }}</code></dd>
+                  </div>
+                  <div data-review-identifier-row>
+                    <dt>执行哈希</dt>
+                    <dd><code>{{ packet.action_hash }}</code></dd>
+                  </div>
+                  <div
+                    v-if="listEntries(packet.agent_run_refs).length"
+                    class="review-audit__identifier-runs"
+                    data-review-identifier-row
+                  >
+                    <dt>
+                      <span>智能体运行记录</span>
+                      <small data-review-agent-run-count>
+                        {{ listEntries(packet.agent_run_refs).length }} 条记录
+                      </small>
+                    </dt>
+                    <dd class="review-audit__run-list">
+                      <code
+                        v-for="run in listEntries(packet.agent_run_refs)"
+                        :key="run"
+                        data-review-agent-run-id
+                      >
+                        {{ run }}
+                      </code>
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+            </div>
+          </section>
         </section>
 
       </div>
@@ -2304,8 +2439,7 @@ onBeforeUnmount(() => {
     minmax(420px, 1.05fr)
     minmax(320px, .83fr);
   grid-template-areas:
-    "chat materials operation"
-    "audit audit audit";
+    "chat materials operation";
   align-items: start;
   gap: 18px;
 }
@@ -2506,6 +2640,7 @@ onBeforeUnmount(() => {
 
 .review-operation-room__scroll {
   display: grid;
+  grid-auto-rows: max-content;
   align-content: start;
   gap: 12px;
   min-height: 0;
@@ -2543,19 +2678,101 @@ onBeforeUnmount(() => {
 }
 
 .review-risk-strip {
+  display: grid;
+  overflow: hidden;
+  color: #71532b;
+  background: #fffaf0;
+  border: 1px solid #efdfbb;
+  border-radius: 18px;
+}
+
+.review-risk-strip__header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 15px 12px;
+  border-bottom: 1px solid #f0e3c7;
+}
+
+.review-risk-strip__header > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.review-risk-strip__header strong {
+  color: #765322;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.review-risk-strip__header small {
+  color: #9a7b52;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.review-risk-strip__header > span {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  color: #8b632a;
+  background: #fff1cc;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.review-risk-strip__list {
+  display: grid;
+  margin: 0;
+  padding: 0 15px;
+  list-style: none;
+}
+
+.review-risk-strip__list > li {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: start;
   gap: 10px;
-  padding: 10px 12px;
-  border-radius: 15px;
+  min-width: 0;
+  padding: 11px 0;
+}
+
+.review-risk-strip__list > li + li {
+  border-top: 1px solid #f0e5cd;
+}
+
+.review-risk-strip__index {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: #8f6429;
+  background: #fff0c9;
+  border: 1px solid #efdbad;
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.review-risk-strip__list p {
+  margin: 0;
+  color: #674f31;
+  font-size: 11px;
+  line-height: 1.65;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .review-case-strip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 15px 18px;
+  display: grid;
+  gap: 12px;
+  padding: 16px 17px 13px;
   background:
     radial-gradient(circle at 12% 0, rgba(255, 255, 255, .94), transparent 34%),
     linear-gradient(135deg, #f8fbff 0%, #f4f8ff 52%, #f2fbf7 100%);
@@ -2566,15 +2783,19 @@ onBeforeUnmount(() => {
 .review-case-strip__identity {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .review-case-strip__identity > strong {
   color: #34445b;
-  font-size: 15px;
+  font-size: 16px;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .review-case-strip__identity > span,
-.review-case-strip__version > span,
+.review-case-strip__version span,
 .review-case-strip__version > small {
   color: #7a8799;
   font-size: 10px;
@@ -2582,20 +2803,38 @@ onBeforeUnmount(() => {
 
 .review-case-strip__identity > span {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.review-case-strip__identity .review-workbench__badges {
+  margin-top: 2px;
 }
 
 .review-case-strip__version {
   display: grid;
-  flex: 0 0 auto;
-  gap: 3px;
-  padding-left: 20px;
-  border-left: 1px solid #dce4e9;
-  text-align: right;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px 16px;
+  padding-top: 10px;
+  border-top: 1px solid #dce4e9;
+  text-align: left;
+}
+
+.review-case-strip__version > div {
+  display: grid;
+  gap: 2px;
 }
 
 .review-case-strip__version strong {
   color: #4f6078;
   font-size: 12px;
+}
+
+.review-case-strip__version > small {
+  max-width: 148px;
+  line-height: 1.45;
+  text-align: right;
 }
 
 .review-loading,
@@ -2646,96 +2885,170 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.review-risk-strip {
-  justify-content: flex-start;
-  color: #815a26;
-  background: #fffaf0;
-  border: 1px solid #efdfbb;
-}
-
-.review-risk-strip strong {
-  margin-right: 4px;
-  font-size: 12px;
-}
-
-.review-risk-strip span {
-  padding: 4px 8px;
-  color: #815a26;
-  background: rgba(255, 255, 255, .82);
-  border: 1px solid #eeddb8;
-  border-radius: 999px;
-  font-size: 10px;
-}
-
-.review-audit {
-  grid-area: audit;
-  background: linear-gradient(135deg, #ffffffd6, #f7faffc9);
-  border: 1px solid #dfe8f4;
-  border-radius: 20px;
-  box-shadow: 0 12px 30px #556d950d;
-}
-
-.review-audit summary {
-  display: flex;
-  min-height: 48px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 16px;
-  color: #536683;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.review-audit summary small {
-  color: #8a949f;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
-  font-weight: 500;
-}
-
 .review-audit__content {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.85fr);
-  gap: 18px;
-  padding: 12px;
-  border-top: 1px solid var(--review-border);
+  gap: 22px;
+  padding-top: 18px;
+}
+
+.review-audit__group {
+  display: grid;
+  gap: 10px;
+}
+
+.review-audit__group > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.review-audit__group h3 {
+  margin: 0;
+  color: #42536a;
+  font-size: 13px;
+}
+
+.review-audit__group > header span {
+  color: #8793a3;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .review-audit__versions {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 1.15fr);
+  overflow: hidden;
+  background: linear-gradient(135deg, #fbfcff 0%, #f7f9fd 100%);
+  border: 1px solid #e1e8f1;
+  border-radius: 14px;
 }
 
-.review-audit__versions > div,
-.review-audit__identifiers > div {
+.review-audit__version-group {
+  min-width: 0;
+  padding: 0 13px 4px;
+}
+
+.review-audit__version-group + .review-audit__version-group {
+  border-left: 1px solid #e1e8f1;
+}
+
+.review-audit__version-group > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 38px;
+  border-bottom: 1px solid #e6ecf3;
+}
+
+.review-audit__version-group h4 {
+  margin: 0;
+  color: #415a73;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.05em;
+}
+
+.review-audit__version-group > header span {
+  color: #95a1af;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.review-audit__version-group dl {
+  margin: 0;
+}
+
+.review-audit__version-group dl > div {
   display: grid;
   gap: 3px;
+  padding: 8px 0;
 }
 
-.review-audit dt {
+.review-audit__version-group dl > div + div {
+  border-top: 1px solid #ebf0f5;
+}
+
+.review-audit__content dt {
   color: #87919c;
   font-size: 9px;
 }
 
-.review-audit dd {
+.review-audit__content dd {
   margin: 0;
   color: #414f5d;
   font-size: 11px;
 }
 
+.review-audit__version-group dd {
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
 .review-audit__identifiers {
   display: grid;
-  gap: 8px;
+  padding: 0 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e9f1;
+  border-radius: 14px;
+}
+
+.review-audit__identifiers > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  min-width: 0;
+  padding: 14px 0 15px;
+}
+
+.review-audit__identifiers > div + div {
+  border-top: 1px solid #e6ebf1;
+}
+
+.review-audit__identifiers dt {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: #66778b;
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1.45;
+}
+
+.review-audit__identifiers dt small {
+  flex: 0 0 auto;
+  color: #929eac;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.review-audit__identifiers dd {
+  min-width: 0;
 }
 
 .review-audit__identifiers code {
   display: block;
-  color: #435563;
+  color: #334f65;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 9px;
+  font-size: 12px;
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: 560;
+  line-height: 1.68;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.review-audit__run-list {
+  display: grid;
+  gap: 4px;
+}
+
+.review-audit__run-list code {
+  padding: 1px 0;
 }
 
 .review-workbench__workspace {
@@ -2757,7 +3070,8 @@ onBeforeUnmount(() => {
 }
 
 .review-tabs {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(78px, 1fr));
   min-height: 58px;
   gap: 6px;
   padding: 8px 12px;
@@ -2768,8 +3082,8 @@ onBeforeUnmount(() => {
 
 .review-tabs button {
   position: relative;
-  flex: 0 0 auto;
-  padding: 0 16px;
+  min-height: 40px;
+  padding: 0 10px;
   color: #687a96;
   background: transparent;
   border: 1px solid transparent;
@@ -2777,6 +3091,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
   font-size: 12px;
   font-weight: 750;
+  white-space: nowrap;
 }
 
 .review-tabs button[aria-selected="true"] {
@@ -3934,19 +4249,12 @@ onBeforeUnmount(() => {
   to { transform: rotate(360deg); }
 }
 
-@media (max-width: 1120px) {
-  .review-audit__content {
-    grid-template-columns: 1fr;
-  }
-}
-
 @container room-workspace (max-width: 1099px) {
   .review-triple-layout {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     grid-template-areas:
       "chat operation"
-      "materials materials"
-      "audit audit";
+      "materials materials";
   }
 
   .review-explain-room,
@@ -3961,8 +4269,7 @@ onBeforeUnmount(() => {
     grid-template-areas:
       "chat"
       "materials"
-      "operation"
-      "audit";
+      "operation";
   }
 
   .review-workbench__timing,
@@ -3974,18 +4281,6 @@ onBeforeUnmount(() => {
   .review-workbench__timing {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .review-case-strip {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .review-case-strip__version {
-    padding: 12px 0 0;
-    border-top: 1px solid #dce4e9;
-    border-left: 0;
-    text-align: left;
   }
 
   .review-explain-room {
@@ -4034,10 +4329,6 @@ onBeforeUnmount(() => {
     justify-self: start;
   }
 
-  .review-audit__versions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .review-panel {
     padding: 15px;
   }
@@ -4066,10 +4357,6 @@ onBeforeUnmount(() => {
     border-bottom: 1px solid #d4e0de;
   }
 
-  .review-risk-strip {
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
 }
 
 @media (max-width: 480px) {
@@ -4081,11 +4368,12 @@ onBeforeUnmount(() => {
   }
 
   .review-tabs {
-    padding: 0 5px;
+    grid-template-columns: repeat(4, minmax(74px, 1fr));
+    padding: 6px;
   }
 
   .review-tabs button {
-    padding: 0 10px;
+    padding: 0 8px;
   }
 
   .review-tabs button[aria-selected="true"]::after {
@@ -4100,6 +4388,40 @@ onBeforeUnmount(() => {
 
   .decision-confirm {
     grid-template-columns: 1fr;
+  }
+
+  .review-risk-strip__header,
+  .review-risk-strip__list {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .review-case-strip__version {
+    grid-template-columns: 1fr;
+  }
+
+  .review-case-strip__version > small {
+    max-width: none;
+    text-align: left;
+  }
+
+  .review-audit__versions {
+    grid-template-columns: 1fr;
+  }
+
+  .review-audit__version-group + .review-audit__version-group {
+    border-top: 1px solid #e1e8f1;
+    border-left: 0;
+  }
+
+  .review-audit__identifiers {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .review-audit__identifiers > div {
+    padding-top: 12px;
+    padding-bottom: 13px;
   }
 
 }
