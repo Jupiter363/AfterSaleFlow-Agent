@@ -1642,6 +1642,12 @@ function normalizedPartyRole(role) {
   return normalizePartyRoleValue(role);
 }
 
+function compactOriginalStatementSpacing(value) {
+  return String(value || "")
+    .replace(/\r\n?/gu, "\n")
+    .replace(/\n(?:[ \t]*\n)+/gu, "\n");
+}
+
 const subjectiveStatement = computed(() => {
   const detail = caseDetailDossier.value;
   const claim = detail?.claim_resolution || {};
@@ -1671,10 +1677,12 @@ const subjectiveStatement = computed(() => {
   if (pendingStatement && !visibleStatement.includes(pendingStatement)) {
     visibleStatement = [visibleStatement, pendingStatement].filter(Boolean).join("\n");
   }
+  const value = visibleStatement.trim() ? visibleStatement : "暂无原始陈述";
   return {
     titleSuffix: `${sourceRoleName}原话`,
     label: "原始陈述",
-    value: visibleStatement.trim() ? visibleStatement : "暂无原始陈述",
+    value,
+    displayValue: compactOriginalStatementSpacing(value),
   };
 });
 
@@ -3481,7 +3489,28 @@ onBeforeUnmount(() => {
               class="intake-case-detail__dispute"
               data-dispute-detail-card
             >
-              <span>争议详情</span>
+              <div
+                class="intake-case-detail__heading"
+                data-dispute-detail-heading
+              >
+                <span>争议详情</span>
+                <div
+                  v-if="visibleClaimStatus.amountDisplay || visibleClaimStatus.requestedItems"
+                  class="intake-case-detail__claim-meta"
+                  data-dispute-detail-claim-meta
+                  :title="[
+                    visibleClaimStatus.requestedItems,
+                    visibleClaimStatus.amountDisplay,
+                  ].filter(Boolean).join('，')"
+                >
+                  <small v-if="visibleClaimStatus.requestedItems">
+                    {{ visibleClaimStatus.requestedItems }}
+                  </small>
+                  <em v-if="visibleClaimStatus.amountDisplay">
+                    {{ visibleClaimStatus.amountDisplay }}
+                  </em>
+                </div>
+              </div>
               <div class="intake-case-detail__summary-note">
                 <ExpandableText
                   data-dossier-fulltext-trigger="summary"
@@ -3504,16 +3533,8 @@ onBeforeUnmount(() => {
                   data-dispute-detail-claim
                 >
                   <span>{{ visibleClaimStatus.claimLabel }}</span>
-                  <strong
-                    :title="[
-                      visibleClaimStatus.claimSummary,
-                      visibleClaimStatus.amountDisplay,
-                      visibleClaimStatus.requestedItems,
-                    ].filter(Boolean).join(' · ')"
-                  >
+                  <strong :title="visibleClaimStatus.claimSummary">
                     {{ visibleClaimStatus.claimSummary }}
-                    <em v-if="visibleClaimStatus.amountDisplay">{{ visibleClaimStatus.amountDisplay }}</em>
-                    <small v-if="visibleClaimStatus.requestedItems">{{ visibleClaimStatus.requestedItems }}</small>
                   </strong>
                 </article>
                 <article
@@ -3565,7 +3586,7 @@ onBeforeUnmount(() => {
                   <ExpandableText
                     data-dossier-fulltext-trigger="origin"
                     data-origin-statement-text
-                    :text="subjectiveStatement.value || '待补充'"
+                    :text="subjectiveStatement.displayValue || '待补充'"
                     :title="subjectiveStatement.value || '待补充'"
                     label="原始陈述"
                     :lines="4"
@@ -4025,13 +4046,52 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__status-copy span,
 .intake-case-detail__risk span,
-.intake-case-detail__dispute > span,
+.intake-case-detail__heading > span,
 .intake-case-detail__todo-heading span,
 .intake-case-detail__meta-title {
   color: #7788a5;
   font-size: 10px;
   font-weight: 900;
   letter-spacing: .14em;
+}
+.intake-case-detail__heading {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  height: 18px;
+  overflow: hidden;
+}
+.intake-case-detail__heading > span {
+  flex: 0 0 auto;
+}
+.intake-case-detail__claim-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+.intake-case-detail__claim-meta em {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  color: #9b6b19;
+  background: #fff5d9;
+  border-radius: 999px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+  line-height: 16px;
+}
+.intake-case-detail__claim-meta small {
+  min-width: 0;
+  overflow: hidden;
+  color: #68768e;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .intake-case-detail__status-copy strong {
   display: inline-flex;
@@ -4099,7 +4159,7 @@ onBeforeUnmount(() => {
 .intake-case-detail__single-statement :deep(.expandable-text__content) {
   color: #34425a;
   font-size: 12px;
-  line-height: 1.52;
+  line-height: 1.5;
   white-space: pre-wrap;
 }
 .intake-case-detail__dispute {
@@ -4222,27 +4282,6 @@ onBeforeUnmount(() => {
   color: #2d4d70;
   -webkit-line-clamp: 3;
   max-height: 4.5em;
-}
-.intake-case-detail__field em,
-.intake-case-detail__field small {
-  display: inline-block;
-  margin-left: 6px;
-  vertical-align: 1px;
-}
-.intake-case-detail__field em {
-  width: fit-content;
-  padding: 2px 7px;
-  color: #9b6b19;
-  background: #fff5d9;
-  border-radius: 999px;
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 900;
-}
-.intake-case-detail__field small {
-  color: #68768e;
-  font-size: 11px;
-  font-weight: 800;
 }
 .intake-case-detail__index-strip {
   box-sizing: border-box;

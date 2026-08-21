@@ -4365,13 +4365,23 @@ describe("IntakeRoomView", () => {
     });
 
     const disputeDetail = wrapper.get("[data-dispute-detail-card]");
+    const disputeHeading = disputeDetail.get("[data-dispute-detail-heading]");
+    const claimMeta = disputeHeading.get("[data-dispute-detail-claim-meta]");
     expect(disputeDetail.text()).toContain("争议详情");
+    expect(disputeHeading.text()).toContain("¥299");
+    expect(disputeHeading.text()).toContain("儿童手表 1 件");
+    expect(
+      Array.from(claimMeta.element.children).map((element) => element.textContent.trim()),
+    ).toEqual(["儿童手表 1 件", "¥299"]);
+    expect(disputeHeading.element.nextElementSibling).toBe(
+      disputeDetail.get("[data-dispute-detail-summary]").element.parentElement,
+    );
     expect(disputeDetail.find("[data-dispute-detail-title]").exists()).toBe(false);
     expect(disputeDetail.get("[data-dispute-detail-summary]").element.tagName).toBe("DIV");
     expect(disputeDetail.get("[data-dispute-detail-summary]").text()).toContain("物流显示签收");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("用户称未实际收到包裹，并请求退款");
-    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("¥299");
-    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("儿童手表 1 件");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("¥299");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("儿童手表 1 件");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("我方（用户）诉求");
     expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("对方（商家）回应");
     expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("暂无回应");
@@ -4461,7 +4471,7 @@ describe("IntakeRoomView", () => {
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
-  it("renders the original statement without trimming or replacing internal-looking tokens", async () => {
+  it("preserves the raw original statement while removing visual blank lines between turns", async () => {
     const originalStatement = "  我原话里写了 REFUND 和 UNKNOWN。\n\n请保持原样。  ";
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {
@@ -4486,8 +4496,20 @@ describe("IntakeRoomView", () => {
       },
     });
 
-    expect(wrapper.get("[data-origin-statement-text]").attributes("title")).toBe(
-      originalStatement,
+    const originStatement = wrapper.get("[data-origin-statement-text]");
+    expect(originStatement.attributes("title")).toBe(originalStatement);
+    expect(originStatement.get("[data-expandable-content]").element.textContent).toBe(
+      "  我原话里写了 REFUND 和 UNKNOWN。\n请保持原样。  ",
+    );
+    expect(
+      originStatement.get("[data-expandable-content]").element.textContent,
+    ).not.toContain("\n\n");
+    expect(
+      originStatement.get("[data-expandable-content]").element.textContent.match(/\n/gu),
+    ).toHaveLength(1);
+    const source = readUtf8Source("src/views/disputes/IntakeRoomView.vue");
+    expect(source).toMatch(
+      /\.intake-case-detail__single-statement :deep\(\.expandable-text__content\)\s*{[\s\S]*?line-height:\s*1\.5;/,
     );
   });
 
