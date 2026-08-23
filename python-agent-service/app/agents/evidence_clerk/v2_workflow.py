@@ -35,6 +35,7 @@ from app.agents.evidence_clerk.v2_contracts import (
 from app.agents.evidence_clerk.v2_policy import (
     EvidenceV2PublicOutputPolicy,
     bind_assessment_observation_slots,
+    bind_room_readiness_fact_ids,
 )
 
 
@@ -118,6 +119,7 @@ class EvidenceTurnWorkflowV2:
             generation.value.model_dump(mode="json")
         )
         stream = _bind_v2_transport_sequences(stream)
+        stream = _bind_v2_room_readiness_fact_ids(stream, assembled)
         _validate_v2_authority(stream, assembled)
         stream = _bind_v2_assessment_observation_slots(stream, assembled)
         return _materialize_result(stream, assembled, request)
@@ -367,6 +369,33 @@ def _validate_v2_authority(
         elif header.frame_type == "ROOM_READINESS":
             if any(fact_id not in fact_ids for fact_id in header.remaining_core_fact_ids):
                 raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
+
+
+def _bind_v2_room_readiness_fact_ids(
+    stream: EvidenceTurnStreamV2,
+    assembled: AssembledEvidenceRoomContextV2,
+) -> EvidenceTurnStreamV2:
+    """Apply the live frozen-readiness projection to the terminal object."""
+
+    allowed_fact_ids = tuple(
+        item["fact_id"]
+        for item in assembled.base.working_set.allowed_fact_targets
+    )
+    return stream.model_copy(
+        update={
+            "frames": [
+                frame.model_copy(
+                    update={
+                        "header": bind_room_readiness_fact_ids(
+                            frame.header,
+                            allowed_fact_ids,
+                        )
+                    }
+                )
+                for frame in stream.frames
+            ]
+        }
+    )
 
 
 def _bind_v2_transport_sequences(stream: EvidenceTurnStreamV2) -> EvidenceTurnStreamV2:

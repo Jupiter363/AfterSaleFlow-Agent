@@ -24,6 +24,7 @@ from app.agents.evidence_clerk.v2_workflow import (
     EvidenceTurnWorkflowV2,
     _authority_bound_output_type,
     _bind_v2_assessment_observation_slots,
+    _bind_v2_room_readiness_fact_ids,
     _bind_v2_transport_sequences,
     _output_type_for_mode,
     _validate_v2_authority,
@@ -1011,6 +1012,45 @@ async def test_v2_workflow_rejects_out_of_scope_focus_fact_before_public_text() 
     assert not any(
         getattr(event, "field", None) == "frame.2.public_text" for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_v2_workflow_projects_readiness_fact_ids_to_frozen_authority() -> None:
+    request = EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
+    assembled = assemble_evidence_room_context_v2(request)
+    allowed_fact_id = assembled.base.working_set.allowed_fact_targets[0]["fact_id"]
+    frames = _opening_frames(request)
+    assert isinstance(frames[-1]["header"], dict)
+    frames[-1]["header"]["remaining_core_fact_ids"] = [
+        allowed_fact_id,
+        "FACT_NOT_IN_FROZEN_MATRIX",
+    ]
+    stream = EvidenceRoomOpeningStreamV2.model_validate(
+        {"lead_public_text": "欢迎进入证据室。", "frames": frames}
+    )
+    runner = _StreamingRunner(stream)
+    policy = EvidenceV2PublicOutputPolicy()
+    observer = AgentStreamObserver(
+        operation="evidence_turn",
+        run_id="V2_WORKFLOW_READINESS_BINDING_TEST",
+        publish=lambda event: None,
+        public_output_policy=policy,
+    )
+    observer.begin_public_output("evidence_turn", "frames")
+
+    with bind_stream_observer(observer):
+        runner.release.set()
+        result = await asyncio.wait_for(
+            EvidenceTurnWorkflowV2(model_runner=runner).arun(request),
+            timeout=1,
+        )
+
+    assert result.room_readiness["remaining_core_fact_ids"] == [allowed_fact_id]
+    assert policy.frame_records[-1]["header"]["remaining_core_fact_ids"] == [
+        allowed_fact_id
+    ]
+    rebound = _bind_v2_room_readiness_fact_ids(stream, assembled)
+    assert rebound.frames[-1].header.remaining_core_fact_ids == [allowed_fact_id]
 
 
 @pytest.mark.asyncio

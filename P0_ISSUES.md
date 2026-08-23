@@ -1,5 +1,16 @@
 # P0 / Confirmed Bug Ledger
 
+## P1-20260824-EVIDENCE-IMAGE-GRAPH-CONTRACT-REJECTED-6A8AC2C9-13
+
+- Severity: P1
+- Status: FIXED_FOCUSED_VERIFIED
+- Component: Evidence V2 image-evidence model output contract
+- Confirmed fact: In fresh browser UAT case `CASE_P9_6A8AC2C9_13`, the MERCHANT submitted exactly one PNG evidence item. The original entered the durable catalog as `待人工复核`; the Evidence clerk then durably streamed valid `MATERIAL_RECEIPT`, `EVIDENCE_OBSERVATION`, `EVIDENCE_ASSESSMENT`, and `EVIDENCE_REQUEST` frames before the unpublished terminal `ROOM_READINESS` frame was rejected and the browser received `GRAPH_CONTRACT_REJECTED`.
+- Root cause and evidence: Python raised `EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE` at `EvidenceV2PublicOutputPolicy._validate_header_scope` specifically while checking `ROOM_READINESS.remaining_core_fact_ids`. The frozen invocation exposed ten legal fact IDs, and every fact ID in the four committed frames belonged to that set, so the rejected terminal frame contained at least one provider-generated ID outside the frozen matrix. The prompt explicitly forbids creating or rewriting that field and the provider-visible JSON Schema injects the ten IDs as an item enum, but `_authority_bound_output_type` only overrides `model_json_schema()`; the local Pydantic field remains `list[str]` and accepts an out-of-scope identifier. A direct local parse accepted `FACT_NOT_IN_FROZEN_MATRIX`, proving that provider failure to honor the nested enum is not caught until the later authority policy. Stable case `CASE_P9_6A8AC2C9_1` emitted a terminal readiness list entirely drawn from its own frozen matrix, confirming that the current input matrix is not malformed and that provider compliance had only been stochastic.
+- Impact: The first of the required three consecutive full-chain UAT runs stopped at MERCHANT Evidence analysis and the success streak remains zero.
+- Verification evidence: The live Evidence projector and terminal materializer now apply the same frozen-authority projection only to the optional readiness fact list, preserving legal IDs in provider order and discarding provider-created references; actionable observation and request bindings remain fail-closed. The focused old-red readiness regression and the adjacent out-of-scope focus rejection both passed (2/2).
+- Identifying metadata: observed 2026-08-24; case `CASE_P9_6A8AC2C9_13`; actor `merchant-local/MERCHANT`; route `/disputes/CASE_P9_6A8AC2C9_13/evidence`; run `target-evidence-run:4933f5f9388837658aa40b5b42802aa5`; public diagnostic `GRAPH_CONTRACT_REJECTED`; internal diagnostic `EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE`; submitted file `CASE_P9_6A8AC2C9_5-merchant-qc-record.png`.
+
 ## P1-20260824-INTAKE-SCHEMA-OMITTED-IN-COMPATIBILITY-MODE
 
 - Severity: P1

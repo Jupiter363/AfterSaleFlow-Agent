@@ -18,6 +18,33 @@ from app.graph_runtime.errors import GraphContractError
 LOGGER = logging.getLogger(__name__)
 
 
+def bind_room_readiness_fact_ids(
+    header: EvidenceFrameHeaderV2,
+    allowed_fact_ids: Iterable[str],
+) -> EvidenceFrameHeaderV2:
+    """Project readiness-only references onto immutable frozen fact authority.
+
+    ``remaining_core_fact_ids`` is an optional status projection and an empty
+    list is valid. Provider-created identifiers therefore carry no authority:
+    preserve allowed identifiers in provider order and discard only
+    out-of-scope references. Actionable observation/request bindings keep
+    their fail-closed checks elsewhere in this policy.
+    """
+
+    if header.frame_type != "ROOM_READINESS":
+        return header
+    allowed = frozenset(str(fact_id) for fact_id in allowed_fact_ids)
+    return header.model_copy(
+        update={
+            "remaining_core_fact_ids": [
+                fact_id
+                for fact_id in header.remaining_core_fact_ids
+                if fact_id in allowed
+            ]
+        }
+    )
+
+
 def bind_assessment_observation_slots(
     header: EvidenceFrameHeaderV2,
     observation_evidence: Mapping[str, str] | Iterable[tuple[str, str]],
@@ -268,6 +295,7 @@ class EvidenceV2PublicOutputPolicy:
             header,
             self._observation_evidence,
         )
+        header = bind_room_readiness_fact_ids(header, self._fact_ids)
         self._validate_header_scope(header, sequence)
         frame = {
             "frame_sequence": sequence,
