@@ -1926,7 +1926,18 @@ async function submitPendingBatch() {
     }
   } catch (failure) {
     if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
-    error.value = failure.message;
+    const failureMessage = failure.message;
+    try {
+      // The submission request can persist the batch before its asynchronous
+      // agent run fails. Re-read the authoritative catalog so a submitted
+      // item is never offered as a stale, repeatable pending action.
+      await refreshWorkspace({ generation });
+    } catch {
+      // Preserve the original submission failure even when reconciliation is
+      // temporarily unavailable; a later workspace refresh can still recover.
+    }
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+    error.value = failureMessage;
     agentState.value = "ERROR";
   } finally {
     if (isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {

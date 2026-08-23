@@ -2095,6 +2095,39 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("书记官已读取本批材料");
   });
 
+  it("reconciles a durably submitted batch after asynchronous finalization fails", async () => {
+    const afterFailedFinalizationCatalog = {
+      ...catalog,
+      items: catalog.items.map((item) =>
+        item.evidence_id === "EVIDENCE_USER_PENDING"
+          ? {
+              ...item,
+              submission_status: "SUBMITTED",
+              submitted_at: "2026-07-03T01:00:00Z",
+              submission_batch_id: "EVIDENCE_BATCH_FAILED_FINALIZATION",
+            }
+          : item,
+      ),
+    };
+    evidenceApi.submitBatch.mockRejectedValueOnce(
+      new Error("AGENT_RUN_FINALIZATION_REJECTED"),
+    );
+    evidenceApi.catalog.mockResolvedValue(afterFailedFinalizationCatalog);
+    const { wrapper } = await mountView();
+
+    await wrapper.get("[data-submit-evidence-batch]").trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(evidenceApi.submitBatch).toHaveBeenCalledTimes(1);
+    expect(evidenceApi.catalog).toHaveBeenCalled();
+    expect(wrapper.find("[data-submit-evidence-batch]").exists()).toBe(false);
+    expect(wrapper.get("[data-evidence-originals]").text()).toContain(
+      "logistics-pending.png",
+    );
+    expect(wrapper.text()).toContain("AGENT_RUN_FINALIZATION_REJECTED");
+  });
+
   it("finishes the merchant clerk stream before refreshing the evidence board", async () => {
     const runId = "AGENT_RUN_MERCHANT_EVIDENCE";
     const streamedReply =
