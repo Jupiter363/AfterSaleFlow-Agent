@@ -179,6 +179,34 @@ describe("agent stream protocol", () => {
     });
   });
 
+  it("accepts a V3 same-attempt generation reset", () => {
+    expect(normalizeAgentStreamEvent({
+      id: "v3:ATTEMPT_GEN:2",
+      event: "generation_reset",
+      data: {
+        protocol: "agent-stream.v3",
+        runId: "AGENT_RUN_GEN_RESET",
+        attemptId: "ATTEMPT_GEN",
+        sequence: 2,
+        cursor: "v3:ATTEMPT_GEN:2",
+        audience: "USER",
+        payload: {
+          node: "turn",
+          generation: 2,
+          reason_code: "OUTPUT_SCHEMA_INVALID",
+        },
+      },
+    }, "AGENT_RUN_GEN_RESET", "USER")).toMatchObject({
+      protocol: "agent-stream.v3",
+      runId: "AGENT_RUN_GEN_RESET",
+      attemptId: "ATTEMPT_GEN",
+      event: "generation_reset",
+      sequence: 2,
+      cursor: "v3:ATTEMPT_GEN:2",
+      terminal: false,
+    });
+  });
+
   it.each([
     ["missing", undefined],
     ["string", "2"],

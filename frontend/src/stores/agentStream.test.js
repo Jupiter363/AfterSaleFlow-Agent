@@ -373,6 +373,34 @@ describe("agentStreamStore", () => {
     expect(run.lastEventId).toBe("v2:ATTEMPT_2:3");
   });
 
+  it("replaces provisional text after a V3 generation reset in the same attempt", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(streamResponse([
+      'id: v3:ATTEMPT_GEN:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v3","runId":"AGENT_RUN_GEN_RESET","attemptId":"ATTEMPT_GEN","sequence":0,"cursor":"v3:ATTEMPT_GEN:0","audience":"USER","payload":{"node":"turn"}}\n\n',
+      'id: v3:ATTEMPT_GEN:1\nevent: visible_delta\ndata: {"protocol":"agent-stream.v3","runId":"AGENT_RUN_GEN_RESET","attemptId":"ATTEMPT_GEN","sequence":1,"cursor":"v3:ATTEMPT_GEN:1","audience":"USER","payload":{"node":"turn","field":"room_utterance","delta":"旧生成文本"}}\n\n',
+      'id: v3:ATTEMPT_GEN:2\nevent: generation_reset\ndata: {"protocol":"agent-stream.v3","runId":"AGENT_RUN_GEN_RESET","attemptId":"ATTEMPT_GEN","sequence":2,"cursor":"v3:ATTEMPT_GEN:2","audience":"USER","payload":{"node":"turn","generation":2,"reason_code":"OUTPUT_SCHEMA_INVALID"}}\n\n',
+      'id: v3:ATTEMPT_GEN:3\nevent: visible_delta\ndata: {"protocol":"agent-stream.v3","runId":"AGENT_RUN_GEN_RESET","attemptId":"ATTEMPT_GEN","sequence":3,"cursor":"v3:ATTEMPT_GEN:3","audience":"USER","payload":{"node":"turn","field":"room_utterance","delta":"新生成文本"}}\n\n',
+      'id: v3:ATTEMPT_GEN:4\nevent: final\ndata: {"protocol":"agent-stream.v3","runId":"AGENT_RUN_GEN_RESET","attemptId":"ATTEMPT_GEN","sequence":4,"cursor":"v3:ATTEMPT_GEN:4","audience":"USER","payload":{"final_result_ref":"urn:result:generation-reset","final_result_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}\n\n',
+    ]));
+
+    await consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      descriptor: {
+        runId: "AGENT_RUN_GEN_RESET",
+        streamUrl: "/api/agent-runs/AGENT_RUN_GEN_RESET/events",
+      },
+      fetchImpl,
+    });
+
+    const run = getAgentStreamRun("AGENT_RUN_GEN_RESET");
+    expect(run.content).toBe("新生成文本");
+    expect(run.content).not.toContain("旧生成文本");
+    expect(run.currentAttemptId).toBe("ATTEMPT_GEN");
+    expect(run.resetCount).toBe(1);
+    expect(run.lastEventId).toBe("v3:ATTEMPT_GEN:4");
+  });
+
   it("replays an overflowed delta without duplicating received or durable fallback text", async () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
     const accepted = "A".repeat(256 * 1024);

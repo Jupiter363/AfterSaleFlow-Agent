@@ -2684,7 +2684,11 @@ function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot
   // delayed reset cannot leave facts from the failed attempt on screen. This
   // only removes streamed sections; the persisted dossier remains the base
   // rendered by caseDetailDossier.
-  if (event?.event === "attempt_aborted" || event?.event === "attempt_reset") {
+  if (
+    event?.event === "attempt_aborted" ||
+    event?.event === "attempt_reset" ||
+    event?.event === "generation_reset"
+  ) {
     resetStreamedCaseDetail();
     return;
   }

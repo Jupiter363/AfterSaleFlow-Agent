@@ -628,6 +628,19 @@ export async function consumeAgentRun({
                 }
                 run.attempts[event.attemptId] ||= { startedAt: Date.now() };
                 run.attempts[event.attemptId].status = "STREAMING";
+              } else if (attemptScoped && event.event === "generation_reset") {
+                if (!event.attemptId || run.currentAttemptId !== event.attemptId) {
+                  const error = new Error("数字人 generation reset 与当前 attempt 不匹配");
+                  error.code = "AGENT_STREAM_GENERATION_RESET_MISMATCH";
+                  throw error;
+                }
+                // A generation reset replaces provisional output inside the
+                // same durable attempt. Clear every visible projection while
+                // preserving the attempt/cursor authority for the replacement
+                // generation that follows on the same SSE connection.
+                resetAttemptProjection(run, event.attemptId, event.attemptId);
+                run.attempts[event.attemptId] ||= { startedAt: Date.now() };
+                run.attempts[event.attemptId].status = "STREAMING";
               } else if (
                 attemptScoped &&
                 !["attempt_started"].includes(event.event) &&
@@ -730,6 +743,8 @@ export async function consumeAgentRun({
                 }
                 run.status = "RECONNECTING";
               } else if (event.event === "attempt_reset") {
+                run.status = "STREAMING";
+              } else if (event.event === "generation_reset") {
                 run.status = "STREAMING";
               } else if (event.event === "final") {
                 terminal = true;

@@ -17,6 +17,7 @@ const AGENT_STREAM_EVENTS = new Set([
   "start",
   "attempt_started",
   "visible_delta",
+  "generation_reset",
   "public_frame_start",
   "public_text_delta",
   "active_frame_snapshot",
