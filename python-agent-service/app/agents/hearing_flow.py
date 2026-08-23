@@ -6,6 +6,9 @@ import hashlib
 from collections.abc import Callable
 from typing import Any, Iterable
 
+from app.contracts.case_fact_matrix_hash import (
+    validate_case_fact_matrix_content_hash,
+)
 from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
 from app.graphs.hearing import (
     HEARING_OPERATION_IDENTITIES,
@@ -1971,7 +1974,7 @@ def _assert_case_matrix_integrity(
 ) -> None:
     if matrix.case_id != expected_case_id:
         _schema_error(node_name, "case matrix belongs to another case")
-    if matrix.content_hash != content_hash(matrix, hash_field="content_hash"):
+    if not validate_case_fact_matrix_content_hash(matrix):
         _schema_error(node_name, "input case matrix hash is invalid")
 
 

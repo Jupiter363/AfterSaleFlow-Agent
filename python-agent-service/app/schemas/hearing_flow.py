@@ -7,6 +7,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
+from app.contracts.case_fact_matrix_hash import (
+    validate_case_fact_matrix_content_hash,
+)
 from app.contracts.v1.codec import canonical_sha256
 from app.schemas.intake_case_matrix import ClaimAttitude, FactCategory, FactMateriality, FactStance
 from app.schemas.case_fact_matrix import CaseFactMatrixV2
@@ -1281,9 +1284,7 @@ class TrialDossierV1(StrictModel):
             or self.case_matrix_hash != self.case_fact_matrix.content_hash
         ):
             raise ValueError("trial dossier case matrix version/hash binding is invalid")
-        if self.case_fact_matrix.content_hash != content_hash(
-            self.case_fact_matrix, hash_field="content_hash"
-        ):
+        if not validate_case_fact_matrix_content_hash(self.case_fact_matrix):
             raise ValueError("trial dossier case matrix content hash is invalid")
         evidence = self.fact_evidence_matrix
         if evidence.case_id != self.case_id or evidence.matrix_status != "FROZEN":
@@ -1351,6 +1352,9 @@ class TrialDossierV1(StrictModel):
         if len(policy_refs) != len(set(policy_refs)):
             raise ValueError("trial dossier policy rules must be unique by rule version")
         hash_payload = self.model_dump(mode="json")
+        hash_payload["case_fact_matrix"] = self.case_fact_matrix.model_dump(
+            mode="json", exclude_unset=True
+        )
         hash_payload["answer_bundles"] = [
             value.model_dump(mode="json", exclude_unset=True)
             for value in self.answer_bundles
@@ -1385,8 +1389,7 @@ class TrialDossierV2(StrictModel):
         if (
             self.case_matrix_version != self.case_fact_matrix.matrix_version
             or self.case_matrix_hash != self.case_fact_matrix.content_hash
-            or self.case_fact_matrix.content_hash
-            != content_hash(self.case_fact_matrix, hash_field="content_hash")
+            or not validate_case_fact_matrix_content_hash(self.case_fact_matrix)
         ):
             raise ValueError("trial dossier case matrix binding is invalid")
         evidence = self.fact_evidence_matrix
@@ -1409,7 +1412,11 @@ class TrialDossierV2(StrictModel):
         ]
         if len(policy_refs) != len(set(policy_refs)):
             raise ValueError("trial dossier adjudication rules must be unique by version")
-        if self.content_hash != content_hash(self, hash_field="content_hash"):
+        hash_payload = self.model_dump(mode="json")
+        hash_payload["case_fact_matrix"] = self.case_fact_matrix.model_dump(
+            mode="json", exclude_unset=True
+        )
+        if self.content_hash != content_hash(hash_payload, hash_field="content_hash"):
             raise ValueError("trial_dossier.v2 content hash is invalid")
         return self
 

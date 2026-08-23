@@ -8,7 +8,10 @@ import re
 from collections.abc import Mapping
 from typing import Any, NoReturn
 
-from app.contracts.v1.codec import canonical_sha256
+from app.contracts.case_fact_matrix_hash import (
+    case_fact_matrix_content_hash,
+    validate_case_fact_matrix_content_hash,
+)
 from app.graphs.intake.contracts import RESPONDENT_OPENING_MARKER
 from app.llm import AgentOutputSchemaError
 from app.schemas.intake_case_matrix import (
@@ -31,7 +34,6 @@ from app.schemas.final_agents import IntakeTurnRequest
 SUBJECTIVE_RESPONDENT_SOURCE = "发起方单方陈述（主观）"
 DIRECT_RESPONDENT_SOURCE = "被发起方接待室直接陈述"
 _SUBSTANTIVE = {FactStance.CONFIRM, FactStance.DENY, FactStance.PARTIAL}
-_CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
 def respondent_opening_carry_delta(
@@ -1059,37 +1061,6 @@ def _with_hash(value: dict[str, Any]) -> CaseFactMatrixV2:
     material.pop("content_hash")
     return CaseFactMatrixV2.model_validate(
         {**material, "content_hash": case_fact_matrix_content_hash(material)}
-    )
-
-
-def case_fact_matrix_content_hash(value: Mapping[str, Any]) -> str:
-    """Return the cross-language RFC 8785 CaseFactMatrixV2 content hash."""
-
-    material = dict(value)
-    material.pop("content_hash", None)
-    return canonical_sha256(material)
-
-
-def _historic_case_fact_matrix_content_hash(value: Mapping[str, Any]) -> str:
-    """Return the pre-JCS Python hash accepted only for legacy verification."""
-
-    material = dict(value)
-    material.pop("content_hash", None)
-    return _hash_json(material)
-
-
-def validate_case_fact_matrix_content_hash(value: Mapping[str, Any]) -> bool:
-    """Validate JCS matrices plus already-persisted pre-JCS Python matrices."""
-
-    content_hash = value.get("content_hash")
-    return (
-        isinstance(content_hash, str)
-        and _CONTENT_HASH.fullmatch(content_hash) is not None
-        and content_hash
-        in {
-            case_fact_matrix_content_hash(value),
-            _historic_case_fact_matrix_content_hash(value),
-        }
     )
 
 

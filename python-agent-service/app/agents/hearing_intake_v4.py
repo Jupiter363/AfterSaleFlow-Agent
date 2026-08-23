@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Iterable
 
+from app.contracts.case_fact_matrix_hash import (
+    validate_case_fact_matrix_content_hash,
+)
 from app.contracts.v1.codec import canonical_sha256
 from app.llm import AgentOutputSchemaError
 from app.schemas.case_fact_matrix import CaseFactMatrixV2
@@ -824,9 +827,7 @@ def _public_frame(
 
 
 def _assert_matrix_integrity(matrix: CaseFactMatrixV2, case_id: str) -> None:
-    if matrix.case_id != case_id or matrix.content_hash != content_hash(
-        matrix, hash_field="content_hash"
-    ):
+    if matrix.case_id != case_id or not validate_case_fact_matrix_content_hash(matrix):
         _fail("hearing_intake", "frozen M1 authority is invalid")
 
 

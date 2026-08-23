@@ -9,7 +9,8 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 import pytest
 
-from app.agents.hearing_flow import HearingFlowWorkflows
+from app.agents.hearing_flow import HearingFlowWorkflows, _assert_case_matrix_integrity
+from app.agents.hearing_intake_v4 import _assert_matrix_integrity
 from app.config import Settings
 from app.contracts.v1.codec import canonicalize
 from app.graph_runtime.target_e2e_room_exchange import (
@@ -571,36 +572,50 @@ def test_intake_questions_accepts_java_canonical_hash_for_whole_number_amount() 
     matrix_payload["claims"]["initiator_claim"]["requested_amount"] = 11_899
     matrix_payload["content_hash"] = _hash_payload(matrix_payload)
     matrix = CaseFactMatrixV2.model_validate(matrix_payload)
-    request = HearingIntakeQuestionsRequest.model_validate(
-        {
-            **_base("INTAKE_QUESTIONS", 4),
-            "case_fact_matrix": matrix,
-            "max_questions": 5,
-        }
-    )
-    runner = QueueRunner(
-        {
-            "hearing_intake_questions": {
-                "questions": [
-                    {
-                        "fact_ids": ["FACT_DELIVERY"],
-                        "issue_statement": "请双方说明商品性能宣传标准与实测条件。",
-                        "party_prompts": {
-                            "USER": "请说明实测条件、结果及宣传页面依据。",
-                            "MERCHANT": "请说明宣传标准、适用工况及检测依据。",
-                        },
-                    }
-                ],
-                "public_message": "现围绕商品性能争议向双方发问。",
-            }
-        }
-    )
 
-    result = HearingFlowWorkflows(runner).intake_questions(request)
+    _assert_case_matrix_integrity(
+        matrix,
+        expected_case_id=matrix.case_id,
+        node_name="hearing_intake_questions",
+    )
+    _assert_matrix_integrity(matrix, matrix.case_id)
 
-    assert request.case_fact_matrix.claims.initiator_claim.requested_amount == 11_899.0
-    assert result.questions[0].fact_ids == ["FACT_DELIVERY"]
-    assert [call["node_name"] for call in runner.calls] == ["hearing_intake_questions"]
+    assert matrix.claims.initiator_claim.requested_amount == 11_899.0
+
+
+def test_intake_questions_preserves_omitted_claim_optionals_during_hash_verification() -> None:
+    matrix_payload = _prehearing_case_matrix().model_dump(mode="json")
+    initiator_claim = matrix_payload["claims"]["initiator_claim"]
+    initiator_claim.pop("requested_amount")
+    initiator_claim.pop("requested_items")
+    matrix_payload["content_hash"] = _hash_payload(matrix_payload)
+    matrix = CaseFactMatrixV2.model_validate(matrix_payload)
+
+    _assert_case_matrix_integrity(
+        matrix,
+        expected_case_id=matrix.case_id,
+        node_name="hearing_intake_questions",
+    )
+    _assert_matrix_integrity(matrix, matrix.case_id)
+
+    parsed_claim = matrix.claims.initiator_claim
+    assert "requested_amount" not in parsed_claim.model_fields_set
+    assert "requested_items" not in parsed_claim.model_fields_set
+
+
+def test_intake_questions_still_rejects_tampered_omitted_claim_matrix() -> None:
+    matrix_payload = _prehearing_case_matrix().model_dump(mode="json")
+    matrix_payload["claims"]["initiator_claim"].pop("requested_amount")
+    matrix_payload["content_hash"] = _hash_payload(matrix_payload)
+    matrix_payload["case_overview"]["neutral_summary"] = "哈希生成后被篡改的摘要。"
+    matrix = CaseFactMatrixV2.model_validate(matrix_payload)
+
+    with pytest.raises(AgentOutputSchemaError, match="input case matrix hash is invalid"):
+        _assert_case_matrix_integrity(
+            matrix,
+            expected_case_id=matrix.case_id,
+            node_name="hearing_intake_questions",
+        )
 
 
 def test_target_e2e_hearing_v2_invocation_uses_governed_case_specific_model_output() -> None:
@@ -862,6 +877,39 @@ def test_trial_dossier_uses_the_java_canonical_frozen_payload_and_hash() -> None
         TrialDossierV1.model_validate(corrupted)
 
 
+def _omit_claim_optionals_and_rehash_dossier(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    case_matrix = payload["case_fact_matrix"]
+    case_matrix["claims"]["initiator_claim"].pop("requested_amount")
+    case_matrix["claims"]["initiator_claim"].pop("requested_items")
+    case_matrix["content_hash"] = _hash_payload(case_matrix)
+    payload["case_matrix_hash"] = case_matrix["content_hash"]
+
+    evidence_matrix = payload["fact_evidence_matrix"]
+    evidence_matrix["case_fact_matrix_hash"] = case_matrix["content_hash"]
+    evidence_matrix["content_hash"] = _hash_payload(evidence_matrix)
+    payload["evidence_matrix_hash"] = evidence_matrix["content_hash"]
+
+    evidence_request_set = payload.get("evidence_request_set")
+    if evidence_request_set is not None:
+        evidence_request_set["case_matrix_hash"] = case_matrix["content_hash"]
+    payload["content_hash"] = _hash_payload(payload)
+    return payload
+
+
+def test_trial_dossier_v1_accepts_case_matrix_with_omitted_claim_optionals() -> None:
+    payload = _omit_claim_optionals_and_rehash_dossier(
+        _trial_dossier().model_dump(mode="json")
+    )
+
+    dossier = TrialDossierV1.model_validate(payload)
+
+    claim = dossier.case_fact_matrix.claims.initiator_claim
+    assert "requested_amount" not in claim.model_fields_set
+    assert "requested_items" not in claim.model_fields_set
+
+
 def test_trial_dossier_v2_contains_only_frozen_adjudication_authorities() -> None:
     dossier = _trial_dossier_v2()
 
@@ -897,6 +945,18 @@ def test_trial_dossier_v2_contains_only_frozen_adjudication_authorities() -> Non
     mismatched["content_hash"] = _hash_payload(mismatched)
     with pytest.raises(ValueError, match="evidence matrix binding"):
         TrialDossierV2.model_validate(mismatched)
+
+
+def test_trial_dossier_v2_accepts_case_matrix_with_omitted_claim_optionals() -> None:
+    payload = _omit_claim_optionals_and_rehash_dossier(
+        _trial_dossier_v2().model_dump(mode="json")
+    )
+
+    dossier = TrialDossierV2.model_validate(payload)
+
+    claim = dossier.case_fact_matrix.claims.initiator_claim
+    assert "requested_amount" not in claim.model_fields_set
+    assert "requested_items" not in claim.model_fields_set
 
 
 def test_trial_dossier_accepts_bilateral_natural_language_statements() -> None:
