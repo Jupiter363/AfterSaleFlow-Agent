@@ -7,6 +7,7 @@ import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_P
 
 import com.example.dispute.hearing.domain.HearingAuthorityCommit;
 import com.example.dispute.workflow.contract.v1.AgentRunWorkflowIds;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -335,7 +336,7 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
       failProtocol("HEARING_PARTY_COMMAND_STAGE_OR_COORDINATE_MISMATCH");
       return;
     }
-    String participant = participantFor(partyCommand.command());
+    String participant = participantFor(start, partyCommand.command());
     if (partyTerminals.containsKey(participant)) {
       failProtocol("HEARING_PARTY_ALREADY_TERMINAL");
       return;
@@ -537,12 +538,21 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
             && commandType == CommandType.HEARING_EVIDENCE_BATCH);
   }
 
-  private String participantFor(com.example.dispute.workflow.contract.v1.CaseCommandRef command) {
-    return switch (command.actorRef().actorRole()) {
-      case USER -> start.initiatorParticipantId();
-      case MERCHANT -> start.respondentParticipantId();
-      default -> throw new IllegalArgumentException("Hearing party command requires a USER or MERCHANT actor");
-    };
+  static String participantFor(
+      HearingRoomStart start,
+      com.example.dispute.workflow.contract.v1.CaseCommandRef command) {
+    Objects.requireNonNull(start, "start");
+    Objects.requireNonNull(command, "command");
+    if (command.actorRef().actorRole() != ActorRole.USER
+        && command.actorRef().actorRole() != ActorRole.MERCHANT) {
+      throw new IllegalArgumentException("Hearing party command requires a USER or MERCHANT actor");
+    }
+    String actorId = command.actorRef().actorId();
+    if (!start.initiatorParticipantId().equals(actorId)
+        && !start.respondentParticipantId().equals(actorId)) {
+      throw new IllegalArgumentException("Hearing party command actor is not a bound participant");
+    }
+    return actorId;
   }
 
   private void drainCommittedReceipts() {

@@ -34,7 +34,7 @@ final class JdbcTargetHearingRoomStartLoader {
     }
     List<StartFact> rows = jdbc.query(
         """
-        select epoch.room_id, dispute.user_id, dispute.merchant_id,
+        select epoch.room_id, dispute.initiator_id, dispute.respondent_id,
                flow.created_at, epoch.temporal_build_id
           from case_room_epoch epoch
           join fulfillment_dispute_case dispute on dispute.id = epoch.case_id
@@ -76,8 +76,8 @@ final class JdbcTargetHearingRoomStartLoader {
         HearingWriterMode.TEMPORAL,
         authority.roomEpoch(),
         authority.fencingToken(),
-        fact.userId(),
-        fact.merchantId(),
+        fact.initiatorId(),
+        fact.respondentId(),
         fact.openedAt().toInstant(),
         stageAuthority.hearingDeadlineAt(),
         stageAuthority.partyStageWindowSeconds(),
@@ -88,8 +88,8 @@ final class JdbcTargetHearingRoomStartLoader {
 
   private record StartFact(
       String roomId,
-      String userId,
-      String merchantId,
+      String initiatorId,
+      String respondentId,
       OffsetDateTime openedAt,
       String workflowBuildId) {}
 }

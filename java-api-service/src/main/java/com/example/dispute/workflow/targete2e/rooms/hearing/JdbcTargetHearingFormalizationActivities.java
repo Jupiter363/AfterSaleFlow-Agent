@@ -965,13 +965,21 @@ public final class JdbcTargetHearingFormalizationActivities
     return count;
   }
   private String timeoutParticipantRole(TimeoutRequest request) {
-    if (request.participantId().equals(request.transition().start().initiatorParticipantId())) {
-      return "USER";
-    }
     require(
-        request.participantId().equals(request.transition().start().respondentParticipantId()),
+        request.participantId().equals(request.transition().start().initiatorParticipantId())
+            || request.participantId().equals(request.transition().start().respondentParticipantId()),
         "timeout participant authority");
-    return "MERCHANT";
+    return one(
+        jdbc.query(
+            """
+            select participant_role
+              from case_participant
+             where case_id = ? and actor_id = ? and participant_status = 'ACTIVE'
+               and participant_role in ('USER', 'MERCHANT')
+            """,
+            (row, ignored) -> row.getString(1),
+            request.transition().start().caseId(),
+            request.participantId()));
   }
   private PartyAction timeoutAction(
       TimeoutRequest request,
