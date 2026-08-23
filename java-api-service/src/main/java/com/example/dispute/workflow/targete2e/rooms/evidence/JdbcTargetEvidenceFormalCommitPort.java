@@ -6,6 +6,7 @@ import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -734,8 +735,10 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
     TargetEvidenceTurnResultV2 result = request.proposal().evidenceTurnResult();
     String resultHash = ContractJson.sha256Hex(result.document());
     String projectionId = "ETPV2_" + resultHash.substring(0, 32).toUpperCase();
+    List<JsonNode> formalObservations =
+        TargetEvidenceFormalObservationBinder.bind(result.observationGraph());
     String observations = ContractJson.canonicalString(
-        objectMapper.valueToTree(result.observationGraph()));
+        objectMapper.valueToTree(formalObservations));
     String assessments = ContractJson.canonicalString(
         objectMapper.valueToTree(result.evidenceAssessments()));
     String requests = ContractJson.canonicalString(
@@ -820,7 +823,7 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       }
     }
     java.util.List<FactEdge> edges = new java.util.ArrayList<>();
-    for (var observation : result.observationGraph()) {
+    for (var observation : formalObservations) {
       if (!"BOUND".equals(observation.path("binding_status").asText())) {
         continue;
       }
