@@ -190,6 +190,7 @@ def test_env_example_is_complete_and_contains_only_placeholders() -> None:
     assert values["DEFAULT_LLM_MODEL"] == "qwen3.7-max-2026-06-08"
     assert values["LITELLM_DEFAULT_MODEL"] == "qwen3.7-max-2026-06-08"
     assert values["LLM_ENABLE_THINKING"] == "false"
+    assert values["LLM_STRICT_JSON_SCHEMA_ENABLED"] == "true"
     for key in GENERATED_SECRET_KEYS:
         assert values[key] == "__GENERATED_BY_CODEX__", key
 
@@ -223,6 +224,9 @@ def test_qwen_credentials_stop_at_litellm_gateway() -> None:
     assert "DASHSCOPE_API_KEY" not in agent_environment
     assert agent_environment["LITELLM_MODEL"] == (
         "${LITELLM_DEFAULT_MODEL:-qwen3.7-max-2026-06-08}"
+    )
+    assert agent_environment["LLM_STRICT_JSON_SCHEMA_ENABLED"] == (
+        "${LLM_STRICT_JSON_SCHEMA_ENABLED:-true}"
     )
     model = litellm_config["model_list"][0]
     assert model["model_name"] == "qwen3.7-max-2026-06-08"

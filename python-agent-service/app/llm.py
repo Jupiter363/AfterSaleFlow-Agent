@@ -81,11 +81,7 @@ _NODE_GENERATION_BUDGETS: dict[str, ModelGenerationBudget] = {
     "external_import_simulator": ModelGenerationBudget(4_096),
     "intake_analyze": ModelGenerationBudget(4_096),
     "intake_turn_dialogue": ModelGenerationBudget(4_096),
-    # Qwen thinking usage is reported inside completion_tokens. The Intake
-    # document itself is bounded by the strict Schema and byte limit, so the
-    # governed token ceiling must also cover the server-enabled reasoning
-    # budget instead of rejecting an otherwise valid completed document.
-    "intake_turn_case_detail": ModelGenerationBudget(16_384),
+    "intake_turn_case_detail": ModelGenerationBudget(6_144),
     "evidence_turn": ModelGenerationBudget(8_192),
     "evaluation_analyze": ModelGenerationBudget(8_192),
     "hearing_intake_questions": ModelGenerationBudget(4_096),
@@ -1754,7 +1750,7 @@ class LiteLlmProxyClient:
             await recorder.arecord_provider_call(intent)
 
     # 所属模块：LLM 网关 > LiteLLM 适配器 > OpenAI 兼容请求体构造。
-    # 具体功能：`_completion_request_body` 固定 system/user 消息、temperature=0 并关闭 Thinking；有图片时先二次校验，json_mode 时把 output_type 的 Pydantic JSON Schema 作为 strict provider response_format，普通兼容模式才携带节点输出预算。
+    # 具体功能：`_completion_request_body` 固定 system/user 消息、temperature=0、节点输出预算并关闭 Thinking；有图片时先二次校验，json_mode 时把 output_type 的 Pydantic JSON Schema 作为 strict provider response_format。
     # 上下游：上游是非流式与流式请求路径；下游是 LiteLLM `/chat/completions` HTTP JSON body。
     # 系统意义：所有业务节点统一关闭隐藏推理；外部调用者不能通过 case_data 覆盖模型、温度、预算或 response_format。
     def _completion_request_body(
@@ -1808,8 +1804,9 @@ class LiteLlmProxyClient:
                 {"role": "user", "content": user_content},
             ],
             "temperature": temperature,
+            "max_tokens": max_output_tokens,
             # Thinking 只能由服务端受信配置决定，案件输入不得覆盖。
-            # 不传 thinking_budget，由供应商在当前输出上限内管理推理预算。
+            # `_1` 稳定链路不传 thinking_budget，并由运行配置统一关闭推理。
             "enable_thinking": self._enable_thinking,
         }
         if json_mode:
@@ -1823,10 +1820,6 @@ class LiteLlmProxyClient:
                     "schema": output_type.model_json_schema(),
                 },
             }
-        else:
-            # 百炼严格结构化输出要求不设置 max_tokens，避免完整 JSON 在闭合前被截断；
-            # 只有供应商拒绝 response_format 后的普通文本兼容调用保留受控输出预算。
-            request_body["max_tokens"] = max_output_tokens
         return request_body
 
     def _effective_model(

@@ -116,15 +116,14 @@ def test_stream_line_parser_yields_the_first_complete_upstream_line_immediately(
 
 
 # 所属模块：LLM 网关测试 > 接待节点单次调用预算与严格 Schema。
-# 具体功能：验证开启 Thinking 时，intake_turn_case_detail 使用可覆盖推理用量的受控输出预算，并把本地测试 Schema 以 strict json_schema response_format 发给供应商。
+# 具体功能：验证 intake_turn_case_detail 恢复 `_1` 的受控输出预算、关闭 Thinking，并把本地测试 Schema 以 strict json_schema response_format 发给供应商。
 # 上下游：上游直接调用 LiteLlmProxyClient 请求体构造器；下游断言请求预算与运行时治理配置一致，且 Schema 名称与正文正确。
 # 系统意义：避免供应商把推理 Token 计入 completion_tokens 后，完整且合法的接待结果被后置治理误拒绝。
-def test_intake_generation_uses_a_thinking_compatible_bounded_budget() -> None:
+def test_intake_generation_uses_stable_strict_schema_request() -> None:
     client = LiteLlmProxyClient(
         "http://litellm:4000",
-        "qwen3.7-plus",
+        "qwen3.7-max-2026-06-08",
         "test-master-key",
-        enable_thinking=True,
     )
 
     body = client._completion_request_body(
@@ -136,9 +135,9 @@ def test_intake_generation_uses_a_thinking_compatible_bounded_budget() -> None:
         json_mode=True,
     )
 
-    assert body["model"] == "qwen3.7-plus"
-    assert "max_tokens" not in body
-    assert body["enable_thinking"] is True
+    assert body["model"] == "qwen3.7-max-2026-06-08"
+    assert body["max_tokens"] == 6_144
+    assert body["enable_thinking"] is False
     assert "thinking_budget" not in body
     assert body["response_format"]["type"] == "json_schema"
     assert body["response_format"]["json_schema"]["strict"] is True

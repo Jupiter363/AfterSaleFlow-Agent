@@ -11,7 +11,6 @@ from app.main import _build_evaluation_workflow, _build_llm_client
 def test_settings_resolve_qwen_only_through_litellm() -> None:
     settings = Settings(
         litellm_base_url="http://litellm-proxy:4000",
-        litellm_model="qwen3.8-max",
         litellm_master_key="test-litellm-master-key",
         langfuse_public_key="pk-test-key",
         langfuse_secret_key="sk-test-secret",
@@ -21,14 +20,13 @@ def test_settings_resolve_qwen_only_through_litellm() -> None:
     )
 
     assert settings.resolved_llm_base_url == "http://litellm-proxy:4000"
-    assert settings.resolved_llm_model == "qwen3.8-max"
+    assert settings.resolved_llm_model == "qwen3.7-max-2026-06-08"
     assert settings.resolved_llm_api_key == "test-litellm-master-key"
 
 
-def test_llm_builder_propagates_thinking_configuration() -> None:
+def test_llm_builder_uses_stable_output_controls_by_default() -> None:
     settings = Settings(
         litellm_master_key="test-litellm-master-key",
-        llm_enable_thinking=True,
         langfuse_public_key="pk-test-key",
         langfuse_secret_key="sk-test-secret",
         java_service_secret="test-java-service-secret",
@@ -38,8 +36,8 @@ def test_llm_builder_propagates_thinking_configuration() -> None:
 
     client = _build_llm_client(settings)
 
-    assert client._enable_thinking is True
-    assert client._strict_json_schema_enabled is False
+    assert client._enable_thinking is False
+    assert client._strict_json_schema_enabled is True
 
 
 def test_llm_builder_can_explicitly_enable_provider_json_schema() -> None:

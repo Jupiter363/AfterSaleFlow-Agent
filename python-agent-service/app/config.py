@@ -336,7 +336,7 @@ class Settings(BaseSettings):
     例如 litellm_base_url 可由 LITELLM_BASE_URL 覆盖。
     """
 
-    QWEN_MODEL: ClassVar[str] = "qwen3.8-max"
+    QWEN_MODEL: ClassVar[str] = "qwen3.7-max-2026-06-08"
 
     model_config = SettingsConfigDict(
         # .env 是本地开发配置文件；生产环境通常由容器环境变量注入。
@@ -354,9 +354,9 @@ class Settings(BaseSettings):
     # Field(...) 可以声明校验规则；这里要求超时 >0 且 <=300 秒。
     llm_timeout_seconds: float = Field(default=120.0, gt=0, le=300)
     llm_enable_thinking: bool = False
-    # 默认只要求模型输出 JSON，并由本地 Pydantic 做最终验收；
-    # 供应商侧 strict JSON Schema 仅在显式开启时使用。
-    llm_strict_json_schema_enabled: bool = False
+    # `_1` 稳定链路由供应商 strict JSON Schema 与本地 Pydantic 共同约束；
+    # 兼容模式只能由显式配置关闭，不能成为生产默认值。
+    llm_strict_json_schema_enabled: bool = True
     langfuse_host: str = "http://langfuse:3000"
     langfuse_public_key: str = Field(min_length=8)
     langfuse_secret_key: str = Field(min_length=8)
