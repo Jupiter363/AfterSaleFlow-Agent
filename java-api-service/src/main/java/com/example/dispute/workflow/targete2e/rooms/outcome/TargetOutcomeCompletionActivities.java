@@ -40,7 +40,7 @@ public interface TargetOutcomeCompletionActivities {
           || workflowId.isBlank()
           || caseId == null
           || caseId.isBlank()
-          || outcomeEpoch < 1
+          || outcomeEpoch < 0
           || fencingToken < 1
           || humanReceiptId == null
           || humanReceiptId.isBlank()

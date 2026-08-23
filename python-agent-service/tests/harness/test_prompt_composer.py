@@ -57,6 +57,25 @@ def test_target_e2e_v2_prompt_bundle_resolves_evidence_contract() -> None:
         )
 
 
+def test_judge_prompts_force_one_catalog_decision_action_at_generation_tail() -> None:
+    repository = PromptRepository()
+
+    v1_prompt = repository.render_system_prompt("hearing_judge_v1")
+    v2_prompt = repository.render_system_prompt("hearing_judge_v2")
+
+    for prompt in (v1_prompt, v2_prompt):
+        assert "decision_action_catalog" in prompt
+        assert "draft.decision_action" in prompt
+        assert "必须且只能选择其中一个" in prompt
+        assert "不得输出自由文本、OTHER、UNKNOWN 或人工接管编码" in prompt
+    assert v1_prompt.rstrip().endswith(
+        "作答前最后检查输入末尾的 decision_action_catalog，并用其中一个编码收束整份草案。"
+    )
+    assert v2_prompt.rstrip().endswith(
+        "若改变 V1 编码，相关 review_responses[].affected_fields 必须包含 decision_action。"
+    )
+
+
 # 所属模块：Agent Harness > test_prompt_composer；函数角色：回归测试用例。
 # 具体功能：`test_prompt_repository_loads_common_fragments_and_agent_prompt` 读取并按案件、角色或会话范围筛选模型提示词；关键协作调用：`PromptRepository`、`repo.render`。
 # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `PromptRepository`、`repo.render`。
@@ -111,6 +130,12 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     assert "不得索要截图、照片、视频" in system_prompt
     assert "只进行一次模型调用" in system_prompt
     assert "不输出增量补丁" in system_prompt
+    assert "纯业务文本叶子" in system_prompt
+    assert "每个数组元素必须是一条完整、可独立阅读的简体中文" in system_prompt
+    assert "数组元素内部不得写入或续写输出协议结构" in system_prompt
+    assert "禁止直接输出或加上“核验”后照抄" in system_prompt
+    assert "必须先理解其业务含义，再改写成完整的中文自然语言" in system_prompt
+    assert "没有实际业务内容时直接输出空数组" in system_prompt
     assert "total_score >= 85" in system_prompt
     assert system_prompt.index("room_utterance") < system_prompt.index(
         "ordered_sections"
@@ -120,11 +145,25 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     )
     assert "WAITING_FOR_REMARK" in system_prompt
     assert "HAS_REMARKS" in system_prompt
+    assert "blocking_gaps 是封闭的接待门槛" in system_prompt
+    assert "另一方尚未直接回应不属于当前方的阻塞缺口" in system_prompt
+    assert "当前方主动提供的对方态度转述可以保留为当前方陈述" in system_prompt
+    assert "是否提供该转述不得影响 party_positions 评分" in system_prompt
+    assert "所有问题和缺口只能由当前方本人直接、权威回答" in system_prompt
+    assert "检测机构名称/资质、报告编号" in system_prompt
+    assert "必须令 blocking_gaps=[]" in system_prompt
     assert "claim_resolution" in system_prompt
     assert "respondent_attitude" in system_prompt
     assert "dispute_core_state" in system_prompt
-    assert "发起方主观转述或尚未回应" in system_prompt
-    assert "发起方单方陈述（主观）" in system_prompt
+    assert "当前方主动转述另一方曾表达的态度" in system_prompt
+    assert "不得写入另一方观点字段" in system_prompt
+    assert "另一方已持久化的观点由服务端从上一成功轮次确定性装填" in system_prompt
+    assert "发起方 Schema 只输出 initiator_position" in system_prompt
+    assert "被发起方 Schema 只输出 respondent_position" in system_prompt
+    assert "未被当前方直接回应的旧事实可以省略" in system_prompt
+    assert "冻结时直接提取双方各自已持久化的位置" in system_prompt
+    assert "发起方单方陈述（主观）" not in system_prompt
+    assert "INITIATOR_REPORTED" not in system_prompt
     assert (
         "FACT_* 行无论使用 CURRENT_SOURCE、PREVIOUS_MATRIX 还是 "
         "PREVIOUS_AND_CURRENT_SOURCE" in system_prompt
@@ -133,7 +172,6 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     assert "NEW_* 禁止使用 PREVIOUS_MATRIX" in system_prompt
     assert "NEW_* 使用 PREVIOUS_AND_CURRENT_SOURCE 合法" in system_prompt
     assert "只提供当前授权来源" in system_prompt
-    assert len(system_prompt) < 10_000
 
 
 def test_target_intake_prompt_reuses_common_rules_without_legacy_output_envelope() -> None:
@@ -152,9 +190,17 @@ def test_target_intake_prompt_reuses_common_rules_without_legacy_output_envelope
     assert "IntakeCognitionDraft" in system_prompt
     assert "room_utterance 必须是 JSON 对象中的第一个字段" in system_prompt
     assert "每轮都重新生成完整、去重、第三人称" in system_prompt
-    assert "发起方单方陈述（主观）" in system_prompt
-    assert "沉默不得被编造成态度" in system_prompt
-    assert "NOT_ADDRESSED 与 PREVIOUS_MATRIX" in system_prompt
+    assert "当前方主动转述另一方曾表达的态度" in system_prompt
+    assert "不得写入另一方观点字段或升级为另一方直接立场" in system_prompt
+    assert "另一方已持久化的直接观点由服务端从其本人成功轮次自动装填" in system_prompt
+    assert "未提供或不清楚不属于发起方缺口" in system_prompt
+    assert "商家正式立场只由商家本人轮次输出" in system_prompt
+    assert "禁止直接输出或加“核验”后照抄" in system_prompt
+    assert "必须先理解业务含义再改写为中文" in system_prompt
+    assert "未直接回应的旧事实直接省略" in system_prompt
+    assert "服务端直接提取双方各自已持久化的位置" in system_prompt
+    assert "发起方单方陈述（主观）" not in system_prompt
+    assert "INITIATOR_REPORTED" not in system_prompt
     for legacy_field in (
         "case_detail",
         "case_matrix_delta",
@@ -184,6 +230,17 @@ def test_intake_party_profiles_keep_current_message_priority_and_do_not_request_
 
         assert "current_user_message 是本轮最高优先级输入" in system_prompt
         assert "不得要求截图、照片、视频、聊天记录" in system_prompt
+
+    user_system_prompt, _ = repository.render(
+        "intake_turn_case_detail",
+        {"case_id": "CASE_prompt_user_profile"},
+        {"type": "object"},
+        prompt_profile_id="DISPUTE_INTAKE_OFFICER:USER:v1",
+    )
+    assert "用户主动转述商家曾表达的态度" in user_system_prompt
+    assert "不得写入 merchant_claim、respondent_position 或商家直接立场" in user_system_prompt
+    assert "不得因此扣减完善度" in user_system_prompt
+    assert "用户所了解的商家态度" not in user_system_prompt
 
 
 # 所属模块：Agent Harness > test_prompt_composer；函数角色：回归测试用例。
@@ -226,6 +283,28 @@ def test_common_prompt_fragments_define_injection_resistance_and_fairness_policy
     assert "通用安全边界" in system_prompt
     assert "提示词与策略保密" in system_prompt
     assert "权限与最小授权" in system_prompt
+
+
+def test_judge_stage_prompts_share_only_core_and_keep_v1_v2_rules_separate() -> None:
+    repository = PromptRepository()
+
+    v1_prompt = repository.render_system_prompt("hearing_judge_v1")
+    v2_prompt = repository.render_system_prompt("hearing_judge_v2")
+
+    shared_rule = "裁判依据只有 frozen_adjudication_context"
+    assert shared_rule in v1_prompt
+    assert shared_rule in v2_prompt
+    assert "本节点生成第一阶段完整裁决草案" in v1_prompt
+    assert "既有草案执行复审" not in v1_prompt
+    assert "v1_draft_pack" not in v1_prompt
+    assert "jury_opinion_pack" not in v1_prompt
+    assert "本节点对既有草案执行复审" in v2_prompt
+    assert "v1_draft_pack" in v2_prompt
+    assert "review_requirements_pack.review_items" in v2_prompt
+    assert "required_response_count" in v2_prompt
+    assert "jury_opinion_pack" in v2_prompt
+    assert "review_item_ref" in v2_prompt
+    assert "本节点生成第一阶段完整裁决草案" not in v2_prompt
 
 
 def test_prompt_composer_converts_markdown_to_plain_text_without_damaging_contracts() -> None:

@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.targete2e.rooms.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
 import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
@@ -9,6 +10,7 @@ import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunStreamProjection;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
@@ -16,6 +18,7 @@ import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart;
 import com.example.dispute.workflow.temporal.room.hearing.HearingWorkflowStage;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -72,6 +75,79 @@ class TargetHearingInternalStageMaterializerTest {
     assertThat(first).isEqualTo(start.epochId());
     assertThat(replay).isEqualTo(first);
     assertThat(first).isNotEqualTo(start.caseId() + ':' + start.roomEpoch());
+  }
+
+  @Test
+  void evidenceSynthesisBudgetCoversEveryModelInvocationAndIsReplayStable() {
+    ObjectNode request = evidenceSynthesisRequest(1, 1);
+
+    int first =
+        TargetHearingInternalStageMaterializer.providerAttemptBudget(
+            "evidence_synthesis", request);
+    int replay =
+        TargetHearingInternalStageMaterializer.providerAttemptBudget(
+            "evidence_synthesis", request.deepCopy());
+
+    assertThat(first).isEqualTo(6);
+    assertThat(replay).isEqualTo(first);
+    assertThat(
+            TargetHearingInternalStageMaterializer.providerAttemptBudget(
+                "judge_v1", MAPPER.createObjectNode()))
+        .isEqualTo(RoomGraphCommand.MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT);
+  }
+
+  @Test
+  void evidenceSynthesisBudgetFailsClosedWithoutTwoBoundPartyBatches() {
+    ObjectNode missingBatches = MAPPER.createObjectNode();
+    ObjectNode missingEvidence = MAPPER.createObjectNode();
+    var partyBatches = missingEvidence.putArray("party_batches");
+    partyBatches.addObject().putArray("evidence");
+    partyBatches.addObject();
+
+    assertThatThrownBy(
+            () ->
+                TargetHearingInternalStageMaterializer.providerAttemptBudget(
+                    "evidence_synthesis", missingBatches))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("party batches");
+    assertThatThrownBy(
+            () ->
+                TargetHearingInternalStageMaterializer.providerAttemptBudget(
+                    "evidence_synthesis", missingEvidence))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("batch evidence");
+  }
+
+  @Test
+  void aggregateProviderBudgetIsBoundOnlyToHearingEvidenceSynthesis() {
+    assertThat(
+            command(
+                    Instant.parse("2026-08-16T04:35:00Z"),
+                    RoomType.HEARING,
+                    "EVIDENCE_SYNTHESIZING",
+                    6)
+                .retryBudget()
+                .providerAttemptsRemaining())
+        .isEqualTo(6);
+
+    assertThatThrownBy(
+            () ->
+                command(
+                    Instant.parse("2026-08-16T04:35:00Z"),
+                    RoomType.HEARING,
+                    "JUDGE_V1_GENERATING",
+                    6))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("reserved");
+    assertThatThrownBy(
+            () ->
+                command(
+                    Instant.parse("2026-08-16T04:35:00Z"),
+                    RoomType.EVIDENCE,
+                    "EVIDENCE_SYNTHESIZING",
+                    6))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("reserved");
   }
 
   @Test
@@ -136,11 +212,14 @@ class TargetHearingInternalStageMaterializerTest {
         binding.logicalInputHash(),
         3,
         command.deadlineAt(),
-        authority.startedAt());
+        authority.startedAt(),
+        AgentRunStreamProjection.CASE_PARTICIPANTS);
 
     assertThat(request.command().deadlineAt()).isEqualTo(authority.deadlineAt());
     assertThat(logical.deadlineAt()).isEqualTo(authority.deadlineAt());
     assertThat(logical.createdAt()).isEqualTo(authority.startedAt());
+    assertThat(logical.streamProjection())
+        .isEqualTo(AgentRunStreamProjection.CASE_PARTICIPANTS);
     assertThat(binding.commandRequestHash()).isEqualTo(command.requestHash());
     assertThat(command(authority.deadlineAt())).isEqualTo(command);
 
@@ -150,6 +229,11 @@ class TargetHearingInternalStageMaterializerTest {
   }
 
   private static RoomGraphCommand command(Instant deadlineAt) {
+    return command(deadlineAt, RoomType.HEARING, "INTAKE_QUESTIONS_GENERATING", 2);
+  }
+
+  private static RoomGraphCommand command(
+      Instant deadlineAt, RoomType roomType, String stageCode, int providerAttemptBudget) {
     RoomGraphCommand provisional = new RoomGraphCommand(
         "room-graph-command.v1",
         "hearing-stage:4:time-canonicalization",
@@ -157,7 +241,7 @@ class TargetHearingInternalStageMaterializerTest {
         "target-hearing-run:time-canonicalization:1",
         "legacy-default",
         "CASE_HEARING_TIME",
-        RoomType.HEARING,
+        roomType,
         0,
         "all-rooms.target-e2e.v1",
         "target-e2e-graph.2026-07-27.1",
@@ -169,7 +253,7 @@ class TargetHearingInternalStageMaterializerTest {
             Audience.SYSTEM,
             List.of("hearing:INTAKE_QUESTIONS_GENERATING")),
         14,
-        "INTAKE_QUESTIONS_GENERATING",
+        stageCode,
         4,
         new RoomGraphCommand.SnapshotRef(
             "HEARING_STATE_TIME", "hearing-state.v1", "minio://hearing/state", hash('1'), 1),
@@ -179,7 +263,7 @@ class TargetHearingInternalStageMaterializerTest {
             "agent-hearing", "prompt-hearing", "model-hearing",
             "target-e2e-room-proposal-source.v1", "policy-hearing", "guardrail-hearing",
             List.of(), "key-hearing", "nonce-hearing"),
-        new RoomGraphCommand.RetryBudget(2, 3, 1),
+        new RoomGraphCommand.RetryBudget(providerAttemptBudget, 3, 1),
         deadlineAt,
         "00-0123456789abcdef0123456789abcdef-0000000000000001-01",
         hash('0'));
@@ -199,6 +283,21 @@ class TargetHearingInternalStageMaterializerTest {
 
   private static String hash(char value) {
     return String.valueOf(value).repeat(64);
+  }
+
+  private static ObjectNode evidenceSynthesisRequest(
+      int userEvidenceItems, int merchantEvidenceItems) {
+    ObjectNode request = MAPPER.createObjectNode();
+    var partyBatches = request.putArray("party_batches");
+    var userEvidence = partyBatches.addObject().putArray("evidence");
+    for (int index = 0; index < userEvidenceItems; index++) {
+      userEvidence.addObject().put("evidence_id", "USER_EVIDENCE_" + index);
+    }
+    var merchantEvidence = partyBatches.addObject().putArray("evidence");
+    for (int index = 0; index < merchantEvidenceItems; index++) {
+      merchantEvidence.addObject().put("evidence_id", "MERCHANT_EVIDENCE_" + index);
+    }
+    return request;
   }
 
   private static HearingRoomStart hearingStart() {

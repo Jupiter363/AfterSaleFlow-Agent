@@ -68,7 +68,8 @@ public record AcceptCaseCommand(
                             RoomType.INTAKE;
                     case EVIDENCE_OPENING, EVIDENCE_SUBMIT, PARTY_EVIDENCE_COMPLETE ->
                             RoomType.EVIDENCE;
-                    case HEARING_STATEMENT, HEARING_EVIDENCE_BATCH -> RoomType.HEARING;
+                    case HEARING_STATEMENT, HEARING_ANSWER_BUNDLE, HEARING_EVIDENCE_BATCH ->
+                            RoomType.HEARING;
                     case REVIEW_DECISION, EXECUTE_APPROVED_PLAN, CLOSE_CASE -> RoomType.REVIEW;
                 };
         if (roomType != expectedRoom) {

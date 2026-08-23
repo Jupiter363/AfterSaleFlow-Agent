@@ -37,6 +37,10 @@ import {
   clearAgentStreams,
   consumeAgentRun,
 } from "../../stores/agentStream";
+import {
+  domainCodeLabel,
+  humanizeDossierText,
+} from "../../utils/displayText";
 
 const props = defineProps({
   initialCatalog: { type: Object, default: null },
@@ -329,45 +333,6 @@ const evidenceStreamingRuns = computed(() =>
     };
   }),
 );
-const liveEvidenceFrames = computed(() => evidenceStreamingRuns.value.flatMap((run) =>
-  (run.frameOrder || [])
-    .map((frameId) => run.frames?.[frameId])
-    .filter((frame) => frame && [
-      "EVIDENCE_OBSERVATION",
-      "EVIDENCE_ASSESSMENT",
-      "EVIDENCE_REQUEST",
-      "ROOM_READINESS",
-    ].includes(frame.frameType))
-    .map((frame) => ({ ...frame, runId: run.runId })),
-));
-
-function liveEvidenceFrameTitle(frame) {
-  return {
-    EVIDENCE_OBSERVATION: "材料观察",
-    EVIDENCE_ASSESSMENT: "证据核验",
-    EVIDENCE_REQUEST: "补证要求",
-    ROOM_READINESS: "举证完善度",
-  }[frame?.frameType] || "证据更新";
-}
-
-function liveEvidenceFrameSummary(frame) {
-  const header = frame?.publicHeader || {};
-  if (frame?.frameType === "EVIDENCE_OBSERVATION") {
-    const facts = (header.fact_bindings || []).map((item) => item.fact_id).filter(Boolean);
-    return [header.binding_status, ...facts].filter(Boolean).join(" · ");
-  }
-  if (frame?.frameType === "EVIDENCE_ASSESSMENT") {
-    return [
-      header.evidence_id,
-      header.authenticity_status,
-      header.relevance,
-    ].filter(Boolean).join(" · ");
-  }
-  if (frame?.frameType === "EVIDENCE_REQUEST") {
-    return [header.requested_material_kind, header.priority].filter(Boolean).join(" · ");
-  }
-  return [header.overall_readiness, header.core_fact_coverage].filter(Boolean).join(" · ");
-}
 const modelConnected = computed(() => modelConnectionState.value === "connected");
 const modelConnectionLabel = computed(() => {
   if (historyMode.value) return "历史记录已封存";
@@ -644,6 +609,7 @@ const evidenceSourceType = computed(() => {
 });
 
 const statusLabels = {
+  UNVERIFIED: "尚未核实",
   PENDING: "待核验",
   VERIFIED: "已核验",
   PLAUSIBLE: "基本可信",
@@ -662,36 +628,10 @@ const evidenceTypeLabels = {
   OTHER: "其他材料",
 };
 
-const confidenceLabels = {
-  HIGH: "高置信",
-  MEDIUM: "中置信",
-  LOW: "低置信",
-  UNKNOWN: "待评分",
-};
-
-const humanReviewReasonLabels = {
-  VISUAL_DETAIL_UNCERTAIN: "图片或视频细节无法由模型可靠判定",
-  FINE_VISUAL_DAMAGE_REQUIRES_HUMAN: "细微外观损伤需要人工查看原图",
-  VISUAL_NOT_INSPECTED: "模型未完成原始画面检查",
-  SOURCE_HASH_MISSING: "原件缺少可核对的入库哈希",
-  LOW_AUTHENTICITY_SCORE: "真实性评分偏低",
-  LOW_COMPLETENESS_SCORE: "材料完整性评分偏低",
-  LOW_ASSESSMENT_CONFIDENCE: "模型对本次核验的把握不足",
-  HIGH_RISK_FLAG: "模型识别到高风险信号",
-  ASSESSMENT_MISSING: "模型未返回完整的结构化核验结果",
-  UNKNOWN_FACT_REFERENCE: "证据引用了接待卷宗之外的事实，需人工映射",
-  SOURCE_PROVENANCE_UNVERIFIED: "材料来源或流转链路尚未核实",
-  POSSIBLE_EDITING: "材料可能存在编辑或拼接痕迹",
-  LOW_IMAGE_QUALITY: "画面清晰度不足",
-  OCR_AMBIGUOUS: "文字识别结果存在歧义",
-  METADATA_MISSING: "缺少可用于交叉核验的元数据",
-  CROSS_SOURCE_CONFLICT: "与其他材料存在冲突",
-  CONTENT_NOT_RELEVANT: "材料与当前争议事实的关联性不足",
-  SUSPECTED_FORGERY_LOW_AUTHENTICITY: "疑似造假：真实性评分低于 50%",
-  LOW_AUTHENTICITY_SUSPECTED_FORGERY: "疑似造假：真实性评分低于 50%",
-  SUSPECTED_FORGERY: "疑似造假：真实性评分低于 50%，等待人工确认",
-  LOW_RELEVANCE_SCORE: "关联度低：材料与所填证明内容的关联性评分低于 50%",
-  LOW_RELEVANCE: "关联度低：材料与所填证明内容的关联性评分低于 50%",
+const evidenceRiskLabels = {
+  LOW: "低风险",
+  MEDIUM: "中风险",
+  HIGH: "高风险",
 };
 
 const fileIconCatalog = {
@@ -734,7 +674,7 @@ function evidenceSubmissionStatusLabel(item) {
   if (status === "PENDING_SUBMISSION") return "待提交";
   if (status === "SUBMITTED") return "已提交";
   if (status === "VOIDED") return "已作废";
-  return status || "待确认";
+  return domainCodeLabel(status, "待确认");
 }
 
 // 业务位置：【前端证据室】evidenceVerificationStatus：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
@@ -754,63 +694,7 @@ function percentageScore(raw) {
   if (raw === null || raw === undefined || raw === "") return null;
   const numeric = Number(raw);
   if (!Number.isFinite(numeric)) return null;
-  return Math.min(100, Math.max(0, numeric <= 1 ? Math.round(numeric * 100) : Math.round(numeric)));
-}
-
-// 业务位置：【前端证据室】evidenceAssessmentConfidenceRaw：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-function evidenceAssessmentConfidenceRaw(item) {
-  return evidenceField(
-    item,
-    "assessment_confidence",
-    "assessmentConfidence",
-    evidenceField(
-      item,
-      "confidence_score",
-      "confidenceScore",
-      evidenceField(item, "confidence", "confidence", null),
-    ),
-  );
-}
-
-// 业务位置：【前端证据室】evidenceConfidenceScore：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-function evidenceConfidenceScore(item) {
-  return percentageScore(evidenceAssessmentConfidenceRaw(item));
-}
-
-// 业务位置：【前端证据室】evidenceConfidenceLevel：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-function evidenceConfidenceLevel(item) {
-  const score = evidenceConfidenceScore(item);
-  if (score !== null) {
-    if (score >= 80) return confidenceLabels.HIGH;
-    if (score >= 50) return confidenceLabels.MEDIUM;
-    return confidenceLabels.LOW;
-  }
-  const value = String(
-    evidenceField(item, "confidence_level", "confidenceLevel", "UNKNOWN"),
-  ).toUpperCase();
-  return confidenceLabels[value] || confidenceLabels.UNKNOWN;
-}
-
-// 业务位置：【前端证据室】evidenceConfidenceTone：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-function evidenceConfidenceTone(item) {
-  const score = evidenceConfidenceScore(item);
-  if (score !== null) {
-    if (score >= 80) return "high";
-    if (score >= 50) return "medium";
-    return "low";
-  }
-  const value = String(
-    evidenceField(item, "confidence_level", "confidenceLevel", "UNKNOWN"),
-  ).toLowerCase();
-  if (["high", "medium", "low"].includes(value)) return value;
-  return "unknown";
-}
-
-// 业务位置：【前端证据室】evidenceConfidenceCopy：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-function evidenceConfidenceCopy(item) {
-  const score = evidenceConfidenceScore(item);
-  const label = evidenceConfidenceLevel(item);
-  return score === null ? label : `${score}% · ${label}`;
+  return Math.round(numeric * 100);
 }
 
 // 业务位置：【前端证据室】evidenceMetricScore：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
@@ -845,28 +729,101 @@ function evidenceLimitations(item) {
 
 // 业务位置：【前端证据室】evidenceHumanReviewReasons：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceHumanReviewReasons(item) {
-  return evidenceListField(
-    item,
-    "human_review_reason_codes",
-    "humanReviewReasonCodes",
-  );
+  const value = evidenceField(item, "reason_details", "reasonDetails", []);
+  return Array.isArray(value)
+    ? value.filter((entry) => entry && typeof entry === "object")
+    : [];
 }
 
-// 业务位置：【前端证据室】evidenceHumanReviewInstructions：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-function evidenceHumanReviewInstructions(item) {
-  return evidenceListField(
-    item,
-    "human_review_instructions",
-    "humanReviewInstructions",
-  );
+function evidenceUnsupportedClaims(item) {
+  return evidenceListField(item, "unsupported_claims", "unsupportedClaims");
 }
 
-// 业务位置：【前端证据室】humanReviewReasonLabel：围绕 人工审核关注点和陪审团提示 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-function humanReviewReasonLabel(reasonCode) {
-  const code = String(reasonCode || "").trim();
-  if (code.startsWith("VISUAL_INPUT_")) return "原始视觉内容未能安全加载";
-  if (code.startsWith("ASSESSMENT_MISSING_")) return "模型未返回完整的结构化核验结果";
-  return humanReviewReasonLabels[code] || code.replaceAll("_", " ");
+function evidenceFindings(item) {
+  const value = evidenceField(item, "findings", "findings", []);
+  return Array.isArray(value)
+    ? value
+        .filter((entry) => entry && typeof entry === "object")
+        .map((entry) => ({
+          type: String(entry.finding_type ?? entry.findingType ?? "材料发现"),
+          description: String(entry.description ?? ""),
+        }))
+        .filter((entry) => entry.description)
+    : [];
+}
+
+function evidenceScoreExplanation(item, snakeCaseKey, camelCaseKey) {
+  return String(evidenceField(item, snakeCaseKey, camelCaseKey, "") || "");
+}
+
+function evidenceScoreCards(item) {
+  return [
+    {
+      key: "authenticity",
+      label: "真实性",
+      score: evidenceMetricCopy(item, "authenticity_score", "authenticityScore"),
+      explanation: evidenceScoreExplanation(
+        item,
+        "authenticity_score_explanation",
+        "authenticityScoreExplanation",
+      ),
+    },
+    {
+      key: "relevance",
+      label: "关联性",
+      score: evidenceMetricCopy(item, "relevance_score", "relevanceScore"),
+      explanation: evidenceScoreExplanation(
+        item,
+        "relevance_score_explanation",
+        "relevanceScoreExplanation",
+      ),
+    },
+    {
+      key: "completeness",
+      label: "完整性",
+      score: evidenceMetricCopy(item, "completeness_score", "completenessScore"),
+      explanation: evidenceScoreExplanation(
+        item,
+        "completeness_score_explanation",
+        "completenessScoreExplanation",
+      ),
+    },
+    {
+      key: "confidence",
+      label: "核验把握",
+      score: evidenceMetricCopy(item, "assessment_confidence", "assessmentConfidence"),
+      explanation: evidenceScoreExplanation(
+        item,
+        "assessment_confidence_explanation",
+        "assessmentConfidenceExplanation",
+      ),
+    },
+  ];
+}
+
+function evidenceHasAssessment(item) {
+  return evidenceScoreCards(item).some((entry) => entry.score !== "待评估") ||
+    Boolean(evidenceRiskLevel(item));
+}
+
+function evidenceHasAnalysis(item) {
+  return Boolean(
+    evidenceField(item, "formation_time_assessment", "formationTimeAssessment", ""),
+  ) || evidenceFindings(item).length > 0 || evidenceLimitations(item).length > 0 ||
+    evidenceUnsupportedClaims(item).length > 0;
+}
+
+function evidenceClaimedFact(item) {
+  return String(evidenceField(item, "claimed_fact", "claimedFact", "") || "").trim();
+}
+
+function evidenceRiskLevel(item) {
+  return String(evidenceField(item, "risk_level", "riskLevel", "")).toUpperCase();
+}
+
+function evidenceRiskLabel(item) {
+  const risk = evidenceRiskLevel(item);
+  return evidenceRiskLabels[risk] || domainCodeLabel(risk, "待评估");
 }
 
 // 业务位置：【前端证据室】evidenceRequiresHumanReview：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
@@ -887,7 +844,11 @@ function evidenceOwnerLabel(item) {
   if (owner === "MERCHANT") return "商家提交";
   if (owner === "USER") return "用户提交";
   if (owner === "PLATFORM_REVIEWER") return "平台提交";
-  return owner || "来源待确认";
+  return domainCodeLabel(owner, "来源待确认");
+}
+
+function evidenceReviewReasonCodeLabel(reason) {
+  return domainCodeLabel(reason?.code, "人工复核原因");
 }
 
 // 业务位置：【前端证据室】evidenceFeedback：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
@@ -901,19 +862,22 @@ function evidenceOriginalFilename(item) {
 }
 
 function evidenceHumanReviewTags(item) {
-  const reasons = new Set(evidenceHumanReviewReasons(item));
-  const tags = [];
-  if (
-    reasons.has("SUSPECTED_FORGERY_LOW_AUTHENTICITY") ||
-    reasons.has("LOW_AUTHENTICITY_SUSPECTED_FORGERY") ||
-    reasons.has("SUSPECTED_FORGERY")
-  ) {
-    tags.push("疑似造假");
-  }
-  if (reasons.has("LOW_RELEVANCE_SCORE") || reasons.has("LOW_RELEVANCE")) {
-    tags.push("关联度低");
-  }
-  return tags.length ? tags : ["人工审核任务"];
+  const labels = {
+    LOW_AUTHENTICITY_SUSPECTED_FORGERY: "疑似造假",
+    LOW_RELEVANCE_SCORE: "关联度低",
+    LOW_COMPLETENESS_SCORE: "完成度低",
+    LOW_ASSESSMENT_CONFIDENCE: "置信度低",
+    HIGH_RISK_FLAG: "高风险",
+  };
+  const tags = evidenceHumanReviewReasons(item)
+    .map(
+      (reason) =>
+        labels[reason.code] ||
+        domainCodeLabel(reason.code, "") ||
+        humanizeDossierText(reason.label, { fallback: "" }),
+    )
+    .filter(Boolean);
+  return tags.length ? [...new Set(tags)] : ["待人工复核"];
 }
 
 function compactEvidenceDisplayName(item) {
@@ -2260,42 +2224,6 @@ onBeforeUnmount(() => {
         </header>
 
         <div class="evidence-board__cards" data-evidence-list-scroll>
-          <section
-            v-if="liveEvidenceFrames.length"
-            class="evidence-library evidence-library--private"
-            data-live-evidence-frames
-            aria-live="polite"
-          >
-            <header>
-              <div>
-                <span class="evidence-kicker">LIVE MODEL FRAMES</span>
-                <h3>书记官实时核验</h3>
-              </div>
-              <span class="privacy-seal">{{ liveEvidenceFrames.length }} 帧</span>
-            </header>
-            <div class="evidence-card-strip" data-evidence-horizontal-strip>
-              <article
-                v-for="frame in liveEvidenceFrames"
-                :key="`${frame.runId}:${frame.frameId}`"
-                class="evidence-card evidence-card--compact evidence-card--stream-updating"
-                :data-frame-id="frame.frameId"
-                :data-frame-type="frame.frameType"
-                :data-frame-status="frame.status"
-                data-live-evidence-frame
-              >
-                <span class="evidence-card__main">
-                  <strong>{{ liveEvidenceFrameTitle(frame) }}</strong>
-                  <small>{{ liveEvidenceFrameSummary(frame) || "正在生成结构化核验内容…" }}</small>
-                  <small v-if="frame.publicText">{{ frame.publicText }}</small>
-                </span>
-                <span class="evidence-card__labels">
-                  <em>#{{ frame.frameSequence }}</em>
-                  <em>{{ frame.status === "COMMITTED" ? "已持久化" : "流式生成中" }}</em>
-                </span>
-              </article>
-            </div>
-          </section>
-
           <section class="evidence-uploader">
             <div class="evidence-uploader__illustration" aria-hidden="true">
               <span>📎</span><span>🖼️</span><span>🎞️</span>
@@ -2362,7 +2290,7 @@ onBeforeUnmount(() => {
                   </span>
                 </span>
                 <span class="evidence-card__main">
-                  <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
+                  <strong>{{ evidenceTypeLabels[item.evidence_type] || domainCodeLabel(item.evidence_type, "其他材料") }}</strong>
                   <small class="evidence-card__filename" data-evidence-filename :title="evidenceOriginalFilename(item) || evidenceId(item)">
                     {{ evidenceOriginalFilename(item) || evidenceId(item) }}
                   </small>
@@ -2420,7 +2348,7 @@ onBeforeUnmount(() => {
                   </span>
                 </span>
                 <span class="evidence-card__main">
-                  <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
+                  <strong>{{ evidenceTypeLabels[item.evidence_type] || domainCodeLabel(item.evidence_type, "其他材料") }}</strong>
                   <small class="evidence-card__filename" data-evidence-filename :title="evidenceOriginalFilename(item) || evidenceId(item)">
                     {{ evidenceOriginalFilename(item) || evidenceId(item) }}
                   </small>
@@ -2473,7 +2401,7 @@ onBeforeUnmount(() => {
                 </span>
                 <span class="evidence-card__main">
                   <strong :title="evidenceOriginalFilename(item) || evidenceId(item)">{{ evidenceOriginalFilename(item) || evidenceId(item) }}</strong>
-                  <small>点击查看人工审核要求</small>
+                  <small>点击查看人工复核原因</small>
                 </span>
                 <span class="evidence-card__labels">
                   <em>{{ evidenceOwnerLabel(item) }}</em>
@@ -2728,7 +2656,7 @@ onBeforeUnmount(() => {
             <div>
               <span class="evidence-kicker">{{ selectedEvidenceMode === "human-review" ? "人工审核详情" : "证据详情" }}</span>
               <h2>{{ evidenceOriginalFilename(selectedEvidence) || evidenceId(selectedEvidence) }}</h2>
-              <p>{{ evidenceTypeLabels[selectedEvidence.evidence_type] || selectedEvidence.evidence_type || "其他材料" }}</p>
+              <p>{{ evidenceTypeLabels[selectedEvidence.evidence_type] || domainCodeLabel(selectedEvidence.evidence_type, "其他材料") }}</p>
             </div>
           </div>
           <button
@@ -2742,64 +2670,161 @@ onBeforeUnmount(() => {
             ×
           </button>
         </header>
-        <div class="evidence-modal__facts">
-          <span><small>提交方</small><strong>{{ evidenceOwnerLabel(selectedEvidence) }}</strong></span>
-          <span><small>核验状态</small><strong>{{ statusLabels[evidenceVerificationStatus(selectedEvidence)] || evidenceVerificationStatus(selectedEvidence) || "待核验" }}</strong></span>
-          <span><small>核验把握</small><strong>{{ evidenceConfidenceCopy(selectedEvidence) }}</strong></span>
-          <span><small>提交状态</small><strong>{{ evidenceSubmissionStatusLabel(selectedEvidence) }}</strong></span>
+        <div class="evidence-modal__detail-scroll">
+          <section class="evidence-modal__overview" data-evidence-detail-overview>
+            <div class="evidence-modal__facts" aria-label="材料状态">
+              <span><small>提交方</small><strong>{{ evidenceOwnerLabel(selectedEvidence) }}</strong></span>
+              <span><small>提交状态</small><strong>{{ evidenceSubmissionStatusLabel(selectedEvidence) }}</strong></span>
+              <span><small>核验状态</small><strong>{{ statusLabels[evidenceVerificationStatus(selectedEvidence)] || domainCodeLabel(evidenceVerificationStatus(selectedEvidence), "待核验") }}</strong></span>
+            </div>
+
+            <article
+              v-if="evidenceClaimedFact(selectedEvidence)"
+              class="evidence-modal__claim"
+              data-evidence-claimed-fact
+            >
+              <div class="evidence-modal__section-title">
+                <strong>材料拟证明事项</strong>
+                <small>提交方声明</small>
+              </div>
+              <p>{{ displayEvidenceReferences(evidenceClaimedFact(selectedEvidence), selectedEvidence) }}</p>
+            </article>
+
+            <section
+              v-if="evidenceFeedback(selectedEvidence) || evidenceHasAssessment(selectedEvidence)"
+              class="evidence-modal__decision"
+              data-evidence-detail-decision
+            >
+              <article v-if="evidenceFeedback(selectedEvidence)" class="evidence-modal__feedback">
+                <div class="evidence-modal__section-title">
+                  <strong>书记官核验结论</strong>
+                  <small>当前材料</small>
+                </div>
+                <p>{{ evidenceFeedbackDisplay(selectedEvidence) }}</p>
+              </article>
+              <article
+                v-if="evidenceHasAssessment(selectedEvidence)"
+                class="evidence-modal__risk"
+                :data-risk-level="evidenceRiskLevel(selectedEvidence)"
+              >
+                <div>
+                  <small>综合风险</small>
+                  <strong>{{ evidenceRiskLabel(selectedEvidence) }}</strong>
+                </div>
+                <p>{{ displayEvidenceReferences(evidenceScoreExplanation(selectedEvidence, "risk_explanation", "riskExplanation"), selectedEvidence) }}</p>
+              </article>
+            </section>
+          </section>
+
+          <div class="evidence-modal__detail-content">
+            <section
+              v-if="evidenceHasAssessment(selectedEvidence)"
+              class="evidence-modal__assessment"
+              data-evidence-detail-assessment
+            >
+              <div class="evidence-modal__section-title">
+                <strong>核验评分与依据</strong>
+                <small>AI 初步核验</small>
+              </div>
+              <div class="evidence-modal__score-list">
+                <article
+                  v-for="score in evidenceScoreCards(selectedEvidence)"
+                  :key="score.key"
+                  class="evidence-modal__score-row"
+                  :data-evidence-score="score.key"
+                >
+                  <header>
+                    <strong>{{ score.label }}</strong>
+                    <b>{{ score.score }}</b>
+                  </header>
+                  <p v-if="score.explanation">{{ displayEvidenceReferences(score.explanation, selectedEvidence) }}</p>
+                  <p v-else class="evidence-modal__muted">暂无可展示的评分说明。</p>
+                </article>
+              </div>
+
+              <section
+                v-if="evidenceHasAnalysis(selectedEvidence)"
+                class="evidence-modal__analysis"
+                data-evidence-detail-findings
+              >
+                <div class="evidence-modal__section-title">
+                  <strong>材料核验依据</strong>
+                </div>
+                <div class="evidence-modal__analysis-columns">
+                  <section
+                    v-if="evidenceField(selectedEvidence, 'formation_time_assessment', 'formationTimeAssessment', '') || evidenceFindings(selectedEvidence).length"
+                    class="evidence-modal__analysis-column"
+                  >
+                    <h3>已识别的信息</h3>
+                    <div
+                      v-if="evidenceField(selectedEvidence, 'formation_time_assessment', 'formationTimeAssessment', '')"
+                      class="evidence-modal__analysis-block"
+                    >
+                      <b>形成时间</b>
+                      <p>{{ displayEvidenceReferences(evidenceField(selectedEvidence, "formation_time_assessment", "formationTimeAssessment", ""), selectedEvidence) }}</p>
+                    </div>
+                    <div v-if="evidenceFindings(selectedEvidence).length" class="evidence-modal__analysis-block">
+                      <b>核验发现</b>
+                      <ul>
+                        <li v-for="finding in evidenceFindings(selectedEvidence)" :key="`${finding.type}:${finding.description}`">
+                          {{ displayEvidenceReferences(finding.description, selectedEvidence) }}
+                        </li>
+                      </ul>
+                    </div>
+                  </section>
+                  <section
+                    v-if="evidenceLimitations(selectedEvidence).length || evidenceUnsupportedClaims(selectedEvidence).length"
+                    class="evidence-modal__analysis-column evidence-modal__analysis-column--boundary"
+                  >
+                    <h3>适用边界</h3>
+                    <div v-if="evidenceLimitations(selectedEvidence).length" class="evidence-modal__analysis-block">
+                      <b>能力限制</b>
+                      <ul>
+                        <li v-for="limitation in evidenceLimitations(selectedEvidence)" :key="limitation">{{ displayEvidenceReferences(limitation, selectedEvidence) }}</li>
+                      </ul>
+                    </div>
+                    <div v-if="evidenceUnsupportedClaims(selectedEvidence).length" class="evidence-modal__analysis-block">
+                      <b>本材料不能单独证明</b>
+                      <ul>
+                        <li v-for="claim in evidenceUnsupportedClaims(selectedEvidence)" :key="claim">{{ displayEvidenceReferences(claim, selectedEvidence) }}</li>
+                      </ul>
+                    </div>
+                  </section>
+                </div>
+              </section>
+            </section>
+
+            <section v-else class="evidence-modal__empty" data-evidence-assessment-empty>
+              <strong>核验尚未完成</strong>
+              <p>材料已进入当前流程，完成核验后将在这里展示评分、风险和核验依据。</p>
+            </section>
+
+            <article
+              v-if="selectedEvidenceMode === 'human-review' && evidenceRequiresHumanReview(selectedEvidence)"
+              class="evidence-modal__human-review"
+              data-evidence-detail-human-review
+            >
+              <div class="evidence-modal__section-title">
+                <strong>人工复核原因</strong>
+                <small>平台复核</small>
+              </div>
+              <div v-if="evidenceHumanReviewReasons(selectedEvidence).length" class="evidence-modal__review-list">
+                <section
+                  v-for="reason in evidenceHumanReviewReasons(selectedEvidence)"
+                  :key="reason.code"
+                  class="evidence-modal__review-reason"
+                >
+                  <div>
+                    <strong>{{ humanizeDossierText(reason.label, { fallback: "待人工复核" }) }}</strong>
+                    <small>{{ evidenceReviewReasonCodeLabel(reason) }}</small>
+                  </div>
+                  <p>{{ humanizeDossierText(displayEvidenceReferences(reason.explanation, selectedEvidence), { fallback: "暂无补充说明" }) }}</p>
+                </section>
+              </div>
+              <p v-else>该材料没有可展示的复核原因详情。</p>
+            </article>
+          </div>
         </div>
-        <section class="evidence-modal__assessment" data-evidence-detail-assessment>
-          <div class="evidence-modal__section-title">
-            <strong>多维核验结果</strong>
-            <span>AI 初步核验</span>
-          </div>
-          <div class="human-review-metrics">
-            <span><small>真实性</small><strong>{{ evidenceMetricCopy(selectedEvidence, "authenticity_score", "authenticityScore") }}</strong></span>
-            <span><small>关联性</small><strong>{{ evidenceMetricCopy(selectedEvidence, "relevance_score", "relevanceScore") }}</strong></span>
-            <span><small>完整性</small><strong>{{ evidenceMetricCopy(selectedEvidence, "completeness_score", "completenessScore") }}</strong></span>
-            <span><small>核验把握</small><strong>{{ evidenceConfidenceScore(selectedEvidence) === null ? "待评估" : `${evidenceConfidenceScore(selectedEvidence)}%` }}</strong></span>
-          </div>
-        </section>
-        <article
-          v-if="selectedEvidenceMode === 'human-review' && evidenceRequiresHumanReview(selectedEvidence)"
-          class="evidence-modal__human-review"
-          data-evidence-detail-human-review
-        >
-          <div class="evidence-modal__section-title">
-            <strong>待人工审核</strong>
-            <span>平台复核</span>
-          </div>
-          <div class="evidence-modal__review-scroll">
-            <section>
-              <b>触发原因</b>
-              <ul v-if="evidenceHumanReviewReasons(selectedEvidence).length">
-                <li v-for="reason in evidenceHumanReviewReasons(selectedEvidence)" :key="reason">{{ humanReviewReasonLabel(reason) }}</li>
-              </ul>
-              <p v-else>模型将该材料标记为需要人工审核。</p>
-            </section>
-            <section>
-              <b>模型限制</b>
-              <ul v-if="evidenceLimitations(selectedEvidence).length">
-                <li v-for="limitation in evidenceLimitations(selectedEvidence)" :key="limitation">{{ limitation }}</li>
-              </ul>
-              <p v-else>暂无具体限制说明，请以原始材料为准。</p>
-            </section>
-            <section>
-              <b>审核指引</b>
-              <ul v-if="evidenceHumanReviewInstructions(selectedEvidence).length">
-                <li v-for="instruction in evidenceHumanReviewInstructions(selectedEvidence)" :key="instruction">{{ instruction }}</li>
-              </ul>
-              <p v-else>请结合原件、元数据和相关业务记录进行交叉核验。</p>
-            </section>
-          </div>
-        </article>
-        <article v-if="evidenceFeedback(selectedEvidence)" class="evidence-modal__feedback">
-          <div class="evidence-modal__section-title">
-            <strong>书记官核验反馈</strong>
-            <span>核验说明</span>
-          </div>
-          <p>{{ evidenceFeedbackDisplay(selectedEvidence) }}</p>
-        </article>
         <footer class="evidence-modal__actions">
           <span>{{ selectedEvidenceMode === "human-review" ? "该材料需要结合原件与业务记录完成人工确认。" : "AI 核验结果仅供审核参考，请结合原始材料判断。" }}</span>
           <a
@@ -2879,7 +2904,7 @@ onBeforeUnmount(() => {
               ></span>
             </span>
             <strong>{{ evidenceOriginalFilename(item) || evidenceId(item) }}</strong>
-            <small>{{ evidenceSubmissionStatusLabel(item) }} · {{ statusLabels[item.verification_status] || item.verification_status || "待核验" }}</small>
+            <small>{{ evidenceSubmissionStatusLabel(item) }} · {{ statusLabels[item.verification_status] || domainCodeLabel(item.verification_status, "待核验") }}</small>
             <a
               v-if="item.content_url"
               :href="item.content_url"
@@ -3398,36 +3423,6 @@ onBeforeUnmount(() => {
   font-size: 10px;
   font-weight: 800;
   white-space: nowrap;
-}
-
-.human-review-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  min-width: 0;
-  gap: 6px;
-}
-
-.human-review-metrics > span {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
-  padding: 7px 6px;
-  text-align: center;
-  background: #f8f4f1;
-  border-radius: 10px;
-}
-
-.human-review-metrics small {
-  overflow: hidden;
-  color: #8a786e;
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.human-review-metrics strong {
-  color: #54433b;
-  font-size: 12px;
 }
 
 .human-review-card__body {
@@ -4345,67 +4340,67 @@ onBeforeUnmount(() => {
   opacity: .55;
 }
 
+/* Material detail uses one stable document surface: conclusion, basis, then limits. */
 .evidence-modal__panel--detail {
-  width: min(760px, 100%);
-  max-height: min(680px, calc(100vh - 48px));
-  gap: 10px;
-  padding: 18px;
-  background: #f7f9fc;
-  border-color: #dfe7f1;
-  border-radius: 24px;
+  --detail-accent: #6575cd;
+  --detail-border: #dfe6ef;
+  --detail-ink: #314159;
+  --detail-muted: #718096;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(920px, calc(100vw - 32px));
+  height: min(780px, calc(100dvh - 32px));
+  max-height: calc(100dvh - 32px);
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  color-scheme: light;
+  background: #fff;
+  border-color: var(--detail-border);
+  border-radius: 22px;
+  box-shadow: 0 30px 90px rgba(35, 48, 69, .28);
 }
 
-.evidence-modal__detail-header {
-  align-items: center;
-  padding: 12px 14px;
-  background: linear-gradient(135deg, #ffffff 20%, #f0f6ff 100%);
-  border: 1px solid #e2eaf4;
-  border-radius: 18px;
-}
-
+.evidence-modal__detail-header,
 .evidence-modal__panel--human-review .evidence-modal__detail-header {
-  background: linear-gradient(135deg, #fffdfb 15%, #fff2e7 100%);
-  border-color: #efd7c5;
-}
-
-.evidence-modal__panel--human-review .evidence-modal__identity .evidence-kicker {
-  color: #a76843;
-}
-
-.evidence-modal__panel--human-review .evidence-modal__section-title > span {
-  color: #9b5f3c;
-  background: #fff0e4;
-}
-
-.evidence-modal__panel--human-review .evidence-modal__section-title > strong {
-  color: #684633;
+  position: relative;
+  top: auto;
+  z-index: 1;
+  align-items: center;
+  min-height: 82px;
+  padding: 15px 20px;
+  background: #fff;
+  border: 0;
+  border-bottom: 1px solid var(--detail-border);
+  border-radius: 0;
 }
 
 .evidence-modal__identity {
   display: flex;
   align-items: center;
-  gap: 14px;
-}
-
-.evidence-modal__identity > div {
-  min-width: 0;
-}
-
-.evidence-modal__identity .evidence-file-icon--large {
-  flex: 0 0 auto;
-  margin: 0;
+  gap: 13px;
 }
 
 .evidence-modal__identity h2 {
-  margin: 3px 0 2px;
-  font-size: 19px;
-  line-height: 1.3;
+  margin: 2px 0;
+  color: var(--detail-ink);
+  font-size: clamp(17px, 2vw, 20px);
+  line-height: 1.32;
 }
 
 .evidence-modal__identity p {
-  color: #8794a7;
-  font-size: 12px;
-  font-weight: 700;
+  color: #8190a4;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.evidence-modal__identity .evidence-kicker {
+  color: #6d7b91;
+  font-size: 10px;
+  letter-spacing: .06em;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__identity .evidence-kicker {
+  color: #9a6547;
 }
 
 .evidence-modal__panel .evidence-modal__close {
@@ -4413,209 +4408,432 @@ onBeforeUnmount(() => {
   min-width: 44px;
   height: 44px;
   min-height: 44px;
-  padding: 0;
-  color: #75849a;
-  background: #edf3f9;
-  border-radius: 50%;
-  font-size: 22px;
-  font-weight: 500;
-  line-height: 1;
+  color: #6f7f94;
+  background: #f3f6f9;
+  border: 1px solid #e6ebf1;
+  border-radius: 12px;
+  box-shadow: none;
 }
 
 .evidence-modal__panel .evidence-modal__close:hover {
-  color: #40516a;
-  background: #e3ebf5;
+  color: #37485f;
+  background: #eaf0f6;
+}
+
+.evidence-modal__panel .evidence-modal__close:focus-visible,
+.evidence-modal__actions .evidence-modal__link:focus-visible {
+  outline: 3px solid rgba(101, 117, 205, .28);
+  outline-offset: 2px;
+}
+
+.evidence-modal__detail-scroll {
+  min-height: 0;
+  padding: 16px 20px 22px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.evidence-modal__overview {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #f5f7ff 0%, #fbfcff 48%, #fffaf2 100%);
+  border: 1px solid var(--detail-border);
+  border-radius: 14px;
+  box-shadow: 0 10px 28px rgba(55, 68, 102, .07);
 }
 
 .evidence-modal__panel--detail .evidence-modal__facts {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0;
-  padding: 5px;
-  background: #edf2f7;
-  border: 1px solid #e1e9f2;
-  border-radius: 15px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #e2e8f0;
+  border-radius: 0;
 }
 
 .evidence-modal__panel--detail .evidence-modal__facts span {
   display: grid;
-  gap: 5px;
-  padding: 8px 13px;
+  gap: 4px;
+  padding: 10px 14px;
   background: transparent;
   border: 0;
   border-radius: 0;
-  white-space: normal;
 }
 
 .evidence-modal__panel--detail .evidence-modal__facts span + span {
-  border-left: 1px solid #d8e1eb;
+  border-left: 1px solid #dce3eb;
 }
 
-.evidence-modal__panel--human-review .evidence-modal__facts {
-  background: #f7ede5;
-  border-color: #ead7c8;
-}
-
-.evidence-modal__panel--human-review .evidence-modal__facts span + span {
-  border-left-color: #e3cfc0;
-}
-
-.evidence-modal__facts small {
-  color: #8a98aa;
+.evidence-modal__panel--detail .evidence-modal__facts small {
+  color: #8290a2;
   font-size: 10px;
   font-weight: 700;
 }
 
-.evidence-modal__facts strong {
-  overflow: hidden;
-  color: #3e4f68;
+.evidence-modal__panel--detail .evidence-modal__facts strong {
+  margin: 0;
+  color: #344760;
   font-size: 13px;
+  font-weight: 800;
   line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.evidence-modal__panel--detail .evidence-modal__assessment {
-  padding: 14px;
-  background: #fff;
-  border-color: #e2ebf5;
-  border-radius: 15px;
-}
-
-.evidence-modal__panel--human-review .evidence-modal__assessment {
-  background: #fffaf6;
-  border-color: #efd9c9;
+.evidence-modal__detail-content {
+  display: grid;
+  gap: 18px;
+  margin-top: 20px;
 }
 
 .evidence-modal__section-title {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
 }
 
 .evidence-modal__section-title > strong {
   margin: 0 !important;
-  color: #33445d;
+  color: var(--detail-ink);
   font-size: 14px;
+  line-height: 1.4;
 }
 
-.evidence-modal__section-title > span {
-  padding: 4px 8px;
-  color: #6174c8;
-  background: #eef1ff;
-  border-radius: 999px;
+.evidence-modal__section-title > small {
+  color: #8794a6;
   font-size: 10px;
-  font-weight: 800;
+  font-weight: 750;
+  white-space: nowrap;
 }
 
-.evidence-modal__panel--detail .human-review-metrics > span {
-  padding: 8px;
-  background: #f4f7fb;
-  border: 0;
-  border-radius: 10px;
-}
-
-.evidence-modal__panel--detail .human-review-metrics small {
-  color: #8996a8;
-}
-
-.evidence-modal__panel--detail .human-review-metrics strong {
-  margin: 0;
-  color: #43536b;
-  font-size: 13px;
-}
-
-.evidence-modal__panel--human-review .human-review-metrics > span {
-  background: #f9eee6;
-}
-
-.evidence-modal__panel--human-review .human-review-metrics small {
-  color: #9b7862;
-}
-
-.evidence-modal__panel--human-review .human-review-metrics strong {
-  color: #704b36;
-}
-
-.evidence-modal__panel--detail .evidence-modal__human-review {
+.evidence-modal__claim {
   display: grid;
-  gap: 9px;
-  padding: 14px;
-  border-color: #f0d9c8 !important;
-  background: linear-gradient(135deg, #fffaf5, #fffdfb) !important;
-  border-radius: 15px;
+  gap: 7px;
+  padding: 14px 16px 15px !important;
+  background: transparent !important;
+  border: 0 !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+  border-radius: 0 !important;
 }
 
-.evidence-modal__panel--detail .evidence-modal__review-scroll {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  max-height: none;
+.evidence-modal__claim p {
+  color: #435873;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.evidence-modal__decision {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
   gap: 0;
-  padding: 0;
-  overflow: visible;
-  scrollbar-gutter: auto;
+  align-items: stretch;
 }
 
-.evidence-modal__panel--detail .evidence-modal__review-scroll section {
-  padding: 2px 14px 0;
-}
-
-.evidence-modal__panel--detail .evidence-modal__review-scroll section:first-child {
-  padding-left: 0;
-}
-
-.evidence-modal__panel--detail .evidence-modal__review-scroll section:last-child {
-  padding-right: 0;
-}
-
-.evidence-modal__panel--detail .evidence-modal__review-scroll section + section {
-  border-left: 1px solid #ecdccc;
-}
-
-.evidence-modal__panel--detail .evidence-modal__human-review ul {
-  margin-bottom: 0;
-  padding-left: 16px;
-  color: #6f625b;
-  font-size: 11px;
-  line-height: 1.45;
+.evidence-modal__decision > article:only-child {
+  grid-column: 1 / -1;
 }
 
 .evidence-modal__feedback {
   position: relative;
   display: grid;
   gap: 9px;
-  padding: 14px 15px 14px 18px !important;
+  align-content: start;
+  padding: 16px !important;
   overflow: hidden;
-  background: linear-gradient(135deg, #fff, #f8fbff) !important;
-  border-color: #e2ebf5 !important;
-  border-radius: 15px !important;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
 }
 
 .evidence-modal__feedback::before {
-  position: absolute;
-  inset: 12px auto 12px 0;
-  width: 3px;
-  content: "";
-  background: #8c9de3;
-  border-radius: 0 999px 999px 0;
+  content: none;
 }
 
 .evidence-modal__feedback p {
-  color: #5f6f86;
+  color: #455a74;
   font-size: 13px;
+  line-height: 1.65;
+}
+
+.evidence-modal__risk {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 9px;
+  align-content: start;
+  padding: 16px !important;
+  background: #f5f7fa !important;
+  border: 0 !important;
+  border-left: 1px solid #e2e8f0 !important;
+  border-radius: 0 !important;
+}
+
+.evidence-modal__risk > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+}
+
+.evidence-modal__risk small {
+  color: #7b899b;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.evidence-modal__risk strong {
+  margin: 0 !important;
+  color: #56667c;
+  font-size: 18px;
+  letter-spacing: .02em;
+}
+
+.evidence-modal__risk p {
+  color: #64748a;
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
+}
+
+.evidence-modal__risk[data-risk-level="HIGH"] {
+  background: #fff7f4 !important;
+  border-left-color: #efd5ca !important;
+}
+
+.evidence-modal__risk[data-risk-level="HIGH"] strong {
+  color: #a9523b;
+}
+
+.evidence-modal__risk[data-risk-level="MEDIUM"] {
+  background: #fffaf0 !important;
+  border-left-color: #eadbb8 !important;
+}
+
+.evidence-modal__risk[data-risk-level="MEDIUM"] strong {
+  color: #8a642b;
+}
+
+.evidence-modal__panel--detail .evidence-modal__assessment {
+  display: grid;
+  gap: 12px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.evidence-modal__score-list {
+  display: grid;
+  grid-template-rows: repeat(4, minmax(76px, 1fr));
+  overflow: hidden;
+  background: #fbfcfe;
+  border: 1px solid var(--detail-border);
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(49, 65, 89, .05);
+}
+
+.evidence-modal__score-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 0;
+  align-items: stretch;
+  min-width: 0;
+  padding: 0 !important;
+  background: #fbfcfe !important;
+  border: 0 !important;
+  border-bottom: 1px solid #e8edf3 !important;
+  border-radius: 0 !important;
+}
+
+.evidence-modal__score-row:last-child {
+  border-bottom: 0 !important;
+}
+
+.evidence-modal__score-row header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 18px;
+  background: #f4f6fc;
+  border-right: 1px solid #e2e7f1;
+}
+
+.evidence-modal__score-row header strong {
+  margin: 0;
+  color: #46566d;
+  font-size: 12px;
+}
+
+.evidence-modal__score-row header b {
+  color: #4f63ca;
+  font-size: 21px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.evidence-modal__score-row p {
+  display: flex;
+  align-items: center;
+  padding: 14px 18px;
+  color: #65758a;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.evidence-modal__score-row .evidence-modal__muted {
+  color: #929dad;
+}
+
+.evidence-modal__analysis {
+  display: grid;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.evidence-modal__analysis-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.evidence-modal__analysis-column {
+  min-width: 0;
+  padding: 15px 16px;
+  background: #f8fafc;
+  border: 1px solid #e5eaf0;
+  border-radius: 14px;
+}
+
+.evidence-modal__analysis-column:only-child {
+  grid-column: 1 / -1;
+}
+
+.evidence-modal__analysis-column--boundary {
+  background: #fbfaf8;
+  border-color: #e9e4db;
+}
+
+.evidence-modal__analysis-column h3 {
+  margin: 0 0 12px;
+  color: #405168;
+  font-size: 13px;
+}
+
+.evidence-modal__analysis-block + .evidence-modal__analysis-block {
+  padding-top: 12px;
+  margin-top: 12px;
+  border-top: 1px solid #e1e7ee;
+}
+
+.evidence-modal__analysis-column--boundary .evidence-modal__analysis-block + .evidence-modal__analysis-block {
+  border-top-color: #e7e0d6;
+}
+
+.evidence-modal__analysis-block b {
+  color: #596980;
+  font-size: 11px;
+}
+
+.evidence-modal__analysis-block p,
+.evidence-modal__analysis-block li {
+  min-width: 0;
+  color: #69788c;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.evidence-modal__analysis-block p,
+.evidence-modal__analysis-block ul {
+  margin: 6px 0 0;
+}
+
+.evidence-modal__analysis-block ul {
+  padding-left: 17px;
+}
+
+.evidence-modal__analysis-block li + li {
+  margin-top: 5px;
+}
+
+.evidence-modal__panel--detail .evidence-modal__human-review {
+  display: grid;
+  gap: 11px;
+  padding: 15px 16px !important;
+  background: #fff8f3 !important;
+  border: 1px solid #ecd5c4 !important;
+  border-radius: 14px !important;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__section-title > strong {
+  color: #684a39;
+}
+
+.evidence-modal__review-list {
+  display: grid;
+  gap: 8px;
+}
+
+.evidence-modal__review-reason {
+  display: grid;
+  grid-template-columns: minmax(180px, .7fr) minmax(0, 1.3fr);
+  gap: 16px;
+  min-width: 0;
+  padding: 11px 12px;
+  background: rgba(255, 255, 255, .68);
+  border: 1px solid #efded1;
+  border-radius: 10px;
+}
+
+.evidence-modal__review-reason > div {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  min-width: 0;
+}
+
+.evidence-modal__review-reason strong {
+  margin: 0 !important;
+  color: #6e4f3d;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.evidence-modal__review-reason small {
+  color: #aa7f68;
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+
+.evidence-modal__review-reason p {
+  color: #7a5d4c;
+  font-size: 12px;
   line-height: 1.55;
 }
 
-.evidence-modal__panel--human-review .evidence-modal__feedback {
-  background: linear-gradient(135deg, #f8ede4, #f5e5d9) !important;
-  border-color: #e8cbb7 !important;
+.evidence-modal__empty {
+  display: grid;
+  gap: 5px;
+  padding: 16px;
+  background: #f7f9fb;
+  border: 1px dashed #d7e0e9;
+  border-radius: 13px;
 }
 
-.evidence-modal__panel--human-review .evidence-modal__feedback::before {
-  background: #d28b5e;
+.evidence-modal__empty strong {
+  color: #53647a;
+  font-size: 13px;
 }
 
-.evidence-modal__panel--human-review .evidence-modal__feedback p {
-  color: #6d4d3a;
+.evidence-modal__empty p {
+  color: #7c899a;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .evidence-modal__actions {
@@ -4623,40 +4841,91 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 2px 2px 0;
+  min-height: 68px;
+  padding: 12px 20px;
+  background: #fff;
+  border-top: 1px solid var(--detail-border);
 }
 
 .evidence-modal__actions > span {
-  min-width: 0;
-  color: #8a97a8;
+  color: #7e8b9d;
   font-size: 11px;
-  line-height: 1.5;
 }
 
-.evidence-modal__actions .evidence-modal__link {
-  flex: 0 0 auto;
-  min-height: 40px;
-  padding-inline: 16px;
-  color: #fff;
-  background: linear-gradient(135deg, #7886df, #6070cc);
-  border-radius: 12px;
-  box-shadow: 0 8px 18px #6676cf2b;
-}
-
-.evidence-modal__panel--human-review .evidence-modal__actions > span {
-  color: #987762;
-}
-
+.evidence-modal__actions .evidence-modal__link,
 .evidence-modal__panel--human-review .evidence-modal__actions .evidence-modal__link {
-  background: linear-gradient(135deg, #d99365, #bd7448);
-  box-shadow: 0 8px 18px #bd74482b;
+  min-height: 44px;
+  padding-inline: 17px;
+  color: #fff;
+  background: #6474cc;
+  border-radius: 11px;
+  box-shadow: 0 8px 18px rgba(92, 108, 194, .22);
+}
+
+.evidence-modal__actions .evidence-modal__link:hover {
+  background: #5868bd;
 }
 
 @container room-workspace (max-width: 1059px) {
   .evidence-room { grid-template-columns: 1fr; }
 }
 
+@media (max-width: 760px) {
+  .evidence-modal__decision,
+  .evidence-modal__analysis-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .evidence-modal__analysis-column:only-child {
+    grid-column: auto;
+  }
+
+  .evidence-modal__risk {
+    border-top: 1px solid #e2e8f0 !important;
+    border-left: 0 !important;
+  }
+}
+
 @media (max-width: 620px) {
+  .evidence-modal {
+    padding: 8px;
+  }
+
+  .evidence-modal__panel--detail {
+    width: 100%;
+    height: calc(100dvh - 16px);
+    max-height: calc(100dvh - 16px);
+    border-radius: 16px;
+  }
+
+  .evidence-modal__detail-header {
+    min-height: 76px;
+    padding: 12px 14px;
+  }
+
+  .evidence-modal__identity {
+    gap: 10px;
+  }
+
+  .evidence-modal__identity .evidence-file-icon--large {
+    transform: scale(.9);
+    transform-origin: left center;
+  }
+
+  .evidence-modal__detail-scroll {
+    padding: 12px 13px 18px;
+  }
+
+  .evidence-modal__detail-content {
+    gap: 18px;
+    margin-top: 14px;
+  }
+
+  .evidence-modal__score-list {
+    grid-template-rows: none;
+    grid-auto-rows: auto;
+  }
+
   .evidence-modal__panel--upload {
     padding: 18px;
   }
@@ -4682,37 +4951,54 @@ onBeforeUnmount(() => {
   }
 
   .evidence-modal__panel--detail .evidence-modal__facts {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .evidence-modal__panel--detail .evidence-modal__facts span:nth-child(3) {
+  .evidence-modal__panel--detail .evidence-modal__facts span + span {
     border-left: 0;
+    border-top: 1px solid #d8e1eb;
   }
 
-  .evidence-modal__panel--detail .evidence-modal__review-scroll {
+  .evidence-modal__score-row,
+  .evidence-modal__review-reason {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .evidence-modal__score-row header {
+    justify-content: flex-start;
+    padding: 12px 14px;
+    border-right: 0;
+    border-bottom: 1px solid #e2e7f1;
+  }
+
+  .evidence-modal__score-row header b {
+    margin-left: auto;
+  }
+
+  .evidence-modal__score-row p {
+    padding: 12px 14px;
+  }
+
+  .evidence-modal__risk {
     grid-template-columns: 1fr;
   }
 
-  .evidence-modal__panel--detail .evidence-modal__review-scroll section {
-    padding: 8px 0;
-  }
-
-  .evidence-modal__panel--detail .evidence-modal__review-scroll section + section {
-    border-top: 1px solid #ecdccc;
-    border-left: 0;
+  .evidence-modal__risk > div {
+    padding: 0 0 9px;
+    border-right: 0;
+    border-bottom: 1px solid #dce3ed;
   }
 
   .evidence-modal__actions {
     align-items: stretch;
     flex-direction: column;
+    min-height: auto;
+    padding: 10px 13px 12px;
   }
 
   .evidence-modal__actions .evidence-modal__link {
     width: 100%;
-  }
-
-  .human-review-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .evidence-uploader {

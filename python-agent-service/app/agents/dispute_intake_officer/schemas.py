@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping
-from functools import lru_cache
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import NotRequired, Required, TypedDict
 
 from app.schemas.case_fact_matrix import (
+    CaseFactDeltaRowV2,
     CaseFactMatrixDeltaV2,
     RespondentClaimDeltaV2,
 )
@@ -86,8 +84,29 @@ class IntakeRoomBoundRespondentClaim(RespondentClaimDeltaV2):
         return self
 
 
-class IntakeInitiatorRoomMatrixDelta(CaseFactMatrixDeltaV2):
-    respondent_claim: None = None
+class IntakeInitiatorRoomMatrixDelta(StrictIntakeRoomModel):
+    """Current initiator facts only; no counterparty claim field is exposed."""
+
+    schema_version: Literal["case_fact_matrix.delta.v2"] = (
+        "case_fact_matrix.delta.v2"
+    )
+    fact_rows: Annotated[
+        list[CaseFactDeltaRowV2],
+        Field(min_length=1, max_length=200),
+    ]
+    summary_source_fact_keys: Annotated[
+        list[str],
+        Field(min_length=1, max_length=200),
+    ]
+
+    @model_validator(mode="after")
+    def validate_fact_key_references(self) -> "IntakeInitiatorRoomMatrixDelta":
+        validated = CaseFactMatrixDeltaV2.model_validate(
+            self.model_dump(mode="python")
+        )
+        self.fact_rows = validated.fact_rows
+        self.summary_source_fact_keys = validated.summary_source_fact_keys
+        return self
 
 
 class IntakeRespondentRoomMatrixDelta(CaseFactMatrixDeltaV2):
@@ -103,6 +122,25 @@ class IntakeRoomPartyPositionsValue(StrictIntakeRoomModel):
     user_claim: str = Field(max_length=20_000)
     merchant_claim: str = Field(max_length=20_000)
     initiator_position: str = Field(max_length=20_000)
+    respondent_position: str = Field(max_length=20_000)
+    platform_observation: str = Field(max_length=20_000)
+
+
+class IntakeInitiatorRoomPartyPositionsValue(StrictIntakeRoomModel):
+    """Provider-owned positions for an initiator turn.
+
+    The initiator model owns only the initiator's position.  Counterparty slots
+    are deliberately absent from the provider Schema and are materialized by the
+    server as a neutral no-direct-statement placeholder.
+    """
+
+    initiator_position: str = Field(max_length=20_000)
+    platform_observation: str = Field(max_length=20_000)
+
+
+class IntakeRespondentRoomPartyPositionsValue(StrictIntakeRoomModel):
+    """Provider-owned positions for an authenticated respondent turn."""
+
     respondent_position: str = Field(max_length=20_000)
     platform_observation: str = Field(max_length=20_000)
 
@@ -162,9 +200,27 @@ class IntakeRoomRespondentAttitudeValue(StrictIntakeRoomModel):
         return self
 
 
+class IntakeRespondentRoomAttitudeValue(IntakeRoomRespondentAttitudeValue):
+    """Respondent-owned response without an initiator-reported source option."""
+
+    source_attribution: Literal["RESPONDENT_DIRECT", "NO_DIRECT_POSITION"]
+
+
 class IntakeRoomClaimAndResponseValue(StrictIntakeRoomModel):
     claim_resolution: IntakeRoomClaimResolutionValue
     respondent_attitude: IntakeRoomRespondentAttitudeValue
+
+
+class IntakeInitiatorRoomClaimValue(StrictIntakeRoomModel):
+    """An initiator may author only its own requested resolution."""
+
+    claim_resolution: IntakeRoomClaimResolutionValue
+
+
+class IntakeRespondentRoomResponseValue(StrictIntakeRoomModel):
+    """A respondent may author only its own direct response."""
+
+    respondent_attitude: IntakeRespondentRoomAttitudeValue
 
 
 class IntakeRoomDisputeCoreValue(StrictIntakeRoomModel):
@@ -270,10 +326,26 @@ class IntakeRoomPartyPositionsSection(StrictIntakeRoomModel):
     value: IntakeRoomPartyPositionsValue
 
 
+class IntakeInitiatorRoomPartyPositionsSection(IntakeRoomPartyPositionsSection):
+    value: IntakeInitiatorRoomPartyPositionsValue
+
+
+class IntakeRespondentRoomPartyPositionsSection(IntakeRoomPartyPositionsSection):
+    value: IntakeRespondentRoomPartyPositionsValue
+
+
 class IntakeRoomClaimAndResponseSection(StrictIntakeRoomModel):
     sequence: Literal[4]
     kind: Literal["CLAIM_AND_RESPONSE"]
     value: IntakeRoomClaimAndResponseValue
+
+
+class IntakeInitiatorRoomClaimSection(IntakeRoomClaimAndResponseSection):
+    value: IntakeInitiatorRoomClaimValue
+
+
+class IntakeRespondentRoomResponseSection(IntakeRoomClaimAndResponseSection):
+    value: IntakeRespondentRoomResponseValue
 
 
 class IntakeRoomDisputeFocusSection(StrictIntakeRoomModel):
@@ -425,12 +497,13 @@ class IntakeRoomNoRemarkEvaluationSection(IntakeRoomTurnEvaluationSection):
 
 def _ordered_room_sections_type(
     matrix_section_type: type[BaseModel],
+    party_positions_section_type: type[BaseModel],
     claim_section_type: type[BaseModel],
 ) -> Any:
     common_prefix = (
         matrix_section_type,
         IntakeRoomCaseStorySection,
-        IntakeRoomPartyPositionsSection,
+        party_positions_section_type,
         claim_section_type,
         IntakeRoomDisputeFocusSection,
         IntakeRoomVerificationFocusSection,
@@ -475,11 +548,13 @@ def _ordered_room_sections_type(
 
 IntakeInitiatorRoomSections = _ordered_room_sections_type(
     IntakeRoomCaseMatrixSection,
-    IntakeRoomClaimAndResponseSection,
+    IntakeInitiatorRoomPartyPositionsSection,
+    IntakeInitiatorRoomClaimSection,
 )
 IntakeRespondentRoomSections = _ordered_room_sections_type(
     IntakeRespondentRoomCaseMatrixSection,
-    IntakeRoomClaimAndResponseSection,
+    IntakeRespondentRoomPartyPositionsSection,
+    IntakeRespondentRoomResponseSection,
 )
 
 
@@ -520,19 +595,29 @@ def _validate_ordered_room_outcome(
 class IntakeInitiatorRoomLlmOutputV3(StrictIntakeRoomModel):
     """Ordered provider contract for initiator substantive/opening turns."""
 
-    room_utterance: str = Field(min_length=1, max_length=20_000)
-    ordered_sections: IntakeInitiatorRoomSections
+    room_utterance: str = Field(
+        min_length=1,
+        max_length=20_000,
+        description=(
+            "Only ask about facts, experiences, and requests that the initiator can "
+            "state authoritatively. If the initiator voluntarily reports what the "
+            "merchant/opponent previously said, preserve it only as an attributed "
+            "initiator report; never treat it as the opponent's direct position. "
+            "The absence of such a report is not a completeness gap."
+        ),
+    )
+    ordered_sections: IntakeInitiatorRoomSections = Field(
+        description=(
+            "Every gap, verification focus, question, and handoff instruction is "
+            "initiator-local. An attributed counterparty report remains part of the "
+            "initiator's narrative; direct opponent positions are collected only in "
+            "the respondent turn."
+        )
+    )
 
     @model_validator(mode="after")
     def validate_turn_outcome(self) -> "IntakeInitiatorRoomLlmOutputV3":
         _validate_ordered_room_outcome(self.ordered_sections)
-        if (
-            self.ordered_sections[3].value.respondent_attitude.source_attribution
-            == "RESPONDENT_DIRECT"
-        ):
-            raise ValueError(
-                "an initiator turn cannot create direct respondent attribution"
-            )
         return self
 
 
@@ -576,91 +661,18 @@ _FROZEN_CLAIM_FIELDS = (
 )
 
 
-def _frozen_respondent_claim_authority(
-    request: IntakeTurnRequest,
-) -> tuple[Any, ...] | None:
-    """Return the complete initiator claim already frozen before a respondent turn."""
+def _frozen_claim_resolution_payload(request: IntakeTurnRequest) -> dict[str, Any]:
+    """Load the initiator claim from the previous durable turn, never from the model."""
 
     previous = request.previous_case_detail
-    if not isinstance(previous, Mapping):
-        return None
-    claim = previous.get("claim_resolution")
+    claim = previous.get("claim_resolution") if isinstance(previous, Mapping) else None
     if not isinstance(claim, Mapping) or any(
         field not in claim for field in _FROZEN_CLAIM_FIELDS
     ):
-        return None
-    try:
-        canonical = IntakeRoomClaimResolutionValue.model_validate(
-            {field: claim[field] for field in _FROZEN_CLAIM_FIELDS}
-        ).model_dump(mode="python")
-    except ValueError:
-        return None
-    return tuple(canonical[field] for field in _FROZEN_CLAIM_FIELDS)
-
-
-@lru_cache(maxsize=256)
-def _respondent_output_type_with_frozen_claim(
-    initiator_role: str,
-    requested_resolution: str,
-    requested_amount: float | None,
-    requested_items: str | None,
-    request_reason: str,
-    normalized_statement: str,
-) -> type[BaseModel]:
-    """Build a Provider Schema whose cross-party claim is an exact frozen projection."""
-
-    authority = {
-        "initiator_role": initiator_role,
-        "requested_resolution": requested_resolution,
-        "requested_amount": requested_amount,
-        "requested_items": requested_items,
-        "request_reason": request_reason,
-        "normalized_statement": normalized_statement,
-    }
-    suffix = hashlib.sha256(
-        json.dumps(
-            authority,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
-    respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
-    frozen_claim_type = create_model(
-        f"IntakeFrozenClaimResolution_{suffix}",
-        __base__=IntakeRoomClaimResolutionValue,
-        initiator_role=(Literal[initiator_role], ...),
-        requested_resolution=(Literal[requested_resolution], ...),
-        requested_amount=(Literal[requested_amount], ...),
-        requested_items=(Literal[requested_items], ...),
-        request_reason=(Literal[request_reason], ...),
-        normalized_statement=(Literal[normalized_statement], ...),
-    )
-    frozen_attitude_type = create_model(
-        f"IntakeFrozenRespondentRole_{suffix}",
-        __base__=IntakeRoomRespondentAttitudeValue,
-        respondent_role=(Literal[respondent_role], ...),
-    )
-    frozen_claim_and_response_type = create_model(
-        f"IntakeFrozenClaimAndResponse_{suffix}",
-        __base__=IntakeRoomClaimAndResponseValue,
-        claim_resolution=(frozen_claim_type, ...),
-        respondent_attitude=(frozen_attitude_type, ...),
-    )
-    frozen_claim_section_type = create_model(
-        f"IntakeFrozenClaimAndResponseSection_{suffix}",
-        __base__=IntakeRoomClaimAndResponseSection,
-        value=(frozen_claim_and_response_type, ...),
-    )
-    ordered_sections_type = _ordered_room_sections_type(
-        IntakeRespondentRoomCaseMatrixSection,
-        frozen_claim_section_type,
-    )
-    return create_model(
-        f"IntakeRespondentRoomLlmOutputV3_{suffix}",
-        __base__=IntakeRespondentRoomLlmOutputV3,
-        ordered_sections=(ordered_sections_type, ...),
-    )
+        raise ValueError("respondent turn requires a complete frozen initiator claim")
+    return IntakeRoomClaimResolutionValue.model_validate(
+        {field: claim[field] for field in _FROZEN_CLAIM_FIELDS}
+    ).model_dump(mode="json")
 
 
 class IntakeCaseStoryPatch(TypedDict, total=False):
@@ -1010,9 +1022,6 @@ def intake_case_detail_output_type(
     if is_exact_handoff_remark_turn(request):
         return IntakeRemarkAcknowledgementLlmOutput
     if is_exact_respondent_substantive_turn(request):
-        frozen_claim = _frozen_respondent_claim_authority(request)
-        if frozen_claim is not None:
-            return _respondent_output_type_with_frozen_claim(*frozen_claim)
         return IntakeRespondentRoomLlmOutputV3
     return IntakeInitiatorRoomLlmOutputV3
 
@@ -1041,7 +1050,60 @@ def _materialize_ordered_intake_room_output(
         respondent_claim.pop("source_binding", None)
 
     case_story = sections[1].value.model_dump(mode="json")
-    party_positions = sections[2].value.model_dump(mode="json")
+    if isinstance(output, IntakeRespondentRoomLlmOutputV3):
+        frozen_claim = _frozen_claim_resolution_payload(request)
+        previous = request.previous_case_detail
+        previous_positions = (
+            previous.get("party_positions")
+            if isinstance(previous, Mapping)
+            else None
+        )
+        previous_positions = (
+            previous_positions if isinstance(previous_positions, Mapping) else {}
+        )
+        initiator_role = frozen_claim["initiator_role"]
+        initiator_position = str(
+            previous_positions.get("initiator_position")
+            or previous_positions.get(
+                "user_claim" if initiator_role == "USER" else "merchant_claim"
+            )
+            or frozen_claim["normalized_statement"]
+        )
+        respondent_position = sections[2].value.respondent_position
+        party_positions = {
+            "user_claim": (
+                initiator_position
+                if initiator_role == "USER"
+                else respondent_position
+            ),
+            "merchant_claim": (
+                initiator_position
+                if initiator_role == "MERCHANT"
+                else respondent_position
+            ),
+            "initiator_position": initiator_position,
+            "respondent_position": respondent_position,
+            "platform_observation": sections[2].value.platform_observation,
+        }
+    else:
+        initiator_position = sections[2].value.initiator_position
+        initiator_role = sections[3].value.claim_resolution.initiator_role
+        no_direct_statement = "尚未直接陈述"
+        party_positions = {
+            "user_claim": (
+                initiator_position
+                if initiator_role == "USER"
+                else no_direct_statement
+            ),
+            "merchant_claim": (
+                initiator_position
+                if initiator_role == "MERCHANT"
+                else no_direct_statement
+            ),
+            "initiator_position": initiator_position,
+            "respondent_position": no_direct_statement,
+            "platform_observation": sections[2].value.platform_observation,
+        }
     claim_and_response = sections[3].value
     dispute = sections[4].value
     verification_focus = sections[5].value
@@ -1057,20 +1119,31 @@ def _materialize_ordered_intake_room_output(
 
     dispute_core_state = dispute.dispute_core_state.model_dump(mode="json")
     dispute_core_state["next_verification_focus"] = list(verification_focus.items)
-    respondent_attitude = claim_and_response.respondent_attitude.model_dump(
-        mode="json",
-        exclude_none=True,
-    )
-    # Provider-only attribution selects the trusted source branch below; public
-    # dossiers retain the established source/grounding contract instead of a
-    # second, model-owned provenance field.
-    respondent_attitude.pop("source_attribution", None)
+    if isinstance(output, IntakeRespondentRoomLlmOutputV3):
+        respondent_attitude = claim_and_response.respondent_attitude.model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+        # Provider-only attribution selects the trusted source branch below; public
+        # dossiers retain the established source/grounding contract instead of a
+        # second, model-owned provenance field.
+        respondent_attitude.pop("source_attribution", None)
+        claim_resolution = frozen_claim
+    else:
+        respondent_attitude = {
+            "respondent_role": (
+                "MERCHANT"
+                if claim_and_response.claim_resolution.initiator_role == "USER"
+                else "USER"
+            ),
+            "attitude": "NOT_RESPONDED",
+            "position": "尚未直接陈述",
+        }
+        claim_resolution = claim_and_response.claim_resolution.model_dump(mode="json")
     case_detail = {
         "case_story": case_story,
         "party_positions": party_positions,
-        "claim_resolution": claim_and_response.claim_resolution.model_dump(
-            mode="json"
-        ),
+        "claim_resolution": claim_resolution,
         "respondent_attitude": respondent_attitude,
         "dispute_core_state": dispute_core_state,
         "dispute_focus": dispute.dispute_focus.model_dump(mode="json"),

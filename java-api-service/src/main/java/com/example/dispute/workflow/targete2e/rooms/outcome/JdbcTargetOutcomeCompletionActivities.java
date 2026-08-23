@@ -84,6 +84,10 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
          and approval.action_snapshot_hash =
              decision_event.event_json ->> 'approved_action_snapshot_hash'
          and approval.decision_type::text = decision_event.event_json ->> 'decision'
+         and approval.ai_decision_action =
+             decision_event.event_json ->> 'ai_decision_action'
+         and approval.reviewer_decision_action =
+             decision_event.event_json ->> 'reviewer_decision_action'
        where command.case_id = ?
          and command.command_type = 'REVIEW_DECISION'
          and command.room_type = 'REVIEW'
@@ -91,6 +95,11 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
          and admission.room_fencing_token = ?
          and approval.id = ?
          and approval.decision_type in ('APPROVE', 'MODIFY_AND_APPROVE')
+         and approval.reviewer_decision_action in (
+             'CANCEL_ORDER', 'RETURN_AND_REFUND', 'REFUND_ONLY', 'RESHIP', 'REPLACE',
+             'REPAIR', 'COMPENSATE', 'CONTINUE_FULFILLMENT', 'REJECT_CLAIM')
+         and approval.approved_plan_json ->> 'decision_action' =
+             approval.reviewer_decision_action
          and command.payload_schema_version = 'target-e2e-review-human-decision-event.v1'
          and command.payload_sha256 = ?
          and decision_event.event_json ->> 'schema_version' = command.payload_schema_version
@@ -116,16 +125,27 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
              command.room_epoch::text
          and material.material_canonical_json::jsonb #>> '{request,command,event_ref,uri}' =
              command.payload_uri
-         and material.material_canonical_json::jsonb #>> '{request,command,event_ref,sha256}' =
-             command.payload_sha256
-         and material.material_canonical_json::jsonb #>> '{request,command,request_hash}' =
-             command.request_hash
-      """;
+          and material.material_canonical_json::jsonb #>> '{request,command,event_ref,sha256}' =
+              command.payload_sha256
+       """;
   static final String COMMAND_COMPLETION_SQL = """
       select 1 from target_e2e_command_completion
        where admission_id = ? and activation_id = ? and command_id = ?
          and command_hash = ? and command_envelope_hash = ? and completion_hash = ?
-       for key share
+      for key share
+      """;
+  static final String BEGIN_EXECUTION_SQL = """
+      update fulfillment_dispute_case
+         set case_status = 'EXECUTING', current_room = 'OUTCOME', current_deadline_at = null,
+             updated_at = ?, updated_by = ?, version = version + 1
+       where id = ? and case_status = 'APPROVED_FOR_EXECUTION'
+      """;
+  static final String TERMINALIZE_EPOCH_SQL = """
+      update case_room_epoch
+         set lifecycle_status = 'TERMINAL', process_revision = ?, room_revision = ?,
+             terminal_at = ?, updated_at = ?, version = version + 1
+       where case_id = ? and room_type = 'REVIEW' and room_epoch = ? and fencing_token = ?
+         and lifecycle_status = 'ACTIVE'
       """;
   private final DataSource dataSource;
   private final TransactionTemplate transactions;
@@ -177,6 +197,7 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
     CompletionResult terminal = transactions.execute(ignored -> replayTerminalIfPresent(completionRequest));
     if (terminal != null) return terminal;
     transactions.executeWithoutResult(ignored -> prepareOperations(completionRequest));
+    transactions.executeWithoutResult(ignored -> beginExecution(completionRequest));
     // CaseClosureService deliberately runs outside the durable operation transaction.
     ClosureView closure = closeNoEffectCase(completionRequest);
     EvaluationReportView evaluation = closureService.evaluation(completionRequest.start().caseId(),
@@ -203,6 +224,30 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
       return replay(facts, request.expectedRevision(), progress);
     } catch (java.sql.SQLException failure) {
       throw new IllegalStateException("target Outcome terminal replay failed", failure);
+    } finally { DataSourceUtils.releaseConnection(connection, dataSource); }
+  }
+
+  private void beginExecution(CompletionRequest request) {
+    Connection connection = DataSourceUtils.getConnection(dataSource);
+    try (PreparedStatement update = connection.prepareStatement(BEGIN_EXECUTION_SQL)) {
+      update.setTimestamp(1, sqlTimestamp(clock.instant())); update.setString(2, WRITER);
+      update.setString(3, request.start().caseId());
+      if (update.executeUpdate() == 1) return;
+      try (PreparedStatement current = connection.prepareStatement(
+          "select case_status from fulfillment_dispute_case where id = ? for update")) {
+        current.setString(1, request.start().caseId());
+        try (ResultSet rows = current.executeQuery()) {
+          if (!rows.next()) {
+            throw new IllegalStateException("target Outcome case is not execution-authorized");
+          }
+          String status = rows.getString(1);
+          if (rows.next() || !("EXECUTING".equals(status) || "CLOSED".equals(status))) {
+            throw new IllegalStateException("target Outcome case is not execution-authorized");
+          }
+        }
+      }
+    } catch (java.sql.SQLException failure) {
+      throw new IllegalStateException("cannot begin target Outcome execution", failure);
     } finally { DataSourceUtils.releaseConnection(connection, dataSource); }
   }
 
@@ -258,8 +303,9 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
           """)) {
         statement.setString(1, request.caseId()); statement.setLong(2, request.outcomeEpoch()); statement.setLong(3, request.fencingToken());
         try (ResultSet rows = statement.executeQuery()) {
-          if (!rows.next() || rows.next()) throw new IllegalStateException("target Outcome terminal state is absent");
+          if (!rows.next()) throw new IllegalStateException("target Outcome terminal state is absent");
           processRevision = rows.getLong(1); roomRevision = rows.getLong(2);
+          if (rows.next()) throw new IllegalStateException("target Outcome terminal state is absent");
         }
       }
       CommandAdmissionBinding command = commandAdmission(connection, request.caseId(),
@@ -380,6 +426,10 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
     try (PreparedStatement statement = connection.prepareStatement("""
         select id from human_review_record
          where id = ? and case_id = ? and decision_type in ('APPROVE', 'MODIFY_AND_APPROVE')
+           and reviewer_decision_action in (
+               'CANCEL_ORDER', 'RETURN_AND_REFUND', 'REFUND_ONLY', 'RESHIP', 'REPLACE',
+               'REPAIR', 'COMPENSATE', 'CONTINUE_FULFILLMENT', 'REJECT_CLAIM')
+           and approved_plan_json ->> 'decision_action' = reviewer_decision_action
          for key share
         """)) {
       statement.setString(1, decision.decisionRecordRef()); statement.setString(2, start.caseId());
@@ -460,7 +510,7 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
             external_result_ref = coalesce(external_result_ref, ?)
          where id = ? and execution_status = 'RUNNING'
         """)) {
-      statement.setObject(1, completedAt); statement.setObject(2, completedAt.toString());
+      statement.setTimestamp(1, sqlTimestamp(completedAt)); statement.setString(2, completedAt.toString());
       statement.setString(3, "urn:target-outcome:no-effect:" + actionId); statement.setString(4, actionId);
       int changed = statement.executeUpdate();
       if (changed == 0 && !actionSucceeded(connection, actionId)) {
@@ -527,8 +577,11 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
         """)) {
       statement.setString(1, traceId); statement.setString(2, caseId);
       try (ResultSet rows = statement.executeQuery()) {
-        if (!rows.next() || rows.next()) throw new IllegalStateException("target Outcome completed evaluation facts are absent");
-        return new SnapshotFacts(canonicalPayloadHash(rows.getString(1)), canonicalPayloadHash(rows.getString(2)), rows.getLong(3));
+        if (!rows.next()) throw new IllegalStateException("target Outcome completed evaluation facts are absent");
+        SnapshotFacts facts = new SnapshotFacts(
+            canonicalPayloadHash(rows.getString(1)), canonicalPayloadHash(rows.getString(2)), rows.getLong(3));
+        if (rows.next()) throw new IllegalStateException("target Outcome completed evaluation facts are absent");
+        return facts;
       }
     }
   }
@@ -590,7 +643,7 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
              and result_uri is null and result_sha256 is null
           """)) {
         Instant now = clock.instant(); update.setString(1, resultUri); update.setString(2, terminalFact.hash());
-        update.setObject(3, now); update.setObject(4, now); update.setString(5, command.id());
+        update.setTimestamp(3, sqlTimestamp(now)); update.setTimestamp(4, sqlTimestamp(now)); update.setString(5, command.id());
         if (update.executeUpdate() != 1) throw new IllegalStateException("target Outcome command CAS was rejected");
       }
     } else {
@@ -675,13 +728,14 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
         """)) {
       statement.setString(1, request.start().caseId()); statement.setLong(2, request.start().epoch()); statement.setLong(3, request.start().fence());
       try (ResultSet rows = statement.executeQuery()) {
-        if (!rows.next() || rows.next()) throw new IllegalStateException("target Outcome projection is absent or ambiguous");
+        if (!rows.next()) throw new IllegalStateException("target Outcome projection is absent or ambiguous");
         projection = new OutcomeProcessProjection(rows.getString(1), rows.getString(2), rows.getString(3), rows.getString(4),
             rows.getLong(5), OutcomeProcessProjection.WriterMode.valueOf(rows.getString(6)),
             OutcomeProcessProjection.RuntimeMode.valueOf(rows.getString(7)), rows.getLong(8), rows.getLong(9), rows.getLong(10),
             rows.getString(11), rows.getString(12), rows.getString(13), rows.getLong(14),
             OutcomeProcessProjection.ProcessState.valueOf(rows.getString(15)), rows.getObject(16, java.time.OffsetDateTime.class).toInstant(),
             rows.getObject(17, java.time.OffsetDateTime.class).toInstant());
+        if (rows.next()) throw new IllegalStateException("target Outcome projection is absent or ambiguous");
       }
     }
     String state = projection.processState().name();
@@ -710,8 +764,9 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
       statement.setString(1, request.start().caseId()); statement.setLong(2, request.start().epoch());
       statement.setLong(3, request.start().fence());
       try (ResultSet rows = statement.executeQuery()) {
-        if (!rows.next() || rows.next()) throw new IllegalStateException("target Outcome terminal epoch is absent");
+        if (!rows.next()) throw new IllegalStateException("target Outcome terminal epoch is absent");
         processRevision = rows.getLong(1); roomRevision = rows.getLong(2); lifecycle = rows.getString(3);
+        if (rows.next()) throw new IllegalStateException("target Outcome terminal epoch is absent");
       }
     }
     if (!"TERMINAL".equals(lifecycle)) {
@@ -722,18 +777,15 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
           """)) {
         statement.setString(1, request.start().caseId()); statement.setLong(2, request.start().epoch()); statement.setLong(3, request.start().fence());
         try (ResultSet rows = statement.executeQuery()) {
-          if (!rows.next() || rows.next()) throw new IllegalStateException("target Outcome evaluated projection is absent");
+          if (!rows.next()) throw new IllegalStateException("target Outcome evaluated projection is absent");
           processRevision = rows.getLong(1) + 1; roomRevision = rows.getLong(2) + 1;
+          if (rows.next()) throw new IllegalStateException("target Outcome evaluated projection is absent");
         }
       }
-      try (PreparedStatement statement = connection.prepareStatement("""
-          update case_room_epoch set lifecycle_status = 'TERMINAL', writer_activation_status = 'TERMINAL', process_revision = ?, room_revision = ?,
-              terminal_at = ?, updated_at = ?, version = version + 1
-           where case_id = ? and room_type = 'REVIEW' and room_epoch = ? and fencing_token = ?
-             and lifecycle_status = 'ACTIVE'
-          """)) {
+      try (PreparedStatement statement = connection.prepareStatement(TERMINALIZE_EPOCH_SQL)) {
         Instant terminalAt = clock.instant();
-        statement.setLong(1, processRevision); statement.setLong(2, roomRevision); statement.setObject(3, terminalAt); statement.setObject(4, terminalAt);
+        statement.setLong(1, processRevision); statement.setLong(2, roomRevision);
+        statement.setTimestamp(3, sqlTimestamp(terminalAt)); statement.setTimestamp(4, sqlTimestamp(terminalAt));
         statement.setString(5, request.start().caseId()); statement.setLong(6, request.start().epoch()); statement.setLong(7, request.start().fence());
         if (statement.executeUpdate() != 1) throw new IllegalStateException("target Outcome terminal epoch transition was rejected");
       }
@@ -745,7 +797,7 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
            where case_id = ? and writer_mode = 'TEMPORAL' and process_revision <= ?
           """)) {
         statement.setLong(1, processRevision); statement.setLong(2, request.start().epoch()); statement.setLong(3, request.start().fence());
-        statement.setObject(4, clock.instant()); statement.setString(5, request.start().caseId()); statement.setLong(6, processRevision);
+        statement.setTimestamp(4, sqlTimestamp(clock.instant())); statement.setString(5, request.start().caseId()); statement.setLong(6, processRevision);
         if (statement.executeUpdate() != 1) throw new IllegalStateException("target Outcome process projection terminal transition was rejected");
       }
     }
@@ -766,7 +818,8 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
       statement.setString(1, start.workflowId()); statement.setString(2, start.caseId()); statement.setLong(3, start.epoch());
       statement.setLong(4, start.fence()); statement.setString(5, decision.receiptId()); statement.setString(6, decision.receiptHash());
       statement.setString(7, fact.kind()); statement.setLong(8, fact.revision()); statement.setLong(9, fact.sequence());
-      statement.setString(10, fact.payload()); statement.setString(11, fact.hash()); statement.setObject(12, clock.instant());
+      statement.setString(10, fact.payload()); statement.setString(11, fact.hash());
+      statement.setTimestamp(12, sqlTimestamp(clock.instant()));
       statement.setString(13, WRITER); statement.executeUpdate();
     }
   }
@@ -774,6 +827,10 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
   private Fact fact(String kind, Object value, long revision, long sequence) {
     String payload = ContractJson.canonicalString(mapper.valueToTree(value));
     return new Fact(kind, revision, sequence, payload, canonicalPayloadHash(payload));
+  }
+
+  static java.sql.Timestamp sqlTimestamp(Instant value) {
+    return java.sql.Timestamp.from(Objects.requireNonNull(value, "timestamp"));
   }
   private String canonicalPayloadHash(String payload) {
     try { return ContractJson.sha256Hex(mapper.readTree(payload)); }

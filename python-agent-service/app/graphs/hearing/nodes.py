@@ -176,7 +176,12 @@ def assess_evidence_item(
     assessor = runtime.context.execute_work_item
     if not callable(assessor):
         raise HearingGraphContractError("HEARING_EVIDENCE_ASSESSOR_REQUIRED")
-    result = assessor(runtime.context.request, key)
+    result = _invoke_with_agent_context(
+        assessor,
+        runtime.context.request,
+        key,
+        agent_context=runtime.context.agent_context,
+    )
     if not isinstance(result, BaseModel):
         raise HearingGraphContractError("HEARING_EVIDENCE_RESULT_NOT_TYPED")
     payload = result.model_dump(mode="json")
@@ -198,7 +203,12 @@ async def aassess_evidence_item(
     assessor = runtime.context.execute_work_item
     if not callable(assessor):
         raise HearingGraphContractError("HEARING_EVIDENCE_ASSESSOR_REQUIRED")
-    result = assessor(runtime.context.request, key)
+    result = _invoke_with_agent_context(
+        assessor,
+        runtime.context.request,
+        key,
+        agent_context=runtime.context.agent_context,
+    )
     if inspect.isawaitable(result):
         result = await result
     if not isinstance(result, BaseModel):
@@ -249,7 +259,12 @@ def complete_evidence_synthesis(
     projector = runtime.context.execute_with_work_results
     if not callable(projector):
         raise HearingGraphContractError("HEARING_EVIDENCE_PROJECTOR_REQUIRED")
-    result = projector(runtime.context.request, results)
+    result = _invoke_with_agent_context(
+        projector,
+        runtime.context.request,
+        results,
+        agent_context=runtime.context.agent_context,
+    )
     return _proposal_update(result)
 
 
@@ -270,7 +285,12 @@ async def acomplete_evidence_synthesis(
     projector = runtime.context.execute_with_work_results
     if not callable(projector):
         raise HearingGraphContractError("HEARING_EVIDENCE_PROJECTOR_REQUIRED")
-    result = projector(runtime.context.request, results)
+    result = _invoke_with_agent_context(
+        projector,
+        runtime.context.request,
+        results,
+        agent_context=runtime.context.agent_context,
+    )
     if inspect.isawaitable(result):
         result = await result
     return _proposal_update(result)
@@ -286,7 +306,11 @@ def execute_operation(
         expected_operation.value
     ):
         raise HearingGraphContractError("HEARING_ROUTED_OPERATION_MISMATCH")
-    result = runtime.context.execute(runtime.context.request)
+    result = _invoke_with_agent_context(
+        runtime.context.execute,
+        runtime.context.request,
+        agent_context=runtime.context.agent_context,
+    )
     return _proposal_update(result)
 
 
@@ -300,10 +324,24 @@ async def aexecute_operation(
         expected_operation.value
     ):
         raise HearingGraphContractError("HEARING_ROUTED_OPERATION_MISMATCH")
-    result = runtime.context.execute(runtime.context.request)
+    result = _invoke_with_agent_context(
+        runtime.context.execute,
+        runtime.context.request,
+        agent_context=runtime.context.agent_context,
+    )
     if inspect.isawaitable(result):
         result = await result
     return _proposal_update(result)
+
+
+def _invoke_with_agent_context(
+    callback: Any,
+    *args: Any,
+    agent_context: Any,
+) -> Any:
+    if agent_context is None:
+        return callback(*args)
+    return callback(*args, agent_context=agent_context)
 
 
 def _proposal_update(result: BaseModel) -> dict[str, Any]:

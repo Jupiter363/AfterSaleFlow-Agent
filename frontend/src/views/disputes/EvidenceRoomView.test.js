@@ -51,8 +51,11 @@ const catalog = {
       content_url: "/objects/user-original.png",
       redacted: false,
       verification_status: "VERIFIED",
-      confidence_score: 0.92,
-      confidence_level: "HIGH",
+      assessment_protocol: "evidence-turn-result.v3",
+      assessment_confidence: 0.92,
+      assessment_confidence_explanation: "原始截图内容清晰，可完成当前范围内的判断。",
+      risk_level: "LOW",
+      risk_explanation: "未发现明显异常。",
       verification_feedback: "原始截图来源清晰，时间线可核对。",
       original_filename: "user-original.png",
       submission_status: "SUBMITTED",
@@ -129,8 +132,11 @@ function stressCatalog(role, count = 100, filenameFactory = null) {
       content_url: null,
       redacted: false,
       verification_status: index % 3 === 0 ? "NEEDS_HUMAN_REVIEW" : "VERIFIED",
-      confidence_score: 0.88,
-      confidence_level: "HIGH",
+      assessment_protocol: "evidence-turn-result.v3",
+      assessment_confidence: 0.88,
+      assessment_confidence_explanation: "材料内容能够读取。",
+      risk_level: "LOW",
+      risk_explanation: "未发现明显异常。",
       verification_feedback:
         `书记官核验说明 ${index + 1}：` + "来源完整性与时间线需要逐项核对。".repeat(8),
       original_filename: filenameFactory
@@ -646,6 +652,27 @@ describe("EvidenceRoomView", () => {
     expect(evidenceRoomSource).toMatch(
       /\.evidence-modal__panel p\s*\{[^}]*min-width:\s*0[^}]*white-space:\s*pre-wrap[^}]*overflow-wrap:\s*anywhere[^}]*word-break:\s*break-word/s,
     );
+    const detail = wrapper.get("[data-evidence-detail-modal]");
+    expect(detail.findAll("[data-evidence-score]")).toHaveLength(4);
+    expect(detail.find(".evidence-modal__risk").exists()).toBe(true);
+    expect(detail.find("[data-evidence-detail-overview]").exists()).toBe(true);
+    expect(detail.find("[data-evidence-detail-decision]").exists()).toBe(true);
+    expect(detail.find(".evidence-modal__detail-scroll").exists()).toBe(true);
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-modal__panel--detail\s*\{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\) auto[^}]*width:\s*min\(920px, calc\(100vw - 32px\)\)[^}]*overflow:\s*hidden/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-modal__score-list\s*\{[^}]*grid-template-rows:\s*repeat\(4, minmax\(76px, 1fr\)\)[^}]*border:\s*1px solid var\(--detail-border\)[^}]*border-radius:\s*14px/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-modal__score-row\s*\{[^}]*grid-template-columns:\s*150px minmax\(0, 1fr\)[^}]*border-bottom:\s*1px solid #e8edf3/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-modal__analysis-columns\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)[^}]*gap:\s*12px/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /@media \(max-width: 760px\)[\s\S]*?\.evidence-modal__decision,[\s\S]*?\.evidence-modal__analysis-columns\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/,
+    );
   });
 
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
@@ -665,14 +692,17 @@ describe("EvidenceRoomView", () => {
   });
 
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-  it("shows confidence feedback and keeps completion available for low confidence evidence", async () => {
+  it("shows assessment confidence feedback and keeps completion available for low confidence evidence", async () => {
     const lowConfidenceCatalog = {
       ...catalog,
       items: [
         {
           ...catalog.items[0],
-          confidence_score: 0.31,
-          confidence_level: "LOW",
+          assessment_protocol: "evidence-turn-result.v3",
+          assessment_confidence: 0.31,
+          assessment_confidence_explanation: "当前可读取信息有限。",
+          risk_level: "MEDIUM",
+          risk_explanation: "来源信息仍不完整。",
           verification_feedback: "证据来源仍需补充，当前只能作为低置信参考。",
           verification_status: "SUSPICIOUS",
         },
@@ -702,12 +732,23 @@ describe("EvidenceRoomView", () => {
           relevance_score: 0.93,
           completeness_score: 0.58,
           assessment_confidence: 0.67,
-          confidence_score: 0.99,
-          inspected_modalities: ["IMAGE", "OCR"],
+          authenticity_score_explanation: "能够识别图片来源，但缺少平台原始导出。",
+          relevance_score_explanation: "图片内容直接对应商品外观事实。",
+          completeness_score_explanation: "单张照片没有覆盖完整拍摄上下文。",
+          assessment_confidence_explanation: "图片可读，但反光影响局部判断。",
+          risk_level: "HIGH",
+          risk_explanation: "反光与形成时间无法仅凭当前图片排除，需要人工确认。",
+          source_basis: ["IMAGE", "OCR"],
           limitations: ["单张照片无法排除光线反射对划痕形态的影响。"],
+          unsupported_claims: ["不能仅凭单张照片确认划痕形成时间。"],
           requires_human_review: true,
-          human_review_reason_codes: ["VISUAL_DETAIL_UNCERTAIN"],
-          human_review_instructions: ["对照原图检查划痕边缘、反光和拍摄时间。"],
+          reason_details: [
+            {
+              code: "HIGH_RISK_FLAG",
+              label: "模型综合判断该材料为高风险",
+              explanation: "反光与形成时间无法仅凭当前图片排除，需要人工确认。",
+            },
+          ],
         },
       ],
     };
@@ -723,7 +764,7 @@ describe("EvidenceRoomView", () => {
     const reviewCard = queue.get("[data-human-review-card]");
     expect(reviewCard.text()).toContain("商品划痕细节照片.png");
     expect(reviewCard.text()).toContain("用户提交");
-    expect(reviewCard.text()).toContain("人工审核任务");
+    expect(reviewCard.text()).toContain("查看人工复核原因");
     expect(reviewCard.text()).not.toContain("单张照片无法排除光线反射");
     expect(reviewCard.element.tagName).toBe("BUTTON");
 
@@ -739,7 +780,119 @@ describe("EvidenceRoomView", () => {
     await reviewCard.trigger("click");
     detail = wrapper.get("[data-evidence-detail-modal]");
     expect(detail.attributes("data-detail-mode")).toBe("human-review");
-    expect(detail.get("[data-evidence-detail-human-review]").text()).toContain("审核指引");
+    expect(detail.get("[data-evidence-detail-human-review]").text()).toContain(
+      "模型综合判断该材料为高风险",
+    );
+    expect(detail.get("[data-evidence-detail-human-review]").text()).toContain(
+      "反光与形成时间无法仅凭当前图片排除，需要人工确认。",
+    );
+    expect(detail.text()).not.toContain("审核指引");
+    expect(detail.text()).not.toContain("审核目标");
+  });
+
+  it("renders Evidence V3 scores, risk, findings, feedback, and review reasons without duplicate board frames", async () => {
+    const v3Catalog = {
+      ...catalog,
+      items: [
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_V3_DETAIL",
+          original_filename: "商家物流底单.md",
+          verification_status: "NEEDS_HUMAN_REVIEW",
+          assessment_protocol: "evidence-turn-result.v3",
+          assessment_text: "材料文本可读，但缺少签收人身份和交付照片。",
+          verification_feedback: "材料文本可读，但缺少签收人身份和交付照片。",
+          claimed_fact: "证明物流记录与本案签收事实相关。",
+          parsed_text: "内部解析文本不应出现在核验详情中。",
+          authenticity_score: 0.76,
+          authenticity_score_explanation: "可读取物流页面，但缺少原始平台导出来源。",
+          relevance_score: 0.91,
+          relevance_score_explanation: "签收时间直接对应冻结矩阵中的物流事实。",
+          completeness_score: 0.42,
+          completeness_score_explanation: "缺少签收人身份和交付照片。",
+          assessment_confidence: 0.83,
+          assessment_confidence_explanation: "文本清晰，可判断当前材料覆盖范围。",
+          risk_level: "HIGH",
+          risk_explanation: "来源链不完整且签收主体未知，需要人工确认。",
+          source_basis: ["ESRC_INTERNAL_DO_NOT_RENDER"],
+          formation_time_assessment: "页面时间与物流节点部分对应",
+          findings: [
+            { finding_type: "LOGISTICS_RECORD", description: "可见签收时间" },
+          ],
+          limitations: ["缺少签收人身份"],
+          unsupported_claims: ["不能仅凭该页面确认实际签收人"],
+          requires_human_review: true,
+          reason_details: [
+            {
+              code: "LOW_COMPLETENESS_SCORE",
+              label: "完成度低：材料完整性评分偏低",
+              explanation: "缺少签收人身份和交付照片。",
+            },
+            {
+              code: "HIGH_RISK_FLAG",
+              label: "模型综合判断该材料为高风险",
+              explanation: "来源链不完整且签收主体未知，需要人工确认。",
+            },
+          ],
+        },
+      ],
+    };
+    const { wrapper } = await mountView({ initialCatalog: v3Catalog });
+
+    expect(evidenceRoomSource).not.toContain("data-live-evidence-frames");
+    await wrapper.get("[data-evidence-originals] [data-evidence-card]").trigger("click");
+    let detail = wrapper.get("[data-evidence-detail-modal]");
+    expect(detail.text()).toContain("真实性76%");
+    expect(detail.text()).toContain("关联性91%");
+    expect(detail.text()).toContain("完整性42%");
+    expect(detail.text()).toContain("核验把握83%");
+    expect(detail.get("[data-evidence-claimed-fact]").text()).toContain(
+      "证明物流记录与本案签收事实相关。",
+    );
+    expect(detail.findAll("[data-evidence-score]")).toHaveLength(4);
+    expect(detail.text()).toContain("可读取物流页面，但缺少原始平台导出来源。");
+    expect(detail.text()).toContain("来源链不完整且签收主体未知，需要人工确认。");
+    expect(detail.text()).toContain("页面时间与物流节点部分对应");
+    expect(detail.text()).toContain("可见签收时间");
+    expect(detail.text()).not.toContain("LOGISTICS_RECORD");
+    expect(detail.text()).not.toContain("ESRC_INTERNAL_DO_NOT_RENDER");
+    expect(detail.text()).not.toContain("材料依据");
+    expect(detail.text()).not.toContain("内部解析文本不应出现在核验详情中。");
+    expect(detail.text()).toContain("材料文本可读，但缺少签收人身份和交付照片。");
+    expect(
+      detail.text().split("材料文本可读，但缺少签收人身份和交付照片。").length - 1,
+    ).toBe(1);
+    expect(detail.get("[data-evidence-detail-findings]").text()).toContain("缺少签收人身份");
+    expect(detail.get("[data-evidence-detail-findings]").text()).toContain(
+      "不能仅凭该页面确认实际签收人",
+    );
+    expect(detail.text()).not.toContain("待评估");
+    const detailHtml = detail.html();
+    expect(detailHtml.indexOf("data-evidence-claimed-fact")).toBeLessThan(
+      detailHtml.indexOf("data-evidence-detail-decision"),
+    );
+    expect(detailHtml.indexOf("data-evidence-detail-decision")).toBeLessThan(
+      detailHtml.indexOf("data-evidence-detail-assessment"),
+    );
+    expect(detail.get("[data-evidence-detail-decision]").text()).toContain(
+      "书记官核验结论",
+    );
+    expect(detail.get("[data-evidence-detail-findings]").text()).toContain(
+      "已识别的信息",
+    );
+    expect(detail.get("[data-evidence-detail-findings]").text()).toContain("适用边界");
+
+    await detail.get("[data-close-evidence-modal]").trigger("click");
+    await wrapper.get("[data-human-review-card]").trigger("click");
+    detail = wrapper.get("[data-evidence-detail-human-review]");
+    expect(detail.text()).toContain("完整度较低");
+    expect(detail.text()).toContain("完成度低：材料完整性评分偏低");
+    expect(detail.text()).toContain("缺少签收人身份和交付照片。");
+    expect(detail.text()).toContain("高风险提示");
+    expect(detail.text()).not.toContain("LOW_COMPLETENESS_SCORE");
+    expect(detail.text()).not.toContain("HIGH_RISK_FLAG");
+    expect(detail.text()).not.toContain("审核目标");
+    expect(detail.text()).not.toContain("审核指引");
   });
 
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
@@ -756,15 +909,27 @@ describe("EvidenceRoomView", () => {
           originalFilename: "聊天记录.png",
           submissionStatus: "SUBMITTED",
           verificationStatus: "PLAUSIBLE",
-          authenticityScore: 81,
-          relevanceScore: 88,
-          completenessScore: 72,
-          assessmentConfidence: 76,
-          inspectedModalities: ["IMAGE", "TEXT"],
+          assessmentProtocol: "evidence-turn-result.v3",
+          authenticityScore: 0.81,
+          authenticityScoreExplanation: "账号主体仍需结合平台信息确认。",
+          relevanceScore: 0.88,
+          relevanceScoreExplanation: "聊天内容与协商事实直接相关。",
+          completenessScore: 0.72,
+          completenessScoreExplanation: "当前截图缺少完整上下文。",
+          assessmentConfidence: 0.76,
+          assessmentConfidenceExplanation: "文字清晰但参与方身份未完全确认。",
+          riskLevel: "HIGH",
+          riskExplanation: "账号主体和完整上下文仍需人工确认。",
+          sourceBasis: ["IMAGE", "TEXT"],
           limitations: "聊天参与方身份仍需核对。",
           requiresHumanReview: true,
-          humanReviewReasonCodes: ["SOURCE_PROVENANCE_UNVERIFIED"],
-          humanReviewInstructions: ["核对账号主体和完整上下文。"],
+          reasonDetails: [
+            {
+              code: "HIGH_RISK_FLAG",
+              label: "模型综合判断该材料为高风险",
+              explanation: "账号主体和完整上下文仍需人工确认。",
+            },
+          ],
         },
       ],
     };
@@ -772,11 +937,12 @@ describe("EvidenceRoomView", () => {
 
     const reviewCard = wrapper.get("[data-human-review-card]");
     expect(reviewCard.text()).toContain("聊天记录.png");
-    expect(reviewCard.text()).toContain("人工审核任务");
+    expect(reviewCard.text()).toContain("查看人工复核原因");
     expect(reviewCard.text()).not.toContain("聊天参与方身份仍需核对");
     await reviewCard.trigger("click");
     const detail = wrapper.get("[data-evidence-detail-modal]");
-    expect(detail.text()).toContain("材料来源或流转链路尚未核实");
+    expect(detail.text()).toContain("模型综合判断该材料为高风险");
+    expect(detail.text()).toContain("账号主体和完整上下文仍需人工确认。");
     expect(detail.text()).toContain("聊天参与方身份仍需核对");
     expect(detail.text()).toContain("76%");
   });
@@ -792,7 +958,13 @@ describe("EvidenceRoomView", () => {
           authenticity_score: 0.42,
           relevance_score: 0.91,
           requires_human_review: true,
-          human_review_reason_codes: ["SUSPECTED_FORGERY_LOW_AUTHENTICITY"],
+          reason_details: [
+            {
+              code: "LOW_AUTHENTICITY_SUSPECTED_FORGERY",
+              label: "疑似造假：真实性评分低于 50%",
+              explanation: "真实性评分解释。",
+            },
+          ],
         },
         {
           ...catalog.items[0],
@@ -801,7 +973,13 @@ describe("EvidenceRoomView", () => {
           authenticity_score: 0.88,
           relevance_score: 0.34,
           requires_human_review: true,
-          human_review_reason_codes: ["LOW_RELEVANCE_SCORE"],
+          reason_details: [
+            {
+              code: "LOW_RELEVANCE_SCORE",
+              label: "关联度低：材料与待证事实的关联性评分低于 50%",
+              explanation: "关联性评分解释。",
+            },
+          ],
         },
         {
           ...catalog.items[0],
@@ -810,9 +988,17 @@ describe("EvidenceRoomView", () => {
           authenticity_score: 0.31,
           relevance_score: 0.28,
           requires_human_review: true,
-          human_review_reason_codes: [
-            "LOW_AUTHENTICITY_SUSPECTED_FORGERY",
-            "LOW_RELEVANCE_SCORE",
+          reason_details: [
+            {
+              code: "LOW_AUTHENTICITY_SUSPECTED_FORGERY",
+              label: "疑似造假：真实性评分低于 50%",
+              explanation: "真实性评分解释。",
+            },
+            {
+              code: "LOW_RELEVANCE_SCORE",
+              label: "关联度低：材料与待证事实的关联性评分低于 50%",
+              explanation: "关联性评分解释。",
+            },
           ],
         },
       ],

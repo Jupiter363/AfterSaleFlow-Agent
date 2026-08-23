@@ -202,6 +202,16 @@ public class ExternalCaseImportTransactionService {
             return new SimulatedImportResultView(List.of(restoreExisting(existing, actor)));
         }
 
+        if (command.fixtureId() != null) {
+            SimulatedExternalDisputeTemplate fixture =
+                    simulatedImportTemplates.getFixture(command.fixtureId());
+            ImportDisputeCommand importCommand =
+                    simulatedCommand(command, fixture, idempotencyKey);
+            ImportedDisputeView imported =
+                    importDispute(importCommand, actor, idempotencyKey, traceId, requestId);
+            return new SimulatedImportResultView(List.of(imported));
+        }
+
         SimulatedImportTemplateCursorEntity cursor =
                 simulatedImportCursorRepository
                         .findByIdForUpdate(SimulatedImportTemplateCursorEntity.CURSOR_ID)
@@ -771,7 +781,16 @@ public class ExternalCaseImportTransactionService {
                         perspective.requestedAmount(),
                         perspective.requestedItems(),
                         perspective.requestReason(),
-                        null);
+                        request.fixtureId() == null ? null : perspective.originalStatement());
+        IntakeLobbySeed.RespondentAttitudeSeed respondent =
+                request.fixtureId() == null
+                        ? null
+                        : new IntakeLobbySeed.RespondentAttitudeSeed(
+                                initiatorRole == ActorRole.USER ? "MERCHANT" : "USER",
+                                perspective.respondentAttitude(),
+                                perspective.respondentPosition(),
+                                "INITIATOR_REPORTED",
+                                0.6);
         return new ImportDisputeCommand(
                 SimulatedExternalDisputeTemplateCatalog.SOURCE_SYSTEM,
                 "SIM-" + templatePrefix + stableKey,
@@ -790,7 +809,7 @@ public class ExternalCaseImportTransactionService {
                 null,
                 perspective.requestedResolution(),
                 claim,
-                null);
+                respondent);
     }
 
     private static void assertSimulationReplayMatches(
@@ -837,7 +856,8 @@ public class ExternalCaseImportTransactionService {
                 request.initiatorRoleHint().name(),
                 request.currentActorId(),
                 request.counterpartyActorId(),
-                request.simulationBatchId());
+                request.simulationBatchId(),
+                request.fixtureId() == null ? "" : request.fixtureId());
     }
 
     // 所属模块：【案件核心与导入 / 应用编排层】「ExternalCaseImportTransactionService.stableReferenceKey(String)」。

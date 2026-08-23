@@ -451,6 +451,18 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
                     throw new AgentStreamProtocolException("agent stream v2 visible output exceeds limit");
                 }
                 state.visibleCharacters += delta.length();
+                state.visibleInGeneration = true;
+            }
+            case GENERATION_RESET -> {
+                requireV3(schemaVersion);
+                requiredV2Identifier(payload, "node");
+                int generation = requiredV3Int(payload, "generation", 2, 2);
+                String reasonCode = requiredV2Identifier(payload, "reason_code");
+                if (!"OUTPUT_SCHEMA_INVALID".equals(reasonCode)) {
+                    throw new AgentStreamProtocolException(
+                            "agent stream v3 generation reset reason is invalid");
+                }
+                state.acceptGenerationReset(generation);
             }
             case PUBLIC_FRAME_START -> {
                 requireV3(schemaVersion);
@@ -563,6 +575,7 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
         return switch (eventType) {
             case ATTEMPT_STARTED -> Set.of("node");
             case VISIBLE_DELTA -> Set.of("node", "field", "delta");
+            case GENERATION_RESET -> Set.of("node", "generation", "reason_code");
             case PUBLIC_FRAME_START ->
                     Set.of("frame_id", "frame_sequence", "frame_type", "public_header");
             case PUBLIC_TEXT_DELTA ->
@@ -951,6 +964,8 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
         private String activeFrameType;
         private int nextDeltaIndex;
         private int nextFrameSequence = 1;
+        private int generation = 1;
+        private boolean visibleInGeneration;
 
         public V2ProtocolState(
                 String runId,
@@ -1006,6 +1021,18 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
             terminal = eventType == StreamEventType.FINAL
                     || eventType == StreamEventType.ERROR
                     || eventType == StreamEventType.ATTEMPT_ABORTED;
+        }
+
+        private void acceptGenerationReset(int nextGeneration) {
+            if (activeFrameId != null
+                    || !visibleInGeneration
+                    || nextGeneration != generation + 1
+                    || nextGeneration != 2) {
+                throw new AgentStreamProtocolException(
+                        "agent stream v3 generation reset is invalid");
+            }
+            generation = nextGeneration;
+            visibleInGeneration = false;
         }
 
         public void assertComplete() {

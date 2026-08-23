@@ -455,7 +455,8 @@ class JdbcIntakeFormalCommitPortTest {
         IntakeFinalizationReceipt replayed = port.commit(fixture.commitCommand());
 
         assertThat(replayed).isEqualTo(committed);
-        assertThat(committed.matrixVersion()).isNull();
+        assertThat(committed.matrixVersion())
+                .isEqualTo(opening.path("matrix_version").asLong() + 1);
         assertCounts(fixture.caseId(), 1, 1, 1, 1, 1, 1);
         assertThat(scalar(
                         "select dossier_version::text from case_intake_dossier where case_id = ?",
@@ -464,9 +465,24 @@ class JdbcIntakeFormalCommitPortTest {
         JsonNode persisted = objectMapper.readTree(scalar(
                 "select dossier_json::text from case_intake_dossier where case_id = ?",
                 fixture.caseId()));
-        JsonNode canonicalOpening = objectMapper.readTree(
-                ContractJson.canonicalString(opening));
-        assertThat(persisted.path("case_fact_matrix")).isEqualTo(canonicalOpening);
+        JsonNode successor = persisted.path("case_fact_matrix");
+        assertThat(successor).isNotEqualTo(opening);
+        assertThat(successor.path("matrix_version").asLong())
+                .isEqualTo(opening.path("matrix_version").asLong() + 1);
+        assertThat(successor.at("/parent_ref/matrix_id"))
+                .isEqualTo(opening.path("matrix_id"));
+        assertThat(successor.at("/parent_ref/matrix_version").asLong())
+                .isEqualTo(opening.path("matrix_version").asLong());
+        assertThat(successor.at("/parent_ref/content_hash"))
+                .isEqualTo(opening.path("content_hash"));
+        JsonNode memorySnapshot = objectMapper.readTree(scalar(
+                "select scroll_snapshot_json::text from room_turn_memory where case_id = ?",
+                fixture.caseId()));
+        assertThat(memorySnapshot).isEqualTo(persisted);
+        assertThat(scalar(
+                        "select event_type from case_timeline_event where case_id = ?",
+                        fixture.caseId()))
+                .isEqualTo("TURN_NEEDS_INPUT");
         assertThat(scalar(
                         "select operation_status from domain_operation where operation_key = ?",
                         fixture.request().operationKey()))
@@ -1575,7 +1591,7 @@ class JdbcIntakeFormalCommitPortTest {
                     'intake-skill.v2', 'agent-stream.v2', 'synthetic', 'RESULT_READY', '{}'::jsonb,
                     '{}'::jsonb, '[]'::jsonb, ?, 'trace-jdbc', 'test', 'INTAKE_TURN',
                     'internal://graph', '{}'::jsonb, ?, '[]'::jsonb, '[]'::jsonb, ?, ?, ?, ?,
-                    'agent-stream.v2', ?, 'TEMPORAL_ACTIVITY', 'UNCOMMITTED', ?, 'INTAKE', 1, 5, 2, ?, 1, ?, null, ?,
+                    'agent-stream.v3', ?, 'TEMPORAL_ACTIVITY', 'UNCOMMITTED', ?, 'INTAKE', 1, 5, 2, ?, 1, ?, null, ?,
                      'agent-run-lineage.v1', ?)
                 """, run, c, roomId, now, requestHash, "key:" + run, run, now, tenant, requestHash,
                 epochId, requestHash, now.plusMinutes(5), resultHash, "e".repeat(64));

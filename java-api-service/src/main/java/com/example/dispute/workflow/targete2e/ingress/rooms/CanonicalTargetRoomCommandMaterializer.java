@@ -365,9 +365,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         RoomGraphCommand provisional = new RoomGraphCommand("room-graph-command.v1", commandId, logicalRunId, attemptId,
                 epoch.getTenantSurrogate(), epoch.getCaseId(), command.roomType(), epoch.getRoomEpoch(),
                 epoch.getGraphKey(), epoch.getGraphVersion(), epoch.getCheckpointSchemaVersion(),
-                command.roomType() == RoomType.EVIDENCE
-                        ? evidenceThreadId(epoch, actor, commandId)
-                    : "target-room-thread:" + stableToken(epoch.getCaseId() + "\n" + actor.actorId() + "\n" + command.roomType()),
+                graphThreadId(epoch, actor, command.roomType(), commandId),
                 new RoomGraphCommand.ActorScope(actor.actorId(), mapRole(actor.role()), audience(actor.role()),
                         command.roomType() == RoomType.EVIDENCE
                                 ? List.of(
@@ -408,7 +406,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
     private static boolean isGraphCommand(CommandType type) {
         return type == CommandType.EVIDENCE_OPENING
                 || type == CommandType.EVIDENCE_SUBMIT
-                || type == CommandType.HEARING_STATEMENT
+                || type == CommandType.HEARING_ANSWER_BUNDLE
                 || type == CommandType.HEARING_EVIDENCE_BATCH || type == CommandType.REVIEW_DECISION;
     }
     static boolean isMaterializedCommand(CommandType type) {
@@ -446,6 +444,19 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
                                 + actor.role().name()
                                 + "\n"
                                 + commandId);
+    }
+    static String graphThreadId(
+            CaseRoomEpochEntity epoch,
+            AuthenticatedActor actor,
+            RoomType roomType,
+            String commandId) {
+        return switch (roomType) {
+            case EVIDENCE -> evidenceThreadId(epoch, actor, commandId);
+            case REVIEW -> "grt.v1."
+                    + stableToken(epoch.getCaseId() + "\n" + actor.actorId() + "\n" + roomType);
+            default -> throw new IllegalArgumentException(
+                    "target browser Graph thread is unsupported for " + roomType);
+        };
     }
     private static boolean isTargetEpoch(CaseRoomEpochEntity epoch) {
         return epoch.getWriterMode() == com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode.TEMPORAL

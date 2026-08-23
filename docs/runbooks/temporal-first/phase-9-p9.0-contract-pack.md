@@ -87,7 +87,7 @@ contractVersion = target-e2e-activation.v1
 executionLane = TARGET_E2E_CANDIDATE
 environmentId + environmentGeneration
 candidateSha = 40 lowercase hex
-issuedAt + expiresAt (lifetime <= 7200 seconds)
+issuedAt + expiresAt (lifetime <= 2592000 seconds / 30 days)
 activationId = p9act.v1.<32 lowercase hex>
 unique nonce
 tenantSurrogate

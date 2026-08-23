@@ -8,7 +8,7 @@ import re
 from collections.abc import Mapping
 from typing import Any, NoReturn
 
-from app.contracts.v1.codec import canonical_sha256_omitting
+from app.contracts.v1.codec import canonical_sha256
 from app.graphs.intake.contracts import RESPONDENT_OPENING_MARKER
 from app.llm import AgentOutputSchemaError
 from app.schemas.intake_case_matrix import (
@@ -19,6 +19,7 @@ from app.schemas.intake_case_matrix import (
 )
 from app.schemas.case_fact_matrix import (
     CaseAlignmentStatus,
+    CaseFactDeltaRowV2,
     CaseFactMatrixDeltaV2,
     CaseFactMatrixV2,
     CaseMatrixKind,
@@ -189,12 +190,49 @@ def finalize_case_fact_matrix(
             )
         )
 
+    # The Provider emits only the current authenticated party's rows.  Prior
+    # facts omitted by that party are carried by the server as NOT_ADDRESSED;
+    # the model never has to reproduce the other party's position to preserve a
+    # complete frozen matrix.
     missing_previous = set(previous_rows) - referenced_previous
-    if missing_previous:
-        _schema_error(
-            "case matrix delta must carry every prior fact; missing="
-            + str(sorted(missing_previous)),
-            safe_code="INTAKE_MATRIX_PRIOR_FACT_MISSING",
+    for fact_id in previous_rows:
+        if fact_id not in missing_previous:
+            continue
+        previous_row = previous_rows[fact_id]
+        carry = CaseFactDeltaRowV2.model_validate(
+            {
+                "fact_key": fact_id,
+                "category": previous_row.category,
+                "fact_target": previous_row.fact_target,
+                "materiality": previous_row.materiality,
+                "stance": "NOT_ADDRESSED",
+                "position_summary": "当前方未就该事实直接陈述。",
+                "asserted_value": None,
+                "source_scope": "PREVIOUS_MATRIX",
+                "agreed_statement": previous_row.party_alignment.agreed_statement,
+                "conflict_summary": previous_row.party_alignment.conflict_summary,
+            }
+        )
+        seen.add(fact_id)
+        rows.append(
+            _reduce_fact_row(
+                item=carry,
+                fact_id=fact_id,
+                previous_row=previous_row,
+                current_ref=current_ref,
+                actor_role=actor_role,
+                matrix_kind=matrix_kind,
+            )
+        )
+    if previous_rows:
+        previous_order = {fact_id: index for index, fact_id in enumerate(previous_rows)}
+        rows.sort(
+            key=lambda row: (
+                0,
+                previous_order[row["fact_id"]],
+            )
+            if row["fact_id"] in previous_order
+            else (1, 0)
         )
     summary_ids = _deduplicate(
         [resolved_ids[key] for key in resolved_delta.summary_source_fact_keys]
@@ -425,6 +463,7 @@ def _reduce_fact_row(
             else status != CaseAlignmentStatus.AGREED
         ),
         "truth_status": "NOT_EVALUATED",
+        "evidence_coverage_status": "PENDING_EVIDENCE_REVIEW",
     }
 
 
@@ -544,14 +583,10 @@ def _claims(
     if not claim_refs:
         claim_refs.append(current_ref)
 
-    reported = _reported_position(
-        request,
-        case_detail,
-        previous,
-        respondent_role,
-        current_ref,
-        actor_role == initiator_role,
-    )
+    # Actor-local viewpoint ownership: an initiator-authored turn never creates
+    # or carries a position that purports to describe the respondent.  The real
+    # respondent position is added only by the authenticated respondent turn.
+    reported = None
     direct = (
         previous.claims.respondent_direct.model_dump(mode="json")
         if previous is not None and previous.claims.respondent_direct is not None
@@ -831,6 +866,7 @@ def _upgrade_unilateral(source: UnilateralCaseMatrixV1) -> CaseFactMatrixV2:
                 },
                 "requires_resolution": None,
                 "truth_status": "NOT_EVALUATED",
+                "evidence_coverage_status": "PENDING_EVIDENCE_REVIEW",
             }
         )
     refs = list(source.source_binding.source_refs)
@@ -1027,12 +1063,15 @@ def _with_hash(value: dict[str, Any]) -> CaseFactMatrixV2:
 
 
 def case_fact_matrix_content_hash(value: Mapping[str, Any]) -> str:
-    """Return the historic CaseFactMatrixV2 content hash.
+    """Return the cross-language RFC 8785 CaseFactMatrixV2 content hash."""
 
-    Baseline formal-matrix self-hashes deliberately use sorted compact
-    ``json.dumps`` bytes rather than the RFC8785 envelope protocol, so this
-    helper must not be replaced with the generic contract hash.
-    """
+    material = dict(value)
+    material.pop("content_hash", None)
+    return canonical_sha256(material)
+
+
+def _historic_case_fact_matrix_content_hash(value: Mapping[str, Any]) -> str:
+    """Return the pre-JCS Python hash accepted only for legacy verification."""
 
     material = dict(value)
     material.pop("content_hash", None)
@@ -1040,13 +1079,7 @@ def case_fact_matrix_content_hash(value: Mapping[str, Any]) -> str:
 
 
 def validate_case_fact_matrix_content_hash(value: Mapping[str, Any]) -> bool:
-    """Validate baseline and Java-authoritative CaseFactMatrixV2 hashes.
-
-    Baseline Python matrices retain their historic sorted-JSON hash, while
-    Java-owned formal matrices use the cross-language RFC8785 contract hash.
-    The stored value remains authoritative; this compatibility check never
-    rewrites it or weakens parent/hash binding.
-    """
+    """Validate JCS matrices plus already-persisted pre-JCS Python matrices."""
 
     content_hash = value.get("content_hash")
     return (
@@ -1055,7 +1088,7 @@ def validate_case_fact_matrix_content_hash(value: Mapping[str, Any]) -> bool:
         and content_hash
         in {
             case_fact_matrix_content_hash(value),
-            canonical_sha256_omitting(value, "content_hash"),
+            _historic_case_fact_matrix_content_hash(value),
         }
     )
 

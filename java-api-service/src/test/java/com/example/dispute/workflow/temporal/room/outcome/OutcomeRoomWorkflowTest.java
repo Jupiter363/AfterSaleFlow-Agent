@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.temporal.room.outcome;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
@@ -35,6 +36,42 @@ class OutcomeRoomWorkflowTest {
           .isEqualTo(decision.authorizesExecution() ? 2 : 0);
       assertThat(state.operations()).isEmpty();
     });
+  }
+
+  @Test
+  void runtimeKernelUsesTheSharedZeroBasedReviewEpochContract() {
+    assertThatCode(
+            () ->
+                new OutcomeWorkflowKernel.Start(
+                    "OUTCOME_WORKFLOW_ZERO",
+                    "CASE_ZERO",
+                    0,
+                    1,
+                    0,
+                    OPENED_AT,
+                    OPENED_AT.plusSeconds(30),
+                    com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes.RuntimeMode
+                        .TEMPORAL,
+                    false))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> new OutcomeWorkflowKernel.Authority("OUTCOME_WORKFLOW_ZERO", "CASE_ZERO", 0, 1))
+        .doesNotThrowAnyException();
+    assertThatThrownBy(
+            () ->
+                new OutcomeWorkflowKernel.Start(
+                    "OUTCOME_WORKFLOW_NEGATIVE",
+                    "CASE_NEGATIVE",
+                    -1,
+                    1,
+                    0,
+                    OPENED_AT,
+                    OPENED_AT.plusSeconds(30),
+                    com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes.RuntimeMode
+                        .TEMPORAL,
+                    false))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("non-negative");
   }
 
   @Test

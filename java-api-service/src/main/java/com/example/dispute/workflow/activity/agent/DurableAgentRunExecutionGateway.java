@@ -105,6 +105,29 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                             state.stageFinal(candidate);
                             return;
                         }
+                        if (publicEvent.eventType() == StreamEventType.GENERATION_RESET) {
+                            if (!v3Frames.isIdle()) {
+                                throw state.protocolFailure(
+                                        "generation reset cannot invalidate an active v3 frame");
+                            }
+                            flushBatch(
+                                    batch,
+                                    state,
+                                    false,
+                                    progressListener,
+                                    cancellationToken);
+                            AgentStreamEvent durableReset =
+                                    state.allocateDurable(publicEvent);
+                            state.accept(candidate);
+                            batch.add(durableReset);
+                            flushBatch(
+                                    batch,
+                                    state,
+                                    false,
+                                    progressListener,
+                                    cancellationToken);
+                            return;
+                        }
                         if (v3FrameEvent(publicEvent.eventType())) {
                             switch (publicEvent.eventType()) {
                                 case PUBLIC_FRAME_START -> {
@@ -214,6 +237,10 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                         state.publicOutputEmitted,
                         failure);
             }
+            if (failure instanceof AgentRunExecutionException typed
+                    && state.hasObservedFailureTerminal()) {
+                throw normalizeObservedFailureTerminal(typed, state);
+            }
             if (state.hasPendingFinal()
                     && !(failure instanceof AgentRunExecutionException)) {
                 throw AgentRunExecutionException.reconcileTerminal(
@@ -281,6 +308,17 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                 progressListener,
                 cancellationToken);
         return new Completion(result, state.lastSequence, state.publicOutputEmitted);
+    }
+
+    private static AgentRunExecutionException normalizeObservedFailureTerminal(
+            AgentRunExecutionException failure, ProgressState state) {
+        return new AgentRunExecutionException(
+                failure.errorCode(),
+                "agent run failure terminal is already durable",
+                failure.recoveryAction(),
+                state.durableSequence(),
+                state.publicOutputEmitted || failure.publicOutputEmitted(),
+                failure);
     }
 
     private static boolean shouldMaterializeLocalFailureTerminal(
@@ -721,6 +759,10 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             return start;
         }
 
+        private boolean isIdle() {
+            return start == null;
+        }
+
         private List<AgentStreamEvent> finish(
                 AgentStreamEvent terminalEvent, ProgressState progress) {
             StreamEventType type = terminalEvent.eventType();
@@ -868,6 +910,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
         private boolean finalObserved;
         private boolean publicOutputEmitted;
         private boolean publicOutputStartMarked;
+        private int generation = 1;
         private AgentStreamEvent pendingFinal;
 
         private ProgressState(ExecuteAgentRunRequest request) {
@@ -890,6 +933,18 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                         durableSequence(),
                         publicOutputEmitted,
                         null);
+            }
+            if (event.eventType() == StreamEventType.GENERATION_RESET
+                    && (!"agent-stream.v3".equals(event.schemaVersion())
+                            || event.payload().node() == null
+                            || event.payload().node().isBlank()
+                            || event.payload().generation() == null
+                            || event.payload().generation() != generation + 1
+                            || event.payload().generation() != 2
+                            || !"OUTPUT_SCHEMA_INVALID".equals(
+                                    event.payload().reasonCode())
+                            || !publicOutputEmitted)) {
+                throw protocolFailure("generation reset violates the bounded retry contract");
             }
             long expectedCandidateSequence;
             try {
@@ -939,6 +994,9 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
 
         private void accept(ProjectedCandidate candidate) {
             acceptedCandidateSequence = candidate.candidateSequence();
+            if (candidate.publicEvent().eventType() == StreamEventType.GENERATION_RESET) {
+                generation = candidate.publicEvent().payload().generation();
+            }
             acceptedTerminal = candidate.publicEvent().eventType() == StreamEventType.FINAL
                     || terminal(candidate.publicEvent().eventType());
         }
@@ -1024,6 +1082,10 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
 
         private boolean hasObservedTerminal() {
             return acceptedTerminal || finalObserved;
+        }
+
+        private boolean hasObservedFailureTerminal() {
+            return acceptedTerminal && pendingFinal == null && !finalObserved;
         }
 
         private AgentStreamEvent pendingFinal() {

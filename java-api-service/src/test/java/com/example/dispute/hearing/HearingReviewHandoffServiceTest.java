@@ -250,8 +250,7 @@ class HearingReviewHandoffServiceTest {
         HearingReviewHandoffService handoff = org.mockito.Mockito.mock(HearingReviewHandoffService.class);
         HearingReviewHandoffRecoveryScheduler scheduler =
                 new HearingReviewHandoffRecoveryScheduler(artifactRepository, handoff);
-        when(artifactRepository.findTop50ByArtifactTypeOrderByCreatedAtDesc(
-                        HearingArtifactType.ADJUDICATION_DRAFT))
+        when(artifactRepository.findTop50LegacyAdjudicationDrafts())
                 .thenReturn(List.of(artifact));
 
         scheduler.recover();

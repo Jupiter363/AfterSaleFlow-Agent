@@ -129,6 +129,17 @@ describe("agent stream protocol", () => {
       runId: "AGENT_RUN_3",
       streamUrl: "/api/agent-runs/AGENT_RUN_3/events",
     });
+
+    expect(extractAgentRunDescriptor({
+      schema_version: "target-hearing-agent-run-started.v2",
+      agent_run_id: "AGENT_RUN_INTERNAL",
+      stream_access: "INTERNAL_SYSTEM_ONLY",
+    })).toMatchObject({
+      runId: "AGENT_RUN_INTERNAL",
+      streamUrl: "",
+      streamAccess: "INTERNAL_SYSTEM_ONLY",
+      schemaVersion: "target-hearing-agent-run-started.v2",
+    });
   });
 
   // 业务位置：【前端 API/SSE 适配】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面操作和访问令牌 正确进入 Java HTTP 请求或 Agent 流事件。上游：页面操作和访问令牌。下游：Java HTTP 请求或 Agent 流事件。边界：统一处理错误和取消，不能伪造服务端状态。

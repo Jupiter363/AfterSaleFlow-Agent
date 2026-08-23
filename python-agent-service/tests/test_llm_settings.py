@@ -1,7 +1,7 @@
 # 文件作用：自动化测试文件，验证 test_llm_settings 相关模块的行为、契约或页面布局。
 
 from app.config import Settings
-from app.main import _build_evaluation_workflow
+from app.main import _build_evaluation_workflow, _build_llm_client
 
 
 # 所属模块：Python 支撑模块 > test_llm_settings；函数角色：回归测试用例。
@@ -11,7 +11,7 @@ from app.main import _build_evaluation_workflow
 def test_settings_resolve_qwen_only_through_litellm() -> None:
     settings = Settings(
         litellm_base_url="http://litellm-proxy:4000",
-        litellm_model="qwen3.7-plus",
+        litellm_model="qwen3.8-max",
         litellm_master_key="test-litellm-master-key",
         langfuse_public_key="pk-test-key",
         langfuse_secret_key="sk-test-secret",
@@ -21,8 +21,41 @@ def test_settings_resolve_qwen_only_through_litellm() -> None:
     )
 
     assert settings.resolved_llm_base_url == "http://litellm-proxy:4000"
-    assert settings.resolved_llm_model == "qwen3.7-plus"
+    assert settings.resolved_llm_model == "qwen3.8-max"
     assert settings.resolved_llm_api_key == "test-litellm-master-key"
+
+
+def test_llm_builder_propagates_thinking_configuration() -> None:
+    settings = Settings(
+        litellm_master_key="test-litellm-master-key",
+        llm_enable_thinking=True,
+        langfuse_public_key="pk-test-key",
+        langfuse_secret_key="sk-test-secret",
+        java_service_secret="test-java-service-secret",
+        python_agent_service_secret="test-agent-service-secret",
+        langfuse_enabled=False,
+    )
+
+    client = _build_llm_client(settings)
+
+    assert client._enable_thinking is True
+    assert client._strict_json_schema_enabled is False
+
+
+def test_llm_builder_can_explicitly_enable_provider_json_schema() -> None:
+    settings = Settings(
+        litellm_master_key="test-litellm-master-key",
+        llm_strict_json_schema_enabled=True,
+        langfuse_public_key="pk-test-key",
+        langfuse_secret_key="sk-test-secret",
+        java_service_secret="test-java-service-secret",
+        python_agent_service_secret="test-agent-service-secret",
+        langfuse_enabled=False,
+    )
+
+    client = _build_llm_client(settings)
+
+    assert client._strict_json_schema_enabled is True
 
 
 # 所属模块：Python 支撑模块 > test_llm_settings；函数角色：回归测试用例。

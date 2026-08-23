@@ -19,6 +19,8 @@ import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.executor.application.ToolExecutorService;
+import com.example.dispute.hearing.infrastructure.persistence.entity.HearingFlowArtifactEntity;
+import com.example.dispute.hearing.infrastructure.persistence.repository.HearingFlowArtifactRepository;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
@@ -37,6 +39,7 @@ import com.example.dispute.review.application.ReviewDecisionCommand;
 import com.example.dispute.review.application.ReviewDecisionView;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -58,6 +61,7 @@ class CaseOutcomeServiceTest {
     @Mock private FulfillmentCaseRepository caseRepository;
     @Mock private ApprovalRecordRepository approvalRepository;
     @Mock private AdjudicationDraftRepository draftRepository;
+    @Mock private HearingFlowArtifactRepository hearingFlowArtifactRepository;
     @Mock private FlowConclusionRepository conclusionRepository;
     @Mock private ToolExecutorService executorService;
     @Mock private RemedyPlanRepository remedyPlanRepository;
@@ -77,6 +81,7 @@ class CaseOutcomeServiceTest {
                         caseRepository,
                         approvalRepository,
                         draftRepository,
+                        hearingFlowArtifactRepository,
                         conclusionRepository,
                         executorService,
                         remedyPlanRepository,
@@ -93,19 +98,27 @@ class CaseOutcomeServiceTest {
     @Test
     void projectsTheLatestHumanDecisionOverTheAdjudicationDraft() {
         FulfillmentCaseEntity dispute = dispute();
+        OffsetDateTime committedAt = OffsetDateTime.parse("2026-08-21T14:00:00Z");
         ApprovalRecordEntity approval =
-                ApprovalRecordEntity.record(
-                        "APPROVAL_1",
-                        dispute.getId(),
-                        "TASK_1",
+                ApprovalRecordEntity.recordFrozen(
+                         "APPROVAL_1",
+                         dispute.getId(),
+                         "TASK_1",
                         "PLAN_1",
                         "reviewer-1",
                         "PLATFORM_REVIEWER",
                         ApprovalDecisionType.APPROVE,
-                        "{}",
-                        "{\"actions\":[{\"type\":\"REFUND\"}]}",
-                        "审核员确认证据链完整。",
-                        "hash-1");
+                         "{}",
+                         "{\"actions\":[{\"type\":\"REFUND\"}]}",
+                         "审核员确认证据链完整。",
+                         "hash-1",
+                         "PACKET_1",
+                         1,
+                         "review-policy.v1",
+                         "snapshot-hash-1",
+                         committedAt.plusHours(1),
+                         committedAt);
+        approval.bindDecisionActions("REFUND_ONLY", "REFUND_ONLY");
         AdjudicationDraftEntity draft =
                 AdjudicationDraftEntity.create(
                         "DRAFT_1",
@@ -122,6 +135,36 @@ class CaseOutcomeServiceTest {
                         "adjudication-agent",
                         "READY",
                         "system");
+        HearingFlowArtifactEntity frozenDraft =
+                HearingFlowArtifactEntity.adjudicationDraft(
+                        draft.getId(),
+                        dispute.getId(),
+                        "FLOW_1",
+                        "DOSSIER_1",
+                        "a".repeat(64),
+                        "PROPOSAL_1",
+                        "b".repeat(64),
+                        "REPORT_1",
+                        "c".repeat(64),
+                        "d".repeat(64),
+                        "{\"draft_id\":\"DRAFT_1\",\"draft\":{\"decision_reasoning\":\"物流记录与双方陈述表明签收主体仍待核验。\",\"remedy_orders\":[{\"remedy_type\":\"REFUND_ONLY\",\"order_text\":\"核验完成后执行退款。\"}]},\"review_responses\":[{\"review_item_ref\":\"JURY_FINDING_FACT_COMPLETENESS\",\"review_source\":\"JURY_FINDING\",\"disposition\":\"ACCEPTED\",\"response\":\"已补充签收主体证据缺口。\",\"affected_fields\":[\"fact_findings\"]},{\"review_item_ref\":\"JURY_MANDATORY_01\",\"review_source\":\"MANDATORY_REVISION\",\"disposition\":\"ACCEPTED\",\"response\":\"已改为等待身份核验。\",\"affected_fields\":[\"decision_reasoning\"]}]}",
+                        "RUN_1",
+                        Instant.parse("2026-08-21T13:59:00Z"),
+                        "system");
+        HearingFlowArtifactEntity frozenJuryReport =
+                HearingFlowArtifactEntity.juryReviewReport(
+                        "REPORT_1",
+                        dispute.getId(),
+                        "FLOW_1",
+                        "DOSSIER_1",
+                        "a".repeat(64),
+                        "PROPOSAL_1",
+                        "b".repeat(64),
+                        "c".repeat(64),
+                        "{\"report_id\":\"REPORT_1\",\"proposal\":{\"findings\":[{\"dimension\":\"FACT_COMPLETENESS\",\"assessment\":\"签收主体事实仍有缺口。\",\"basis\":[\"签收底单未记载身份。\"],\"severity\":\"HIGH\",\"requires_revision\":true}],\"mandatory_revisions\":[\"必须核验签收主体后再裁决。\"]}}",
+                        "RUN_JURY_1",
+                        Instant.parse("2026-08-21T13:58:00Z"),
+                        "system");
 
         when(caseRepository.findById(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
@@ -129,6 +172,14 @@ class CaseOutcomeServiceTest {
                 .thenReturn(List.of(approval));
         when(draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(dispute.getId()))
                 .thenReturn(Optional.of(draft));
+        when(hearingFlowArtifactRepository.findByCaseIdAndArtifactType(
+                        dispute.getId(),
+                        com.example.dispute.hearing.domain.HearingArtifactType.ADJUDICATION_DRAFT))
+                .thenReturn(Optional.of(frozenDraft));
+        when(hearingFlowArtifactRepository.findByCaseIdAndArtifactType(
+                        dispute.getId(),
+                        com.example.dispute.hearing.domain.HearingArtifactType.JURY_REVIEW_REPORT))
+                .thenReturn(Optional.of(frozenJuryReport));
         when(conclusionRepository.findByCaseId(dispute.getId()))
                 .thenReturn(Optional.empty());
         when(executorService.actions(
@@ -148,6 +199,11 @@ class CaseOutcomeServiceTest {
         assertThat(outcome.finalDecision().reviewReason())
                 .isEqualTo("审核员确认证据链完整。");
         assertThat(outcome.finalDecision().humanConfirmed()).isTrue();
+        assertThat(outcome.finalDecision().approvalRecordId()).isEqualTo("APPROVAL_1");
+        assertThat(outcome.finalDecision().decisionType()).isEqualTo("APPROVE");
+        assertThat(outcome.finalDecision().aiDecisionAction()).isEqualTo("REFUND_ONLY");
+        assertThat(outcome.finalDecision().reviewerDecisionAction()).isEqualTo("REFUND_ONLY");
+        assertThat(outcome.finalDecision().decidedAt()).isNotNull();
         assertThat(outcome.finalDecision().approvedPlan().at("/actions/0/type").asText())
                 .isEqualTo("REFUND");
         assertThat(outcome.adjudicationDraft()).isNotNull();
@@ -160,6 +216,25 @@ class CaseOutcomeServiceTest {
                 .isEqualTo("签收争议举证责任");
         assertThat(outcome.adjudicationDraft().reviewerAttention().get(0).asText())
                 .isEqualTo("核验签收人身份");
+        assertThat(outcome.adjudicationDraft().decisionReasoning())
+                .isEqualTo("物流记录与双方陈述表明签收主体仍待核验。");
+        assertThat(outcome.adjudicationDraft().remedyOrders().at("/0/remedy_type").asText())
+                .isEqualTo("REFUND_ONLY");
+        assertThat(outcome.adjudicationDraft().remedyOrders().at("/0/order_text").asText())
+                .isEqualTo("核验完成后执行退款。");
+        assertThat(outcome.adjudicationDraft().juryReviewExchanges()).hasSize(2);
+        assertThat(
+                        outcome.adjudicationDraft()
+                                .juryReviewExchanges()
+                                .at("/0/review_item_ref")
+                                .asText())
+                .isEqualTo("JURY_FINDING_FACT_COMPLETENESS");
+        assertThat(outcome.adjudicationDraft().juryReviewExchanges().at("/0/jury_opinion").asText())
+                .isEqualTo("签收主体事实仍有缺口。");
+        assertThat(outcome.adjudicationDraft().juryReviewExchanges().at("/0/judge_response").asText())
+                .isEqualTo("已补充签收主体证据缺口。");
+        assertThat(outcome.adjudicationDraft().juryReviewExchanges().at("/1/jury_opinion").asText())
+                .isEqualTo("必须核验签收主体后再裁决。");
     }
 
     // 所属模块：【裁决结果查询 / 自动化测试层】「CaseOutcomeServiceTest.exposesLatestPendingRemedyPlanOnTheAdjudicationDraftForReviewerPrefill()」。

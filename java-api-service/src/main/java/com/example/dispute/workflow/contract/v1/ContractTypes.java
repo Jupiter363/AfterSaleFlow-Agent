@@ -59,7 +59,9 @@ public final class ContractTypes {
         EVIDENCE_OPENING,
         EVIDENCE_SUBMIT,
         PARTY_EVIDENCE_COMPLETE,
+        /** Historical discriminator retained only for immutable old ledger rows. */
         HEARING_STATEMENT,
+        HEARING_ANSWER_BUNDLE,
         HEARING_EVIDENCE_BATCH,
         REVIEW_DECISION,
         EXECUTE_APPROVED_PLAN,
@@ -92,6 +94,7 @@ public final class ContractTypes {
     public enum StreamEventType {
         ATTEMPT_STARTED("attempt_started"),
         VISIBLE_DELTA("visible_delta"),
+        GENERATION_RESET("generation_reset"),
         PUBLIC_FRAME_START("public_frame_start"),
         PUBLIC_TEXT_DELTA("public_text_delta"),
         ACTIVE_FRAME_SNAPSHOT("active_frame_snapshot"),
@@ -144,6 +147,16 @@ public final class ContractTypes {
     public enum AgentRunExecutorKind {
         LEGACY_WORKER,
         TEMPORAL_ACTIVITY
+    }
+
+    /**
+     * Selects the HTTP/SSE projection boundary without changing the signed Graph command
+     * audience. BOUND_AUDIENCE preserves the command actor/audience contract.
+     * CASE_PARTICIPANTS exposes only a role-local projection to an already authorized case actor.
+     */
+    public enum AgentRunStreamProjection {
+        BOUND_AUDIENCE,
+        CASE_PARTICIPANTS
     }
 
     public enum AgentRunAttemptStatus {

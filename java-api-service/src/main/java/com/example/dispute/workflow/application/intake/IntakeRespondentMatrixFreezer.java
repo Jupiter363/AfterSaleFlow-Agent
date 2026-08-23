@@ -348,18 +348,25 @@ public final class IntakeRespondentMatrixFreezer {
                             "respondent matrix delta carries a prior fact more than once");
                 }
             } else {
-                if (parentIndex.byFingerprint()
-                        .containsKey(fingerprint(item.category(), item.factTarget()))) {
-                    throw rejected(
-                            "INTAKE_RESPONDENT_MATRIX_NEW_FACT_COLLISION",
-                            "a proposal-local new fact duplicates existing formal authority");
-                }
-                factId = stableFactId(
-                        authority.caseId(), item.category(), item.factTarget());
-                if (parentIndex.byId().containsKey(factId)) {
-                    throw rejected(
-                            "INTAKE_RESPONDENT_MATRIX_NEW_FACT_COLLISION",
-                            "a proposal-local new fact collides with existing formal authority");
+                String canonicalId = parentIndex.byFingerprint()
+                        .get(fingerprint(item.category(), item.factTarget()));
+                if (canonicalId != null) {
+                    factId = canonicalId;
+                    prior = parentIndex.byId().get(factId);
+                    requireStableBinding(prior, item);
+                    if (!carriedParentIds.add(factId)) {
+                        throw rejected(
+                                "INTAKE_RESPONDENT_MATRIX_FACT_DUPLICATE",
+                                "respondent matrix delta carries a prior fact more than once");
+                    }
+                } else {
+                    factId = stableFactId(
+                            authority.caseId(), item.category(), item.factTarget());
+                    if (parentIndex.byId().containsKey(factId)) {
+                        throw rejected(
+                                "INTAKE_RESPONDENT_MATRIX_NEW_FACT_COLLISION",
+                                "a proposal-local new fact collides with existing formal authority");
+                    }
                 }
             }
             if (!resolvedIds.add(factId)) {

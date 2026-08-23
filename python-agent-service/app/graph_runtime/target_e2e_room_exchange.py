@@ -23,7 +23,10 @@ import httpx
 
 from app.agents.hearing_flow import HearingFlowWorkflows
 from app.contracts.v1.codec import canonicalize
-from app.contracts.v1.models import SnapshotRef
+from app.contracts.v1.models import (
+    MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT,
+    SnapshotRef,
+)
 from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.gateway import GatewayExecution
 from app.graph_runtime.identity import ThreadRecord
@@ -33,16 +36,17 @@ from app.graphs.hearing.contracts import HearingOperation
 from app.graphs.hearing.errors import HearingGraphContractError
 from app.graphs.hearing.state import HearingGraphInvocation
 from app.graphs.hearing.target_e2e import HearingTargetE2ELoadedInvocation
+from app.harness.invocation_context import AgentInvocationContext
 from app.schemas import (
     HearingBatchEvidenceAssessment,
     HearingEvidenceSynthesisRequest,
     HearingEvidenceSynthesisResult,
     HearingEvidenceRequestsRequest,
     HearingEvidenceRequestsResult,
-    HearingIntakeQuestionsRequest,
-    HearingIntakeQuestionsResult,
-    HearingIntakeSynthesisRequest,
-    HearingIntakeSynthesisResult,
+    HearingIntakeQuestionsRequestV4,
+    HearingIntakeQuestionsResultV5,
+    HearingIntakeSynthesisRequestV4,
+    HearingIntakeSynthesisResultV5,
     HearingJudgeV1Request,
     HearingJudgeV1Result,
     HearingJudgeV2Request,
@@ -65,12 +69,12 @@ _PROPOSAL_REF = re.compile(
 
 _HEARING_TYPES = {
     HearingOperation.INTAKE_QUESTIONS: (
-        HearingIntakeQuestionsRequest,
-        HearingIntakeQuestionsResult,
+        HearingIntakeQuestionsRequestV4,
+        HearingIntakeQuestionsResultV5,
     ),
     HearingOperation.INTAKE_SYNTHESIS: (
-        HearingIntakeSynthesisRequest,
-        HearingIntakeSynthesisResult,
+        HearingIntakeSynthesisRequestV4,
+        HearingIntakeSynthesisResultV5,
     ),
     HearingOperation.EVIDENCE_REQUESTS: (
         HearingEvidenceRequestsRequest,
@@ -337,7 +341,7 @@ class DeterministicTargetE2EHearingInvocationDecoder:
 
 
 class GovernedTargetE2EHearingInvocationDecoder:
-    """Decode a v2 invocation and bind it to the governed Hearing model workflow."""
+    """Decode the V4 invocation and retain its signed Harness sidecar."""
 
     def __init__(self, workflows: HearingFlowWorkflows) -> None:
         if not callable(getattr(workflows, "target_e2e_invocation", None)):
@@ -352,7 +356,7 @@ class GovernedTargetE2EHearingInvocationDecoder:
         event_payload: bytes | None,
     ) -> HearingTargetE2ELoadedInvocation:
         document = _canonical_document(snapshot_payload, "TARGET_E2E_HEARING_INVOCATION_INVALID")
-        if document.get("schema_version") != "target-e2e-hearing-invocation.v2" or set(
+        if document.get("schema_version") != "target-e2e-hearing-invocation.v4" or set(
             document
         ) != {
             "schema_version",
@@ -377,51 +381,100 @@ class GovernedTargetE2EHearingInvocationDecoder:
             or any(character not in "0123456789abcdef" for character in barrier)
         ):
             raise HearingGraphContractError("TARGET_E2E_HEARING_BARRIER_INVALID")
-        governed = self._workflows.target_e2e_invocation(operation, request)
+        agent_context = build_hearing_agent_context(execution)
+        governed = self._workflows.target_e2e_invocation(
+            operation,
+            request,
+            agent_context=agent_context,
+        )
         if not isinstance(governed, HearingGraphInvocation) or governed.request is not request:
             raise HearingGraphContractError("TARGET_E2E_HEARING_WORKFLOW_BINDING_INVALID")
-
-        def exact(value: Any) -> Any:
-            if value is not request:
-                raise HearingGraphContractError("TARGET_E2E_HEARING_REQUEST_IDENTITY_INVALID")
-            return value
-
-        invocation = HearingGraphInvocation(
-            request=request,
-            execute=lambda value: governed.execute(exact(value)),
-            plan_work_items=(
-                (lambda value: governed.plan_work_items(exact(value)))
-                if governed.plan_work_items is not None
-                else None
-            ),
-            execute_work_item=(
-                (lambda value, key: governed.execute_work_item(exact(value), key))
-                if governed.execute_work_item is not None
-                else None
-            ),
-            execute_with_work_results=(
-                (
-                    lambda value, results: governed.execute_with_work_results(
-                        exact(value), results
-                    )
-                )
-                if governed.execute_with_work_results is not None
-                else None
-            ),
-        )
+        if governed.agent_context != agent_context:
+            raise HearingGraphContractError("TARGET_E2E_HEARING_AGENT_CONTEXT_LOST")
         event = command.event_ref
         if event_payload is not None and event is None:
             raise HearingGraphContractError("TARGET_E2E_HEARING_EVENT_BINDING_INVALID")
         return HearingTargetE2ELoadedInvocation(
             operation=operation,
             request=request,
-            invocation=invocation,
+            invocation=governed,
             snapshot_uri=command.domain_snapshot_ref.uri,
             snapshot_hash=command.domain_snapshot_ref.sha256,
             event_uri=event.uri if event is not None else None,
             event_hash=event.sha256 if event is not None else None,
             shared_barrier_receipt_hash=barrier,
         )
+
+
+def build_hearing_agent_context(execution: GatewayExecution) -> AgentInvocationContext:
+    """Project command/thread authority into the shared Hearing Harness context."""
+
+    command = execution.admission.command
+    record = execution.thread_record
+    if not isinstance(record, ThreadRecord) or record.identity != execution.admission.thread:
+        raise HearingGraphContractError("TARGET_E2E_HEARING_THREAD_AUTHORITY_INVALID")
+    identity = record.identity
+    actor = identity.actor_scope
+    role = actor.actor_role.value
+    permission_level = {
+        "USER": "PARTY_USER",
+        "MERCHANT": "PARTY_MERCHANT",
+        "SYSTEM": "SYSTEM_ALL",
+    }.get(role)
+    if permission_level is None:
+        raise HearingGraphContractError("TARGET_E2E_HEARING_ACTOR_ROLE_INVALID")
+    invocation = command.invocation_context
+    access_session_id = f"ACCESS_{identity.actor_scope_hash[:32]}"
+    conversation_scope = ":".join(
+        (
+            command.tenant_surrogate,
+            command.case_id,
+            "HEARING",
+            str(command.room_epoch),
+            role,
+            invocation.agent_profile_id,
+            invocation.prompt_profile_id,
+            access_session_id,
+        )
+    )
+    return AgentInvocationContext.model_validate(
+        {
+            "tenant_id": command.tenant_surrogate,
+            "case_id": command.case_id,
+            "room_type": "HEARING",
+            "actor_id": actor.actor_id,
+            "actor_role": role,
+            "access_session_id": access_session_id,
+            "permission_level": permission_level,
+            "permission_scopes": sorted(actor.capabilities),
+            "agent_key": invocation.agent_profile_id,
+            "agent_invocation_id": command.attempt_id,
+            "agent_session_id": identity.agent_session_id,
+            "conversation_scope": conversation_scope,
+            "scope_type": "ROOM_SHARED",
+            "allowed_actor_ids": [actor.actor_id],
+            "allowed_actor_roles": [role],
+            "prompt_profile_id": invocation.prompt_profile_id,
+            "memory_policy_id": "MEMEO_DEFAULT",
+            "model_profile_id": invocation.model_profile_id,
+            "output_schema_version": invocation.output_schema_version,
+            "policy_version": invocation.policy_version,
+            "guardrail_version": invocation.guardrail_version,
+            "tool_capabilities": list(invocation.tool_capabilities),
+            "retry_budget": {
+                "provider_attempts_remaining": min(
+                    command.retry_budget.provider_attempts_remaining,
+                    MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT,
+                ),
+                "activity_attempts_remaining": (
+                    command.retry_budget.activity_attempts_remaining
+                ),
+                "repairs_remaining": command.retry_budget.repairs_remaining,
+            },
+            "deadline_at": command.deadline_at,
+            "traceparent": command.traceparent,
+        }
+    )
 
 class _ScopedJavaTargetE2ERoomExchange:
     def __init__(self, exchange: JavaTargetE2ERoomExchange, authority: dict[str, Any]) -> None:

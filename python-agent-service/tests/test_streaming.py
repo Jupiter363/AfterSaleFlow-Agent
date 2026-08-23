@@ -756,16 +756,16 @@ def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_docume
         frame_sequence_start=2,
     )
     chunks = (
-        '{"schema_version":"evidence_turn_stream.v2","lead_public_text":"欢迎',
+        '{"schema_version":"evidence_turn_stream.v3","lead_public_text":"欢迎',
         "进入证据",
         '室。","frames":[{"header":{"frame_sequence":2,'
         '"frame_type":"OPENING_ORIENTATION","focus_fact_ids":["FACT_1"]},'
         '"public_text":"正在',
         '核对。"},',
-        '{"header":{"frame_sequence":3,"frame_type":"HUMAN_REVIEW_TASK",'
-        '"evidence_id":"EVIDENCE_1","observation_slots":[],"trigger_code":'
-        '"SOURCE_CHAIN","review_target":"原件","review_instruction":"核对原件",'
-        '"priority":"MEDIUM"},"public_text":null}',
+        '{"header":{"frame_sequence":3,"frame_type":"EVIDENCE_REQUEST",'
+        '"request_slot":"REQ_1","target_fact_ids":["FACT_1"],"gap_codes":[],'
+        '"requested_material_kind":"平台原始记录","priority":"MEDIUM"},'
+        '"public_text":"请补充原件。"}',
         ']}'
     )
 
@@ -791,6 +791,7 @@ def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_docume
     assert json.loads(emitted[3][0][1])["delta"] == "核对。"
     assert [json.loads(delta)["kind"] for _, delta in emitted[4]] == [
         "frame_start",
+        "public_text_delta",
         "frame_end",
     ]
     assert emitted[5] == []
@@ -801,7 +802,7 @@ def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_docume
         match="gate field is not first",
     ):
         reordered_root.feed(
-            '{"schema_version":"evidence_turn_stream.v2","frames":[],'
+            '{"schema_version":"evidence_turn_stream.v3","frames":[],'
             '"lead_public_text":"延迟输出"}'
         )
 
@@ -820,7 +821,7 @@ def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_docume
         match="public frame object must use non-empty public_text",
     ):
         public_null.feed(
-            '{"schema_version":"evidence_turn_stream.v2","frames":'
+            '{"schema_version":"evidence_turn_stream.v3","frames":'
             '[{"header":{"frame_sequence":2,"frame_type":"OPENING_ORIENTATION"},'
             '"public_text":null}]}'
         )
@@ -831,22 +832,9 @@ def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_docume
         match="public frame object must use non-empty public_text",
     ):
         public_empty.feed(
-            '{"schema_version":"evidence_turn_stream.v2","frames":'
+            '{"schema_version":"evidence_turn_stream.v3","frames":'
             '[{"header":{"frame_sequence":2,"frame_type":"OPENING_ORIENTATION"},'
             '"public_text":""}]}'
-        )
-
-    internal_string = IncrementalVisibleJsonProjector((negative_frame_spec,))
-    with pytest.raises(
-        AgentStreamProjectionError,
-        match="internal frame object must use a null public_text",
-    ):
-        internal_string.feed(
-            '{"schema_version":"evidence_turn_stream.v2","frames":'
-            '[{"header":{"frame_sequence":2,"frame_type":"HUMAN_REVIEW_TASK",'
-            '"evidence_id":"EVIDENCE_1","trigger_code":"SOURCE_CHAIN",'
-            '"review_target":"原件","review_instruction":"核对原件",'
-            '"priority":"MEDIUM"},"public_text":"不得公开"}]}'
         )
 
     public_first = IncrementalVisibleJsonProjector((negative_frame_spec,))
@@ -855,9 +843,58 @@ def test_evidence_v2_frame_projector_releases_public_text_before_frame_or_docume
         match="must begin with header",
     ):
         public_first.feed(
-            '{"schema_version":"evidence_turn_stream.v2","frames":['
+            '{"schema_version":"evidence_turn_stream.v3","frames":['
             '{"public_text":"不得先公开","header":'
             '{"frame_sequence":2,"frame_type":"OPENING_ORIENTATION"}}]}'
+        )
+
+
+def test_hearing_v5_projector_streams_self_contained_frame_text_before_object_close() -> None:
+    specs = VISIBLE_FIELD_REGISTRY["hearing_intake_questions"][
+        "hearing_intake_questions"
+    ]
+    chunks = (
+        '{"lead_public_text":"庭前案情已',
+        '装载。","schema_version":"hearing_intake_question_stream.v5",',
+        '"frames":[{"header":{"frame_sequence":2,"frame_type":'
+        '"SHARED_ISSUE_QUESTION","question_slot_id":"QUESTION_SLOT_01",'
+        '"fact_ids":["FACT_01"]},"public_text":"请双方说明',
+        '实际情况。"}',
+        ']',
+        ',"question_bindings":[]}',
+    )
+
+    projector = IncrementalVisibleJsonProjector(specs)
+    replay = IncrementalVisibleJsonProjector(specs)
+    emitted = [projector.feed(chunk) for chunk in chunks]
+    replayed = [replay.feed(chunk) for chunk in chunks]
+
+    assert emitted == replayed
+    assert emitted[0] == [("lead_public_text", "庭前案情已")]
+    assert emitted[1] == [("lead_public_text", "装载。")]
+    assert [json.loads(delta)["kind"] for _, delta in emitted[2]] == [
+        "frame_start",
+        "public_text_delta",
+    ]
+    assert json.loads(emitted[2][0][1])["header"]["question_slot_id"] == (
+        "QUESTION_SLOT_01"
+    )
+    assert json.loads(emitted[2][1][1])["delta"] == "请双方说明"
+    assert [json.loads(delta)["kind"] for _, delta in emitted[3]] == [
+        "public_text_delta",
+        "frame_end",
+    ]
+    assert json.loads(emitted[3][0][1])["delta"] == "实际情况。"
+    assert emitted[4] == []
+    assert emitted[5] == []
+
+    reordered = IncrementalVisibleJsonProjector(specs)
+    with pytest.raises(AgentStreamProjectionError):
+        reordered.feed(
+            '{"lead_public_text":"开始。","frames":'
+            '[{"public_text":"不得先输出","header":'
+            '{"frame_sequence":2,"frame_type":"SHARED_ISSUE_QUESTION",'
+            '"question_slot_id":"QUESTION_SLOT_01","fact_ids":["FACT_01"]}}]}'
         )
 
 
@@ -1170,6 +1207,9 @@ def test_real_provider_stream_projects_answer_and_ignores_reasoning_channel() ->
     assert sent["stream_options"] == {"include_usage": True}
 
 
+@pytest.mark.skip(
+    reason="retired room_utterance root; Evidence V3 streams lead_public_text and frame_texts"
+)
 def test_evidence_litellm_stream_projects_root_before_done_once() -> None:
     safe_sentence = "我会先核验本轮材料与案情的关联。"
     private_object = "PRIVATE_NESTED_PROVIDER_TEXT"
@@ -1328,6 +1368,9 @@ def test_evidence_litellm_stream_projects_root_before_done_once() -> None:
     assert len(requests) == 1
 
 
+@pytest.mark.skip(
+    reason="retired room_utterance root; Evidence V3 native streaming has dedicated coverage"
+)
 @pytest.mark.asyncio
 async def test_evidence_native_async_runner_streams_safe_root_before_done_once() -> None:
     from contextlib import suppress
@@ -1588,6 +1631,9 @@ def test_ndjson_endpoint_uses_one_versioned_terminal_contract() -> None:
     assert events[-1]["response"] == {"answer": "完成"}
 
 
+@pytest.mark.skip(
+    reason="legacy Evidence opening is intentionally unsupported after the V3 activation cutover"
+)
 def test_legacy_evidence_opening_accepts_raw_authority_hash_and_streams_guarded_result() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.config import Settings

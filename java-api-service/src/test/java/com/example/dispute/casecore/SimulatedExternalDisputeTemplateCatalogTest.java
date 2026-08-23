@@ -7,6 +7,7 @@
 package com.example.dispute.casecore;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.casecore.application.SimulatedExternalDisputeTemplate;
 import com.example.dispute.casecore.application.SimulatedExternalDisputeTemplateCatalog;
@@ -104,5 +105,22 @@ class SimulatedExternalDisputeTemplateCatalogTest {
                                             template.requestedResolution(),
                                             "VERIFY_OR_EXPLAIN_ONLY");
                         });
+    }
+
+    @Test
+    void resolvesOnlyTheNamedCanonicalFullChainFixture() {
+        SimulatedExternalDisputeTemplate fixture =
+                catalog.getFixture(
+                        SimulatedExternalDisputeTemplateCatalog.CANONICAL_FULL_CHAIN_FIXTURE_ID);
+
+        assertThat(fixture.templateNo()).isEqualTo(20);
+        assertThat(fixture.title()).isEqualTo("商品参数宣传与检测结果不符");
+        assertThat(fixture.requestedAmount()).isEqualByComparingTo("1899.00");
+        assertThat(fixture.originalStatement()).contains("空气净化器");
+        assertThat(fixture.requestReason()).contains("宣传参数依据");
+
+        assertThatThrownBy(() -> catalog.getFixture("unknown-fixture-v1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unknown simulated import fixture_id");
     }
 }

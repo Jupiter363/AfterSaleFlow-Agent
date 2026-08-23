@@ -708,6 +708,32 @@ def _intake_governed_delta(field: str, delta: str) -> tuple[str, tuple[AIMessage
     )
 
 
+def test_intake_live_projection_applies_agent_stream_delta_limit_before_payload_validation() -> None:
+    oversized_card = json.dumps(
+        {"kind": "CASE_FACT_MATRIX", "value": {"detail": "x" * 5_000}},
+        separators=(",", ":"),
+    )
+
+    assert CompiledIntakeGraphShadowExecutor._live_public_updates(
+        intake_executor._IntakeLiveVisibleDelta(
+            "intake_turn_case_detail",
+            "ordered_sections",
+            oversized_card,
+        )
+    ) == ()
+
+    oversized_room = "答" * 5_000
+    room_updates = CompiledIntakeGraphShadowExecutor._live_public_updates(
+        intake_executor._IntakeLiveVisibleDelta(
+            "intake_turn_case_detail",
+            "room_utterance",
+            oversized_room,
+        )
+    )
+    assert "".join(update.payload.delta or "" for update in room_updates) == oversized_room
+    assert all(len(update.payload.delta or "") <= 4_096 for update in room_updates)
+
+
 def _intake_stream_executor(
     monkeypatch: pytest.MonkeyPatch,
     candidates: list[Any],

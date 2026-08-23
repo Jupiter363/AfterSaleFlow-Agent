@@ -16,6 +16,7 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.application.EvidenceCatalogService;
+import com.example.dispute.evidence.application.RoleScopedEvidenceView;
 import com.example.dispute.evidence.application.EvidenceVerificationCommand;
 import com.example.dispute.evidence.application.EvidenceVerificationService;
 import com.example.dispute.evidence.domain.EvidenceVerificationStatus;
@@ -163,7 +164,7 @@ class EvidenceVerificationAndCatalogServiceTest {
     // 下游影响：「EvidenceVerificationAndCatalogServiceTest.catalogIncludesLatestVerificationConfidenceFeedback()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「EvidenceVerificationAndCatalogServiceTest.catalogIncludesLatestVerificationConfidenceFeedback()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「EVIDENCE_CONFIDENCE」、「USER」、「user-local」、「PARTIES」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void catalogIncludesLatestVerificationConfidenceFeedback() {
+    void catalogIncludesLatestV3AssessmentConfidenceAndFeedback() {
         FulfillmentCaseEntity dispute = evidenceCase();
         EvidenceItemEntity sharedEvidence =
                 evidence("EVIDENCE_CONFIDENCE", "USER", "user-local", "PARTIES");
@@ -175,7 +176,14 @@ class EvidenceVerificationAndCatalogServiceTest {
                         3,
                         EvidenceVerificationStatus.PLAUSIBLE,
                         "{}",
-                        "{\"confidence_score\":0.82,\"confidence_level\":\"HIGH\",\"verification_feedback\":\"原始图片时间线与物流节点基本一致。\"}",
+                        """
+                        {"schema_version":"evidence-turn-result.v3",
+                         "assessment_confidence":0.82,
+                         "assessment_confidence_explanation":"图片文字清晰，时间节点能够读取。",
+                         "risk_level":"LOW",
+                         "risk_explanation":"未发现明显异常。",
+                         "assessment_public_text":"原始图片时间线与物流节点基本一致。"}
+                        """,
                         "{\"summary\":\"OCR 与物流签收时间可互相印证\"}",
                         false,
                         Instant.parse("2026-07-03T01:00:00Z"),
@@ -200,8 +208,12 @@ class EvidenceVerificationAndCatalogServiceTest {
                 item -> {
                     assertThat(item.evidenceId()).isEqualTo("EVIDENCE_CONFIDENCE");
                     assertThat(item.verificationStatus()).isEqualTo(EvidenceVerificationStatus.PLAUSIBLE);
-                    assertThat(item.confidenceScore()).isEqualTo(0.82);
-                    assertThat(item.confidenceLevel()).isEqualTo("HIGH");
+                    assertThat(item.assessmentProtocol()).isEqualTo("evidence-turn-result.v3");
+                    assertThat(item.assessmentConfidence()).isEqualTo(0.82);
+                    assertThat(item.assessmentConfidenceExplanation())
+                            .isEqualTo("图片文字清晰，时间节点能够读取。");
+                    assertThat(item.riskLevel()).isEqualTo("LOW");
+                    assertThat(item.riskExplanation()).isEqualTo("未发现明显异常。");
                     assertThat(item.verificationFeedback())
                             .isEqualTo("原始图片时间线与物流节点基本一致。");
                 });
@@ -227,21 +239,31 @@ class EvidenceVerificationAndCatalogServiceTest {
                         "{}",
                         """
                         {
-                          "confidence_score":0.82,
+                          "schema_version":"evidence-turn-result.v3",
                           "authenticity_score":0.71,
+                          "authenticity_score_explanation":"材料来源可识别但缺少平台原始导出。",
                           "relevance_score":0.93,
+                          "relevance_score_explanation":"材料内容直接对应目标事实。",
                           "completeness_score":0.66,
+                          "completeness_score_explanation":"当前截图未包含完整上下文。",
                           "assessment_confidence":0.82,
-                          "inspected_modalities":["IMAGE","OCR_TEXT"],
+                          "assessment_confidence_explanation":"图像及 OCR 文本均可读取。",
+                          "risk_level":"HIGH",
+                          "risk_explanation":"原始来源链缺失，需要人工确认。",
+                          "source_basis":["IMAGE","OCR_TEXT"],
+                          "formation_time_assessment":"像素内容本身不能确定拍摄时间",
+                          "findings":[{"finding_type":"OCR_TEXT","description":"识别到物流节点"}],
                           "limitations":["Cannot establish capture time from pixels alone"],
-                          "human_review":{
-                            "required":true,
-                            "reason_codes":["SOURCE_PROVENANCE"],
-                            "instructions":["Inspect original export"]
-                          }
+                          "unsupported_claims":["不能仅凭截图确认原始形成时间"],
+                          "assessment_public_text":"材料与物流事实相关，但原始来源链需要人工确认。"
                         }
                         """,
-                        "{}",
+                        """
+                        {"requires_human_review":true,
+                         "reason_details":[{"code":"HIGH_RISK_FLAG",
+                         "label":"模型综合判断该材料为高风险",
+                         "explanation":"原始来源链缺失，需要人工确认。"}]}
+                        """,
                         true,
                         Instant.parse("2026-07-03T01:30:00Z"),
                         "evidence-clerk",
@@ -267,12 +289,29 @@ class EvidenceVerificationAndCatalogServiceTest {
         assertThat(item.relevanceScore()).isEqualTo(0.93);
         assertThat(item.completenessScore()).isEqualTo(0.66);
         assertThat(item.assessmentConfidence()).isEqualTo(0.82);
-        assertThat(item.inspectedModalities()).containsExactly("IMAGE", "OCR_TEXT");
+        assertThat(item.authenticityScoreExplanation())
+                .isEqualTo("材料来源可识别但缺少平台原始导出。");
+        assertThat(item.relevanceScoreExplanation()).isEqualTo("材料内容直接对应目标事实。");
+        assertThat(item.completenessScoreExplanation()).isEqualTo("当前截图未包含完整上下文。");
+        assertThat(item.assessmentConfidenceExplanation()).isEqualTo("图像及 OCR 文本均可读取。");
+        assertThat(item.riskLevel()).isEqualTo("HIGH");
+        assertThat(item.riskExplanation()).isEqualTo("原始来源链缺失，需要人工确认。");
+        assertThat(item.sourceBasis()).containsExactly("IMAGE", "OCR_TEXT");
+        assertThat(item.formationTimeAssessment()).isEqualTo("像素内容本身不能确定拍摄时间");
+        assertThat(item.findings())
+                .containsExactly(new RoleScopedEvidenceView.AssessmentFinding(
+                        "OCR_TEXT", "识别到物流节点"));
         assertThat(item.limitations())
                 .containsExactly("Cannot establish capture time from pixels alone");
+        assertThat(item.unsupportedClaims()).containsExactly("不能仅凭截图确认原始形成时间");
+        assertThat(item.verificationFeedback())
+                .isEqualTo("材料与物流事实相关，但原始来源链需要人工确认。");
         assertThat(item.requiresHumanReview()).isTrue();
-        assertThat(item.humanReviewReasonCodes()).containsExactly("SOURCE_PROVENANCE");
-        assertThat(item.humanReviewInstructions()).containsExactly("Inspect original export");
+        assertThat(item.reasonDetails())
+                .containsExactly(new RoleScopedEvidenceView.ReviewReasonDetail(
+                        "HIGH_RISK_FLAG",
+                        "模型综合判断该材料为高风险",
+                        "原始来源链缺失，需要人工确认。"));
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceVerificationAndCatalogServiceTest.deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable()」。

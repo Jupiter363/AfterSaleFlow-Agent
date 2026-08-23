@@ -65,7 +65,7 @@ def _semantic_errors(manifest: dict[str, Any], context: dict[str, Any]) -> set[s
         errors.add("MANIFEST_ISSUED_IN_FUTURE")
     if expires_at <= issued_at:
         errors.add("MANIFEST_EXPIRY_ORDER_INVALID")
-    if (expires_at - issued_at).total_seconds() > 7200:
+    if (expires_at - issued_at).total_seconds() > 2_592_000:
         errors.add("MANIFEST_LIFETIME_EXCEEDED")
     if expires_at <= now:
         errors.add("MANIFEST_EXPIRED")
@@ -399,7 +399,7 @@ def test_policy_freezes_transport_replay_authority_and_exact_bindings() -> None:
     assert policy["contractVersion"] == "target-e2e-activation.v1"
     assert policy["executionLane"] == "TARGET_E2E_CANDIDATE"
     assert policy["timePolicy"] == {
-        "maximumLifetimeSeconds": 7200,
+        "maximumLifetimeSeconds": 2_592_000,
         "futureIssuedAtToleranceSeconds": 0,
         "expiresAtMustBeAfterIssuedAt": True,
         "expiredManifestAllowed": False,

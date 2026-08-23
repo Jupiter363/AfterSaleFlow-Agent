@@ -558,6 +558,8 @@ class JdbcTargetHearingBootstrapActivitiesTest {
             select event_json ->> 'agent_run_id' as agent_run_id,
                    event_json ->> 'attempt_id' as attempt_id,
                    event_json ->> 'stream_url' as stream_url,
+                   event_json ->> 'stream_access' as stream_access,
+                   event_json ->> 'schema_version' as schema_version,
                    event_json ->> 'stage_code' as stage_code,
                    (event_json ->> 'fencing_token')::bigint as fencing_token
               from case_timeline_event
@@ -567,7 +569,10 @@ class JdbcTargetHearingBootstrapActivitiesTest {
     assertThat(stored)
         .containsEntry("agent_run_id", event.agentRunId())
         .containsEntry("attempt_id", event.attemptId())
-        .containsEntry("stream_url", "/api/agent-runs/" + event.agentRunId() + "/events")
+        .containsEntry(
+            "stream_url", "/api/agent-runs/" + event.agentRunId() + "/events")
+        .containsEntry("stream_access", "ACTOR_VISIBLE")
+        .containsEntry("schema_version", "target-hearing-agent-run-started.v3")
         .containsEntry("stage_code", event.stageCode())
         .containsEntry("fencing_token", event.fencingToken());
 
@@ -816,7 +821,7 @@ class JdbcTargetHearingBootstrapActivitiesTest {
         ContractJson.canonicalString(intakeDossier));
 
     ObjectNode evidenceMatrix = mapper.createObjectNode();
-    evidenceMatrix.put("schema_version", "fact_evidence_matrix.v2");
+    evidenceMatrix.put("schema_version", "fact_evidence_matrix.v3");
     evidenceMatrix.put("case_id", caseId);
     evidenceMatrix.put("matrix_id", "EVIDENCE_MATRIX_" + caseId);
     evidenceMatrix.put("matrix_version", 1);
@@ -829,7 +834,8 @@ class JdbcTargetHearingBootstrapActivitiesTest {
     evidenceMatrix.putArray("source_refs");
     evidenceMatrix.put("content_hash", ContractJson.sha256Hex(evidenceMatrix));
     ObjectNode matrixSummary = mapper.createObjectNode();
-    matrixSummary.set("fact_evidence_matrix_v2", evidenceMatrix);
+    matrixSummary.put("schema_version", "evidence-dossier-matrix-summary.v3");
+    matrixSummary.set("fact_evidence_matrix", evidenceMatrix);
     jdbc.update(
         """
         insert into evidence_dossier (

@@ -100,8 +100,8 @@ def _build_async_family(identity: HearingGraphIdentity) -> StateGraph:
     return _build_family(identity, async_execution=True)
 
 
-def build_hearing_intake_v1_graph() -> StateGraph:
-    return _build_family(HEARING_GRAPH_IDENTITIES["hearing.intake.v1"])
+def build_hearing_intake_v4_graph() -> StateGraph:
+    return _build_family(HEARING_GRAPH_IDENTITIES["hearing.intake.v4"])
 
 
 def build_hearing_evidence_v1_graph() -> StateGraph:

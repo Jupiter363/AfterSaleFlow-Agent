@@ -6,15 +6,47 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.temporal.room.outcome.OutcomeCompletionRequest;
+import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
 class TargetOutcomeCompletionBindingTest {
 
   @Test
-  void usesTheApprovedActionSnapshotRatherThanTheApprovalIdentityHash() {
+  void convertsOutcomeWriteTimesToExplicitJdbcTimestamps() {
+    Instant value = Instant.parse("2026-08-23T10:00:00.123456Z");
+
+    assertThat(JdbcTargetOutcomeCompletionActivities.sqlTimestamp(value).toInstant())
+        .isEqualTo(value);
+  }
+
+  @Test
+  void beginsExecutionOnlyFromTheHumanApprovedCaseState() {
+    assertThat(JdbcTargetOutcomeCompletionActivities.BEGIN_EXECUTION_SQL)
+        .contains(
+            "case_status = 'EXECUTING'",
+            "case_status = 'APPROVED_FOR_EXECUTION'",
+            "version = version + 1");
+  }
+
+  @Test
+  void terminalizesTheEpochUsingOnlyColumnsOwnedByTheEpochTable() {
+    assertThat(JdbcTargetOutcomeCompletionActivities.TERMINALIZE_EPOCH_SQL)
+        .contains(
+            "lifecycle_status = 'TERMINAL'",
+            "process_revision = ?",
+            "room_revision = ?",
+            "terminal_at = ?")
+        .doesNotContain("writer_activation_status");
+  }
+
+  @Test
+  void bindsTheApprovalIdentityAndApprovedActionSnapshotSeparately() {
     assertThat(JdbcTargetTemporalOutcomeBindingResolver.BINDING_SQL)
-        .contains("approval.action_snapshot_hash as approval_action_hash")
-        .doesNotContain("approval.action_hash as approval_action_hash");
+        .contains(
+            "approval.action_hash as approval_hash",
+            "approval.action_snapshot_hash as approval_action_snapshot_hash")
+        .contains("approval.reviewer_decision_action in")
+        .contains("approval.approved_plan_json ->> 'decision_action' =");
   }
 
   @Test
@@ -32,14 +64,17 @@ class TargetOutcomeCompletionBindingTest {
             "admission.command_id = command.command_id",
             "admission.room_epoch = command.room_epoch",
             "approval.id = ?",
+            "approval.ai_decision_action =",
+            "approval.reviewer_decision_action =",
+            "approval.approved_plan_json ->> 'decision_action' =",
             "command.payload_sha256 = ?",
             "material.admission_id = admission.admission_id",
             "material.command_hash = admission.command_hash",
             "material.command_envelope_hash = admission.command_envelope_hash",
-            "'{request,command,event_ref,sha256}'",
-            "'{request,command,request_hash}'",
-            "command.request_hash")
-        .doesNotContain("command.request_hash = ?");
+            "'{request,command,event_ref,sha256}'")
+        .doesNotContain(
+            "material.material_canonical_json::jsonb #>> '{request,command,request_hash}'",
+            "command.request_hash = ?");
   }
 
   @Test
@@ -72,6 +107,21 @@ class TargetOutcomeCompletionBindingTest {
         request, 7, 8, 7, 7))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("revision is stale");
+  }
+
+  @Test
+  void terminalProgressAcceptsTheFirstZeroEpochButRejectsNegativeCoordinates() {
+    assertThatCode(
+            () ->
+                new TargetOutcomeCompletionActivities.TerminalProgressRequest(
+                    "outcome:CASE_1:0", "CASE_1", 0, 9, "APPROVAL_1", "a".repeat(64), 0))
+        .doesNotThrowAnyException();
+
+    assertThatThrownBy(
+            () ->
+                new TargetOutcomeCompletionActivities.TerminalProgressRequest(
+                    "outcome:CASE_1:-1", "CASE_1", -1, 9, "APPROVAL_1", "a".repeat(64), 0))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   private static OutcomeCompletionRequest request(long processRevision, long roomRevision) {

@@ -1,16 +1,18 @@
 package com.example.dispute.workflow.targete2e.rooms.hearing;
 
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart;
 import com.example.dispute.workflow.temporal.room.hearing.HearingWorkflowStage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.security.MessageDigest;
 import java.util.ArrayList;
-import java.util.HexFormat;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import javax.sql.DataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -42,6 +44,8 @@ public final class JdbcTargetHearingAgentStageInputFactory {
           'stage_sequence', s.stage_sequence, 'stage_input', s.input_json, 'stage_output', s.output_json,
           'trial_dossier', coalesce((select payload_json from hearing_trial_dossier d where d.case_id = f.case_id and d.flow_instance_id = f.id order by d.created_at desc, d.id desc limit 1), '{}'::jsonb),
           'actions', coalesce((select jsonb_agg(jsonb_build_object('id', a.id, 'action_type', a.action_type,
+            'schema_version', a.schema_version, 'participant_id', a.participant_id,
+            'participant_role', a.participant_role, 'submission_status', a.submission_status,
             'content_hash', a.content_hash, 'payload', a.payload_json) order by a.created_at, a.id)
              from hearing_flow_action a where a.flow_instance_id = f.id), '[]'::jsonb))
          from hearing_flow_instance f join hearing_flow_stage s on s.flow_instance_id = f.id
@@ -50,12 +54,37 @@ public final class JdbcTargetHearingAgentStageInputFactory {
     String operation = stage.agentOperation();
     ObjectNode matrix = currentCaseFactMatrix(start, stage, preHearingMatrix);
     ObjectNode request = base(start, stage);
+    if (operation.equals("intake_questions") || operation.equals("intake_synthesis")) {
+      request.put("context_schema_version", "hearing_intake_context.v4");
+      request.put("prelude_authority_hash", prelude.contentHash());
+      ArrayNode sources = request.putArray("source_refs");
+      sources.add(prelude.contentHash());
+      sources.add(sharedBarrierReceiptHash);
+    }
     switch (operation) {
-      case "intake_questions" -> request.set("case_fact_matrix", matrix.deepCopy());
-      case "intake_synthesis" -> {
-        request.set("questions", proposal(action(hearing, "QUESTION_SET")).path("questions").deepCopy());
-        request.set("party_submissions", partySubmissions(hearing, "ANSWER_BUNDLE"));
+      case "intake_questions" -> {
         request.set("case_fact_matrix", matrix.deepCopy());
+        ArrayNode slots = request.putArray("question_slots");
+        for (int index = 1; index <= 5; index++) {
+          ObjectNode slot = slots.addObject();
+          slot.put("question_slot_id", "QUESTION_SLOT_%02d".formatted(index));
+          slot.putArray("target_roles").add("USER").add("MERCHANT");
+        }
+      }
+      case "intake_synthesis" -> {
+        request.set("case_fact_matrix", matrix.deepCopy());
+        ObjectNode questionSet = requireQuestionSet(
+            object(action(hearing, "QUESTION_SET")), matrix, prelude.contentHash(), start.caseId());
+        request.set("question_set", questionSet.deepCopy());
+        request.set("party_answer_bundles", partyAnswerBundles(hearing, questionSet));
+        ArrayNode issueSlots = request.putArray("new_issue_slots");
+        for (int index = 1; index <= 5; index++) {
+          issueSlots.add("NEW_ISSUE_SLOT_%02d".formatted(index));
+        }
+        ArrayNode factSlots = request.putArray("new_fact_slots");
+        for (int index = 1; index <= 20; index++) {
+          factSlots.add("NEW_FACT_SLOT_%02d".formatted(index));
+        }
       }
       case "evidence_requests" -> {
         request.set("case_fact_matrix", matrix.deepCopy()); request.set("evidence_dossier", evidence.deepCopy());
@@ -123,7 +152,7 @@ public final class JdbcTargetHearingAgentStageInputFactory {
     require(evidence.path("dossier_id").isTextual()
         && !evidence.path("dossier_id").asText().isBlank()
         && evidence.path("dossier_version").asInt(0) >= 1, "frozen evidence dossier identity");
-    require("fact_evidence_matrix.v2".equals(matrix.path("schema_version").asText())
+    require("fact_evidence_matrix.v3".equals(matrix.path("schema_version").asText())
         && start.caseId().equals(matrix.path("case_id").asText())
         && "FROZEN".equals(matrix.path("matrix_status").asText())
         && matrix.path("matrix_id").isTextual()
@@ -186,35 +215,147 @@ public final class JdbcTargetHearingAgentStageInputFactory {
   static String pythonContentHash(ObjectMapper mapper, ObjectNode value, String field) {
     ObjectNode unsigned = value.deepCopy();
     unsigned.remove(field);
-    try {
-      byte[] canonical = mapper.writeValueAsBytes(sortObjectMembers(mapper, unsigned));
-      return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(canonical));
-    } catch (Exception failure) {
-      throw new IllegalStateException("target Hearing fixture self-hash failed", failure);
-    }
+    return ContractJson.sha256Hex(unsigned);
   }
 
-  /** Mirrors the frozen Python Hearing content_hash contract (sorted json.dumps, not RFC 8785). */
-  private static JsonNode sortObjectMembers(ObjectMapper mapper, JsonNode value) {
-    if (value.isObject()) {
-      ObjectNode sorted = mapper.createObjectNode();
-      ArrayList<String> fields = new ArrayList<>();
-      value.fieldNames().forEachRemaining(fields::add);
-      fields.sort(String::compareTo);
-      fields.forEach(field -> sorted.set(field, sortObjectMembers(mapper, value.get(field))));
-      return sorted;
+  private ObjectNode requireQuestionSet(
+      ObjectNode value, ObjectNode matrix, String preludeHash, String caseId) {
+    require("hearing_question_set.v4".equals(value.path("schema_version").asText())
+            && caseId.equals(value.path("case_id").asText())
+            && matrix.path("matrix_id").asText().equals(value.path("source_matrix_id").asText())
+            && matrix.path("matrix_version").asInt() == value.path("source_matrix_version").asInt(0)
+            && matrix.path("content_hash").asText().equals(value.path("source_matrix_hash").asText())
+            && preludeHash.equals(value.path("prelude_authority_hash").asText())
+            && value.path("question_set_id").isTextual()
+            && !value.path("question_set_id").asText().isBlank()
+            && value.path("question_set_hash").asText().matches("[a-f0-9]{64}")
+            && value.path("question_set_hash").asText()
+                .equals(pythonContentHash(mapper, value, "question_set_hash")),
+        "V4 question set authority");
+    JsonNode rawQuestions = value.path("questions");
+    require(rawQuestions.isArray() && rawQuestions.size() >= 1 && rawQuestions.size() <= 5,
+        "V4 question set size");
+    Set<String> knownFacts = new LinkedHashSet<>();
+    matrix.path("fact_rows").forEach(row -> knownFacts.add(row.path("fact_id").asText()));
+    Set<String> questionIds = new LinkedHashSet<>();
+    Set<String> issueIds = new LinkedHashSet<>();
+    ObjectNode catalog = mapper.createObjectNode();
+    catalog.put("schema_version", "hearing_formal_issue_catalog.v4");
+    ArrayNode catalogIssues = catalog.putArray("issues");
+    for (int index = 0; index < rawQuestions.size(); index++) {
+      ObjectNode question = object(rawQuestions.get(index));
+      String slot = "QUESTION_SLOT_%02d".formatted(index + 1);
+      String questionId = question.path("question_id").asText();
+      String issueId = question.path("issue_id").asText();
+      JsonNode targetRoles = question.path("target_roles");
+      JsonNode factIds = question.path("fact_ids");
+      require(slot.equals(question.path("question_slot_id").asText())
+              && !questionId.isBlank() && questionIds.add(questionId)
+              && !issueId.isBlank() && issueIds.add(issueId)
+              && question.path("issue_version").asInt(0) == 1
+              && question.path("issue_state_hash").asText().matches("[a-f0-9]{64}")
+              && targetRoles.isArray() && targetRoles.size() == 2
+              && "USER".equals(targetRoles.get(0).asText())
+              && "MERCHANT".equals(targetRoles.get(1).asText())
+              && factIds.isArray() && !factIds.isEmpty()
+              && question.path("question_text").isTextual()
+              && !question.path("question_text").asText().isBlank()
+              && question.path("issue_baseline").isObject()
+              && question.path("party_prompts").isObject(),
+          "V4 formal question");
+      Set<String> localFacts = new LinkedHashSet<>();
+      factIds.forEach(fact -> require(
+          fact.isTextual() && knownFacts.contains(fact.asText()) && localFacts.add(fact.asText()),
+          "V4 formal question fact authority"));
+      ObjectNode catalogIssue = catalogIssues.addObject();
+      catalogIssue.put("question_slot_id", slot);
+      catalogIssue.put("question_id", questionId);
+      catalogIssue.put("issue_id", issueId);
+      catalogIssue.put("issue_version", 1);
+      catalogIssue.put("issue_state_hash", question.path("issue_state_hash").asText());
+      catalogIssue.set("issue_baseline", question.path("issue_baseline").deepCopy());
     }
-    if (value.isArray()) {
-      ArrayNode sorted = mapper.createArrayNode();
-      value.forEach(item -> sorted.add(sortObjectMembers(mapper, item)));
-      return sorted;
-    }
-    return value.deepCopy();
+    require(value.path("formal_issue_catalog_hash").asText().matches("[a-f0-9]{64}")
+            && value.path("formal_issue_catalog_hash").asText().equals(pythonHash(catalog)),
+        "V4 formal issue catalog hash");
+    return value;
   }
-  private ArrayNode partySubmissions(ObjectNode hearing, String actionType) { ArrayNode result = mapper.createArrayNode(); for (JsonNode action : actions(hearing, actionType)) { JsonNode p = action.path("payload"); ObjectNode item = result.addObject(); item.put("participant_id", p.path("participant_id").asText()); item.put("participant_role", p.path("participant_role").asText()); boolean submitted = "SUBMITTED".equals(p.path("submission_status").asText()); item.put("terminal_status", submitted ? "COMPLETED" : "TIMED_OUT"); item.put("submission_source", submitted ? "PARTY_ACTION" : "AUTO_TIMEOUT"); item.set("source_refs", p.path("source_message_ids").deepCopy()); item.set("submission", p.deepCopy()); } require(result.size() == 2, "two answer parents"); return result; }
+
+  private ArrayNode partyAnswerBundles(ObjectNode hearing, ObjectNode questionSet) {
+    List<JsonNode> selected = new ArrayList<>(actions(hearing, "ANSWER_BUNDLE"));
+    selected.sort(Comparator.comparingInt(value -> switch (
+        value.path("participant_role").asText()) {
+      case "USER" -> 0;
+      case "MERCHANT" -> 1;
+      default -> 2;
+    }));
+    require(selected.size() == 2, "two V4 answer bundle parents");
+    ArrayNode questions = (ArrayNode) questionSet.path("questions");
+    ArrayNode result = mapper.createArrayNode();
+    Set<String> participantIds = new LinkedHashSet<>();
+    Set<String> bundleIds = new LinkedHashSet<>();
+    for (int roleIndex = 0; roleIndex < selected.size(); roleIndex++) {
+      ObjectNode action = object(selected.get(roleIndex));
+      ObjectNode payload = object(action.path("payload"));
+      String expectedRole = roleIndex == 0 ? "USER" : "MERCHANT";
+      String bundleId = payload.path("answer_bundle_id").asText();
+      String bundleHash = payload.path("answer_bundle_hash").asText();
+      String participantId = payload.path("participant_id").asText();
+      require("hearing_answer_bundle.v4".equals(action.path("schema_version").asText())
+              && "hearing_answer_bundle.v4".equals(payload.path("schema_version").asText())
+              && action.path("id").asText().equals(bundleId)
+              && !bundleId.isBlank() && bundleIds.add(bundleId)
+              && action.path("content_hash").asText().equals(bundleHash)
+              && bundleHash.matches("[a-f0-9]{64}")
+              && bundleHash.equals(pythonContentHash(mapper, payload, "answer_bundle_hash"))
+              && expectedRole.equals(action.path("participant_role").asText())
+              && expectedRole.equals(payload.path("participant_role").asText())
+              && "SUBMITTED".equals(action.path("submission_status").asText())
+              && "SUBMITTED".equals(payload.path("submission_status").asText())
+              && action.path("participant_id").asText().equals(participantId)
+              && !participantId.isBlank() && participantIds.add(participantId)
+              && questionSet.path("question_set_id").asText()
+                  .equals(payload.path("question_set_id").asText())
+              && questionSet.path("question_set_hash").asText()
+                  .equals(payload.path("question_set_hash").asText())
+              && questionSet.path("formal_issue_catalog_hash").asText()
+                  .equals(payload.path("formal_issue_catalog_hash").asText()),
+          "V4 answer bundle authority");
+      JsonNode answerUnits = payload.path("answer_units");
+      require(answerUnits.isArray() && answerUnits.size() == questions.size(),
+          "V4 answer bundle coverage");
+      Set<String> unitIds = new LinkedHashSet<>();
+      int totalCharacters = 0;
+      for (int index = 0; index < questions.size(); index++) {
+        JsonNode unit = answerUnits.get(index);
+        JsonNode question = questions.get(index);
+        String answerText = unit.path("answer_text").asText();
+        require(unit.path("answer_unit_id").isTextual()
+                && !unit.path("answer_unit_id").asText().isBlank()
+                && unitIds.add(unit.path("answer_unit_id").asText())
+                && question.path("question_id").asText().equals(unit.path("question_id").asText())
+                && question.path("issue_id").asText().equals(unit.path("issue_id").asText())
+                && unit.path("answer_text").isTextual()
+                && !answerText.trim().isEmpty()
+                && answerText.length() <= 2_000,
+            "V4 answer unit binding");
+        totalCharacters += answerText.length();
+      }
+      require(totalCharacters <= 10_000
+              && payload.path("source_message_ids").isArray(),
+          "V4 answer bundle budget");
+      result.add(payload.deepCopy());
+    }
+    return result;
+  }
+
+  private String pythonHash(ObjectNode value) {
+    return pythonContentHash(mapper, value, "__absent_hash_field__");
+  }
+
   private ArrayNode partyBatches(HearingRoomStart start, ObjectNode hearing) {
     ArrayNode result = mapper.createArrayNode();
-    var seenEvidenceIds = new java.util.LinkedHashSet<String>();
+    Set<String> materializedEvidenceIds = new LinkedHashSet<>();
     for (JsonNode action : actions(hearing, "EVIDENCE_BATCH")) {
       ObjectNode payload = object(action.path("payload"));
       String participantId = payload.path("participant_id").asText();
@@ -244,13 +385,16 @@ public final class JdbcTargetHearingAgentStageInputFactory {
         require(evidenceIds.isEmpty(), "timed-out evidence batch is empty");
         continue;
       }
+      Set<String> batchEvidenceIds = new LinkedHashSet<>();
       for (JsonNode evidenceIdNode : evidenceIds) {
         String evidenceId = evidenceIdNode.asText();
         require(evidenceIdNode.isTextual() && !evidenceId.isBlank()
-            && seenEvidenceIds.add(evidenceId), "supplemental evidence identity");
+            && batchEvidenceIds.add(evidenceId), "supplemental evidence identity");
         sourceRefs.add(evidenceId);
-        evidence.add(supplementalEvidence(
-            start, evidenceId, participantId, participantRole, batchId));
+        if (materializedEvidenceIds.add(evidenceId)) {
+          evidence.add(supplementalEvidence(
+              start, evidenceId, participantId, participantRole));
+        }
       }
     }
     require(result.size() == 2, "two evidence batch parents");
@@ -260,9 +404,8 @@ public final class JdbcTargetHearingAgentStageInputFactory {
   private ObjectNode supplementalEvidence(
       HearingRoomStart start,
       String evidenceId,
-      String participantId,
-      String participantRole,
-      String batchId) {
+      String ignoredParticipantId,
+      String ignoredParticipantRole) {
     return object(one("""
         select jsonb_build_object(
           'evidence_id', evidence.id,
@@ -273,21 +416,17 @@ public final class JdbcTargetHearingAgentStageInputFactory {
           'file_hash', evidence.file_hash,
           'parsed_text', evidence.parsed_text,
           'claimed_fact', nullif(evidence.metadata_json ->> 'claimed_fact', ''),
-          'metadata', evidence.metadata_json)
-          from evidence_item evidence
+          'metadata', case
+            when jsonb_typeof(evidence.metadata_json) = 'object'
+              then evidence.metadata_json
+            else '{}'::jsonb
+          end)
+         from evidence_item evidence
          where evidence.id = ?
            and evidence.case_id = ?
-           and evidence.submitted_by_id = ?
-           and evidence.submitted_by_role = ?
-           and evidence.submission_batch_id = ?
-           and evidence.submission_status = 'SUBMITTED'
-           and evidence.visibility = 'PARTIES'
-           and evidence.submitted_at is not null
-           and evidence.deleted_at is null
-           and jsonb_typeof(evidence.metadata_json) = 'object'
          for update
-        """, "submitted supplemental Hearing evidence " + evidenceId,
-        evidenceId, start.caseId(), participantId, participantRole, batchId));
+        """, "bound supplemental Hearing evidence " + evidenceId,
+        evidenceId, start.caseId()));
   }
   private JsonNode completed(HearingRoomStart start, String stageCode) { return one("select output_json from hearing_flow_stage where flow_instance_id = ? and case_id = ? and stage_code = ? and stage_status = 'COMPLETED' for update", "completed Hearing parent " + stageCode, start.flowInstanceId(), start.caseId(), stageCode); }
   private JsonNode action(ObjectNode hearing, String type) { List<JsonNode> values = actions(hearing, type); if (values.size() != 1) throw new IllegalStateException("Hearing action parent is absent or ambiguous: " + type); return values.getFirst().path("payload"); }

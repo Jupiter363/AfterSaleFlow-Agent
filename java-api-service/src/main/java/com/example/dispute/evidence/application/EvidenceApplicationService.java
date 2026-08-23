@@ -31,9 +31,7 @@ import java.time.ZoneOffset;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
@@ -55,18 +53,6 @@ public class EvidenceApplicationService {
     private static final long MAX_FILE_SIZE = 25L * 1024 * 1024;
     private static final String ATTESTATION_VERSION = "EVIDENCE_TRUTH_ATTESTATION_V1";
     private static final String HUMAN_FORGERY_GATE = "HUMAN_CONFIRMED_FORGERY_REQUIRED";
-    private static final String MARKDOWN_CONTENT_TYPE = "text/markdown";
-    private static final String CHROMIUM_MARKDOWN_CONTENT_TYPE = "application/text";
-    private static final Set<String> ALLOWED_CONTENT_TYPES =
-            Set.of(
-                    "image/png",
-                    "image/jpeg",
-                    "application/pdf",
-                    "text/plain",
-                    "text/markdown",
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-
     private final FulfillmentCaseRepository caseRepository;
     private final EvidenceItemRepository evidenceRepository;
     private final EvidenceDossierRepository dossierRepository;
@@ -183,10 +169,9 @@ public class EvidenceApplicationService {
         String normalizedClaimedFact = validateSubmissionDeclaration(claimedFact, truthAttested, actor);
         SubmissionAttestation attestation = submissionAttestation(disputeCase, actor);
         String originalFilename = safeFilename(file == null ? null : file.getOriginalFilename());
-        String contentType = canonicalContentType(file, originalFilename);
-        validateFile(file, contentType);
+        String contentType = canonicalContentType(file);
+        validateFile(file);
         byte[] content = bytes(file);
-        validateSignature(contentType, content);
         String hash = sha256(content);
         var duplicate =
                 evidenceRepository
@@ -610,28 +595,20 @@ public class EvidenceApplicationService {
     // 上游调用：「EvidenceApplicationService.validateFile(MultipartFile)」的上游调用点包括 「EvidenceApplicationService.upload」。
     // 下游影响：「EvidenceApplicationService.validateFile(MultipartFile)」向下依次触达 「file.getSize」、「file.getContentType」。
     // 系统意义：「EvidenceApplicationService.validateFile(MultipartFile)」在“文件”进入下游前阻断非法状态；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static void validateFile(MultipartFile file, String contentType) {
+    private static void validateFile(MultipartFile file) {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("file must not be empty");
         }
         if (file.getSize() > MAX_FILE_SIZE) {
             throw new IllegalArgumentException("file exceeds 25 MiB");
         }
-        if (!ALLOWED_CONTENT_TYPES.contains(contentType)) {
-            throw new IllegalArgumentException("unsupported content type");
-        }
     }
 
-    private static String canonicalContentType(MultipartFile file, String filename) {
-        if (file == null) {
-            return null;
+    private static String canonicalContentType(MultipartFile file) {
+        if (file == null || file.getContentType() == null || file.getContentType().isBlank()) {
+            return "application/octet-stream";
         }
-        String contentType = file.getContentType();
-        if (CHROMIUM_MARKDOWN_CONTENT_TYPE.equals(contentType)
-                && filename.toLowerCase(Locale.ROOT).endsWith(".md")) {
-            return MARKDOWN_CONTENT_TYPE;
-        }
-        return contentType;
+        return file.getContentType().trim();
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceApplicationService.bytes(MultipartFile)」。
@@ -645,64 +622,6 @@ public class EvidenceApplicationService {
         } catch (IOException exception) {
             throw new IllegalArgumentException("cannot read uploaded file", exception);
         }
-    }
-
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceApplicationService.validateSignature(String,byte[])」。
-    // 具体功能：「EvidenceApplicationService.validateSignature(String,byte[])」：校验文件签名；实际协作者为 「noneMatch」、「java.util.stream.IntStream.range」；不满足前置条件时抛出 「IllegalArgumentException」；处理的关键状态/协议值包括 「%PDF-」，最终返回「void」。
-    // 上游调用：「EvidenceApplicationService.validateSignature(String,byte[])」的上游调用点包括 「EvidenceApplicationService.upload」。
-    // 下游影响：「EvidenceApplicationService.validateSignature(String,byte[])」向下依次触达 「noneMatch」、「java.util.stream.IntStream.range」。
-    // 系统意义：「EvidenceApplicationService.validateSignature(String,byte[])」在“文件签名”进入下游前阻断非法状态；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static void validateSignature(String contentType, byte[] content) {
-        boolean valid =
-                switch (contentType) {
-                    case "image/png" ->
-                            startsWith(
-                                    content,
-                                    new byte[] {
-                                        (byte) 0x89,
-                                        0x50,
-                                        0x4E,
-                                        0x47,
-                                        0x0D,
-                                        0x0A,
-                                        0x1A,
-                                        0x0A
-                                    });
-                    case "image/jpeg" ->
-                            startsWith(
-                                    content,
-                                    new byte[] {(byte) 0xFF, (byte) 0xD8, (byte) 0xFF});
-                    case "application/pdf" ->
-                            startsWith(content, "%PDF-".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
-                    case "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ->
-                            startsWith(content, new byte[] {'P', 'K', 0x03, 0x04});
-                    case "text/plain", "text/markdown" ->
-                            java.util.stream.IntStream.range(0, content.length)
-                                    .noneMatch(index -> content[index] == 0);
-                    default -> false;
-                };
-        if (!valid) {
-            throw new IllegalArgumentException(
-                    "file signature does not match content type");
-        }
-    }
-
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceApplicationService.startsWith(byte[],byte[])」。
-    // 具体功能：「EvidenceApplicationService.startsWith(byte[],byte[])」：启动starts包含，最终返回「boolean」。
-    // 上游调用：「EvidenceApplicationService.startsWith(byte[],byte[])」的上游调用点包括 「EvidenceApplicationService.validateSignature」。
-    // 下游影响：「EvidenceApplicationService.startsWith(byte[],byte[])」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「boolean」交给调用方。
-    // 系统意义：「EvidenceApplicationService.startsWith(byte[],byte[])」负责主链路中的“starts包含”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static boolean startsWith(byte[] content, byte[] signature) {
-        if (content.length < signature.length) {
-            return false;
-        }
-        for (int index = 0; index < signature.length; index++) {
-            if (content[index] != signature[index]) {
-                return false;
-            }
-        }
-        return true;
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceApplicationService.sha256(byte[])」。

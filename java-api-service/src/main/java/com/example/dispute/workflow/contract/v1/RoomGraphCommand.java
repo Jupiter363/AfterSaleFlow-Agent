@@ -38,6 +38,9 @@ public record RoomGraphCommand(
         String traceparent,
         String requestHash) {
 
+    public static final int MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT = 2;
+    public static final int HEARING_EVIDENCE_SYNTHESIS_PROVIDER_ATTEMPT_LIMIT = 202;
+
     public RoomGraphCommand {
         schemaVersion = version(schemaVersion, "room-graph-command.v1");
         required(commandId, "commandId");
@@ -55,6 +58,13 @@ public record RoomGraphCommand(
         required(domainSnapshotRef, "domainSnapshotRef");
         required(invocationContext, "invocationContext");
         required(retryBudget, "retryBudget");
+        if (retryBudget.providerAttemptsRemaining()
+                        > MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT
+                && (roomType != RoomType.HEARING
+                        || !"EVIDENCE_SYNTHESIZING".equals(stageCode))) {
+            throw new IllegalArgumentException(
+                    "aggregate provider budget is reserved for Hearing evidence synthesis");
+        }
         required(deadlineAt, "deadlineAt");
         required(traceparent, "traceparent");
         required(requestHash, "requestHash");
@@ -110,5 +120,19 @@ public record RoomGraphCommand(
     public record RetryBudget(
             int providerAttemptsRemaining,
             int activityAttemptsRemaining,
-            int repairsRemaining) {}
+            int repairsRemaining) {
+        public RetryBudget {
+            if (providerAttemptsRemaining < 0
+                    || providerAttemptsRemaining
+                            > HEARING_EVIDENCE_SYNTHESIS_PROVIDER_ATTEMPT_LIMIT) {
+                throw new IllegalArgumentException("providerAttemptsRemaining is out of range");
+            }
+            if (activityAttemptsRemaining < 0 || activityAttemptsRemaining > 3) {
+                throw new IllegalArgumentException("activityAttemptsRemaining is out of range");
+            }
+            if (repairsRemaining < 0 || repairsRemaining > 1) {
+                throw new IllegalArgumentException("repairsRemaining is out of range");
+            }
+        }
+    }
 }

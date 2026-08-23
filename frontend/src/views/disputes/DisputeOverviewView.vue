@@ -23,6 +23,7 @@ import {
   clearAgentStreams,
   consumeAgentRun,
 } from "../../stores/agentStream";
+import { domainCodeLabel } from "../../utils/displayText";
 
 const props = defineProps({
   initialCases: { type: Array, default: () => [] },
@@ -330,7 +331,10 @@ async function enterStage(stage, index) {
       });
       return;
     }
-    if (await redirectToRequiredIntake(dispute, stage.room)) return;
+    // A completed evidence stage is a read-only historical record. Its route
+    // must follow the selected journey node directly; a stale/private Intake
+    // projection must never hijack "查看证据核验" back to the reception room.
+    if (!historical && await redirectToRequiredIntake(dispute, stage.room)) return;
     const name = stageRouteNames[stage.room];
     if (!name) return;
     await router.push({
@@ -398,12 +402,13 @@ function roomLabel(dispute) {
   if (["DRAFT_READY", "REVIEW_PENDING", "WAITING_HUMAN_REVIEW", "REMEDY_PLANNED"].includes(status)) {
     return "裁决草案";
   }
-  return journey.find((stage) => stage.room === dispute.current_room)?.label || dispute.current_room || "待分配房间";
+  return journey.find((stage) => stage.room === dispute.current_room)?.label ||
+    domainCodeLabel(dispute.current_room, "待分配房间");
 }
 
 // 业务位置：【前端案件页面】riskLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function riskLabel(risk) {
-  return riskLabels[risk] || risk || "未评估";
+  return riskLabels[risk] || domainCodeLabel(risk, "未评估");
 }
 
 // 业务位置：【前端案件页面】pendingActionLabel：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
@@ -412,7 +417,7 @@ function pendingActionLabel(action, dispute = selectedCase.value) {
     if (isCaseParty.value && isAwaitingHumanReview(dispute)) return "等待人工终审";
     return dispute?.current_room === "REVIEW" ? "平台终审进行中" : "查看裁决草案";
   }
-  return pendingActionLabels[action] || action || "等待下一步";
+  return pendingActionLabels[action] || domainCodeLabel(action, "等待下一步");
 }
 
 // 业务位置：【前端案件页面】openIntake：切换与 案件受理信息和接待结论 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
@@ -474,6 +479,7 @@ async function simulateExternalImport() {
   ) return;
   const initiatorRole = actor.role === "MERCHANT" ? "MERCHANT" : "USER";
   const command = {
+    fixture_id: "air-purifier-specification-mismatch-v1",
     count: 1,
     scenario: "手表售后争议",
     risk_level_hint: "MEDIUM",

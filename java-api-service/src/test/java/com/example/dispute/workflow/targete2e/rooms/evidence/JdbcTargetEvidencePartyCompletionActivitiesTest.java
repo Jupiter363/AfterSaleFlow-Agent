@@ -36,6 +36,100 @@ import org.junit.jupiter.api.Test;
 class JdbcTargetEvidencePartyCompletionActivitiesTest {
 
   @Test
+  void freshCompletionRequiresTheImmediatelyPrecedingProjectionCommandCursor()
+      throws Exception {
+    Request request = request("user-local", ActorRole.USER);
+    Connection connection = mock(Connection.class);
+    PreparedStatement statement = mock(PreparedStatement.class);
+    ResultSet rows = mock(ResultSet.class);
+    when(connection.prepareStatement(anyString())).thenReturn(statement);
+    when(statement.executeQuery()).thenReturn(rows);
+    when(rows.next()).thenReturn(true, false);
+    when(rows.getLong(1)).thenReturn(request.expectedProcessRevision());
+    when(rows.getLong(2)).thenReturn(request.command().caseCommandSequence() - 1);
+
+    assertThatCode(
+            () ->
+                JdbcTargetEvidencePartyCompletionActivities.lockProjection(
+                    connection, request, false))
+        .doesNotThrowAnyException();
+
+    verify(connection)
+        .prepareStatement(
+            argThat(
+                sql ->
+                    sql.contains("select process_revision, last_command_sequence")
+                        && sql.contains("for update")));
+  }
+
+  @Test
+  void appliedCompletionReplayRequiresTheCommittedProjectionCommandCursor()
+      throws Exception {
+    Request request = request("user-local", ActorRole.USER);
+    Connection connection = mock(Connection.class);
+    PreparedStatement statement = mock(PreparedStatement.class);
+    ResultSet rows = mock(ResultSet.class);
+    when(connection.prepareStatement(anyString())).thenReturn(statement);
+    when(statement.executeQuery()).thenReturn(rows);
+    when(rows.next()).thenReturn(true, false);
+    when(rows.getLong(1)).thenReturn(request.expectedProcessRevision() + 1);
+    when(rows.getLong(2)).thenReturn(request.command().caseCommandSequence());
+
+    assertThatCode(
+            () ->
+                JdbcTargetEvidencePartyCompletionActivities.lockProjection(
+                    connection, request, true))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void appliedCompletionReplayRejectsAProjectionWhoseCursorWasNotAdvanced()
+      throws Exception {
+    Request request = request("user-local", ActorRole.USER);
+    Connection connection = mock(Connection.class);
+    PreparedStatement statement = mock(PreparedStatement.class);
+    ResultSet rows = mock(ResultSet.class);
+    when(connection.prepareStatement(anyString())).thenReturn(statement);
+    when(statement.executeQuery()).thenReturn(rows);
+    when(rows.next()).thenReturn(true, false);
+    when(rows.getLong(1)).thenReturn(request.expectedProcessRevision() + 1);
+    when(rows.getLong(2)).thenReturn(request.command().caseCommandSequence() - 1);
+
+    assertThatThrownBy(
+            () ->
+                JdbcTargetEvidencePartyCompletionActivities.lockProjection(
+                    connection, request, true))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("process projection drifted");
+  }
+
+  @Test
+  void completionAtomicallyAdvancesRevisionAndCommandCursorWithExactCas()
+      throws Exception {
+    Request request = request("user-local", ActorRole.USER);
+    Connection connection = mock(Connection.class);
+    PreparedStatement statement = mock(PreparedStatement.class);
+    when(connection.prepareStatement(anyString())).thenReturn(statement);
+    when(statement.executeUpdate()).thenReturn(1);
+    long nextProcessRevision = request.expectedProcessRevision() + 1;
+
+    JdbcTargetEvidencePartyCompletionActivities.updateProjection(
+        connection, request, nextProcessRevision);
+
+    verify(connection)
+        .prepareStatement(
+            argThat(
+                sql ->
+                    sql.contains("set process_revision = ?, last_command_sequence = ?")
+                        && sql.contains(
+                            "and process_revision = ? and last_command_sequence = ?")));
+    verify(statement).setLong(1, nextProcessRevision);
+    verify(statement).setLong(2, request.command().caseCommandSequence());
+    verify(statement).setLong(7, request.expectedProcessRevision());
+    verify(statement).setLong(8, request.command().caseCommandSequence() - 1);
+  }
+
+  @Test
   void merchantInitiatedCompletionUsesThePersistedActorRoleInsteadOfParticipantPosition() {
     EvidenceRoomStart start = start("merchant-local", "user-local");
     Binding participants = binding(start, "merchant-local", "user-local");
@@ -466,6 +560,16 @@ class JdbcTargetEvidencePartyCompletionActivitiesTest {
             "urn:target-e2e:evidence-completion-intent",
             "c".repeat(64),
             128));
+  }
+
+  private static Request request(String actorId, ActorRole actorRole) {
+    EvidenceRoomStart start = start("user-local", "merchant-local");
+    return new Request(
+        start,
+        binding(start, "user-local", "merchant-local"),
+        command(start, actorId, actorRole),
+        start.initialProcessRevision(),
+        start.initialRoomRevision());
   }
 
   private static CaseCommandRef command(

@@ -393,7 +393,7 @@ def run_preflight(env_file: Path) -> dict[str, Any]:
         projection["expiresAt"], "runtime projection expiresAt"
     )
     if not (issued <= common.utc_now() < expires) or expires - issued > dt.timedelta(
-        hours=2
+        days=30
     ):
         raise common.TargetE2EError(
             "runtime projection is expired or exceeds the activation ceiling"

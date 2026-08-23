@@ -17,6 +17,14 @@ const initialOutcome = {
     recommended_decision: "建议核验签收身份后退款",
     confidence: 0.82,
     draft_text: "庭审记录显示签收人身份仍存在争议。",
+    decision_reasoning:
+      "签收底单未显示签收主体，签收人身份仍存在争议，现有证据不足以确认由用户本人签收。",
+    remedy_orders: [
+      {
+        remedy_type: "REFUND_ONLY",
+        order_text: "完成签收主体核验后，向用户退还订单款项。",
+      },
+    ],
     draft_status: "PENDING_HUMAN_REVIEW",
     fact_findings: [
       {
@@ -50,6 +58,32 @@ const initialOutcome = {
       },
     ],
     reviewer_attention: ["复核签收人身份"],
+    jury_review_exchanges: [
+      {
+        review_item_ref: "JURY_FINDING_FACT_COMPLETENESS",
+        item_type: "FINDING",
+        dimension: "FACT_COMPLETENESS",
+        jury_opinion: "签收主体事实仍有关键缺口。",
+        basis: ["签收底单未记载签收人身份。"],
+        severity: "HIGH",
+        requires_revision: true,
+        judge_response: "已在事实认定中补充签收主体证据缺口。",
+        disposition: "ACCEPTED",
+        affected_fields: ["fact_findings"],
+      },
+      {
+        review_item_ref: "JURY_MANDATORY_01",
+        item_type: "MANDATORY_REVISION",
+        dimension: null,
+        jury_opinion: "必须核验签收主体后再作出终局裁决。",
+        basis: [],
+        severity: null,
+        requires_revision: null,
+        judge_response: "已改为等待签收主体核验。",
+        disposition: "PARTIALLY_ACCEPTED",
+        affected_fields: ["decision_reasoning"],
+      },
+    ],
   },
   final_decision: { conclusion: "不应在草案室展示" },
   actions: [{ action_type: "REFUND" }],
@@ -64,7 +98,11 @@ const expandedV2Outcome = {
     draft_version: 2,
     recommended_decision: "MANUAL_REVIEW_REQUIRED",
     draft_text:
-      "双方均未提供足以证明商品交付状态或食用情况的关键证据，需转交人工客服专家进一步审核与调解。".repeat(5),
+      "双方均未提供足以证明商品交付状态或食用情况的关键证据，需转交人工客服专家进一步审核与调解。".repeat(5) +
+      "Merchant-approved refund policy 与 Unshipped order cancellation policy 均不适用，应在 finding 中说明。",
+    decision_reasoning:
+      "双方均未提供足以证明商品交付状态或食用情况的关键证据，需转交人工客服专家进一步审核与调解。" +
+      "Merchant-approved refund policy 与 Unshipped order cancellation policy 均不适用，应在 finding 中说明。",
     fact_findings: Array.from({ length: 4 }, (_, index) => ({
       fact_id: `FACT_INTAKE_${index + 1}`,
       finding: `第 ${index + 1} 项核心事实缺少客观证据，当前处于未证实状态。`,
@@ -184,7 +222,11 @@ describe("AdjudicationDraftView", () => {
     expect(wrapper.get("[data-draft-stage]").text()).toContain("待进入平台终审");
     expect(source).toContain(".draft-scroll__masthead");
     expect(source).toContain(".draft-scroll__analysis-board");
-    expect(source).toContain("grid-template-columns: repeat(4, minmax(240px, 1fr))");
+    expect(source).toContain(
+      "grid-template-columns: minmax(270px, .72fr) minmax(0, 1.85fr)",
+    );
+    expect(source).toContain("grid-template-columns: repeat(2, minmax(0, 1fr))");
+    expect(source).toContain("grid-template-rows: repeat(2, minmax(0, 1fr))");
     expect(source).toContain("width: 100%");
     expect(source).toContain("--draft-panel-height: 740px");
     expect(source).toContain("grid-template-rows: var(--draft-panel-height) auto auto");
@@ -237,37 +279,146 @@ describe("AdjudicationDraftView", () => {
     expect(outerRule).not.toMatch(/background\s*:|border\s*:|border-radius\s*:|box-shadow\s*:/);
   });
 
-  it("maps the judge output into conclusion, issue, evidence, policy and review sections", async () => {
+  it("maps the judge output into conclusion, merged fact-evidence, policy and review sections", async () => {
     const { wrapper } = await mountDraft("USER");
 
     expect(wrapper.get("[data-draft-summary]").text()).toContain("建议核验签收身份后退款");
-    expect(wrapper.get("[data-draft-reasoning]").text()).toContain(
-      "庭审记录显示签收人身份仍存在争议",
+    const reasoning = wrapper.get("[data-draft-reasoning]");
+    expect(reasoning.text()).toContain("法官裁判理由");
+    expect(reasoning.text()).not.toContain("庭审结论摘要");
+    expect(reasoning.get("[data-decision-reasoning]").text()).toContain(
+      "签收底单未显示签收主体",
     );
+    expect(reasoning.get("[data-remedy-orders]").text()).toContain("1. [仅退款]");
+    expect(reasoning.get("[data-remedy-orders]").text()).toContain(
+      "完成签收主体核验后，向用户退还订单款项",
+    );
+    expect(reasoning.text()).not.toContain("庭审记录显示签收人身份仍存在争议");
 
     const facts = wrapper.get('[data-draft-section="facts"]');
-    expect(facts.text()).toContain("FACT_RECIPIENT");
+    expect(facts.text()).toContain("事实 01");
     expect(facts.text()).toContain("物流记录显示订单已签收");
-    expect(facts.text()).toContain("EVIDENCE_WAYBILL、EVIDENCE_SIGNATURE");
+    expect(facts.text()).toContain("证据材料 01、证据材料 02");
     expect(facts.text()).toContain("签收争议举证规则 · V1");
     expect(facts.text()).toContain("签收人身份仍需核验");
-    expect(facts.text()).toContain("可信分 78/100");
-
-    const evidence = wrapper.get('[data-draft-section="evidence"]');
-    expect(evidence.text()).toContain("EVIDENCE_WAYBILL");
-    expect(evidence.text()).toContain("签收底单不能证明用户本人签收");
-    expect(evidence.text()).toContain("FACT_RECIPIENT");
-    expect(evidence.text()).toContain("证明权重中");
-    expect(evidence.text()).toContain("缺少签收人身份信息");
+    expect(facts.get(".draft-scroll__fact-summary-score small").text()).toBe("综合可信分");
+    expect(facts.get(".draft-scroll__fact-summary-score strong").text()).toBe("78/100");
+    expect(facts.text()).not.toContain("事实可信");
+    expect(facts.text()).not.toContain("核验可信");
+    expect(facts.text()).toContain("证据材料 01");
+    expect(facts.text()).toContain("签收底单不能证明用户本人签收");
+    expect(facts.text()).toContain("事实 01");
+    expect(facts.text()).toContain("证明权重中");
+    expect(facts.text()).toContain("缺少签收人身份信息");
+    const factUnit = facts.get("[data-fact-evidence-unit]");
+    const factSummary = factUnit.get(".draft-scroll__fact-detail-heading");
+    expect(factSummary.text()).not.toContain("当前事实");
+    expect(factSummary.text()).toContain("事实认定");
+    expect(factSummary.text()).toContain("证据依据");
+    expect(factSummary.text()).toContain("规则依据");
+    expect(factUnit.text()).toContain("证据核验");
+    expect(factUnit.text()).toContain("物流记录显示订单已签收");
+    expect(factUnit.text()).toContain("签收底单不能证明用户本人签收");
+    expect(factUnit.get(".draft-scroll__fact-record").text()).not.toContain("事实认定");
+    expect(factUnit.get(".draft-scroll__fact-record").text()).not.toContain("证据依据");
+    expect(factUnit.get(".draft-scroll__fact-record").text()).not.toContain("规则依据");
+    expect(wrapper.find('[data-draft-section="evidence"]').exists()).toBe(false);
+    expect(wrapper.text().match(/签收底单不能证明用户本人签收/g)).toHaveLength(1);
 
     const policy = wrapper.get('[data-draft-section="policy"]');
     expect(policy.text()).toContain("签收争议举证规则 · V1");
-    expect(policy.get(".draft-scroll__rule").attributes("title")).toBe("DELIVERY_PROOF");
+    expect(policy.get(".draft-scroll__rule").attributes("title")).toBe("签收争议举证规则 · V1");
     expect(policy.text()).toContain("签收争议举证责任由商家承担");
-    expect(policy.text()).toContain("FACT_RECIPIENT");
+    expect(policy.text()).toContain("事实 01");
     expect(policy.text()).toContain("仍需核验签收人身份");
 
     expect(wrapper.get('[data-draft-section="attention"]').text()).toContain("复核签收人身份");
+    const jury = wrapper.get('[data-draft-section="jury"]');
+    expect(jury.text()).toContain("肆");
+    expect(jury.text()).toContain("陪审团评审意见");
+    expect(jury.text()).toContain("事实完整性");
+    expect(jury.text()).toContain("签收主体事实仍有关键缺口");
+    expect(jury.text()).toContain("签收底单未记载签收人身份");
+    expect(jury.text()).toContain("已在事实认定中补充签收主体证据缺口");
+    expect(jury.text()).toContain("陪审必改项 01");
+    expect(jury.text()).toContain("部分采纳");
+    expect(jury.text()).not.toContain("JURY_FINDING_FACT_COMPLETENESS");
+    expect(jury.text()).not.toContain("PARTIALLY_ACCEPTED");
+  });
+
+  it("omits the complete processing-items module when the frozen draft has no orders", async () => {
+    const outcomeWithoutOrders = {
+      ...initialOutcome,
+      adjudication_draft: {
+        ...initialOutcome.adjudication_draft,
+        remedy_orders: [],
+      },
+    };
+    const { wrapper } = await mountDraft("USER", vi.fn(), false, outcomeWithoutOrders);
+
+    expect(wrapper.find("[data-remedy-orders]").exists()).toBe(false);
+    expect(wrapper.get("[data-draft-reasoning]").text()).not.toContain("处理事项");
+    expect(wrapper.text()).not.toContain("暂无处理事项");
+  });
+
+  it("uses one confidence projection and switches fact-evidence details from the index", async () => {
+    const twoFactOutcome = {
+      ...initialOutcome,
+      adjudication_draft: {
+        ...initialOutcome.adjudication_draft,
+        fact_findings: [
+          {
+            fact_id: "FACT_RECIPIENT",
+            finding: "第一项事实认定",
+            evidence_ids: ["EVIDENCE_WAYBILL"],
+            confidence: 0.9,
+          },
+          {
+            fact_id: "FACT_DELIVERY",
+            finding: "第二项事实认定",
+            evidence_ids: ["EVIDENCE_SIGNATURE"],
+          },
+        ],
+        evidence_assessment: [
+          {
+            evidence_id: "EVIDENCE_WAYBILL",
+            fact_ids: ["FACT_RECIPIENT"],
+            assessment: "第一项证据核验",
+            confidence: 0.4,
+          },
+          {
+            evidence_id: "EVIDENCE_SIGNATURE",
+            fact_ids: ["FACT_DELIVERY"],
+            assessment: "第二项证据核验",
+            confidence: 0.62,
+          },
+        ],
+      },
+    };
+    const { wrapper } = await mountDraft("USER", vi.fn(), false, twoFactOutcome);
+    const facts = wrapper.get('[data-draft-section="facts"]');
+    const indexItems = facts.findAll("[data-fact-index-item]");
+    const detail = facts.get("[data-fact-evidence-unit]");
+
+    expect(indexItems).toHaveLength(2);
+    expect(indexItems[0].text()).not.toContain("90/100");
+    expect(indexItems[0].text()).toContain("事实");
+    expect(indexItems[0].text()).toContain("01");
+    expect(indexItems[0].find("small").exists()).toBe(false);
+    expect(indexItems[1].text()).not.toContain("62/100");
+    expect(detail.text()).toContain("第一项事实认定");
+    expect(detail.text()).toContain("第一项证据核验");
+    expect(detail.get(".draft-scroll__fact-summary-score small").text()).toBe("综合可信分");
+    expect(detail.get(".draft-scroll__fact-summary-score strong").text()).toBe("90/100");
+    expect(detail.text()).not.toContain("40/100");
+
+    await indexItems[1].trigger("click");
+
+    expect(detail.text()).toContain("第二项事实认定");
+    expect(detail.text()).toContain("第二项证据核验");
+    expect(detail.get(".draft-scroll__fact-summary-score strong").text()).toBe("62/100");
+    expect(facts.text()).not.toContain("事实可信");
+    expect(facts.text()).not.toContain("核验可信");
   });
 
   it("maps the complete V2 remedy payload into one continuous document", async () => {
@@ -276,10 +427,11 @@ describe("AdjudicationDraftView", () => {
     expect(wrapper.get("[data-adjudication-draft-room]").attributes("data-content-density"))
       .toBeUndefined();
     expect(wrapper.get(".draft-scroll__title").text()).toContain("生鲜到货变质无法食用");
-    expect(wrapper.get(".draft-scroll__title").text()).toContain("JUDGE_V2_TARGET_DRAFT");
+    expect(wrapper.get(".draft-scroll__title").text()).toContain("裁决草案第 2 版 · 编号已记录");
+    expect(wrapper.get(".draft-scroll__title small").attributes("title")).toBeUndefined();
     expect(wrapper.get("[data-draft-summary]").text()).toContain("转人工复核");
     expect(wrapper.get(".draft-scroll__recommendation").attributes("title"))
-      .toBe("MANUAL_REVIEW_REQUIRED");
+      .toBe("建议结论：转人工复核");
     expect(wrapper.get("[data-draft-summary]").text()).not.toContain("MANUAL_REVIEW_REQUIRED");
 
     const policy = wrapper.get('[data-draft-section="policy"]');
@@ -288,19 +440,24 @@ describe("AdjudicationDraftView", () => {
     expect(policy.text()).not.toContain("Unshipped order cancellation policy");
     expect(policy.text()).not.toContain("Merchant-approved refund policy");
 
-    const plan = wrapper.get('[data-draft-section="plan"]');
-    expect(wrapper.get(".draft-scroll__analysis-board").find('[data-draft-section="plan"]').exists())
-      .toBe(true);
-    expect(plan.text()).toContain("REMEDY_TARGET_PLAN");
-    expect(plan.text()).toContain("创建人工复核工单");
-    expect(plan.text()).toContain("低风险");
-    expect(plan.text()).toContain("否，仍需平台终审");
-    expect(plan.text()).toContain("平台终审通过后执行");
-    expect(plan.text()).toContain("案件尚未关闭");
-    expect(plan.text()).toContain("执行后通知用户");
-    expect(plan.text()).toContain("执行后通知商家");
-    expect(plan.text()).toContain("记录执行审计结果");
-    expect(plan.text()).not.toContain("INTERNAL_KEY_MUST_NOT_RENDER");
+    const overview = wrapper.get(".draft-scroll__overview");
+    const board = wrapper.get(".draft-scroll__analysis-board");
+    expect(overview.find('[data-draft-section="attention"]').exists()).toBe(false);
+    expect(board.find('[data-draft-section="attention"]').exists()).toBe(true);
+    expect(board.find('[data-draft-section="plan"]').exists()).toBe(false);
+    expect(board.findAll("[data-draft-section]").map((section) => section.attributes("data-draft-section")))
+      .toEqual(["facts", "policy", "attention", "jury"]);
+    expect(board.get('[data-draft-section="attention"]').text()).toContain("叁");
+    expect(board.get('[data-draft-section="attention"]').text()).toContain("重点关注事项");
+    expect(board.get('[data-draft-section="jury"]').text()).toContain("肆");
+    expect(board.get('[data-draft-section="jury"]').text()).toContain("陪审意见");
+    expect(board.get('[data-draft-section="jury"]').text()).toContain("法官回复");
+    expect(wrapper.text()).not.toContain("拟定执行方案");
+    expect(wrapper.text()).not.toContain("INTERNAL_KEY_MUST_NOT_RENDER");
+    expect(wrapper.text()).not.toContain("Merchant-approved refund policy");
+    expect(wrapper.text()).not.toContain("Unshipped order cancellation policy");
+    expect(wrapper.get("[data-draft-reasoning]").text()).toContain("应在事实认定中说明");
+    expect(wrapper.text()).not.toMatch(/\b(?:FACT|EVIDENCE)_[A-Z0-9_-]+\b/u);
   });
 
   it("keeps historical string-only V2 sections readable", async () => {
@@ -315,8 +472,15 @@ describe("AdjudicationDraftView", () => {
     };
     const { wrapper } = await mountDraft("USER", vi.fn(), false, legacyOutcome);
 
-    expect(wrapper.get('[data-draft-section="facts"]').text()).toContain("历史事实认定");
-    expect(wrapper.get('[data-draft-section="evidence"]').text()).toContain("历史证据评估");
+    const facts = wrapper.get('[data-draft-section="facts"]');
+    expect(facts.text()).toContain("历史事实认定");
+    expect(facts.text()).toContain("其他证据核验");
+    const unmatchedIndex = facts
+      .findAll("[data-fact-index-item]")
+      .find((item) => item.text().includes("其他证据核验"));
+    await unmatchedIndex.trigger("click");
+    expect(facts.get("[data-fact-evidence-unit]").text()).toContain("历史证据评估");
+    expect(wrapper.find('[data-draft-section="evidence"]').exists()).toBe(false);
     expect(wrapper.get('[data-draft-section="policy"]').text()).toContain("历史规则适用");
   });
 
@@ -339,12 +503,12 @@ describe("AdjudicationDraftView", () => {
       },
     };
     const { wrapper } = await mountDraft("USER", vi.fn(), false, gapOutcome);
-    const evidence = wrapper.get('[data-draft-section="evidence"]');
+    const facts = wrapper.get('[data-draft-section="facts"]');
 
-    expect(evidence.text()).toContain("证据缺口 01");
-    expect(evidence.text()).toContain("仍有缺失");
-    expect(evidence.text()).toContain("证明权重未形成");
-    expect(evidence.text()).not.toContain("EVIDENCE_undefined");
+    expect(facts.text()).toContain("证据缺口 01");
+    expect(facts.text()).toContain("仍有缺失");
+    expect(facts.text()).toContain("证明权重未形成");
+    expect(facts.text()).not.toContain("EVIDENCE_undefined");
   });
 
   it("keeps a fixed dossier with internal scroll areas and the boundary at the bottom", async () => {
@@ -354,7 +518,7 @@ describe("AdjudicationDraftView", () => {
 
     expect(parchment.element.lastElementChild).toBe(boundary.element);
     expect(boundary.text()).toContain("平台终审完成前");
-    expect(wrapper.findAll(".draft-scroll__module-content")).toHaveLength(5);
+    expect(wrapper.findAll(".draft-scroll__module-content")).toHaveLength(4);
 
     const source = fs.readFileSync(
       "src/views/disputes/AdjudicationDraftView.vue",
@@ -367,7 +531,8 @@ describe("AdjudicationDraftView", () => {
       /grid-template-rows:\s*var\(--draft-masthead-height\)\s*minmax\(0, 1fr\)\s*minmax\(0, 1fr\)\s*var\(--draft-notice-height\)/,
     );
     expect(source).toContain(".draft-scroll__module-content { min-width: 0; min-height: 0; padding-right: 5px; overflow-y: auto;");
-    expect(source).toContain(".draft-scroll__plan-grid { display: grid;");
+    expect(source).toContain(".draft-scroll__overview { display: grid; grid-template-columns: minmax(0, 1fr);");
+    expect(source).not.toContain(".draft-scroll__plan-grid");
     expect(source).toContain("overflow-y: auto");
     expect(source).toContain("padding: 24px 40px 0");
   });

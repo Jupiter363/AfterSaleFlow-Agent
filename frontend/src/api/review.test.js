@@ -22,6 +22,14 @@ describe("reviewApi", () => {
     vi.stubGlobal("crypto", { randomUUID: () => "idem-review-1" });
   });
 
+  it("exposes only approve, bounded modification, and manual escalation", () => {
+    expect(REVIEW_DECISIONS).toEqual([
+      "APPROVE",
+      "MODIFY_AND_APPROVE",
+      "ESCALATE_MANUAL",
+    ]);
+  });
+
   // 业务位置：【前端 API/SSE 适配】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面操作和访问令牌 正确进入 Java HTTP 请求或 Agent 流事件。上游：页面操作和访问令牌。下游：Java HTTP 请求或 Agent 流事件。边界：统一处理错误和取消，不能伪造服务端状态。
   it("sends reviewer identity and a purpose-scoped idempotency key", async () => {
     const actor = { id: "reviewer-1", role: "PLATFORM_REVIEWER" };

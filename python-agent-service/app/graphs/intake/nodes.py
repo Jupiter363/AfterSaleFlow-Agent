@@ -40,6 +40,7 @@ from app.graphs.intake.validators import (
     validate_state,
     validate_baseline_pending_promotion,
     validate_terminal_proposal,
+    unwrap_verified_baseline_previous_case_detail,
 )
 from app.schemas import IntakeInitialCaseFacts
 
@@ -598,6 +599,9 @@ def _apply_event(
         },
         "route": "respondent_opening" if respondent_opening else "message",
     }
+    committed_public_dossier = _committed_public_dossier_for_next_event(state)
+    if committed_public_dossier is not None:
+        patch["dossier_draft"] = committed_public_dossier
     if respondent_opening:
         event_record["control_marker"] = RESPONDENT_OPENING_MARKER
         source_record["control_marker"] = RESPONDENT_OPENING_MARKER
@@ -631,6 +635,28 @@ def _apply_event(
     }
     patch["messages"] = {message["message_id"]: message}
     return patch
+
+
+def _committed_public_dossier_for_next_event(
+    state: IntakeGraphStateV2,
+) -> dict[str, Any] | None:
+    """Restore the exact latest committed public projection for a new event.
+
+    Every successful substantive turn advances its working matrix regardless of
+    readiness.  The verified capsule therefore projects that successor and its
+    adjacent handoff partition together before the next event is evaluated.
+    """
+
+    previous = state.get("baseline_previous_case_detail")
+    if not (
+        isinstance(previous, Mapping)
+        and previous.get("schema_version") == "intake-baseline-context.v1"
+    ):
+        return None
+    committed = unwrap_verified_baseline_previous_case_detail(state)
+    committed.pop("case_fact_matrix", None)
+    committed.pop("unilateral_case_matrix", None)
+    return committed
 
 
 def _state_after_patch(

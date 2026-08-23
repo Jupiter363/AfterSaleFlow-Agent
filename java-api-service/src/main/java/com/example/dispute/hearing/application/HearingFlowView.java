@@ -7,11 +7,59 @@ import java.util.Map;
 
 /** Authoritative projection returned by GET /hearing. */
 public record HearingFlowView(
+        String projectionSchemaVersion,
         Status status,
         JsonNode questionSet,
         JsonNode evidenceRequestSet,
+        Reference caseFactMatrix,
+        Reference issueStateSet,
         Reference trialDossier,
+        JsonNode juryReviewReport,
         Map<String, Reference> decisionChain) {
+
+    public HearingFlowView(
+            Status status,
+            JsonNode questionSet,
+            JsonNode evidenceRequestSet,
+            Reference trialDossier,
+            Map<String, Reference> decisionChain) {
+        this(
+                "hearing-flow-projection.v4",
+                status,
+                questionSet,
+                evidenceRequestSet,
+                null,
+                null,
+                trialDossier,
+                null,
+                decisionChain);
+    }
+
+    public HearingFlowView {
+        questionSet = copy(questionSet);
+        evidenceRequestSet = copy(evidenceRequestSet);
+        juryReviewReport = copy(juryReviewReport);
+        decisionChain = decisionChain == null ? Map.of() : Map.copyOf(decisionChain);
+    }
+
+    @Override
+    public JsonNode questionSet() {
+        return copy(questionSet);
+    }
+
+    @Override
+    public JsonNode evidenceRequestSet() {
+        return copy(evidenceRequestSet);
+    }
+
+    @Override
+    public JsonNode juryReviewReport() {
+        return copy(juryReviewReport);
+    }
+
+    private static JsonNode copy(JsonNode value) {
+        return value == null ? null : value.deepCopy();
+    }
 
     public record Status(
             String flowSchemaVersion,

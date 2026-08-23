@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import sys
@@ -8,18 +9,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from app.agents.evidence_clerk.v2_contracts import (
+    EvidenceFrameObjectV2,
+    EvidenceMaterialReviewNoObservationStreamV2,
     EvidenceMaterialReviewStreamV2,
     EvidenceRoomOpeningStreamV2,
+    leading_evidence_frame_header_v2,
 )
 from app.agents.evidence_clerk.v2_policy import EvidenceV2PublicOutputPolicy
 from app.agents.evidence_clerk.v2_workflow import (
     EvidenceTurnWorkflowV2,
     _authority_bound_output_type,
+    _bind_v2_assessment_observation_slots,
+    _bind_v2_transport_sequences,
+    _output_type_for_mode,
+    _validate_v2_authority,
 )
-from app.harness.evidence_room_context_v2 import assemble_evidence_room_context_v2
+from app.harness.evidence_asset_loader import (
+    EvidenceAssetLoader,
+    validated_evidence_asset_manifest,
+)
+from app.harness.evidence_room_context_v2 import (
+    assemble_evidence_room_context_v2,
+    finalize_evidence_room_sources_v2,
+)
 from app.harness.model_runner import (
     HarnessGeneration,
     HarnessStreamCompleted,
@@ -134,7 +150,6 @@ def _opening_frames(request: EvidenceTurnRequest) -> list[dict[str, object]]:
             "core_fact_coverage": "NONE",
             "source_chain_coverage": "NONE",
             "time_integrity_coverage": "UNKNOWN",
-            "human_review_status": "NONE",
             "overall_readiness": "NOT_READY",
             "remaining_core_fact_ids": facts,
         },
@@ -186,7 +201,6 @@ def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> No
     public_branch = material_schema["$defs"][
         "EvidenceMaterialReviewPublicFrameObjectV2"
     ]
-    internal_branch = material_schema["$defs"]["EvidenceHumanReviewFrameObjectV2"]
     assert list(public_branch["properties"]) == ["header", "public_text"]
     assert set(public_branch["properties"]["header"]["discriminator"]["mapping"]) == {
         "EVIDENCE_OBSERVATION",
@@ -194,11 +208,18 @@ def test_v2_provider_schema_discriminates_frame_headers_before_streaming() -> No
         "EVIDENCE_REQUEST",
         "ROOM_READINESS",
     }
-    assert list(internal_branch["properties"]) == ["header", "public_text"]
-    assert internal_branch["properties"] == {
-        "header": {"$ref": "#/$defs/EvidenceHumanReviewFrameHeaderV2"},
-        "public_text": {"title": "Public Text", "type": "null"},
-    }
+    serialized_material_schema = json.dumps(material_schema, sort_keys=True)
+    assert "HUMAN_REVIEW_TASK" not in serialized_material_schema
+    assert "human_review_status" not in serialized_material_schema
+    assessment_properties = material_schema["$defs"][
+        "EvidenceAssessmentFrameHeaderV2"
+    ]["properties"]
+    assert "authenticity_score" in assessment_properties
+    assert "authenticity_score_explanation" in assessment_properties
+    assert assessment_properties["risk_level"]["enum"] == ["LOW", "MEDIUM", "HIGH"]
+    request_schema = material_schema["$defs"]["EvidenceRequestFrameHeaderV2"]
+    assert "target_fact_ids" in request_schema["required"]
+    assert request_schema["properties"]["target_fact_ids"]["minItems"] == 1
 
     orientation = schema["$defs"][mapping["OPENING_ORIENTATION"].rsplit("/", 1)[-1]]
     assert orientation["additionalProperties"] is False
@@ -299,15 +320,475 @@ def test_v2_provider_schema_binds_frozen_invocation_authority_ids() -> None:
     assert material_defs["EvidenceAssessmentFrameHeaderV2"]["properties"][
         "evidence_id"
     ]["enum"] == attachment_ids
-    assert material_defs["EvidenceHumanReviewFrameHeaderV2"]["properties"][
-        "evidence_id"
-    ]["enum"] == attachment_ids
     assert material_defs["EvidenceRequestFrameHeaderV2"]["properties"][
         "target_fact_ids"
     ]["items"]["enum"] == material_fact_ids
     assert material_defs["EvidenceRoomReadinessFrameHeaderV2"]["properties"][
         "remaining_core_fact_ids"
     ]["items"]["enum"] == material_fact_ids
+
+
+def _authorized_image_material_fixture() -> tuple[EvidenceTurnRequest, bytes]:
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    document = _java_evidence_turn_command_payload()
+    visible = document["context_envelope"]["visible_evidence"][0]
+    visible.update(
+        {
+            "content_type": "image/png",
+            "file_size": len(image),
+            "file_hash": hashlib.sha256(image).hexdigest(),
+            "parsed_text": None,
+            "parse_status": "PENDING",
+            "desensitized": True,
+        }
+    )
+    document["context_envelope"]["evidence_content_authorities"] = []
+    return EvidenceTurnRequest.model_validate(document), image
+
+
+def _loaded_image_assets(request: EvidenceTurnRequest, image: bytes):
+    return EvidenceAssetLoader(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, content=image)
+        ),
+    ).load(request.context_envelope)
+
+
+def test_v3_loaded_image_pixels_become_bound_observation_source_authority() -> None:
+    request, image = _authorized_image_material_fixture()
+    base = assemble_evidence_room_context_v2(request)
+    assert base.source_units == ()
+
+    loaded = _loaded_image_assets(request, image)
+    assembled = finalize_evidence_room_sources_v2(
+        base,
+        validated_evidence_asset_manifest(loaded),
+    )
+
+    assert len(assembled.source_units) == 1
+    source = assembled.source_units[0]
+    evidence_id = request.context_envelope.current_event.attachment_refs[0]
+    assert source["evidence_id"] == evidence_id
+    assert source["basis"] == "IMAGE_PIXELS"
+    assert source["authority"]["content_sha256"] == hashlib.sha256(image).hexdigest()
+    assert assembled.payload["turn_contract"]["allow_observation"] is True
+    assert assembled.payload["current_evidence_batch"][0]["visual_input_status"] == "LOADED"
+
+    output_type = _authority_bound_output_type(
+        _output_type_for_mode("MATERIAL_REVIEW", allow_observation=True),
+        assembled,
+    )
+    schema = output_type.model_json_schema()
+    source_schema = schema["$defs"]["EvidenceObservationFrameHeaderV2"][
+        "properties"
+    ]["source_unit_id"]
+    assert source_schema["enum"] == [source["source_unit_id"]]
+
+    policy = EvidenceV2PublicOutputPolicy()
+    policy.configure(assembled)
+    projected = policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="lead_public_text",
+        delta="已收到图片材料，正在核验画面内容。",
+    )
+    assert projected
+    fact_id = assembled.base.working_set.allowed_fact_targets[0]["fact_id"]
+    projected = policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="frames",
+        delta=_event(
+            "frame_start",
+            2,
+            header={
+                "frame_sequence": 2,
+                "frame_type": "EVIDENCE_OBSERVATION",
+                "observation_slot": "OBS_IMAGE_1",
+                "source_unit_id": source["source_unit_id"],
+                "binding_status": "BOUND",
+                "fact_bindings": [
+                    {
+                        "fact_id": fact_id,
+                        "relation": "CONTENT_SUPPORTS",
+                        "reason": "图片可见内容与该冻结事实相关。",
+                    }
+                ],
+                "candidate_fact_ids": [],
+                "binding_reason": "图片像素直接呈现该项材料内容。",
+                "observation_kind": "IMAGE_PIXELS",
+                "epistemic_status": "PROVISIONAL",
+            },
+        ),
+    )
+    assert any(field == "frame.2.header" for field, _ in projected)
+
+
+def test_v3_material_without_source_authority_makes_observation_provider_inaccessible() -> None:
+    request, _ = _authorized_image_material_fixture()
+    assembled = finalize_evidence_room_sources_v2(
+        assemble_evidence_room_context_v2(request),
+        None,
+    )
+
+    assert assembled.source_units == ()
+    assert assembled.payload["turn_contract"]["allow_observation"] is False
+    assert "EVIDENCE_OBSERVATION" not in assembled.payload["turn_contract"][
+        "allowed_frame_types"
+    ]
+    output_type = _output_type_for_mode(
+        "MATERIAL_REVIEW",
+        allow_observation=False,
+    )
+    assert output_type is EvidenceMaterialReviewNoObservationStreamV2
+    assert "EVIDENCE_OBSERVATION" not in json.dumps(
+        _authority_bound_output_type(output_type, assembled).model_json_schema(),
+        sort_keys=True,
+    )
+
+
+def _material_review_validation_fixture(
+    assessment_observation_slots: list[str],
+    *,
+    binding_status: str = "UNRELATED",
+) -> tuple[object, EvidenceMaterialReviewStreamV2]:
+    document = _java_evidence_turn_command_payload()
+    visible = document["context_envelope"]["visible_evidence"][0]
+    parsed_text = "附件正文记录了一项与当前争议关联度较低的材料内容。"
+    file_sha256 = "b" * 64
+    visible.update(
+        {
+            "content_type": "text/markdown",
+            "file_hash": file_sha256,
+            "parsed_text": parsed_text,
+            "parse_status": "SUCCEEDED",
+        }
+    )
+    document["context_envelope"]["evidence_content_authorities"] = [
+        {
+            "schema_version": "evidence_content_authority.v1",
+            "case_id": document["context_envelope"]["case_snapshot"]["case_id"],
+            "evidence_id": visible["evidence_id"],
+            "file_sha256": file_sha256,
+            "content_type": "text/markdown",
+            "parser_version": "PARSER_ASSESSMENT_SLOT_TEST_V1",
+            "parsed_content_sha256": hashlib.sha256(
+                parsed_text.encode("utf-8")
+            ).hexdigest(),
+            "parsed_text": parsed_text,
+            "parsed_byte_length": len(parsed_text.encode("utf-8")),
+            "completed_at": "2026-08-20T10:00:00+08:00",
+            "status": "SUCCEEDED",
+        }
+    ]
+    request = EvidenceTurnRequest.model_validate(document)
+    assembled = assemble_evidence_room_context_v2(request)
+    evidence_id = str(visible["evidence_id"])
+    source_unit_id = str(assembled.source_units[0]["source_unit_id"])
+    fact_ids = [
+        item["fact_id"] for item in assembled.base.working_set.allowed_fact_targets
+    ]
+    stream = EvidenceMaterialReviewStreamV2.model_validate(
+        {
+            "lead_public_text": "已收到本批材料，开始核验。",
+            "frames": [
+                {
+                    "header": {
+                        "frame_sequence": 2,
+                        "frame_type": "EVIDENCE_OBSERVATION",
+                        "observation_slot": "OBS_1",
+                        "source_unit_id": source_unit_id,
+                        "binding_status": binding_status,
+                        "fact_bindings": (
+                            [
+                                {
+                                    "fact_id": fact_ids[0],
+                                    "relation": "CONTENT_SUPPORTS",
+                                    "reason": "材料内容支持该冻结事实。",
+                                }
+                            ]
+                            if binding_status == "BOUND"
+                            else []
+                        ),
+                        "candidate_fact_ids": [],
+                        "binding_reason": "材料内容与当前争议事实没有直接对应关系。",
+                        "observation_kind": "PARSED_RECORD",
+                        "epistemic_status": "PROVISIONAL",
+                    },
+                    "public_text": "该附件内容与当前争议事实没有直接对应关系。",
+                },
+                {
+                    "header": {
+                        "frame_sequence": 3,
+                        "frame_type": "EVIDENCE_ASSESSMENT",
+                        "evidence_id": evidence_id,
+                        "observation_slots": assessment_observation_slots,
+                        "authenticity_score": 0.72,
+                        "authenticity_score_explanation": "材料来源可识别，但没有平台原始导出链。",
+                        "relevance_score": 0.31,
+                        "relevance_score_explanation": "材料正文没有直接覆盖当前冻结争议事实。",
+                        "completeness_score": 0.68,
+                        "completeness_score_explanation": "正文可读，但缺少形成上下文。",
+                        "assessment_confidence": 0.86,
+                        "assessment_confidence_explanation": "解析文本清晰，可判断当前文本范围。",
+                        "risk_level": "MEDIUM",
+                        "risk_explanation": "材料可读但来源链和事实关联均存在缺口。",
+                        "source_basis": ["已读取当前附件解析正文。"],
+                        "formation_time_assessment": "正文未提供可核对的形成时间。",
+                        "findings": [
+                            {
+                                "finding_type": "PARSED_TEXT",
+                                "description": "附件正文可以完整读取。",
+                            }
+                        ],
+                        "limitations": ["仅能核验文本内容。"],
+                        "unsupported_claims": ["不能单独证明核心争议事实。"],
+                    },
+                    "public_text": "材料可读，但与当前争议关联度较低。",
+                },
+                {
+                    "header": {
+                        "frame_sequence": 4,
+                        "frame_type": "ROOM_READINESS",
+                        "core_fact_coverage": "NONE",
+                        "source_chain_coverage": "PARTIAL",
+                        "time_integrity_coverage": "UNKNOWN",
+                        "unresolved_conflicts": [],
+                        "remaining_core_fact_ids": fact_ids,
+                        "overall_readiness": "NOT_READY",
+                        "readiness_reasons": ["当前材料未覆盖核心争议事实。"],
+                    },
+                    "public_text": "仍需补充与核心争议直接相关的材料。",
+                },
+            ],
+        }
+    )
+    return assembled, stream
+
+
+def test_v3_assessment_slots_are_derived_from_source_authority() -> None:
+    assembled, stream = _material_review_validation_fixture([])
+
+    _validate_v2_authority(stream, assembled)
+    bound = _bind_v2_assessment_observation_slots(stream, assembled)
+
+    assessment = next(
+        frame.header
+        for frame in bound.frames
+        if frame.header.frame_type == "EVIDENCE_ASSESSMENT"
+    )
+    assert assessment.observation_slots == ["OBS_1"]
+
+
+def test_v3_material_output_accepts_parsed_text_and_missing_semantic_fields() -> None:
+    stream = EvidenceMaterialReviewStreamV2.model_validate(
+        {
+            "frames": [
+                {
+                    "header": {
+                        "frame_sequence": 2,
+                        "frame_type": "EVIDENCE_OBSERVATION",
+                        "observation_kind": "PARSED_TEXT",
+                    },
+                    "public_text": "已读取文本材料。",
+                },
+                {
+                    "header": {
+                        "frame_sequence": 3,
+                        "frame_type": "EVIDENCE_ASSESSMENT",
+                        "risk_level": "MODEL_DEFINED_LEVEL",
+                    },
+                    "public_text": None,
+                },
+            ]
+        }
+    )
+
+    rebound = _bind_v2_transport_sequences(stream)
+
+    observation = rebound.frames[0].header
+    assessment = rebound.frames[1].header
+    assert observation.frame_sequence == 2
+    assert observation.observation_kind == "PARSED_TEXT"
+    assert observation.binding_status is None
+    assert observation.fact_bindings == []
+    assert assessment.frame_sequence == 3
+    assert assessment.evidence_id is None
+    assert assessment.risk_level == "MODEL_DEFINED_LEVEL"
+    assert rebound.frames[1].public_text is None
+
+
+def test_internal_leading_frame_preserves_authoritative_transport_identity() -> None:
+    header = leading_evidence_frame_header_v2("ROOM_OPENING")
+
+    frame = EvidenceFrameObjectV2(header=header, public_text="欢迎进入证据室。")
+
+    assert frame.header.frame_sequence == 1
+    assert frame.header.frame_type == "ROOM_WELCOME"
+
+
+def test_v3_public_policy_streams_parsed_text_without_semantic_header_rejection() -> None:
+    assembled, stream = _material_review_validation_fixture([])
+    observation = stream.frames[0].header.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_defaults=True,
+    )
+    observation["observation_kind"] = "PARSED_TEXT"
+    observation.pop("binding_status", None)
+    observation.pop("epistemic_status", None)
+    policy = EvidenceV2PublicOutputPolicy()
+    policy.configure(assembled)
+    policy.begin(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="frames",
+    )
+    policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="lead_public_text",
+        delta="已收到文本材料。",
+    )
+
+    projected = policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="frames",
+        delta=_event("frame_start", 2, header=observation),
+    )
+
+    header = json.loads(next(value for field, value in projected if field.endswith(".header")))
+    assert header["observation_kind"] == "PARSED_TEXT"
+    assert "binding_status" not in header
+    assert "epistemic_status" not in header
+
+
+def test_v3_provider_assessment_slot_guess_is_replaced_by_source_authority() -> None:
+    assembled, stream = _material_review_validation_fixture(["OBS_UNKNOWN"])
+
+    _validate_v2_authority(stream, assembled)
+    bound = _bind_v2_assessment_observation_slots(stream, assembled)
+
+    assessment = next(
+        frame.header
+        for frame in bound.frames
+        if frame.header.frame_type == "EVIDENCE_ASSESSMENT"
+    )
+    assert assessment.observation_slots == ["OBS_1"]
+
+
+def test_v3_repeated_model_observation_slot_remains_authoritative() -> None:
+    assembled, stream = _material_review_validation_fixture([])
+    document = stream.model_dump(mode="json")
+    duplicate = json.loads(json.dumps(document["frames"][0]))
+    duplicate["header"]["frame_sequence"] = 3
+    for frame in document["frames"][1:]:
+        frame["header"]["frame_sequence"] += 1
+    document["frames"].insert(1, duplicate)
+    repeated = EvidenceMaterialReviewStreamV2.model_validate(document)
+
+    _validate_v2_authority(repeated, assembled)
+    bound = _bind_v2_assessment_observation_slots(repeated, assembled)
+
+    assessment = next(
+        frame.header
+        for frame in bound.frames
+        if frame.header.frame_type == "EVIDENCE_ASSESSMENT"
+    )
+    assert assessment.observation_slots == ["OBS_1", "OBS_1"]
+
+
+def test_v3_bound_observation_is_attached_before_terminal_materialization() -> None:
+    assembled, stream = _material_review_validation_fixture(
+        [],
+        binding_status="BOUND",
+    )
+
+    _validate_v2_authority(stream, assembled)
+    bound = _bind_v2_assessment_observation_slots(stream, assembled)
+
+    assessment = next(
+        frame.header
+        for frame in bound.frames
+        if frame.header.frame_type == "EVIDENCE_ASSESSMENT"
+    )
+    assert assessment.observation_slots == ["OBS_1"]
+
+
+def test_v3_live_and_terminal_assessment_headers_share_derived_binding() -> None:
+    assembled, stream = _material_review_validation_fixture(
+        [],
+        binding_status="BOUND",
+    )
+    policy = EvidenceV2PublicOutputPolicy()
+    policy.configure(assembled)
+    policy.begin(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="frames",
+    )
+    policy.project_event(
+        operation="evidence_turn",
+        node_name="evidence_turn",
+        field_name="lead_public_text",
+        delta=stream.lead_public_text,
+    )
+
+    assessment_header = None
+    for frame in stream.frames:
+        sequence = frame.header.frame_sequence
+        projected = policy.project_event(
+            operation="evidence_turn",
+            node_name="evidence_turn",
+            field_name="frames",
+            delta=_event(
+                "frame_start",
+                sequence,
+                header=frame.header.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                    exclude_defaults=True,
+                ),
+            ),
+        )
+        if frame.header.frame_type == "EVIDENCE_ASSESSMENT":
+            assessment_header = json.loads(
+                next(value for field, value in projected if field.endswith(".header"))
+            )
+        policy.project_event(
+            operation="evidence_turn",
+            node_name="evidence_turn",
+            field_name="frames",
+            delta=_event(
+                "public_text_delta",
+                sequence,
+                delta=frame.public_text,
+            ),
+        )
+        policy.project_event(
+            operation="evidence_turn",
+            node_name="evidence_turn",
+            field_name="frames",
+            delta=_event("frame_end", sequence),
+        )
+
+    terminal = _bind_v2_assessment_observation_slots(stream, assembled)
+    terminal_header = next(
+        frame.header.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude_defaults=True,
+        )
+        for frame in terminal.frames
+        if frame.header.frame_type == "EVIDENCE_ASSESSMENT"
+    )
+    assert assessment_header == terminal_header
+    assert assessment_header["observation_slots"] == ["OBS_1"]
 
 
 def test_v2_provider_context_keeps_semantics_without_audit_metadata() -> None:
@@ -472,6 +953,37 @@ async def test_v2_workflow_releases_first_frame_before_terminal_json_and_is_sing
 
 
 @pytest.mark.asyncio
+async def test_v3_workflow_binds_missing_readiness_to_empty_projection() -> None:
+    request = EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
+    frames = _opening_frames(request)[:-1]
+    stream = EvidenceRoomOpeningStreamV2.model_validate(
+        {
+            "lead_public_text": "欢迎进入证据室，本轮将按冻结案情梳理证据。",
+            "frames": frames,
+        }
+    )
+    runner = _StreamingRunner(stream)
+    runner.release.set()
+
+    result = await EvidenceTurnWorkflowV2(model_runner=runner).arun(request)
+
+    assert runner.calls == 1
+    assert result.room_readiness == {}
+    assert all(
+        frame.frame_type != "ROOM_READINESS" for frame in result.frame_manifest
+    )
+    assert result.evidence_requests == [
+        frame.header.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude_defaults=True,
+        )
+        for frame in stream.frames
+        if frame.header.frame_type == "EVIDENCE_REQUEST"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v2_workflow_rejects_out_of_scope_focus_fact_before_public_text() -> None:
     request = EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
     frames = _opening_frames(request)
@@ -615,7 +1127,7 @@ def test_target_e2e_binding_is_exactly_the_v2_evidence_workflow() -> None:
             1.0,
         ),
     )
-    assert workflow.protocol_version == "evidence-turn-result.v2"
+    assert workflow.protocol_version == "evidence-turn-result.v3"
     assert callable(workflow.run)
     assert callable(workflow.arun)
 

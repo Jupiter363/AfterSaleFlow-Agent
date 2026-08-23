@@ -21,8 +21,10 @@ from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
 from app.main import create_app
 from app.schemas import (
     CaseFactMatrixV2,
-    FactEvidenceMatrixV2,
+    FactEvidenceMatrixV3,
+    HearingAdjudicationDraftBody,
     HearingCaseFactMatrixDelta,
+    HearingDecisionAction,
     HearingEvidenceFileAssessmentLlmOutput,
     HearingEvidenceRequestsRequest,
     HearingEvidenceSynthesisRequest,
@@ -36,6 +38,7 @@ from app.schemas import (
     HearingJuryReviewRequest,
     HearingPartyStatementV1,
     TrialDossierV1,
+    TrialDossierV2,
     content_hash,
 )
 
@@ -231,11 +234,11 @@ def _evidence_matrix(
     frozen: bool = False,
     prehearing_binding: bool = False,
     case_matrix: CaseFactMatrixV2 | None = None,
-) -> FactEvidenceMatrixV2:
+) -> FactEvidenceMatrixV3:
     case = case_matrix or _case_matrix()
     bound_case = _prehearing_case_matrix() if prehearing_binding else case
     payload = {
-        "schema_version": "fact_evidence_matrix.v2",
+        "schema_version": "fact_evidence_matrix.v3",
         "case_id": case.case_id,
         "matrix_id": "FACT_EVIDENCE_MATRIX_prior",
         "matrix_version": 2,
@@ -250,9 +253,10 @@ def _evidence_matrix(
             {
                 "fact_id": "FACT_DELIVERY",
                 "evidence_id": "EVIDENCE_old",
-                "relation": "SUPPORTS",
+                "relation": "CONTENT_SUPPORTS",
                 "reason": "旧物流记录显示已签收。",
-                "confidence": 0.7,
+                "source_unit_id": "SOURCE_UNIT_prior",
+                "observation_slot": "OBS_prior",
                 "source_batch_id": "BATCH_prior",
             }
         ],
@@ -278,7 +282,7 @@ def _evidence_matrix(
         ],
     }
     payload["content_hash"] = _hash_payload(payload)
-    return FactEvidenceMatrixV2.model_validate(payload)
+    return FactEvidenceMatrixV3.model_validate(payload)
 
 
 def _trial_dossier(
@@ -377,6 +381,90 @@ def _trial_dossier(
     return TrialDossierV1.model_validate(payload)
 
 
+def _trial_dossier_v2() -> TrialDossierV2:
+    case_matrix = _adjudication_case_matrix()
+    evidence_matrix = _evidence_matrix(frozen=True, case_matrix=case_matrix)
+    payload = {
+        "schema_version": "trial_dossier.v2",
+        "trial_dossier_id": "TRIAL_DOSSIER_V2_hearing_flow",
+        "case_id": case_matrix.case_id,
+        "frozen_at": "2026-07-15T21:30:00+08:00",
+        "case_matrix_version": case_matrix.matrix_version,
+        "case_matrix_hash": case_matrix.content_hash,
+        "case_fact_matrix": case_matrix.model_dump(mode="json"),
+        "evidence_matrix_version": evidence_matrix.matrix_version,
+        "evidence_matrix_hash": evidence_matrix.content_hash,
+        "fact_evidence_matrix": evidence_matrix.model_dump(mode="json"),
+        "adjudication_rules": [
+            {
+                "policy_id": "POLICY_DELIVERY_PROOF_V1",
+                "rule_code": "DELIVERY_PROOF",
+                "rule_version": 1,
+                "rule_name": "签收争议举证规则",
+                "rule_scope": "DELIVERY_DISPUTE",
+                "rule_status": "ACTIVE",
+                "effective_from": "2020-01-01T00:00:00Z",
+                "effective_to": None,
+                "priority": 100,
+                "conditions": {"requires_delivery_proof": True},
+                "outcome": {"requires_human_review": True},
+                "source_document": {"section": "DELIVERY_PROOF"},
+            }
+        ],
+        "content_hash": "0" * 64,
+    }
+    payload["content_hash"] = _hash_payload(payload)
+    return TrialDossierV2.model_validate(payload)
+
+
+def _adjudication_draft(*, reviewer_attention: list[str] | None = None) -> dict[str, object]:
+    return {
+        "remedy_orders": [
+            {
+                "remedy_type": "REJECT_CLAIM",
+                "order_text": "现有冻结材料不足以支持退款诉求，结束本次案件。",
+                "fact_ids": ["FACT_DELIVERY", "FACT_RECIPIENT"],
+                "conditions": [],
+            }
+        ],
+        "fact_findings": [
+            {
+                "fact_id": "FACT_DELIVERY",
+                "finding": "现有物流记录仅能证明系统记载已签收。",
+                "evidence_ids": ["EVIDENCE_old"],
+                "evidence_gap": None,
+                "confidence": 0.72,
+            },
+            {
+                "fact_id": "FACT_RECIPIENT",
+                "finding": "冻结证据不能确认实际签收主体。",
+                "evidence_ids": [],
+                "evidence_gap": "没有与签收主体事实绑定的证据。",
+                "confidence": 0.4,
+            },
+        ],
+        "rule_applications": [
+            {
+                "rule_code": "DELIVERY_PROOF",
+                "rule_version": 1,
+                "rule_name": "签收争议举证规则",
+                "fact_ids": ["FACT_DELIVERY", "FACT_RECIPIENT"],
+                "applicable": True,
+                "conditions_met": ["存在交付是否完成的争议"],
+                "conditions_unmet": [],
+                "rationale": "本案须依据可核验交付证据认定履约。",
+                "resulting_effect": "签收主体不明事项保留人工审核",
+            }
+        ],
+        "decision_reasoning": (
+            "M2 显示双方对实际交付和签收主体存在冲突；E2 仅绑定物流系统记录，"
+            "不能确认实际签收主体；依冻结举证规则，当前材料不足以支持退款诉求。"
+        ),
+        "reviewer_attention": reviewer_attention or ["核验实际签收主体。"],
+        "decision_action": "REJECT_CLAIM",
+    }
+
+
 def _base(stage_code: str, stage_sequence: int) -> dict[str, object]:
     return {
         "flow_schema_version": "hearing_flow.v2",
@@ -387,6 +475,55 @@ def _base(stage_code: str, stage_sequence: int) -> dict[str, object]:
         "stage_deadline_at": "2026-07-15T21:00:00+08:00",
         "source_refs": [f"SOURCE_{stage_code}"],
     }
+
+
+@pytest.mark.parametrize("decision_action", list(HearingDecisionAction))
+def test_adjudication_draft_requires_one_supported_decision_action(
+    decision_action: HearingDecisionAction,
+) -> None:
+    payload = _adjudication_draft()
+    payload["decision_action"] = decision_action.value
+
+    draft = HearingAdjudicationDraftBody.model_validate(payload)
+
+    assert draft.decision_action is decision_action
+
+
+def test_decision_action_schema_explains_every_supported_code() -> None:
+    description = HearingAdjudicationDraftBody.model_json_schema()["properties"][
+        "decision_action"
+    ]["description"]
+
+    assert "必须且只能选择一个" in description
+    for decision_action in HearingDecisionAction:
+        assert f"{decision_action.value}=" in description
+    assert "RETURN_AND_REFUND=用户退回商品后，由商家退还相应款项" in description
+    assert "CONTINUE_FULFILLMENT=维持当前订单关系" in description
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.pop("decision_action"),
+        lambda payload: payload.update(decision_action="MANUAL_REVIEW"),
+        lambda payload: payload.update(decision_action="建议退货退款"),
+    ],
+)
+def test_adjudication_draft_rejects_missing_or_open_decision_action(mutate) -> None:
+    payload = _adjudication_draft()
+    mutate(payload)
+
+    with pytest.raises(ValueError, match="decision_action"):
+        HearingAdjudicationDraftBody.model_validate(payload)
+
+
+def test_adjudication_draft_rejects_legacy_recommended_decision() -> None:
+    payload = _adjudication_draft()
+    payload.pop("decision_action")
+    payload["recommended_decision"] = "建议退货退款"
+
+    with pytest.raises(ValueError, match="decision_action|recommended_decision"):
+        HearingAdjudicationDraftBody.model_validate(payload)
 
 
 class QueueRunner:
@@ -403,6 +540,13 @@ class QueueRunner:
             value=output_type.model_validate(value),
             model="test-model",
         )
+
+
+def _hearing_context_from_call(call: dict[str, object]) -> dict[str, object]:
+    context_pack = call["context_pack"]
+    assert len(context_pack.sections) == 1
+    assert context_pack.sections[0].name == "hearing_room_context_v3"
+    return json.loads(context_pack.sections[0].content)
 
 
 class ParallelEvidenceRunner(QueueRunner):
@@ -535,7 +679,7 @@ def test_target_e2e_hearing_v2_invocation_uses_governed_case_specific_model_outp
     assert "Synthetic" not in result.model_dump_json()
     assert "Provide your account" not in result.model_dump_json()
     assert "270元替代购买" in json.dumps(
-        runner.calls[0]["case_data"], ensure_ascii=False
+        _hearing_context_from_call(runner.calls[0]), ensure_ascii=False
     )
 
     with pytest.raises(
@@ -642,7 +786,7 @@ def test_intake_synthesis_payload_catalogs_existing_fact_keys_in_sorted_order() 
 
     HearingFlowWorkflows(runner).intake_synthesis(request)
 
-    assert runner.calls[-1]["case_data"]["existing_fact_keys"] == [
+    assert _hearing_context_from_call(runner.calls[-1])["existing_fact_keys"] == [
         "FACT_DELIVERY",
         "FACT_RECIPIENT",
     ]
@@ -716,6 +860,43 @@ def test_trial_dossier_uses_the_java_canonical_frozen_payload_and_hash() -> None
     corrupted["content_hash"] = "f" * 64
     with pytest.raises(ValueError, match="content hash is invalid"):
         TrialDossierV1.model_validate(corrupted)
+
+
+def test_trial_dossier_v2_contains_only_frozen_adjudication_authorities() -> None:
+    dossier = _trial_dossier_v2()
+
+    assert set(TrialDossierV2.model_fields) == {
+        "schema_version",
+        "trial_dossier_id",
+        "case_id",
+        "frozen_at",
+        "case_matrix_version",
+        "case_matrix_hash",
+        "case_fact_matrix",
+        "evidence_matrix_version",
+        "evidence_matrix_hash",
+        "fact_evidence_matrix",
+        "adjudication_rules",
+        "content_hash",
+    }
+    payload = dossier.model_dump(mode="json")
+    assert {
+        "question_set_id",
+        "question_set",
+        "answer_bundles",
+        "request_set_id",
+        "evidence_request_set",
+        "evidence_batches",
+        "policy_rules",
+    }.isdisjoint(payload)
+    assert dossier.adjudication_rules[0].rule_code == "DELIVERY_PROOF"
+    assert dossier.content_hash == _hash_payload(payload)
+
+    mismatched = dict(payload)
+    mismatched["evidence_matrix_hash"] = "f" * 64
+    mismatched["content_hash"] = _hash_payload(mismatched)
+    with pytest.raises(ValueError, match="evidence matrix binding"):
+        TrialDossierV2.model_validate(mismatched)
 
 
 def test_trial_dossier_accepts_bilateral_natural_language_statements() -> None:
@@ -945,7 +1126,9 @@ def test_intake_synthesis_deterministically_merges_a_bounded_fact_delta() -> Non
         "ACTION_MERCHANT_ANSWER",
         "MESSAGE_MERCHANT_STATEMENT",
     ]
-    assert runner.calls[-1]["case_data"]["party_statements"][0]["statement_text"] == (
+    assert _hearing_context_from_call(runner.calls[-1])["party_statement_catalog"][0][
+        "statement_text"
+    ] == (
         "物流虽然显示签收，但签收人不是我本人。"
     )
     assert any(point.fact_ids == [new_row.fact_id] for point in synthesis.dispute_points)
@@ -1104,7 +1287,7 @@ def test_intake_synthesis_maps_the_legacy_java_answer_envelope_as_party_statemen
 
     result = HearingFlowWorkflows(runner).intake_synthesis(request)
 
-    statements = runner.calls[-1]["case_data"]["party_statements"]
+    statements = _hearing_context_from_call(runner.calls[-1])["party_statement_catalog"]
     assert statements[0]["statement_text"] == "物流显示签收，但我本人没有收到包裹。"
     assert statements[1]["statement_text"] == "承运方记录的状态为已签收。"
     assert result.issue_mappings[0].issue_id == issue_id
@@ -1243,6 +1426,67 @@ def test_evidence_requests_accept_the_prehearing_frozen_matrix_for_new_facts() -
     assert result.requests[0].verification_goal == "核验实际签收人与代收授权"
 
 
+def test_evidence_request_scope_remains_prompt_guidance_but_roles_are_shared() -> None:
+    runner = QueueRunner(
+        {
+            "hearing_evidence_requests": {
+                "requests": [
+                    {
+                        "target_roles": ["USER"],
+                        "fact_ids": ["FACT_DELIVERY"],
+                        "requested_material": "用户持有的交付记录",
+                        "verification_goal": "从用户侧核对交付记录",
+                        "required": True,
+                    },
+                    {
+                        "target_roles": ["MERCHANT"],
+                        "fact_ids": ["FACT_DELIVERY"],
+                        "requested_material": "商家持有的交付记录",
+                        "verification_goal": "从商家侧核对交付记录",
+                        "required": True,
+                    },
+                ],
+                "public_message": "请围绕交付记录补充说明。",
+            }
+        }
+    )
+    request = HearingEvidenceRequestsRequest.model_validate(
+        {
+            **_base("EVIDENCE_REQUESTS", 3),
+            "case_fact_matrix": _adjudication_case_matrix(),
+            "evidence_dossier": {
+                "dossier_id": "EVIDENCE_DOSSIER_prompt_guidance",
+                "dossier_version": 1,
+                "dossier_status": "FROZEN",
+                "fact_evidence_matrix": _evidence_matrix(
+                    frozen=True,
+                    prehearing_binding=True,
+                ),
+                "evidence_summary": {},
+                "evidence_gaps": [],
+            },
+        }
+    )
+
+    result = HearingFlowWorkflows(runner).evidence_requests(request)
+
+    context = _hearing_context_from_call(runner.calls[0])
+    assert context["uncovered_fact_catalog"] == [
+        {
+            "fact_id": "FACT_RECIPIENT",
+            "uncovered_reason": "MISSING_FROM_FROZEN_E1",
+        }
+    ]
+    assert [item.fact_ids for item in result.requests] == [
+        ["FACT_DELIVERY"],
+        ["FACT_DELIVERY"],
+    ]
+    assert [item.target_roles for item in result.requests] == [
+        ["USER", "MERCHANT"],
+        ["USER", "MERCHANT"],
+    ]
+
+
 def test_evidence_requests_reject_a_matrix_not_bound_to_current_or_parent_case_matrix() -> None:
     request = HearingEvidenceRequestsRequest.model_validate(
         {
@@ -1271,7 +1515,9 @@ def test_evidence_requests_reject_a_matrix_not_bound_to_current_or_parent_case_m
 
 def test_evidence_synthesis_consumes_complete_batch_and_prior_matrix() -> None:
     def assessment(kwargs: dict[str, object]) -> dict[str, object]:
-        evidence_id = kwargs["case_data"]["evidence_file"]["evidence_id"]
+        evidence_id = _hearing_context_from_call(kwargs)["current_evidence_item"][
+            "evidence_file"
+        ]["evidence_id"]
         if evidence_id == "EVIDENCE_user_new":
             return {
                 "fact_links": [
@@ -1360,13 +1606,14 @@ def test_evidence_synthesis_consumes_complete_batch_and_prior_matrix() -> None:
     synthesis_call = next(
         item for item in runner.calls if item["node_name"] == "hearing_evidence_synthesis"
     )
-    assert len(synthesis_call["case_data"]["evidence_assessments"]) == 2
-    assert len(synthesis_call["case_data"]["merged_fact_evidence_matrix"]["links"]) == 3
+    synthesis_context = _hearing_context_from_call(synthesis_call)
+    assert len(synthesis_context["evidence_assessment_catalog"]) == 2
+    assert len(synthesis_context["merged_evidence_matrix"]["links"]) == 3
     assert (
-        synthesis_call["case_data"]["merged_fact_evidence_matrix"]["matrix_status"]
+        synthesis_context["merged_evidence_matrix"]["matrix_status"]
         == "FROZEN"
     )
-    assert result.fact_evidence_matrix.schema_version == "fact_evidence_matrix.v2"
+    assert result.fact_evidence_matrix.schema_version == "fact_evidence_matrix.v3"
     assert result.fact_evidence_matrix.matrix_version == 3
     assert result.fact_evidence_matrix.matrix_status == "FROZEN"
     assert result.fact_evidence_matrix.parent_ref.matrix_id == "FACT_EVIDENCE_MATRIX_prior"
@@ -1529,7 +1776,9 @@ def test_evidence_synthesis_runs_bounded_parallel_send_waves() -> None:
 
 def test_evidence_synthesis_never_merges_a_partial_assessment_set() -> None:
     def assessment(kwargs: dict[str, object]) -> dict[str, object]:
-        evidence_id = kwargs["case_data"]["evidence_file"]["evidence_id"]
+        evidence_id = _hearing_context_from_call(kwargs)["current_evidence_item"][
+            "evidence_file"
+        ]["evidence_id"]
         if evidence_id == "EVIDENCE_failure":
             raise AgentServiceUnavailable("file assessment failed")
         return {
@@ -1589,7 +1838,7 @@ def test_evidence_synthesis_never_merges_a_partial_assessment_set() -> None:
     assert all(item["node_name"] != "hearing_evidence_synthesis" for item in runner.calls)
 
 
-def test_v1_review_v2_are_hash_bound_and_v2_text_is_persistable() -> None:
+def test_v1_and_v2_assemble_separate_contexts_over_one_frozen_authority() -> None:
     dimensions = [
         "FACT_COMPLETENESS",
         "EVIDENCE_CONSISTENCY",
@@ -1598,15 +1847,46 @@ def test_v1_review_v2_are_hash_bound_and_v2_text_is_persistable() -> None:
         "REMEDY_FEASIBILITY",
         "RISK_AND_OMISSIONS",
     ]
-    v2_text = "V2 草案：转人工审核签收主体与通知日志后再决定退款。"
+    v1_draft = _adjudication_draft()
+    v2_draft = _adjudication_draft(
+        reviewer_attention=["人工终审仍需核验实际签收主体。"]
+    )
+    v1_draft["fact_findings"][1]["evidence_gap"] = None
+    v2_draft["fact_findings"][1]["evidence_gap"] = None
+    review_responses = [
+        *[
+            {
+                "review_item_ref": f"V1_FOCUS_{index:02d}",
+                "review_source": "V1_REVIEW_FOCUS",
+                "disposition": "ACCEPTED",
+                "response": "已回到冻结 M2、E2 与规则核验该关注点。",
+                "affected_fields": ["reviewer_attention"],
+            }
+            for index in range(1, 3)
+        ],
+        *[
+            {
+                "review_item_ref": f"JURY_FINDING_{dimension}",
+                "review_source": "JURY_FINDING",
+                "disposition": "ACCEPTED",
+                "response": "该意见未超出冻结裁判依据，已纳入复审。",
+                "affected_fields": ["decision_reasoning"],
+            }
+            for dimension in dimensions
+        ],
+        {
+            "review_item_ref": "JURY_MANDATORY_01",
+            "review_source": "MANDATORY_REVISION",
+            "disposition": "ACCEPTED",
+            "response": "已明确签收主体不能确认时保留人工审核。",
+            "affected_fields": ["decision_action", "reviewer_attention"],
+        },
+    ]
     runner = QueueRunner(
         {
             "hearing_judge_v1": {
-                "proposal_text": "非最终 V1：先核验签收主体，再决定退款。",
-                "recommended_decision": "人工核验后决定退款",
-                "reasoning_summary": "当前签收人事实仍有冲突。",
+                "draft": v1_draft,
                 "review_focus": ["签收主体", "驿站通知日志"],
-                "public_message": "法官 V1 已形成并提交独立评审。",
             },
             "hearing_jury_review": {
                 "findings": [
@@ -1623,58 +1903,23 @@ def test_v1_review_v2_are_hash_bound_and_v2_text_is_persistable() -> None:
                 "public_message": "独立评审完成，V1 需要补充事实不明时的处理规则。",
             },
             "hearing_judge_v2": {
-                "draft": {
-                    "recommended_decision": "转人工审核",
-                    "confidence": 0.72,
-                    "draft_text": v2_text,
-                    "fact_findings": [
-                        {
-                            "fact_id": "FACT_DELIVERY",
-                            "finding": "物流记录显示签收，但不能单独证明本人收货。",
-                            "evidence_ids": ["EVIDENCE_old"],
-                            "evidence_gap": "缺少能够确认实际签收主体的材料。",
-                            "confidence": 0.72,
-                        }
-                    ],
-                    "evidence_assessment": [
-                        {
-                            "assessment_type": "EVIDENCE",
-                            "evidence_id": "EVIDENCE_old",
-                            "fact_ids": ["FACT_DELIVERY"],
-                            "assessment": "现有证据只能证明物流系统记录，不能单独确认签收主体。",
-                            "weight": "MEDIUM",
-                            "confidence": 0.7,
-                            "limitations": ["缺少签收人身份信息"],
-                        }
-                    ],
-                    "policy_application": [
-                        {
-                            "rule_code": "DELIVERY_PROOF",
-                            "rule_version": 1,
-                            "rule_name": "签收争议举证规则",
-                            "fact_ids": ["FACT_DELIVERY"],
-                            "applicable": True,
-                            "rationale": "履约方应提供可核验的交付记录。",
-                            "limitations": ["签收主体仍待人工核验"],
-                        }
-                    ],
-                    "reviewer_attention": ["核对签收主体无法查明时的处理路径。"],
-                },
-                "public_message": v2_text,
+                "draft": v2_draft,
+                "review_responses": review_responses,
             },
         }
     )
     workflows = HearingFlowWorkflows(runner)
+    dossier = _trial_dossier_v2()
     v1 = workflows.judge_v1(
         HearingJudgeV1Request.model_validate(
-            {**_base("JUDGE_V1", 5), "trial_dossier": _trial_dossier()}
+            {**_base("JUDGE_V1", 5), "trial_dossier": dossier}
         )
     )
     review = workflows.jury_review(
         HearingJuryReviewRequest.model_validate(
             {
                 **_base("JURY_REVIEW", 6),
-                "trial_dossier": _trial_dossier(),
+                "trial_dossier": dossier,
                 "judge_v1": v1,
             }
         )
@@ -1682,7 +1927,7 @@ def test_v1_review_v2_are_hash_bound_and_v2_text_is_persistable() -> None:
     v2_request = HearingJudgeV2Request.model_validate(
         {
             **_base("JUDGE_V2", 7),
-            "trial_dossier": _trial_dossier(),
+            "trial_dossier": dossier,
             "judge_v1": v1,
             "jury_review": review,
         }
@@ -1693,106 +1938,204 @@ def test_v1_review_v2_are_hash_bound_and_v2_text_is_persistable() -> None:
     assert review.reviewed_proposal_hash == v1.proposal_hash
     assert v2.parent_proposal_hash == v1.proposal_hash
     assert v2.jury_review_hash == review.review_hash
-    assert v2.public_message == v2.draft.draft_text == v2_text
-    assert v2.draft.draft_status == "PENDING_HUMAN_REVIEW"
+    assert v1.schema_version == "hearing_judge_v1.v2"
+    assert v2.schema_version == "hearing_judge_v2.v2"
+    assert v2.draft_status == "PENDING_HUMAN_REVIEW"
+    assert "法官 V1 裁决草案（非终局）" in v1.public_message
+    assert "法官 V2 裁决草案（待人工审核）" in v2.public_message
+    assert "REJECT_CLAIM（不支持本次售后诉求并结束案件）" in v1.public_message
+    assert "REJECT_CLAIM（不支持本次售后诉求并结束案件）" in v2.public_message
+    assert "JURY_MANDATORY_01 [ACCEPTED]" in v2.public_message
+    assert v1.draft.fact_findings[1].evidence_gap == (
+        "冻结 E2 中本事实认定未引用任何与该 fact_id 绑定的证据，需人工复核。"
+    )
+    assert v2.draft.fact_findings[1].evidence_gap == (
+        "冻结 E2 中本事实认定未引用任何与该 fact_id 绑定的证据，需人工复核。"
+    )
     assert content_hash(v2, hash_field="judge_v2_hash") == v2.judge_v2_hash
 
-    gap_text = "V2 草案：签收主体缺少直接证据，提交人工终审。"
-    runner.outputs["hearing_judge_v2"] = {
-        "draft": {
-            "recommended_decision": "转人工审核",
-            "confidence": 0.4,
-            "draft_text": gap_text,
-            "fact_findings": [
-                {
-                    "fact_id": "FACT_RECIPIENT",
-                    "finding": "现有卷宗不能确认签收主体。",
-                    "evidence_ids": [],
-                    "evidence_gap": "没有与签收主体事实关联的证据。",
-                    "confidence": 0.4,
-                }
-            ],
-            "evidence_assessment": [
-                {
-                    "assessment_type": "EVIDENCE_GAP",
-                    "evidence_id": None,
-                    "fact_ids": ["FACT_RECIPIENT"],
-                    "assessment": "签收主体事实没有可供采信的证据。",
-                    "weight": "NONE",
-                    "confidence": 0.4,
-                    "limitations": ["需人工判断举证不能的不利后果"],
-                }
-            ],
-            "policy_application": [
-                {
-                    "rule_code": "DELIVERY_PROOF",
-                    "rule_version": 1,
-                    "rule_name": "签收争议举证规则",
-                    "fact_ids": ["FACT_RECIPIENT"],
-                    "applicable": True,
-                    "rationale": "签收主体不明时仍需按冻结规则审查举证责任。",
-                    "limitations": ["缺少直接证据"],
-                }
-            ],
-            "reviewer_attention": ["确认签收主体无法查明时的处理路径。"],
-        },
-        "public_message": gap_text,
+    v1_call = next(call for call in runner.calls if call["node_name"] == "hearing_judge_v1")
+    v2_call = next(call for call in runner.calls if call["node_name"] == "hearing_judge_v2")
+    v1_context = v1_call["case_data"]
+    v2_context = v2_call["case_data"]
+    assert list(v1_context)[-1] == "decision_action_catalog"
+    assert set(v1_context) == {
+        "frozen_adjudication_context",
+        "decision_action_catalog",
     }
-    gap_v2 = workflows.judge_v2(v2_request)
-    assert gap_v2.draft.evidence_assessment[0].assessment_type == "EVIDENCE_GAP"
-    assert gap_v2.draft.evidence_assessment[0].evidence_id is None
-
-    runner.outputs["hearing_judge_v2"] = {
-        "draft": {
-            "recommended_decision": "转人工审核",
-            "confidence": 0.5,
-            "draft_text": "错误草案：把其他事实的证据用于签收主体认定。",
-            "fact_findings": [
-                {
-                    "fact_id": "FACT_RECIPIENT",
-                    "finding": "错误引用。",
-                    "evidence_ids": ["EVIDENCE_old"],
-                    "evidence_gap": None,
-                    "confidence": 0.5,
-                }
-            ],
-            "evidence_assessment": [
-                {
-                    "assessment_type": "EVIDENCE",
-                    "evidence_id": "EVIDENCE_old",
-                    "fact_ids": ["FACT_DELIVERY"],
-                    "assessment": "该证据只能关联交付记录事实。",
-                    "weight": "MEDIUM",
-                    "confidence": 0.5,
-                    "limitations": [],
-                }
-            ],
-            "policy_application": [
-                {
-                    "rule_code": "DELIVERY_PROOF",
-                    "rule_version": 1,
-                    "rule_name": "签收争议举证规则",
-                    "fact_ids": ["FACT_RECIPIENT"],
-                    "applicable": True,
-                    "rationale": "需要人工纠正事实证据绑定。",
-                    "limitations": [],
-                }
-            ],
-            "reviewer_attention": ["检查事实证据绑定。"],
-        },
-        "public_message": "错误草案：把其他事实的证据用于签收主体认定。",
+    assert set(v1_context["frozen_adjudication_context"]) == {
+        "case_fact_matrix",
+        "fact_evidence_matrix",
+        "adjudication_rules",
     }
-    with pytest.raises(AgentOutputSchemaError, match="not linked to its fact"):
-        workflows.judge_v2(v2_request)
-
-    runner.outputs["hearing_judge_v2"]["draft"]["fact_findings"][0]["fact_id"] = (
-        "FACT_DELIVERY"
+    forbidden = {
+        "trial_dossier_id",
+        "frozen_at",
+        "question_set",
+        "answer_bundles",
+        "evidence_request_set",
+        "evidence_batches",
+        "v1_draft_pack",
+        "jury_opinion_pack",
+    }
+    assert forbidden.isdisjoint(v1_context)
+    assert set(v2_context) == {
+        "frozen_adjudication_context",
+        "v1_draft_pack",
+        "review_requirements_pack",
+        "jury_opinion_pack",
+        "decision_action_catalog",
+    }
+    assert list(v2_context)[-1] == "decision_action_catalog"
+    assert v2_context["decision_action_catalog"] == v1_context[
+        "decision_action_catalog"
+    ]
+    assert [item["code"] for item in v1_context["decision_action_catalog"]] == [
+        action.value for action in HearingDecisionAction
+    ]
+    assert all(item["meaning"] for item in v1_context["decision_action_catalog"])
+    assert (
+        v2_context["frozen_adjudication_context"]
+        == v1_context["frozen_adjudication_context"]
     )
-    runner.outputs["hearing_judge_v2"]["draft"]["policy_application"][0][
-        "rule_code"
-    ] = "INVENTED_RULE"
-    with pytest.raises(AgentOutputSchemaError, match="absent from the frozen dossier"):
-        workflows.judge_v2(v2_request)
+    assert v2_context["v1_draft_pack"]["draft"] == v1.draft.model_dump(mode="json")
+    assert set(v2_context["v1_draft_pack"]) == {"draft"}
+    requirements = v2_context["review_requirements_pack"]
+    assert requirements["required_response_count"] == len(review_responses)
+    assert [item["review_item_ref"] for item in requirements["review_items"]] == [
+        item["review_item_ref"] for item in review_responses
+    ]
+    assert len(v2_context["jury_opinion_pack"]["findings"]) == 6
+
+
+def test_judge_v2_rejects_cross_fact_evidence_and_incomplete_review_responses() -> None:
+    dimensions = [
+        "FACT_COMPLETENESS",
+        "EVIDENCE_CONSISTENCY",
+        "RULE_APPLICABILITY",
+        "PROCEDURAL_FAIRNESS",
+        "REMEDY_FEASIBILITY",
+        "RISK_AND_OMISSIONS",
+    ]
+    runner = QueueRunner(
+        {
+            "hearing_judge_v1": {
+                "draft": _adjudication_draft(),
+                "review_focus": ["签收主体"],
+            },
+            "hearing_jury_review": {
+                "findings": [
+                    {
+                        "dimension": dimension,
+                        "severity": "LOW",
+                        "assessment": f"{dimension} 评审意见。",
+                        "basis": ["FACT_RECIPIENT"],
+                        "requires_revision": False,
+                    }
+                    for dimension in dimensions
+                ],
+                "mandatory_revisions": [],
+                "public_message": "评审完成。",
+            },
+            "hearing_judge_v2": {
+                "draft": _adjudication_draft(),
+                "review_responses": [],
+            },
+        }
+    )
+    workflows = HearingFlowWorkflows(runner)
+    dossier = _trial_dossier_v2()
+    v1 = workflows.judge_v1(
+        HearingJudgeV1Request.model_validate(
+            {**_base("JUDGE_V1", 5), "trial_dossier": dossier}
+        )
+    )
+    review = workflows.jury_review(
+        HearingJuryReviewRequest.model_validate(
+            {
+                **_base("JURY_REVIEW", 6),
+                "trial_dossier": dossier,
+                "judge_v1": v1,
+            }
+        )
+    )
+    request = HearingJudgeV2Request.model_validate(
+        {
+            **_base("JUDGE_V2", 7),
+            "trial_dossier": dossier,
+            "judge_v1": v1,
+            "jury_review": review,
+        }
+    )
+
+    invalid_binding = _adjudication_draft()
+    invalid_binding["fact_findings"][1]["evidence_ids"] = ["EVIDENCE_old"]
+    invalid_binding["fact_findings"][1]["evidence_gap"] = None
+    runner.outputs["hearing_judge_v2"] = {
+        "draft": invalid_binding,
+        "review_responses": [
+            {
+                "review_item_ref": "V1_FOCUS_01",
+                "review_source": "V1_REVIEW_FOCUS",
+                "disposition": "REJECTED",
+                "response": "测试引用边界。",
+                "affected_fields": ["fact_findings"],
+            }
+        ],
+    }
+    with pytest.raises(AgentOutputSchemaError, match="not bound to its fact"):
+        workflows.judge_v2(request)
+
+    runner.outputs["hearing_judge_v2"] = {
+        "draft": _adjudication_draft(),
+        "review_responses": [
+            {
+                "review_item_ref": "V1_FOCUS_01",
+                "review_source": "V1_REVIEW_FOCUS",
+                "disposition": "ACCEPTED",
+                "response": "只回应了一个项目。",
+                "affected_fields": ["reviewer_attention"],
+            }
+        ],
+    }
+    with pytest.raises(AgentOutputSchemaError, match="address every assembled"):
+        workflows.judge_v2(request)
+
+    v2_call = next(
+        call for call in reversed(runner.calls) if call["node_name"] == "hearing_judge_v2"
+    )
+    semantic_validator = v2_call["semantic_validator"]
+    incomplete_output = v2_call["output_type"].model_validate(
+        runner.outputs["hearing_judge_v2"]
+    )
+    with pytest.raises(ValueError, match="address every assembled"):
+        semantic_validator(incomplete_output)
+
+    complete_responses = [
+        {
+            "review_item_ref": "V1_FOCUS_01",
+            "review_source": "JURY_FINDING",
+            "disposition": "REJECTED",
+            "response": "故意使用错误来源绑定。",
+            "affected_fields": ["reviewer_attention"],
+        },
+        *[
+            {
+                "review_item_ref": f"JURY_FINDING_{dimension}",
+                "review_source": "JURY_FINDING",
+                "disposition": "ACCEPTED",
+                "response": "已按冻结裁判依据完成复核。",
+                "affected_fields": ["decision_reasoning"],
+            }
+            for dimension in dimensions
+        ],
+    ]
+    runner.outputs["hearing_judge_v2"] = {
+        "draft": _adjudication_draft(),
+        "review_responses": complete_responses,
+    }
+    with pytest.raises(AgentOutputSchemaError, match="review_source binding"):
+        workflows.judge_v2(request)
 
 
 def test_jury_review_repairs_duplicate_dimensions_as_mandatory_review_gaps() -> None:
@@ -1807,11 +2150,8 @@ def test_jury_review_repairs_duplicate_dimensions_as_mandatory_review_gaps() -> 
     runner = QueueRunner(
         {
             "hearing_judge_v1": {
-                "proposal_text": "法官 V1 建议结合现有事实和证据形成待审核方案。",
-                "recommended_decision": "形成待人工审核的处理方案",
-                "reasoning_summary": "当前材料足以形成非最终建议。",
+                "draft": _adjudication_draft(),
                 "review_focus": ["事实完整性", "证据一致性"],
-                "public_message": "法官 V1 已提交独立评议。",
             },
             "hearing_jury_review": {
                 "findings": [
@@ -1830,12 +2170,7 @@ def test_jury_review_repairs_duplicate_dimensions_as_mandatory_review_gaps() -> 
         }
     )
     workflows = HearingFlowWorkflows(runner)
-    dossier = _trial_dossier(
-        answer_schemas=(
-            "hearing_party_statement.v1",
-            "hearing_party_statement.v1",
-        )
-    )
+    dossier = _trial_dossier_v2()
     v1 = workflows.judge_v1(
         HearingJudgeV1Request.model_validate(
             {**_base("JUDGE_V1", 5), "trial_dossier": dossier}

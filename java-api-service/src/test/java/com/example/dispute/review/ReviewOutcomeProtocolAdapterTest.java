@@ -20,7 +20,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 class ReviewOutcomeProtocolAdapterTest {
 
     @Test
-    void mapsBoundHumanReceiptWithoutStartingOrExecutingAnything() {
+  void mapsBoundHumanReceiptWithoutStartingOrExecutingAnything() {
         OffsetDateTime committedAt=OffsetDateTime.of(2026,7,24,9,0,0,0,ZoneOffset.UTC);
         ReviewDecisionReceiptView receipt=ReviewDecisionReceiptTestFixture.mint(
                 "review-decision-receipt.v1","RECEIPT_1","HUMAN_DECISION","TASK_1","CASE_1",
@@ -44,6 +44,47 @@ class ReviewOutcomeProtocolAdapterTest {
         assertThat(wire.executionAuthorized()).isTrue();
         assertThat(wire.frozenReviewPacketHash()).isEqualTo(receipt.packetContentHash());
         assertThat(wire.requestHash()).isEqualTo(receipt.requestHash());
+    }
+
+    @Test
+    void boundedDecisionCodeModificationRetainsTheFrozenExecutionActionHash() {
+        OffsetDateTime committedAt=OffsetDateTime.of(2026,7,24,9,0,0,0,ZoneOffset.UTC);
+        ReviewDecisionReceiptView receipt=ReviewDecisionReceiptTestFixture.mint(
+                "review-decision-receipt.v1","RECEIPT_1","HUMAN_DECISION","TASK_1","CASE_1",
+                "PACKET_1",2,"a".repeat(64),"MODIFY_AND_APPROVE","reviewer-local","policy-v1",
+                "b".repeat(64),"c".repeat(64),"c".repeat(64),4,7,3,true,false,committedAt);
+        ReviewPacketAuthorizationView authorization=new ReviewPacketAuthorizationView(
+                "review-packet-authorization.v1","CASE_1","TASK_1",reviewerAuthorityHash(),
+                "PACKET_1",2,"a".repeat(64),"c".repeat(64),"PENDING","policy-v1",
+                committedAt.minusHours(1),committedAt.plusHours(1),4,3,7,
+                Map.of("packet","PACKET_1",
+                        "decision_contract","hearing-decision-action.v1"));
+
+        var wire=ReviewOutcomeProtocolAdapter.humanDecision(
+                receipt,context(authorization,"b".repeat(64),"1".repeat(64),1,2));
+
+        assertThat(wire.decision())
+                .isEqualTo(OutcomeWireTypes.ReviewDecision.MODIFY_AND_APPROVE);
+        assertThat(wire.approvedActionSnapshotHash())
+                .isEqualTo(wire.actionSnapshotHash());
+    }
+
+    @Test
+    void reviewAuthorizationAcceptsTheFirstZeroEpochButRejectsNegativeCoordinates() {
+        OffsetDateTime openedAt=OffsetDateTime.of(2026,7,24,8,0,0,0,ZoneOffset.UTC);
+        ReviewPacketAuthorizationView first=new ReviewPacketAuthorizationView(
+                "review-packet-authorization.v1","CASE_ZERO","TASK_ZERO",reviewerAuthorityHash(),
+                "PACKET_ZERO",1,"a".repeat(64),"b".repeat(64),"PENDING","policy-v1",
+                openedAt,openedAt.plusHours(1),0,0,1,Map.of("packet","PACKET_ZERO"));
+
+        assertThat(first.roomEpoch()).isZero();
+        assertThatThrownBy(() -> new ReviewPacketAuthorizationView(
+                "review-packet-authorization.v1","CASE_NEGATIVE","TASK_NEGATIVE",
+                reviewerAuthorityHash(),"PACKET_NEGATIVE",1,"a".repeat(64),"b".repeat(64),
+                "PENDING","policy-v1",openedAt,openedAt.plusHours(1),-1,0,1,
+                Map.of("packet","PACKET_NEGATIVE")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("epoch, revision, and fence");
     }
 
     @Test

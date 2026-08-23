@@ -21,12 +21,14 @@ from app.harness.model_runner import (
     HarnessModelRunner,
     HarnessStreamCompleted,
     HarnessStreamDelta,
+    HarnessStreamReset,
 )
 from app.harness.prompt_composer import PromptRepository
 from app.llm import (
     StructuredGeneration,
     StructuredStreamCompleted,
     StructuredStreamDelta,
+    StructuredStreamReset,
 )
 from app.streaming import VisibleFieldSpec
 from app.schemas import EvidenceContextEnvelopeV1
@@ -543,6 +545,61 @@ def test_model_runner_streams_public_callbacks_and_parses_one_final_document() -
     assert updates[0].delta == "智能接待回复"
     assert isinstance(updates[1], HarnessStreamCompleted)
     assert updates[1].generation.value.answer == "智能接待回复"
+
+
+def test_model_runner_preserves_generation_reset_between_stream_generations() -> None:
+    class ResettingRecordingLlm(RecordingLlm):
+        def generate_stream(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            output_type = kwargs["output_type"]
+            yield StructuredStreamDelta(
+                kind="visible_delta",
+                field="answer",
+                delta="第一代",
+            )
+            yield StructuredStreamReset(
+                kind="generation_reset",
+                generation=2,
+            )
+            yield StructuredStreamDelta(
+                kind="visible_delta",
+                field="answer",
+                delta="第二代",
+            )
+            yield StructuredStreamCompleted(
+                kind="completed",
+                generation=StructuredGeneration(
+                    value=output_type(answer="第二代"),
+                    model="fake-model",
+                    latency_ms=20,
+                    token_usage={"input": 60, "output": 10, "total": 70},
+                    provider_attempts_used=1,
+                    repairs_used=0,
+                ),
+            )
+
+    runner = HarnessModelRunner(llm=ResettingRecordingLlm(), prompts=PromptRepository())
+
+    updates = list(
+        runner.invoke_structured_stream(
+            node_name="intake_analyze",
+            case_data={"raw_text": "用户文本"},
+            output_type=RunnerOutput,
+            visible_fields=(VisibleFieldSpec("answer", "answer"),),
+        )
+    )
+
+    assert [update.kind for update in updates] == [
+        "visible_delta",
+        "generation_reset",
+        "visible_delta",
+        "completed",
+    ]
+    assert isinstance(updates[1], HarnessStreamReset)
+    assert updates[1].generation == 2
+    assert updates[1].reason_code == "OUTPUT_SCHEMA_INVALID"
+    assert isinstance(updates[-1], HarnessStreamCompleted)
+    assert updates[-1].generation.value.answer == "第二代"
 
 
 # 所属模块：Agent Harness > test_model_runner；函数角色：回归测试用例。

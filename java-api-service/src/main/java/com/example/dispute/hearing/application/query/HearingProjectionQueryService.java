@@ -27,6 +27,8 @@ import com.example.dispute.workflow.projection.hearing.HearingProjectionSnapshot
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
@@ -157,6 +159,7 @@ public class HearingProjectionQueryService {
                                                     instance, item, payload);
                                 })
                         .orElse(null);
+        MatrixProjection matrixProjection = intakeMatrixProjection(instance);
         HearingProjectionSnapshot snapshot =
                 new HearingProjectionSnapshot(
                         instance.getSchemaVersion(),
@@ -172,6 +175,8 @@ public class HearingProjectionQueryService {
                         draft == null ? null : draft.getId(),
                         questionSet,
                         systemPayload(actions, HearingFlowActionType.EVIDENCE_REQUEST_SET).orElse(null),
+                        matrixProjection.caseMatrix(),
+                        matrixProjection.issueStateSet(),
                         trialDossierRepository
                                 .findByCaseId(requiredCaseId)
                                 .map(
@@ -181,8 +186,43 @@ public class HearingProjectionQueryService {
                                                         item.getSchemaVersion(),
                                                         item.getContentHash()))
                                 .orElse(null),
+                        juryReviewProjection(artifacts.get(HearingArtifactType.JURY_REVIEW_REPORT)),
                         decisionChain(artifacts));
         return adapter.adapt(snapshot);
+    }
+
+    private MatrixProjection intakeMatrixProjection(HearingFlowInstanceEntity instance) {
+        Optional<HearingFlowStageEntity> synthesis =
+                stageRepository.findByFlowInstanceIdAndStageCode(
+                        instance.getId(), HearingFlowStage.INTAKE_SYNTHESIZING);
+        if (synthesis.isEmpty()
+                || synthesis.orElseThrow().getStageStatus()
+                        != com.example.dispute.hearing.domain.HearingFlowStageStatus.COMPLETED) {
+            return MatrixProjection.empty();
+        }
+        JsonNode output = read(synthesis.orElseThrow().getOutputJson());
+        if (!"hearing_intake_synthesis.v5".equals(output.path("schema_version").asText())) {
+            throw new IllegalStateException("completed Hearing Intake output is not V5");
+        }
+        return new MatrixProjection(
+                reference(output.path("case_fact_matrix"), "case_fact_matrix.v2", "matrix_id"),
+                reference(
+                        output.path("issue_state_set"),
+                        "hearing_issue_state_set.v4",
+                        "issue_state_set_id"));
+    }
+
+    private static HearingFlowView.Reference reference(
+            JsonNode value, String schemaVersion, String idField) {
+        if (!value.isObject()
+                || !schemaVersion.equals(value.path("schema_version").asText())
+                || !value.path(idField).isTextual()
+                || value.path(idField).asText().isBlank()
+                || !value.path("content_hash").asText().matches("[a-f0-9]{64}")) {
+            throw new IllegalStateException("completed Hearing V4 authority reference is invalid");
+        }
+        return new HearingFlowView.Reference(
+                value.path(idField).asText(), schemaVersion, value.path("content_hash").asText());
     }
 
     /** POST /complete remains the same read-only projection gate as GET /hearing. */
@@ -280,6 +320,69 @@ public class HearingProjectionQueryService {
         return result;
     }
 
+    /**
+     * Returns only the public, adjudication-relevant part of the immutable jury artifact. The
+     * formal wrapper ids, hashes and execution flags remain server-side, while completed cases can
+     * still reconstruct the full jury card without relying on a shortened room-message summary.
+     */
+    private JsonNode juryReviewProjection(HearingFlowArtifactEntity artifact) {
+        if (artifact == null) {
+            return null;
+        }
+        JsonNode persisted = read(artifact.getPayloadJson());
+        JsonNode proposal = persisted.path("proposal");
+        if (!proposal.isObject()) {
+            throw new IllegalStateException("formal jury review proposal is absent");
+        }
+
+        ObjectNode result = objectMapper.createObjectNode();
+        result.put("schema_version", "jury-review-public-projection.v1");
+        result.put("report_id", artifact.getId());
+        copyText(proposal, result, "public_message");
+
+        ArrayNode findings = result.putArray("findings");
+        JsonNode sourceFindings = proposal.path("findings");
+        if (sourceFindings.isArray()) {
+            for (JsonNode source : sourceFindings) {
+                if (!source.isObject()) {
+                    continue;
+                }
+                ObjectNode finding = findings.addObject();
+                copyText(source, finding, "dimension");
+                copyText(source, finding, "severity");
+                copyText(source, finding, "assessment");
+                if (source.path("requires_revision").isBoolean()) {
+                    finding.put("requires_revision", source.path("requires_revision").asBoolean());
+                }
+                ArrayNode basis = finding.putArray("basis");
+                if (source.path("basis").isArray()) {
+                    for (JsonNode item : source.path("basis")) {
+                        if (item.isTextual() && !item.asText().isBlank()) {
+                            basis.add(item.asText());
+                        }
+                    }
+                }
+            }
+        }
+
+        ArrayNode revisions = result.putArray("mandatory_revisions");
+        if (proposal.path("mandatory_revisions").isArray()) {
+            for (JsonNode item : proposal.path("mandatory_revisions")) {
+                if (item.isTextual() && !item.asText().isBlank()) {
+                    revisions.add(item.asText());
+                }
+            }
+        }
+        return result;
+    }
+
+    private static void copyText(JsonNode source, ObjectNode target, String field) {
+        JsonNode value = source.path(field);
+        if (value.isTextual() && !value.asText().isBlank()) {
+            target.put(field, value.asText());
+        }
+    }
+
     private boolean reviewGateReady(
             HearingFlowInstanceEntity instance, HearingFlowArtifactEntity draft) {
         if (draft == null
@@ -341,6 +444,14 @@ public class HearingProjectionQueryService {
 
         private static PartyProjection empty() {
             return new PartyProjection(Map.of(), List.of());
+        }
+    }
+
+    private record MatrixProjection(
+            HearingFlowView.Reference caseMatrix,
+            HearingFlowView.Reference issueStateSet) {
+        private static MatrixProjection empty() {
+            return new MatrixProjection(null, null);
         }
     }
 }

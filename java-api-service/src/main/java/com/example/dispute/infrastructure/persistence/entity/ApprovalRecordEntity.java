@@ -7,6 +7,7 @@
 package com.example.dispute.infrastructure.persistence.entity;
 
 import com.example.dispute.domain.model.ApprovalDecisionType;
+import com.example.dispute.hearing.domain.HearingDecisionAction;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -32,6 +33,8 @@ public class ApprovalRecordEntity extends AbstractEntity {
     @Column(name="reviewer_id",length=128,nullable=false) private String reviewerId;
     @Column(name="reviewer_role",length=32,nullable=false) private String reviewerRole;
     @Enumerated(EnumType.STRING) @Column(name="decision_type",length=32,nullable=false) private ApprovalDecisionType decisionType;
+    @Column(name="ai_decision_action",length=64) private String aiDecisionAction;
+    @Column(name="reviewer_decision_action",length=64) private String reviewerDecisionAction;
     @JdbcTypeCode(SqlTypes.JSON) @Column(name="original_plan_json",nullable=false,columnDefinition="jsonb") private String originalPlanJson;
     @JdbcTypeCode(SqlTypes.JSON) @Column(name="approved_plan_json",nullable=false,columnDefinition="jsonb") private String approvedPlanJson;
     @Column(name="decision_reason",columnDefinition="text") private String decisionReason;
@@ -143,6 +146,26 @@ public class ApprovalRecordEntity extends AbstractEntity {
                 : committedAt.withOffsetSameInstant(ZoneOffset.UTC);
         return record;
     }
+
+    public void bindDecisionActions(String aiDecisionAction, String reviewerDecisionAction) {
+        if (!HearingDecisionAction.supports(aiDecisionAction)) {
+            throw new IllegalArgumentException("aiDecisionAction must be a Judge decision code");
+        }
+        boolean reviewerBusinessAction = HearingDecisionAction.supports(reviewerDecisionAction);
+        boolean valid = switch (decisionType) {
+            case APPROVE -> aiDecisionAction.equals(reviewerDecisionAction);
+            case MODIFY_AND_APPROVE -> reviewerBusinessAction
+                    && !aiDecisionAction.equals(reviewerDecisionAction);
+            case ESCALATE_MANUAL -> "ESCALATE_MANUAL".equals(reviewerDecisionAction);
+            case REJECT, REQUEST_MORE_EVIDENCE -> false;
+        };
+        if (!valid) {
+            throw new IllegalArgumentException(
+                    "reviewerDecisionAction does not match the human review decision");
+        }
+        this.aiDecisionAction = aiDecisionAction;
+        this.reviewerDecisionAction = reviewerDecisionAction;
+    }
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「ApprovalRecordEntity.prePersist()」。
     // 具体功能：「ApprovalRecordEntity.prePersist()」：在 JPA 首次 INSERT 前初始化 「createdAt」，保证即使调用方没有显式赋值，数据库中的审计字段也完整。
     // 上游调用：「ApprovalRecordEntity.prePersist()」由使用「ApprovalRecordEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。
@@ -187,6 +210,8 @@ public class ApprovalRecordEntity extends AbstractEntity {
     // 下游影响：「ApprovalRecordEntity.getDecisionType()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「ApprovalDecisionType」交给调用方。
     // 系统意义：「ApprovalRecordEntity.getDecisionType()」直接影响 PostgreSQL 事实投影；实体记录是 API 查询投影和审计依据，写入必须服从上层事务与状态机
     public ApprovalDecisionType getDecisionType(){return decisionType;}
+    public String getAiDecisionAction(){return aiDecisionAction;}
+    public String getReviewerDecisionAction(){return reviewerDecisionAction;}
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「ApprovalRecordEntity.getOriginalPlanJson()」。
     // 具体功能：「ApprovalRecordEntity.getOriginalPlanJson()」：读取「ApprovalRecordEntity」中的「originalPlanJson」状态，向 JPA、应用服务或序列化层返回「String」。
     // 上游调用：「ApprovalRecordEntity.getOriginalPlanJson()」由使用「ApprovalRecordEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。

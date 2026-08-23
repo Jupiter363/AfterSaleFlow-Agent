@@ -532,7 +532,7 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
 
   private static boolean matchesPartyCommand(HearingWorkflowStage stage, CommandType commandType) {
     return (stage == HearingWorkflowStage.PARTY_ANSWERS_OPEN
-            && commandType == CommandType.HEARING_STATEMENT)
+            && commandType == CommandType.HEARING_ANSWER_BUNDLE)
         || (stage == HearingWorkflowStage.PARTY_EVIDENCE_OPEN
             && commandType == CommandType.HEARING_EVIDENCE_BATCH);
   }
@@ -780,6 +780,10 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     }
     if (!partyTerminals.containsKey(start.respondentParticipantId())) {
       timeoutRequired.add(start.respondentParticipantId());
+    }
+    if (stage == HearingWorkflowStage.PARTY_ANSWERS_OPEN) {
+      protocolErrorCode = "HEARING_REQUIRED_ANSWER_COVERAGE_INCOMPLETE";
+      return;
     }
     if (!isTargetChild()) {
       return;

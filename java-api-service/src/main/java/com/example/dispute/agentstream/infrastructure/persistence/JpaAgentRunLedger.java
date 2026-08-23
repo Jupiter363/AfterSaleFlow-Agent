@@ -922,7 +922,6 @@ public class JpaAgentRunLedger implements AgentRunLedger {
 
         long highWatermark = eventRepository.findMaxV2Sequence(run.getId(), attempt.getId());
         requireEqual(highWatermark, attempt.getLastSequenceNo(), "activityFailureHighWatermark");
-        requireEqual(highWatermark, result.lastSequenceNo(), "activityFailureResultSequenceNo");
         AgentRunStreamEventEntity persisted = eventRepository
                 .findV2Event(run.getId(), attempt.getId(), highWatermark)
                 .orElseThrow(() -> new IllegalStateException(
@@ -967,8 +966,17 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                     lastEvent.payload().retryable(),
                     result.retryable(),
                     "activityFailureExistingErrorRetryable");
+            boolean resultEndsAtSourceOrImmediatelyBeforeError =
+                    result.lastSequenceNo() == highWatermark
+                            || (highWatermark > 0L
+                                    && result.lastSequenceNo() == highWatermark - 1L);
+            requireEqual(
+                    resultEndsAtSourceOrImmediatelyBeforeError,
+                    true,
+                    "activityFailureResultSequenceNo");
             return new FailureTerminalPosition(highWatermark, audience, false);
         }
+        requireEqual(highWatermark, result.lastSequenceNo(), "activityFailureResultSequenceNo");
         if (lastEvent.eventType() == StreamEventType.FINAL
                 || lastEvent.eventType() == StreamEventType.ATTEMPT_ABORTED) {
             throw new IllegalStateException(

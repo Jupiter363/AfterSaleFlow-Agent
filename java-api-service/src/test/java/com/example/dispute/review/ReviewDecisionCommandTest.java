@@ -9,6 +9,7 @@ import com.example.dispute.review.application.ReviewDecisionCommand;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class ReviewDecisionCommandTest {
@@ -33,6 +34,17 @@ class ReviewDecisionCommandTest {
         ((com.fasterxml.jackson.databind.node.ObjectNode) returned).put("id","ALSO_MUTATED");
 
         assertThat(command.approvedPlan().path("id").asText()).isEqualTo("PLAN_1");
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = ApprovalDecisionType.class,
+            names = {"REJECT", "REQUEST_MORE_EVIDENCE"})
+    void removedReviewDecisionsFailBeforePersistence(ApprovalDecisionType decision) {
+        assertThatThrownBy(() -> new ReviewDecisionCommand(
+                        decision, "legacy action is closed", null, "key"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("current review decision");
     }
 
     @ParameterizedTest
@@ -68,12 +80,12 @@ class ReviewDecisionCommandTest {
 
         var request=httpMapper.readValue(
                 """
-                {"decision":"REJECT","reason":"reviewed","%s":{"id":"PLAN_1"}}
+                {"decision":"MODIFY_AND_APPROVE","reason":"reviewed","%s":{"id":"PLAN_1"}}
                 """.formatted(approvedPlanField),
                 ReviewController.DecisionRequest.class);
 
         assertThat(request.confirmed()).isTrue();
-        assertThat(request.decision()).isEqualTo(ApprovalDecisionType.REJECT);
+        assertThat(request.decision()).isEqualTo(ApprovalDecisionType.MODIFY_AND_APPROVE);
         assertThat(request.reason()).isEqualTo("reviewed");
         assertThat(request.approvedPlan().path("id").asText()).isEqualTo("PLAN_1");
     }

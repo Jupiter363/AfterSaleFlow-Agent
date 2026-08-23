@@ -91,6 +91,40 @@ describe("ConversationStream", () => {
     });
   });
 
+  it("attaches common inputs to the message surface and inserts a selection without sending", async () => {
+    const quickPrompts = [
+      "请概括这个案件的核心争议",
+      "当前证据缺口和主要风险是什么？",
+      "解释草案建议与适用规则的关系",
+    ];
+    const wrapper = mount(ConversationStream, {
+      props: { quickPrompts },
+    });
+
+    expect(wrapper.find("[data-quick-prompts-panel]").exists()).toBe(false);
+    expect(wrapper.get("[data-quick-prompts-toggle]").attributes("aria-expanded")).toBe("false");
+    expect(
+      wrapper.get(".conversation-stream__composer-shell").find("[data-quick-prompts-toggle]").exists(),
+    ).toBe(false);
+
+    await wrapper.get("[data-quick-prompts-toggle]").trigger("click");
+    expect(wrapper.get("[data-quick-prompts-panel]").text()).toContain("选择后可继续编辑");
+    expect(wrapper.findAll("[data-quick-prompts-panel] button")).toHaveLength(3);
+
+    await wrapper.findAll("[data-quick-prompts-panel] button")[1].trigger("click");
+    expect(wrapper.get("textarea").element.value).toBe(quickPrompts[1]);
+    expect(wrapper.find("[data-quick-prompts-panel]").exists()).toBe(false);
+    expect(wrapper.emitted("submit")).toBeUndefined();
+
+    await wrapper.get("[data-send-message]").trigger("submit");
+    expect(wrapper.emitted("submit")?.[0]?.[0]).toEqual({
+      message_type: "PARTY_TEXT",
+      text: quickPrompts[1],
+      attachment_refs: [],
+    });
+    wrapper.unmount();
+  });
+
   // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("keeps immutable corrupted history readable without showing question-mark noise", () => {
     const wrapper = mount(ConversationStream, {

@@ -28,6 +28,8 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from app.llm import GovernedProviderRequest
 from app.model_runtime.callbacks import (
     GOVERNED_EVENTS_KEY,
+    generation_reset_event,
+    publish_governed_generation_reset,
     publish_governed_visible_delta,
     visible_delta_event,
 )
@@ -35,6 +37,7 @@ from app.model_runtime.profiles import ModelInvocationPolicy, ModelProfile, syst
 from app.model_runtime.transports import (
     ModelTransport,
     ModelTransportCompleted,
+    ModelTransportGenerationReset,
     ModelTransportRequest,
     ModelTransportResult,
     ModelTransportStreamUpdate,
@@ -142,11 +145,32 @@ class _BufferedIntakeObserver:
             )
         )
 
+    def generation_reset(
+        self,
+        *,
+        node_name: str,
+        generation: int,
+        reason_code: str,
+    ) -> None:
+        self._events.append(
+            (
+                "generation_reset",
+                {
+                    "node_name": node_name,
+                    "generation": generation,
+                    "reason_code": reason_code,
+                },
+            )
+        )
+
     def release(self) -> None:
         events, self._events = self._events, []
         for event_type, payload in events:
             if event_type == "visible_delta":
                 self._delegate.visible_delta(**payload)
+                continue
+            if event_type == "generation_reset":
+                self._delegate.generation_reset(**payload)
                 continue
             self._delegate.usage(**payload)
 
@@ -270,6 +294,7 @@ class GovernedChatModel(BaseChatModel):
             remaining = attempts_allowed - attempts_used
             bounded_request = _request_with_attempt_budget(request, remaining)
             visible = False
+            reset_seen = False
             completed_result: ModelTransportResult | None = None
             try:
                 self._guard()
@@ -288,6 +313,18 @@ class GovernedChatModel(BaseChatModel):
                             delta=update.delta,
                         )
                         yield self._visible_chunk(update)
+                        continue
+                    if isinstance(update, ModelTransportGenerationReset):
+                        self._validate_generation_reset(update, reset_seen=reset_seen)
+                        reset_seen = True
+                        if visible:
+                            publish_governed_generation_reset(
+                                node_name=self.policy.node_name,
+                                generation=update.generation,
+                                reason_code=update.reason_code,
+                            )
+                            yield self._generation_reset_chunk(update)
+                        visible = False
                         continue
                     if not isinstance(update, ModelTransportCompleted):
                         raise ModelStreamInterrupted(
@@ -341,6 +378,7 @@ class GovernedChatModel(BaseChatModel):
             remaining = attempts_allowed - attempts_used
             bounded_request = _request_with_attempt_budget(request, remaining)
             visible = False
+            reset_seen = False
             completed_result: ModelTransportResult | None = None
             try:
                 self._guard()
@@ -360,6 +398,18 @@ class GovernedChatModel(BaseChatModel):
                                 delta=update.delta,
                             )
                             yield self._visible_chunk(update)
+                            continue
+                        if isinstance(update, ModelTransportGenerationReset):
+                            self._validate_generation_reset(update, reset_seen=reset_seen)
+                            reset_seen = True
+                            if visible:
+                                publish_governed_generation_reset(
+                                    node_name=self.policy.node_name,
+                                    generation=update.generation,
+                                    reason_code=update.reason_code,
+                                )
+                                yield self._generation_reset_chunk(update)
+                            visible = False
                             continue
                         if not isinstance(update, ModelTransportCompleted):
                             raise ModelStreamInterrupted(
@@ -616,6 +666,19 @@ class GovernedChatModel(BaseChatModel):
             raise ModelPolicyViolation("model transport emitted an oversized visible delta")
         return update
 
+    @staticmethod
+    def _validate_generation_reset(
+        update: ModelTransportGenerationReset,
+        *,
+        reset_seen: bool,
+    ) -> None:
+        if (
+            reset_seen
+            or update.generation != 2
+            or update.reason_code != "OUTPUT_SCHEMA_INVALID"
+        ):
+            raise ModelPolicyViolation("model transport emitted an invalid generation reset")
+
     def _message(
         self,
         result: ModelTransportResult,
@@ -640,6 +703,23 @@ class GovernedChatModel(BaseChatModel):
                 additional_kwargs={GOVERNED_EVENTS_KEY: [event]},
             ),
             generation_info={"governed_event": "visible_delta"},
+        )
+
+    def _generation_reset_chunk(
+        self,
+        update: ModelTransportGenerationReset,
+    ) -> ChatGenerationChunk:
+        event = generation_reset_event(
+            node_name=self.policy.node_name,
+            generation=update.generation,
+            reason_code=update.reason_code,
+        )
+        return ChatGenerationChunk(
+            message=AIMessageChunk(
+                content="",
+                additional_kwargs={GOVERNED_EVENTS_KEY: [event]},
+            ),
+            generation_info={"governed_event": "generation_reset"},
         )
 
     def _final_chunk(

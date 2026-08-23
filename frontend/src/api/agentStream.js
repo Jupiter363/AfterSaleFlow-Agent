@@ -190,12 +190,21 @@ export function extractAgentRunDescriptor(value) {
     candidate.agent_run_id ??
     candidate.agentRunId,
   );
+  const streamAccess = String(
+    candidate.stream_access ?? candidate.streamAccess ?? "",
+  ).toUpperCase();
+  const explicitStreamUrl = candidate.stream_url ?? candidate.streamUrl ?? "";
   return {
     runId,
-    streamUrl: String(
-      candidate.stream_url ??
-      candidate.streamUrl ??
-      `/api/agent-runs/${encodeURIComponent(runId)}/events`,
+    streamUrl: streamAccess === "INTERNAL_SYSTEM_ONLY"
+      ? ""
+      : String(
+          explicitStreamUrl ||
+          `/api/agent-runs/${encodeURIComponent(runId)}/events`,
+        ),
+    streamAccess,
+    schemaVersion: String(
+      candidate.schema_version ?? candidate.schemaVersion ?? "",
     ),
     operation: String(candidate.operation || "").toUpperCase(),
     status: String(candidate.status || "PENDING").toUpperCase(),

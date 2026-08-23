@@ -30,7 +30,29 @@ public record SimulateImportRequest(
         @NotBlank @Size(max = 128) String counterpartyActorId,
         @Size(max = 128)
                 @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
-                String simulationBatchId) {
+                String simulationBatchId,
+        @Size(max = 128)
+                @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+                String fixtureId) {
+
+    public SimulateImportRequest(
+            int count,
+            String scenario,
+            RiskLevel riskLevelHint,
+            ActorRole initiatorRoleHint,
+            String currentActorId,
+            String counterpartyActorId,
+            String simulationBatchId) {
+        this(
+                count,
+                scenario,
+                riskLevelHint,
+                initiatorRoleHint,
+                currentActorId,
+                counterpartyActorId,
+                simulationBatchId,
+                null);
+    }
 
     // 所属模块：【案件核心与导入 / HTTP 接口层】「SimulateImportRequest.toCommand()」。
     // 具体功能：「SimulateImportRequest.toCommand()」：提供「toCommand」的便捷重载：接收 无显式入参，补齐默认选项后委托参数更完整的同名方法，保证两条入口共享同一套校验、事务和持久化逻辑。
@@ -60,6 +82,7 @@ public record SimulateImportRequest(
                 initiatorRoleHint,
                 currentActorId,
                 counterpartyActorId,
-                batchId);
+                batchId,
+                fixtureId);
     }
 }

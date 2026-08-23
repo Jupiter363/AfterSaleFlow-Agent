@@ -9,7 +9,7 @@ import java.util.Objects;
 public final class HearingProjectionContract {
 
     public static final String FLOW_SCHEMA_VERSION = "hearing_flow.v2";
-    public static final String PROJECTION_SCHEMA_VERSION = "hearing-stage-projection.v1";
+    public static final String PROJECTION_SCHEMA_VERSION = "hearing-flow-projection.v5";
 
     private static final List<StageDefinition> STAGES =
             List.of(

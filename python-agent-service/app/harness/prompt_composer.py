@@ -78,11 +78,11 @@ class PromptComposer:
         ),
         "hearing_intake_questions": PromptTemplateRef(
             "dispute_intake_officer",
-            "hearing_intake_questions.md",
+            "hearing_intake_question_generation_v5.md",
         ),
         "hearing_intake_synthesis": PromptTemplateRef(
             "dispute_intake_officer",
-            "hearing_intake_synthesis.md",
+            "hearing_intake_answer_synthesis_v5.md",
         ),
         "hearing_evidence_requests": PromptTemplateRef(
             "evidence_clerk",
@@ -143,6 +143,23 @@ class PromptComposer:
         "business_code_localization.md",
         "case_narration_rules.md",
         "json_output_rules.md",
+    )
+
+    NODE_SHARED_TEMPLATE_FILES: Mapping[str, tuple[PromptTemplateRef, ...]] = (
+        MappingProxyType(
+            {
+                "hearing_judge_v1": (
+                    PromptTemplateRef(
+                        "presiding_judge", "hearing_judge_shared_core.md"
+                    ),
+                ),
+                "hearing_judge_v2": (
+                    PromptTemplateRef(
+                        "presiding_judge", "hearing_judge_shared_core.md"
+                    ),
+                ),
+            }
+        )
     )
 
     VERSIONED_PROMPT_BUNDLES: Mapping[str, frozenset[str]] = MappingProxyType(
@@ -228,6 +245,22 @@ class PromptComposer:
                 )
                 + "\n</trusted_agent_context>"
             )
+        if node_name in {"hearing_intake_questions", "hearing_intake_synthesis"}:
+            fragments.append(
+                self._read_required(
+                    self._agent_prompt_root
+                    / "dispute_intake_officer"
+                    / "hearing_intake_officer_v5.md"
+                )
+            )
+        for shared_ref in self.NODE_SHARED_TEMPLATE_FILES.get(node_name, ()):
+            fragments.append(
+                self._read_required(
+                    self._agent_prompt_root
+                    / shared_ref.agent_key
+                    / shared_ref.filename
+                )
+            )
         base_template_path = self._base_template_path(node_name)
         selected_template_path = self._absolute_template_path(
             node_name,
@@ -302,6 +335,13 @@ class PromptComposer:
             self._read_required(self._harness_prompt_dir / filename)
         resolved: list[Path] = []
         for node_name in requested:
+            for shared_ref in self.NODE_SHARED_TEMPLATE_FILES.get(node_name, ()):
+                shared_path = (
+                    self._agent_prompt_root
+                    / shared_ref.agent_key
+                    / shared_ref.filename
+                )
+                self._read_required(shared_path)
             path = self._absolute_template_path(
                 node_name,
                 prompt_profile_id=prompt_profile_id,

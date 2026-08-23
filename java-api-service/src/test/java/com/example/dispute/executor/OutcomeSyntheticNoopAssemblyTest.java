@@ -54,6 +54,14 @@ class OutcomeSyntheticNoopAssemblyTest {
     }
 
     @Test
+    void firstZeroEpochIsAcceptedButNegativeSyntheticCoordinatesAreRejected() {
+        assertThat(command().epoch()).isZero();
+        assertThatThrownBy(() -> command(-1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("epoch");
+    }
+
+    @Test
     void implementationHasNoRegistryRepositoryNetworkOrEvaluationClientDependency() {
         assertNoForbiddenFieldType(SyntheticNoopToolActivityImpl.class);
         assertNoForbiddenFieldType(SyntheticNoopExecutionAssembly.class);
@@ -226,6 +234,10 @@ class OutcomeSyntheticNoopAssemblyTest {
     }
 
     private static SyntheticNoopExecutionCommand command() {
+        return command(0);
+    }
+
+    private static SyntheticNoopExecutionCommand command(long epoch) {
         return new SyntheticNoopExecutionCommand(
                 SyntheticNoopExecutionCommand.SCHEMA_VERSION,
                 SyntheticNoopExecutionCommand.MARKER,
@@ -237,7 +249,7 @@ class OutcomeSyntheticNoopAssemblyTest {
                 "synthetic/packet/assembly",
                 "a".repeat(64),
                 "b".repeat(64),
-                3,
+                epoch,
                 5,
                 7,
                 false,
@@ -267,7 +279,7 @@ class OutcomeSyntheticNoopAssemblyTest {
                 true,
                 false,
                 1,
-                3,
+                0,
                 4,
                 5,
                 7,

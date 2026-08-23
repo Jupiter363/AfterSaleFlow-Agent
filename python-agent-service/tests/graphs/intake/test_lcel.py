@@ -68,6 +68,7 @@ from app.graphs.intake.graph import (
     compile_intake_v2_graph,
 )
 from app.graphs.intake.nodes import (
+    _state_after_patch,
     apply_dossier_patch,
     checkpoint_terminal,
     import_snapshot_once_or_apply_event,
@@ -99,6 +100,7 @@ from app.graphs.intake.validators import (
     MATRIX_AUTHORITY_RECORD_KEY,
     handoff_remark_message_hash,
     next_intake_cognitive_revision,
+    unwrap_verified_baseline_previous_case_detail,
     validate_matrix_patch,
     validate_proposal_binding,
     validated_respondent_opening_frozen_context,
@@ -317,6 +319,80 @@ def build_intake_model_node(
         trusted_system_prompt=trusted_system_prompt or _trusted_system_prompt(context),
         _test_hook=_test_hook,
     )
+
+
+def test_post_adapter_party_state_requires_component_sum_as_canonical_score() -> None:
+    observed_breakdown = {
+        "references": 15,
+        "event_story": 18,
+        "party_positions": 12,
+        "requested_resolution": 15,
+        "risk_and_conflicts": 12,
+        "next_action_clarity": 13,
+    }
+
+    def not_ready_entry(*, score: int, breakdown: dict[str, int]) -> dict[str, Any]:
+        return {
+            "intake_quality": {
+                "score": score,
+                "threshold": 85,
+                "ready_for_next_step": False,
+                "score_breakdown": copy.deepcopy(breakdown),
+                "improvement_reason": "仍需补充对方回应和商品当前状态。",
+            },
+            "missing_information": {
+                "blocking_gaps": [],
+                "nice_to_have_gaps": ["对方的具体回应"],
+                "next_questions": ["请补充对方的具体回应？"],
+            },
+            "handoff_notes": {
+                "remark_status": "NOT_READY",
+                "phase_source_message_id": "",
+                "latest_remark": "",
+                "remarks": [],
+                "instruction": "信息尚不完整，继续实质问询。",
+            },
+            "admission": {
+                "recommendation": "NEED_MORE_INFO",
+                "reasoning": "当前完善度未达到阈值。",
+                "confidence": 0.85,
+            },
+        }
+
+    user_entry = not_ready_entry(score=85, breakdown=observed_breakdown)
+    merchant_entry = not_ready_entry(
+        score=0,
+        breakdown={component: 0 for component in observed_breakdown},
+    )
+    payload = _draft(
+        conversation_action="ASK_SUBSTANTIVE",
+        room_utterance="请补充商家的具体回应以及商品当前是否仍由您持有？",
+        dossier_patch={
+            "intake_quality": copy.deepcopy(user_entry["intake_quality"]),
+            "missing_information": copy.deepcopy(user_entry["missing_information"]),
+            "handoff_notes": copy.deepcopy(user_entry["handoff_notes"]),
+            "admission": copy.deepcopy(user_entry["admission"]),
+            "party_intake_state": {
+                "schema_version": "party-intake-state.v1",
+                "USER": user_entry,
+                "MERCHANT": merchant_entry,
+            },
+        },
+        readiness="INCOMPLETE",
+        missing_fields=[],
+        recommendation="NEED_MORE_INFO",
+    )
+
+    draft = IntakeCognitionDraft.model_validate(payload)
+    quality = draft.dossier_patch.party_intake_state.USER["intake_quality"]
+    assert quality["score"] == sum(quality["score_breakdown"].values()) == 85
+
+    invalid = copy.deepcopy(payload)
+    invalid["dossier_patch"]["party_intake_state"]["USER"]["intake_quality"][
+        "score"
+    ] = 80
+    with pytest.raises(ValueError, match="canonical score contract"):
+        IntakeCognitionDraft.model_validate(invalid)
 
 
 def _generation_parts(
@@ -2942,6 +3018,107 @@ def _prior_formal_matrix(
     ).model_dump(mode="json")
 
 
+def test_post_threshold_remark_mechanically_inherits_frozen_respondent_attitude(
+    bindings,
+    version_pins,
+) -> None:
+    case_id = bindings["private"]["case_id"]
+    agent_context = _agent_context(role="USER", case_id=case_id)
+    matrix = _prior_formal_matrix(case_id=case_id, agent_context=agent_context)
+    expected_attitude = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "据用户转述，商家不同意直接退款。",
+        "source": "发起方单方陈述（主观）",
+        "confidence": 0.8,
+        "confidence_note": "仅表示从发起方单方陈述中提取态度的明确度，不代表事实真实性。",
+        "grounding": {
+            "source": "PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_USER_SUBSTANTIVE_1",
+        },
+    }
+    waiting_notes = {"remark_status": "WAITING_FOR_REMARK"}
+    previous_detail = {
+        "respondent_attitude": copy.deepcopy(expected_attitude),
+        "case_fact_matrix": copy.deepcopy(matrix),
+        "party_intake_state": {
+            "USER": {"handoff_notes": copy.deepcopy(waiting_notes)},
+        },
+        "handoff_notes": copy.deepcopy(waiting_notes),
+        "intake_quality": {"ready_for_next_step": True},
+        "missing_information": {"next_questions": []},
+        "handoff_remark_partition": {
+            "case_fact_matrix_id": matrix["matrix_id"],
+            "case_fact_matrix_version": matrix["matrix_version"],
+            "case_fact_matrix_hash": matrix["content_hash"],
+            "parties": {
+                "USER": {"remark_status": "WAITING_FOR_REMARK"},
+            },
+        },
+    }
+    handoff_request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_USER_REMARK_2",
+                "sequence_no": 2,
+                "role": "USER",
+                "source": "ROOM_MESSAGE",
+                "text": "补充说明退款金额为1899元。",
+            },
+            "previous_case_detail": copy.deepcopy(previous_detail),
+            "agent_context": agent_context,
+        }
+    )
+    assert intake_case_detail_output_type(handoff_request) is (
+        IntakeRemarkAcknowledgementLlmOutput
+    )
+    state = _state_with_matrix_roles(
+        bindings,
+        version_pins,
+        actor="USER",
+        initiator="USER",
+    )
+    state["dossier_draft"] = copy.deepcopy(previous_detail)
+    state["baseline_previous_case_detail"] = copy.deepcopy(previous_detail)
+    tampered_draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            conversation_action="ACK_REMARK",
+            room_utterance="已记录备注。",
+            dossier_patch={
+                "respondent_attitude": {
+                    **copy.deepcopy(expected_attitude),
+                    "position": "模型不应覆盖的内容。",
+                }
+            },
+        )
+    )
+    state_before = copy.deepcopy(state)
+    draft_before = tampered_draft.model_dump(mode="json")
+
+    normalized = _normalize_model_respondent_attitude(
+        state,
+        tampered_draft,
+        handoff_request=handoff_request,
+    )
+
+    assert normalized.dossier_patch.respondent_attitude == expected_attitude
+    assert state == state_before
+    assert tampered_draft.model_dump(mode="json") == draft_before
+
+    no_prior_state = copy.deepcopy(state)
+    no_prior_state["dossier_draft"].pop("respondent_attitude")
+    no_prior_state["baseline_previous_case_detail"].pop("respondent_attitude")
+    normalized_without_prior = _normalize_model_respondent_attitude(
+        no_prior_state,
+        tampered_draft,
+        handoff_request=handoff_request,
+    )
+    assert normalized_without_prior.dossier_patch.respondent_attitude is None
+
+
 def _snapshot_with_imported_formal_m0(snapshot: dict[str, Any]) -> dict[str, Any]:
     imported = copy.deepcopy(snapshot)
     matrix = _prior_formal_matrix(
@@ -3548,7 +3725,7 @@ def test_respondent_room_message_advances_from_opening_bilateral_terminal(
     assert next_event["message_id"] in successor["source_refs"]
 
 
-def test_respondent_checkpoint_message_rebinds_handoff_from_private_matrix_authority(
+def test_respondent_incomplete_turn_advances_working_matrix_and_next_baseline(
     bindings,
     version_pins,
     snapshot,
@@ -3595,16 +3772,21 @@ def test_respondent_checkpoint_message_rebinds_handoff_from_private_matrix_autho
     )
     next_event["event_hash"] = canonical_sha256_omitting(next_event, "event_hash")
     respondent_position = next_event["text"]
-    second_document = _ready_handoff_document(next_event)
-    second_document["dossier_patch"]["party_positions"]["merchant_claim"] = (
-        respondent_position
+    second_document = intake_initiator_v3_payload(
+        room_utterance="Please provide the verification method and expected timing?",
+        total_score=9,
+        blocking_gaps=[],
+        nice_to_have_gaps=("verification method", "expected timing"),
+        next_questions=(
+            "Please provide the verification method and expected timing?",
+        ),
+        improvement_reason="The verification method and timing remain open.",
     )
-    second_document["dossier_patch"]["respondent_attitude"] = {
-        "respondent_role": "MERCHANT",
-        "attitude": "DISAGREE",
-        "position": respondent_position,
+    sections = {
+        section["kind"]: section["value"]
+        for section in second_document["ordered_sections"]
     }
-    second_document["matrix_patch"] = {
+    sections["CASE_MATRIX"] = {
         "schema_version": "case_fact_matrix.delta.v2",
         "fact_rows": [
             {
@@ -3623,8 +3805,66 @@ def test_respondent_checkpoint_message_rebinds_handoff_from_private_matrix_autho
         "respondent_claim": {
             "attitude": "DISAGREE",
             "position_summary": respondent_position,
+            "source_binding": {
+                "schema_version": "respondent-claim-binding.v1",
+                "binding_kind": "CURRENT_ACTOR_DIRECT",
+                "subject_role": "MERCHANT",
+                "source_quote": respondent_position,
+                "linked_fact_keys": [opening_row["fact_id"]],
+            },
         },
     }
+    sections["CASE_STORY"] = {
+        "title": "Damaged delivered order dispute",
+        "one_sentence_summary": (
+            "The user reports a damaged delivery and the merchant disputes liability."
+        ),
+    }
+    sections["PARTY_POSITIONS"] = {
+        "user_claim": "The delivered order was damaged and the user requests a refund.",
+        "merchant_claim": respondent_position,
+        "initiator_position": "The user requests a refund.",
+        "respondent_position": respondent_position,
+        "platform_observation": "The parties disagree about the item condition.",
+    }
+    sections["CLAIM_AND_RESPONSE"] = {
+        "claim_resolution": {
+            "initiator_role": "USER",
+            "requested_resolution": "REFUND",
+            "requested_amount": None,
+            "requested_items": None,
+            "request_reason": "The delivered order was damaged.",
+            "normalized_statement": "The user requests a refund for the damaged order.",
+        },
+        "respondent_attitude": {
+            "respondent_role": "MERCHANT",
+            "source_attribution": "RESPONDENT_DIRECT",
+            "attitude": "DISAGREE",
+            "position": respondent_position,
+            "alternative_proposal": None,
+        },
+    }
+    sections["DISPUTE_FOCUS"] = {
+        "dispute_core_state": {
+            "conflict_type": "CLAIM_REJECTED",
+            "core_conflict": "The parties disagree about refunding the damaged order.",
+            "facts_in_dispute": ["Whether the item was damaged before dispatch."],
+        },
+        "dispute_focus": {
+            "core_issue": "Responsibility for the damaged delivered item.",
+            "focus_points": ["Dispatch condition", "Delivery condition"],
+        },
+    }
+    sections["TURN_EVALUATION"]["score_breakdown"] = {
+        "references": 15,
+        "event_story": 18,
+        "party_positions": 18,
+        "requested_resolution": 14,
+        "risk_and_conflicts": 13,
+        "next_action_clarity": 12,
+    }
+    for section in second_document["ordered_sections"]:
+        section["value"] = sections[section["kind"]]
 
     attempt_id = "ATTEMPT_P4_MERCHANT_CHECKPOINT_2_1"
     opening_result["bindings"]["command"].update(
@@ -3638,7 +3878,7 @@ def test_respondent_checkpoint_message_rebinds_handoff_from_private_matrix_autho
         agent_session_id=snapshot["agent_session_id"],
         invocation_id=attempt_id,
     )
-    second_transport = IntakeTransport(second_document)
+    second_transport = RawBaselineIntakeTransport(second_document)
     second_graph = compile_intake_v2_graph(
         intake_lcel=build_intake_model_node(
             transport=second_transport,
@@ -3662,7 +3902,7 @@ def test_respondent_checkpoint_message_rebinds_handoff_from_private_matrix_autho
 
     assert opening_transport.generate_calls == 1
     assert second_transport.generate_calls == 1
-    assert result["result_json"]["conversation_action"] == "INVITE_OPTIONAL_REMARK"
+    assert result["result_json"]["conversation_action"] == "ASK_SUBSTANTIVE"
     assert "case_fact_matrix" not in result["dossier_draft"]
     successor_context = result["baseline_previous_case_detail"]
     successor = successor_context["formal_matrix"]
@@ -3684,9 +3924,170 @@ def test_respondent_checkpoint_message_rebinds_handoff_from_private_matrix_autho
     assert successor_partition["parties"]["USER"] == opening_partition["parties"][
         "USER"
     ]
-    assert successor_partition["parties"]["MERCHANT"]["remark_status"] == (
-        "WAITING_FOR_REMARK"
+    assert successor_partition["parties"]["MERCHANT"]["remark_status"] == "NOT_READY"
+
+    # An incomplete business outcome still commits the deterministic working
+    # successor.  Readiness controls confirmation only, so the next turn must
+    # receive that successor and its adjacent handoff partition atomically.
+    proposal_partition = result["result_json"]["dossier_patch"].get(
+        "handoff_remark_partition"
     )
+    assert proposal_partition == successor_partition
+    committed_context = unwrap_verified_baseline_previous_case_detail(result)
+    assert committed_context["case_fact_matrix"] == successor
+    committed_partition = committed_context["handoff_remark_partition"]
+    assert {
+        "matrix_id": committed_partition["case_fact_matrix_id"],
+        "matrix_version": committed_partition["case_fact_matrix_version"],
+        "content_hash": committed_partition["case_fact_matrix_hash"],
+    } == {
+        "matrix_id": successor["matrix_id"],
+        "matrix_version": successor["matrix_version"],
+        "content_hash": successor["content_hash"],
+    }
+    assert committed_partition["parties"] == successor_partition["parties"]
+    third_event = copy.deepcopy(next_event)
+    third_event.update(
+        event_id="EVENT_P4_MERCHANT_CHECKPOINT_3",
+        message_id="MESSAGE_P4_MERCHANT_CHECKPOINT_3",
+        sequence_no=result["last_event_sequence"] + 1,
+        domain_revision=next_event["domain_revision"] + 1,
+        text=(
+            "We still reject the refund; the verification method and timing "
+            "are now stated."
+        ),
+        source_refs=["MESSAGE_P4_MERCHANT_CHECKPOINT_3"],
+        occurred_at="2026-07-20T08:04:00Z",
+    )
+    third_event["event_hash"] = canonical_sha256_omitting(
+        third_event,
+        "event_hash",
+    )
+    next_event_patch = import_snapshot_once_or_apply_event(
+        result,
+        SimpleNamespace(context=IntakeTurnContext("EVENT", third_event)),
+    )
+    assert next_event_patch["dossier_draft"] == {
+        key: value
+        for key, value in committed_context.items()
+        if key not in {"case_fact_matrix", "unilateral_case_matrix"}
+    }
+    next_state = _state_after_patch(result, next_event_patch)
+    next_request = build_intake_baseline_request(
+        next_state,
+        agent_context=second_context,
+    )
+    assert next_request.previous_case_detail == committed_context
+
+    third_document = intake_initiator_v3_payload(
+        room_utterance=(
+            "The material Intake detail is complete; you may confirm or add an "
+            "optional handoff remark."
+        ),
+        total_score=90,
+        nice_to_have_gaps=(),
+    )
+    third_sections = {
+        section["kind"]: section["value"]
+        for section in third_document["ordered_sections"]
+    }
+    third_sections["CASE_MATRIX"] = copy.deepcopy(sections["CASE_MATRIX"])
+    third_row = third_sections["CASE_MATRIX"]["fact_rows"][0]
+    third_row.update(
+        position_summary=third_event["text"],
+        asserted_value="verification method and timing stated",
+        source_scope="PREVIOUS_AND_CURRENT_SOURCE",
+    )
+    third_sections["CASE_MATRIX"]["respondent_claim"] = {
+        "attitude": "DISAGREE",
+        "position_summary": third_event["text"],
+        "alternative_proposal": None,
+        "source_binding": {
+            "schema_version": "respondent-claim-binding.v1",
+            "binding_kind": "CURRENT_ACTOR_DIRECT",
+            "subject_role": "MERCHANT",
+            "source_quote": "We still reject the refund",
+            "linked_fact_keys": [opening_row["fact_id"]],
+        },
+    }
+    for kind in ("CASE_STORY", "DISPUTE_FOCUS"):
+        third_sections[kind] = copy.deepcopy(sections[kind])
+    third_sections["PARTY_POSITIONS"] = copy.deepcopy(sections["PARTY_POSITIONS"])
+    third_sections["PARTY_POSITIONS"]["merchant_claim"] = third_event["text"]
+    third_sections["PARTY_POSITIONS"]["respondent_position"] = third_event["text"]
+    third_sections["CLAIM_AND_RESPONSE"] = copy.deepcopy(
+        sections["CLAIM_AND_RESPONSE"]
+    )
+    third_sections["CLAIM_AND_RESPONSE"]["claim_resolution"] = {
+        field: copy.deepcopy(committed_context["claim_resolution"].get(field))
+        for field in (
+            "initiator_role",
+            "requested_resolution",
+            "requested_amount",
+            "requested_items",
+            "request_reason",
+            "normalized_statement",
+        )
+    }
+    third_sections["CLAIM_AND_RESPONSE"]["respondent_attitude"].update(
+        position=third_event["text"],
+    )
+    for section in third_document["ordered_sections"]:
+        section["value"] = third_sections[section["kind"]]
+
+    third_state = copy.deepcopy(result)
+    third_attempt_id = "ATTEMPT_P4_MERCHANT_CHECKPOINT_3_1"
+    third_state["bindings"]["command"].update(
+        command_id="COMMAND_P4_MERCHANT_CHECKPOINT_3",
+        logical_run_id="RUN_P4_MERCHANT_CHECKPOINT_3",
+        attempt_id=third_attempt_id,
+    )
+    third_context = _agent_context(
+        role="MERCHANT",
+        case_id=snapshot["case_id"],
+        agent_session_id=snapshot["agent_session_id"],
+        invocation_id=third_attempt_id,
+    )
+    third_transport = RawBaselineIntakeTransport(third_document)
+    third_graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=third_transport,
+            profile=_profile(),
+            policy=_policy().model_copy(
+                update={
+                    "invocation_id": third_attempt_id,
+                    "trusted_system_sha256": system_prompt_sha256(
+                        _trusted_system_prompt(third_context)
+                    ),
+                }
+            ),
+            agent_context=third_context,
+        ).runnable
+    )
+    third_result = third_graph.invoke(
+        third_state,
+        context=IntakeTurnContext("EVENT", third_event),
+    )
+    assert third_transport.generate_calls == 1
+    assert third_result["result_json"]["readiness"] == "READY_TO_CONFIRM"
+    third_successor = third_result["baseline_previous_case_detail"]["formal_matrix"]
+    assert third_successor["matrix_version"] == successor["matrix_version"] + 1
+    assert third_successor["parent_ref"] == {
+        "matrix_id": successor["matrix_id"],
+        "matrix_version": successor["matrix_version"],
+        "content_hash": successor["content_hash"],
+    }
+    assert unwrap_verified_baseline_previous_case_detail(third_result)[
+        "case_fact_matrix"
+    ] == third_successor
+
+    replay = second_graph.invoke(
+        copy.deepcopy(opening_result),
+        context=IntakeTurnContext("EVENT", copy.deepcopy(next_event)),
+    )
+    assert replay["result_json"] == result["result_json"]
+    assert replay["baseline_previous_case_detail"] == successor_context
+    assert second_transport.generate_calls == 2
 
 
 def test_merchant_turn_preserves_inherited_formal_confirmation_source_through_terminal() -> None:
@@ -4374,7 +4775,7 @@ def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
     request = transport.requests[0]
     assert request.node_name == BASELINE_INTAKE_NODE_NAME
     assert request.output_type is IntakeCaseDetailLlmOutput
-    assert request.governed_request.max_output_tokens == 6144
+    assert request.governed_request.max_output_tokens == 16_384
     provider_body = LiteLlmProxyClient(
         base_url="http://model.invalid/v1",
         model="intake-model",
@@ -5491,7 +5892,7 @@ def test_imported_m0_allows_verified_respondent_successor_capsule_without_public
     assert first_context["formal_matrix_hash"] != active_m1["content_hash"]
     assert first_context["formal_matrix_hash"] == canonical_sha256(active_m1)
     assert active_m1["content_hash"] == case_fact_matrix_content_hash(active_m1)
-    assert active_m1["content_hash"] != canonical_sha256_omitting(
+    assert active_m1["content_hash"] == canonical_sha256_omitting(
         active_m1,
         "content_hash",
     )
@@ -6024,9 +6425,9 @@ def test_model_delta_fact_key_normalization_uses_only_current_domain_matrix_auth
         )
         return graph.invoke(state, context=IntakeTurnContext("EVENT", next_event))
 
-    # Ordinary non-ready respondent candidates are validated by Java but not
-    # persisted.  The private candidate may contain extra FACTs, yet the next
-    # prompt and matrix validator must see the exact authority input parent.
+    # Every accepted substantive respondent turn advances the working matrix,
+    # even when more information is required.  The next prompt and validator
+    # therefore see the exact deterministic successor, including its new FACT.
     incomplete_result = respondent_follow_up(
         opening_result,
         suffix="INCOMPLETE_2",
@@ -6039,11 +6440,9 @@ def test_model_delta_fact_key_normalization_uses_only_current_domain_matrix_auth
     assert len(incomplete_envelope["formal_matrix"]["fact_rows"]) == 2
     incomplete_selected = _previous_case_detail(incomplete_result)
     assert incomplete_selected is not None
-    assert incomplete_selected["case_fact_matrix"] == incomplete_envelope[
-        "authority_input_matrix"
-    ]
+    assert incomplete_selected["case_fact_matrix"] == incomplete_envelope["formal_matrix"]
     assert intake_baseline_authorized_fact_ids(incomplete_result) == frozenset(
-        row["fact_id"] for row in incomplete_envelope["authority_input_matrix"]["fact_rows"]
+        row["fact_id"] for row in incomplete_envelope["formal_matrix"]["fact_rows"]
     )
 
     # Opening selection depends on its immutable event/source marker receipt,
@@ -7717,11 +8116,11 @@ def test_exact_uat_merchant_current_remedy_stance_is_direct_authority(
         ).state
         == "UNRESOLVED"
     )
-    with pytest.raises(
-        IntakeGraphContractError,
-        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-    ):
-        normalize(contradictory)
+    trusted = normalize(contradictory)
+    assert trusted.dossier_patch.respondent_attitude == expected
+    assert trusted.matrix_patch is not None
+    assert trusted.matrix_patch.respondent_claim is not None
+    assert trusted.matrix_patch.respondent_claim.attitude == "AGREE"
 
 
 def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
@@ -8467,7 +8866,7 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
     assert normalized_handoff.conversation_action == "ACK_NO_REMARK"
     assert normalized_handoff.room_utterance == remark_room_utterance
     assert normalized_handoff.matrix_patch is None
-    assert normalized_handoff.dossier_patch.respondent_attitude is None
+    assert normalized_handoff.dossier_patch.respondent_attitude == expected_attitude
     assert frozen_handoff_matrix == first_detail["case_fact_matrix"]
     assert frozen_handoff_matrix["content_hash"] == first_detail[
         "case_fact_matrix"
@@ -8517,30 +8916,27 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         "position"
     ] = "被篡改的继承态度。"
     tampered_handoff = IntakeCognitionDraft.model_validate(tampered_handoff_payload)
-    with pytest.raises(
-        IntakeGraphContractError,
-        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID",
-    ):
-        _normalize_model_respondent_attitude(
-            handoff_state,
-            tampered_handoff,
-            handoff_request=handoff_request,
-        )
+    normalized_tampered_handoff = _normalize_model_respondent_attitude(
+        handoff_state,
+        tampered_handoff,
+        handoff_request=handoff_request,
+    )
+    assert (
+        normalized_tampered_handoff.dossier_patch.respondent_attitude
+        == expected_attitude
+    )
 
     missing_prior_state = copy.deepcopy(handoff_state)
     missing_prior_state["dossier_draft"].pop("respondent_attitude")
     missing_prior_state["baseline_previous_case_detail"].pop(
         "respondent_attitude"
     )
-    with pytest.raises(
-        IntakeGraphContractError,
-        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID",
-    ):
-        _normalize_model_respondent_attitude(
-            missing_prior_state,
-            adapted_handoff,
-            handoff_request=handoff_request,
-        )
+    normalized_missing_prior = _normalize_model_respondent_attitude(
+        missing_prior_state,
+        adapted_handoff,
+        handoff_request=handoff_request,
+    )
+    assert normalized_missing_prior.dossier_patch.respondent_attitude is None
 
     invalid_matrix_request_payload = handoff_request.model_dump(mode="json")
     invalid_matrix_request_payload["previous_case_detail"]["case_fact_matrix"][
@@ -8553,15 +8949,15 @@ def test_exact_uat_user_model_claim_completes_direct_respondent_authority(
         intake_case_detail_output_type(invalid_matrix_request)
         is IntakeRemarkAcknowledgementLlmOutput
     )
-    with pytest.raises(
-        IntakeGraphContractError,
-        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID",
-    ):
-        _normalize_model_respondent_attitude(
-            handoff_state,
-            adapted_handoff,
-            handoff_request=invalid_matrix_request,
-        )
+    normalized_invalid_matrix_request = _normalize_model_respondent_attitude(
+        handoff_state,
+        adapted_handoff,
+        handoff_request=invalid_matrix_request,
+    )
+    assert (
+        normalized_invalid_matrix_request.dossier_patch.respondent_attitude
+        == expected_attitude
+    )
 
     wrong_handoff_action_payload = adapted_handoff.model_dump(mode="json")
     wrong_handoff_action_payload["conversation_action"] = "ASK_SUBSTANTIVE"

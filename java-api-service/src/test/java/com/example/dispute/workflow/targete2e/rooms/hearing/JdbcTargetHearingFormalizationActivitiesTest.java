@@ -14,20 +14,17 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.hearing.domain.HearingAuthorityExpectation;
-import com.example.dispute.hearing.domain.HearingDomainReceipt;
-import com.example.dispute.hearing.domain.HearingFormalCommitResult;
 import com.example.dispute.hearing.domain.HearingFormalTransition;
 import com.example.dispute.hearing.domain.HearingWriterMode;
 import com.example.dispute.hearing.domain.HearingFlowActionType;
 import com.example.dispute.hearing.domain.HearingAuthorityLedger;
 import com.example.dispute.hearing.infrastructure.persistence.JdbcHearingFormalFinalizer;
-import com.example.dispute.workflow.activity.hearing.HearingDomainReceiptAdapter;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalizationActivities.TransitionRequest;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart;
 import com.example.dispute.workflow.temporal.room.hearing.HearingOperationKeys;
-import com.example.dispute.workflow.temporal.room.hearing.HearingPartyTerminalReceipt;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.hearing.HearingWorkflowStage;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,9 +32,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.lang.reflect.Method;
 import java.sql.ResultSet;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.sql.DataSource;
@@ -54,7 +51,72 @@ import org.springframework.transaction.support.TransactionTemplate;
 class JdbcTargetHearingFormalizationActivitiesTest {
 
   @Test
-  void autoTimeoutMaterializesBaselinePartyPayloadAndFormalContract() throws Exception {
+  void reviewHandoffPersistsTheAuthoritativeFullHearingRoute() {
+    assertThat(JdbcTargetHearingFormalizationActivities.TARGET_REVIEW_SOURCE_ROUTE)
+        .isEqualTo("FULL_HEARING")
+        .isNotEqualTo("HEARING_V2");
+  }
+
+  @Test
+  void dossierFreezeDerivesAnExactFinalizeKeyAndReplaysByFrozenSourceCoordinates() {
+    String requestHash = "a".repeat(64);
+    HearingAuthorityExpectation authority = new HearingAuthorityExpectation(
+        "tenant-dossier", "CASE_DOSSIER", "FLOW_DOSSIER", "EPOCH_DOSSIER", 3,
+        HearingWriterMode.TEMPORAL,
+        com.example.dispute.hearing.domain.HearingFlowStage.DOSSIER_FREEZING,
+        HearingWorkflowStage.DOSSIER_FREEZING.sequence(), 17, 9, 4);
+
+    String key = JdbcTargetHearingFormalizationActivities.dossierFinalizeOperationKey(
+        authority, requestHash);
+
+    assertThat(key).isEqualTo(
+        "hearing.finalize:tenant-dossier:CASE_DOSSIER:3:10:trial_dossier.v2:"
+            + requestHash);
+    assertThat(key).isNotEqualTo(HearingOperationKeys.stageCompletion(
+        "tenant-dossier", "CASE_DOSSIER", 3,
+        HearingWorkflowStage.DOSSIER_FREEZING,
+        HearingWorkflowStage.DOSSIER_FREEZING.sequence()));
+    assertThat(JdbcTargetHearingFormalizationActivities.DOSSIER_FINALIZE_REPLAY_SQL)
+        .contains(
+            "operation_type = 'FINALIZE'",
+            "epoch_id = ? and hearing_epoch = ? and fencing_token = ?",
+            "source_stage = ? and source_stage_sequence = ?",
+            "source_process_revision = ? and source_room_revision = ?",
+            "for update");
+
+    HearingAuthorityExpectation wrongStage = new HearingAuthorityExpectation(
+        "tenant-dossier", "CASE_DOSSIER", "FLOW_DOSSIER", "EPOCH_DOSSIER", 3,
+        HearingWriterMode.TEMPORAL,
+        com.example.dispute.hearing.domain.HearingFlowStage.EVIDENCE_SYNTHESIZING,
+        HearingWorkflowStage.EVIDENCE_SYNTHESIZING.sequence(), 16, 8, 4);
+    assertThatThrownBy(() ->
+        JdbcTargetHearingFormalizationActivities.dossierFinalizeOperationKey(
+            wrongStage, requestHash))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("DOSSIER_FREEZING");
+  }
+
+  @Test
+  void partyFormalizationAcquiresCaseCommandBeforeHearingCursor() {
+    List<String> acquired = new ArrayList<>();
+
+    var locks = JdbcTargetHearingFormalizationActivities.acquirePartyLocksInGlobalOrder(
+        () -> {
+          acquired.add("case_command");
+          return "COMMAND_LOCK";
+        },
+        () -> {
+          acquired.add("hearing_cursor");
+          return "HEARING_LOCK";
+        });
+
+    assertThat(acquired).containsExactly("case_command", "hearing_cursor");
+    assertThat(locks.caseCommand()).isEqualTo("COMMAND_LOCK");
+    assertThat(locks.hearingCursor()).isEqualTo("HEARING_LOCK");
+  }
+
+  @Test
+  void answerTimeoutIsForbiddenWhileEvidenceTimeoutKeepsItsFormalContract() throws Exception {
     ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
     Instant deadline = Instant.parse("2026-08-16T07:20:00Z");
     ObjectNode questionSet = mapper.createObjectNode();
@@ -62,23 +124,11 @@ class JdbcTargetHearingFormalizationActivitiesTest {
     ObjectNode requestSet = mapper.createObjectNode();
     requestSet.put("request_set_id", "REQUEST_SET_TIMEOUT");
 
-    ObjectNode answer = JdbcTargetHearingFormalizationActivities.timeoutPayload(
+    assertThatThrownBy(() -> JdbcTargetHearingFormalizationActivities.timeoutPayload(
         mapper, com.example.dispute.hearing.domain.HearingFlowStage.PARTY_ANSWERS_OPEN,
-        "user-timeout", "USER", deadline, questionSet, "BATCH_UNUSED");
-    ObjectNode answerReplay = JdbcTargetHearingFormalizationActivities.timeoutPayload(
-        mapper, com.example.dispute.hearing.domain.HearingFlowStage.PARTY_ANSWERS_OPEN,
-        "user-timeout", "USER", deadline, questionSet, "BATCH_UNUSED");
-    assertThat(answerReplay).isEqualTo(answer);
-    assertThat(answer.path("schema_version").asText())
-        .isEqualTo("hearing_party_statement.v1");
-    assertThat(answer.path("participant_id").asText()).isEqualTo("user-timeout");
-    assertThat(answer.path("participant_role").asText()).isEqualTo("USER");
-    assertThat(answer.path("submission_status").asText()).isEqualTo("AUTO_TIMEOUT");
-    assertThat(answer.path("submitted_at").asText()).isEqualTo(deadline.toString());
-    assertThat(answer.path("question_set_id").asText()).isEqualTo("QUESTION_SET_TIMEOUT");
-    assertThat(answer.path("issue_set_id").asText()).isEqualTo("QUESTION_SET_TIMEOUT");
-    assertThat(answer.path("statement_text").isNull()).isTrue();
-    assertThat(answer.path("source_message_ids")).isEmpty();
+        "user-timeout", "USER", deadline, questionSet, "BATCH_UNUSED"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("answer timeout payloads are forbidden");
 
     ObjectNode evidence = JdbcTargetHearingFormalizationActivities.timeoutPayload(
         mapper, com.example.dispute.hearing.domain.HearingFlowStage.PARTY_EVIDENCE_OPEN,
@@ -116,164 +166,6 @@ class JdbcTargetHearingFormalizationActivitiesTest {
   }
 
   @Test
-  void autoTimeoutPersistsOneFormalReceiptAndReplayDoesNotDuplicate() throws Exception {
-    String tenant = "tenant-timeout-formal";
-    String caseId = "CASE_TIMEOUT_FORMAL";
-    String flowId = "FLOW_TIMEOUT_FORMAL";
-    String epochId = "EPOCH_TIMEOUT_FORMAL";
-    String stageId = "STAGE_TIMEOUT_FORMAL_5";
-    Instant deadline = Instant.parse("2026-08-16T08:00:00Z");
-    HearingRoomStart start = new HearingRoomStart(
-        "hearing-room-start.v1", tenant, caseId, "ROOM_TIMEOUT_FORMAL", flowId, epochId,
-        HearingWriterMode.TEMPORAL, 3, 11, "user-timeout-formal", "merchant-timeout-formal",
-        deadline.minusSeconds(300), deadline.plusSeconds(3_600), 300, 40, 16,
-        "hearing-build-v1");
-    String operationKey = HearingOperationKeys.partyTerminal(
-        tenant, caseId, start.roomEpoch(), HearingWorkflowStage.PARTY_ANSWERS_OPEN,
-        HearingWorkflowStage.PARTY_ANSWERS_OPEN.sequence(),
-        start.initiatorParticipantId(), "AUTO_TIMEOUT");
-    TransitionRequest transition = new TransitionRequest(
-        start, HearingWorkflowStage.PARTY_ANSWERS_OPEN,
-        HearingWorkflowStage.PARTY_ANSWERS_OPEN.sequence(), 40, 16, 11, operationKey);
-    var timeout = new TargetHearingFormalizationActivities.TimeoutRequest(
-        transition, start.initiatorParticipantId());
-
-    JdbcTemplate jdbc = mock(JdbcTemplate.class);
-    TransactionTemplate transactions = mock(TransactionTemplate.class);
-    TransactionStatus transactionStatus = mock(TransactionStatus.class);
-    when(transactions.execute(any())).thenAnswer(invocation -> {
-      TransactionCallback<?> callback = invocation.getArgument(0);
-      return callback.doInTransaction(transactionStatus);
-    });
-    HearingAuthorityLedger ledger = mock(HearingAuthorityLedger.class);
-    AtomicReference<HearingDomainReceipt> committed = new AtomicReference<>();
-    when(ledger.findCommitted(anyString(), anyString())).thenAnswer(invocation -> {
-      String key = invocation.getArgument(1);
-      return operationKey.equals(key)
-          ? Optional.ofNullable(committed.get())
-          : Optional.empty();
-    });
-
-    ResultSet cursorRow = mock(ResultSet.class);
-    when(cursorRow.getString(1)).thenReturn(tenant);
-    when(cursorRow.getString(2)).thenReturn(epochId);
-    when(cursorRow.getLong(3)).thenReturn(3L);
-    when(cursorRow.getLong(4)).thenReturn(40L);
-    when(cursorRow.getLong(5)).thenReturn(16L);
-    when(cursorRow.getLong(6)).thenReturn(11L);
-    when(cursorRow.getString(7)).thenReturn(flowId);
-    when(cursorRow.getString(8)).thenReturn(HearingWorkflowStage.PARTY_ANSWERS_OPEN.name());
-    when(cursorRow.getInt(9)).thenReturn(HearingWorkflowStage.PARTY_ANSWERS_OPEN.sequence());
-    when(cursorRow.getString(10)).thenReturn(stageId);
-    when(cursorRow.getString(11)).thenReturn("{}");
-    when(jdbc.query(
-        contains("from hearing_temporal_projection"), any(RowMapper.class), any(Object[].class)))
-        .thenAnswer(invocation -> {
-          @SuppressWarnings("unchecked")
-          RowMapper<Object> mapper = invocation.getArgument(1);
-          return List.of(mapper.mapRow(cursorRow, 0));
-        });
-
-    ResultSet deadlineRow = mock(ResultSet.class);
-    when(deadlineRow.getObject(1, java.time.OffsetDateTime.class))
-        .thenReturn(java.time.OffsetDateTime.ofInstant(deadline, java.time.ZoneOffset.UTC));
-    when(jdbc.query(
-        contains("shared_deadline_at <= current_timestamp"),
-        any(RowMapper.class), any(Object[].class)))
-        .thenAnswer(invocation -> {
-          @SuppressWarnings("unchecked")
-          RowMapper<Object> mapper = invocation.getArgument(1);
-          return List.of(mapper.mapRow(deadlineRow, 0));
-        });
-    when(jdbc.query(
-        eq("select shared_deadline_at from hearing_flow_instance where id = ? for update"),
-        any(RowMapper.class), any(Object[].class)))
-        .thenAnswer(invocation -> {
-          @SuppressWarnings("unchecked")
-          RowMapper<Object> mapper = invocation.getArgument(1);
-          return List.of(mapper.mapRow(deadlineRow, 0));
-        });
-
-    AtomicReference<Integer> pendingSubmitted = new AtomicReference<>(0);
-    when(jdbc.queryForObject(anyString(), eq(Integer.class), any(Object[].class)))
-        .thenAnswer(invocation -> {
-          String sql = invocation.getArgument(0);
-          return sql.contains("submission_status = 'SUBMITTED'")
-              ? pendingSubmitted.get()
-              : 0;
-        });
-    when(jdbc.query(
-        contains("from hearing_flow_action action"),
-        any(RowMapper.class), any(Object[].class)))
-        .thenReturn(List.of());
-    ResultSet parentRow = mock(ResultSet.class);
-    when(parentRow.getString(1)).thenReturn("{\"question_set_id\":\"QUESTION_TIMEOUT_FORMAL\"}");
-    when(jdbc.query(
-        contains("select payload_json::text from hearing_flow_action"),
-        any(RowMapper.class), any(Object[].class)))
-        .thenAnswer(invocation -> {
-          @SuppressWarnings("unchecked")
-          RowMapper<Object> mapper = invocation.getArgument(1);
-          return List.of(mapper.mapRow(parentRow, 0));
-        });
-    when(jdbc.update(contains("insert into hearing_flow_action"), any(Object[].class)))
-        .thenReturn(1);
-
-    TargetHearingFormalCompletion completion = mock(TargetHearingFormalCompletion.class);
-    when(completion.adoptParty(any())).thenAnswer(invocation -> {
-      com.example.dispute.hearing.domain.HearingFormalFinalizer.AdoptPartyActionCommand command =
-          invocation.getArgument(0);
-      HearingFormalCommitResult result = new HearingFormalCommitResult(
-          command.transition().resultStage(), command.transition().resultStageSequence(),
-          command.transition().sharedDeadlineAt(),
-          "urn:hearing:party-action:" + command.actionId(), command.contentHash(), 41);
-      HearingDomainReceipt domain = HearingDomainReceipt.committed(
-          command.authorityCommit(), result, "timeout-test-namespace",
-          "timeout-test-workflow", "timeout-test-run", start.workflowBuildId());
-      committed.set(domain);
-      return HearingDomainReceiptAdapter.party(
-          domain, command.requestId(), command.participantId(),
-          HearingPartyTerminalReceipt.TerminalStatus.AUTO_TIMEOUT);
-    });
-
-    JdbcTargetHearingFormalizationActivities subject =
-        new JdbcTargetHearingFormalizationActivities(
-            mock(DataSource.class), transactions, completion,
-            mock(TargetHearingInternalStageMaterializer.class), ledger,
-            new ObjectMapper().findAndRegisterModules());
-    ReflectionTestUtils.setField(subject, "jdbc", jdbc);
-
-    var first = subject.formalizeTimeout(timeout);
-    var replay = subject.formalizeTimeout(timeout);
-
-    assertThat(first.pendingSubmittedAction()).isFalse();
-    assertThat(first.receipt().terminalStatus())
-        .isEqualTo(HearingPartyTerminalReceipt.TerminalStatus.AUTO_TIMEOUT);
-    assertThat(replay).isEqualTo(first);
-    verify(jdbc, times(1)).update(
-        contains("insert into hearing_flow_action"), any(Object[].class));
-    verify(completion, times(1)).adoptParty(any());
-
-    pendingSubmitted.set(1);
-    String respondentKey = HearingOperationKeys.partyTerminal(
-        tenant, caseId, start.roomEpoch(), HearingWorkflowStage.PARTY_ANSWERS_OPEN,
-        HearingWorkflowStage.PARTY_ANSWERS_OPEN.sequence(),
-        start.respondentParticipantId(), "AUTO_TIMEOUT");
-    var pending = subject.formalizeTimeout(
-        new TargetHearingFormalizationActivities.TimeoutRequest(
-            new TransitionRequest(
-                start, HearingWorkflowStage.PARTY_ANSWERS_OPEN,
-                HearingWorkflowStage.PARTY_ANSWERS_OPEN.sequence(),
-                40, 16, 11, respondentKey),
-            start.respondentParticipantId()));
-    assertThat(pending.pendingSubmittedAction()).isTrue();
-    assertThat(pending.receipt()).isNull();
-    verify(jdbc, times(1)).update(
-        contains("insert into hearing_flow_action"), any(Object[].class));
-    verify(completion, times(1)).adoptParty(any());
-  }
-
-  @Test
   void partyTransitionUsesCommittedReceiptOrderAndExactParticipantActor() throws Exception {
     String tenant = "tenant-party-order";
     String caseId = "CASE_PARTY_ORDER";
@@ -305,10 +197,10 @@ class JdbcTargetHearingFormalizationActivitiesTest {
     var actionConstructor = actionType.getDeclaredConstructors()[0];
     actionConstructor.setAccessible(true);
     Object action = actionConstructor.newInstance(
-        "ACTION_PARTY_ORDER", "ANSWER_BUNDLE", "hearing_party_statement.v1",
+        "ACTION_PARTY_ORDER", "ANSWER_BUNDLE", "hearing_answer_bundle.v4",
         participantId, "USER", "SUBMITTED",
         "{\"participant_id\":\"user-party-order\",\"participant_role\":\"USER\","
-            + "\"schema_version\":\"hearing_party_statement.v1\","
+            + "\"schema_version\":\"hearing_answer_bundle.v4\","
             + "\"submission_status\":\"SUBMITTED\"}",
         "a".repeat(64));
 
@@ -359,25 +251,31 @@ class JdbcTargetHearingFormalizationActivitiesTest {
   }
 
   @Test
-  void acceptsLegacyAnswerBundleSchemaForStatementCommand() {
-    assertDoesNotThrow(() -> JdbcTargetHearingFormalizationActivities.requireExactPartySubmissionSchema(
-        CommandType.HEARING_STATEMENT, HearingFlowActionType.ANSWER_BUNDLE,
-        "hearing_answer_bundle.v1", "hearing_answer_bundle.v1", "hearing_answer_bundle.v1"));
+  void rejectsLegacyAnswerSchemasAndStatementCommand() {
+    assertThrows(IllegalStateException.class,
+        () -> JdbcTargetHearingFormalizationActivities.requireExactPartySubmissionSchema(
+            CommandType.HEARING_STATEMENT, HearingFlowActionType.ANSWER_BUNDLE,
+            "hearing_answer_bundle.v1", "hearing_answer_bundle.v1", "hearing_answer_bundle.v1"));
+    assertThrows(IllegalStateException.class,
+        () -> JdbcTargetHearingFormalizationActivities.requireExactPartySubmissionSchema(
+            CommandType.HEARING_ANSWER_BUNDLE, HearingFlowActionType.ANSWER_BUNDLE,
+            "hearing_party_statement.v1", "hearing_party_statement.v1",
+            "hearing_party_statement.v1"));
   }
 
   @Test
-  void acceptsCurrentPartyStatementSchemaForStatementCommand() {
+  void acceptsV4AnswerBundleSchemaForAnswerBundleCommand() {
     assertDoesNotThrow(() -> JdbcTargetHearingFormalizationActivities.requireExactPartySubmissionSchema(
-        CommandType.HEARING_STATEMENT, HearingFlowActionType.ANSWER_BUNDLE,
-        "hearing_party_statement.v1", "hearing_party_statement.v1", "hearing_party_statement.v1"));
+        CommandType.HEARING_ANSWER_BUNDLE, HearingFlowActionType.ANSWER_BUNDLE,
+        "hearing_answer_bundle.v4", "hearing_answer_bundle.v4", "hearing_answer_bundle.v4"));
   }
 
   @Test
   void rejectsSchemaConfusionAcrossActionEventAndPayload() {
     assertThrows(IllegalStateException.class,
         () -> JdbcTargetHearingFormalizationActivities.requireExactPartySubmissionSchema(
-            CommandType.HEARING_STATEMENT, HearingFlowActionType.ANSWER_BUNDLE,
-            "hearing_party_statement.v1", "hearing_answer_bundle.v1", "hearing_party_statement.v1"));
+            CommandType.HEARING_ANSWER_BUNDLE, HearingFlowActionType.ANSWER_BUNDLE,
+            "hearing_answer_bundle.v4", "hearing_answer_bundle.v1", "hearing_answer_bundle.v4"));
   }
 
   @Test
@@ -388,11 +286,15 @@ class JdbcTargetHearingFormalizationActivitiesTest {
     assertThrows(IllegalStateException.class,
         () -> JdbcTargetHearingFormalizationActivities.requireExactPartySubmissionSchema(
             CommandType.HEARING_EVIDENCE_BATCH, HearingFlowActionType.EVIDENCE_BATCH,
-            "hearing_party_statement.v1", "hearing_party_statement.v1", "hearing_party_statement.v1"));
+            "hearing_answer_bundle.v4", "hearing_answer_bundle.v4", "hearing_answer_bundle.v4"));
   }
 
   @Test
   void targetHearingPinsTheExactPolicyDecisionOnItsReviewTaskProjection() {
+    assertThat(JdbcTargetHearingFormalizationActivities.TARGET_REVIEW_AGENT_RUN_ROLE)
+        .isEqualTo("SYSTEM");
+    assertThat(JdbcTargetHearingFormalizationActivities.TARGET_REVIEW_DRAFT_VERSION)
+        .isEqualTo(2);
     assertThat(JdbcTargetHearingFormalizationActivities.REVIEW_TASK_INSERT_SQL)
         .contains("packet_id, policy_decision_id, task_status", "values (?, ?, ?, ?, ?");
     assertThat(JdbcTargetHearingFormalizationActivities.REVIEW_TASK_REPLAY_SQL)
@@ -402,6 +304,36 @@ class JdbcTargetHearingFormalizationActivitiesTest {
             "policy.plan_id = task.plan_id",
             "policy.id = ?",
             "policy.policy_version = ?");
+  }
+
+  @Test
+  void targetHearingRouteReconciliationIsBoundToTheExactTemporalTargetEpoch() {
+    assertThat(JdbcTargetHearingFormalizationActivities.RECONCILE_TARGET_FULL_HEARING_ROUTE_SQL)
+        .contains(
+            "dispute.hearing_route is null",
+            "dispute.current_room = 'HEARING'",
+            "projection.flow_instance_id = ?",
+            "projection.epoch_id = ?",
+            "projection.hearing_epoch = ?",
+            "projection.process_revision = ?",
+            "projection.room_revision = ?",
+            "projection.fencing_token = ?",
+            "projection.writer_mode = 'TEMPORAL'",
+            "epoch.lifecycle_status = 'ACTIVE'",
+            "epoch.provisioning_status = 'READY'",
+            "binding.execution_lane = 'TARGET_E2E_CANDIDATE'")
+        .doesNotContain("coalesce(dispute.hearing_route");
+
+    assertDoesNotThrow(
+        () -> JdbcTargetHearingFormalizationActivities.requireFullHearingRoute("FULL_HEARING"));
+    assertThatThrownBy(
+            () -> JdbcTargetHearingFormalizationActivities.requireFullHearingRoute(null))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("FULL_HEARING");
+    assertThatThrownBy(
+            () -> JdbcTargetHearingFormalizationActivities.requireFullHearingRoute("QUICK_CHECK"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("FULL_HEARING");
   }
 
   @Test
@@ -419,6 +351,89 @@ class JdbcTargetHearingFormalizationActivitiesTest {
             "task.id = binding.review_task_id",
             "task.policy_decision_id = binding.policy_decision_id",
             "policy.id = binding.policy_decision_id");
+  }
+
+  @Test
+  void reviewTransitionCarriesTheExactPersistedCaseSequenceBoundary() {
+    Instant committedAt = Instant.parse("2026-08-21T08:00:00Z");
+    var sequenceAuthority =
+        new JdbcTargetHearingFormalizationActivities.ReviewSequenceAuthority(15, 68);
+
+    var transition = JdbcTargetHearingFormalizationActivities.reviewTransitionCommand(
+        "CASE_REVIEW_SEQUENCE", "ROOM_REVIEW_SEQUENCE", committedAt, sequenceAuthority);
+
+    assertThat(transition.caseId()).isEqualTo("CASE_REVIEW_SEQUENCE");
+    assertThat(transition.expectedRoomType()).isEqualTo(RoomType.HEARING);
+    assertThat(transition.nextRoomId()).isEqualTo("ROOM_REVIEW_SEQUENCE");
+    assertThat(transition.nextRoomType()).isEqualTo(RoomType.REVIEW);
+    assertThat(transition.macroPhase()).isEqualTo("REVIEW_OPEN");
+    assertThat(transition.roomPhase()).isEqualTo("PROVISIONING");
+    assertThat(transition.occurredAt().toInstant()).isEqualTo(committedAt);
+    assertThat(transition.hasProjectionAuthority()).isFalse();
+    assertThat(transition.hasSequenceAuthority()).isTrue();
+    assertThat(transition.lastCommandSequence()).isEqualTo(15L);
+    assertThat(transition.lastCaseEventSequence()).isEqualTo(68L);
+    assertThat(JdbcTargetHearingFormalizationActivities.REVIEW_TRANSITION_CASE_LOCK_SQL)
+        .contains("from fulfillment_dispute_case", "where id = ?", "for update");
+    assertThat(JdbcTargetHearingFormalizationActivities.REVIEW_LAST_COMMAND_SEQUENCE_SQL)
+        .contains(
+            "tenant_surrogate = ? and case_id = ?",
+            "order by case_command_sequence desc",
+            "limit 1",
+            "for update");
+    assertThat(JdbcTargetHearingFormalizationActivities.REVIEW_LAST_CASE_EVENT_SEQUENCE_SQL)
+        .contains(
+            "where case_id = ?", "order by sequence_no desc", "limit 1", "for update");
+    assertThat(JdbcTargetHearingFormalizationActivities.REVIEW_SEQUENCE_AUTHORITY_REPLAY_SQL)
+        .contains(
+            "current_room = 'REVIEW'",
+            "process_revision = ?",
+            "room_epoch = ?",
+            "fencing_token = ?",
+            "for update");
+    assertThatThrownBy(() ->
+        new JdbcTargetHearingFormalizationActivities.ReviewSequenceAuthority(0, 68))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("must be positive");
+    assertThatThrownBy(() -> JdbcTargetHearingFormalizationActivities.reviewTransitionCommand(
+        "CASE_REVIEW_SEQUENCE", "ROOM_REVIEW_SEQUENCE", committedAt, null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("sequenceAuthority");
+  }
+
+  @Test
+  void hearingTerminalTimeUsesTheExactPersistedMonotonicEpochBoundary() {
+    assertThat(JdbcTargetHearingFormalizationActivities.HEARING_EPOCH_TIME_BOUNDARY_SQL)
+        .contains(
+            "epoch.id = ?",
+            "epoch.tenant_surrogate = ?",
+            "epoch.case_id = ?",
+            "epoch.room_type = 'HEARING'",
+            "epoch.room_epoch = ?",
+            "epoch.process_revision = ?",
+            "epoch.room_revision = ?",
+            "epoch.fencing_token = ?",
+            "epoch.writer_mode = 'TEMPORAL'",
+            "epoch.lifecycle_status = 'ACTIVE'",
+            "epoch.provisioning_status = 'READY'",
+            "for update");
+
+    Instant older = Instant.parse("2026-08-21T00:00:00Z");
+    Instant newer = Instant.parse("2026-08-21T00:05:00Z");
+    assertThat(JdbcTargetHearingFormalizationActivities.laterBoundary(newer, older))
+        .isEqualTo(newer);
+    assertThat(JdbcTargetHearingFormalizationActivities.laterBoundary(older, newer))
+        .isEqualTo(newer);
+    assertThat(JdbcTargetHearingFormalizationActivities.laterBoundary(newer, newer))
+        .isEqualTo(newer);
+    assertThatThrownBy(() ->
+        JdbcTargetHearingFormalizationActivities.laterBoundary(null, newer))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("epochBoundary");
+    assertThatThrownBy(() ->
+        JdbcTargetHearingFormalizationActivities.laterBoundary(newer, null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("handoffBoundary");
   }
 
   @Test

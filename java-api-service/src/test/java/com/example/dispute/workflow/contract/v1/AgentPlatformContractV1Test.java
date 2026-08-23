@@ -138,6 +138,36 @@ class AgentPlatformContractV1Test {
     }
 
     @Test
+    void aggregateProviderBudgetRequiresTheExplicitHearingEvidenceSynthesisStage()
+            throws IOException {
+        JsonNode fixture =
+                MAPPER.readTree(
+                        FIXTURE_ROOT.resolve("valid/room-graph-command-valid.json").toFile());
+        String schemaFile = fixture.required("schema").asText();
+        ObjectNode authorized = (ObjectNode) fixture.required("instance").deepCopy();
+        authorized.put("room_type", "HEARING");
+        authorized.put("stage_code", "EVIDENCE_SYNTHESIZING");
+        ((ObjectNode) authorized.required("retry_budget"))
+                .put("provider_attempts_remaining", 6);
+        ObjectNode authorizedPreimage = authorized.deepCopy();
+        authorizedPreimage.remove("request_hash");
+        authorized.put("request_hash", ContractJson.sha256Hex(authorizedPreimage));
+
+        RoomGraphCommand decoded = codec.decode(schemaFile, authorized, RoomGraphCommand.class);
+        assertThat(decoded.retryBudget().providerAttemptsRemaining()).isEqualTo(6);
+
+        ObjectNode judgeV1 = authorized.deepCopy();
+        judgeV1.put("stage_code", "JUDGE_V1_GENERATING");
+        assertThatThrownBy(() -> codec.decode(schemaFile, judgeV1, RoomGraphCommand.class))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        ObjectNode evidenceRoom = authorized.deepCopy();
+        evidenceRoom.put("room_type", "EVIDENCE");
+        assertThatThrownBy(() -> codec.decode(schemaFile, evidenceRoom, RoomGraphCommand.class))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void schemaValidShapeStillRespectsTotalPayloadLimit() throws IOException {
         JsonNode fixture =
                 MAPPER.readTree(

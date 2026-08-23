@@ -3,21 +3,34 @@ package com.example.dispute.hearing.domain;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.HexFormat;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.TreeMap;
+import java.util.Set;
+import org.erdtman.jcs.JsonCanonicalizer;
 
 /** Canonical JSON validation shared by formal Hearing commands. */
 final class HearingFormalPayload {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Set<String> DOSSIER_V2_FIELDS =
+            Set.of(
+                    "schema_version",
+                    "trial_dossier_id",
+                    "case_id",
+                    "frozen_at",
+                    "case_matrix_version",
+                    "case_matrix_hash",
+                    "case_fact_matrix",
+                    "evidence_matrix_version",
+                    "evidence_matrix_hash",
+                    "fact_evidence_matrix",
+                    "adjudication_rules",
+                    "content_hash");
 
     private HearingFormalPayload() {}
 
@@ -30,7 +43,16 @@ final class HearingFormalPayload {
             HearingFlowSubmissionStatus submissionStatus) {
         ObjectNode payload = object(payloadJson);
         requireText(payload, "schema_version", schemaVersion);
-        if (!sha256(canonicalJson(payload)).equals(contentHash)) {
+        if ("hearing_question_set.v4".equals(schemaVersion)) {
+            requireText(payload, "question_set_hash", contentHash);
+            requireHashWithoutField(
+                    payload, "question_set_hash", contentHash, "question set");
+        } else if ("hearing_answer_bundle.v4".equals(schemaVersion)) {
+            requireText(payload, "answer_bundle_hash", contentHash);
+            requireHashWithoutField(
+                    payload, "answer_bundle_hash", contentHash, "answer bundle");
+            requireText(payload, "submission_status", "SUBMITTED");
+        } else if (!sha256(canonicalJson(payload)).equals(contentHash)) {
             throw new IllegalArgumentException("action contentHash is not canonical");
         }
         if (participantId != null && payload.has("participant_id")) {
@@ -56,7 +78,7 @@ final class HearingFormalPayload {
             String requestSetId,
             Instant frozenAt) {
         ObjectNode payload = object(payloadJson);
-        requireText(payload, "schema_version", "trial_dossier.v1");
+        requireText(payload, "schema_version", "trial_dossier.v2");
         requireText(payload, "trial_dossier_id", dossierId);
         requireText(payload, "case_id", caseId);
         requireText(payload, "frozen_at", frozenAt.toString());
@@ -65,8 +87,32 @@ final class HearingFormalPayload {
         requireText(payload, "case_matrix_hash", caseMatrixHash);
         requireInteger(payload, "evidence_matrix_version", evidenceMatrixVersion);
         requireText(payload, "evidence_matrix_hash", evidenceMatrixHash);
-        requireText(payload, "question_set_id", questionSetId);
-        requireText(payload, "request_set_id", requestSetId);
+        if (!fieldNames(payload).equals(DOSSIER_V2_FIELDS)
+                || !payload.path("adjudication_rules").isArray()
+                || payload.path("adjudication_rules").isEmpty()
+                || !(payload.path("case_fact_matrix") instanceof ObjectNode caseMatrix)
+                || !(payload.path("fact_evidence_matrix") instanceof ObjectNode evidenceMatrix)) {
+            throw new IllegalArgumentException(
+                    "trial_dossier.v2 must contain only frozen matrices and adjudication rules");
+        }
+        requireText(caseMatrix, "case_id", caseId);
+        requireInteger(caseMatrix, "matrix_version", caseMatrixVersion);
+        requireText(caseMatrix, "content_hash", caseMatrixHash);
+        if (!caseMatrix.path("matrix_id").isTextual()
+                || caseMatrix.path("matrix_id").asText().isBlank()) {
+            throw new IllegalArgumentException("case matrix_id is absent");
+        }
+        String caseMatrixId = caseMatrix.path("matrix_id").asText();
+        requireText(evidenceMatrix, "case_id", caseId);
+        requireInteger(evidenceMatrix, "matrix_version", evidenceMatrixVersion);
+        requireText(evidenceMatrix, "content_hash", evidenceMatrixHash);
+        requireText(evidenceMatrix, "matrix_status", "FROZEN");
+        requireText(
+                evidenceMatrix,
+                "case_fact_matrix_id",
+                caseMatrixId);
+        requireInteger(evidenceMatrix, "case_fact_matrix_version", caseMatrixVersion);
+        requireText(evidenceMatrix, "case_fact_matrix_hash", caseMatrixHash);
         requireHashWithoutField(payload, "content_hash", contentHash, "dossier");
         return payload;
     }
@@ -95,12 +141,28 @@ final class HearingFormalPayload {
         if (artifactType == HearingArtifactType.ADJUDICATION_DRAFT) {
             requireText(payload, "report_id", reportId);
             requireText(payload, "report_content_hash", reportHash);
+            JsonNode draft = payload.path("draft");
             if (!payload.path("public_text").isTextual()
-                    || !payload.path("draft").path("draft_text").isTextual()
-                    || !payload.path("public_text").asText()
-                            .equals(payload.path("draft").path("draft_text").asText())) {
+                    || payload.path("public_text").asText().isBlank()
+                    || !structuredDraft(draft)
+                    || !payload.path("review_responses").isArray()
+                    || payload.path("review_responses").isEmpty()) {
                 throw new IllegalArgumentException(
-                        "displayed Judge V2 text must equal the frozen draft text");
+                        "Judge V2 artifact must contain the structured draft and review responses");
+            }
+        } else if (artifactType == HearingArtifactType.JUDGE_PROPOSAL) {
+            JsonNode source = payload.path("proposal");
+            if (!source.isObject()
+                    || !"hearing_judge_v1.v2".equals(
+                            source.path("schema_version").asText())
+                    || !structuredDraft(source.path("draft"))
+                    || !source.path("review_focus").isArray()
+                    || source.path("review_focus").isEmpty()
+                    || !source.path("public_message").isTextual()
+                    || source.path("public_message").asText().isBlank()
+                    || source.path("is_final_decision").asBoolean(true)) {
+                throw new IllegalArgumentException(
+                        "Judge V1 artifact must contain the structured draft and review focus");
             }
         }
         requireHashWithoutField(payload, "content_hash", contentHash, "decision artifact");
@@ -138,6 +200,31 @@ final class HearingFormalPayload {
             throw new IllegalArgumentException("matrix synthesis matrix must be a JSON object");
         }
         requireText(matrix, "schema_version", kind.matrixSchemaVersion());
+        if (kind == HearingFormalFinalizer.MatrixKind.INTAKE) {
+            requireHashWithoutField(
+                    matrix,
+                    "content_hash",
+                    matrix.path("content_hash").asText(),
+                    "case matrix");
+            if (!(payload.path("issue_transition_set") instanceof ObjectNode transitions)
+                    || !(payload.path("issue_state_set") instanceof ObjectNode states)) {
+                throw new IllegalArgumentException(
+                        "intake synthesis issue authorities must be JSON objects");
+            }
+            requireText(
+                    transitions, "schema_version", "hearing_issue_transition_set.v4");
+            requireHashWithoutField(
+                    transitions,
+                    "transition_hash",
+                    transitions.path("transition_hash").asText(),
+                    "issue transition set");
+            requireText(states, "schema_version", "hearing_issue_state_set.v4");
+            requireHashWithoutField(
+                    states,
+                    "content_hash",
+                    states.path("content_hash").asText(),
+                    "issue state set");
+        }
         if (!hashCanonical(payloadJson).equals(contentHash)) {
             throw new IllegalArgumentException("matrix synthesis contentHash is not canonical");
         }
@@ -173,29 +260,34 @@ final class HearingFormalPayload {
         }
     }
 
-    private static String canonicalJson(JsonNode value) {
-        try {
-            return MAPPER.writeValueAsString(canonicalNode(value));
-        } catch (JsonProcessingException impossible) {
-            throw new IllegalArgumentException("formal payload cannot be canonicalized", impossible);
-        }
+    private static boolean structuredDraft(JsonNode draft) {
+        return draft.isObject()
+                && draft.path("decision_action").isTextual()
+                && HearingDecisionAction.supports(draft.path("decision_action").asText())
+                && draft.path("remedy_orders").isArray()
+                && !draft.path("remedy_orders").isEmpty()
+                && draft.path("fact_findings").isArray()
+                && !draft.path("fact_findings").isEmpty()
+                && draft.path("rule_applications").isArray()
+                && !draft.path("rule_applications").isEmpty()
+                && draft.path("decision_reasoning").isTextual()
+                && !draft.path("decision_reasoning").asText().isBlank()
+                && draft.path("reviewer_attention").isArray();
     }
 
-    private static JsonNode canonicalNode(JsonNode value) {
-        if (value.isObject()) {
-            ObjectNode sorted = MAPPER.createObjectNode();
-            Map<String, JsonNode> fields = new TreeMap<>();
-            Iterator<Map.Entry<String, JsonNode>> iterator = value.fields();
-            iterator.forEachRemaining(entry -> fields.put(entry.getKey(), entry.getValue()));
-            fields.forEach((name, child) -> sorted.set(name, canonicalNode(child)));
-            return sorted;
+    private static Set<String> fieldNames(ObjectNode payload) {
+        Set<String> fields = new java.util.HashSet<>();
+        payload.fieldNames().forEachRemaining(fields::add);
+        return Set.copyOf(fields);
+    }
+
+    private static String canonicalJson(JsonNode value) {
+        try {
+            String json = MAPPER.writeValueAsString(value);
+            return new String(new JsonCanonicalizer(json).getEncodedUTF8(), StandardCharsets.UTF_8);
+        } catch (IOException impossible) {
+            throw new IllegalArgumentException("formal payload cannot be canonicalized", impossible);
         }
-        if (value.isArray()) {
-            ArrayNode array = MAPPER.createArrayNode();
-            value.forEach(child -> array.add(canonicalNode(child)));
-            return array;
-        }
-        return value.deepCopy();
     }
 
     private static String sha256(String value) {

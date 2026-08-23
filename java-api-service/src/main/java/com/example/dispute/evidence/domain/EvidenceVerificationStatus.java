@@ -12,6 +12,7 @@ package com.example.dispute.evidence.domain;
 // 边界意义：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
 // Java 语法：enum 把允许值限制为固定常量，switch 可穷举状态分支。
 public enum EvidenceVerificationStatus {
+    UNVERIFIED,
     VERIFIED,
     PLAUSIBLE,
     SUSPICIOUS,

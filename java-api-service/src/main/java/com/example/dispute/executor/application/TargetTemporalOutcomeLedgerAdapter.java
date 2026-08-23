@@ -11,6 +11,9 @@ import java.util.Objects;
 
 /** Formal target-lane adapter over the shared Java-authoritative Outcome ledger. */
 public final class TargetTemporalOutcomeLedgerAdapter {
+  static final String ADAPTER_ID = "TARGET_E2E_MANIFEST_NOOP";
+  static final String ADAPTER_VERSION = "v1";
+
   private final OutcomeOperationLedger ledger;
 
   public TargetTemporalOutcomeLedgerAdapter(OutcomeOperationLedger ledger) {
@@ -41,9 +44,9 @@ public final class TargetTemporalOutcomeLedgerAdapter {
         binding.projection().processRevision(), binding.projection().outcomeRevision(),
         OutcomeOperation.OperationKind.OPERATION, command.operationSequence(), command.operationKeyHash(),
         command.requestHash(), binding.reviewPacketId(), binding.reviewPacketVersion(), binding.reviewPacketHash(),
-        binding.reviewPacketActionHash(), binding.approvalRecordId(), binding.approvalActionHash(),
+        binding.reviewPacketActionHash(), binding.approvalRecordId(), binding.approvalHash(),
         binding.decisionRequestHash(), binding.policyVersion(), binding.actionRecordId(command.operationSequence()),
-        command.approvedActionSnapshotHash(), "TARGET_E2E_MANIFEST_NOOP", command.toolCapabilityVersion(),
+        command.approvedActionSnapshotHash(), ADAPTER_ID, ADAPTER_VERSION,
         OutcomeOperation.RetryClass.NON_RETRYABLE, command.externalIdempotencyKeyHash(), true, false, reservedAt), null);
   }
 
@@ -67,7 +70,7 @@ public final class TargetTemporalOutcomeLedgerAdapter {
 
   public record Binding(OutcomeProcessProjection projection, String reviewPacketId,
       int reviewPacketVersion, String reviewPacketHash, String reviewPacketActionHash,
-      String approvalRecordId, String approvalActionHash, String decisionRequestHash,
+      String approvalRecordId, String approvalHash, String decisionRequestHash,
       String policyVersion, java.util.List<String> actionRecordIds) {
     public Binding {
       projection = Objects.requireNonNull(projection, "projection");

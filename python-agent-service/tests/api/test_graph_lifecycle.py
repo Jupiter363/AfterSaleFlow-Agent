@@ -191,10 +191,11 @@ def _install_open_dependencies(
     gate_start_error: Exception | None = None,
     security_close_error: Exception | None = None,
     bulkhead_ready: bool = True,
-    control_ready: bool | None = None,
+    readiness_ready: bool = True,
 ) -> tuple[Any, list[Any], list[Any]]:
     pool = object()
-    control_pool = pool if control_ready is None else object()
+    control_pool = object()
+    readiness_pool = object()
     saver = object()
     gateways: list[Any] = []
     durable_bulkheads: list[Any] = []
@@ -203,6 +204,7 @@ def _install_open_dependencies(
         def __init__(self) -> None:
             self.pool = pool
             self.control_pool = control_pool
+            self.readiness_pool = readiness_pool
             self.saver = saver
 
         @classmethod
@@ -216,15 +218,17 @@ def _install_open_dependencies(
 
     class PersistenceProbe:
         def __init__(self, config: Any, actual_pool: Any) -> None:
-            assert actual_pool in {pool, control_pool}
-            self._control = actual_pool is control_pool and control_pool is not pool
+            assert actual_pool is readiness_pool
 
         async def check(self) -> Any:
-            events.append("control_persistence_check" if self._control else "persistence_check")
-            ready = True if not self._control else bool(control_ready)
+            events.append("persistence_check")
             return SimpleNamespace(
-                ready=ready,
-                code="GRAPH_PERSISTENCE_READY" if ready else "GRAPH_DB_UNAVAILABLE",
+                ready=readiness_ready,
+                code=(
+                    "GRAPH_PERSISTENCE_READY"
+                    if readiness_ready
+                    else "GRAPH_DB_UNAVAILABLE"
+                ),
             )
 
     class Gateway:
@@ -843,11 +847,11 @@ async def test_shadow_startup_fails_closed_when_durable_bulkhead_is_not_ready(
 
 
 @pytest.mark.asyncio
-async def test_shadow_startup_fails_closed_when_control_pool_readiness_fails(
+async def test_shadow_startup_fails_closed_when_readiness_pool_probe_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
-    _install_open_dependencies(monkeypatch, events, control_ready=False)
+    _install_open_dependencies(monkeypatch, events, readiness_ready=False)
 
     with pytest.raises(RuntimeError, match="GRAPH_DB_UNAVAILABLE"):
         await GraphApplicationRuntime.open(_shadow_settings(), _bindings())
@@ -855,39 +859,8 @@ async def test_shadow_startup_fails_closed_when_control_pool_readiness_fails(
     assert events == [
         "checkpoint_open",
         "persistence_check",
-        "control_persistence_check",
         "checkpoint_close",
     ]
-
-
-@pytest.mark.asyncio
-async def test_composite_persistence_readiness_requires_a_healthy_control_pool() -> None:
-    class Probe:
-        def __init__(self, ready: bool) -> None:
-            self.ready = ready
-            self.calls = 0
-
-        async def check(self) -> Any:
-            self.calls += 1
-            return SimpleNamespace(
-                ready=self.ready,
-                code="GRAPH_PERSISTENCE_READY" if self.ready else "GRAPH_DB_UNAVAILABLE",
-            )
-
-    checkpoint = Probe(ready=True)
-    control = Probe(ready=False)
-    probe = graph_lifecycle._CompositeGraphPersistenceReadinessProbe(
-        checkpoint_probe=cast(Any, checkpoint),
-        control_probe=cast(Any, control),
-        mode=GraphGatewayMode.SHADOW,
-    )
-
-    report = await probe.check()
-
-    assert report.ready is False
-    assert report.code == "GRAPH_DB_UNAVAILABLE"
-    assert checkpoint.calls == 1
-    assert control.calls == 1
 
 
 @pytest.mark.asyncio

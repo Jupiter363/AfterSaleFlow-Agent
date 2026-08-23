@@ -45,6 +45,7 @@ import com.example.dispute.workflow.targete2e.rooms.outcome.TargetOutcomeComplet
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewAgentRunTrigger;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewCommandBridgeActivities;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewNonExecutionActivities;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeChildUpdateActivities;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeHandoffActivities;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingActivities;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
@@ -97,12 +98,16 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       "target-intake-complete-timeline-cursor-v1";
   public static final String TARGET_REVIEW_NON_EXECUTION_CHANGE_ID =
       "target-review-non-execution-v1";
+  public static final String TARGET_REVIEW_OUTCOME_CHILD_UPDATE_ACTIVITY_CHANGE_ID =
+      "target-review-outcome-child-update-activity-v1";
   public static final String TARGET_EVIDENCE_FROZEN_SUBMISSION_START_CHANGE_ID =
       "target-evidence-frozen-submission-start-v1";
   public static final String TARGET_EVIDENCE_AGENT_RUN_TERMINAL_NO_COMMIT_CHANGE_ID =
       "target-evidence-agent-run-terminal-no-commit-v1";
   public static final String TARGET_EVIDENCE_RETURNED_AGENT_RUN_TERMINAL_NO_COMMIT_CHANGE_ID =
       "target-evidence-returned-agent-run-terminal-no-commit-v1";
+  public static final String TARGET_EVIDENCE_TERMINAL_PROJECTION_CURSOR_CHANGE_ID =
+      "target-evidence-terminal-projection-cursor-v1";
   public static final String TARGET_HEARING_PARTY_STAGE_WINDOW_CHANGE_ID =
       "target-hearing-party-stage-window-authority-v1";
   private static final int FROZEN_EVIDENCE_START = 1;
@@ -186,6 +191,14 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
               .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
               .setStartToCloseTimeout(Duration.ofSeconds(10))
               .setScheduleToCloseTimeout(Duration.ofSeconds(30))
+              .build());
+  private final TargetReviewOutcomeChildUpdateActivities targetReviewOutcomeChildUpdates =
+      Workflow.newActivityStub(
+          TargetReviewOutcomeChildUpdateActivities.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
+              .setStartToCloseTimeout(Duration.ofMinutes(3))
+              .setScheduleToCloseTimeout(Duration.ofMinutes(5))
               .build());
   private final TargetHearingBootstrapActivities targetHearingBootstrap =
       Workflow.newActivityStub(
@@ -505,7 +518,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
 
   private TargetTypedRoomChildHandle startOutcome(
       ProvisionRoomEpoch request, String provisioningHash) {
-    requirePositiveEpoch(request);
+    requireNonNegativeEpoch(request);
     Binding binding = targetReviewOutcomeStartBinding.bind(request).binding();
     OutcomeWorkflowStart start = binding.start();
     OutcomeRoomWorkflow child =
@@ -549,14 +562,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     return openedAt.plus(Duration.ofHours(24));
   }
 
-  private static void requirePositiveEpoch(ProvisionRoomEpoch request) {
-    if (request.roomEpoch() < 1) {
-      throw new IllegalArgumentException(
-          request.roomType() + " target room epoch must be positive");
-    }
-  }
-
-  private static void requireNonNegativeEpoch(ProvisionRoomEpoch request) {
+  static void requireNonNegativeEpoch(ProvisionRoomEpoch request) {
     if (request.roomEpoch() < 0) {
       throw new IllegalArgumentException(
           request.roomType() + " target room epoch must not be negative");
@@ -581,6 +587,26 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
   private static void requireHash(String value, String field) {
     if (value == null || !value.matches("[0-9a-f]{64}")) {
       throw new IllegalArgumentException(field + " must be lowercase SHA-256");
+    }
+  }
+
+  /**
+   * Terminal persistence can finish before the parent Update records its own adoption. Temporal
+   * keeps workflow-object mutations made by a failed Update handler, so manual recovery may replay
+   * the exact same durable terminal receipt against an already advanced child handle. Exact replay
+   * is idempotent; a mixed, stale, or partially advanced coordinate pair is still invalid.
+   */
+  static void requireTerminalAdvanceOrExactReplay(
+      long currentProcessRevision,
+      long currentRoomRevision,
+      TargetRoomProgressReceipt progress) {
+    boolean exactReplay =
+        progress.processRevision() == currentProcessRevision
+            && progress.roomRevision() == currentRoomRevision;
+    if (!exactReplay
+        && (progress.processRevision() <= currentProcessRevision
+            || progress.roomRevision() <= currentRoomRevision)) {
+      throw new IllegalStateException("target terminal acknowledgement coordinates are invalid");
     }
   }
 
@@ -665,9 +691,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
 
     /** A terminal Outcome may condense multiple durable facts into one parent transition. */
     protected final void advanceToTerminal(TargetRoomProgressReceipt progress) {
-      if (progress.processRevision() <= processRevision || progress.roomRevision() <= roomRevision) {
-        throw new IllegalStateException("target terminal acknowledgement coordinates are invalid");
-      }
+      requireTerminalAdvanceOrExactReplay(processRevision, roomRevision, progress);
       processRevision = progress.processRevision();
       roomRevision = progress.roomRevision();
     }
@@ -835,7 +859,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     private static boolean isPartyCommand(
         com.example.dispute.workflow.contract.v1.ContractTypes.CommandType commandType) {
       return commandType
-              == com.example.dispute.workflow.contract.v1.ContractTypes.CommandType.HEARING_STATEMENT
+              == com.example.dispute.workflow.contract.v1.ContractTypes.CommandType.HEARING_ANSWER_BUNDLE
           || commandType
               == com.example.dispute.workflow.contract.v1.ContractTypes.CommandType.HEARING_EVIDENCE_BATCH;
     }
@@ -858,6 +882,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     private String acceptedReviewReceiptId;
     private String acceptedReviewReceiptHash;
     private long acceptedReviewReceiptRevision;
+    private int outcomeChildUpdateActivityVersion = Workflow.DEFAULT_VERSION;
     private com.example.dispute.workflow.contract.outcome.v1.OutcomeReviewDecisionReceipt
         acceptedReviewDecision;
     private TargetRoomProgressReceipt terminalProgressReceipt;
@@ -897,8 +922,19 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
                   fencingToken()));
       Objects.requireNonNull(binding, "target Review Outcome start binding");
       binding.requireCompatible(handoff.outcomeReceipt());
+      outcomeChildUpdateActivityVersion =
+          Workflow.getVersion(
+              TARGET_REVIEW_OUTCOME_CHILD_UPDATE_ACTIVITY_CHANGE_ID,
+              Workflow.DEFAULT_VERSION,
+              1);
       OutcomeReviewDecisionAcceptance acceptance =
-          outcomeChild.reviewDecisionAccepted(handoff.outcomeReceipt());
+          outcomeChildUpdateActivityVersion == Workflow.DEFAULT_VERSION
+              ? outcomeChild.reviewDecisionAccepted(handoff.outcomeReceipt())
+              : targetReviewOutcomeChildUpdates.acceptDecision(
+                  new TargetReviewOutcomeChildUpdateActivities.AcceptRequest(
+                      execution().getWorkflowId(),
+                      execution().getRunId(),
+                      handoff.outcomeReceipt()));
       if (!acceptance.accepted()
           || !handoff.outcomeReceipt().receiptId().equals(acceptance.receiptId())
           || !handoff.outcomeReceipt().receiptHash().equals(acceptance.receiptHash())
@@ -956,7 +992,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         sourceTransitionClosed = !terminalClosed;
         return targetReceipt();
       }
-      OutcomeCompletionResult completion = outcomeChild.completeTargetOutcomeAfterRouting(
+      OutcomeCompletionRequest completionRequest =
           new OutcomeCompletionRequest(
               RoomType.REVIEW,
               roomEpoch(),
@@ -965,7 +1001,15 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
               roomRevision(),
               acceptedReviewReceiptId,
               acceptedReviewReceiptHash,
-              acceptedReviewReceiptRevision));
+              acceptedReviewReceiptRevision);
+      OutcomeCompletionResult completion =
+          outcomeChildUpdateActivityVersion == Workflow.DEFAULT_VERSION
+              ? outcomeChild.completeTargetOutcomeAfterRouting(completionRequest)
+              : targetReviewOutcomeChildUpdates.completeAfterRouting(
+                  new TargetReviewOutcomeChildUpdateActivities.CompleteRequest(
+                      execution().getWorkflowId(),
+                      execution().getRunId(),
+                      completionRequest));
       TargetRoomProgressReceipt progress = completion.terminalProgressReceipt();
       advanceToTerminal(progress);
       terminalProgressReceipt = progress;
@@ -1127,31 +1171,52 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
                   Workflow.DEFAULT_VERSION,
                   1);
           if (returnedTerminalNoCommitVersion == 1) {
-            AgentRunAttemptStatus attemptStatus =
-                result.publicOutputEmitted()
-                    ? AgentRunAttemptStatus.ABORTED
-                    : AgentRunAttemptStatus.FAILED;
-            convergeTargetEvidenceTerminalNoCommit(
-                new TargetRoomAgentRunTerminalNoCommit(
-                    TargetRoomAgentRunTerminalNoCommit.SCHEMA_VERSION,
-                    command,
-                    fencingToken(),
-                    trigger.expectedRoomRevision(),
-                    targetEvidenceExpectedLastCaseEventSequence(),
-                    execution().getWorkflowId(),
-                    execution().getRunId(),
-                    workflowBuildId,
-                    trigger.commandHash(),
-                    trigger.commandEnvelopeHash(),
-                    trigger.request(),
-                    result,
-                    attemptStatus,
-                    result.errorCode(),
-                    result.retryable(),
-                    result.recoveryAction(),
-                    result.lastSequenceNo(),
-                    result.completedAt(),
-                    false));
+            int projectionCursorVersion =
+                Workflow.getVersion(
+                    TARGET_EVIDENCE_TERMINAL_PROJECTION_CURSOR_CHANGE_ID,
+                    Workflow.DEFAULT_VERSION,
+                    1);
+            if (projectionCursorVersion == 1) {
+              TargetRoomAgentRunTerminalNoCommit authority =
+                  resolveTargetEvidenceTerminalNoCommit(
+                      command,
+                      fencingToken(),
+                      trigger.expectedRoomRevision(),
+                      targetEvidenceExpectedLastCaseEventSequence(),
+                      execution().getWorkflowId(),
+                      execution().getRunId(),
+                      workflowBuildId,
+                      trigger.commandHash(),
+                      trigger.commandEnvelopeHash(),
+                      trigger.request());
+              convergeTargetEvidenceTerminalNoCommit(authority);
+            } else {
+              AgentRunAttemptStatus attemptStatus =
+                  result.publicOutputEmitted()
+                      ? AgentRunAttemptStatus.ABORTED
+                      : AgentRunAttemptStatus.FAILED;
+              convergeTargetEvidenceTerminalNoCommit(
+                  new TargetRoomAgentRunTerminalNoCommit(
+                      TargetRoomAgentRunTerminalNoCommit.SCHEMA_VERSION,
+                      command,
+                      fencingToken(),
+                      trigger.expectedRoomRevision(),
+                      targetEvidenceExpectedLastCaseEventSequence(),
+                      execution().getWorkflowId(),
+                      execution().getRunId(),
+                      workflowBuildId,
+                      trigger.commandHash(),
+                      trigger.commandEnvelopeHash(),
+                      trigger.request(),
+                      result,
+                      attemptStatus,
+                      result.errorCode(),
+                      result.retryable(),
+                      result.recoveryAction(),
+                      result.lastSequenceNo(),
+                      result.completedAt(),
+                      false));
+            }
           }
         }
         child.agentRunFinalized(

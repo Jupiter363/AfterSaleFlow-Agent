@@ -241,6 +241,79 @@ class SimulatedExternalImportTemplateCycleTest {
     }
 
     @Test
+    void importsTheNamedFullChainFixtureWithoutConsumingTheRotationCursor() {
+        SimulateExternalImportCommand fixedFixture =
+                new SimulateExternalImportCommand(
+                        1,
+                        "固定全链路验收案件",
+                        RiskLevel.HIGH,
+                        ActorRole.USER,
+                        "user-local",
+                        "merchant-local",
+                        "canonical-full-chain-batch",
+                        SimulatedExternalDisputeTemplateCatalog.CANONICAL_FULL_CHAIN_FIXTURE_ID);
+
+        var first =
+                facade.simulateExternalImport(
+                                fixedFixture,
+                                systemActor(),
+                                "fixed-fixture-key",
+                                "fixed-fixture-trace",
+                                "fixed-fixture-request")
+                        .items()
+                        .getFirst();
+        var replay =
+                facade.simulateExternalImport(
+                                fixedFixture,
+                                systemActor(),
+                                "fixed-fixture-key",
+                                "fixed-fixture-replay-trace",
+                                "fixed-fixture-replay-request")
+                        .items()
+                        .getFirst();
+
+        assertThat(first.title()).isEqualTo("商品参数宣传与检测结果不符");
+        assertThat(first.disputeType()).isEqualTo("SPECIFICATION_MISMATCH");
+        assertThat(first.riskLevel()).isEqualTo(RiskLevel.HIGH);
+        assertThat(first.externalCaseReference()).startsWith("SIM-T20-");
+        assertThat(replay.id()).isEqualTo(first.id());
+        assertThat(cursor.getNextTemplateNo()).isEqualTo(1);
+        verify(cursorRepository, never())
+                .findByIdForUpdate(SimulatedImportTemplateCursorEntity.CURSOR_ID);
+        verify(cursorRepository, never()).save(any());
+    }
+
+    @Test
+    void rejectsAnUnknownNamedFixtureBeforeReadingTheRotationCursor() {
+        SimulateExternalImportCommand unknownFixture =
+                new SimulateExternalImportCommand(
+                        1,
+                        "固定全链路验收案件",
+                        RiskLevel.HIGH,
+                        ActorRole.USER,
+                        "user-local",
+                        "merchant-local",
+                        "unknown-fixture-batch",
+                        "unknown-fixture-v1");
+
+        assertThatThrownBy(
+                        () ->
+                                facade.simulateExternalImport(
+                                        unknownFixture,
+                                        systemActor(),
+                                        "unknown-fixture-key",
+                                        "unknown-fixture-trace",
+                                        "unknown-fixture-request"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unknown simulated import fixture_id");
+
+        verify(caseRepository, never()).save(any());
+        verify(cursorRepository, never())
+                .findByIdForUpdate(SimulatedImportTemplateCursorEntity.CURSOR_ID);
+        verify(cursorRepository, never()).save(any());
+    }
+
+    @Test
     void rejectsReusingASimulationKeyForDifferentPartiesBeforeRepairingTheCase() {
         SimulateExternalImportCommand firstRequest =
                 new SimulateExternalImportCommand(

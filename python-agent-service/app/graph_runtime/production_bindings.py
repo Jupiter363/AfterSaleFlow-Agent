@@ -276,6 +276,7 @@ def build_graph_runtime_bindings(
             settings.resolved_llm_model,
             settings.resolved_llm_api_key,
             settings.llm_timeout_seconds,
+            enable_thinking=settings.llm_enable_thinking,
         )
         intake_transport = StructuredClientTransport(structured_client)
         intake_exchange = JavaIntakeExchangeClient(
@@ -531,7 +532,7 @@ def _build_target_e2e_room_providers(
         not callable(getattr(evidence_workflow, "run", None))
         or not callable(getattr(evidence_workflow, "arun", None))
         or getattr(evidence_workflow, "protocol_version", None)
-        != "evidence-turn-result.v2"
+        != "evidence-turn-result.v3"
     ):
         raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
     if not callable(getattr(hearing_workflow, "target_e2e_invocation", None)):
@@ -586,7 +587,7 @@ def _build_target_e2e_evidence_workflow(
             prompts=PromptRepository(),
         ),
         asset_loader=EvidenceAssetLoader(
-            java_api_service_url=settings.java_api_service_url,
+            java_api_service_url=settings.java_evidence_content_service_url,
             java_service_secret=settings.java_service_secret,
         ),
     )

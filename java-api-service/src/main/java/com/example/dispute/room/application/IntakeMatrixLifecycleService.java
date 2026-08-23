@@ -13,6 +13,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.List;
 import org.springframework.stereotype.Service;
 
@@ -42,20 +45,42 @@ public class IntakeMatrixLifecycleService {
         ObjectNode root = readObject(dossier.getDossierJson());
         JsonNode existing = root.path("case_fact_matrix");
         if (existing.isObject()) {
+            ObjectNode formal = (ObjectNode) existing;
             // Graph finalization already materializes the Java-owned unified matrix. Confirmation
             // is therefore idempotent; it may only remove a stale pre-baseline unilateral branch.
-            initiatorFreezer.validateFrozen(
-                    (ObjectNode) existing,
-                    dispute.getId(),
-                    toContractRole(dispute.getInitiatorRole()),
-                    toContractRole(dispute.getRespondentRole()));
+            try {
+                initiatorFreezer.validateFrozen(
+                        formal,
+                        dispute.getId(),
+                        toContractRole(dispute.getInitiatorRole()),
+                        toContractRole(dispute.getRespondentRole()));
+            } catch (IntakeFinalizationRejectedException rejection) {
+                boolean historicCoverageGap =
+                        ("INTAKE_INITIATOR_MATRIX_INVALID".equals(rejection.code())
+                                        || "INTAKE_INITIATOR_MATRIX_ROWS_INVALID"
+                                                .equals(rejection.code()))
+                                && hasUnsetEvidenceCoverage(formal);
+                if (!"INTAKE_INITIATOR_MATRIX_HASH_INVALID".equals(rejection.code())
+                        && !historicCoverageGap) {
+                    throw rejection;
+                }
+                formal = upgradeVerifiedHistoricPythonMatrix(dispute, formal);
+                rebindAdjacentHandoffPartition(root, (ObjectNode) existing, formal);
+                root.set("case_fact_matrix", formal);
+                root.remove("unilateral_case_matrix");
+                persistProjection(actorId, dossier, root);
+                return new FreezeResult(
+                        false,
+                        formal.path("matrix_kind").asText(null),
+                        formal.path("content_hash").asText(null));
+            }
             if (root.remove("unilateral_case_matrix") != null) {
-                persistProjection(dispute, actorId, dossier, root);
+                persistProjection(actorId, dossier, root);
             }
             return new FreezeResult(
                     false,
-                    existing.path("matrix_kind").asText(null),
-                    existing.path("content_hash").asText(null));
+                    formal.path("matrix_kind").asText(null),
+                    formal.path("content_hash").asText(null));
         }
         JsonNode unilateral = root.path("unilateral_case_matrix");
         if (!unilateral.isObject()) {
@@ -68,15 +93,122 @@ public class IntakeMatrixLifecycleService {
                 (ObjectNode) unilateral);
         root.set("case_fact_matrix", frozen);
         root.remove("unilateral_case_matrix");
-        persistProjection(dispute, actorId, dossier, root);
+        persistProjection(actorId, dossier, root);
         return new FreezeResult(true, "INITIATOR_FROZEN", frozen.path("content_hash").asText());
     }
 
+    /**
+     * Upgrades only a matrix whose stored self-hash proves it was produced by the historic Python
+     * sorted-JSON algorithm. The returned matrix is immediately strict-validated under the single
+     * RFC 8785/JCS protocol used by every current producer and consumer.
+     */
+    private ObjectNode upgradeVerifiedHistoricPythonMatrix(
+            FulfillmentCaseEntity dispute, ObjectNode matrix) {
+        ObjectNode historicMaterial = matrix.deepCopy();
+        JsonNode storedHash = historicMaterial.remove("content_hash");
+        if (storedHash == null
+                || !storedHash.isTextual()
+                || !storedHash.asText().matches("[0-9a-f]{64}")
+                || !storedHash.asText().equals(historicPythonSha256(historicMaterial))) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_HASH_INVALID",
+                    "initiator matrix content hash is neither JCS nor verified historic Python");
+        }
+
+        ObjectNode upgraded = historicMaterial.deepCopy();
+        JsonNode rows = upgraded.path("fact_rows");
+        if (rows.isArray()) {
+            for (JsonNode candidate : rows) {
+                if (candidate instanceof ObjectNode row) {
+                    JsonNode coverage = row.get("evidence_coverage_status");
+                    if (coverage == null || coverage.isNull()) {
+                        row.put("evidence_coverage_status", "PENDING_EVIDENCE_REVIEW");
+                    }
+                }
+            }
+        }
+        upgraded.put("content_hash", ContractJson.sha256Hex(upgraded));
+        initiatorFreezer.validateFrozen(
+                upgraded,
+                dispute.getId(),
+                toContractRole(dispute.getInitiatorRole()),
+                toContractRole(dispute.getRespondentRole()));
+        return upgraded;
+    }
+
+    private static boolean hasUnsetEvidenceCoverage(ObjectNode matrix) {
+        JsonNode rows = matrix.path("fact_rows");
+        if (!rows.isArray() || rows.isEmpty()) {
+            return false;
+        }
+        for (JsonNode candidate : rows) {
+            if (!candidate.isObject()) {
+                return false;
+            }
+            JsonNode coverage = candidate.get("evidence_coverage_status");
+            if (coverage == null || coverage.isNull()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void rebindAdjacentHandoffPartition(
+            ObjectNode root, ObjectNode historicMatrix, ObjectNode upgradedMatrix) {
+        JsonNode partition = root.get("handoff_remark_partition");
+        if (partition == null) {
+            return;
+        }
+        if (!(partition instanceof ObjectNode partitionObject)
+                || !partition.path("case_fact_matrix_id")
+                        .equals(historicMatrix.path("matrix_id"))
+                || !partition.path("case_fact_matrix_version")
+                        .equals(historicMatrix.path("matrix_version"))
+                || !partition.path("case_fact_matrix_hash")
+                        .equals(historicMatrix.path("content_hash"))) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_MATRIX_MISMATCH",
+                    "handoff remark partition is not bound to the historic adjacent matrix");
+        }
+        partitionObject.set(
+                "case_fact_matrix_id", upgradedMatrix.path("matrix_id").deepCopy());
+        partitionObject.set(
+                "case_fact_matrix_version", upgradedMatrix.path("matrix_version").deepCopy());
+        partitionObject.set(
+                "case_fact_matrix_hash", upgradedMatrix.path("content_hash").deepCopy());
+    }
+
+    private String historicPythonSha256(JsonNode value) {
+        try {
+            byte[] serialized = objectMapper.writeValueAsBytes(sortObjectMembers(value));
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(serialized);
+            return HexFormat.of().formatHex(digest);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("failed to serialize historic intake matrix", exception);
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
+        }
+    }
+
+    private JsonNode sortObjectMembers(JsonNode value) {
+        if (value.isObject()) {
+            ObjectNode sorted = objectMapper.createObjectNode();
+            List<String> names = new java.util.ArrayList<>();
+            value.fieldNames().forEachRemaining(names::add);
+            names.sort(String::compareTo);
+            names.forEach(name -> sorted.set(name, sortObjectMembers(value.get(name))));
+            return sorted;
+        }
+        if (value.isArray()) {
+            ArrayNode sorted = objectMapper.createArrayNode();
+            value.forEach(item -> sorted.add(sortObjectMembers(item)));
+            return sorted;
+        }
+        return value.deepCopy();
+    }
+
     private void persistProjection(
-            FulfillmentCaseEntity dispute,
-            String actorId,
-            CaseIntakeDossierEntity dossier,
-            ObjectNode root) {
+            String actorId, CaseIntakeDossierEntity dossier, ObjectNode root) {
         String updated = write(root);
         dossier.replaceWith(
                 updated,
@@ -86,7 +218,6 @@ public class IntakeMatrixLifecycleService {
                 dossier.getSourceTurnNo(),
                 actorId);
         repository.save(dossier);
-        dispute.refreshIntakeResult(updated, actorId);
     }
 
     /** Strict formal check used by the TEMPORAL branch authority after all rows are locked. */

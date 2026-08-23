@@ -12,6 +12,10 @@ import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.hearing.domain.HearingFlowStage;
+import com.example.dispute.hearing.domain.HearingFlowStageStatus;
+import com.example.dispute.hearing.infrastructure.persistence.repository.HearingFlowInstanceRepository;
+import com.example.dispute.hearing.infrastructure.persistence.repository.HearingFlowStageRepository;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.domain.MessageSenderType;
@@ -75,6 +79,8 @@ public class RoomMessageService {
     private final IntakeMessageIngressRouter intakeMessageIngressRouter;
     private final LegacyIntakeWriterGuard legacyIntakeWriterGuard;
     private final CaseRoomEpochRepository roomEpochRepository;
+    private final HearingFlowInstanceRepository hearingFlowInstanceRepository;
+    private final HearingFlowStageRepository hearingFlowStageRepository;
     private TargetEvidenceOpeningIngress targetEvidenceOpeningIngress;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -98,6 +104,8 @@ public class RoomMessageService {
             IntakeProgressService intakeProgressService,
             IntakeMessageIngressRouter intakeMessageIngressRouter,
             LegacyIntakeWriterGuard legacyIntakeWriterGuard,
+            HearingFlowInstanceRepository hearingFlowInstanceRepository,
+            HearingFlowStageRepository hearingFlowStageRepository,
             Clock clock) {
         this(
                 caseRepository,
@@ -113,7 +121,9 @@ public class RoomMessageService {
                 intakeMessageIngressRouter,
                 legacyIntakeWriterGuard,
                 clock,
-                null);
+                null,
+                hearingFlowInstanceRepository,
+                hearingFlowStageRepository);
     }
 
     @Autowired
@@ -131,7 +141,9 @@ public class RoomMessageService {
             IntakeMessageIngressRouter intakeMessageIngressRouter,
             LegacyIntakeWriterGuard legacyIntakeWriterGuard,
             Clock clock,
-            CaseRoomEpochRepository roomEpochRepository) {
+            CaseRoomEpochRepository roomEpochRepository,
+            HearingFlowInstanceRepository hearingFlowInstanceRepository,
+            HearingFlowStageRepository hearingFlowStageRepository) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.participantRepository = participantRepository;
@@ -146,6 +158,11 @@ public class RoomMessageService {
         this.legacyIntakeWriterGuard = legacyIntakeWriterGuard;
         this.clock = clock;
         this.roomEpochRepository = roomEpochRepository;
+        this.hearingFlowInstanceRepository =
+                Objects.requireNonNull(
+                        hearingFlowInstanceRepository, "hearingFlowInstanceRepository");
+        this.hearingFlowStageRepository =
+                Objects.requireNonNull(hearingFlowStageRepository, "hearingFlowStageRepository");
     }
 
     @Autowired
@@ -361,11 +378,48 @@ public class RoomMessageService {
                 roomRepository
                         .findByCaseIdAndRoomType(caseId, roomType)
                         .orElseThrow(() -> new IllegalArgumentException("room not found"));
+        boolean discloseSealedHearingAnswers =
+                roomType == RoomType.HEARING
+                        && isParty(actor.role())
+                        && hearingAnswerStageCompleted(caseId);
         return messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId())
                 .stream()
-                .filter(message -> visibleTo(message, accessSession))
+                .filter(
+                        message ->
+                                visibleTo(message, accessSession)
+                                        || visibleAsSealedHearingAnswer(
+                                                message,
+                                                accessSession,
+                                                discloseSealedHearingAnswers))
                 .map(this::view)
                 .toList();
+    }
+
+    private boolean hearingAnswerStageCompleted(String caseId) {
+        return hearingFlowInstanceRepository
+                .findByCaseId(caseId)
+                .flatMap(
+                        instance ->
+                                hearingFlowStageRepository.findByFlowInstanceIdAndStageCode(
+                                        instance.getId(), HearingFlowStage.PARTY_ANSWERS_OPEN))
+                .map(stage -> stage.getStageStatus() == HearingFlowStageStatus.COMPLETED)
+                .orElse(false);
+    }
+
+    private boolean visibleAsSealedHearingAnswer(
+            RoomMessageEntity message,
+            CaseAccessSessionEntity accessSession,
+            boolean discloseSealedHearingAnswers) {
+        if (!discloseSealedHearingAnswers || !isParty(accessSession.getActorRole())) {
+            return false;
+        }
+        if (message.getSenderType() != MessageSenderType.PARTY
+                || message.getMessageSource() != MessageSource.PARTY_ACTION
+                || message.getMessageType() != MessageType.PARTY_TEXT) {
+            return false;
+        }
+        return ActorRole.USER.name().equals(message.getSenderRole())
+                || ActorRole.MERCHANT.name().equals(message.getSenderRole());
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomMessageService.ensureOpening(String,RoomType,AuthenticatedActor,String,String)」。

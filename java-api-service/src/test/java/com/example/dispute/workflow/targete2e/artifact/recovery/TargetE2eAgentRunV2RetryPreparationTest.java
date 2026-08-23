@@ -27,9 +27,30 @@ class TargetE2eAgentRunV2RetryPreparationTest {
         .doesNotContain("state.logicalRun().protocol() != AgentRunProtocol.V2");
   }
 
+  @Test
+  void hearingRetryCarriesTheExactPredecessorPartyStageAuthority() throws IOException {
+    String source = Files.readString(SOURCE);
+    String persistHearing = privateMethod(source, "persistHearing");
+
+    assertThat(persistHearing)
+        .contains("TargetHearingCommandMaterial source = previous.material();")
+        .contains("source.schemaVersion(), admission, request, source.partyStageAuthority()")
+        .contains("rebind(previous.admission(), source.request().command()")
+        .doesNotContain(
+            "TargetHearingCommandMaterial.SCHEMA_VERSION, admission, request,\n"
+                + "        sealed.commandHash()");
+  }
+
   private static String method(String source, String methodName) {
     int start = source.indexOf(methodName);
     int end = source.indexOf("\n  @Override", start + methodName.length());
+    return source.substring(start, end < 0 ? source.length() : end);
+  }
+
+  private static String privateMethod(String source, String methodName) {
+    String declaration = "\n  private void " + methodName + "(";
+    int start = source.indexOf(declaration);
+    int end = source.indexOf("\n  private ", start + declaration.length());
     return source.substring(start, end < 0 ? source.length() : end);
   }
 }

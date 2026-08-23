@@ -445,6 +445,31 @@ describe("DisputeOverviewView", () => {
     );
   });
 
+  it("opens historical evidence directly without reapplying the private intake gate", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    const intakeStatus = vi.spyOn(disputeApi, "intakeStatus").mockResolvedValue({
+      current_actor_completed: false,
+      can_use_intake: true,
+      can_enter_evidence: false,
+    });
+    const hearingCase = [{
+      ...cases[0],
+      case_status: "HEARING_OPEN",
+      current_room: "HEARING",
+      pending_action: "PARTICIPATE_HEARING",
+    }];
+    const { wrapper, router } = await mountOverview(null, null, null, hearingCase);
+
+    await wrapper.get('[data-stage-entry="EVIDENCE"]').trigger("click");
+    await flushPromises();
+
+    expect(intakeStatus).not.toHaveBeenCalled();
+    expect(router.currentRoute.value.fullPath).toBe(
+      "/history-evidence/CASE_EXT_001?view=history",
+    );
+  });
+
   it("opens the current stage without carrying the history lock", async () => {
     actor.id = "user-local";
     actor.role = "USER";
@@ -796,6 +821,7 @@ describe("DisputeOverviewView", () => {
 
     expect(simulateExternalImportAction).toHaveBeenCalledWith(
       expect.objectContaining({
+        fixture_id: "air-purifier-specification-mismatch-v1",
         count: 1,
         initiator_role_hint: "MERCHANT",
         current_actor_id: "merchant-local",

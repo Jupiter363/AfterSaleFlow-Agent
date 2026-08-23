@@ -23,7 +23,8 @@ import com.example.dispute.hearing.application.HearingFlowRuntimeService;
 import com.example.dispute.hearing.application.HearingFlowView;
 import com.example.dispute.hearing.application.HearingReviewHandoffService;
 import com.example.dispute.hearing.application.HearingTrialDossierService;
-import com.example.dispute.hearing.api.HearingPartyStatementRequest;
+import com.example.dispute.hearing.api.HearingAnswerBundleRequest;
+import com.example.dispute.hearing.api.HearingEvidenceBatchRequest;
 import com.example.dispute.hearing.domain.HearingFlowActionType;
 import com.example.dispute.hearing.domain.HearingFlowStage;
 import com.example.dispute.hearing.domain.HearingFlowStageStatus;
@@ -37,6 +38,7 @@ import com.example.dispute.hearing.infrastructure.persistence.repository.Hearing
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingFlowStageRepository;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingTrialDossierRepository;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
+import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingStateEntity;
@@ -52,33 +54,35 @@ import com.example.dispute.room.domain.MessageSource;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.workflow.application.command.AcceptCaseCommand;
+import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.temporal.room.hearing.HearingOperationKeys;
+import com.example.dispute.workflow.temporal.room.hearing.HearingWorkflowStage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.HexFormat;
 import java.util.List;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.Optional;
-import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
@@ -87,6 +91,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.test.util.ReflectionTestUtils;
 
 @ExtendWith(MockitoExtension.class)
 class HearingFlowRuntimeServiceTest {
@@ -157,6 +163,83 @@ class HearingFlowRuntimeServiceTest {
     }
 
     @Test
+    void factLevelEvidenceBindingIgnoresUploaderAndAvailabilityState() {
+        EvidenceItemEntity sharedEvidence =
+                evidence("EVIDENCE_SHARED", CASE_ID, "user-1");
+        sharedEvidence.deletePending(
+                OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC), "user-1");
+        when(evidenceItemRepository.findAllById(List.of("EVIDENCE_SHARED")))
+                .thenReturn(List.of(sharedEvidence));
+
+        HearingEvidenceBatchRequest request =
+                new HearingEvidenceBatchRequest(
+                        "hearing_evidence_batch.v1",
+                        "REQUEST_SET_1",
+                        List.of("REQUEST_1"),
+                        List.of("EVIDENCE_SHARED"),
+                        "fact-level reuse");
+
+        List<EvidenceItemEntity> validated =
+                ReflectionTestUtils.invokeMethod(
+                        service, "validateEvidenceIds", CASE_ID, request);
+
+        assertThat(validated).containsExactly(sharedEvidence);
+    }
+
+    @Test
+    void factLevelEvidenceBindingStillRejectsEvidenceFromAnotherCase() {
+        EvidenceItemEntity foreignEvidence =
+                evidence("EVIDENCE_FOREIGN", "CASE_OTHER", "user-1");
+        when(evidenceItemRepository.findAllById(List.of("EVIDENCE_FOREIGN")))
+                .thenReturn(List.of(foreignEvidence));
+
+        HearingEvidenceBatchRequest request =
+                new HearingEvidenceBatchRequest(
+                        "hearing_evidence_batch.v1",
+                        "REQUEST_SET_1",
+                        List.of("REQUEST_1"),
+                        List.of("EVIDENCE_FOREIGN"),
+                        "foreign evidence");
+
+        assertThatThrownBy(
+                        () ->
+                                ReflectionTestUtils.invokeMethod(
+                                        service, "validateEvidenceIds", CASE_ID, request))
+                .hasMessageContaining("evidence belongs to another case");
+    }
+
+    @Test
+    void evidenceRequestPersistenceCanonicalizesTheSharedRoleVector() {
+        ObjectNode providerRequest = objectMapper.createObjectNode();
+        providerRequest.putArray("target_roles").add("MERCHANT");
+
+        ArrayNode targetRoles =
+                ReflectionTestUtils.invokeMethod(
+                        service, "canonicalEvidenceRequestTargetRoles", providerRequest);
+
+        assertThat(targetRoles).extracting(JsonNode::asText).containsExactly("USER", "MERCHANT");
+    }
+
+    private EvidenceItemEntity evidence(String id, String caseId, String submittedById) {
+        return EvidenceItemEntity.uploaded(
+                id,
+                caseId,
+                "EVIDENCE_DOSSIER_1",
+                "DOCUMENT",
+                "USER_UPLOAD",
+                "USER",
+                submittedById,
+                "evidence-bucket",
+                "object-key",
+                "a".repeat(64),
+                "evidence.txt",
+                "text/plain",
+                1L,
+                "BOTH_PARTIES",
+                OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC));
+    }
+
+    @Test
     void startupUsesTemplateJudgeAndStartsNoJudgeAgentBeforeDossierFreeze() {
         FulfillmentCaseEntity dispute =
                 FulfillmentCaseEntity.imported(
@@ -199,6 +282,27 @@ class HearingFlowRuntimeServiceTest {
                         "ACCEPTED",
                         2,
                         "test");
+        ObjectNode evidenceMatrix = objectMapper.createObjectNode();
+        evidenceMatrix.put("schema_version", "fact_evidence_matrix.v3");
+        evidenceMatrix.put("case_id", CASE_ID);
+        evidenceMatrix.put("matrix_id", "FACT_EVIDENCE_MATRIX_PREHEARING");
+        evidenceMatrix.put("matrix_version", 1);
+        evidenceMatrix.put("matrix_status", "FROZEN");
+        evidenceMatrix.putNull("parent_ref");
+        evidenceMatrix.put("case_fact_matrix_id", matrix.path("matrix_id").asText());
+        evidenceMatrix.put("case_fact_matrix_version", matrix.path("matrix_version").asInt());
+        evidenceMatrix.put("case_fact_matrix_hash", matrix.path("content_hash").asText());
+        evidenceMatrix.putArray("source_refs").add("EVIDENCE_DOSSIER_1");
+        evidenceMatrix.putArray("links");
+        ObjectNode coverage = evidenceMatrix.putArray("fact_coverage").addObject();
+        coverage.put("fact_id", "FACT_DELIVERY");
+        coverage.put("coverage_status", "NOT_COVERED_BY_FROZEN_DOSSIER");
+        coverage.putArray("evidence_ids");
+        coverage.put("note", "该事实尚未被庭前冻结证据卷宗覆盖。");
+        evidenceMatrix.put("content_hash", embeddedHash(evidenceMatrix));
+        ObjectNode evidenceMatrixSummary = objectMapper.createObjectNode();
+        evidenceMatrixSummary.put("schema_version", "evidence-dossier-matrix-summary.v3");
+        evidenceMatrixSummary.set("fact_evidence_matrix", evidenceMatrix);
         EvidenceDossierEntity evidenceDossier =
                 EvidenceDossierEntity.frozen(
                         "EVIDENCE_DOSSIER_1",
@@ -207,7 +311,7 @@ class HearingFlowRuntimeServiceTest {
                         "test",
                         "{}",
                         "[]",
-                        "[]");
+                        json(evidenceMatrixSummary));
 
         AtomicReference<HearingFlowStageEntity> currentStage = new AtomicReference<>();
         AtomicLong sequence = new AtomicLong();
@@ -477,12 +581,14 @@ class HearingFlowRuntimeServiceTest {
     }
 
     @Test
-    void naturalLanguageStatementsArePrivateAndTerminalByParticipantId() throws Exception {
+    @SuppressWarnings("unchecked")
+    void v4AnswerBundlesAreHashedPrivateIdempotentAndAdmittedWithoutLocalAdvance()
+            throws Exception {
         FulfillmentCaseEntity dispute = hearingCase(NOW.plus(Duration.ofHours(3)));
         HearingStateEntity hearingState =
                 HearingStateEntity.start(
-                        "HEARING_STATE_STATEMENTS", CASE_ID, "WORKFLOW_STATEMENTS", "test");
-        CaseRoomEntity room = hearingRoom("ROOM_HEARING_STATEMENTS");
+                        "HEARING_STATE_ANSWERS_V4", CASE_ID, "WORKFLOW_ANSWERS_V4", "test");
+        CaseRoomEntity room = hearingRoom("ROOM_HEARING_ANSWERS_V4");
         HearingFlowInstanceEntity flow = flowAtIntakeQuestions(hearingState.getId());
         flow.advance(
                 HearingFlowStage.PARTY_ANSWERS_OPEN,
@@ -491,11 +597,9 @@ class HearingFlowRuntimeServiceTest {
                 NOW,
                 "test");
 
-        ObjectNode questionStageInput = objectMapper.createObjectNode();
-        questionStageInput.set("case_fact_matrix", objectMapper.createObjectNode());
         HearingFlowStageEntity questionStage =
                 HearingFlowStageEntity.open(
-                        "STAGE_QUESTIONS_STATEMENTS",
+                        "STAGE_QUESTIONS_V4",
                         flow.getId(),
                         CASE_ID,
                         HearingFlowStage.INTAKE_QUESTIONS_GENERATING,
@@ -503,12 +607,12 @@ class HearingFlowRuntimeServiceTest {
                         "INTAKE_OFFICER",
                         HearingFlowStageStatus.RUNNING,
                         null,
-                        json(questionStageInput),
+                        "{}",
                         NOW,
                         "test");
         HearingFlowStageEntity answerStage =
                 HearingFlowStageEntity.open(
-                        "STAGE_PARTY_STATEMENTS",
+                        "STAGE_PARTY_ANSWERS_V4",
                         flow.getId(),
                         CASE_ID,
                         HearingFlowStage.PARTY_ANSWERS_OPEN,
@@ -521,13 +625,32 @@ class HearingFlowRuntimeServiceTest {
                         "test");
 
         ObjectNode questionPayload = objectMapper.createObjectNode();
-        questionPayload.put("schema_version", "hearing_question_set.v1");
-        questionPayload.put("question_set_id", "LEGACY_QUESTION_SET_1");
-        ObjectNode merchantOnlyQuestion = questionPayload.putArray("questions").addObject();
-        merchantOnlyQuestion.put("question_id", "QUESTION_MERCHANT_ONLY");
-        merchantOnlyQuestion.putArray("target_roles").add("MERCHANT");
-        merchantOnlyQuestion.putArray("fact_ids").add("FACT_1");
-        merchantOnlyQuestion.put("question_text", "Please provide the merchant record.");
+        questionPayload.put("schema_version", "hearing_question_set.v4");
+        questionPayload.put("question_set_id", "HEARING_QUESTION_SET_V4");
+        questionPayload.put("question_set_hash", "0".repeat(64));
+        questionPayload.put("formal_issue_catalog_hash", "b".repeat(64));
+        questionPayload.put("case_id", CASE_ID);
+        questionPayload.put("source_matrix_id", "CASE_MATRIX_PREHEARING");
+        questionPayload.put("source_matrix_version", 2);
+        questionPayload.put("source_matrix_hash", "c".repeat(64));
+        questionPayload.put("prelude_authority_hash", "d".repeat(64));
+        ObjectNode question = questionPayload.putArray("questions").addObject();
+        question.put("question_slot_id", "QUESTION_SLOT_01");
+        question.put("question_id", "HEARING_QUESTION_V4_1");
+        question.put("issue_id", "HEARING_ISSUE_V4_1");
+        question.put("issue_version", 1);
+        question.put("issue_state_hash", "e".repeat(64));
+        question.putArray("target_roles").add("USER").add("MERCHANT");
+        question.putArray("fact_ids").add("FACT_1");
+        question.put("question_text", "Please address the current disputed delivery fact.");
+        question.putObject("issue_baseline");
+        question.putObject("party_prompts")
+                .put("USER", "State the current user position.")
+                .put("MERCHANT", "State the current merchant position.");
+        ObjectNode unsignedQuestionSet = questionPayload.deepCopy();
+        unsignedQuestionSet.remove("question_set_hash");
+        String questionSetHash = ContractJson.sha256Hex(unsignedQuestionSet);
+        questionPayload.put("question_set_hash", questionSetHash);
         HearingFlowActionEntity questionAction =
                 HearingFlowActionEntity.agentOutput(
                         "ACTION_QUESTION_SET",
@@ -536,28 +659,50 @@ class HearingFlowRuntimeServiceTest {
                         CASE_ID,
                         HearingFlowActionType.QUESTION_SET,
                         json(questionPayload),
-                        sha256(canonicalJson(questionPayload)),
+                        questionSetHash,
                         "AGENT_RUN_QUESTIONS",
                         NOW,
                         "test");
 
-        Map<String, HearingFlowActionEntity> partyActions = new LinkedHashMap<>();
+        java.util.Map<String, HearingFlowActionEntity> partyActions = new java.util.LinkedHashMap<>();
         List<HearingFlowActionEntity> allActions = new java.util.ArrayList<>();
         allActions.add(questionAction);
         AtomicLong sequence = new AtomicLong();
+        CaseRoomEpochRepository epochRepository = mock(CaseRoomEpochRepository.class);
+        CaseRoomEpochEntity epoch = mock(CaseRoomEpochEntity.class);
+        CaseCommandService caseCommandService = mock(CaseCommandService.class);
+        TargetRoomCommandIngress ingress = mock(TargetRoomCommandIngress.class);
+        ObjectProvider<TargetRoomCommandIngress> ingressProvider = mock(ObjectProvider.class);
+        CaseTimelineEventEntity lifecycleEvent = mock(CaseTimelineEventEntity.class);
+
+        when(epochRepository.findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        CASE_ID,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.HEARING,
+                        EpochLifecycleStatus.ACTIVE))
+                .thenReturn(Optional.of(epoch));
+        when(epoch.getWriterMode()).thenReturn(WriterMode.TEMPORAL);
+        when(epoch.getSelectionSchemaVersion())
+                .thenReturn(TargetTypedRoomProtocol.SELECTION_SCHEMA_VERSION);
+        when(epoch.getProcessContractVersion())
+                .thenReturn(TargetTypedRoomProtocol.PROCESS_CONTRACT_VERSION);
+        when(epoch.getWorkflowType()).thenReturn(TargetTypedRoomProtocol.CASE_WORKFLOW_TYPE);
+        when(epoch.getRoomWorkflowType()).thenReturn(TargetTypedRoomProtocol.HEARING_WORKFLOW_TYPE);
+        when(epoch.getGraphKey()).thenReturn(TargetTypedRoomProtocol.GRAPH_KEY);
+        when(epoch.getGraphVersion()).thenReturn(TargetTypedRoomProtocol.GRAPH_VERSION);
+        when(epoch.getCheckpointSchemaVersion())
+                .thenReturn(TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION);
+        when(epoch.getStreamProtocol()).thenReturn(TargetTypedRoomProtocol.STREAM_PROTOCOL);
+        when(epoch.getRoomEpoch()).thenReturn(4L);
+        when(epoch.getProcessRevision()).thenReturn(12L);
+        when(ingressProvider.getIfUnique()).thenReturn(ingress);
+        when(lifecycleEvent.getId()).thenReturn("EVENT_ANSWER_V4");
+        when(lifecycleEvent.getEventJson()).thenReturn("{}");
 
         when(caseRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(dispute));
         when(instanceRepository.findByCaseIdForUpdate(CASE_ID)).thenReturn(Optional.of(flow));
         when(stageRepository.findByFlowInstanceIdAndStageCode(
                         flow.getId(), HearingFlowStage.PARTY_ANSWERS_OPEN))
                 .thenReturn(Optional.of(answerStage));
-        when(stageRepository.findByFlowInstanceIdAndStageCode(
-                        flow.getId(), HearingFlowStage.INTAKE_QUESTIONS_GENERATING))
-                .thenReturn(Optional.of(questionStage));
-        when(stageRepository.findByFlowInstanceIdAndStageSequence(flow.getId(), 5))
-                .thenReturn(Optional.of(answerStage));
-        when(stageRepository.save(any(HearingFlowStageEntity.class)))
-                .thenAnswer(invocation -> invocation.getArgument(0));
         when(actionRepository.findByStageIdAndActionTypeAndParticipantId(
                         anyString(), any(HearingFlowActionType.class), anyString()))
                 .thenAnswer(invocation -> Optional.ofNullable(partyActions.get(invocation.getArgument(2))));
@@ -571,7 +716,6 @@ class HearingFlowRuntimeServiceTest {
                         });
         when(actionRepository.findAllByFlowInstanceIdOrderByCreatedAtAsc(flow.getId()))
                 .thenAnswer(invocation -> List.copyOf(allActions));
-        when(hearingStateRepository.findByCaseId(CASE_ID)).thenReturn(Optional.of(hearingState));
         when(roomRepository.findByCaseIdAndRoomTypeForUpdate(CASE_ID, RoomType.HEARING))
                 .thenReturn(Optional.of(room));
         when(messageRepository.findByCaseIdAndIdempotencyKey(anyString(), anyString()))
@@ -580,86 +724,139 @@ class HearingFlowRuntimeServiceTest {
                 .thenAnswer(invocation -> sequence.getAndIncrement());
         when(messageRepository.save(any(RoomMessageEntity.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
-        when(artifactRepository.findByCaseIdAndArtifactType(anyString(), any()))
-                .thenReturn(Optional.empty());
-        when(trialDossierRepository.findByCaseId(CASE_ID)).thenReturn(Optional.empty());
-        when(agentRunCoordinator.start(any()))
-                .thenReturn(
-                        new AgentRunAcceptedView(
-                                "AGENT_RUN_SYNTHESIS",
-                                "PENDING",
-                                "/api/agent-runs/AGENT_RUN_SYNTHESIS/events",
-                                OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC)));
+        when(caseEventService.recordLifecycleEvent(
+                        anyString(), anyString(), anyString(), any(), anyString(), anyString()))
+                .thenReturn(lifecycleEvent);
 
-        HearingPartyStatementRequest userRequest =
-                new HearingPartyStatementRequest(
-                        "hearing_party_statement.v1",
-                        "LEGACY_QUESTION_SET_1",
-                        "The parcel shown as delivered was not received by me.",
+        HearingFlowRuntimeService targetService =
+                new HearingFlowRuntimeService(
+                        caseRepository,
+                        hearingStateRepository,
+                        instanceRepository,
+                        stageRepository,
+                        actionRepository,
+                        artifactRepository,
+                        adjudicationDraftRepository,
+                        trialDossierRepository,
+                        intakeDossierRepository,
+                        evidenceDossierRepository,
+                        evidenceItemRepository,
+                        roomRepository,
+                        messageRepository,
+                        caseEventService,
+                        agentRunRepository,
+                        agentRunCoordinator,
+                        trialDossierService,
+                        reviewHandoffService,
+                        postCommitSideEffects,
+                        remedyPlanRepository,
+                        reviewTaskRepository,
+                        new DisputeProperties(
+                                Duration.ofHours(2),
+                                Duration.ofHours(3),
+                                Duration.ofMinutes(20),
+                                Duration.ofSeconds(15),
+                                false),
+                        objectMapper,
+                        CLOCK,
+                        epochRepository,
+                        caseCommandService,
+                        ingressProvider);
+
+        HearingAnswerBundleRequest userRequest =
+                new HearingAnswerBundleRequest(
+                        "hearing_answer_bundle.v4",
+                        "HEARING_QUESTION_SET_V4",
+                        questionSetHash,
+                        "b".repeat(64),
+                        List.of(new HearingAnswerBundleRequest.Answer(
+                                "HEARING_QUESTION_V4_1",
+                                "HEARING_ISSUE_V4_1",
+                                "The parcel shown as delivered was not received by me.")),
                         List.of("MESSAGE_USER_1"));
-        var userResult =
-                service.submitStatement(
-                        CASE_ID, userRequest, new AuthenticatedActor("user-1", ActorRole.USER));
-        var repeated =
-                service.submitStatement(
-                        CASE_ID, userRequest, new AuthenticatedActor("user-1", ActorRole.USER));
+        var userResult = targetService.submitAnswers(
+                CASE_ID, userRequest, new AuthenticatedActor("user-1", ActorRole.USER));
+        var repeated = targetService.submitAnswers(
+                CASE_ID, userRequest, new AuthenticatedActor("user-1", ActorRole.USER));
 
         assertThat(userResult.participantId()).isEqualTo("user-1");
-        assertThat(userResult.schemaVersion()).isEqualTo("hearing_party_statement.v1");
+        assertThat(userResult.schemaVersion()).isEqualTo("hearing_answer_bundle.v4");
+        assertThat(userResult.submittedAt()).isEqualTo(NOW);
         assertThat(repeated.actionId()).isEqualTo(userResult.actionId());
-        assertThat(userResult.payload().path("statement_text").asText())
-                .isEqualTo(userRequest.statementText());
+        assertThat(userResult.payload().has("submitted_at")).isFalse();
+        assertThat(userResult.payload().path("answer_units")).singleElement().satisfies(unit -> {
+            assertThat(unit.path("answer_unit_id").asText()).startsWith("ANSWER_UNIT_");
+            assertThat(unit.path("question_id").asText()).isEqualTo("HEARING_QUESTION_V4_1");
+            assertThat(unit.path("issue_id").asText()).isEqualTo("HEARING_ISSUE_V4_1");
+        });
+        ObjectNode unsignedUserBundle = (ObjectNode) userResult.payload().deepCopy();
+        unsignedUserBundle.remove("answer_bundle_hash");
+        assertThat(userResult.payload().path("answer_bundle_hash").asText())
+                .isEqualTo(ContractJson.sha256Hex(unsignedUserBundle));
         assertThat(partyActions).containsOnlyKeys("user-1");
+        assertThat(flow.getCurrentStage()).isEqualTo(HearingFlowStage.PARTY_ANSWERS_OPEN);
+        verify(caseCommandService).accept(
+                anyString(), anyString(), any(), any(), anyString(), anyString(),
+                org.mockito.ArgumentMatchers.isNull());
 
-        HearingFlowView beforeMerchant =
-                service.get(CASE_ID, new AuthenticatedActor("user-1", ActorRole.USER));
-        assertThat(beforeMerchant.status().participantStatuses())
-                .containsExactly(
-                        new HearingFlowView.ParticipantStatus("user-1", "USER", "SUBMITTED"),
-                        new HearingFlowView.ParticipantStatus(
-                                "merchant-1", "MERCHANT", "PENDING"));
-
-        HearingPartyStatementRequest merchantRequest =
-                new HearingPartyStatementRequest(
-                        "hearing_party_statement.v1",
-                        "LEGACY_QUESTION_SET_1",
-                        "The parcel was delivered to the agreed collection point.",
+        HearingAnswerBundleRequest merchantRequest =
+                new HearingAnswerBundleRequest(
+                        "hearing_answer_bundle.v4",
+                        "HEARING_QUESTION_SET_V4",
+                        questionSetHash,
+                        "b".repeat(64),
+                        List.of(new HearingAnswerBundleRequest.Answer(
+                                "HEARING_QUESTION_V4_1",
+                                "HEARING_ISSUE_V4_1",
+                                "The parcel was delivered to the agreed collection point.")),
                         List.of("MESSAGE_MERCHANT_1"));
-        service.submitStatement(
+        targetService.submitAnswers(
                 CASE_ID,
                 merchantRequest,
                 new AuthenticatedActor("merchant-1", ActorRole.MERCHANT));
 
-        assertThat(flow.getCurrentStage()).isEqualTo(HearingFlowStage.INTAKE_SYNTHESIZING);
-        JsonNode completion = objectMapper.readTree(answerStage.getOutputJson());
-        assertThat(completion.path("participant_statuses")).hasSize(2);
-        assertThat(completion.path("participant_statuses").get(0).path("participantId").asText())
-                .isEqualTo("user-1");
+        assertThat(flow.getCurrentStage()).isEqualTo(HearingFlowStage.PARTY_ANSWERS_OPEN);
         verify(actionRepository, org.mockito.Mockito.times(2)).save(any());
-        ArgumentCaptor<AgentRunStartCommand> synthesisStart =
-                ArgumentCaptor.forClass(AgentRunStartCommand.class);
-        verify(agentRunCoordinator).start(synthesisStart.capture());
-        assertThat(synthesisStart.getValue().operation()).isEqualTo("HEARING_INTAKE_SYNTHESIS");
-        JsonNode partySubmissions =
-                synthesisStart.getValue().request().path("party_submissions");
-        assertThat(partySubmissions).hasSize(2);
-        assertThat(partySubmissions.get(0).path("participant_id").asText())
-                .isEqualTo("user-1");
-        assertThat(partySubmissions.get(1).path("participant_id").asText())
-                .isEqualTo("merchant-1");
+        ArgumentCaptor<AcceptCaseCommand> admittedCommands =
+                ArgumentCaptor.forClass(AcceptCaseCommand.class);
+        ArgumentCaptor<String> admittedCommandIds = ArgumentCaptor.forClass(String.class);
+        verify(caseCommandService, org.mockito.Mockito.times(2)).accept(
+                anyString(),
+                admittedCommandIds.capture(),
+                admittedCommands.capture(),
+                any(),
+                anyString(),
+                anyString(),
+                org.mockito.ArgumentMatchers.isNull());
+        assertThat(admittedCommands.getAllValues())
+                .extracting(AcceptCaseCommand::commandType)
+                .containsExactly(CommandType.HEARING_ANSWER_BUNDLE,
+                        CommandType.HEARING_ANSWER_BUNDLE);
+        assertThat(admittedCommandIds.getAllValues())
+                .allSatisfy(commandId ->
+                        assertThat(HearingOperationKeys.partyTerminal(
+                                "legacy-default",
+                                CASE_ID,
+                                4,
+                                HearingWorkflowStage.PARTY_ANSWERS_OPEN,
+                                HearingWorkflowStage.PARTY_ANSWERS_OPEN.sequence(),
+                                commandId.equals(admittedCommandIds.getAllValues().getFirst())
+                                        ? "user-1"
+                                        : "merchant-1",
+                                commandId))
+                                .endsWith(commandId));
+        verify(agentRunCoordinator, org.mockito.Mockito.never()).start(any());
 
         ArgumentCaptor<RoomMessageEntity> messages =
                 ArgumentCaptor.forClass(RoomMessageEntity.class);
-        verify(messageRepository, org.mockito.Mockito.times(3)).save(messages.capture());
-        List<RoomMessageEntity> privateStatements =
-                messages.getAllValues().stream()
-                        .filter(message -> message.getMessageSource() == MessageSource.PARTY_ACTION)
-                        .toList();
-        assertThat(privateStatements).hasSize(2);
-        assertThat(privateStatements.get(0).getAudienceJson()).isEqualTo("[]");
-        assertThat(objectMapper.readTree(privateStatements.get(0).getAudienceActorIdsJson()))
+        verify(messageRepository, org.mockito.Mockito.times(2)).save(messages.capture());
+        assertThat(messages.getAllValues()).allSatisfy(message ->
+                assertThat(message.getMessageSource()).isEqualTo(MessageSource.PARTY_ACTION));
+        assertThat(messages.getAllValues().get(0).getAudienceJson()).isEqualTo("[]");
+        assertThat(objectMapper.readTree(
+                messages.getAllValues().get(0).getAudienceActorIdsJson()))
                 .containsExactly(objectMapper.getNodeFactory().textNode("user-1"));
-        verify(caseEventService, org.mockito.Mockito.times(3))
+        verify(caseEventService, org.mockito.Mockito.times(2))
                 .recordRoomMessage(
                         anyString(),
                         anyString(),
@@ -901,27 +1098,7 @@ class HearingFlowRuntimeServiceTest {
     private String embeddedHash(ObjectNode value) {
         ObjectNode copy = value.deepCopy();
         copy.remove("content_hash");
-        return sha256(canonicalJson(copy));
-    }
-
-    private String canonicalJson(JsonNode value) {
-        return json(canonicalize(value));
-    }
-
-    private JsonNode canonicalize(JsonNode value) {
-        if (value.isObject()) {
-            ObjectNode result = objectMapper.createObjectNode();
-            TreeMap<String, JsonNode> fields = new TreeMap<>();
-            value.fields().forEachRemaining(entry -> fields.put(entry.getKey(), entry.getValue()));
-            fields.forEach((key, child) -> result.set(key, canonicalize(child)));
-            return result;
-        }
-        if (value.isArray()) {
-            ArrayNode result = objectMapper.createArrayNode();
-            value.forEach(child -> result.add(canonicalize(child)));
-            return result;
-        }
-        return value.deepCopy();
+        return ContractJson.sha256Hex(copy);
     }
 
     private String json(JsonNode value) {
@@ -932,14 +1109,4 @@ class HearingFlowRuntimeServiceTest {
         }
     }
 
-    private static String sha256(String value) {
-        try {
-            return HexFormat.of()
-                    .formatHex(
-                            MessageDigest.getInstance("SHA-256")
-                                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (Exception exception) {
-            throw new IllegalStateException(exception);
-        }
-    }
 }

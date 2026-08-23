@@ -1,4 +1,7 @@
-class HearingGraphContractError(ValueError):
+from app.graph_runtime.errors import GraphContractError
+
+
+class HearingGraphContractError(GraphContractError):
     """A Hearing graph command or proposal violated the bounded graph contract."""
 
 

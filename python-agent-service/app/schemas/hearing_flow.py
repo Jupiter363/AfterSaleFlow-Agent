@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, model_validator
 
 from app.contracts.v1.codec import canonical_sha256
-from app.schemas.intake_case_matrix import FactCategory, FactMateriality, FactStance
+from app.schemas.intake_case_matrix import ClaimAttitude, FactCategory, FactMateriality, FactStance
 from app.schemas.case_fact_matrix import CaseFactMatrixV2
 from app.schemas.models import Confidence, Identifier, LongText, ShortText, StrictModel
 
@@ -80,8 +80,8 @@ class HearingIntakeQuestion(StrictModel):
 
 
 class HearingIntakeQuestionsLlmOutput(StrictModel):
-    questions: Annotated[list[HearingIntakeQuestionDraft], Field(min_length=1, max_length=5)]
     public_message: LongText
+    questions: Annotated[list[HearingIntakeQuestionDraft], Field(min_length=1, max_length=5)]
 
 
 class HearingIntakeQuestionsRequest(HearingFlowRequest):
@@ -252,9 +252,9 @@ class HearingIssueMapping(StrictModel):
 
 
 class HearingIntakeSynthesisLlmOutput(StrictModel):
+    public_message: LongText
     case_fact_matrix_delta: HearingCaseFactMatrixDelta
     issue_mappings: Annotated[list[HearingIssueMappingDraft], Field(max_length=5)]
-    public_message: LongText
 
 
 class HearingIntakeSynthesisRequest(HearingFlowRequest):
@@ -287,9 +287,628 @@ class HearingIntakeSynthesisResult(StrictModel):
     public_message: LongText
 
 
+QuestionSlotId = Annotated[str, Field(pattern=r"^QUESTION_SLOT_0[1-5]$")]
+NewIssueSlotId = Annotated[str, Field(pattern=r"^NEW_ISSUE_SLOT_0[1-5]$")]
+NewFactSlotId = Annotated[
+    str, Field(pattern=r"^NEW_FACT_SLOT_(?:0[1-9]|1[0-9]|20)$")
+]
+FactReference = Annotated[
+    str,
+    Field(
+        pattern=(
+            r"^(?:FACT_[A-Za-z0-9_:-]{1,123}|"
+            r"NEW_FACT_SLOT_(?:0[1-9]|1[0-9]|20))$"
+        )
+    ),
+]
+IssueAlignmentStatus = Literal[
+    "AGREED",
+    "PARTIALLY_AGREED",
+    "CONTESTED",
+    "ONE_SIDED",
+    "UNRESOLVED",
+]
+
+
+class HearingQuestionSlotV4(StrictModel):
+    question_slot_id: QuestionSlotId
+    target_roles: tuple[Literal["USER"], Literal["MERCHANT"]] = (
+        "USER",
+        "MERCHANT",
+    )
+
+
+class HearingIssuePositionV4(StrictModel):
+    position_source: Literal["M1", "CURRENT_ANSWER"]
+    position_summary: LongText
+
+
+class HearingIssuePartyPositionsV4(StrictModel):
+    USER: HearingIssuePositionV4 | None
+    MERCHANT: HearingIssuePositionV4 | None
+
+
+class HearingAgreedIssueAlignmentV4(StrictModel):
+    status: Literal["AGREED"]
+    agreed_statement: LongText
+    conflict_summary: None
+
+
+class HearingPartiallyAgreedIssueAlignmentV4(StrictModel):
+    status: Literal["PARTIALLY_AGREED"]
+    agreed_statement: LongText
+    conflict_summary: LongText
+
+
+class HearingNonAgreedIssueAlignmentV4(StrictModel):
+    status: Literal["CONTESTED", "ONE_SIDED", "UNRESOLVED"]
+    agreed_statement: None
+    conflict_summary: LongText
+
+
+HearingIssueAlignmentV4 = Annotated[
+    HearingAgreedIssueAlignmentV4
+    | HearingPartiallyAgreedIssueAlignmentV4
+    | HearingNonAgreedIssueAlignmentV4,
+    Field(discriminator="status"),
+]
+
+
+class HearingIssueBaselineV4(StrictModel):
+    issue_statement: LongText
+    source_fact_ids: Annotated[list[FactId], Field(min_length=1, max_length=20)]
+    effective_party_positions: HearingIssuePartyPositionsV4
+    alignment: HearingIssueAlignmentV4
+
+    @model_validator(mode="after")
+    def unique_fact_ids(self) -> "HearingIssueBaselineV4":
+        if len(self.source_fact_ids) != len(set(self.source_fact_ids)):
+            raise ValueError("baseline source_fact_ids must be unique")
+        return self
+
+
+class HearingQuestionFrameHeaderV5(StrictModel):
+    frame_sequence: Annotated[int, Field(ge=2, le=6)]
+    frame_type: Literal["SHARED_ISSUE_QUESTION"]
+    question_slot_id: QuestionSlotId
+    fact_ids: Annotated[list[FactId], Field(min_length=1, max_length=20)]
+
+
+class HearingQuestionPublicFrameDraftV5(StrictModel):
+    header: HearingQuestionFrameHeaderV5
+    public_text: LongText
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_property_order(cls, value: Any) -> Any:
+        if isinstance(value, dict) and list(value) != ["header", "public_text"]:
+            raise ValueError("question public frame property order is invalid")
+        return value
+
+
+class HearingQuestionBindingDraftV4(StrictModel):
+    question_slot_id: QuestionSlotId
+    issue_baseline: HearingIssueBaselineV4
+    party_prompts: HearingPartyPerspectivePrompts
+
+
+class HearingIntakeQuestionsLlmOutputV5(StrictModel):
+    lead_public_text: Annotated[str, Field(min_length=1, max_length=600)]
+    schema_version: Literal["hearing_intake_question_stream.v5"]
+    frames: Annotated[
+        list[HearingQuestionPublicFrameDraftV5], Field(min_length=1, max_length=5)
+    ]
+    question_bindings: Annotated[
+        list[HearingQuestionBindingDraftV4], Field(min_length=1, max_length=5)
+    ]
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_root_order(cls, value: Any) -> Any:
+        if isinstance(value, dict) and list(value) != [
+            "lead_public_text",
+            "schema_version",
+            "frames",
+            "question_bindings",
+        ]:
+            raise ValueError("question output root property order is invalid")
+        return value
+
+
+class HearingIntakeQuestionsRequestV4(HearingFlowRequest):
+    stage_code: Literal[HearingFlowStageCode.INTAKE_QUESTIONS]
+    context_schema_version: Literal["hearing_intake_context.v4"] = (
+        "hearing_intake_context.v4"
+    )
+    prelude_authority_hash: ContentHash
+    case_fact_matrix: CaseFactMatrixV2
+    question_slots: Annotated[
+        list[HearingQuestionSlotV4], Field(min_length=1, max_length=5)
+    ]
+
+    @model_validator(mode="after")
+    def require_ordered_slots(self) -> "HearingIntakeQuestionsRequestV4":
+        expected = [f"QUESTION_SLOT_{index:02d}" for index in range(1, len(self.question_slots) + 1)]
+        if [slot.question_slot_id for slot in self.question_slots] != expected:
+            raise ValueError("question_slots must be a continuous server-owned prefix")
+        return self
+
+
+class HearingFormalQuestionV4(StrictModel):
+    question_slot_id: QuestionSlotId
+    question_id: Identifier
+    issue_id: Identifier
+    issue_version: Literal[1] = 1
+    issue_state_hash: ContentHash
+    target_roles: tuple[Literal["USER"], Literal["MERCHANT"]] = (
+        "USER",
+        "MERCHANT",
+    )
+    fact_ids: Annotated[list[FactId], Field(min_length=1, max_length=20)]
+    question_text: LongText
+    issue_baseline: HearingIssueBaselineV4
+    party_prompts: HearingPartyPerspectivePrompts
+
+
+class HearingQuestionSetV4(StrictModel):
+    schema_version: Literal["hearing_question_set.v4"] = "hearing_question_set.v4"
+    question_set_id: Identifier
+    question_set_hash: ContentHash
+    formal_issue_catalog_hash: ContentHash
+    case_id: CaseId
+    source_matrix_id: Identifier
+    source_matrix_version: Annotated[int, Field(ge=1)]
+    source_matrix_hash: ContentHash
+    prelude_authority_hash: ContentHash
+    questions: Annotated[list[HearingFormalQuestionV4], Field(min_length=1, max_length=5)]
+
+    @model_validator(mode="after")
+    def validate_question_set_hash(self) -> "HearingQuestionSetV4":
+        if self.question_set_hash != content_hash(self, hash_field="question_set_hash"):
+            raise ValueError("question set hash is invalid")
+        identities = [
+            (question.question_slot_id, question.question_id, question.issue_id)
+            for question in self.questions
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("question set identities must be unique")
+        return self
+
+
+class HearingPublicFrameV5(StrictModel):
+    frame_sequence: Annotated[int, Field(ge=1, le=11)]
+    frame_type: Identifier
+    authority_ref: Identifier
+    public_text: LongText
+    public_text_hash: ContentHash
+
+
+class HearingIntakeQuestionsResultV5(StrictModel):
+    schema_version: Literal["hearing_intake_questions.v5"] = "hearing_intake_questions.v5"
+    case_id: CaseId
+    workflow_id: Identifier
+    stage_sequence: Annotated[int, Field(ge=1)]
+    speaker_role: Literal["INTAKE_OFFICER"] = "INTAKE_OFFICER"
+    question_set: HearingQuestionSetV4
+    public_frames: Annotated[list[HearingPublicFrameV5], Field(min_length=2, max_length=6)]
+    lead_public_text: LongText
+
+
+class HearingAnswerUnitV4(StrictModel):
+    answer_unit_id: Identifier
+    question_id: Identifier
+    issue_id: Identifier
+    answer_text: Annotated[str, Field(min_length=1, max_length=2000)]
+
+    @model_validator(mode="after")
+    def reject_blank_answer(self) -> "HearingAnswerUnitV4":
+        if not self.answer_text.strip():
+            raise ValueError("answer_text must contain a non-whitespace current answer")
+        return self
+
+
+class HearingAnswerBundleV4(StrictModel):
+    schema_version: Literal["hearing_answer_bundle.v4"]
+    answer_bundle_id: Identifier
+    answer_bundle_hash: ContentHash
+    question_set_id: Identifier
+    question_set_hash: ContentHash
+    formal_issue_catalog_hash: ContentHash
+    participant_id: Identifier
+    participant_role: PartyRole
+    submission_status: Literal["SUBMITTED"]
+    answer_units: Annotated[list[HearingAnswerUnitV4], Field(min_length=1, max_length=5)]
+    source_message_ids: Annotated[list[Identifier], Field(max_length=100)] = Field(
+        default_factory=list
+    )
+
+    @model_validator(mode="after")
+    def validate_bundle_identity(self) -> "HearingAnswerBundleV4":
+        question_ids = [value.question_id for value in self.answer_units]
+        issue_ids = [value.issue_id for value in self.answer_units]
+        unit_ids = [value.answer_unit_id for value in self.answer_units]
+        if any(
+            len(values) != len(set(values))
+            for values in (question_ids, issue_ids, unit_ids, self.source_message_ids)
+        ):
+            raise ValueError("answer bundle identifiers must be unique")
+        if self.answer_bundle_hash != content_hash(self, hash_field="answer_bundle_hash"):
+            raise ValueError("answer bundle hash is invalid")
+        return self
+
+
+class HearingBindingAction(StrEnum):
+    REAFFIRM = "REAFFIRM"
+    REPLACE = "REPLACE"
+    WITHDRAW = "WITHDRAW"
+    NO_POSITION = "NO_POSITION"
+
+
+class HearingCurrentPositionV4(StrictModel):
+    position_summary: LongText
+
+
+class HearingIssuePartyBindingV4(StrictModel):
+    binding_action: HearingBindingAction
+    answer_bundle_id: Identifier
+    answer_unit_id: Identifier
+    current_position: HearingCurrentPositionV4 | None
+
+
+class HearingIssuePartyBindingsV4(StrictModel):
+    USER: HearingIssuePartyBindingV4
+    MERCHANT: HearingIssuePartyBindingV4
+
+
+class HearingIssueRebindingV4(StrictModel):
+    issue_id: Identifier
+    party_bindings: HearingIssuePartyBindingsV4
+    current_alignment: HearingIssueAlignmentV4
+
+
+class HearingNewIssueProposalV4(StrictModel):
+    new_issue_slot_id: NewIssueSlotId
+    issue_kind: Literal["NEW_UNILATERAL_ISSUE", "NEW_SHARED_ISSUE"]
+    issue_statement: LongText
+    raised_by_role: PartyRole | None
+    source_answer_bundle_ids: Annotated[list[Identifier], Field(min_length=1, max_length=2)]
+    source_answer_unit_ids: Annotated[list[Identifier], Field(min_length=1, max_length=2)]
+    fact_refs: Annotated[list[FactReference], Field(min_length=1, max_length=20)]
+    effective_party_positions: HearingIssuePartyPositionsV4
+    current_alignment: HearingIssueAlignmentV4
+    counterparty_response_opportunity: Literal[
+        "NOT_PROVIDED", "INDEPENDENTLY_EXERCISED"
+    ]
+    additional_response_round: Literal["NOT_OPENED"] = "NOT_OPENED"
+    requires_resolution: bool
+
+    @model_validator(mode="after")
+    def new_issue_shape(self) -> "HearingNewIssueProposalV4":
+        if len(self.source_answer_bundle_ids) != len(set(self.source_answer_bundle_ids)):
+            raise ValueError("new issue answer bundle ids must be unique")
+        if len(self.source_answer_unit_ids) != len(set(self.source_answer_unit_ids)):
+            raise ValueError("new issue answer unit ids must be unique")
+        if len(self.source_answer_bundle_ids) != len(self.source_answer_unit_ids):
+            raise ValueError("new issue bundle and answer-unit sources must align")
+        if self.issue_kind == "NEW_UNILATERAL_ISSUE":
+            if (
+                self.raised_by_role is None
+                or self.counterparty_response_opportunity != "NOT_PROVIDED"
+                or self.current_alignment.status != "ONE_SIDED"
+                or not self.requires_resolution
+            ):
+                raise ValueError("unilateral new issue structure is invalid")
+        elif (
+            self.raised_by_role is not None
+            or self.counterparty_response_opportunity != "INDEPENDENTLY_EXERCISED"
+        ):
+            raise ValueError("shared new issue structure is invalid")
+        return self
+
+
+class HearingSynthesisFrameHeaderV5(StrictModel):
+    frame_sequence: Annotated[int, Field(ge=2, le=11)]
+    frame_type: Literal["REBIND_ISSUE_SYNTHESIS", "NEW_ISSUE_SYNTHESIS"]
+    issue_ref: Identifier
+
+
+class HearingSynthesisPublicFrameDraftV5(StrictModel):
+    header: HearingSynthesisFrameHeaderV5
+    public_text: LongText
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_property_order(cls, value: Any) -> Any:
+        if isinstance(value, dict) and list(value) != ["header", "public_text"]:
+            raise ValueError("synthesis public frame property order is invalid")
+        return value
+
+
+class HearingInitiatorClaimReplacementV4(StrictModel):
+    requested_resolution: Identifier
+    requested_amount: Annotated[float, Field(ge=0)] | None = None
+    requested_items: ShortText | None = None
+    reason_summary: LongText
+    position_summary: LongText
+
+
+class HearingRespondentClaimReplacementV4(StrictModel):
+    attitude: ClaimAttitude
+    position_summary: LongText
+    alternative_proposal: LongText | None = None
+
+
+class HearingInitiatorClaimEffectV4(StrictModel):
+    source_issue_refs: Annotated[list[Identifier], Field(min_length=1, max_length=10)]
+    effect_type: Literal["INITIATOR_CLAIM_REPLACE"]
+    subject_role: PartyRole
+    answer_bundle_id: Identifier
+    answer_unit_ids: Annotated[list[Identifier], Field(min_length=1, max_length=5)]
+    replacement: HearingInitiatorClaimReplacementV4
+
+
+class HearingRespondentClaimEffectV4(StrictModel):
+    source_issue_refs: Annotated[list[Identifier], Field(min_length=1, max_length=10)]
+    effect_type: Literal["RESPONDENT_CLAIM_REPLACE"]
+    subject_role: PartyRole
+    answer_bundle_id: Identifier
+    answer_unit_ids: Annotated[list[Identifier], Field(min_length=1, max_length=5)]
+    replacement: HearingRespondentClaimReplacementV4
+
+
+HearingClaimEffectV4 = Annotated[
+    HearingInitiatorClaimEffectV4 | HearingRespondentClaimEffectV4,
+    Field(discriminator="effect_type"),
+]
+
+
+class HearingFactPartyUpdateV4(StrictModel):
+    answer_bundle_id: Identifier
+    answer_unit_ids: Annotated[list[Identifier], Field(min_length=1, max_length=5)]
+    stance: FactStance
+    position_summary: LongText
+    asserted_value: ShortText | None = None
+
+
+class HearingFactPartyUpdatesV4(StrictModel):
+    USER: HearingFactPartyUpdateV4 | None
+    MERCHANT: HearingFactPartyUpdateV4 | None
+
+    @model_validator(mode="after")
+    def require_update(self) -> "HearingFactPartyUpdatesV4":
+        if self.USER is None and self.MERCHANT is None:
+            raise ValueError("fact effect requires at least one party update")
+        return self
+
+
+class HearingExistingFactEffectV4(StrictModel):
+    source_issue_refs: Annotated[list[Identifier], Field(min_length=1, max_length=10)]
+    fact_id: FactId
+    party_updates: HearingFactPartyUpdatesV4
+    alignment: HearingIssueAlignmentV4
+
+
+class HearingNewFactEffectV4(StrictModel):
+    new_fact_slot_id: NewFactSlotId
+    source_issue_refs: Annotated[list[Identifier], Field(min_length=1, max_length=10)]
+    category: FactCategory
+    fact_target: LongText
+    materiality: FactMateriality
+    party_updates: HearingFactPartyUpdatesV4
+    alignment: HearingIssueAlignmentV4
+
+
+class HearingFactRelationshipEffectV4(StrictModel):
+    relationship_type: Literal["CORRECTS", "QUALIFIES", "DUPLICATES"]
+    from_fact_ref: FactReference
+    to_fact_ref: FactReference
+    source_issue_refs: Annotated[list[Identifier], Field(min_length=1, max_length=10)]
+
+
+class HearingMatrixEffectsV4(StrictModel):
+    claim_effects: Annotated[list[HearingClaimEffectV4], Field(max_length=2)] = Field(
+        default_factory=list
+    )
+    existing_fact_effects: Annotated[
+        list[HearingExistingFactEffectV4], Field(max_length=200)
+    ] = Field(default_factory=list)
+    new_fact_effects: Annotated[list[HearingNewFactEffectV4], Field(max_length=20)] = Field(
+        default_factory=list
+    )
+    relationship_effects: Annotated[
+        list[HearingFactRelationshipEffectV4], Field(max_length=40)
+    ] = Field(default_factory=list)
+
+
+class HearingMatrixSummaryV4(StrictModel):
+    summary_text: LongText
+    core_conflict: LongText
+    summary_fact_refs: Annotated[
+        list[FactReference], Field(min_length=1, max_length=200)
+    ]
+
+
+class HearingIntakeSynthesisLlmOutputV5(StrictModel):
+    lead_public_text: Annotated[str, Field(min_length=1, max_length=800)]
+    schema_version: Literal["hearing_intake_answer_stream.v5"]
+    frames: Annotated[
+        list[HearingSynthesisPublicFrameDraftV5], Field(min_length=1, max_length=10)
+    ]
+    issue_rebindings: Annotated[
+        list[HearingIssueRebindingV4], Field(min_length=1, max_length=5)
+    ]
+    new_issue_proposals: Annotated[list[HearingNewIssueProposalV4], Field(max_length=5)] = (
+        Field(default_factory=list)
+    )
+    matrix_effects: HearingMatrixEffectsV4
+    matrix_summary: HearingMatrixSummaryV4
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_root_order(cls, value: Any) -> Any:
+        if isinstance(value, dict) and list(value) != [
+            "lead_public_text",
+            "schema_version",
+            "frames",
+            "issue_rebindings",
+            "new_issue_proposals",
+            "matrix_effects",
+            "matrix_summary",
+        ]:
+            raise ValueError("synthesis output root property order is invalid")
+        return value
+
+
+class HearingIntakeSynthesisRequestV4(HearingFlowRequest):
+    stage_code: Literal[HearingFlowStageCode.INTAKE_SYNTHESIS]
+    context_schema_version: Literal["hearing_intake_context.v4"] = (
+        "hearing_intake_context.v4"
+    )
+    prelude_authority_hash: ContentHash
+    case_fact_matrix: CaseFactMatrixV2
+    question_set: HearingQuestionSetV4
+    party_answer_bundles: Annotated[
+        list[HearingAnswerBundleV4], Field(min_length=2, max_length=2)
+    ]
+    new_issue_slots: Annotated[list[NewIssueSlotId], Field(min_length=1, max_length=5)]
+    new_fact_slots: Annotated[list[NewFactSlotId], Field(min_length=1, max_length=20)]
+
+    @model_validator(mode="after")
+    def require_complete_authority(self) -> "HearingIntakeSynthesisRequestV4":
+        matrix = self.case_fact_matrix
+        question_set = self.question_set
+        if (
+            question_set.case_id != self.case_id
+            or question_set.source_matrix_id != matrix.matrix_id
+            or question_set.source_matrix_version != matrix.matrix_version
+            or question_set.source_matrix_hash != matrix.content_hash
+            or question_set.prelude_authority_hash != self.prelude_authority_hash
+        ):
+            raise ValueError("question set is not bound to the frozen M1 authority")
+        roles = [bundle.participant_role for bundle in self.party_answer_bundles]
+        participants = [bundle.participant_id for bundle in self.party_answer_bundles]
+        if roles != ["USER", "MERCHANT"] or len(participants) != len(set(participants)):
+            raise ValueError("party answer bundles must be ordered USER then MERCHANT")
+        expected_questions = [question.question_id for question in question_set.questions]
+        expected_issues = [question.issue_id for question in question_set.questions]
+        for bundle in self.party_answer_bundles:
+            if (
+                bundle.question_set_id != question_set.question_set_id
+                or bundle.question_set_hash != question_set.question_set_hash
+                or bundle.formal_issue_catalog_hash
+                != question_set.formal_issue_catalog_hash
+                or [unit.question_id for unit in bundle.answer_units] != expected_questions
+                or [unit.issue_id for unit in bundle.answer_units] != expected_issues
+            ):
+                raise ValueError("answer bundle does not fully cover the formal issue catalog")
+        expected_issue_slots = [
+            f"NEW_ISSUE_SLOT_{index:02d}" for index in range(1, len(self.new_issue_slots) + 1)
+        ]
+        expected_fact_slots = [
+            f"NEW_FACT_SLOT_{index:02d}" for index in range(1, len(self.new_fact_slots) + 1)
+        ]
+        if self.new_issue_slots != expected_issue_slots or self.new_fact_slots != expected_fact_slots:
+            raise ValueError("transition slots must be continuous server-owned prefixes")
+        return self
+
+
+class HearingIssueStateV4(StrictModel):
+    issue_id: Identifier
+    issue_version: Annotated[int, Field(ge=1)]
+    issue_state_hash: ContentHash
+    issue_kind: Literal["REBIND", "NEW_UNILATERAL_ISSUE", "NEW_SHARED_ISSUE"]
+    issue_statement: LongText
+    effective_party_positions: HearingIssuePartyPositionsV4
+    current_alignment: HearingIssueAlignmentV4
+    requires_resolution: bool
+    source_question_id: Identifier | None
+    source_answer_bundle_ids: Annotated[list[Identifier], Field(min_length=1, max_length=2)]
+    source_answer_unit_ids: Annotated[list[Identifier], Field(min_length=1, max_length=2)]
+
+    @model_validator(mode="after")
+    def validate_issue_state(self) -> "HearingIssueStateV4":
+        if self.issue_state_hash != content_hash(self, hash_field="issue_state_hash"):
+            raise ValueError("issue state hash is invalid")
+        if self.requires_resolution != (self.current_alignment.status != "AGREED"):
+            raise ValueError("issue resolution flag must follow current alignment")
+        if len(self.source_answer_bundle_ids) != len(
+            set(self.source_answer_bundle_ids)
+        ) or len(self.source_answer_unit_ids) != len(set(self.source_answer_unit_ids)):
+            raise ValueError("issue state sources must be unique")
+        return self
+
+
+class HearingIssueTransitionSetV4(StrictModel):
+    schema_version: Literal["hearing_issue_transition_set.v4"] = (
+        "hearing_issue_transition_set.v4"
+    )
+    transition_set_id: Identifier
+    transition_hash: ContentHash
+    case_id: CaseId
+    question_set_id: Identifier
+    question_set_hash: ContentHash
+    answer_bundle_ids: tuple[Identifier, Identifier]
+    answer_bundle_hashes: tuple[ContentHash, ContentHash]
+    issues: Annotated[list[HearingIssueStateV4], Field(min_length=1, max_length=10)]
+
+    @model_validator(mode="after")
+    def validate_transition_set(self) -> "HearingIssueTransitionSetV4":
+        if self.transition_hash != content_hash(self, hash_field="transition_hash"):
+            raise ValueError("issue transition hash is invalid")
+        if len(set(self.answer_bundle_ids)) != 2 or len(set(self.answer_bundle_hashes)) != 2:
+            raise ValueError("transition set requires two distinct answer authorities")
+        if len({issue.issue_id for issue in self.issues}) != len(self.issues):
+            raise ValueError("transition issue ids must be unique")
+        return self
+
+
+class HearingIssueStateSetV4(StrictModel):
+    schema_version: Literal["hearing_issue_state_set.v4"] = "hearing_issue_state_set.v4"
+    issue_state_set_id: Identifier
+    content_hash: ContentHash
+    case_id: CaseId
+    transition_set_id: Identifier
+    transition_hash: ContentHash
+    question_set_id: Identifier
+    question_set_hash: ContentHash
+    answer_bundle_ids: tuple[Identifier, Identifier]
+    answer_bundle_hashes: tuple[ContentHash, ContentHash]
+    matrix_id: Identifier
+    matrix_version: Annotated[int, Field(ge=1)]
+    matrix_hash: ContentHash
+    issues: Annotated[list[HearingIssueStateV4], Field(min_length=1, max_length=10)]
+
+    @model_validator(mode="after")
+    def validate_state_set(self) -> "HearingIssueStateSetV4":
+        if self.content_hash != content_hash(self, hash_field="content_hash"):
+            raise ValueError("issue state set hash is invalid")
+        if len({issue.issue_id for issue in self.issues}) != len(self.issues):
+            raise ValueError("issue state ids must be unique")
+        return self
+
+
+class HearingIntakeSynthesisResultV5(StrictModel):
+    schema_version: Literal["hearing_intake_synthesis.v5"] = "hearing_intake_synthesis.v5"
+    case_id: CaseId
+    workflow_id: Identifier
+    stage_sequence: Annotated[int, Field(ge=1)]
+    public_frames: Annotated[list[HearingPublicFrameV5], Field(min_length=2, max_length=11)]
+    issue_transition_set: HearingIssueTransitionSetV4
+    case_fact_matrix: CaseFactMatrixV2
+    issue_state_set: HearingIssueStateSetV4
+    lead_public_text: LongText
+
+
 class FactEvidenceRelation(StrEnum):
     SUPPORTS = "SUPPORTS"
     OPPOSES = "OPPOSES"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class FactEvidenceMatrixRelationV3(StrEnum):
+    CONTENT_SUPPORTS = "CONTENT_SUPPORTS"
+    CONTENT_CONTRADICTS = "CONTENT_CONTRADICTS"
+    CONTEXT_ONLY = "CONTEXT_ONLY"
     INCONCLUSIVE = "INCONCLUSIVE"
 
 
@@ -301,57 +920,61 @@ class FactEvidenceCoverageStatus(StrEnum):
     REQUIRES_HUMAN_REVIEW = "REQUIRES_HUMAN_REVIEW"
 
 
-class FactEvidenceMatrixParentRefV2(StrictModel):
+class FactEvidenceMatrixParentRefV3(StrictModel):
     matrix_id: Identifier
     matrix_version: Annotated[int, Field(ge=1)]
     content_hash: ContentHash
 
 
-class FactEvidenceLinkV2(StrictModel):
+class FactEvidenceLinkV3(StrictModel):
     fact_id: FactId
     evidence_id: Identifier
-    relation: FactEvidenceRelation
+    relation: FactEvidenceMatrixRelationV3
     reason: ShortText
-    confidence: Confidence
+    source_unit_id: Identifier
+    observation_slot: Identifier
     source_batch_id: Identifier | None = None
 
 
-class FactEvidenceCoverageV2(StrictModel):
+class FactEvidenceCoverageV3(StrictModel):
     fact_id: FactId
     coverage_status: FactEvidenceCoverageStatus
     evidence_ids: Annotated[list[Identifier], Field(max_length=200)] = Field(default_factory=list)
     note: ShortText
 
 
-class FactEvidenceMatrixV2(StrictModel):
-    schema_version: Literal["fact_evidence_matrix.v2"] = "fact_evidence_matrix.v2"
+class FactEvidenceMatrixV3(StrictModel):
+    schema_version: Literal["fact_evidence_matrix.v3"] = "fact_evidence_matrix.v3"
     case_id: CaseId
     matrix_id: Identifier
     matrix_version: Annotated[int, Field(ge=1)]
     matrix_status: Literal["WORKING", "FROZEN"]
-    parent_ref: FactEvidenceMatrixParentRefV2 | None = None
+    parent_ref: FactEvidenceMatrixParentRefV3 | None = None
     case_fact_matrix_id: Identifier
     case_fact_matrix_version: Annotated[int, Field(ge=1)]
     case_fact_matrix_hash: ContentHash
     content_hash: ContentHash
     source_refs: Annotated[list[Identifier], Field(max_length=256)] = Field(default_factory=list)
-    links: Annotated[list[FactEvidenceLinkV2], Field(max_length=2_000)] = Field(
+    links: Annotated[list[FactEvidenceLinkV3], Field(max_length=2_000)] = Field(
         default_factory=list
     )
-    fact_coverage: Annotated[list[FactEvidenceCoverageV2], Field(max_length=200)] = Field(
+    fact_coverage: Annotated[list[FactEvidenceCoverageV3], Field(max_length=200)] = Field(
         default_factory=list
     )
 
     @model_validator(mode="after")
-    def validate_matrix(self) -> "FactEvidenceMatrixV2":
-        link_keys = [(item.fact_id, item.evidence_id) for item in self.links]
+    def validate_matrix(self) -> "FactEvidenceMatrixV3":
+        link_keys = [
+            (item.fact_id, item.evidence_id, item.source_unit_id, item.observation_slot)
+            for item in self.links
+        ]
         if len(link_keys) != len(set(link_keys)):
-            raise ValueError("fact/evidence links must be unique")
+            raise ValueError("formal Evidence v3 binding identities must be unique")
         coverage_ids = [item.fact_id for item in self.fact_coverage]
         if len(coverage_ids) != len(set(coverage_ids)):
             raise ValueError("fact coverage rows must be unique")
         if self.content_hash != content_hash(self, hash_field="content_hash"):
-            raise ValueError("fact_evidence_matrix.v2 content hash is invalid")
+            raise ValueError("fact_evidence_matrix.v3 content hash is invalid")
         return self
 
 
@@ -359,7 +982,7 @@ class HearingEvidenceDossier(StrictModel):
     dossier_id: Identifier
     dossier_version: Annotated[int, Field(ge=1)]
     dossier_status: Literal["WORKING", "FROZEN"]
-    fact_evidence_matrix: FactEvidenceMatrixV2
+    fact_evidence_matrix: FactEvidenceMatrixV3
     evidence_summary: dict[str, Any] = Field(default_factory=dict)
     evidence_gaps: Annotated[list[ShortText], Field(max_length=100)] = Field(default_factory=list)
 
@@ -393,10 +1016,10 @@ class HearingEvidenceRequest(HearingEvidenceRequestDraft):
 
 
 class HearingEvidenceRequestsLlmOutput(StrictModel):
+    public_message: LongText
     requests: Annotated[list[HearingEvidenceRequestDraft], Field(max_length=10)] = Field(
         default_factory=list
     )
-    public_message: LongText
 
 
 class HearingEvidenceRequestsRequest(HearingFlowRequest):
@@ -485,9 +1108,9 @@ class HearingEvidenceFileAssessmentLlmOutput(StrictModel):
 
 
 class HearingEvidenceSynthesisLlmOutput(StrictModel):
+    public_message: LongText
     evidence_summary: dict[str, Any] = Field(default_factory=dict)
     evidence_gaps: Annotated[list[ShortText], Field(max_length=100)] = Field(default_factory=list)
-    public_message: LongText
 
 
 class HearingEvidenceSynthesisRequest(HearingFlowRequest):
@@ -497,7 +1120,7 @@ class HearingEvidenceSynthesisRequest(HearingFlowRequest):
     )
     party_batches: Annotated[list[HearingEvidencePartyBatch], Field(min_length=2, max_length=2)]
     case_fact_matrix: CaseFactMatrixV2
-    prior_fact_evidence_matrix: FactEvidenceMatrixV2 | None = None
+    prior_fact_evidence_matrix: FactEvidenceMatrixV3 | None = None
 
     @model_validator(mode="after")
     def require_both_batches(self) -> "HearingEvidenceSynthesisRequest":
@@ -536,7 +1159,7 @@ class HearingEvidenceSynthesisResult(StrictModel):
     case_id: CaseId
     workflow_id: Identifier
     stage_sequence: Annotated[int, Field(ge=1)]
-    fact_evidence_matrix: FactEvidenceMatrixV2
+    fact_evidence_matrix: FactEvidenceMatrixV3
     evidence_summary: dict[str, Any] = Field(default_factory=dict)
     evidence_gaps: Annotated[list[ShortText], Field(max_length=100)] = Field(default_factory=list)
     public_message: LongText
@@ -637,7 +1260,7 @@ class TrialDossierV1(StrictModel):
     case_fact_matrix: CaseFactMatrixV2
     evidence_matrix_version: Annotated[int, Field(ge=1)]
     evidence_matrix_hash: ContentHash
-    fact_evidence_matrix: FactEvidenceMatrixV2
+    fact_evidence_matrix: FactEvidenceMatrixV3
     question_set_id: Identifier
     question_set: dict[str, Any]
     answer_bundles: Annotated[
@@ -737,21 +1360,133 @@ class TrialDossierV1(StrictModel):
         return self
 
 
+class TrialDossierV2(StrictModel):
+    """Frozen adjudication authority; upstream production history is intentionally absent."""
+
+    schema_version: Literal["trial_dossier.v2"] = "trial_dossier.v2"
+    trial_dossier_id: Identifier
+    case_id: CaseId
+    frozen_at: ShortText
+    case_matrix_version: Annotated[int, Field(ge=1)]
+    case_matrix_hash: ContentHash
+    case_fact_matrix: CaseFactMatrixV2
+    evidence_matrix_version: Annotated[int, Field(ge=1)]
+    evidence_matrix_hash: ContentHash
+    fact_evidence_matrix: FactEvidenceMatrixV3
+    adjudication_rules: Annotated[
+        list[HearingPolicyRuleSnapshot], Field(min_length=1, max_length=100)
+    ]
+    content_hash: ContentHash
+
+    @model_validator(mode="after")
+    def validate_dossier(self) -> "TrialDossierV2":
+        if self.case_id != self.case_fact_matrix.case_id:
+            raise ValueError("trial dossier case matrix belongs to another case")
+        if (
+            self.case_matrix_version != self.case_fact_matrix.matrix_version
+            or self.case_matrix_hash != self.case_fact_matrix.content_hash
+            or self.case_fact_matrix.content_hash
+            != content_hash(self.case_fact_matrix, hash_field="content_hash")
+        ):
+            raise ValueError("trial dossier case matrix binding is invalid")
+        evidence = self.fact_evidence_matrix
+        if evidence.case_id != self.case_id or evidence.matrix_status != "FROZEN":
+            raise ValueError("trial dossier requires the frozen evidence matrix")
+        if (
+            self.evidence_matrix_version != evidence.matrix_version
+            or self.evidence_matrix_hash != evidence.content_hash
+            or evidence.content_hash != content_hash(evidence, hash_field="content_hash")
+        ):
+            raise ValueError("trial dossier evidence matrix binding is invalid")
+        if (
+            evidence.case_fact_matrix_id != self.case_fact_matrix.matrix_id
+            or evidence.case_fact_matrix_version != self.case_fact_matrix.matrix_version
+            or evidence.case_fact_matrix_hash != self.case_fact_matrix.content_hash
+        ):
+            raise ValueError("trial dossier matrices are not bound to each other")
+        policy_refs = [
+            (item.rule_code, item.rule_version) for item in self.adjudication_rules
+        ]
+        if len(policy_refs) != len(set(policy_refs)):
+            raise ValueError("trial dossier adjudication rules must be unique by version")
+        if self.content_hash != content_hash(self, hash_field="content_hash"):
+            raise ValueError("trial_dossier.v2 content hash is invalid")
+        return self
+
+
+class HearingJudgeRemedyOrder(StrictModel):
+    remedy_type: ShortText
+    order_text: LongText
+    fact_ids: Annotated[list[FactId], Field(min_length=1, max_length=100)]
+    conditions: Annotated[list[ShortText], Field(max_length=20)] = Field(
+        default_factory=list
+    )
+
+    @model_validator(mode="after")
+    def unique_fact_ids(self) -> "HearingJudgeRemedyOrder":
+        if len(self.fact_ids) != len(set(self.fact_ids)):
+            raise ValueError("remedy order fact_ids must be unique")
+        return self
+
+
+class HearingDecisionAction(StrEnum):
+    CANCEL_ORDER = "CANCEL_ORDER"
+    RETURN_AND_REFUND = "RETURN_AND_REFUND"
+    REFUND_ONLY = "REFUND_ONLY"
+    RESHIP = "RESHIP"
+    REPLACE = "REPLACE"
+    REPAIR = "REPAIR"
+    COMPENSATE = "COMPENSATE"
+    CONTINUE_FULFILLMENT = "CONTINUE_FULFILLMENT"
+    REJECT_CLAIM = "REJECT_CLAIM"
+
+
+HEARING_DECISION_ACTION_MEANINGS: dict[HearingDecisionAction, str] = {
+    HearingDecisionAction.CANCEL_ORDER: (
+        "取消当前订单；是否产生退款由后续订单结算处理"
+    ),
+    HearingDecisionAction.RETURN_AND_REFUND: (
+        "用户退回商品后，由商家退还相应款项"
+    ),
+    HearingDecisionAction.REFUND_ONLY: (
+        "用户无需退货，直接获得全额或部分退款"
+    ),
+    HearingDecisionAction.RESHIP: (
+        "针对未送达、漏发或缺失商品，由商家补发"
+    ),
+    HearingDecisionAction.REPLACE: (
+        "针对已收到但存在问题的商品，由商家换货"
+    ),
+    HearingDecisionAction.REPAIR: "由商家对争议商品提供维修处理",
+    HearingDecisionAction.COMPENSATE: (
+        "在主要交易处理之外或无需退款时，向用户提供补偿"
+    ),
+    HearingDecisionAction.CONTINUE_FULFILLMENT: (
+        "维持当前订单关系，等待商家继续完成原有履约义务"
+    ),
+    HearingDecisionAction.REJECT_CLAIM: "不支持本次售后诉求并结束案件",
+}
+HEARING_DECISION_ACTION_SCHEMA_DESCRIPTION = (
+    "唯一裁决执行编码；必须且只能选择一个。编码含义："
+    + "；".join(
+        f"{action.value}={meaning}"
+        for action, meaning in HEARING_DECISION_ACTION_MEANINGS.items()
+    )
+)
+
+
 class JudgeV1Draft(StrictModel):
-    proposal_text: LongText
-    recommended_decision: ShortText
-    reasoning_summary: LongText
+    draft: "HearingAdjudicationDraftBody"
     review_focus: Annotated[list[ShortText], Field(min_length=1, max_length=30)]
-    public_message: LongText
 
 
 class HearingJudgeV1Request(HearingFlowRequest):
     stage_code: Literal[HearingFlowStageCode.JUDGE_V1]
-    trial_dossier: TrialDossierV1
+    trial_dossier: TrialDossierV2
 
 
 class HearingJudgeV1Result(StrictModel):
-    schema_version: Literal["hearing_judge_v1.v1"] = "hearing_judge_v1.v1"
+    schema_version: Literal["hearing_judge_v1.v2"] = "hearing_judge_v1.v2"
     case_id: CaseId
     workflow_id: Identifier
     stage_sequence: Annotated[int, Field(ge=1)]
@@ -759,9 +1494,7 @@ class HearingJudgeV1Result(StrictModel):
     trial_dossier_hash: ContentHash
     proposal_id: Identifier
     proposal_hash: ContentHash
-    proposal_text: LongText
-    recommended_decision: ShortText
-    reasoning_summary: LongText
+    draft: "HearingAdjudicationDraftBody"
     review_focus: Annotated[list[ShortText], Field(min_length=1, max_length=30)]
     public_message: LongText
     is_final_decision: Literal[False] = False
@@ -824,7 +1557,7 @@ class HearingJuryReviewDraft(StrictModel):
 
 class HearingJuryReviewRequest(HearingFlowRequest):
     stage_code: Literal[HearingFlowStageCode.JURY_REVIEW]
-    trial_dossier: TrialDossierV1
+    trial_dossier: TrialDossierV2
     judge_v1: HearingJudgeV1Result
 
 
@@ -866,8 +1599,6 @@ class HearingJudgeFactFinding(StrictModel):
     def unique_evidence_ids(self) -> "HearingJudgeFactFinding":
         if len(self.evidence_ids) != len(set(self.evidence_ids)):
             raise ValueError("fact finding evidence_ids must be unique")
-        if not self.evidence_ids and self.evidence_gap is None:
-            raise ValueError("fact finding without evidence requires an evidence_gap")
         return self
 
 
@@ -911,64 +1642,101 @@ class HearingJudgePolicyApplication(StrictModel):
         return self
 
 
-class HearingJudgeV2DraftContent(StrictModel):
-    recommended_decision: ShortText
-    confidence: Confidence
-    draft_text: LongText
-    fact_findings: Annotated[list[HearingJudgeFactFinding], Field(min_length=1, max_length=200)]
-    evidence_assessment: Annotated[
-        list[HearingJudgeEvidenceAssessment], Field(min_length=1, max_length=200)
-    ]
-    policy_application: Annotated[
-        list[HearingJudgePolicyApplication], Field(min_length=1, max_length=100)
-    ]
-    reviewer_attention: Annotated[list[ShortText], Field(min_length=1, max_length=100)]
-    draft_status: Literal["PENDING_HUMAN_REVIEW"] = "PENDING_HUMAN_REVIEW"
-    requires_human_review: Literal[True] = True
-    is_final_decision: Literal[False] = False
+class HearingJudgeRuleApplication(StrictModel):
+    rule_code: Identifier
+    rule_version: Annotated[int, Field(ge=1)]
+    rule_name: ShortText
+    fact_ids: Annotated[list[FactId], Field(min_length=1, max_length=100)]
+    applicable: bool
+    conditions_met: Annotated[list[ShortText], Field(max_length=30)] = Field(
+        default_factory=list
+    )
+    conditions_unmet: Annotated[list[ShortText], Field(max_length=30)] = Field(
+        default_factory=list
+    )
+    rationale: LongText
+    resulting_effect: ShortText | None = None
 
     @model_validator(mode="after")
-    def unique_fact_findings(self) -> "HearingJudgeV2DraftContent":
+    def validate_application(self) -> "HearingJudgeRuleApplication":
+        if len(self.fact_ids) != len(set(self.fact_ids)):
+            raise ValueError("rule application fact_ids must be unique")
+        if self.applicable and self.conditions_unmet:
+            raise ValueError("an applicable rule cannot retain unmet conditions")
+        return self
+
+
+class HearingAdjudicationDraftBody(StrictModel):
+    fact_findings: Annotated[list[HearingJudgeFactFinding], Field(min_length=1, max_length=200)]
+    rule_applications: Annotated[
+        list[HearingJudgeRuleApplication], Field(min_length=1, max_length=100)
+    ]
+    decision_reasoning: LongText
+    remedy_orders: Annotated[
+        list[HearingJudgeRemedyOrder], Field(min_length=1, max_length=50)
+    ]
+    reviewer_attention: Annotated[list[ShortText], Field(max_length=100)] = Field(
+        default_factory=list
+    )
+    decision_action: HearingDecisionAction = Field(
+        description=HEARING_DECISION_ACTION_SCHEMA_DESCRIPTION
+    )
+
+    @model_validator(mode="after")
+    def unique_adjudication_entries(self) -> "HearingAdjudicationDraftBody":
         fact_ids = [item.fact_id for item in self.fact_findings]
         if len(fact_ids) != len(set(fact_ids)):
-            raise ValueError("judge V2 fact_findings must be unique by fact_id")
-        evidence_keys = [
-            (
-                item.assessment_type,
-                item.evidence_id or "\u001f".join(sorted(item.fact_ids)),
-            )
-            for item in self.evidence_assessment
+            raise ValueError("fact_findings must be unique by fact_id")
+        rule_refs = [
+            (item.rule_code, item.rule_version) for item in self.rule_applications
         ]
-        if len(evidence_keys) != len(set(evidence_keys)):
-            raise ValueError("judge V2 evidence_assessment entries must be unique")
-        policy_refs = [
-            (item.rule_code, item.rule_version) for item in self.policy_application
-        ]
-        if len(policy_refs) != len(set(policy_refs)):
-            raise ValueError("judge V2 policy_application must be unique by rule version")
+        if len(rule_refs) != len(set(rule_refs)):
+            raise ValueError("rule_applications must be unique by rule version")
+        return self
+
+
+class HearingJudgeReviewResponse(StrictModel):
+    review_item_ref: ShortText
+    review_source: Literal["V1_REVIEW_FOCUS", "JURY_FINDING", "MANDATORY_REVISION"]
+    disposition: Literal["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED"]
+    response: LongText
+    affected_fields: Annotated[
+        list[
+            Literal[
+                "decision_action",
+                "remedy_orders",
+                "fact_findings",
+                "rule_applications",
+                "decision_reasoning",
+                "reviewer_attention",
+            ]
+        ],
+        Field(min_length=1, max_length=6),
+    ]
+
+    @model_validator(mode="after")
+    def unique_affected_fields(self) -> "HearingJudgeReviewResponse":
+        if len(self.affected_fields) != len(set(self.affected_fields)):
+            raise ValueError("review response affected_fields must be unique")
         return self
 
 
 class HearingJudgeV2Draft(StrictModel):
-    draft: HearingJudgeV2DraftContent
-    public_message: LongText
-
-    @model_validator(mode="after")
-    def displayed_text_is_persisted_text(self) -> "HearingJudgeV2Draft":
-        if self.public_message != self.draft.draft_text:
-            raise ValueError("public_message must exactly equal draft.draft_text")
-        return self
+    draft: HearingAdjudicationDraftBody
+    review_responses: Annotated[
+        list[HearingJudgeReviewResponse], Field(min_length=1, max_length=100)
+    ]
 
 
 class HearingJudgeV2Request(HearingFlowRequest):
     stage_code: Literal[HearingFlowStageCode.JUDGE_V2]
-    trial_dossier: TrialDossierV1
+    trial_dossier: TrialDossierV2
     judge_v1: HearingJudgeV1Result
     jury_review: HearingJuryReviewResult
 
 
 class HearingJudgeV2Result(StrictModel):
-    schema_version: Literal["hearing_judge_v2.v1"] = "hearing_judge_v2.v1"
+    schema_version: Literal["hearing_judge_v2.v2"] = "hearing_judge_v2.v2"
     case_id: CaseId
     workflow_id: Identifier
     stage_sequence: Annotated[int, Field(ge=1)]
@@ -980,16 +1748,24 @@ class HearingJudgeV2Result(StrictModel):
     parent_proposal_hash: ContentHash
     jury_review_id: Identifier
     jury_review_hash: ContentHash
-    draft: HearingJudgeV2DraftContent
+    draft: HearingAdjudicationDraftBody
+    review_responses: Annotated[
+        list[HearingJudgeReviewResponse], Field(min_length=1, max_length=100)
+    ]
     public_message: LongText
+    draft_status: Literal["PENDING_HUMAN_REVIEW"] = "PENDING_HUMAN_REVIEW"
+    requires_human_review: Literal[True] = True
+    is_final_decision: Literal[False] = False
 
     @model_validator(mode="after")
     def validate_v2(self) -> "HearingJudgeV2Result":
-        if self.public_message != self.draft.draft_text:
-            raise ValueError("persisted V2 text must exactly equal displayed text")
         if self.judge_v2_hash != content_hash(self, hash_field="judge_v2_hash"):
             raise ValueError("judge V2 hash is invalid")
         return self
+
+
+JudgeV1Draft.model_rebuild()
+HearingJudgeV1Result.model_rebuild()
 
 
 def content_hash(value: StrictModel | dict[str, Any], *, hash_field: str) -> str:

@@ -18,6 +18,7 @@ import com.example.dispute.domain.model.ExecutionStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.executor.domain.ExecutableAction;
 import com.example.dispute.executor.domain.ToolExecutionResult;
+import com.example.dispute.hearing.domain.HearingDecisionAction;
 import com.example.dispute.infrastructure.persistence.entity.ActionRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
@@ -257,6 +258,15 @@ public class ToolExecutorService {
                     Map.of("case_id", caseId));
         }
         JsonNode approvedPlan = read(approval.getApprovedPlanJson());
+        String reviewerDecisionAction = approval.getReviewerDecisionAction();
+        if (reviewerDecisionAction != null
+                && (!HearingDecisionAction.supports(reviewerDecisionAction)
+                        || !reviewerDecisionAction.equals(
+                                approvedPlan.path("decision_action").asText()))) {
+            throw denied(
+                    "approved plan does not match the human reviewer decision action",
+                    Map.of("approval_record_id", approval.getId()));
+        }
         String calculatedActionHash =
                 ActionSnapshotHasher.hash(objectMapper, approvedPlan);
         if (!calculatedActionHash.equals(approval.getActionSnapshotHash())) {

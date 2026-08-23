@@ -89,6 +89,8 @@ import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeSt
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort;
 import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewNonExecutionActivities;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewNonExecutionActivities;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeChildUpdateActivities;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeChildUpdateActivity;
 import com.example.dispute.workflow.targete2e.rooms.outcome.JdbcTargetOutcomeCompletionActivities;
 import com.example.dispute.workflow.targete2e.rooms.outcome.JdbcTargetTemporalOutcomeBindingResolver;
 import com.example.dispute.workflow.targete2e.rooms.outcome.TargetDeterministicEvaluationAgentClient;
@@ -102,6 +104,7 @@ import java.time.Clock;
 import java.util.List;
 import javax.sql.DataSource;
 import io.minio.MinioClient;
+import io.temporal.client.WorkflowClient;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -498,6 +501,12 @@ public class TargetE2eControlConfiguration {
   }
 
   @Bean
+  TargetReviewOutcomeChildUpdateActivities targetReviewOutcomeChildUpdateActivity(
+      WorkflowClient workflowClient) {
+    return new TargetReviewOutcomeChildUpdateActivity(workflowClient);
+  }
+
+  @Bean
   TargetReviewNonExecutionActivities targetReviewNonExecutionActivities(
       DataSource dataSource,
       PlatformTransactionManager transactionManager,
@@ -534,6 +543,7 @@ public class TargetE2eControlConfiguration {
       TargetReviewCommandBridgeActivities targetReviewCommandBridgeActivity,
       TargetReviewOutcomeHandoffActivities targetReviewOutcomeHandoffRelayActivity,
       TargetReviewOutcomeStartBindingActivities targetReviewOutcomeStartBindingActivity,
+      TargetReviewOutcomeChildUpdateActivities targetReviewOutcomeChildUpdateActivity,
       TargetReviewNonExecutionActivities targetReviewNonExecutionActivities,
       TargetOutcomeCompletionActivities targetOutcomeCompletionActivities) {
     requireArmedActivationAuthorityIfEnabled(
@@ -562,9 +572,10 @@ public class TargetE2eControlConfiguration {
                 targetReviewCommandBridgeActivity,
                 targetReviewOutcomeHandoffRelayActivity,
                 targetReviewOutcomeStartBindingActivity,
-                targetReviewNonExecutionActivities,
-                targetOutcomeCompletionActivities),
-            List.of());
+                 targetReviewOutcomeChildUpdateActivity,
+                 targetReviewNonExecutionActivities,
+                 targetOutcomeCompletionActivities),
+            List.of(targetOutcomeCompletionActivities));
     return () -> registration;
   }
 

@@ -193,6 +193,12 @@ public final class IntakeDossierProjectionMerger {
         if (!patch.isObject()) {
             throw rejected("INTAKE_DOSSIER_PATCH_INVALID", "dossier patch is not an object");
         }
+        ObjectNode normalizedCurrent = ((ObjectNode) current).deepCopy();
+        ObjectNode normalizedPatch = ((ObjectNode) patch).deepCopy();
+        normalizePartyIntakeScores(normalizedCurrent, matrixAuthority);
+        normalizePartyIntakeScores(normalizedPatch, matrixAuthority);
+        current = normalizedCurrent;
+        patch = normalizedPatch;
         rejectNestedHandoffRemarkPartition(current);
         rejectNestedHandoffRemarkPartition(patch);
         validateHandoffRemarkPartition(current.get("handoff_remark_partition"));
@@ -312,16 +318,17 @@ public final class IntakeDossierProjectionMerger {
                                 matrixPatch,
                                 matrixAuthority,
                                 proposal);
-                        merged.set("case_fact_matrix", bilateralCandidate);
-                        matrixChanged = true;
                     } else if (proposal.readiness()
                                     == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
                             && proposal.missingFields().isEmpty()) {
                         respondentMatrixFreezer.requireCompleteForFreeze(
                                 bilateralCandidate, matrixAuthority);
-                        merged.set("case_fact_matrix", bilateralCandidate);
-                        matrixChanged = true;
                     }
+                    // Every accepted substantive respondent turn advances the
+                    // immutable working matrix. Readiness controls only the
+                    // confirmation gate; it must not discard a valid delta.
+                    merged.set("case_fact_matrix", bilateralCandidate);
+                    matrixChanged = true;
                 } else {
                     throw rejected(
                             "INTAKE_MATRIX_ACTOR_AUTHORITY_INVALID",
@@ -380,6 +387,7 @@ public final class IntakeDossierProjectionMerger {
         }
 
         normalizeProjectionMetadata(merged, (ObjectNode) patch, proposal);
+        normalizePartyIntakeScores(merged, matrixAuthority);
         requirePartyIntakeProjection(merged, matrixAuthority);
         validateHandoffRemarkPartition(merged.get("handoff_remark_partition"));
         requireHandoffRemarkPartitionMatrixBinding(merged);
@@ -1157,7 +1165,6 @@ public final class IntakeDossierProjectionMerger {
                     "INTAKE_PARTY_STATE_QUALITY_INVALID",
                     "party Intake quality violates the canonical scalar contract");
         }
-        int breakdownTotal = 0;
         for (Map.Entry<String, Integer> component : QUALITY_COMPONENT_MAXIMA.entrySet()) {
             JsonNode value = breakdown.path(component.getKey());
             if (!value.isIntegralNumber()
@@ -1168,12 +1175,11 @@ public final class IntakeDossierProjectionMerger {
                         "INTAKE_PARTY_STATE_QUALITY_INVALID",
                         "party Intake score component is outside its canonical range");
             }
-            breakdownTotal += value.intValue();
         }
-        if (breakdownTotal != score.intValue()) {
+        if (score.intValue() != scoreBreakdownTotal(quality)) {
             throw rejected(
                     "INTAKE_PARTY_STATE_QUALITY_INVALID",
-                    "party Intake score does not equal its canonical breakdown");
+                    "party Intake score must equal the six-component total");
         }
 
         JsonNode missing = entry.path("missing_information");
@@ -1430,11 +1436,64 @@ public final class IntakeDossierProjectionMerger {
     }
 
     private static int qualityScore(ObjectNode dossier, IntakeTurnProposal proposal) {
-        JsonNode score = dossier.path("intake_quality").path("score");
+        JsonNode quality = dossier.path("intake_quality");
+        Integer componentTotal = scoreBreakdownTotal(quality);
+        if (componentTotal != null) {
+            return componentTotal;
+        }
+        JsonNode score = quality.path("score");
         if (score.isIntegralNumber() && score.canConvertToInt()) {
             return Math.max(0, Math.min(100, score.intValue()));
         }
         return 0;
+    }
+
+    private static void normalizePartyIntakeScores(
+            ObjectNode dossier, MatrixAuthority authority) {
+        JsonNode state = dossier.get("party_intake_state");
+        if (state != null && state.isObject()) {
+            for (String role : PARTY_INTAKE_ROLES) {
+                JsonNode quality = state.path(role).path("intake_quality");
+                Integer total = scoreBreakdownTotal(quality);
+                if (total != null && quality instanceof ObjectNode qualityObject) {
+                    qualityObject.put("score", total);
+                }
+            }
+        }
+
+        JsonNode quality = dossier.path("intake_quality");
+        Integer total = scoreBreakdownTotal(quality);
+        if (authority != null && state != null && state.isObject()) {
+            total = scoreBreakdownTotal(
+                    state.path(authority.actorRole().name()).path("intake_quality"));
+        }
+        if (total != null && quality instanceof ObjectNode qualityObject) {
+            qualityObject.put("score", total);
+        }
+    }
+
+    private static Integer scoreBreakdownTotal(JsonNode quality) {
+        JsonNode breakdown = quality.path("score_breakdown");
+        if (!breakdown.isObject()) {
+            return null;
+        }
+        Set<String> fields = new HashSet<>();
+        breakdown.fieldNames().forEachRemaining(fields::add);
+        if (!fields.equals(QUALITY_COMPONENT_MAXIMA.keySet())) {
+            return null;
+        }
+        int total = 0;
+        for (Map.Entry<String, Integer> component : QUALITY_COMPONENT_MAXIMA.entrySet()) {
+            JsonNode value = breakdown.path(component.getKey());
+            if (!value.isIntegralNumber()
+                    || !value.canConvertToInt()
+                    || value.intValue() < 0
+                    || value.intValue() > component.getValue()) {
+                return null;
+            }
+            total += value.intValue();
+        }
+        return total;
     }
 
     private static Long matrixVersion(ObjectNode dossier) {

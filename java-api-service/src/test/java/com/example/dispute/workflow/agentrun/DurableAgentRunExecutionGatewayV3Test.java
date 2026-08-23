@@ -40,6 +40,44 @@ class DurableAgentRunExecutionGatewayV3Test {
     private static final Instant NOW = Instant.parse("2026-08-18T08:00:00Z");
 
     @Test
+    void durablyOrdersGenerationResetBeforeTheReplacementVisibleDelta() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult result = graphResult();
+        RecordingStore store = new RecordingStore();
+        List<Long> progress = new ArrayList<>();
+        AgentGraphCommandClient client = (actual, mode, sink, token) -> {
+            sink.accept(attemptStarted(request));
+            sink.accept(visibleDelta(request, 1, "第一代临时文本"));
+            sink.accept(generationReset(request, 2));
+            sink.accept(visibleDelta(request, 3, "第二代有效文本"));
+            sink.accept(finalEvent(request, 4, result.outputHash()));
+            return result;
+        };
+
+        var gateway = new DurableAgentRunExecutionGateway(client, store);
+        var completion = gateway.execute(
+                request,
+                ExecutionMode.EXECUTE_OR_RECONCILE,
+                state -> progress.add(state.lastSequenceNo()),
+                new AgentRunCancellationToken());
+
+        assertThat(store.batches)
+                .flatExtracting(batch -> batch)
+                .extracting(AgentStreamEvent::eventType)
+                .containsExactly(
+                        StreamEventType.VISIBLE_DELTA,
+                        StreamEventType.GENERATION_RESET,
+                        StreamEventType.VISIBLE_DELTA,
+                        StreamEventType.FINAL);
+        assertThat(store.batches.get(1).getFirst().payload().generation()).isEqualTo(2);
+        assertThat(store.batches.get(1).getFirst().payload().reasonCode())
+                .isEqualTo("OUTPUT_SCHEMA_INVALID");
+        assertThat(progress).containsExactly(1L, 2L, 3L);
+        assertThat(completion.lastSequenceNo()).isEqualTo(4L);
+        assertThat(completion.publicOutputEmitted()).isTrue();
+    }
+
+    @Test
     void relaysEveryDeltaImmediatelyButPersistsOnlyTheCompletedFrameAndFinal() throws Exception {
         ExecuteAgentRunRequest request = request();
         RoomGraphResult result = graphResult();
@@ -206,6 +244,50 @@ class DurableAgentRunExecutionGatewayV3Test {
                                 StreamEventType.PUBLIC_FRAME_COMMITTED));
     }
 
+    @Test
+    void normalizesAProviderTerminalToTheCompressedDurableSequence() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        ObjectNode header = header(1, "ROOM_WELCOME");
+        String frameId = TargetEvidenceTurnResultV2.frameId(
+                request.command().commandId(), request.attemptId(), 1, "ROOM_WELCOME");
+        RecordingStore store = new RecordingStore();
+        List<Long> progress = new ArrayList<>();
+        AgentGraphCommandClient client = (actual, mode, sink, token) -> {
+            sink.accept(attemptStarted(request));
+            sink.accept(frameStart(request, 1, frameId, "ROOM_WELCOME", header));
+            sink.accept(frameDelta(request, 2, frameId, 1, 0, "欢"));
+            sink.accept(frameDelta(request, 3, frameId, 1, 1, "迎"));
+            sink.accept(committedFrame(
+                    request, 4, frameId, 1, "ROOM_WELCOME", header, "欢迎"));
+            sink.accept(errorEvent(request, 5, "AGENT_OUTPUT_SCHEMA_INVALID"));
+            throw AgentRunExecutionException.failLogicalRun(
+                    "AGENT_OUTPUT_SCHEMA_INVALID",
+                    "graph command reached a logical error terminal",
+                    5,
+                    true,
+                    null);
+        };
+        var gateway = new DurableAgentRunExecutionGateway(client, store);
+
+        assertThatThrownBy(() -> gateway.execute(
+                request,
+                ExecutionMode.EXECUTE_OR_RECONCILE,
+                state -> progress.add(state.lastSequenceNo()),
+                new AgentRunCancellationToken()))
+                .isInstanceOf(AgentRunExecutionException.class)
+                .satisfies(error -> {
+                    AgentRunExecutionException failure = (AgentRunExecutionException) error;
+                    assertThat(failure.errorCode()).isEqualTo("AGENT_OUTPUT_SCHEMA_INVALID");
+                    assertThat(failure.lastSequenceNo()).isEqualTo(4L);
+                    assertThat(failure.publicOutputEmitted()).isTrue();
+                });
+        assertThat(progress).containsExactly(3L, 4L);
+        assertThat(store.batches).hasSize(2);
+        assertThat(store.batches.get(1))
+                .extracting(AgentStreamEvent::sequenceNo, AgentStreamEvent::eventType)
+                .containsExactly(org.assertj.core.groups.Tuple.tuple(4L, StreamEventType.ERROR));
+    }
+
     private static AgentStreamEvent attemptStarted(ExecuteAgentRunRequest request) {
         return new AgentStreamEvent(
                 "agent-stream.v3", request.agentRunId(), request.attemptId(), 0,
@@ -213,6 +295,48 @@ class DurableAgentRunExecutionGatewayV3Test {
                 request.command().actorScope().audience(), NOW,
                 new AgentStreamEvent.Payload(
                         "target-e2e", null, null, null, null, null, null, null, null, null));
+    }
+
+    private static AgentStreamEvent visibleDelta(
+            ExecuteAgentRunRequest request, long sequence, String delta) {
+        return new AgentStreamEvent(
+                "agent-stream.v3", request.agentRunId(), request.attemptId(), sequence,
+                StreamEventType.VISIBLE_DELTA,
+                request.command().actorScope().audience(), NOW.plusSeconds(sequence),
+                new AgentStreamEvent.Payload(
+                        "intake_turn_case_detail", "room_utterance", delta,
+                        null, null, null, null, null, null, null));
+    }
+
+    private static AgentStreamEvent generationReset(
+            ExecuteAgentRunRequest request, long sequence) {
+        return new AgentStreamEvent(
+                "agent-stream.v3", request.agentRunId(), request.attemptId(), sequence,
+                StreamEventType.GENERATION_RESET,
+                request.command().actorScope().audience(), NOW.plusSeconds(sequence),
+                new AgentStreamEvent.Payload(
+                        "intake_turn_case_detail",
+                        null,
+                        null,
+                        null,
+                        "OUTPUT_SCHEMA_INVALID",
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        2));
     }
 
     private static AgentStreamEvent frameStart(
@@ -289,6 +413,16 @@ class DurableAgentRunExecutionGatewayV3Test {
                 new AgentStreamEvent.Payload(
                         null, null, null, null, null, null,
                         "urn:target-e2e:result:1", resultHash, null, null));
+    }
+
+    private static AgentStreamEvent errorEvent(
+            ExecuteAgentRunRequest request, long sequence, String errorCode) {
+        return new AgentStreamEvent(
+                "agent-stream.v3", request.agentRunId(), request.attemptId(), sequence,
+                StreamEventType.ERROR,
+                request.command().actorScope().audience(), NOW.plusSeconds(sequence),
+                new AgentStreamEvent.Payload(
+                        null, null, null, null, null, null, null, null, errorCode, false));
     }
 
     private static ObjectNode header(int sequence, String frameType) {

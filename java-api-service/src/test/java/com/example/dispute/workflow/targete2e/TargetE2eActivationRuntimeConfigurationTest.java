@@ -153,6 +153,23 @@ class TargetE2eActivationRuntimeConfigurationTest {
   }
 
   @Test
+  void targetOutcomeCompletionIsRegisteredForBothParentAndOutcomeRoomWorkers()
+      throws Exception {
+    String configuration = Files.readString(TARGET_CONTROL_CONFIGURATION);
+    int registrationStart =
+        configuration.indexOf("new TargetTemporalWorkerRegistration.Registration(");
+    int registrationEnd = configuration.indexOf("return () -> registration;", registrationStart);
+
+    assertThat(registrationStart).isGreaterThanOrEqualTo(0);
+    assertThat(registrationEnd).isGreaterThan(registrationStart);
+    assertThat(
+            configuration
+                .substring(registrationStart, registrationEnd)
+                .split("targetOutcomeCompletionActivities", -1))
+        .hasSize(3);
+  }
+
+  @Test
   void targetControlPublishesSingleSharedActivationStoreAndReusesItForAllAuthorities()
       throws Exception {
     String configuration =

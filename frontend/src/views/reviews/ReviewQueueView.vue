@@ -13,6 +13,7 @@ import {
   toReviewTaskSummary,
 } from "../../api/review";
 import { actor } from "../../state/actor";
+import { domainCodeLabel } from "../../utils/displayText";
 
 const props = defineProps({
   initialTasks: { type: Array, default: null },
@@ -80,12 +81,12 @@ function displayTime(value) {
 
 // 业务位置：【前端审核工作台】priorityLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 function priorityLabel(priority) {
-  return priorityLabels[priority] || priority || "普通";
+  return priorityLabels[priority] || domainCodeLabel(priority, "普通");
 }
 
 // 业务位置：【前端审核工作台】statusLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 function statusLabel(status) {
-  return statusLabels[status] || status || "待审核";
+  return statusLabels[status] || domainCodeLabel(status, "待审核");
 }
 
 onMounted(load);

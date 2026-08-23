@@ -9,8 +9,6 @@ export const ACTIVE_REVIEW_STATUSES = Object.freeze([
 export const REVIEW_DECISIONS = Object.freeze([
   "APPROVE",
   "MODIFY_AND_APPROVE",
-  "REQUEST_MORE_EVIDENCE",
-  "REJECT",
   "ESCALATE_MANUAL",
 ]);
 

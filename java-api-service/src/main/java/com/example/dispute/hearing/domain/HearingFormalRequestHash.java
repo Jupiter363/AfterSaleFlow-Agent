@@ -47,6 +47,31 @@ public final class HearingFormalRequestHash {
         }
     }
 
+    /** Exact v2 handoff key: the durable Hearing epoch and Judge V2 artifact share authority. */
+    public static String handoffOperationKey(
+            String tenantSurrogate,
+            String caseId,
+            String epochId,
+            long roomEpoch,
+            String judgeV2Id,
+            String judgeV2Hash) {
+        String exactTenant = keyComponent(tenantSurrogate, "tenantSurrogate");
+        String exactCase = keyComponent(caseId, "caseId");
+        String exactEpoch = keyComponent(epochId, "epochId");
+        String exactJudgeV2 = keyComponent(judgeV2Id, "judgeV2Id");
+        if (roomEpoch < 0) {
+            throw new IllegalArgumentException("roomEpoch must be non-negative");
+        }
+        if (judgeV2Hash == null || !judgeV2Hash.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("judgeV2Hash must be lowercase SHA-256");
+        }
+        MessageDigest parentDigest = sha256Digest();
+        parentDigest.update((exactEpoch + ':' + exactJudgeV2).getBytes(StandardCharsets.UTF_8));
+        String exactParent = HexFormat.of().formatHex(parentDigest.digest());
+        return "hearing.handoff:" + exactTenant + ':' + exactCase + ':' + roomEpoch + ':'
+                + exactParent + ':' + judgeV2Hash;
+    }
+
     private static void append(MessageDigest digest, Object value) {
         if (value instanceof HearingFormalTransition transition) {
             append(digest, "hearing-formal-transition.v1");
@@ -80,5 +105,13 @@ public final class HearingFormalRequestHash {
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException("SHA-256 is unavailable", impossible);
         }
+    }
+
+    private static String keyComponent(String value, String field) {
+        if (value == null || !value.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")) {
+            throw new IllegalArgumentException(
+                    field + " must be a bounded operation-key component");
+        }
+        return value;
     }
 }

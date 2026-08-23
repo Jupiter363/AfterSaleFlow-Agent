@@ -19,7 +19,9 @@ const componentSource = readFileSync("src/views/disputes/HearingCourtView.vue", 
 
 afterEach(() => {
   clearAgentStreams({}, { abort: true });
+  globalThis.sessionStorage?.clear();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -255,6 +257,51 @@ function makeEvidence(index, submittedByRole) {
 
 // 业务位置：【前端庭审】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 describe("HearingCourtView", () => {
+  it("plays the courtroom prelude only on the party's first normal entry", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    const preludeMessages = [
+      {
+        id: "MESSAGE_PRELUDE_JUDGE",
+        sequence_no: 1,
+        sender_role: "JUDGE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "主审法官宣布庭审开始。",
+        created_at: "2026-07-03T12:00:00+08:00",
+      },
+      {
+        id: "MESSAGE_PRELUDE_INTAKE",
+        sequence_no: 2,
+        sender_role: "INTAKE_OFFICER",
+        message_type: "AGENT_MESSAGE",
+        message_text: "案情接待官介绍已冻结的案情事实。",
+        created_at: "2026-07-03T12:01:00+08:00",
+      },
+      {
+        id: "MESSAGE_PRELUDE_CLERK",
+        sequence_no: 3,
+        sender_role: "EVIDENCE_CLERK",
+        message_type: "AGENT_MESSAGE",
+        message_text: "证据书记官介绍现有证据覆盖情况。",
+        created_at: "2026-07-03T12:02:00+08:00",
+      },
+    ];
+
+    const firstEntry = await mountView({ initialMessages: preludeMessages });
+    await flushPromises();
+    expect(firstEntry.wrapper.get("[data-court-transcript]").attributes("data-prelude-replay"))
+      .toBe("active");
+    firstEntry.wrapper.unmount();
+
+    const secondEntry = await mountView({ initialMessages: preludeMessages });
+    await flushPromises();
+    expect(secondEntry.wrapper.get("[data-court-transcript]").attributes("data-prelude-replay"))
+      .toBe("complete");
+    expect(secondEntry.wrapper.find('[data-prelude-state="streaming"]').exists())
+      .toBe(false);
+    secondEntry.wrapper.unmount();
+  });
+
   it("uses each courtroom digital human's clothing color on their transcript cards", () => {
     expect(componentSource).toMatch(/court-message--intake[\s\S]*?--court-clothing-color: #95c9b6/);
     expect(componentSource).toMatch(/court-message--clerk[\s\S]*?--court-clothing-color: #77a9e7/);
@@ -501,19 +548,15 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "确认或说明异议",
     );
-    const inputHeader = wrapper.get("[data-stage-input-header]");
     const inputComposer = wrapper.get("[data-answer-bundle-form]");
-    expect(inputHeader.text()).not.toContain("当前阶段提交台");
-    expect(inputHeader.text()).toContain("用户提交");
-    expect(inputHeader.text()).toContain("商家提交");
-    expect(inputHeader.text()).not.toContain("确认或说明异议");
+    expect(wrapper.find("[data-stage-input-header]").exists()).toBe(false);
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain("用户提交");
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain("商家提交");
     expect(wrapper.find("[data-stage-input-description]").exists()).toBe(false);
     expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "当前陈述、证据解释或对法官拟处理方向的确认或说明异议会被封装为本轮立场",
     );
-    expect(inputHeader.element.compareDocumentPosition(inputComposer.element)).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    );
+    expect(inputComposer.exists()).toBe(true);
     expect(wrapper.find("[data-open-settlement]").exists()).toBe(false);
     expect(wrapper.get("[data-stage-input-bar]").classes()).toContain(
       "stage-input-bar--fixed-dock",
@@ -1218,6 +1261,15 @@ describe("HearingCourtView", () => {
     );
     expect(componentSource).toMatch(
       /\.stage-input-bar--fixed-dock \.stage-input-bar__body--with-header\s*{\s*grid-template-rows:\s*24px 1fr;/,
+    );
+    expect(componentSource).toMatch(
+      /\.courtroom-center--answer-workbench\s*{\s*grid-template-rows:\s*128px minmax\(0, 1fr\) 180px;/,
+    );
+    expect(componentSource).toMatch(
+      /\.stage-input-bar--fixed-dock\.stage-input-bar--answer-workbench\s*{[^}]*height:\s*180px;[^}]*min-height:\s*180px;[^}]*max-height:\s*180px;/,
+    );
+    expect(componentSource).toMatch(
+      /\.hearing-answer-question-card__scroll\s*{[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/,
     );
     expect(componentSource).toMatch(
       /\.stage-input-bar__sealed-status,[\s\S]*?\.stage-input-bar__final-status\s*{[\s\S]*?background:\s*transparent;[\s\S]*?border:\s*0;[\s\S]*?border-radius:\s*0;/,
@@ -2064,11 +2116,27 @@ describe("HearingCourtView", () => {
       },
     });
 
-    const answers = wrapper.findAll("[data-hearing-answer]");
-    expect(answers).toHaveLength(2);
-    await answers[0].setValue("第一项回答：我方未实际收到商品。");
+    expect(wrapper.findAll("[data-hearing-answer]")).toHaveLength(1);
+    expect(wrapper.get("[data-hearing-issue]").text()).toContain("请双方说明物流交接过程。");
+    await wrapper
+      .get("[data-hearing-answer]")
+      .setValue("第一项回答：我方未实际收到商品。");
     expect(wrapper.get("[data-submit-party-statement]").attributes("disabled")).toBeDefined();
-    await answers[1].setValue("第二项回答：我方维持退款诉求。");
+    expect(wrapper.get("[data-hearing-previous-issue]").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-hearing-next-issue]").attributes("disabled")).toBeUndefined();
+
+    await wrapper.get("[data-hearing-next-issue]").trigger("click");
+    expect(wrapper.get("[data-hearing-issue]").text()).toContain("请双方说明当前处理方案。");
+    expect(wrapper.get("[data-hearing-answer]").element.value).toBe("");
+    await wrapper
+      .get("[data-hearing-answer]")
+      .setValue("第二项回答：我方维持退款诉求。");
+
+    await wrapper.get("[data-hearing-previous-issue]").trigger("click");
+    expect(wrapper.get("[data-hearing-answer]").element.value).toBe(
+      "第一项回答：我方未实际收到商品。",
+    );
+    expect(wrapper.get("[data-submit-party-statement]").attributes("disabled")).toBeUndefined();
     await wrapper.get("[data-submit-party-statement]").trigger("click");
     await flushPromises();
 
@@ -2391,9 +2459,11 @@ describe("HearingCourtView", () => {
   it("discovers a late hearing run once across durable event replay and active enumeration", async () => {
     const descriptor = {
       agent_run_id: "target-hearing-run:late-mounted-1",
+      schema_version: "target-hearing-agent-run-started.v2",
       operation: "HEARING_INTAKE_QUESTIONS",
       status: "RUNNING",
       stream_url: "/api/agent-runs/target-hearing-run%3Alate-mounted-1/events",
+      stream_access: "ACTOR_VISIBLE",
       stage_code: "INTAKE_QUESTIONS_GENERATING",
       stage_sequence: 4,
     };
@@ -2467,6 +2537,35 @@ describe("HearingCourtView", () => {
           stream_url: "/api/agent-runs/missing/events",
           stage_code: "INTAKE_QUESTIONS_GENERATING",
           stage_sequence: 4,
+        }),
+      },
+    });
+    await flushPromises();
+    expect(agentRunConsumer).toHaveBeenCalledOnce();
+
+    await applyCaseEvent({
+      id: 24,
+      event: "AGENT_RUN_STARTED",
+      data: {
+        event_type: "AGENT_RUN_STARTED",
+        payload_json: JSON.stringify({
+          ...descriptor,
+          agent_run_id: "target-hearing-run:internal-system-only",
+          stream_url: undefined,
+          stream_access: "INTERNAL_SYSTEM_ONLY",
+        }),
+      },
+    });
+    await applyCaseEvent({
+      id: 25,
+      event: "AGENT_RUN_STARTED",
+      data: {
+        event_type: "AGENT_RUN_STARTED",
+        payload_json: JSON.stringify({
+          ...descriptor,
+          agent_run_id: "target-hearing-run:legacy-without-authority",
+          schema_version: "target-hearing-agent-run-started.v1",
+          stream_access: undefined,
         }),
       },
     });
@@ -2876,6 +2975,62 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).not.toContain("A2A_INTERNAL");
     expect(wrapper.text()).not.toContain("SYSTEM_AUDIT_ONLY");
     expect(wrapper.text()).not.toContain("evidence_dossier_version");
+  });
+
+  it("reconstructs the complete jury report from the authoritative hearing projection", async () => {
+    const completeAssessment =
+      "规则适用缺少明确触发条件，必须在最终草案中逐条补齐；该结论来自正式陪审报告，末尾内容不得再次被页面截断。";
+    const { wrapper } = await mountView({
+      initialHearing: {
+        ...hearing,
+        jury_review_report: {
+          schema_version: "jury-review-public-projection.v1",
+          public_message: "陪审团已经完成对法官 V1 草案的六维复核。",
+          findings: [
+            {
+              dimension: "FACT_COMPLETENESS",
+              severity: "HIGH",
+              assessment: "关键事实仍有缺口。",
+              basis: ["冻结卷宗中缺少直接检测数据。"],
+              requires_revision: true,
+            },
+            {
+              dimension: "RULE_APPLICABILITY",
+              severity: "BLOCKER",
+              assessment: completeAssessment,
+              basis: ["裁决草案没有引用具体规则触发条件。"],
+              requires_revision: true,
+            },
+          ],
+          mandatory_revisions: ["补充规则触发条件并重新说明处理结论。"],
+        },
+      },
+      initialMessages: [
+        ...courtMessages,
+        {
+          id: "MESSAGE_JURY_PUBLIC_SUMMARY_ONLY",
+          sequence_no: 8,
+          sender_role: "JURY_PANEL",
+          message_type: "JURY_REVIEW_REPORT",
+          message_text: "陪审团已完成复核，报告已交由法官参考。",
+        },
+      ],
+    });
+
+    const juryCard = wrapper
+      .findAll('[data-court-message="jury"]')
+      .find((card) => card.text().includes("逐项评审"));
+    expect(juryCard).toBeTruthy();
+    expect(juryCard.text()).toContain(completeAssessment);
+    expect(juryCard.text()).toContain("强制修订（1 项）");
+    expect(juryCard.text()).toContain("最高问题等级阻断");
+    expect(juryCard.text()).toContain("2 项发现");
+    expect(juryCard.text()).toContain("1 项必改");
+    expect(juryCard.text()).not.toContain("75/100");
+    expect(juryCard.text()).not.toContain("FACT_COMPLETENESS");
+    expect(juryCard.text()).not.toContain("RULE_APPLICABILITY");
+    expect(juryCard.text()).not.toContain("mandatory_revisions");
+    expect(juryCard.text()).not.toContain("requires_revision");
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。

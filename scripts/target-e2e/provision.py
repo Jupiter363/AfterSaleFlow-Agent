@@ -1194,7 +1194,10 @@ def provision(
             bootstrap_env_path, run_lock
         )
         now = common.utc_now()
-        expires = now + dt.timedelta(minutes=30)
+        # Keep one signed activation valid across the complete interactive browser UAT and
+        # any later human-review follow-up. All verifiers and persistence constraints use
+        # the same fixed 30-day ceiling.
+        expires = now + dt.timedelta(days=30)
         environment_generation = int(now.timestamp())
         graph_generation = environment_generation
         environment.update(

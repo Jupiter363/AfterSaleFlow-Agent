@@ -58,6 +58,7 @@ from app.graph_runtime.ledger import (
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
+from app.graphs.hearing.errors import HearingGraphContractError
 from app.llm import GovernedProviderRequest, LiteLlmProxyClient
 from app.model_runtime.governed_chat_model import ModelStreamInterrupted
 from app.model_runtime.transports import ModelTransportOutputError
@@ -1595,7 +1596,7 @@ async def test_preterminal_failure_persists_exact_safe_classification(
 
 
 @pytest.mark.asyncio
-async def test_preterminal_evidence_contract_failure_persists_closed_diagnostic_code() -> None:
+async def test_preterminal_room_contract_failure_persists_closed_diagnostic_code() -> None:
     admission = _admission(AdmissionAction.ACQUIRE)
     captured_finishes: list[dict[str, Any]] = []
 
@@ -1620,11 +1621,29 @@ async def test_preterminal_evidence_contract_failure_persists_closed_diagnostic_
         _execution(admission),
         GraphContractError("EVIDENCE_API_TOKEN_SECRET"),
     )
+    await service._abort_preterminal(
+        _execution(admission),
+        HearingGraphContractError("HEARING_TARGET_STREAM_METADATA_INVALID"),
+    )
+    await service._abort_preterminal(
+        _execution(admission),
+        HearingGraphContractError("HEARING_API_TOKEN_SECRET"),
+    )
 
     assert captured_finishes == [
         {
             "status": AttemptStatus.FAILED,
             "error_code": "EVIDENCE_V2_OPENING_FRAME_ORDER_INVALID",
+            "error_classification": "CONTRACT_REJECTED",
+        },
+        {
+            "status": AttemptStatus.FAILED,
+            "error_code": "GRAPH_STREAM_INTERRUPTED",
+            "error_classification": "STREAM_INTERRUPTED",
+        },
+        {
+            "status": AttemptStatus.FAILED,
+            "error_code": "HEARING_TARGET_STREAM_METADATA_INVALID",
             "error_classification": "CONTRACT_REJECTED",
         },
         {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import inspect
 from collections.abc import AsyncIterator
@@ -40,6 +41,8 @@ from app.graph_runtime.identity import (
     Audience,
     RoomType,
     ThreadIdentity,
+    ThreadLifecycle,
+    ThreadRecord,
 )
 from app.graph_runtime.persistence_models import (
     GraphFenceContext,
@@ -47,6 +50,7 @@ from app.graph_runtime.persistence_models import (
     GraphGatewayMode,
 )
 from app.graph_runtime.target_e2e import TargetE2EGraphResultEnvelope
+from app.graph_runtime.target_e2e_room_exchange import build_hearing_agent_context
 from app.graphs.hearing.contracts import (
     HEARING_MODEL_NODE_PROMPTS,
     HEARING_TARGET_E2E_OPERATION_BINDINGS,
@@ -54,7 +58,7 @@ from app.graphs.hearing.contracts import (
     HearingOperation,
 )
 from app.graphs.hearing.errors import HearingGraphContractError
-from app.graphs.hearing.lcel import invoke_hearing_lcel
+from app.graphs.hearing.lcel import build_hearing_lcel
 from app.graphs.hearing.state import HearingGraphInvocation
 from app.graphs.hearing import target_e2e as hearing_target_e2e
 from app.graphs.hearing.target_e2e import (
@@ -80,7 +84,11 @@ from app.schemas import (
     HearingIntakeQuestionsRequest,
     content_hash,
 )
-from app.streaming import AgentStreamObserver, bind_stream_observer
+from app.streaming import (
+    AgentStreamObserver,
+    bind_stream_observer,
+    current_stream_observer,
+)
 
 
 THREAD_ID = "grt.v1." + "9" * 32
@@ -385,7 +393,12 @@ def _fence(command: RoomGraphCommand) -> GraphFenceContext:
     return _LegacyCandidateFence(**values)
 
 
-def _execution(operation: HearingOperation, *, lane: str = "TARGET_E2E_CANDIDATE"):
+def _execution(
+    operation: HearingOperation,
+    *,
+    lane: str = "TARGET_E2E_CANDIDATE",
+    provider_attempt_budget: int = 2,
+):
     operation_binding = HEARING_TARGET_E2E_OPERATION_BINDINGS[operation]
     payload: dict[str, Any] = {
         "schema_version": "room-graph-command.v1",
@@ -428,7 +441,7 @@ def _execution(operation: HearingOperation, *, lane: str = "TARGET_E2E_CANDIDATE
             "envelope_nonce": f"nonce-{operation.value}",
         },
         "retry_budget": {
-            "provider_attempts_remaining": 2,
+            "provider_attempts_remaining": provider_attempt_budget,
             "activity_attempts_remaining": 3,
             "repairs_remaining": 1,
         },
@@ -509,6 +522,49 @@ def _execution(operation: HearingOperation, *, lane: str = "TARGET_E2E_CANDIDATE
     return execution, request
 
 
+def test_e2_provider_budget_is_command_wide_but_each_model_invocation_stays_bounded() -> None:
+    execution, _ = _execution(
+        HearingOperation.EVIDENCE_SYNTHESIS,
+        provider_attempt_budget=6,
+    )
+    replay, _ = _execution(
+        HearingOperation.EVIDENCE_SYNTHESIS,
+        provider_attempt_budget=6,
+    )
+    execution = replace(
+        execution,
+        thread_record=ThreadRecord(
+            identity=execution.admission.thread,
+            lifecycle=ThreadLifecycle.ACTIVE,
+            cognitive_revision=0,
+            last_checkpoint_ns=None,
+            last_checkpoint_id=None,
+        ),
+    )
+
+    agent_context = build_hearing_agent_context(execution)
+
+    assert execution.admission.command.retry_budget.provider_attempts_remaining == 6
+    assert replay.admission.command.request_hash == execution.admission.command.request_hash
+    assert agent_context.retry_budget.provider_attempts_remaining == 2
+
+
+def test_aggregate_provider_budget_fails_closed_for_adjacent_stages_and_rooms() -> None:
+    execution, _ = _execution(
+        HearingOperation.EVIDENCE_SYNTHESIS,
+        provider_attempt_budget=6,
+    )
+    payload = execution.admission.command.model_dump(mode="json")
+
+    judge_v1 = {**payload, "stage_code": "JUDGE_V1_GENERATING"}
+    with pytest.raises(ValueError, match="reserved"):
+        RoomGraphCommand.model_validate(judge_v1)
+
+    evidence_room = {**payload, "room_type": "EVIDENCE"}
+    with pytest.raises(ValueError, match="reserved"):
+        RoomGraphCommand.model_validate(evidence_room)
+
+
 def test_target_registry_explicitly_covers_15_stage_flow_and_model_operations() -> None:
     registry = target_e2e_hearing_family_registrations()
 
@@ -524,8 +580,8 @@ def test_target_registry_explicitly_covers_15_stage_flow_and_model_operations() 
         binding.result_schema_version
         for binding in HEARING_TARGET_E2E_OPERATION_BINDINGS.values()
     } == {
-        "hearing_intake_questions.v1",
-        "hearing_intake_synthesis.v1",
+        "hearing_intake_questions.v5",
+        "hearing_intake_synthesis.v5",
         "hearing_evidence_requests.v1",
         "hearing_evidence_synthesis.v1",
         "hearing_judge_v1.v1",
@@ -534,23 +590,24 @@ def test_target_registry_explicitly_covers_15_stage_flow_and_model_operations() 
     }
 
 
-def test_all_target_model_nodes_keep_prompt_pipe_model_pipe_parser_flow() -> None:
+def test_all_target_model_nodes_build_prompt_pipe_model_pipe_parser_flow() -> None:
     runner = _DeterministicModelRunner()
 
-    results = {
-        node_name: invoke_hearing_lcel(
+    flows = {
+        node_name: build_hearing_lcel(
             model_runner=runner,
             node_name=node_name,
-            case_data={"fixture": "p9-hearing-001", "node": node_name},
             output_type=_LcelOutput,
         )
         for node_name in HEARING_MODEL_NODE_PROMPTS
     }
 
-    assert runner.nodes == list(HEARING_MODEL_NODE_PROMPTS)
-    assert {name: result.value for name, result in results.items()} == {
+    assert set(flows) == set(HEARING_MODEL_NODE_PROMPTS)
+    assert {name: flow.model.node_name for name, flow in flows.items()} == {
         name: name for name in HEARING_MODEL_NODE_PROMPTS
     }
+    assert all(flow.runnable.first is flow.prompt for flow in flows.values())
+    assert all(flow.runnable.last is flow.parser for flow in flows.values())
 
 
 def test_target_workflow_binds_every_hearing_operation_to_async_execution() -> None:
@@ -663,6 +720,9 @@ def test_target_recovery_reuses_checkpoint_without_repeating_model_execution() -
     assert first.runtime_binding_sha256 == replay.runtime_binding_sha256
 
 
+@pytest.mark.skip(
+    reason="retired V1 intake repair contract; V4 fails closed on identifier authority"
+)
 def test_hearing_intake_closed_world_fact_violation_repairs_once_and_replays_exactly() -> None:
     operation = HearingOperation.INTAKE_QUESTIONS
     execution, _ = _execution(operation)
@@ -1071,6 +1131,313 @@ def test_target_stream_binds_frozen_execution_identity_before_external_terminal_
     assert envelope.result_envelope_hash == result.result_envelope_hash
 
 
+def test_v4_governed_stream_separates_graph_and_model_node_identities() -> None:
+    operation = HearingOperation.INTAKE_QUESTIONS
+    model_node = HEARING_TARGET_E2E_OPERATION_BINDINGS[operation].model_nodes[-1]
+    governed_event = {
+        "schema_version": "governed-model-event.v1",
+        "event_type": "visible_delta",
+        "node_name": model_node,
+        "field": "lead_public_text",
+        "delta": "庭前案情已装载。",
+    }
+
+    def candidate(*, graph_node: str, event_node: str) -> tuple[str, tuple[Any, dict[str, str]]]:
+        event = {**governed_event, "node_name": event_node}
+        return (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="",
+                    additional_kwargs={"governed_events": [event]},
+                ),
+                {"langgraph_node": graph_node},
+            ),
+        )
+
+    events = hearing_target_e2e._governed_hearing_events(
+        candidate(graph_node=operation.value, event_node=model_node),
+        graph_node=operation.value,
+        model_node=model_node,
+    )
+
+    assert events == (governed_event,)
+    with pytest.raises(
+        HearingGraphContractError,
+        match="HEARING_TARGET_STREAM_METADATA_INVALID",
+    ):
+        hearing_target_e2e._governed_hearing_events(
+            candidate(graph_node=model_node, event_node=model_node),
+            graph_node=operation.value,
+            model_node=model_node,
+        )
+    with pytest.raises(
+        HearingGraphContractError,
+        match="HEARING_TARGET_VISIBLE_DELTA_INVALID",
+    ):
+        hearing_target_e2e._governed_hearing_events(
+            candidate(graph_node=operation.value, event_node=operation.value),
+            graph_node=operation.value,
+            model_node=model_node,
+        )
+
+
+def test_non_frame_hearing_stream_projects_generation_reset_control_event() -> None:
+    operation = HearingOperation.JUDGE_V2
+    binding = HEARING_TARGET_E2E_OPERATION_BINDINGS[operation]
+    model_node = binding.model_nodes[-1]
+    candidate = (
+        "messages",
+        (
+            AIMessageChunk(
+                content="",
+                additional_kwargs={
+                    "governed_events": [
+                        {
+                            "schema_version": "governed-model-event.v1",
+                            "event_type": "generation_reset",
+                            "node_name": model_node,
+                            "generation": 2,
+                            "reason_code": "OUTPUT_SCHEMA_INVALID",
+                        }
+                    ]
+                },
+            ),
+            {"langgraph_node": operation.value},
+        ),
+    )
+
+    projected = HearingTargetE2ERuntimeAdapter._visible_events(candidate, binding)
+
+    assert len(projected) == 1
+    event_type, payload = projected[0]
+    assert event_type == "generation_reset"
+    assert payload.node == model_node
+    assert payload.generation == 2
+    assert payload.reason_code == "OUTPUT_SCHEMA_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_v5_target_stream_binds_native_observer_before_graph_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = HearingOperation.INTAKE_QUESTIONS
+    execution, _ = _execution(operation)
+    binding = HEARING_TARGET_E2E_OPERATION_BINDINGS[operation]
+    lead = "庭前案情已经装载，我会先围绕核心争议请双方说明。"
+    question = "请双方分别说明商品核心性能是否达到约定标准。"
+    header = {
+        "frame_sequence": 2,
+        "frame_type": "SHARED_ISSUE_QUESTION",
+        "question_slot_id": "QUESTION_SLOT_01",
+        "fact_ids": ["FACT_PERFORMANCE"],
+    }
+
+    class _ObserverStreamingBundle:
+        runtime_binding_sha256 = "d" * 64
+
+        def __init__(self) -> None:
+            self.native_delta_available = asyncio.Event()
+            self.release_completion = asyncio.Event()
+            self.execute_completed = False
+            self.stream_closed = False
+            self.state = {
+                "status": "PROPOSED",
+                "proposal": {
+                    "schema_version": binding.result_schema_version,
+                    "lead_public_text": lead,
+                    "public_frames": [
+                        {
+                            "frame_sequence": 1,
+                            "frame_type": "HEARING_INTAKE_QUESTION_LEAD",
+                            "public_text": lead,
+                            "public_text_hash": hashlib.sha256(
+                                lead.encode("utf-8")
+                            ).hexdigest(),
+                        },
+                        {
+                            "frame_sequence": 2,
+                            "frame_type": "SHARED_ISSUE_QUESTION",
+                            "public_text": question,
+                            "public_text_hash": hashlib.sha256(
+                                question.encode("utf-8")
+                            ).hexdigest(),
+                        },
+                    ],
+                },
+                "cognitive_revision": 1,
+            }
+
+        async def astream(self) -> AsyncIterator[Any]:
+            try:
+                observer = current_stream_observer()
+                assert observer is not None
+                assert [
+                    field.field
+                    for field in observer.visible_fields_for(
+                        "hearing_intake_questions"
+                    )
+                ] == ["lead_public_text", "frames"]
+                observer.visible_delta(
+                    "hearing_intake_questions", "lead_public_text", lead[:8]
+                )
+                observer.visible_delta(
+                    "hearing_intake_questions", "lead_public_text", lead[8:]
+                )
+                self.native_delta_available.set()
+                await self.release_completion.wait()
+                for item in (
+                    {
+                        "kind": "frame_start",
+                        "frame_sequence": 2,
+                        "header": header,
+                    },
+                    {
+                        "kind": "public_text_delta",
+                        "frame_sequence": 2,
+                        "delta": question,
+                    },
+                    {
+                        "kind": "frame_end",
+                        "frame_sequence": 2,
+                    },
+                ):
+                    observer.visible_delta(
+                        "hearing_intake_questions",
+                        "frames",
+                        json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+                    )
+                self.execute_completed = True
+                if False:  # pragma: no cover - keeps this an async iterator
+                    yield None
+            finally:
+                self.stream_closed = True
+
+        async def completed_state(self) -> dict[str, Any]:
+            assert self.execute_completed
+            return self.state
+
+        async def terminal_checkpoint(self) -> tuple[str, str, int]:
+            assert self.execute_completed
+            return "", "checkpoint-hearing-v5-observer-stream", 1
+
+    bundle = _ObserverStreamingBundle()
+    saver = _MemoryFencedSaver(execution.fence)
+    store = _PayloadStore()
+    adapter = HearingTargetE2ERuntimeAdapter(
+        checkpointer=saver,
+        invocation_provider=_InvocationProvider(),
+        payload_store=store,
+    )
+    monkeypatch.setattr(
+        hearing_target_e2e,
+        "build_target_e2e_hearing_runtime_bundle",
+        lambda **_: bundle,
+    )
+
+    source = adapter.stream(execution)
+    events = [await anext(source)]
+    pending = asyncio.create_task(anext(source))
+    await asyncio.wait_for(bundle.native_delta_available.wait(), timeout=1.0)
+    first_public = await asyncio.wait_for(pending, timeout=1.0)
+    events.append(first_public)
+    assert first_public.event_type == "public_frame_start"
+    assert bundle.execute_completed is False
+
+    lead_delta = await asyncio.wait_for(anext(source), timeout=1.0)
+    events.append(lead_delta)
+    assert lead_delta.event_type == "public_text_delta"
+    assert lead_delta.payload.delta == lead[:8]
+    assert bundle.execute_completed is False
+
+    bundle.release_completion.set()
+    events.extend([event async for event in source])
+
+    assert [event.event_type for event in events] == [
+        "attempt_started",
+        "public_frame_start",
+        "public_text_delta",
+        "public_text_delta",
+        "public_frame_committed",
+        "public_frame_start",
+        "public_text_delta",
+        "public_frame_committed",
+        "final",
+    ]
+    assert "".join(
+        event.payload.delta or ""
+        for event in events
+        if event.event_type == "public_text_delta"
+        and event.payload.frame_sequence == 1
+    ) == lead
+    assert "".join(
+        event.payload.delta or ""
+        for event in events
+        if event.event_type == "public_text_delta"
+        and event.payload.frame_sequence == 2
+    ) == question
+    assert bundle.stream_closed
+    assert len(store.calls) == 1
+    assert len(saver.external_terminal_commits) == 1
+
+
+@pytest.mark.asyncio
+async def test_target_stream_projects_validated_terminal_text_before_final_when_native_deltas_are_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = HearingOperation.JUDGE_V2
+    execution, _ = _execution(operation)
+    binding = HEARING_TARGET_E2E_OPERATION_BINDINGS[operation]
+    public_text = (
+        "法官已完成事实认定、证据核验与规则适用，现将通过格式校验的公开裁判说明"
+        "按增量事件宣读；正式草案仍以最终提交的冻结结果为准。"
+    )
+
+    class _BufferedTerminalBundle:
+        runtime_binding_sha256 = "d" * 64
+
+        async def astream(self) -> AsyncIterator[Any]:
+            if False:
+                yield None
+
+        async def completed_state(self) -> dict[str, Any]:
+            return {
+                "status": "PROPOSED",
+                "proposal": {
+                    "schema_version": binding.result_schema_version,
+                    "case_id": execution.admission.command.case_id,
+                    "public_message": public_text,
+                },
+                "cognitive_revision": 1,
+            }
+
+        async def terminal_checkpoint(self) -> tuple[str, str, int]:
+            return "", "checkpoint-hearing-terminal-projection", 1
+
+    monkeypatch.setattr(
+        hearing_target_e2e,
+        "build_target_e2e_hearing_runtime_bundle",
+        lambda **_: _BufferedTerminalBundle(),
+    )
+    saver = _MemoryFencedSaver(execution.fence)
+    adapter = HearingTargetE2ERuntimeAdapter(
+        checkpointer=saver,
+        invocation_provider=_InvocationProvider(),
+        payload_store=_PayloadStore(),
+    )
+
+    events = [event async for event in adapter.stream(execution)]
+    visible_events = [event for event in events if event.event_type == "visible_delta"]
+
+    assert events[0].event_type == "attempt_started"
+    assert events[-1].event_type == "final"
+    assert len(visible_events) >= 2
+    assert "".join(event.payload.delta or "" for event in visible_events) == public_text
+    assert all(event.payload.field == "public_message" for event in visible_events)
+    assert all(event.payload.node == binding.model_nodes[-1] for event in visible_events)
+    assert len(saver.external_terminal_commits) == 1
+
+
 @pytest.mark.asyncio
 async def test_target_stream_forwards_governed_delta_before_completion_and_replays_bytes(
     monkeypatch: pytest.MonkeyPatch,
@@ -1129,7 +1496,7 @@ async def test_target_stream_forwards_governed_delta_before_completion_and_repla
                                 ]
                             },
                         ),
-                        {"langgraph_node": node_name},
+                        {"langgraph_node": operation.value},
                     ),
                 )
                 await self.release_completion.wait()

@@ -85,17 +85,49 @@ public final class HearingPublicTranscriptPolicy {
         String exactAgentRunId = requiredText(agentRunId, "agentRunId");
         Presentation presentation = presentation(sourceStage);
         List<Draft> drafts = new ArrayList<>();
-        drafts.add(
-                new Draft(
-                        sourceStage,
-                        presentation.suffix(),
-                        MessageSenderType.AGENT,
-                        presentation.role(),
-                        presentation.senderId(),
-                        MessageSource.AGENT_LLM,
-                        presentation.messageType(),
-                        formalPublicText(sourceStage, formalOutput),
-                        exactAgentRunId));
+        if ((sourceStage == HearingFlowStage.INTAKE_QUESTIONS_GENERATING
+                        && "hearing_intake_questions.v5"
+                                .equals(formalOutput.path("schema_version").asText()))
+                || (sourceStage == HearingFlowStage.INTAKE_SYNTHESIZING
+                        && "hearing_intake_synthesis.v5"
+                                .equals(formalOutput.path("schema_version").asText()))) {
+            ArrayNode frames = array(formalOutput.path("public_frames"), "public frames");
+            if (frames.size() < 2 || frames.size() > 11) {
+                throw new IllegalStateException("formal Hearing V5 public frame count is invalid");
+            }
+            for (int index = 0; index < frames.size(); index++) {
+                JsonNode frame = frames.get(index);
+                int sequence = index + 1;
+                if (frame.path("frame_sequence").asInt(0) != sequence
+                        || !frame.path("public_text").isTextual()
+                        || frame.path("public_text").asText().isBlank()) {
+                    throw new IllegalStateException("formal Hearing V4 public frame is invalid");
+                }
+                drafts.add(
+                        new Draft(
+                                sourceStage,
+                                presentation.suffix() + "-frame-" + sequence,
+                                MessageSenderType.AGENT,
+                                presentation.role(),
+                                presentation.senderId(),
+                                MessageSource.AGENT_LLM,
+                                presentation.messageType(),
+                                frame.path("public_text").asText(),
+                                exactAgentRunId));
+            }
+        } else {
+            drafts.add(
+                    new Draft(
+                            sourceStage,
+                            presentation.suffix(),
+                            MessageSenderType.AGENT,
+                            presentation.role(),
+                            presentation.senderId(),
+                            MessageSource.AGENT_LLM,
+                            presentation.messageType(),
+                            formalPublicText(sourceStage, formalOutput),
+                            exactAgentRunId));
+        }
         Draft notice = nextStageNotice(sourceStage);
         if (notice != null) {
             drafts.add(notice);

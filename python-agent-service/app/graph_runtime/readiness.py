@@ -19,6 +19,7 @@ from app.graph_runtime.persistence_models import (
     GraphReadinessConfig,
     GraphReadinessReport,
 )
+from app.graph_runtime.transaction_boundary import run_postgres_transaction
 
 
 REQUIRED_RELATIONS: Final[tuple[str, ...]] = (
@@ -304,15 +305,25 @@ class GraphPersistenceReadinessProbe:
         checks: dict[str, bool] = {"pool_available": True}
         migrations = self._migrations or load_graph_migrations()
 
-        async with self._pool.connection(timeout=self._config.timeout_seconds) as connection:
-            async with connection.transaction():
-                await connection.execute("set transaction read only")
-                await self._check_identity(connection, checks)
-                await self._check_privileges(connection, checks)
-                await self._check_relations(connection, checks)
-                await self._check_migrations(connection, checks, migrations)
-                await self._check_control(connection, checks, migrations)
-                await self._check_consistency(connection, checks)
+        async def readiness_transaction(connection: Any) -> None:
+            await connection.execute("set transaction read only")
+            await self._check_identity(connection, checks)
+            await self._check_privileges(connection, checks)
+            await self._check_relations(connection, checks)
+            await self._check_migrations(connection, checks, migrations)
+            await self._check_control(connection, checks, migrations)
+            await self._check_consistency(connection, checks)
+
+        # Readiness is invoked by short-lived HTTP probes while command execution
+        # uses the same bounded pools.  A caller timeout must therefore finish the
+        # PostgreSQL rollback and pool return before cancellation escapes; otherwise
+        # an INTRANS connection can consume the control lane used by lease renewal.
+        await run_postgres_transaction(
+            self._pool,
+            timeout=self._config.timeout_seconds,
+            operation=readiness_transaction,
+            operation_name="graph persistence readiness",
+        )
 
         checks["bounded_probe"] = True
         return GraphReadinessReport(

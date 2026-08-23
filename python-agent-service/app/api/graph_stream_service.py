@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 import anyio
+from pydantic import ValidationError
 
 from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
 from app.graph_runtime.errors import (
@@ -33,6 +34,7 @@ from app.graph_runtime.gateway import (
 from app.graph_runtime.persistence_models import GraphGatewayMode
 from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.ledger import AttemptStatus, ResultRecord
+from app.graph_runtime.lease import LEASE_DURATION_SECONDS
 from app.graph_runtime.provider_intent import GatewayProviderCallIntentRecorder
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
@@ -500,8 +502,14 @@ class GatewayBackedGraphCommandStreamService:
     ) -> None:
         if not owner_id or len(owner_id) > 128:
             raise ValueError("Graph owner_id must contain 1..128 characters")
-        if lease_renewal_seconds <= 0 or lease_renewal_seconds >= 30:
-            raise ValueError("lease renewal must be inside the 30-second lease window")
+        if (
+            lease_renewal_seconds <= 0
+            or lease_renewal_seconds >= LEASE_DURATION_SECONDS
+        ):
+            raise ValueError(
+                "lease renewal must be inside the "
+                f"{LEASE_DURATION_SECONDS}-second lease window"
+            )
         self._gateway = gateway
         self._executors = executors
         self._owner_id = owner_id
@@ -1068,11 +1076,42 @@ class GatewayBackedGraphCommandStreamService:
             return False, GraphContractError("gateway stream ended without a terminal event")
         except BaseException as error:
             if error_site is not None:
-                logger.error(
-                    "graph_prefetch_source_failed error_type=%s error_site=%s:%s:%s",
-                    type(error).__name__,
-                    *error_site,
+                diagnostic_code = (
+                    error.diagnostic_code
+                    if isinstance(error, AgentOutputSchemaError)
+                    else None
                 )
+                if isinstance(error, ValidationError):
+                    validation_errors = tuple(
+                        {
+                            "loc": ".".join(str(part) for part in detail.get("loc", ())),
+                            "type": str(detail.get("type", "unknown")),
+                            "msg": str(detail.get("msg", "validation failed")),
+                        }
+                        for detail in error.errors(include_input=False, include_url=False)
+                    )
+                    logger.error(
+                        "graph_prefetch_source_failed error_type=%s "
+                        "error_site=%s:%s:%s validation_errors=%s",
+                        type(error).__name__,
+                        *error_site,
+                        validation_errors,
+                    )
+                elif diagnostic_code is None:
+                    logger.error(
+                        "graph_prefetch_source_failed error_type=%s "
+                        "error_site=%s:%s:%s",
+                        type(error).__name__,
+                        *error_site,
+                    )
+                else:
+                    logger.error(
+                        "graph_prefetch_source_failed error_type=%s "
+                        "error_site=%s:%s:%s diagnostic_code=%s",
+                        type(error).__name__,
+                        *error_site,
+                        diagnostic_code,
+                    )
             return False, error
         return event.event_type in TERMINAL_STREAM_EVENTS, None
 

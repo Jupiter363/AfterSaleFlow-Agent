@@ -20,6 +20,7 @@ MAX_SOURCE_UNITS = 64
 MAX_SOURCE_UNIT_CHARS = 12_000
 MAX_CURRENT_BATCH_ITEMS = 20
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -90,8 +91,8 @@ def assemble_evidence_room_context_v2(
         "remaining_verification_requirements": _remaining_requirements(base),
         "private_actor_memory": _private_memory(base),
         "output_contract": {
-            "schema_version": "evidence_turn_stream.v2",
-            "frame_authority_schema": "evidence-turn-frame.v2",
+            "schema_version": "evidence_turn_stream.v3",
+            "frame_authority_schema": "evidence-turn-frame.v3",
             "lead_public_text_property": "lead_public_text",
             "lead_frame_type": (
                 None if mode == "REENTRY_REPLAY" else _leading_frame_type(mode)
@@ -109,6 +110,97 @@ def assemble_evidence_room_context_v2(
         base=base,
         payload=payload,
         source_units=source_units,
+    )
+
+
+def finalize_evidence_room_sources_v2(
+    assembled: AssembledEvidenceRoomContextV2,
+    asset_manifest: dict[str, Any] | None,
+) -> AssembledEvidenceRoomContextV2:
+    """Bind source authority to pixels that the loader actually delivered.
+
+    Parsed text is known while the base context is assembled, but image pixels
+    are known only after the privacy, MIME, size and hash gates run.  This
+    second deterministic projection closes that timing gap before the provider
+    schema and public stream policy are configured.
+    """
+
+    mode = str(assembled.payload["turn_contract"]["turn_mode"])
+    if mode != "MATERIAL_REVIEW":
+        return assembled
+
+    attachment_refs = tuple(
+        str(value)
+        for value in assembled.base.raw_envelope.current_event.attachment_refs
+    )
+    visual_units = _visual_source_unit_catalog(asset_manifest, attachment_refs)
+    combined_units = tuple(
+        [*visual_units, *assembled.source_units][:MAX_SOURCE_UNITS]
+    )
+    allow_observation = bool(combined_units)
+
+    payload = copy.deepcopy(assembled.payload)
+    source_catalog = payload["source_unit_catalog"]
+    source_catalog["items"] = copy.deepcopy(list(combined_units))
+    source_catalog["source_authority_hash"] = canonical_sha256(
+        {
+            "base_source_authority_hash": source_catalog["source_authority_hash"],
+            "source_units": [
+                {
+                    "source_unit_id": item["source_unit_id"],
+                    "evidence_id": item["evidence_id"],
+                    "basis": item["basis"],
+                    "authority": item["authority"],
+                }
+                for item in combined_units
+            ],
+        }
+    )
+
+    turn_contract = payload["turn_contract"]
+    output_contract = payload["output_contract"]
+    turn_contract["allow_observation"] = allow_observation
+    if allow_observation:
+        frame_order = (
+            "MATERIAL_RECEIPT -> OBSERVATION* -> "
+            "ASSESSMENT(exactly one per attachment) -> REQUEST* -> ROOM_READINESS"
+        )
+    else:
+        frame_order = (
+            "MATERIAL_RECEIPT -> ASSESSMENT(exactly one per attachment) -> "
+            "REQUEST* -> ROOM_READINESS"
+        )
+        turn_contract["allowed_frame_types"] = [
+            value
+            for value in turn_contract["allowed_frame_types"]
+            if value != "EVIDENCE_OBSERVATION"
+        ]
+        output_contract["allowed_frame_types"] = [
+            value
+            for value in output_contract["allowed_frame_types"]
+            if value != "EVIDENCE_OBSERVATION"
+        ]
+    turn_contract["frame_order"] = frame_order
+    output_contract["frame_order"] = frame_order
+
+    visual_by_id = {
+        str(item["evidence_id"]): item
+        for item in (asset_manifest or {}).get("items", [])
+        if isinstance(item, dict) and isinstance(item.get("evidence_id"), str)
+    }
+    for item in payload["current_evidence_batch"]:
+        descriptor = visual_by_id.get(str(item["evidence_id"]))
+        if descriptor is None:
+            continue
+        item["visual_input_status"] = descriptor.get("visual_input_status")
+        item["inspected_modalities"] = list(
+            descriptor.get("inspected_modalities") or []
+        )
+
+    return AssembledEvidenceRoomContextV2(
+        base=assembled.base,
+        payload=payload,
+        source_units=combined_units,
     )
 
 
@@ -147,10 +239,9 @@ def _turn_contract(mode: str, attachment_count: int) -> dict[str, Any]:
                 "EVIDENCE_OBSERVATION",
                 "EVIDENCE_ASSESSMENT",
                 "EVIDENCE_REQUEST",
-                "HUMAN_REVIEW_TASK",
                 "ROOM_READINESS",
             ],
-            "frame_order": "MATERIAL_RECEIPT -> OBSERVATION* -> ASSESSMENT(exactly one per attachment) -> REQUEST* -> REVIEW_TASK* -> ROOM_READINESS",
+            "frame_order": "MATERIAL_RECEIPT -> OBSERVATION* -> ASSESSMENT(exactly one per attachment) -> REQUEST* -> ROOM_READINESS",
             "min_requests": 0,
             "max_requests": 3,
             "allow_observation": True,
@@ -360,6 +451,65 @@ def _source_unit_catalog(envelope: Any, attachment_refs: Any) -> tuple[dict[str,
     return tuple(units)
 
 
+def _visual_source_unit_catalog(
+    asset_manifest: dict[str, Any] | None,
+    attachment_refs: tuple[str, ...],
+) -> tuple[dict[str, Any], ...]:
+    if not asset_manifest:
+        return ()
+    manifest_items = asset_manifest.get("items")
+    if not isinstance(manifest_items, list):
+        raise GraphContractError("EVIDENCE_V2_ASSET_MANIFEST_INVALID")
+    attachment_scope = set(attachment_refs)
+    units: list[dict[str, Any]] = []
+    seen_evidence_ids: set[str] = set()
+    for descriptor in manifest_items:
+        if not isinstance(descriptor, dict):
+            raise GraphContractError("EVIDENCE_V2_ASSET_MANIFEST_INVALID")
+        if descriptor.get("visual_input_status") != "LOADED":
+            continue
+        evidence_id = descriptor.get("evidence_id")
+        actual_sha256 = descriptor.get("actual_sha256")
+        modalities = descriptor.get("inspected_modalities") or []
+        content_type = descriptor.get("content_type")
+        if (
+            not isinstance(evidence_id, str)
+            or evidence_id not in attachment_scope
+            or evidence_id in seen_evidence_ids
+            or not isinstance(actual_sha256, str)
+            or _SHA256_HEX.fullmatch(actual_sha256) is None
+            or not isinstance(content_type, str)
+            or "IMAGE_PIXELS" not in modalities
+        ):
+            raise GraphContractError("EVIDENCE_V2_ASSET_MANIFEST_INVALID")
+        seen_evidence_ids.add(evidence_id)
+        identity = {
+            "evidence_id": evidence_id,
+            "content_sha256": actual_sha256,
+            "content_type": content_type,
+            "basis": "IMAGE_PIXELS",
+            "source_projection_version": "evidence-image-source.v1",
+        }
+        units.append(
+            {
+                "source_unit_id": "ESRC_" + canonical_sha256(identity)[:24].upper(),
+                "evidence_id": evidence_id,
+                "basis": "IMAGE_PIXELS",
+                "content": (
+                    "该来源单元对应已通过授权、格式与哈希校验并实际载入模型的"
+                    "完整图片像素；只能依据画面可见内容形成观察。"
+                ),
+                "authority": {
+                    "content_sha256": actual_sha256,
+                    "content_type": content_type,
+                    "coverage": "FULL",
+                    "source_projection_version": "evidence-image-source.v1",
+                },
+            }
+        )
+    return tuple(units)
+
+
 def _normalize_source_text(value: str) -> str:
     return value.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -400,4 +550,8 @@ def _private_memory(base: AssembledEvidenceContext) -> dict[str, Any]:
     return memory
 
 
-__all__ = ["AssembledEvidenceRoomContextV2", "assemble_evidence_room_context_v2"]
+__all__ = [
+    "AssembledEvidenceRoomContextV2",
+    "assemble_evidence_room_context_v2",
+    "finalize_evidence_room_sources_v2",
+]

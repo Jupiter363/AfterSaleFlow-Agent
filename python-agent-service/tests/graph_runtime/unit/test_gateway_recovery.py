@@ -42,7 +42,12 @@ THREAD = f"grt.v1.{'4' * 32}"
 RESULT_HASH = "e" * 64
 
 
-def _binding() -> CommandBinding:
+def _binding(
+    *,
+    room_type: str | None = None,
+    stage_code: str | None = None,
+    provider_attempt_budget: int = 2,
+) -> CommandBinding:
     request: dict[str, Any] = {
         "schema_version": "room-graph-command.v1",
         "logical_run_id": "run-1",
@@ -50,10 +55,14 @@ def _binding() -> CommandBinding:
         "graph_key": "evidence.flow",
         "graph_version": "evidence.v2",
         "retry_budget": {
-            "provider_attempts_remaining": 2,
+            "provider_attempts_remaining": provider_attempt_budget,
             "activity_attempts_remaining": 2,
         },
     }
+    if room_type is not None:
+        request["room_type"] = room_type
+    if stage_code is not None:
+        request["stage_code"] = stage_code
     request["request_hash"] = canonical_sha256(request)
     return CommandBinding(
         thread_id=THREAD,
@@ -78,10 +87,14 @@ def _binding() -> CommandBinding:
     )
 
 
-def _command(status: CommandStatus) -> CommandRecord:
+def _command(
+    status: CommandStatus,
+    *,
+    binding: CommandBinding | None = None,
+) -> CommandRecord:
     terminal_checkpoint = status in {CommandStatus.RESULT_CHECKPOINTED, CommandStatus.COMPLETED}
     return CommandRecord(
-        binding=_binding(),
+        binding=binding or _binding(),
         status=status,
         attempt_count=1 if status is not CommandStatus.REGISTERED else 0,
         fencing_token=1 if status is not CommandStatus.REGISTERED else None,
@@ -319,12 +332,20 @@ class _InspectionLedger:
 
 
 class _RegisteredBudgetLedger:
-    def __init__(self, *, deadline_open: bool) -> None:
+    def __init__(
+        self,
+        *,
+        deadline_open: bool,
+        binding: CommandBinding | None = None,
+        provider_call_count: int = 0,
+    ) -> None:
         self.deadline_open = deadline_open
+        self.binding = binding or _binding()
+        self.provider_call_count = provider_call_count
         self.termination: tuple[CommandStatus, str, str] | None = None
 
     async def load(self, connection: Any, **kwargs: Any) -> CommandRecord:
-        return _command(CommandStatus.REGISTERED)
+        return _command(CommandStatus.REGISTERED, binding=self.binding)
 
     async def latest_attempt(self, connection: Any, **kwargs: Any) -> None:
         return None
@@ -332,7 +353,7 @@ class _RegisteredBudgetLedger:
     async def load_recovery_budget(self, connection: Any, **kwargs: Any) -> RecoveryBudget:
         return RecoveryBudget(
             deadline_open=self.deadline_open,
-            provider_call_count=0,
+            provider_call_count=self.provider_call_count,
         )
 
     async def terminate(
@@ -346,7 +367,7 @@ class _RegisteredBudgetLedger:
     ) -> CommandRecord:
         self.termination = (status, error_code, error_classification)
         return replace(
-            _command(CommandStatus.REGISTERED),
+            _command(CommandStatus.REGISTERED, binding=self.binding),
             status=status,
             error_code=error_code,
             error_classification=error_classification,
@@ -425,6 +446,48 @@ async def test_unstarted_expired_command_is_durably_aborted() -> None:
         "GRAPH_COMMAND_DEADLINE_EXCEEDED",
         "DEADLINE",
     )
+
+
+@pytest.mark.asyncio
+async def test_hearing_e2_recovery_retains_provider_authority_after_two_file_calls() -> None:
+    binding = _binding(
+        room_type="HEARING",
+        stage_code="EVIDENCE_SYNTHESIZING",
+        provider_attempt_budget=6,
+    )
+    ledger = _RegisteredBudgetLedger(
+        deadline_open=True,
+        binding=binding,
+        provider_call_count=2,
+    )
+    coordinator = PostgresRecoveryCoordinator(
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=_Leases(),  # type: ignore[arg-type]
+    )
+
+    decision = await coordinator.inspect(object(), binding=binding)
+
+    assert decision.action is RecoveryAction.RESUME_BEFORE_MODEL
+    assert decision.invoke_model is True
+
+
+@pytest.mark.asyncio
+async def test_adjacent_stage_cannot_use_hearing_e2_aggregate_provider_budget() -> None:
+    binding = _binding(
+        room_type="HEARING",
+        stage_code="JUDGE_V1_GENERATING",
+        provider_attempt_budget=6,
+    )
+    coordinator = PostgresRecoveryCoordinator(
+        ledger=_RegisteredBudgetLedger(
+            deadline_open=True,
+            binding=binding,
+        ),  # type: ignore[arg-type]
+        leases=_Leases(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(GraphRecoveryError, match="GRAPH_RETRY_BUDGET_INVALID"):
+        await coordinator.inspect(object(), binding=binding)
 
 
 class _Cursor:

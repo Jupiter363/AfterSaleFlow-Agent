@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Test;
 class JdbcTargetHearingAgentStageInputFactoryHashTest {
 
   @Test
-  void hearingSelfHashPreservesPythonFloatEncodingAndDefaultMembers() {
+  void hearingSelfHashUsesTheSameRfc8785NumberEncodingAsPython() {
     ObjectMapper mapper = new ObjectMapper();
     ObjectNode value = mapper.createObjectNode();
     value.put("schema_version", "hearing_judge_v2.v1");
@@ -20,6 +20,6 @@ class JdbcTargetHearingAgentStageInputFactoryHashTest {
 
     assertThat(JdbcTargetHearingAgentStageInputFactory.pythonContentHash(
         mapper, value, "judge_v2_hash"))
-        .isEqualTo("7ea476962881d54d254b43c3064682cf8fd6c3b5436dda2f260c5d79cb0c4c69");
+        .isEqualTo("6fc157be68ad534f35b35bf54d3d29e902c18c52f3cf1023a609f5d1a9740ee2");
   }
 }

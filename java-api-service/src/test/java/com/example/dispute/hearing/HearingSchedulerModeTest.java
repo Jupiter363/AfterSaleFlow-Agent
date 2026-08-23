@@ -37,8 +37,7 @@ class HearingSchedulerModeTest {
         HearingFlowRuntimeService runtime = mock(HearingFlowRuntimeService.class);
         HearingFlowArtifactRepository artifacts = mock(HearingFlowArtifactRepository.class);
         HearingReviewHandoffService handoff = mock(HearingReviewHandoffService.class);
-        when(artifacts.findTop50ByArtifactTypeOrderByCreatedAtDesc(
-                        HearingArtifactType.ADJUDICATION_DRAFT))
+        when(artifacts.findTop50LegacyAdjudicationDrafts())
                 .thenReturn(List.of());
 
         new HearingFlowDeadlineScheduler(
@@ -54,9 +53,7 @@ class HearingSchedulerModeTest {
                 .recover();
 
         verify(runtime).expireDuePartyStages();
-        verify(artifacts)
-                .findTop50ByArtifactTypeOrderByCreatedAtDesc(
-                        HearingArtifactType.ADJUDICATION_DRAFT);
+        verify(artifacts).findTop50LegacyAdjudicationDrafts();
     }
 
     @Test
@@ -83,9 +80,7 @@ class HearingSchedulerModeTest {
                     .recover();
 
             verify(runtime, never()).expireDuePartyStages();
-            verify(artifacts, never())
-                    .findTop50ByArtifactTypeOrderByCreatedAtDesc(
-                            HearingArtifactType.ADJUDICATION_DRAFT);
+            verify(artifacts, never()).findTop50LegacyAdjudicationDrafts();
             if (mode == SchedulerMode.DETECTOR) {
                 verify(detector).inspectDeadlineProjection();
                 verify(detector).inspectHandoffProjection();

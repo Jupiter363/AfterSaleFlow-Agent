@@ -8,7 +8,7 @@ import java.time.Instant;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
-/** Immutable trial_dossier.v1 snapshot consumed by every adjudication operation. */
+/** Immutable trial_dossier.v2 snapshot consumed by every adjudication operation. */
 @Entity
 @Table(name = "hearing_trial_dossier")
 public class HearingTrialDossierEntity extends AbstractEntity {
@@ -69,7 +69,7 @@ public class HearingTrialDossierEntity extends AbstractEntity {
         HearingTrialDossierEntity entity = new HearingTrialDossierEntity(id);
         entity.caseId = required(caseId, "caseId");
         entity.flowInstanceId = required(flowInstanceId, "flowInstanceId");
-        entity.schemaVersion = "trial_dossier.v1";
+        entity.schemaVersion = "trial_dossier.v2";
         entity.caseMatrixVersion = caseMatrixVersion;
         entity.caseMatrixHash = requiredHash(caseMatrixHash, "caseMatrixHash");
         entity.evidenceMatrixVersion = evidenceMatrixVersion;

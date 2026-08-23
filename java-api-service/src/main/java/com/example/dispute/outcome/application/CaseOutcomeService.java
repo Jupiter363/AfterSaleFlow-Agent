@@ -13,6 +13,9 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.PlatformReviewerAuthorization;
 import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.executor.application.ToolExecutorService;
+import com.example.dispute.hearing.domain.HearingArtifactType;
+import com.example.dispute.hearing.infrastructure.persistence.entity.HearingFlowArtifactEntity;
+import com.example.dispute.hearing.infrastructure.persistence.repository.HearingFlowArtifactRepository;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.FlowConclusionEntity;
@@ -30,6 +33,9 @@ import com.example.dispute.review.application.ReviewDecisionView;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.stereotype.Service;
@@ -46,6 +52,7 @@ public class CaseOutcomeService {
     private final FulfillmentCaseRepository caseRepository;
     private final ApprovalRecordRepository approvalRepository;
     private final AdjudicationDraftRepository draftRepository;
+    private final HearingFlowArtifactRepository hearingFlowArtifactRepository;
     private final FlowConclusionRepository conclusionRepository;
     private final ToolExecutorService executorService;
     private final RemedyPlanRepository remedyPlanRepository;
@@ -63,6 +70,7 @@ public class CaseOutcomeService {
             FulfillmentCaseRepository caseRepository,
             ApprovalRecordRepository approvalRepository,
             AdjudicationDraftRepository draftRepository,
+            HearingFlowArtifactRepository hearingFlowArtifactRepository,
             FlowConclusionRepository conclusionRepository,
             ToolExecutorService executorService,
             RemedyPlanRepository remedyPlanRepository,
@@ -72,6 +80,7 @@ public class CaseOutcomeService {
         this.caseRepository = caseRepository;
         this.approvalRepository = approvalRepository;
         this.draftRepository = draftRepository;
+        this.hearingFlowArtifactRepository = hearingFlowArtifactRepository;
         this.conclusionRepository = conclusionRepository;
         this.executorService = executorService;
         this.remedyPlanRepository = remedyPlanRepository;
@@ -104,6 +113,20 @@ public class CaseOutcomeService {
                 draftRepository
                         .findFirstByCaseIdOrderByDraftVersionDesc(caseId)
                         .orElse(null);
+        HearingFlowArtifactEntity draftArtifact =
+                draft == null
+                        ? null
+                        : hearingFlowArtifactRepository
+                                .findByCaseIdAndArtifactType(
+                                        caseId, HearingArtifactType.ADJUDICATION_DRAFT)
+                                .orElse(null);
+        HearingFlowArtifactEntity juryReportArtifact =
+                draftArtifact == null
+                        ? null
+                        : hearingFlowArtifactRepository
+                                .findByCaseIdAndArtifactType(
+                                        caseId, HearingArtifactType.JURY_REVIEW_REPORT)
+                                .orElse(null);
         FlowConclusionEntity flowConclusion =
                 conclusionRepository.findByCaseId(caseId).orElse(null);
         RemedyPlanEntity remedyPlan =
@@ -119,7 +142,8 @@ public class CaseOutcomeService {
                 dispute.getCaseStatus(),
                 dispute.getClosedAt(),
                 finalDecision(dispute, approval, draft, flowConclusion),
-                adjudicationDraft(draft, remedyPlan),
+                adjudicationDraft(
+                        caseId, draft, draftArtifact, juryReportArtifact, remedyPlan),
                 reviewTask == null ? null : reviewTask.getId(),
                 reviewTask == null ? null : reviewTask.getTaskStatus().name(),
                 executorService.actions(caseId, actor));
@@ -176,22 +200,210 @@ public class CaseOutcomeService {
     // 下游影响：「CaseOutcomeService.adjudicationDraft(AdjudicationDraftEntity,RemedyPlanEntity)」向下依次触达 「draft.getId」、「draft.getDraftVersion」、「draft.getRecommendedDecision」、「draft.getConfidence」；计算结果以「AdjudicationDraftView」交给调用方。
     // 系统意义：「CaseOutcomeService.adjudicationDraft(AdjudicationDraftEntity,RemedyPlanEntity)」负责主链路中的“adjudication草案”；对外结果必须以人工决定和真实执行记录为准，不能展示内部审核材料
     private AdjudicationDraftView adjudicationDraft(
-            AdjudicationDraftEntity draft, RemedyPlanEntity remedyPlan) {
+            String caseId,
+            AdjudicationDraftEntity draft,
+            HearingFlowArtifactEntity draftArtifact,
+            HearingFlowArtifactEntity juryReportArtifact,
+            RemedyPlanEntity remedyPlan) {
         if (draft == null) {
             return null;
         }
+        FrozenDraftContent frozenContent =
+                frozenDraftContent(caseId, draft, draftArtifact, juryReportArtifact);
         return new AdjudicationDraftView(
                 draft.getId(),
                 draft.getDraftVersion(),
                 draft.getRecommendedDecision(),
                 draft.getConfidence(),
                 draft.getDraftText(),
+                frozenContent.decisionReasoning(),
+                frozenContent.remedyOrders(),
+                frozenContent.juryReviewExchanges(),
                 draft.getDraftStatus(),
                 json(draft.getFactFindingsJson()),
                 json(draft.getEvidenceAssessmentJson()),
                 json(draft.getPolicyApplicationJson()),
                 json(draft.getReviewerAttentionJson()),
                 approvedPlan(remedyPlan));
+    }
+
+    /**
+     * Reads the judge's structured V2 fields from the immutable frozen artifact.  The projection
+     * row and artifact must identify the same case and draft; missing or legacy artifacts return
+     * empty structured fields instead of leaking content from another draft version.
+     */
+    private FrozenDraftContent frozenDraftContent(
+            String caseId,
+            AdjudicationDraftEntity draft,
+            HearingFlowArtifactEntity draftArtifact,
+            HearingFlowArtifactEntity juryReportArtifact) {
+        if (draftArtifact == null
+                || !caseId.equals(draftArtifact.getCaseId())
+                || !draft.getId().equals(draftArtifact.getId())) {
+            return FrozenDraftContent.empty(objectMapper);
+        }
+        try {
+            JsonNode payload = objectMapper.readTree(draftArtifact.getPayloadJson());
+            if (payload == null
+                    || !draft.getId().equals(payload.path("draft_id").asText())) {
+                return FrozenDraftContent.empty(objectMapper);
+            }
+            JsonNode structuredDraft = payload.path("draft");
+            JsonNode reasoning = structuredDraft.path("decision_reasoning");
+            JsonNode orders = structuredDraft.path("remedy_orders");
+            return new FrozenDraftContent(
+                    reasoning.isTextual() ? reasoning.asText() : null,
+                    orders.isArray() ? orders.deepCopy() : objectMapper.createArrayNode(),
+                    juryReviewExchanges(
+                            caseId, draftArtifact, juryReportArtifact, payload));
+        } catch (JsonProcessingException exception) {
+            return FrozenDraftContent.empty(objectMapper);
+        }
+    }
+
+    private JsonNode juryReviewExchanges(
+            String caseId,
+            HearingFlowArtifactEntity draftArtifact,
+            HearingFlowArtifactEntity juryReportArtifact,
+            JsonNode draftPayload)
+            throws JsonProcessingException {
+        ArrayNode exchanges = objectMapper.createArrayNode();
+        if (!isBoundJuryReport(caseId, draftArtifact, juryReportArtifact)) {
+            return exchanges;
+        }
+
+        JsonNode juryPayload = objectMapper.readTree(juryReportArtifact.getPayloadJson());
+        if (juryPayload == null
+                || !juryReportArtifact.getId().equals(juryPayload.path("report_id").asText())) {
+            return exchanges;
+        }
+
+        Map<String, JsonNode> responsesByRef = new HashMap<>();
+        for (JsonNode response : draftPayload.path("review_responses")) {
+            String source = response.path("review_source").asText();
+            String reference = response.path("review_item_ref").asText();
+            if (!reference.isBlank()
+                    && ("JURY_FINDING".equals(source)
+                            || "MANDATORY_REVISION".equals(source))) {
+                responsesByRef.put(reference, response);
+            }
+        }
+
+        JsonNode proposal = juryPayload.path("proposal");
+        for (JsonNode finding : proposal.path("findings")) {
+            String dimension = finding.path("dimension").asText();
+            if (dimension.isBlank()) {
+                continue;
+            }
+            String reference = "JURY_FINDING_" + dimension;
+            appendJuryExchange(
+                    exchanges,
+                    reference,
+                    "FINDING",
+                    dimension,
+                    finding.path("assessment"),
+                    finding.path("basis"),
+                    finding.path("severity"),
+                    finding.path("requires_revision"),
+                    responsesByRef.get(reference));
+        }
+
+        int mandatoryIndex = 0;
+        for (JsonNode revision : proposal.path("mandatory_revisions")) {
+            mandatoryIndex += 1;
+            String reference = "JURY_MANDATORY_" + String.format("%02d", mandatoryIndex);
+            appendJuryExchange(
+                    exchanges,
+                    reference,
+                    "MANDATORY_REVISION",
+                    null,
+                    revision,
+                    objectMapper.createArrayNode(),
+                    null,
+                    null,
+                    responsesByRef.get(reference));
+        }
+        return exchanges;
+    }
+
+    private static boolean isBoundJuryReport(
+            String caseId,
+            HearingFlowArtifactEntity draftArtifact,
+            HearingFlowArtifactEntity juryReportArtifact) {
+        return juryReportArtifact != null
+                && HearingArtifactType.JURY_REVIEW_REPORT
+                        .equals(juryReportArtifact.getArtifactType())
+                && caseId.equals(juryReportArtifact.getCaseId())
+                && juryReportArtifact.getId().equals(draftArtifact.getReportId())
+                && juryReportArtifact.getContentHash()
+                        .equals(draftArtifact.getReportContentHash())
+                && juryReportArtifact.getTrialDossierId()
+                        .equals(draftArtifact.getTrialDossierId())
+                && juryReportArtifact.getTrialDossierHash()
+                        .equals(draftArtifact.getTrialDossierHash())
+                && juryReportArtifact.getProposalId().equals(draftArtifact.getProposalId())
+                && juryReportArtifact.getProposalContentHash()
+                        .equals(draftArtifact.getProposalContentHash());
+    }
+
+    private void appendJuryExchange(
+            ArrayNode exchanges,
+            String reference,
+            String itemType,
+            String dimension,
+            JsonNode opinion,
+            JsonNode basis,
+            JsonNode severity,
+            JsonNode requiresRevision,
+            JsonNode response) {
+        ObjectNode exchange = objectMapper.createObjectNode();
+        exchange.put("review_item_ref", reference);
+        exchange.put("item_type", itemType);
+        if (dimension == null) {
+            exchange.putNull("dimension");
+        } else {
+            exchange.put("dimension", dimension);
+        }
+        exchange.put("jury_opinion", opinion.isTextual() ? opinion.asText() : "");
+        exchange.set(
+                "basis", basis.isArray() ? basis.deepCopy() : objectMapper.createArrayNode());
+        if (severity != null && severity.isTextual()) {
+            exchange.put("severity", severity.asText());
+        } else {
+            exchange.putNull("severity");
+        }
+        if (requiresRevision != null && requiresRevision.isBoolean()) {
+            exchange.put("requires_revision", requiresRevision.asBoolean());
+        } else {
+            exchange.putNull("requires_revision");
+        }
+        if (response == null) {
+            exchange.putNull("judge_response");
+            exchange.putNull("disposition");
+            exchange.set("affected_fields", objectMapper.createArrayNode());
+        } else {
+            JsonNode affectedFields = response.path("affected_fields");
+            exchange.put("judge_response", response.path("response").asText(""));
+            exchange.put("disposition", response.path("disposition").asText(""));
+            exchange.set(
+                    "affected_fields",
+                    affectedFields.isArray()
+                            ? affectedFields.deepCopy()
+                            : objectMapper.createArrayNode());
+        }
+        exchanges.add(exchange);
+    }
+
+    private record FrozenDraftContent(
+            String decisionReasoning,
+            JsonNode remedyOrders,
+            JsonNode juryReviewExchanges) {
+        private static FrozenDraftContent empty(ObjectMapper objectMapper) {
+            return new FrozenDraftContent(
+                    null,
+                    objectMapper.createArrayNode(),
+                    objectMapper.createArrayNode());
+        }
     }
 
     // 所属模块：【裁决结果查询 / 应用编排层】「CaseOutcomeService.approvedPlan(RemedyPlanEntity)」。
@@ -253,7 +465,12 @@ public class CaseOutcomeService {
                 approval != null,
                 approval == null
                         ? null
-                        : json(approval.getApprovedPlanJson()));
+                        : json(approval.getApprovedPlanJson()),
+                approval == null ? null : approval.getId(),
+                approval == null ? null : approval.getDecisionType().name(),
+                approval == null ? null : approval.getAiDecisionAction(),
+                approval == null ? null : approval.getReviewerDecisionAction(),
+                approval == null ? null : approval.getCreatedAt());
     }
 
     // 所属模块：【裁决结果查询 / 应用编排层】「CaseOutcomeService.json(String)」。

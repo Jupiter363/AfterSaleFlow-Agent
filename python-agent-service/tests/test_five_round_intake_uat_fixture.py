@@ -37,6 +37,85 @@ def _load_five_round_uat_contract() -> Any:
     return module
 
 
+def test_fresh_party_ids_use_browser_actor_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_five_round_uat_contract()
+    monkeypatch.setenv(contract.FRESH_USER_ID_ENV, "user-local")
+    monkeypatch.setenv(contract.FRESH_MERCHANT_ID_ENV, "merchant-local")
+
+    assert contract.load_fresh_party_ids() == ("user-local", "merchant-local")
+
+
+def test_fresh_party_ids_reject_a_partial_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_five_round_uat_contract()
+    monkeypatch.setenv(contract.FRESH_USER_ID_ENV, "user-local")
+    monkeypatch.delenv(contract.FRESH_MERCHANT_ID_ENV, raising=False)
+
+    with pytest.raises(contract.uat.UatFailure) as failure:
+        contract.load_fresh_party_ids()
+
+    assert failure.value.stage == "configuration"
+    assert failure.value.check == "fresh_party_ids_pair"
+
+
+@pytest.mark.parametrize(
+    ("envelope", "expected"),
+    (
+        (
+            {
+                "code": "CASE_STATUS_INVALID",
+                "message": "expected process revision is already reserved by an active command",
+                "details": {
+                    "case_id": "CASE_OFFLINE",
+                    "expected_process_revision": 8,
+                },
+            },
+            True,
+        ),
+        (
+            {
+                "code": "CASE_STATUS_INVALID",
+                "message": "expected process revision is stale",
+                "details": {
+                    "expected_process_revision": 8,
+                    "current_process_revision": 9,
+                    "epoch_process_revision": 9,
+                },
+            },
+            True,
+        ),
+        (
+            {
+                "code": "CASE_STATUS_INVALID",
+                "message": "expected process revision is already reserved by an active command",
+                "details": {
+                    "case_id": "CASE_OTHER",
+                    "expected_process_revision": 8,
+                },
+            },
+            False,
+        ),
+        (
+            {
+                "code": "CASE_STATUS_INVALID",
+                "message": "command does not target the active room epoch",
+                "details": {"expected_process_revision": 8},
+            },
+            False,
+        ),
+    ),
+)
+def test_process_revision_retry_is_limited_to_authoritative_races(
+    envelope: dict[str, object], expected: bool
+) -> None:
+    contract = _load_five_round_uat_contract()
+
+    assert contract.process_revision_retryable(envelope, "CASE_OFFLINE") is expected
+
+
 @pytest.mark.parametrize("rounds_per_party", range(2, 6))
 def test_initiator_fixture_closes_semantic_facts_for_every_supported_round_count(
     monkeypatch: pytest.MonkeyPatch,

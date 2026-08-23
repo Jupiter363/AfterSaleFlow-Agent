@@ -28,7 +28,7 @@ final class OutcomeReceiptTestFactory {
   static final String ACTION_REF = "ref:action:p7";
   static final String MODIFIED_ACTION_REF = "ref:action:p7:modified";
   static final String OPERATION_SET_REF = "ref:operation-set:p7";
-  static final long EPOCH = 7;
+  static final long EPOCH = 0;
   static final long FENCE = 71;
 
   private final OutcomeWorkflowStart start;

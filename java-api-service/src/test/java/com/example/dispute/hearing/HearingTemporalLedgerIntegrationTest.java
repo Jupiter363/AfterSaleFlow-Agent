@@ -61,6 +61,7 @@ class HearingTemporalLedgerIntegrationTest {
     private static JdbcTemplate jdbc;
     private static JdbcHearingAuthorityLedger ledger;
     private static JdbcHearingFormalFinalizer finalizer;
+    private static TransactionTemplate transactions;
 
     @BeforeAll
     static void startDatabase() {
@@ -73,9 +74,9 @@ class HearingTemporalLedgerIntegrationTest {
                 .migrate();
         DataSource dataSource = new DriverManagerDataSource(url, USER, PASSWORD);
         jdbc = new JdbcTemplate(dataSource);
+        transactions = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         ledger = new JdbcHearingAuthorityLedger(
-                new NamedParameterJdbcTemplate(dataSource),
-                new TransactionTemplate(new DataSourceTransactionManager(dataSource)));
+                new NamedParameterJdbcTemplate(dataSource), transactions);
         finalizer = new JdbcHearingFormalFinalizer(
                 new NamedParameterJdbcTemplate(dataSource), ledger);
     }
@@ -111,6 +112,8 @@ class HearingTemporalLedgerIntegrationTest {
                 .isEqualTo("CASE_INTRODUCTION");
         assertThat(number("select process_revision from case_room_epoch where id = ?", fixture.epochId()))
                 .isEqualTo(1);
+        assertThat(number("select process_revision from case_process_projection where case_id = ?", fixture.caseId()))
+                .isEqualTo(1);
 
         HearingAuthorityCommit stale = new HearingAuthorityCommit(
                 HearingAuthorityCommit.SCHEMA_VERSION,
@@ -137,6 +140,97 @@ class HearingTemporalLedgerIntegrationTest {
                 .isInstanceOf(HearingAuthorityRejectedException.class)
                 .extracting(failure -> ((HearingAuthorityRejectedException) failure).code())
                 .isEqualTo("HEARING_STALE_AUTHORITY");
+    }
+
+    @Test
+    void closeReceiptWithoutItsSuccessorRoomTransitionRollsBackCompletely() {
+        Fixture fixture = insertFixture(
+                "CLOSE_INCOMPLETE", HearingFlowStage.HUMAN_REVIEW_OPEN, null);
+        HearingAuthorityCommit close = closeCommand(fixture);
+
+        assertThatThrownBy(() -> ledger.commitOrReplay(close, () -> {
+                    closeFormalCursor(fixture);
+                    return result(HearingFlowStage.CLOSED, 15, HASH_C, 1);
+                }))
+                .isInstanceOf(HearingAuthorityRejectedException.class)
+                .extracting(failure -> ((HearingAuthorityRejectedException) failure).code())
+                .isEqualTo("HEARING_CLOSE_TRANSITION_INCOMPLETE");
+
+        assertThat(value(
+                        "select current_stage from hearing_flow_instance where id = ?",
+                        fixture.flowId()))
+                .isEqualTo("HUMAN_REVIEW_OPEN");
+        assertThat(number(
+                        "select count(*) from hearing_domain_receipt where case_id = ?",
+                        fixture.caseId()))
+                .isZero();
+        assertThat(number(
+                        "select process_revision from case_process_projection where case_id = ?",
+                        fixture.caseId()))
+                .isZero();
+    }
+
+    @Test
+    void closeReceiptAndSuccessorRoomTransitionShareOneRevisionAndReplayExactly() {
+        Fixture fixture = insertFixture(
+                "CLOSE_COALESCED", HearingFlowStage.HUMAN_REVIEW_OPEN, null);
+        HearingAuthorityCommit close = closeCommand(fixture);
+        AtomicInteger mutations = new AtomicInteger();
+
+        HearingDomainReceipt first = transactions.execute(ignored -> {
+            ledger.commitOrReplay(close, () -> {
+                mutations.incrementAndGet();
+                closeFormalCursor(fixture);
+                return result(HearingFlowStage.CLOSED, 15, HASH_C, 1);
+            });
+            return ledger.completeCloseTransition(
+                    close, receipt -> transitionToReviewAuthority(fixture, receipt));
+        });
+        HearingDomainReceipt replay = ledger.commitOrReplay(close, () -> {
+            throw new AssertionError("close replay must not execute the formal mutation");
+        });
+
+        assertThat(replay).isEqualTo(first);
+        assertThat(mutations).hasValue(1);
+        assertThat(first.processRevision()).isEqualTo(1);
+        assertThat(first.roomRevision()).isEqualTo(1);
+        assertThat(number(
+                        "select process_revision from case_process_projection where case_id = ?",
+                        fixture.caseId()))
+                .isEqualTo(1);
+        assertThat(value(
+                        "select current_room from case_process_projection where case_id = ?",
+                        fixture.caseId()))
+                .isEqualTo("REVIEW");
+        assertThat(number(
+                        "select process_revision from case_room_epoch where id = ?",
+                        fixture.epochId()))
+                .isEqualTo(1);
+        assertThat(number(
+                        "select room_revision from case_room_epoch where id = ?",
+                        fixture.epochId()))
+                .isEqualTo(1);
+        assertThat(value(
+                        "select lifecycle_status from case_room_epoch where id = ?",
+                        fixture.epochId()))
+                .isEqualTo("TERMINAL");
+        assertThat(number(
+                        "select count(*) from case_room_epoch where case_id = ? and room_type = 'REVIEW'"
+                                + " and lifecycle_status = 'ACTIVE' and process_revision = 1",
+                        fixture.caseId()))
+                .isEqualTo(1);
+        assertThat(value(
+                        "select current_stage from hearing_temporal_projection where flow_instance_id = ?",
+                        fixture.flowId()))
+                .isEqualTo("CLOSED");
+        assertThat(number(
+                        "select process_revision from hearing_temporal_projection where flow_instance_id = ?",
+                        fixture.flowId()))
+                .isEqualTo(1);
+        assertThat(number(
+                        "select room_revision from hearing_temporal_projection where flow_instance_id = ?",
+                        fixture.flowId()))
+                .isEqualTo(1);
     }
 
     @Test
@@ -544,6 +638,114 @@ class HearingTemporalLedgerIntegrationTest {
                 fixture.flowId(),
                 fixture.caseId());
         assertThat(updated).isEqualTo(1);
+    }
+
+    private static void closeFormalCursor(Fixture fixture) {
+        int updated = jdbc.update(
+                """
+                update hearing_flow_instance
+                   set current_stage = 'CLOSED', stage_sequence = 15,
+                       flow_status = 'CLOSED', shared_deadline_at = null,
+                       updated_at = ?, updated_by = 'hearing-ledger-test'
+                 where id = ? and case_id = ?
+                """,
+                NOW.atOffset(ZoneOffset.UTC),
+                fixture.flowId(),
+                fixture.caseId());
+        assertThat(updated).isEqualTo(1);
+    }
+
+    private static HearingAuthorityCommit closeCommand(Fixture fixture) {
+        HearingAuthorityExpectation authority = new HearingAuthorityExpectation(
+                TENANT,
+                fixture.caseId(),
+                fixture.flowId(),
+                fixture.epochId(),
+                0,
+                HearingWriterMode.LEGACY,
+                HearingFlowStage.HUMAN_REVIEW_OPEN,
+                14,
+                0,
+                0,
+                0);
+        return new HearingAuthorityCommit(
+                HearingAuthorityCommit.SCHEMA_VERSION,
+                authority,
+                HearingAuthorityCommit.OperationType.CLOSE,
+                "hearing.close:" + TENANT + ':' + fixture.caseId() + ":0:" + HASH_A,
+                HASH_B,
+                null,
+                NOW);
+    }
+
+    private static void transitionToReviewAuthority(
+            Fixture fixture, HearingDomainReceipt receipt) {
+        String reviewRoomId = fixture.caseId().replace("CASE_HEARING_", "ROOM_REVIEW_");
+        OffsetDateTime now = receipt.committedAt().atOffset(ZoneOffset.UTC);
+        assertThat(jdbc.update(
+                        """
+                        update case_room_epoch
+                           set lifecycle_status = 'TERMINAL', process_revision = ?, room_revision = ?,
+                               terminal_at = ?, updated_at = ?, version = version + 1
+                         where id = ? and case_id = ? and room_type = 'HEARING'
+                           and lifecycle_status = 'ACTIVE' and process_revision = 0
+                           and room_revision = 0 and fencing_token = 0
+                        """,
+                        receipt.processRevision(),
+                        receipt.roomRevision(),
+                        now,
+                        now,
+                        fixture.epochId(),
+                        fixture.caseId()))
+                .isEqualTo(1);
+        assertThat(jdbc.update(
+                        """
+                        insert into case_room (
+                            id, case_id, room_type, room_status, opened_at, created_by, updated_by
+                        ) values (?, ?, 'REVIEW', 'OPEN', ?, 'hearing-ledger-test', 'hearing-ledger-test')
+                        """,
+                        reviewRoomId,
+                        fixture.caseId(),
+                        now))
+                .isEqualTo(1);
+        assertThat(jdbc.update(
+                        """
+                        insert into case_room_epoch (
+                            id, tenant_surrogate, case_id, room_id, room_type, room_epoch,
+                            writer_mode, lifecycle_status, process_revision, room_revision,
+                            fencing_token, temporal_build_id, graph_key, graph_version,
+                            checkpoint_schema_version, stream_protocol, selection_schema_version,
+                            process_contract_version, workflow_type, activated_at, created_at, updated_at
+                        ) values (?, ?, ?, ?, 'REVIEW', 0, 'LEGACY', 'ACTIVE', ?, 0, 1,
+                            'legacy-java.v1', 'review.legacy', 'review-flow.v1',
+                            'legacy-checkpoint.v1', 'agent_stream.v1', 'room-epoch-selection.v1',
+                            'case-process-contract.v1', 'LegacyJavaRoomState', ?, ?, ?)
+                        """,
+                        "EPOCH_REVIEW_" + fixture.caseId().substring("CASE_HEARING_".length()),
+                        TENANT,
+                        fixture.caseId(),
+                        reviewRoomId,
+                        receipt.processRevision(),
+                        now,
+                        now,
+                        now))
+                .isEqualTo(1);
+        assertThat(jdbc.update(
+                        """
+                        update case_process_projection
+                           set macro_phase = 'REVIEW_OPEN', current_room = 'REVIEW', room_phase = 'OPEN',
+                               writer_mode = 'LEGACY', process_revision = ?, room_epoch = 0,
+                               fencing_token = 1, temporal_workflow_id = null, temporal_run_id = null,
+                               temporal_build_id = 'legacy-java.v1', projected_at = ?, updated_at = ?,
+                               version = version + 1
+                         where case_id = ? and current_room = 'HEARING'
+                           and process_revision = 0 and room_epoch = 0 and fencing_token = 0
+                        """,
+                        receipt.processRevision(),
+                        now,
+                        now,
+                        fixture.caseId()))
+                .isEqualTo(1);
     }
 
     private static HearingFormalCommitResult result(

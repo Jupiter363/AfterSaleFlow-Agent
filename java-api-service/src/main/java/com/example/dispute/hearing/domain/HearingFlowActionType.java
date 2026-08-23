@@ -2,8 +2,8 @@ package com.example.dispute.hearing.domain;
 
 /** Immutable structured objects emitted or submitted during collaboration stages. */
 public enum HearingFlowActionType {
-    QUESTION_SET("hearing_question_set.v1", false),
-    ANSWER_BUNDLE("hearing_answer_bundle.v1", true),
+    QUESTION_SET("hearing_question_set.v4", false),
+    ANSWER_BUNDLE("hearing_answer_bundle.v4", true),
     EVIDENCE_REQUEST_SET("hearing_evidence_request_set.v1", false),
     EVIDENCE_BATCH("hearing_evidence_batch.v1", true);
 
@@ -20,9 +20,7 @@ public enum HearingFlowActionType {
     }
 
     public boolean acceptsSchemaVersion(String candidate) {
-        return schemaVersion.equals(candidate)
-                || (this == ANSWER_BUNDLE
-                        && "hearing_party_statement.v1".equals(candidate));
+        return schemaVersion.equals(candidate);
     }
 
     public boolean isPartyAction() {

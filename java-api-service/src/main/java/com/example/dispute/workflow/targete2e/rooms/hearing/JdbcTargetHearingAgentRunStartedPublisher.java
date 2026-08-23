@@ -22,13 +22,17 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 /**
  * Publishes one strict, replayable case event in the same transaction that creates an automatic
- * Hearing AgentRun. The event is a discovery descriptor only; it grants no Agent authority.
+ * Hearing AgentRun. The event is a discovery descriptor only; case access plus the run's durable
+ * stream projection mode remain the authority for the referenced SSE endpoint.
  */
 public final class JdbcTargetHearingAgentRunStartedPublisher
     implements TargetHearingAgentRunStartedPublisher {
 
   static final String EVENT_TYPE = "AGENT_RUN_STARTED";
-  static final String EVENT_SCHEMA = "target-hearing-agent-run-started.v1";
+  static final String EVENT_SCHEMA = "target-hearing-agent-run-started.v3";
+  static final String INTERNAL_EVENT_SCHEMA = "target-hearing-agent-run-started.v2";
+  static final String LEGACY_EVENT_SCHEMA = "target-hearing-agent-run-started.v1";
+  static final String STREAM_ACCESS = "ACTOR_VISIBLE";
   private static final String CONTROL_ACTOR = "hearing-control";
   private static final List<String> COURT_AUDIENCE =
       List.of("USER", "MERCHANT", "PLATFORM_REVIEWER", "ADMIN");
@@ -52,10 +56,16 @@ public final class JdbcTargetHearingAgentRunStartedPublisher
     Objects.requireNonNull(event, "event");
     requireCallerTransaction();
     lockCourt(event);
-    Expected expected = expected(event);
+    Expected expected = expected(event, EVENT_SCHEMA);
     Stored existing = stored(event.caseId(), expected.eventKey());
     if (existing != null) {
-      requireSame(existing, expected);
+      String storedSchema = existing.payload().path("schema_version").asText("");
+      require(
+          EVENT_SCHEMA.equals(storedSchema)
+              || INTERNAL_EVENT_SCHEMA.equals(storedSchema)
+              || LEGACY_EVENT_SCHEMA.equals(storedSchema),
+          "Hearing AgentRun start event schema is unsupported");
+      requireSame(existing, expected(event, storedSchema));
       return;
     }
     Long nextSequence = jdbc.queryForObject(
@@ -112,10 +122,10 @@ public final class JdbcTargetHearingAgentRunStartedPublisher
         "Hearing AgentRun start room is absent or ambiguous");
   }
 
-  private Expected expected(Event event) {
+  private Expected expected(Event event, String schemaVersion) {
     Instant startedAt = event.startedAt().truncatedTo(ChronoUnit.MICROS);
     ObjectNode payload = mapper.createObjectNode();
-    payload.put("schema_version", EVENT_SCHEMA);
+    payload.put("schema_version", schemaVersion);
     payload.put("tenant_surrogate", event.tenantSurrogate());
     payload.put("case_id", event.caseId());
     payload.put("room_id", event.roomId());
@@ -129,9 +139,18 @@ public final class JdbcTargetHearingAgentRunStartedPublisher
     payload.put("agent_run_id", event.agentRunId());
     payload.put("attempt_id", event.attemptId());
     payload.put("status", event.status());
-    payload.put(
-        "stream_url",
-        "/api/agent-runs/" + event.agentRunId() + "/events");
+    if (LEGACY_EVENT_SCHEMA.equals(schemaVersion)) {
+      payload.put(
+          "stream_url",
+          "/api/agent-runs/" + event.agentRunId() + "/events");
+    } else if (INTERNAL_EVENT_SCHEMA.equals(schemaVersion)) {
+      payload.put("stream_access", "INTERNAL_SYSTEM_ONLY");
+    } else {
+      payload.put("stream_access", STREAM_ACCESS);
+      payload.put(
+          "stream_url",
+          "/api/agent-runs/" + event.agentRunId() + "/events");
+    }
     payload.put("started_at", startedAt.toString());
     ArrayNode sourceRefs = mapper.createArrayNode();
     sourceRefs.add(event.agentRunId());

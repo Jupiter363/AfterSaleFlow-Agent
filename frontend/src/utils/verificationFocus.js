@@ -18,8 +18,15 @@ const CANONICAL_FOCUS_RULES = [
     text: "核验商品异常照片或开箱视频，确认商品状态及形成时间",
   },
   {
+    key: "third-party-testing",
+    pattern:
+      /第三方.{0,8}(检测|报告|机构|方法)|third[- ]party.{0,20}(test|testing|report)|testing report|test methodology|testing methodology/iu,
+    text: "核验第三方检测报告、机构资质、检测方法和环境条件",
+  },
+  {
     key: "logistics-signoff",
-    pattern: /物流|签收|投递|派送|收货|验货|快递|包裹|开包|打开检查|开启包裹/u,
+    pattern:
+      /物流|签收|投递|派送|收货|验货|快递|包裹|开包|打开检查|开启包裹|logistics|delivery confirmation|receipt claim/iu,
     text: "核验物流签收及投递记录，确认签收人身份、位置、时间与开箱检查间隔",
   },
   {

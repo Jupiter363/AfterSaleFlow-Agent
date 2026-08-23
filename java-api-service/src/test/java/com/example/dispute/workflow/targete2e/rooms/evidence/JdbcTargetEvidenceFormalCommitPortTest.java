@@ -204,11 +204,33 @@ class JdbcTargetEvidenceFormalCommitPortTest {
         .isEqualTo(ROOM_REVISION + 1);
     assertThat(number("select process_revision from case_process_projection where case_id = ?", CASE_ID))
         .isEqualTo(PROCESS_REVISION + 1);
+    assertThat(number("select last_command_sequence from case_process_projection where case_id = ?", CASE_ID))
+        .isEqualTo(COMMAND_SEQUENCE);
     assertThat(text("select command_status from case_command where id = ?", COMMAND_ROW_ID))
         .isEqualTo("APPLIED");
     assertThat(text("select result_sha256 from case_command where id = ?", COMMAND_ROW_ID))
         .isEqualTo(first.formalCommitHash());
     assertThat(number("select count(*) from room_message where case_id = ?", CASE_ID)).isEqualTo(1);
+  }
+
+  @Test
+  void rejectsProjectionCommandCursorDriftWithoutLeavingAPartialFact() throws Exception {
+    jdbc.update(
+        "update case_process_projection set last_command_sequence = ? where case_id = ?",
+        COMMAND_SEQUENCE - 2,
+        CASE_ID);
+    TargetEvidenceFinalizationRequest request = request(ACTIVATION_ID);
+
+    assertThatThrownBy(() -> commit(request))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("Evidence projection command cursor drifted before formalization");
+
+    assertThat(number("select process_revision from case_room_epoch where id = ?", EPOCH_ID))
+        .isEqualTo(PROCESS_REVISION);
+    assertThat(text("select command_status from case_command where id = ?", COMMAND_ROW_ID))
+        .isEqualTo("ORCHESTRATION_ACCEPTED");
+    assertThat(number("select count(*) from evidence_turn_projection_v2 where case_id = ?", CASE_ID))
+        .isZero();
   }
 
   @Test
@@ -278,11 +300,13 @@ class JdbcTargetEvidenceFormalCommitPortTest {
         PROCESS_REVISION + 4,
         CASE_ID);
     TargetEvidenceFinalizationRequest request = request(ACTIVATION_ID);
+    RoomMessageView message = clerkMessage();
+    seedClerkMessage(message);
 
     try (Connection connection = dataSource.getConnection()) {
       connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
       connection.setAutoCommit(false);
-      assertThatThrownBy(() -> port.commit(connection, request, clerkMessage()))
+      assertThatThrownBy(() -> port.commit(connection, request, message))
           .isInstanceOf(IllegalStateException.class)
           .hasMessage("Evidence projection revision drifted before formalization");
       connection.rollback();
@@ -292,7 +316,7 @@ class JdbcTargetEvidenceFormalCommitPortTest {
         .isEqualTo(PROCESS_REVISION);
     assertThat(text("select command_status from case_command where id = ?", COMMAND_ROW_ID))
         .isEqualTo("ORCHESTRATION_ACCEPTED");
-    assertThat(number("select count(*) from room_message where case_id = ?", CASE_ID)).isZero();
+    assertThat(number("select count(*) from room_message where case_id = ?", CASE_ID)).isEqualTo(1);
   }
 
   @Test
@@ -666,7 +690,6 @@ class JdbcTargetEvidenceFormalCommitPortTest {
     header.put("core_fact_coverage", "UNKNOWN");
     header.put("source_chain_coverage", "UNKNOWN");
     header.put("time_integrity_coverage", "UNKNOWN");
-    header.put("human_review_status", "NONE");
     header.put("overall_readiness", "UNKNOWN");
 
     var frame = mapper.createObjectNode();
@@ -696,7 +719,6 @@ class JdbcTargetEvidenceFormalCommitPortTest {
     result.set("observation_graph", mapper.createArrayNode());
     result.set("evidence_assessments", mapper.createArrayNode());
     result.set("evidence_requests", mapper.createArrayNode());
-    result.set("human_review_tasks", mapper.createArrayNode());
     result.set("room_readiness", header);
     return TargetEvidenceTurnResultV2.parse(mapper, result);
   }
@@ -839,6 +861,7 @@ class JdbcTargetEvidenceFormalCommitPortTest {
           process_revision bigint not null,
           room_epoch bigint not null,
           fencing_token bigint not null,
+          last_command_sequence bigint not null,
           updated_at timestamptz not null default now(),
           version bigint not null default 0)
         """);
@@ -1014,14 +1037,15 @@ class JdbcTargetEvidenceFormalCommitPortTest {
         """
         insert into case_process_projection (
           case_id, tenant_surrogate, macro_phase, current_room, room_phase, writer_mode,
-          process_revision, room_epoch, fencing_token)
-        values (?, ?, 'EVIDENCE_OPEN', 'EVIDENCE', 'OPEN', 'TEMPORAL', ?, ?, ?)
+          process_revision, room_epoch, fencing_token, last_command_sequence)
+        values (?, ?, 'EVIDENCE_OPEN', 'EVIDENCE', 'OPEN', 'TEMPORAL', ?, ?, ?, ?)
         """,
         CASE_ID,
         TENANT,
         PROCESS_REVISION,
         ROOM_EPOCH,
-        FENCE);
+        FENCE,
+        COMMAND_SEQUENCE - 1);
   }
 
   private long number(String sql, Object... parameters) {

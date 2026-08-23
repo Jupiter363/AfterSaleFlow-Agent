@@ -72,8 +72,13 @@ class EvidenceDossierQueryServiceTest {
 
         FrozenEvidenceDossierView view = service.latest("CASE_evidence", actor());
 
-        assertThat(view.matrix()).hasSize(1);
-        assertThat(view.matrix().get(0).get("fact")).isEqualTo("物流显示已签收");
+        assertThat(view.matrix().get("schema_version")).isEqualTo("fact_evidence_matrix.v3");
+        @SuppressWarnings("unchecked")
+        List<java.util.Map<String, Object>> coverage =
+                (List<java.util.Map<String, Object>>) view.matrix().get("fact_coverage");
+        assertThat(coverage).singleElement()
+                .extracting(row -> row.get("fact_id"))
+                .isEqualTo("FACT_SIGNED");
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceDossierQueryServiceTest.frozenDossier()」。
@@ -91,13 +96,21 @@ class EvidenceDossierQueryServiceTest {
                 "[]",
                 """
                 {
-                  "fact_evidence_matrix": [
-                    {
-                      "fact_id": "FACT_SIGNED",
-                      "fact": "物流显示已签收",
-                      "supporting_evidence": ["EVIDENCE_LOGISTICS"]
-                    }
-                  ],
+                  "schema_version":"evidence-dossier-matrix-summary.v3",
+                  "fact_evidence_matrix": {
+                    "schema_version":"fact_evidence_matrix.v3",
+                    "case_id":"CASE_evidence",
+                    "matrix_id":"FACT_EVIDENCE_MATRIX_QUERY",
+                    "matrix_version":2,
+                    "matrix_status":"FROZEN",
+                    "content_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "links":[],
+                    "fact_coverage":[{
+                      "fact_id":"FACT_SIGNED",
+                      "coverage_status":"COVERED_BY_FROZEN_DOSSIER",
+                      "evidence_ids":["EVIDENCE_LOGISTICS"]
+                    }]
+                  },
                   "unmapped_evidence": []
                 }
                 """);

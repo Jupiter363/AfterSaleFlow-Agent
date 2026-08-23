@@ -14,7 +14,9 @@ import org.springframework.stereotype.Component;
 @Component
 public final class JdbcHearingPublicTranscriptWatermarkQuery {
 
-  private static final String QUESTION_PUBLICATION_KEY = "hearing-v2:4:intake-questions";
+  private static final String TARGET_V4_QUESTION_LEAD_PUBLICATION_KEY =
+      "hearing-v2:4:intake-questions-frame-1";
+  private static final String LEGACY_QUESTION_PUBLICATION_KEY = "hearing-v2:4:intake-questions";
 
   private final JdbcTemplate jdbc;
 
@@ -102,7 +104,7 @@ public final class JdbcHearingPublicTranscriptWatermarkQuery {
             row.getString(5)),
         instance.getCaseId(),
         instance.getId(),
-        QUESTION_PUBLICATION_KEY,
+        TARGET_V4_QUESTION_LEAD_PUBLICATION_KEY,
         agentRunId);
     return one(rows, "Target Hearing question transcript binding is absent or ambiguous");
   }
@@ -123,7 +125,7 @@ public final class JdbcHearingPublicTranscriptWatermarkQuery {
         (row, ignored) -> new Watermark(
             row.getString(1), row.getLong(2), row.getString(3), null, null),
         instance.getCaseId(),
-        QUESTION_PUBLICATION_KEY,
+        LEGACY_QUESTION_PUBLICATION_KEY,
         agentRunId);
     return one(rows, "Legacy Hearing question transcript binding is absent or ambiguous");
   }

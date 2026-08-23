@@ -43,17 +43,17 @@ class HearingTargetE2EOperationBinding:
 
 HEARING_GRAPH_IDENTITIES: Mapping[str, HearingGraphIdentity] = MappingProxyType(
     {
-        "hearing.intake.v1": HearingGraphIdentity(
-            identity="hearing.intake.v1",
+        "hearing.intake.v4": HearingGraphIdentity(
+            identity="hearing.intake.v4",
             graph_key="hearing.intake",
-            graph_version="hearing.intake.v1",
-            state_schema_version="hearing.graph-state.v1",
-            checkpoint_schema_version="hearing.checkpoint.v1",
-            prompt_version="hearing.prompt-bundle.v1",
-            model_profile_id="hearing.model-profile.v1",
-            output_schema_version="hearing.intake-proposal.v1",
-            policy_version="hearing.proposal-only.v1",
-            guardrail_version="hearing.guardrails.v1",
+            graph_version="hearing.intake.v4",
+            state_schema_version="hearing.graph-state.v4",
+            checkpoint_schema_version="hearing.checkpoint.v4",
+            prompt_version="hearing.prompt-bundle.v4",
+            model_profile_id="hearing.model-profile.v4",
+            output_schema_version="hearing.intake-proposal.v4",
+            policy_version="hearing.proposal-only.v4",
+            guardrail_version="hearing.guardrails.v4",
             tool_policy_version="hearing.no-tools.v1",
             operations=(
                 HearingOperation.INTAKE_QUESTIONS,
@@ -77,17 +77,17 @@ HEARING_GRAPH_IDENTITIES: Mapping[str, HearingGraphIdentity] = MappingProxyType(
                 HearingOperation.EVIDENCE_SYNTHESIS,
             ),
         ),
-        "hearing.judge.v1": HearingGraphIdentity(
-            identity="hearing.judge.v1",
+        "hearing.judge.v2": HearingGraphIdentity(
+            identity="hearing.judge.v2",
             graph_key="hearing.judge",
-            graph_version="hearing.judge.v1",
-            state_schema_version="hearing.graph-state.v1",
-            checkpoint_schema_version="hearing.checkpoint.v1",
-            prompt_version="hearing.prompt-bundle.v1",
-            model_profile_id="hearing.model-profile.v1",
-            output_schema_version="hearing.judge-proposal.v1",
-            policy_version="hearing.proposal-only.v1",
-            guardrail_version="hearing.guardrails.v1",
+            graph_version="hearing.judge.v2",
+            state_schema_version="hearing.graph-state.v2",
+            checkpoint_schema_version="hearing.checkpoint.v2",
+            prompt_version="hearing.prompt-bundle.v2",
+            model_profile_id="hearing.model-profile.v2",
+            output_schema_version="hearing.judge-proposal.v2",
+            policy_version="hearing.proposal-only.v2",
+            guardrail_version="hearing.guardrails.v2",
             tool_policy_version="hearing.no-tools.v1",
             operations=(HearingOperation.JUDGE_V1, HearingOperation.JUDGE_V2),
         ),
@@ -125,10 +125,10 @@ if len(HEARING_GRAPH_IDENTITIES) != 4 or len(HEARING_OPERATION_IDENTITIES) != 7:
 HEARING_MODEL_NODE_PROMPTS: Mapping[str, str] = MappingProxyType(
     {
         "hearing_intake_questions": (
-            "dispute_intake_officer/hearing_intake_questions.md"
+            "dispute_intake_officer/hearing_intake_question_generation_v5.md"
         ),
         "hearing_intake_synthesis": (
-            "dispute_intake_officer/hearing_intake_synthesis.md"
+            "dispute_intake_officer/hearing_intake_answer_synthesis_v5.md"
         ),
         "hearing_evidence_requests": "evidence_clerk/hearing_evidence_requests.md",
         "hearing_evidence_file_assessment": (
@@ -173,14 +173,14 @@ HEARING_TARGET_E2E_OPERATION_BINDINGS: Mapping[
             operation=HearingOperation.INTAKE_QUESTIONS,
             command_stage_code="INTAKE_QUESTIONS_GENERATING",
             request_stage_code="INTAKE_QUESTIONS",
-            result_schema_version="hearing_intake_questions.v1",
+            result_schema_version="hearing_intake_questions.v5",
             model_nodes=("hearing_intake_questions",),
         ),
         HearingOperation.INTAKE_SYNTHESIS: HearingTargetE2EOperationBinding(
             operation=HearingOperation.INTAKE_SYNTHESIS,
             command_stage_code="INTAKE_SYNTHESIZING",
             request_stage_code="INTAKE_SYNTHESIS",
-            result_schema_version="hearing_intake_synthesis.v1",
+            result_schema_version="hearing_intake_synthesis.v5",
             model_nodes=("hearing_intake_synthesis",),
         ),
         HearingOperation.EVIDENCE_REQUESTS: HearingTargetE2EOperationBinding(
@@ -204,7 +204,7 @@ HEARING_TARGET_E2E_OPERATION_BINDINGS: Mapping[
             operation=HearingOperation.JUDGE_V1,
             command_stage_code="JUDGE_V1_GENERATING",
             request_stage_code="JUDGE_V1",
-            result_schema_version="hearing_judge_v1.v1",
+            result_schema_version="hearing_judge_v1.v2",
             model_nodes=("hearing_judge_v1",),
         ),
         HearingOperation.JURY_REVIEW: HearingTargetE2EOperationBinding(
@@ -218,7 +218,7 @@ HEARING_TARGET_E2E_OPERATION_BINDINGS: Mapping[
             operation=HearingOperation.JUDGE_V2,
             command_stage_code="JUDGE_V2_GENERATING",
             request_stage_code="JUDGE_V2",
-            result_schema_version="hearing_judge_v2.v1",
+            result_schema_version="hearing_judge_v2.v2",
             model_nodes=("hearing_judge_v2",),
         ),
     }

@@ -19,7 +19,6 @@ from app.agents.dispute_intake_officer.schemas import (
 )
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     CaseDetailDossierSkill,
-    SUBJECTIVE_RESPONDENT_SOURCE,
     party_intake_prompt_mirror,
 )
 from app.harness.context_pack import build_context_pack
@@ -301,22 +300,20 @@ def build_intake_turn_context_pack(
 
 
 # 所属模块：接待室 Agent > 单轮 LangGraph > 首轮表单态度隔离。
-# 具体功能：`_subjective_only_initial_case_facts` 深拷贝表单 seed，仅在 respondent_attitude_seed 明确标记发起方主观来源时保留，否则删除该字段。
+# 具体功能：`_subjective_only_initial_case_facts` 深拷贝表单 seed，并无条件删除对方态度 seed。
 # 上下游：上游是 reason_with_llm 的 initial_case_facts；下游是 ContextPack 的 initial_case_facts 段。
-# 系统意义：旧接口可能把正式答辩状态混入首轮表单；接待私聊只能记录发起方“认为对方怎样”，不能冒充对方已正式表态。
+# 系统意义：发起方 Provider 只生成本方观点与诉求，不接收或转述任何对方观点。
 def _subjective_only_initial_case_facts(seed: dict[str, Any]) -> dict[str, Any]:
-    """Remove response-state seeds that were not derived from initiator text."""
+    """Remove every counterparty-attitude seed from the initiator prompt."""
 
     sanitized = copy.deepcopy(seed)
     # deepcopy 是深拷贝：复制嵌套 dict/list，避免清理 prompt 输入时改到原始请求对象。
-    attitude = sanitized.get("respondent_attitude_seed")
-    if not _has_subjective_source(attitude):
-        sanitized.pop("respondent_attitude_seed", None)
+    sanitized.pop("respondent_attitude_seed", None)
     return sanitized
 
 
 # 所属模块：接待室 Agent > 单轮 LangGraph > 旧卷宗态度隔离。
-# 具体功能：`_subjective_only_snapshot` 对发起方保留主观来源展板，对被发起方只投影冻结 case_fact_matrix.v2 的结构化允许字段。
+# 具体功能：`_subjective_only_snapshot` 对发起方删除所有对方观点字段，对被发起方只投影冻结 case_fact_matrix.v2 的结构化允许字段。
 # 上下游：上游是 reason_with_llm 的上一版卷宗；下游是 previous_case_detail ContextSection。
 # 系统意义：双方私聊原文和参与方私有展板都不能跨角色进入模型上下文；跨方只允许冻结事实矩阵的中性结构化投影。
 def _subjective_only_snapshot(
@@ -352,9 +349,17 @@ def _subjective_only_snapshot(
         sanitized["handoff_remark_partition"] = current_actor_partition
     else:
         sanitized.pop("handoff_remark_partition", None)
-    attitude = sanitized.get("respondent_attitude")
-    if not _has_subjective_source(attitude):
-        sanitized.pop("respondent_attitude", None)
+    sanitized.pop("respondent_attitude", None)
+    positions = sanitized.get("party_positions")
+    if isinstance(positions, dict):
+        own_claim_key = "user_claim" if actor_role == "USER" else "merchant_claim"
+        sanitized["party_positions"] = _non_empty_mapping(
+            {
+                own_claim_key: positions.get(own_claim_key),
+                "initiator_position": positions.get("initiator_position"),
+                "platform_observation": positions.get("platform_observation"),
+            }
+        )
     return _compact_case_detail_snapshot(sanitized)
 
 
@@ -424,7 +429,7 @@ def _respondent_matrix_prompt_projection(value: Any) -> dict[str, Any]:
                     "position_summary": initiator_claim.get("position_summary"),
                 }
             )
-        for key in ("respondent_reported_by_initiator", "respondent_direct"):
+        for key in ("respondent_direct",):
             position = claims.get(key)
             if not isinstance(position, dict):
                 continue
@@ -733,20 +738,6 @@ def _fact_verification_items(value: Any) -> list[str]:
         if str(item or "").strip()
         and not any(marker in str(item) for marker in process_markers)
     ]
-
-
-# 所属模块：接待室 Agent > 单轮 LangGraph > 态度来源精确判定。
-# 具体功能：`_has_subjective_source` 只接受 dict 且 source 去空白后精确等于 SUBJECTIVE_RESPONDENT_SOURCE；不按字段内容猜测来源。
-# 上下游：上游是两类卷宗清洗函数；下游决定保留或删除 respondent_attitude 字段。
-# 系统意义：来源标签是信任边界，缺失/未知来源一律保守删除，避免单方主张升级成正式案件状态。
-def _has_subjective_source(value: Any) -> bool:
-    """确认“对方态度”是否确实来自发起方的主观陈述，而非旧流程遗留的正式状态。"""
-
-    return (
-        isinstance(value, dict)
-        and str(value.get("source") or "").strip()
-        == SUBJECTIVE_RESPONDENT_SOURCE
-    )
 
 
 # 所属模块：接待室 Agent > 单轮 LangGraph > 确定性卷宗渲染节点。

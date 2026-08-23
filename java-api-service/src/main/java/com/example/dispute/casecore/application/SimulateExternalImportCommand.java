@@ -21,7 +21,8 @@ public record SimulateExternalImportCommand(
         ActorRole initiatorRoleHint,
         String currentActorId,
         String counterpartyActorId,
-        String simulationBatchId) {
+        String simulationBatchId,
+        String fixtureId) {
 
     // 所属模块：【案件核心与导入 / 应用编排层】「SimulateExternalImportCommand.SimulateExternalImportCommand(int,String,RiskLevel,ActorRole,String,String)」。
     // 具体功能：「SimulateExternalImportCommand.SimulateExternalImportCommand(int,String,RiskLevel,ActorRole,String,String)」：使用 「count」(int)、「scenario」(String)、「riskLevelHint」(RiskLevel)、「initiatorRoleHint」(ActorRole)、「currentActorId」(String)、「counterpartyActorId」(String) 初始化「SimulateExternalImportCommand」的不可变状态或协作参数，使后续方法不必依赖半初始化对象。
@@ -43,7 +44,27 @@ public record SimulateExternalImportCommand(
                 initiatorRoleHint,
                 currentActorId,
                 counterpartyActorId,
-                "default");
+                "default",
+                null);
+    }
+
+    public SimulateExternalImportCommand(
+            int count,
+            String scenario,
+            RiskLevel riskLevelHint,
+            ActorRole initiatorRoleHint,
+            String currentActorId,
+            String counterpartyActorId,
+            String simulationBatchId) {
+        this(
+                count,
+                scenario,
+                riskLevelHint,
+                initiatorRoleHint,
+                currentActorId,
+                counterpartyActorId,
+                simulationBatchId,
+                null);
     }
 
     // 所属模块：【案件核心与导入 / 应用编排层】「SimulateExternalImportCommand.SimulateExternalImportCommand(int,String,RiskLevel,ActorRole,String,String,String)」。
@@ -69,6 +90,11 @@ public record SimulateExternalImportCommand(
         requireBoundedActorId(counterpartyActorId, "counterpartyActorId");
         if (simulationBatchId == null || simulationBatchId.isBlank()) {
             simulationBatchId = "default";
+        }
+        if (fixtureId == null || fixtureId.isBlank()) {
+            fixtureId = null;
+        } else if (!fixtureId.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")) {
+            throw new IllegalArgumentException("fixtureId must be a bounded identifier");
         }
     }
 

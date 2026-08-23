@@ -1438,7 +1438,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
      * 先经 bridge 活动换取受 epoch/fencing 约束的载荷，target typed room 返回 receipt；三条分支都把
      * 外部业务执行保留在 child workflow，而父工作流只维护可 replay 的路由状态。
      */
-    private void routeCommandToActiveChild(CaseCommandRef command) {
+    private boolean routeCommandToActiveChild(CaseCommandRef command) {
         if (activeChildDescriptor.kind() == ActiveChildKind.GENERIC_ROOM_CONTROL) {
             if (activeRoomChild == null) {
                 throw new TypedChildOperationFailure(
@@ -1447,7 +1447,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                     null);
             }
             activeRoomChild.commandAccepted(command);
-            return;
+            return false;
         }
         if (activeChildDescriptor.kind() == ActiveChildKind.TARGET_TYPED_ROOM) {
             validateTargetTypedDescriptor(activeChildDescriptor);
@@ -1472,7 +1472,11 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                     "target typed child could not accept the command",
                     failure);
             }
-            return;
+            // Target typed rooms return their exact post-dispatch coordinates. That receipt is the
+            // only coordinate authority for this route: Evidence/Review may advance immediately,
+            // while Hearing deliberately stays at R until its durable formalization progress
+            // arrives through targetRoomProgressed.
+            return true;
         }
         ActiveChildBinding expected = activeBinding();
         if (activeIntakeChild == null) {
@@ -1504,6 +1508,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                 "typed Intake child could not accept the command",
                 failure);
         }
+        return false;
     }
 
     /**
@@ -1536,7 +1541,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             || command.expectedProcessRevision() != observedProcessRevision
             || authority.expectedRoomRevision() != activeRoomRevision
             || authority.expectedLastCaseEventSequence()
-            != targetEvidenceExpectedLastCaseEventSequence()
+            > targetEvidenceExpectedLastCaseEventSequence()
             || command.caseCommandSequence() != nextCommandSequence) {
             throw new IllegalArgumentException(
                 "target Evidence terminal-no-commit authority conflicts with active CaseProcess state");
@@ -1549,7 +1554,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                     Workflow.getInfo().getWorkflowId(),
                     Workflow.getInfo().getFirstExecutionRunId(),
                     descriptor.caseWorkflowBuildId()));
-        long expectedLastEventSequence = Math.decrementExact(nextCaseEventSequence);
+        long expectedLastEventSequence = authority.expectedLastCaseEventSequence();
         if (result == null
             || !authority.equals(result.authority())
             || result.processRevision() != observedProcessRevision
@@ -1631,7 +1636,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             || !command.equals(authority.command())
             || roomFencingToken != authority.roomFencingToken()
             || expectedRoomRevision != authority.expectedRoomRevision()
-            || expectedLastCaseEventSequence != authority.expectedLastCaseEventSequence()
+            || authority.expectedLastCaseEventSequence() > expectedLastCaseEventSequence
             || !roomWorkflowId.equals(authority.roomWorkflowId())
             || !roomWorkflowRunId.equals(authority.roomWorkflowRunId())
             || !roomWorkflowBuildId.equals(authority.roomWorkflowBuildId())
@@ -2880,7 +2885,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                 }
             }
             ensureRoomChild(command);
-            routeCommandToActiveChild(command);
+            boolean targetReceiptOwnsCoordinates = routeCommandToActiveChild(command);
             if (commandLifecycleEnabled) {
                 RecordCaseCommandRoutedResult completion =
                     commandLifecycleActivities.completeCaseCommandRouting(routing);
@@ -2891,8 +2896,12 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                 }
                 completeTargetChildAfterDurableRouting(command);
             }
-            observedProcessRevision =
-                Math.max(observedProcessRevision, Math.incrementExact(command.expectedProcessRevision()));
+            if (!targetReceiptOwnsCoordinates) {
+                observedProcessRevision =
+                    Math.max(
+                        observedProcessRevision,
+                        Math.incrementExact(command.expectedProcessRevision()));
+            }
             recentCommands.put(
                 command.commandId(),
                 new ProcessedCommandIdentity(

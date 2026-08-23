@@ -503,10 +503,10 @@ public final class JdbcTargetEvidencePartyCompletionActivities
         && ("DRAINED".equals(lifecycle) || "REVOKED_TERMINAL".equals(lifecycle));
   }
 
-  private static void lockProjection(Connection c, Request request, boolean storedReplay)
+  static void lockProjection(Connection c, Request request, boolean storedReplay)
       throws SQLException {
     try (PreparedStatement s = c.prepareStatement("""
-        select process_revision from case_process_projection
+        select process_revision, last_command_sequence from case_process_projection
          where tenant_surrogate = ? and case_id = ? and current_room = 'EVIDENCE'
            and room_phase = 'OPEN' and writer_mode = 'TEMPORAL'
            and writer_activation_status = 'READY' and room_epoch = ? and fencing_token = ?
@@ -518,8 +518,15 @@ public final class JdbcTargetEvidencePartyCompletionActivities
           storedReplay
               ? Math.incrementExact(request.expectedProcessRevision())
               : request.expectedProcessRevision();
+      long expectedCommandSequence =
+          storedReplay
+              ? request.command().caseCommandSequence()
+              : Math.decrementExact(request.command().caseCommandSequence());
       try (ResultSet row = s.executeQuery()) {
-        if (!row.next() || row.getLong(1) != expectedRevision || row.next()) {
+        if (!row.next()
+            || row.getLong(1) != expectedRevision
+            || row.getLong(2) != expectedCommandSequence
+            || row.next()) {
           throw new IllegalStateException("target Evidence process projection drifted");
         }
       }
@@ -535,16 +542,21 @@ public final class JdbcTargetEvidencePartyCompletionActivities
       if (s.executeUpdate() != 1) throw new IllegalStateException("target Evidence epoch update failed"); }
   }
 
-  private static void updateProjection(Connection c, Request request, long process) throws SQLException {
+  static void updateProjection(Connection c, Request request, long process) throws SQLException {
     try (PreparedStatement s = c.prepareStatement("""
-        update case_process_projection set process_revision = ?, updated_at = now(), version = version + 1
+        update case_process_projection
+           set process_revision = ?, last_command_sequence = ?,
+               updated_at = now(), version = version + 1
          where tenant_surrogate = ? and case_id = ? and current_room = 'EVIDENCE'
            and room_phase = 'OPEN' and writer_mode = 'TEMPORAL'
            and writer_activation_status = 'READY' and room_epoch = ? and fencing_token = ?
-           and process_revision = ?
-        """)) { s.setLong(1, process); s.setString(2, request.start().tenantSurrogate());
-      s.setString(3, request.start().caseId()); s.setLong(4, request.start().roomEpoch());
-      s.setLong(5, request.start().fencingToken()); s.setLong(6, request.expectedProcessRevision());
+           and process_revision = ? and last_command_sequence = ?
+        """)) { s.setLong(1, process);
+      s.setLong(2, request.command().caseCommandSequence());
+      s.setString(3, request.start().tenantSurrogate());
+      s.setString(4, request.start().caseId()); s.setLong(5, request.start().roomEpoch());
+      s.setLong(6, request.start().fencingToken()); s.setLong(7, request.expectedProcessRevision());
+      s.setLong(8, Math.decrementExact(request.command().caseCommandSequence()));
       if (s.executeUpdate() != 1) throw new IllegalStateException("target Evidence projection update failed"); }
   }
 

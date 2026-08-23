@@ -8,11 +8,11 @@ limit.maxIDLength:
 # Keep enough routing history for repeated preproduction candidates. Temporal
 # rejects every compatibility update once persisted data exceeds this limit.
 limit.versionCompatibleSetLimitPerQueue:
-  - value: 100
+  - value: 500
     constraints: {}
 
 limit.versionBuildIdLimitPerQueue:
-  - value: 200
+  - value: 1000
     constraints: {}
 
 system.forceSearchAttributesCacheRefreshOnRead:

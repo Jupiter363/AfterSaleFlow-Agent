@@ -381,7 +381,7 @@ class EvidenceApplicationServiceTest {
     }
 
     @Test
-    void canonicalizesChromiumMarkdownContentTypeForStorageEntityAndOcr() throws Exception {
+    void preservesBrowserDeclaredContentTypeForStorageEntityAndOcr() throws Exception {
         when(caseRepository.findById("CASE_evidence")).thenReturn(Optional.of(caseEntity()));
         when(evidenceRepository.findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
                         any(), any(), any()))
@@ -412,21 +412,31 @@ class EvidenceApplicationServiceTest {
                         null,
                         actor());
 
-        assertThat(result.contentType()).isEqualTo("text/markdown");
+        assertThat(result.contentType()).isEqualTo("application/text");
         ArgumentCaptor<String> storedContentType = ArgumentCaptor.forClass(String.class);
         verify(storage)
                 .storeOriginal(any(), any(), any(), storedContentType.capture(), any());
-        assertThat(storedContentType.getValue()).isEqualTo("text/markdown");
+        assertThat(storedContentType.getValue()).isEqualTo("application/text");
         ArgumentCaptor<OcrTaskClient.ParseTask> parseTask =
                 ArgumentCaptor.forClass(OcrTaskClient.ParseTask.class);
         verify(ocrTaskClient).createParseTask(parseTask.capture());
-        assertThat(parseTask.getValue().contentType()).isEqualTo("text/markdown");
+        assertThat(parseTask.getValue().contentType()).isEqualTo("application/text");
     }
 
     @Test
-    void rejectsChromiumTextAliasForNonMarkdownFilename() {
+    void acceptsNonstandardContentTypeRegardlessOfFilename() throws Exception {
         when(caseRepository.findById("CASE_evidence"))
                 .thenReturn(Optional.of(caseEntity()));
+        when(evidenceRepository.findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
+                        any(), any(), any()))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(storage.storeOriginal(any(), any(), any(), any(), any()))
+                .thenReturn(
+                        new EvidenceStorage.StoredObject(
+                                "evidence-original",
+                                "CASE_evidence/EVIDENCE_test/browser-record.txt"));
         MockMultipartFile file =
                 new MockMultipartFile(
                         "file",
@@ -434,21 +444,20 @@ class EvidenceApplicationServiceTest {
                         "application/text",
                         "plain evidence".getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
-        assertThatThrownBy(
-                        () ->
-                                service.upload(
-                                        "CASE_evidence",
-                                        file,
-                                        "DOCUMENT",
-                                        "USER_UPLOAD",
-                                        "PARTIES",
-                                        "该文件用于证明本案相关争议事实",
-                                        true,
-                                        null,
-                                        actor()))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("content type");
-        verify(storage, never()).storeOriginal(any(), any(), any(), any(), any());
+        EvidenceView result =
+                service.upload(
+                        "CASE_evidence",
+                        file,
+                        "DOCUMENT",
+                        "USER_UPLOAD",
+                        "PARTIES",
+                        "该文件用于证明本案相关争议事实",
+                        true,
+                        null,
+                        actor());
+
+        assertThat(result.contentType()).isEqualTo("application/text");
+        verify(storage).storeOriginal(any(), any(), any(), any(), any());
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceApplicationServiceTest.reuploadingVoidedPendingEvidenceCreatesFreshPendingEvidence()」。
@@ -521,9 +530,19 @@ class EvidenceApplicationServiceTest {
     // 下游影响：「EvidenceApplicationServiceTest.rejectsExecutableContentBeforeCallingStorage()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「EvidenceApplicationServiceTest.rejectsExecutableContentBeforeCallingStorage()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_evidence」、「file」、「payload.exe」、「OTHER」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void rejectsExecutableContentBeforeCallingStorage() {
+    void acceptsArbitraryBinaryMaterialType() throws Exception {
         when(caseRepository.findById("CASE_evidence"))
                 .thenReturn(Optional.of(caseEntity()));
+        when(evidenceRepository.findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
+                        any(), any(), any()))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(storage.storeOriginal(any(), any(), any(), any(), any()))
+                .thenReturn(
+                        new EvidenceStorage.StoredObject(
+                                "evidence-original",
+                                "CASE_evidence/EVIDENCE_test/payload.exe"));
         MockMultipartFile file =
                 new MockMultipartFile(
                         "file",
@@ -531,20 +550,20 @@ class EvidenceApplicationServiceTest {
                         "application/octet-stream",
                         new byte[] {77, 90});
 
-        assertThatThrownBy(
-                        () ->
-                                service.upload(
-                                        "CASE_evidence",
-                                        file,
-                                        "OTHER",
-                                "USER_UPLOAD",
-                                "PRIVATE",
-                                "该文件用于证明本案相关争议事实",
-                                true,
-                                null,
-                                        actor()))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("content type");
+        EvidenceView result =
+                service.upload(
+                        "CASE_evidence",
+                        file,
+                        "OTHER",
+                        "USER_UPLOAD",
+                        "PRIVATE",
+                        "该文件用于证明本案相关争议事实",
+                        true,
+                        null,
+                        actor());
+
+        assertThat(result.contentType()).isEqualTo("application/octet-stream");
+        verify(storage).storeOriginal(any(), any(), any(), any(), any());
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceApplicationServiceTest.rejectsExecutableBytesEvenWhenContentTypeClaimsPng()」。
@@ -553,9 +572,19 @@ class EvidenceApplicationServiceTest {
     // 下游影响：「EvidenceApplicationServiceTest.rejectsExecutableBytesEvenWhenContentTypeClaimsPng()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「EvidenceApplicationServiceTest.rejectsExecutableBytesEvenWhenContentTypeClaimsPng()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_evidence」、「file」、「fake.png」、「OTHER」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void rejectsExecutableBytesEvenWhenContentTypeClaimsPng() {
+    void doesNotInspectFileSignature() throws Exception {
         when(caseRepository.findById("CASE_evidence"))
                 .thenReturn(Optional.of(caseEntity()));
+        when(evidenceRepository.findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
+                        any(), any(), any()))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(storage.storeOriginal(any(), any(), any(), any(), any()))
+                .thenReturn(
+                        new EvidenceStorage.StoredObject(
+                                "evidence-original",
+                                "CASE_evidence/EVIDENCE_test/fake.png"));
         MockMultipartFile file =
                 new MockMultipartFile(
                         "file",
@@ -563,20 +592,20 @@ class EvidenceApplicationServiceTest {
                         "image/png",
                         new byte[] {'M', 'Z', 0, 0});
 
-        assertThatThrownBy(
-                        () ->
-                                service.upload(
-                                        "CASE_evidence",
-                                        file,
-                                        "OTHER",
-                                "USER_UPLOAD",
-                                "PRIVATE",
-                                "该文件用于证明本案相关争议事实",
-                                true,
-                                null,
-                                        actor()))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("signature");
+        EvidenceView result =
+                service.upload(
+                        "CASE_evidence",
+                        file,
+                        "OTHER",
+                        "USER_UPLOAD",
+                        "PRIVATE",
+                        "该文件用于证明本案相关争议事实",
+                        true,
+                        null,
+                        actor());
+
+        assertThat(result.contentType()).isEqualTo("image/png");
+        verify(storage).storeOriginal(any(), any(), any(), any(), any());
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceApplicationServiceTest.userCannotClaimThatUploadedEvidenceCameFromThePlatform()」。

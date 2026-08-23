@@ -18,7 +18,7 @@ final class CaseCommandAuthorization {
                     CommandType.EVIDENCE_OPENING,
                     CommandType.EVIDENCE_SUBMIT,
                     CommandType.PARTY_EVIDENCE_COMPLETE,
-                    CommandType.HEARING_STATEMENT,
+                    CommandType.HEARING_ANSWER_BUNDLE,
                     CommandType.HEARING_EVIDENCE_BATCH);
 
     private CaseCommandAuthorization() {}

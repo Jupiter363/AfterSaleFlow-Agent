@@ -2,7 +2,11 @@
 // 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
 
 import { describe, expect, it } from "vitest";
-import { displayRoomMessageText, humanizeDossierText } from "./displayText";
+import {
+  displayRoomMessageText,
+  domainCodeLabel,
+  humanizeDossierText,
+} from "./displayText";
 
 // 业务位置：【前端应用】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 describe("display text helpers", () => {
@@ -60,6 +64,14 @@ describe("display text helpers", () => {
     ).toContain("请人工复核");
   });
 
+  it("localizes persisted rule display names and draft contract terms", () => {
+    const text = humanizeDossierText(
+      "商家同意退款规则@1 Merchant-approved refund policy 与 Unshipped order cancellation policy 均不适用，应在 finding 中说明。",
+    );
+
+    expect(text).toBe("商家同意退款规则（版本 1） 与 未发货订单取消规则 均不适用，应在事实认定中说明。");
+  });
+
   // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("summarizes raw evidence matrix json in immutable room messages", () => {
     const text = displayRoomMessageText(
@@ -73,5 +85,40 @@ describe("display text helpers", () => {
     expect(text).not.toContain("verification_status");
     expect(text).not.toContain("UNMAPPED");
     expect(text).not.toContain("UNVERIFIED");
+  });
+
+  it("maps adjudication, jury and review field codes inside immutable reports", () => {
+    const text = displayRoomMessageText(
+      "decision_action=REJECT_CLAIM；fact_findings=PARTIALLY_ESTABLISHED；" +
+        "requires_revision=true；reviewer_attention 与 review_focus 需要补充；" +
+        "参照 JURY_FINDING_RULE_APPLICABILITY、JURY_MANDATORY_03 和 V1_FOCUS_02。",
+    );
+
+    expect(text).toContain("执行动作=驳回诉求");
+    expect(text).toContain("事实认定=部分认定");
+    expect(text).toContain("是否需要修订：是");
+    expect(text).toContain("人工关注事项");
+    expect(text).toContain("复核重点");
+    expect(text).toContain("陪审意见：规则适用性");
+    expect(text).toContain("陪审必改项 03");
+    expect(text).toContain("法官 V1 复核重点 02");
+    expect(text).not.toMatch(/\b(?:REJECT_CLAIM|PARTIALLY_ESTABLISHED|reviewer_attention|review_focus)\b/u);
+  });
+
+  it("maps intake verification identifiers and embedded role tokens", () => {
+    expect(humanizeDossierText("user_claimed_specific_performance_metrics")).toBe(
+      "用户主张的具体性能指标",
+    );
+    expect(humanizeDossierText("user_merchant_communication_details")).toBe(
+      "用户与商家的沟通详情",
+    );
+    expect(humanizeDossierText("核验user是否已与merchant沟通")).toBe(
+      "核验用户是否已与商家沟通",
+    );
+  });
+
+  it("provides safe labels for structured statuses without echoing unknown codes", () => {
+    expect(domainCodeLabel("CONTINUE_FULFILLMENT", "待确认")).toBe("继续履约");
+    expect(domainCodeLabel("NEVER_SEEN_STATUS", "待确认")).toBe("待确认");
   });
 });

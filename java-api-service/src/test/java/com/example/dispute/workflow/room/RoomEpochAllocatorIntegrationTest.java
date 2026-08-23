@@ -310,6 +310,67 @@ class RoomEpochAllocatorIntegrationTest {
     }
 
     @Test
+    void transitionAdvancesAndReplaysOneExactSequenceAuthorityPair() {
+        String caseId = "CASE_ALLOC_SEQUENCE_AUTHORITY";
+        insertCaseAndRooms(caseId, RoomType.HEARING, RoomType.REVIEW);
+        inTransaction(() -> allocator.activate(activate(caseId, RoomType.HEARING, NOW)));
+        jdbc.update(
+                """
+                update case_process_projection
+                   set last_command_sequence = 11, last_case_event_sequence = 22
+                 where case_id = ?
+                """,
+                caseId);
+        TransitionRoomEpoch command = new TransitionRoomEpoch(
+                caseId,
+                RoomType.HEARING,
+                roomId(caseId, RoomType.REVIEW),
+                RoomType.REVIEW,
+                "REVIEW_OPEN",
+                "PROVISIONING",
+                null,
+                NOW.plusMinutes(1),
+                null,
+                null,
+                15L,
+                68L);
+
+        RoomEpochAllocation inserted = inTransaction(() -> allocator.transition(command));
+        RoomEpochAllocation replayed = inTransaction(() -> allocator.transition(command));
+
+        assertThat(replayed.epochId()).isEqualTo(inserted.epochId());
+        assertThat(countEpochs(caseId)).isEqualTo(2);
+        assertThat(jdbc.queryForObject(
+                        "select last_command_sequence from case_process_projection where case_id = ?",
+                        Long.class,
+                        caseId))
+                .isEqualTo(15L);
+        assertThat(jdbc.queryForObject(
+                        "select last_case_event_sequence from case_process_projection where case_id = ?",
+                        Long.class,
+                        caseId))
+                .isEqualTo(68L);
+        assertThatThrownBy(() -> inTransaction(() -> allocator.transition(
+                        new TransitionRoomEpoch(
+                                caseId,
+                                RoomType.HEARING,
+                                roomId(caseId, RoomType.REVIEW),
+                                RoomType.REVIEW,
+                                "REVIEW_OPEN",
+                                "PROVISIONING",
+                                null,
+                                NOW.plusMinutes(1),
+                                null,
+                                null,
+                                15L,
+                                69L))))
+                .isInstanceOfSatisfying(
+                        RoomEpochAllocationException.class,
+                        failure -> assertThat(failure.reasonCode())
+                                .isEqualTo("ROOM_EPOCH_SEQUENCE_AUTHORITY_CONFLICT"));
+    }
+
+    @Test
     void legacyTransitionAndReplayPreserveExistingFrozenProjectionAuthority() {
         String caseId = "CASE_ALLOC_FROZEN_THEN_LEGACY";
         String projectionRef =

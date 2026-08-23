@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.targete2e.ingress.rooms;
 
 import com.example.dispute.review.domain.ActionSnapshotHasher;
+import com.example.dispute.hearing.domain.HearingDecisionAction;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -18,6 +19,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 /** Reads the Review decision's durable authority facts while the command admission transaction is open. */
 public final class JdbcTargetReviewInvocationFactsLoader {
+  private static final String TARGET_HEARING_PROMPT_VERSION = "hearing-flow.v2";
+  private static final String TARGET_HEARING_PROFILE_VERSION = "hearing-judge-v2";
   private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
   private static final Set<String> NON_EXECUTING_DECISIONS = Set.of(
       "REJECT", "REQUEST_MORE_EVIDENCE", "ESCALATE_MANUAL");
@@ -34,7 +37,8 @@ public final class JdbcTargetReviewInvocationFactsLoader {
              packet.packet_version, packet.case_summary_json::text, packet.claims_json::text,
              packet.issues_json::text, packet.evidence_matrix_json::text, packet.draft_json::text,
              packet.remedy_json::text, packet.risk_flags_json::text, packet.ruleset_version,
-             packet.action_hash, packet.agent_run_refs_json::text, packet.packet_status, packet.frozen,
+             packet.prompt_version, packet.profile_version, packet.action_hash,
+             packet.agent_run_refs_json::text, packet.packet_status, packet.frozen,
              packet.frozen_at, packet.expires_at, packet.case_version, packet.dossier_version,
              packet.issue_version, packet.adjudication_draft_version,
              packet.deliberation_report_version, packet.remedy_plan_version,
@@ -42,7 +46,9 @@ public final class JdbcTargetReviewInvocationFactsLoader {
              approval.review_packet_id as approval_packet_id, approval.review_packet_version,
              approval.action_hash as approval_hash,
              approval.action_snapshot_hash, approval.policy_version, approval.reviewer_id,
-             approval.decision_type, approval.original_plan_json::text as approval_original_plan_json,
+             approval.decision_type, approval.ai_decision_action,
+             approval.reviewer_decision_action,
+             approval.original_plan_json::text as approval_original_plan_json,
              approval.approved_plan_json::text as approval_approved_plan_json,
              draft.id as draft_id, policy.id as policy_decision_id,
              policy.policy_version as authoritative_policy_version
@@ -122,7 +128,11 @@ public final class JdbcTargetReviewInvocationFactsLoader {
         parse(value.remedyJson, "frozen remedy"),
         parse(value.approvalOriginalPlanJson, "approval original plan"),
         parse(value.approvalApprovedPlanJson, "approval approved plan"),
-        event);
+        event,
+        TARGET_HEARING_PROMPT_VERSION.equals(value.promptVersion)
+            && TARGET_HEARING_PROFILE_VERSION.equals(value.profileVersion),
+        value.aiDecisionAction,
+        value.reviewerDecisionAction);
   }
 
   static void requireDecisionMaterialIdentity(JsonNode event, String caseId, String commandId,
@@ -143,6 +153,14 @@ public final class JdbcTargetReviewInvocationFactsLoader {
   static void requireActionBinding(ObjectMapper mapper, String decisionType, String frozenActionHash,
       String approvedActionHash, JsonNode frozenPlan, JsonNode approvalOriginalPlan,
       JsonNode approvalApprovedPlan, JsonNode event) {
+    requireActionBinding(mapper, decisionType, frozenActionHash, approvedActionHash, frozenPlan,
+        approvalOriginalPlan, approvalApprovedPlan, event, false, null, null);
+  }
+
+  static void requireActionBinding(ObjectMapper mapper, String decisionType, String frozenActionHash,
+      String approvedActionHash, JsonNode frozenPlan, JsonNode approvalOriginalPlan,
+      JsonNode approvalApprovedPlan, JsonNode event, boolean boundedDecisionActionReview,
+      String aiDecisionAction, String reviewerDecisionAction) {
     Objects.requireNonNull(mapper, "mapper");
     Objects.requireNonNull(frozenPlan, "frozenPlan");
     Objects.requireNonNull(approvalOriginalPlan, "approvalOriginalPlan");
@@ -151,11 +169,19 @@ public final class JdbcTargetReviewInvocationFactsLoader {
     if (frozenActionHash == null || !frozenActionHash.matches("[0-9a-f]{64}")
         || !frozenPlan.isObject()
         || !frozenPlan.path("actions").isArray() || !frozenPlan.path("notifications").isArray()
-        || !frozenPlan.equals(approvalOriginalPlan)
-        || !approvalOriginalPlan.equals(event.path("original_plan"))
         || !Objects.equals(decisionType, event.path("decision").asText())
         || !frozenActionHash.equals(event.path("frozen_action_snapshot_hash").asText())
         || !frozenActionHash.equals(ActionSnapshotHasher.hash(mapper, frozenPlan))) {
+      throw new IllegalStateException("target Review decision action hashes do not bind canonical plans");
+    }
+    if (boundedDecisionActionReview) {
+      requireBoundedDecisionActionBinding(mapper, decisionType, frozenActionHash,
+          approvedActionHash, frozenPlan, approvalOriginalPlan, approvalApprovedPlan, event,
+          aiDecisionAction, reviewerDecisionAction);
+      return;
+    }
+    if (!frozenPlan.equals(approvalOriginalPlan)
+        || !approvalOriginalPlan.equals(event.path("original_plan"))) {
       throw new IllegalStateException("target Review decision action hashes do not bind canonical plans");
     }
     if ("APPROVE".equals(decisionType) || "MODIFY_AND_APPROVE".equals(decisionType)) {
@@ -196,6 +222,58 @@ public final class JdbcTargetReviewInvocationFactsLoader {
     } else {
       throw new IllegalStateException("target Review invocation has an unsupported decision type");
     }
+  }
+
+  private static void requireBoundedDecisionActionBinding(ObjectMapper mapper, String decisionType,
+      String frozenActionHash, String approvedActionHash, JsonNode frozenPlan,
+      JsonNode approvalOriginalPlan, JsonNode approvalApprovedPlan, JsonNode event,
+      String aiDecisionAction, String reviewerDecisionAction) {
+    if (!HearingDecisionAction.supports(aiDecisionAction)
+        || !Objects.equals(aiDecisionAction, event.path("ai_decision_action").asText())
+        || !Objects.equals(reviewerDecisionAction,
+            event.path("reviewer_decision_action").asText())) {
+      throw new IllegalStateException("target Review decision codes do not bind durable authority");
+    }
+    String frozenDecisionAction = frozenPlan.path("decision_action").asText();
+    if (!frozenDecisionAction.isBlank() && !aiDecisionAction.equals(frozenDecisionAction)) {
+      throw new IllegalStateException("target Review frozen AI decision code conflicts");
+    }
+    com.fasterxml.jackson.databind.node.ObjectNode expectedOriginal =
+        ((com.fasterxml.jackson.databind.node.ObjectNode) frozenPlan).deepCopy();
+    expectedOriginal.put("decision_action", aiDecisionAction);
+    if (!expectedOriginal.equals(approvalOriginalPlan)
+        || !approvalOriginalPlan.equals(event.path("original_plan"))
+        || !Objects.equals(frozenActionHash, approvedActionHash)) {
+      throw new IllegalStateException("target Review decision action hashes do not bind canonical plans");
+    }
+    if ("APPROVE".equals(decisionType) || "MODIFY_AND_APPROVE".equals(decisionType)) {
+      boolean approve = "APPROVE".equals(decisionType);
+      if (!HearingDecisionAction.supports(reviewerDecisionAction)
+          || approve != aiDecisionAction.equals(reviewerDecisionAction)) {
+        throw new IllegalStateException("target Review human decision code conflicts");
+      }
+      com.fasterxml.jackson.databind.node.ObjectNode expectedApproved = expectedOriginal.deepCopy();
+      expectedApproved.put("decision_action", reviewerDecisionAction);
+      if (!expectedApproved.equals(approvalApprovedPlan)
+          || !approvalApprovedPlan.equals(event.path("approved_plan"))
+          || !frozenActionHash.equals(event.path("approved_action_snapshot_hash").asText())
+          || !frozenActionHash.equals(ActionSnapshotHasher.hash(mapper, approvalApprovedPlan))) {
+        throw new IllegalStateException("target Review human decision code conflicts");
+      }
+      return;
+    }
+    if ("ESCALATE_MANUAL".equals(decisionType)) {
+      if (!"ESCALATE_MANUAL".equals(reviewerDecisionAction)
+          || !isAbsentApprovedPlan(approvalApprovedPlan)
+          || !approvalApprovedPlan.equals(event.path("approved_plan"))
+          || !frozenActionHash.equals(event.path("approved_action_snapshot_hash").asText())
+          || carriesExecutionAuthorization(event)) {
+        throw new IllegalStateException(
+            "target Review manual escalation must not carry execution authorization");
+      }
+      return;
+    }
+    throw new IllegalStateException("target Review bounded decision type is unsupported");
   }
 
   private static boolean isAbsentApprovedPlan(JsonNode approvedPlan) {
@@ -280,7 +358,7 @@ public final class JdbcTargetReviewInvocationFactsLoader {
   }
   private JsonNode parse(String json, String field) { try { return mapper.readTree(json); } catch (Exception error) { throw new IllegalStateException("frozen review " + field + " is invalid", error); } }
   private static java.time.Instant deadline(Row value) { return value.dueAt != null && value.dueAt.toInstant().isBefore(value.expiresAt.toInstant()) ? value.dueAt.toInstant() : value.expiresAt.toInstant(); }
-  private static Row row(ResultSet r) throws SQLException { return new Row(r.getString("command_id"), r.getString("tenant_surrogate"), r.getString("case_id"), r.getLong("room_epoch"), r.getString("actor_id"), r.getString("actor_role"), r.getLong("expected_process_revision"), r.getString("payload_sha256"), r.getString("event_json"), r.getString("review_task_id"), r.getString("task_plan_id"), r.getString("task_packet_id"), r.getString("task_policy_decision_id"), r.getString("task_status"), r.getString("assigned_reviewer_id"), offset(r,"due_at"), r.getString("packet_id"), r.getString("packet_case_id"), r.getString("packet_plan_id"), r.getInt("packet_version"), r.getString("case_summary_json"), r.getString("claims_json"), r.getString("issues_json"), r.getString("evidence_matrix_json"), r.getString("draft_json"), r.getString("remedy_json"), r.getString("risk_flags_json"), r.getString("ruleset_version"), r.getString("action_hash"), r.getString("agent_run_refs_json"), r.getString("packet_status"), r.getBoolean("frozen"), offset(r,"expires_at"), r.getLong("case_version"), r.getInt("dossier_version"), r.getInt("issue_version"), r.getInt("adjudication_draft_version"), r.getInt("deliberation_report_version"), r.getInt("remedy_plan_version"), r.getString("approval_record_id"), r.getString("approval_task_id"), r.getString("approval_packet_id"), r.getInt("review_packet_version"), r.getString("approval_hash"), r.getString("action_snapshot_hash"), r.getString("policy_version"), r.getString("reviewer_id"), r.getString("decision_type"), r.getString("approval_original_plan_json"), r.getString("approval_approved_plan_json"), r.getString("draft_id"), r.getString("policy_decision_id"), r.getString("authoritative_policy_version")); }
+  private static Row row(ResultSet r) throws SQLException { return new Row(r.getString("command_id"), r.getString("tenant_surrogate"), r.getString("case_id"), r.getLong("room_epoch"), r.getString("actor_id"), r.getString("actor_role"), r.getLong("expected_process_revision"), r.getString("payload_sha256"), r.getString("event_json"), r.getString("review_task_id"), r.getString("task_plan_id"), r.getString("task_packet_id"), r.getString("task_policy_decision_id"), r.getString("task_status"), r.getString("assigned_reviewer_id"), offset(r,"due_at"), r.getString("packet_id"), r.getString("packet_case_id"), r.getString("packet_plan_id"), r.getInt("packet_version"), r.getString("case_summary_json"), r.getString("claims_json"), r.getString("issues_json"), r.getString("evidence_matrix_json"), r.getString("draft_json"), r.getString("remedy_json"), r.getString("risk_flags_json"), r.getString("ruleset_version"), r.getString("prompt_version"), r.getString("profile_version"), r.getString("action_hash"), r.getString("agent_run_refs_json"), r.getString("packet_status"), r.getBoolean("frozen"), offset(r,"expires_at"), r.getLong("case_version"), r.getInt("dossier_version"), r.getInt("issue_version"), r.getInt("adjudication_draft_version"), r.getInt("deliberation_report_version"), r.getInt("remedy_plan_version"), r.getString("approval_record_id"), r.getString("approval_task_id"), r.getString("approval_packet_id"), r.getInt("review_packet_version"), r.getString("approval_hash"), r.getString("action_snapshot_hash"), r.getString("policy_version"), r.getString("reviewer_id"), r.getString("decision_type"), r.getString("ai_decision_action"), r.getString("reviewer_decision_action"), r.getString("approval_original_plan_json"), r.getString("approval_approved_plan_json"), r.getString("draft_id"), r.getString("policy_decision_id"), r.getString("authoritative_policy_version")); }
   private static OffsetDateTime offset(ResultSet r, String name) throws SQLException { return r.getObject(name, OffsetDateTime.class); }
   public record Facts(String reviewTaskId, String packetId, int packetVersion, String taskStatus, long fencingToken, java.time.Instant deadline, String reviewerActorHash, JsonNode frozenPacket, String frozenPacketHash, String actionHash, JsonNode event, String eventHash, Refs refs) {
     public Facts {
@@ -295,5 +373,5 @@ public final class JdbcTargetReviewInvocationFactsLoader {
     }
   }
   public record Refs(com.fasterxml.jackson.databind.node.ArrayNode facts, com.fasterxml.jackson.databind.node.ArrayNode rules, com.fasterxml.jackson.databind.node.ArrayNode drafts, com.fasterxml.jackson.databind.node.ArrayNode deliberations) {}
-  private record Row(String commandId,String tenant,String caseId,long roomEpoch,String actorId,String actorRole,long processRevision,String payloadHash,String eventJson,String reviewTaskId,String taskPlanId,String taskPacketId,String taskPolicyDecisionId,String taskStatus,String assignedReviewerId,OffsetDateTime dueAt,String packetId,String packetCaseId,String packetPlanId,int packetVersion,String caseSummaryJson,String claimsJson,String issuesJson,String evidenceMatrixJson,String draftJson,String remedyJson,String riskFlagsJson,String rulesetVersion,String actionHash,String agentRunRefsJson,String packetStatus,boolean frozen,OffsetDateTime expiresAt,long caseVersion,int dossierVersion,int issueVersion,int adjudicationDraftVersion,int deliberationReportVersion,int remedyPlanVersion,String approvalRecordId,String approvalTaskId,String approvalPacketId,int approvalPacketVersion,String approvalHash,String approvalActionHash,String policyVersion,String approvalReviewerId,String decisionType,String approvalOriginalPlanJson,String approvalApprovedPlanJson,String draftId,String policyDecisionId,String authoritativePolicyVersion) {}
+  private record Row(String commandId,String tenant,String caseId,long roomEpoch,String actorId,String actorRole,long processRevision,String payloadHash,String eventJson,String reviewTaskId,String taskPlanId,String taskPacketId,String taskPolicyDecisionId,String taskStatus,String assignedReviewerId,OffsetDateTime dueAt,String packetId,String packetCaseId,String packetPlanId,int packetVersion,String caseSummaryJson,String claimsJson,String issuesJson,String evidenceMatrixJson,String draftJson,String remedyJson,String riskFlagsJson,String rulesetVersion,String promptVersion,String profileVersion,String actionHash,String agentRunRefsJson,String packetStatus,boolean frozen,OffsetDateTime expiresAt,long caseVersion,int dossierVersion,int issueVersion,int adjudicationDraftVersion,int deliberationReportVersion,int remedyPlanVersion,String approvalRecordId,String approvalTaskId,String approvalPacketId,int approvalPacketVersion,String approvalHash,String approvalActionHash,String policyVersion,String approvalReviewerId,String decisionType,String aiDecisionAction,String reviewerDecisionAction,String approvalOriginalPlanJson,String approvalApprovedPlanJson,String draftId,String policyDecisionId,String authoritativePolicyVersion) {}
 }

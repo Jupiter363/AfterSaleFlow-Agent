@@ -8,6 +8,7 @@ from enum import StrEnum
 import hmac
 from typing import Any, Final
 
+from app.contracts.v1.models import command_provider_attempt_limit
 from app.graph_runtime.errors import (
     GraphLeaseUnavailableError,
     GraphRecoveryError,
@@ -169,10 +170,14 @@ class PostgresRecoveryCoordinator:
             raise GraphRecoveryError("GRAPH_RETRY_BUDGET_MISSING")
         provider_remaining = request_budget.get("provider_attempts_remaining")
         activity_remaining = request_budget.get("activity_attempts_remaining")
+        provider_limit = command_provider_attempt_limit(
+            binding.request_json.get("room_type"),
+            binding.request_json.get("stage_code"),
+        )
         if (
             not isinstance(provider_remaining, int)
             or isinstance(provider_remaining, bool)
-            or not 0 <= provider_remaining <= 2
+            or not 0 <= provider_remaining <= provider_limit
             or not isinstance(activity_remaining, int)
             or isinstance(activity_remaining, bool)
             or not 0 <= activity_remaining <= 3

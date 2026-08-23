@@ -36,6 +36,24 @@ describe("actor state", () => {
     expect(actor.role).toBe("PLATFORM_REVIEWER");
   });
 
+  it("preserves a generated case-party actor id for a recognized role", async () => {
+    localStorage.setItem(
+      "dispute-actor",
+      JSON.stringify({
+        id: "five-round-uat-user-583c798327e2453fa16de18b6c906ef2",
+        role: "USER",
+      }),
+    );
+
+    const { actor } = await import("./actor");
+
+    expect(actor).toMatchObject({
+      id: "five-round-uat-user-583c798327e2453fa16de18b6c906ef2",
+      role: "USER",
+      label: "用户",
+    });
+  });
+
   // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("switches demo actors by role using the fixed actor id", async () => {
     const { actor, switchDemoActor } = await import("./actor");

@@ -385,6 +385,21 @@ def validated_evidence_content_parts(
     return _content_parts_for_images(images)
 
 
+def validated_evidence_asset_manifest(
+    assets: LoadedEvidenceAssets,
+) -> dict[str, Any]:
+    """Return the loader-issued manifest only after proving its pixel binding.
+
+    The Evidence v2 context uses this view to create source units for image
+    pixels that were actually loaded.  Reusing the same capability validation
+    as the model-input path prevents an untrusted manifest from granting source
+    authority for bytes the model did not receive.
+    """
+
+    validated_evidence_content_parts(assets)
+    return assets.manifest
+
+
 def _issue_loaded_evidence_assets(
     *,
     images: tuple[_AuthorizedEvidenceImage, ...],

@@ -32,6 +32,7 @@ public final class JdbcTargetReviewOutcomeStartBindingPort implements TargetRevi
              epoch.provisioning_status, epoch.fencing_token, epoch.process_revision, epoch.room_revision,
              epoch.room_temporal_workflow_id, epoch.room_workflow_build_id, epoch.graph_version,
              activation.activation_id, activation.activation_manifest_hash,
+             activation_state.expires_at as activation_expires_at,
              task.id as review_task_id, task.plan_id as task_plan_id, task.packet_id as task_packet_id,
              task.policy_decision_id as task_policy_decision_id,
              task.created_at as review_opened_at, task.due_at as review_due_at,
@@ -177,7 +178,8 @@ public final class JdbcTargetReviewOutcomeStartBindingPort implements TargetRevi
   private static void requireFrozenPacket(Row value) {
     if (!value.packetId.equals(value.taskPacketId) || !value.taskPlanId.equals(value.packetPlanId)
         || !value.caseId.equals(value.packetCaseId) || !value.frozen || !"FROZEN".equals(value.packetStatus)
-        || value.openedAt == null || value.expiresAt == null || value.actionHash == null
+        || value.openedAt == null || value.expiresAt == null || value.activationExpiresAt == null
+        || value.actionHash == null
         || !value.actionHash.matches("[0-9a-f]{64}") || value.taskPolicyDecisionId == null
         || !value.taskPolicyDecisionId.equals(value.policyDecisionId) || value.policyVersion == null
         || value.policyVersion.isBlank()) {
@@ -225,9 +227,23 @@ public final class JdbcTargetReviewOutcomeStartBindingPort implements TargetRevi
   }
 
   private static Instant reviewDeadline(Row value) {
-    Instant packetDeadline = value.expiresAt.toInstant();
-    return value.dueAt == null || value.dueAt.toInstant().isAfter(packetDeadline)
-        ? packetDeadline : value.dueAt.toInstant();
+    return earliestDeadline(
+        value.dueAt == null ? null : value.dueAt.toInstant(),
+        value.expiresAt.toInstant(),
+        value.activationExpiresAt.toInstant());
+  }
+
+  /**
+   * Human Review is part of the signed Target activation, so its workflow deadline may never
+   * outlive that activation even when the generic task or packet carries a longer business SLA.
+   */
+  static Instant earliestDeadline(
+      Instant taskDeadline, Instant packetDeadline, Instant activationDeadline) {
+    Objects.requireNonNull(packetDeadline, "packetDeadline");
+    Objects.requireNonNull(activationDeadline, "activationDeadline");
+    Instant deadline = packetDeadline.isBefore(activationDeadline)
+        ? packetDeadline : activationDeadline;
+    return taskDeadline == null || taskDeadline.isAfter(deadline) ? deadline : taskDeadline;
   }
 
   private static RuntimeMode runtimeMode(WriterMode writerMode) {
@@ -241,7 +257,8 @@ public final class JdbcTargetReviewOutcomeStartBindingPort implements TargetRevi
         rs.getString("lifecycle_status"), rs.getString("provisioning_status"), rs.getLong("fencing_token"),
         rs.getLong("process_revision"), rs.getLong("room_revision"), rs.getString("room_temporal_workflow_id"),
         rs.getString("room_workflow_build_id"), rs.getString("graph_version"), rs.getString("activation_id"),
-        rs.getString("activation_manifest_hash"), rs.getString("review_task_id"),
+        rs.getString("activation_manifest_hash"), offset(rs, "activation_expires_at"),
+        rs.getString("review_task_id"),
         rs.getString("task_plan_id"), rs.getString("task_packet_id"),
         rs.getString("task_policy_decision_id"), offset(rs, "review_opened_at"),
         offset(rs, "review_due_at"), rs.getString("packet_id"), rs.getString("packet_case_id"),
@@ -265,7 +282,8 @@ public final class JdbcTargetReviewOutcomeStartBindingPort implements TargetRevi
   private record Row(String tenant, String caseId, String roomId, String roomType, long epoch,
       String writerMode, String lifecycleStatus, String provisioningStatus, long fence, long processRevision,
       long roomRevision, String roomWorkflowId, String roomWorkflowBuildId, String graphVersion,
-      String activationId, String activationManifestHash, String reviewTaskId, String taskPlanId,
+      String activationId, String activationManifestHash, OffsetDateTime activationExpiresAt,
+      String reviewTaskId, String taskPlanId,
       String taskPacketId, String taskPolicyDecisionId, OffsetDateTime openedAt, OffsetDateTime dueAt,
       String packetId, String packetCaseId, String packetPlanId, int packetVersion, String caseSummaryJson,
       String claimsJson, String issuesJson, String evidenceMatrixJson, String draftJson, String remedyJson,

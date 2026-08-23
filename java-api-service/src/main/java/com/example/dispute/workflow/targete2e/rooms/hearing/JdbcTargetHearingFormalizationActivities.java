@@ -1,7 +1,9 @@
 package com.example.dispute.workflow.targete2e.rooms.hearing;
 
+import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.hearing.domain.HearingAuthorityCommit;
 import com.example.dispute.hearing.domain.HearingAuthorityExpectation;
+import com.example.dispute.hearing.domain.HearingDomainReceipt;
 import com.example.dispute.hearing.domain.HearingAuthorityLedger;
 import com.example.dispute.hearing.domain.HearingFlowActionType;
 import com.example.dispute.hearing.domain.HearingFlowStage;
@@ -21,19 +23,24 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.temporal.room.hearing.HearingStageReceipt;
+import com.example.dispute.workflow.activity.hearing.HearingDomainReceiptAdapter;
 import com.example.dispute.workflow.temporal.room.hearing.HearingPartyTerminalReceipt;
 import com.example.dispute.workflow.temporal.room.hearing.HearingCommittedReceipt;
+import com.example.dispute.workflow.temporal.room.hearing.HearingOperationKeys;
 import com.example.dispute.workflow.temporal.room.hearing.HearingWorkflowStage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.function.Supplier;
 import javax.sql.DataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
@@ -56,8 +63,21 @@ public final class JdbcTargetHearingFormalizationActivities
   private static final String TARGET_REVIEW_PROFILE_VERSION = "hearing-judge-v2";
   private static final String TARGET_REVIEW_RULESET_VERSION = "ruleset-current";
   private static final String TARGET_REVIEW_SKILL_VERSION = "dispute-default-v1";
+  static final String TARGET_REVIEW_AGENT_RUN_ROLE = "SYSTEM";
+  static final int TARGET_REVIEW_DRAFT_VERSION = 2;
+  static final String TARGET_REVIEW_SOURCE_ROUTE = RouteType.FULL_HEARING.name();
   private static final HearingPublicTranscriptPolicy TRANSCRIPT_POLICY =
       new HearingPublicTranscriptPolicy();
+  static final String DOSSIER_FINALIZE_REPLAY_SQL = """
+      select operation_key
+        from hearing_domain_receipt
+       where tenant_surrogate = ? and case_id = ? and flow_instance_id = ?
+         and epoch_id = ? and hearing_epoch = ? and fencing_token = ?
+         and operation_type = 'FINALIZE'
+         and source_stage = ? and source_stage_sequence = ?
+         and source_process_revision = ? and source_room_revision = ?
+       for update
+      """;
   static final String REVIEW_TASK_INSERT_SQL = """
       insert into review_task (id, case_id, plan_id, packet_id, policy_decision_id, task_status,
         priority, assigned_reviewer_id, required_role, due_at, decision_json, created_by, updated_by)
@@ -73,6 +93,93 @@ public final class JdbcTargetHearingFormalizationActivities
       where task.id = ? and task.case_id = ? and task.plan_id = ? and task.packet_id = ?
         and task.task_status = 'PENDING' and policy.id = ? and policy.policy_version = ?
       for update of task, policy
+      """;
+  static final String RECONCILE_TARGET_FULL_HEARING_ROUTE_SQL = """
+      update fulfillment_dispute_case dispute
+         set hearing_route = 'FULL_HEARING', updated_at = now(), updated_by = ?,
+             version = version + 1
+       where dispute.id = ?
+         and dispute.hearing_route is null
+         and dispute.current_room = 'HEARING'
+         and dispute.case_status not in ('CLOSED', 'CANCELLED')
+         and exists (
+           select 1
+             from hearing_temporal_projection projection
+             join case_room_epoch epoch
+               on epoch.id = projection.epoch_id
+              and epoch.tenant_surrogate = projection.tenant_surrogate
+              and epoch.case_id = projection.case_id
+              and epoch.room_type = 'HEARING'
+              and epoch.room_epoch = projection.hearing_epoch
+              and epoch.process_revision = projection.process_revision
+              and epoch.room_revision = projection.room_revision
+              and epoch.fencing_token = projection.fencing_token
+             join target_e2e_room_epoch_binding binding
+               on binding.epoch_id = epoch.id
+              and binding.tenant_surrogate = epoch.tenant_surrogate
+              and binding.case_id = epoch.case_id
+              and binding.room_type = epoch.room_type
+              and binding.room_epoch = epoch.room_epoch
+              and binding.room_fencing_token = epoch.fencing_token
+            where projection.tenant_surrogate = ?
+              and projection.case_id = dispute.id
+              and projection.flow_instance_id = ?
+              and projection.epoch_id = ?
+              and projection.hearing_epoch = ?
+              and projection.process_revision = ?
+              and projection.room_revision = ?
+              and projection.fencing_token = ?
+              and projection.writer_mode = 'TEMPORAL'
+              and epoch.writer_mode = 'TEMPORAL'
+              and epoch.lifecycle_status = 'ACTIVE'
+              and epoch.provisioning_status = 'READY'
+              and binding.execution_lane = 'TARGET_E2E_CANDIDATE'
+         )
+      """;
+  static final String HEARING_EPOCH_TIME_BOUNDARY_SQL = """
+      select epoch.updated_at
+        from case_room_epoch epoch
+       where epoch.id = ?
+         and epoch.tenant_surrogate = ?
+         and epoch.case_id = ?
+         and epoch.room_type = 'HEARING'
+         and epoch.room_epoch = ?
+         and epoch.process_revision = ?
+         and epoch.room_revision = ?
+         and epoch.fencing_token = ?
+         and epoch.writer_mode = 'TEMPORAL'
+         and epoch.lifecycle_status = 'ACTIVE'
+         and epoch.provisioning_status = 'READY'
+       for update
+      """;
+  static final String REVIEW_TRANSITION_CASE_LOCK_SQL = """
+      select id
+        from fulfillment_dispute_case
+       where id = ?
+       for update
+      """;
+  static final String REVIEW_LAST_COMMAND_SEQUENCE_SQL = """
+      select case_command_sequence
+        from case_command
+       where tenant_surrogate = ? and case_id = ?
+       order by case_command_sequence desc
+       limit 1
+       for update
+      """;
+  static final String REVIEW_LAST_CASE_EVENT_SEQUENCE_SQL = """
+      select sequence_no
+        from case_timeline_event
+       where case_id = ?
+       order by sequence_no desc
+       limit 1
+       for update
+      """;
+  static final String REVIEW_SEQUENCE_AUTHORITY_REPLAY_SQL = """
+      select last_command_sequence, last_case_event_sequence
+        from case_process_projection
+       where case_id = ? and current_room = 'REVIEW'
+         and process_revision = ? and room_epoch = ? and fencing_token = ?
+       for update
       """;
   static final String REVIEW_EPOCH_TASK_SOURCE_SQL = """
       select task.id, task.plan_id, task.policy_decision_id
@@ -118,6 +225,28 @@ public final class JdbcTargetHearingFormalizationActivities
          and binding.review_task_id = ? and binding.plan_id = ?
          and binding.policy_decision_id = ? and binding.source_handoff_id = ?
        for update of binding, epoch, handoff, task, policy
+      """;
+  static final String PENDING_SUBMITTED_ACTION_COUNT_SQL = """
+      select count(*)
+        from hearing_flow_action action
+       where action.flow_instance_id = ? and action.stage_id = ? and action.case_id = ?
+         and action.action_type = ? and action.submission_status = 'SUBMITTED'
+         and not exists (
+           select 1 from hearing_domain_receipt receipt
+            where receipt.tenant_surrogate = ? and receipt.case_id = action.case_id
+              and receipt.flow_instance_id = action.flow_instance_id
+              and receipt.epoch_id = ? and receipt.hearing_epoch = ?
+              and receipt.fencing_token = ? and receipt.writer_mode = 'TEMPORAL'
+              and receipt.operation_type = 'PARTY_TERMINAL'
+              and receipt.source_stage = ? and receipt.source_stage_sequence = ?
+              and receipt.result_ref = 'urn:hearing:party-action:' || action.id)
+      """;
+  static final String COMMITTED_TERMINAL_COUNT_SQL = """
+      select count(*) from hearing_domain_receipt
+       where tenant_surrogate = ? and case_id = ? and flow_instance_id = ? and epoch_id = ?
+         and hearing_epoch = ? and writer_mode = 'TEMPORAL' and fencing_token = ?
+         and operation_type = 'PARTY_TERMINAL' and source_stage = ?
+         and source_stage_sequence = ?
       """;
 
   private final DataSource dataSource;
@@ -240,12 +369,15 @@ public final class JdbcTargetHearingFormalizationActivities
             replay, request.transition().start(), request.transition().expectedStage());
         return new PartyResult(replay);
       }
-      Cursor cursor = lock(request.transition());
       var command = request.command();
-      require(command.commandType() == CommandType.HEARING_STATEMENT
+      require(command.commandType() == CommandType.HEARING_ANSWER_BUNDLE
               || command.commandType() == CommandType.HEARING_EVIDENCE_BATCH,
           "unsupported party command type");
-      CaseCommandLock commandLock = lockCaseCommand(command);
+      OrderedPartyLocks<CaseCommandLock, Cursor> locks = acquirePartyLocksInGlobalOrder(
+          () -> lockCaseCommand(command),
+          () -> lock(request.transition()));
+      CaseCommandLock commandLock = locks.caseCommand();
+      Cursor cursor = locks.hearingCursor();
       TimelinePartyEvent timeline = lockTimelinePartyEvent(cursor, command);
       PartyAction action = one(jdbc.query("""
           select id, action_type, schema_version, participant_id, participant_role,
@@ -254,8 +386,7 @@ public final class JdbcTargetHearingFormalizationActivities
            where id = ? and flow_instance_id = ? and case_id = ? and stage_id = ?
              and participant_id = ? and content_hash = ? and agent_run_id is null
            for update
-          """, (row, ignored) -> new PartyAction(row.getString(1), row.getString(2), row.getString(3),
-          row.getString(4), row.getString(5), row.getString(6), row.getString(7), row.getString(8)),
+          """, (row, ignored) -> persistedPartyAction(row),
           timeline.actionId(), cursor.flowId(), command.caseId(), cursor.sourceStageId(),
           command.actorRef().actorId(), timeline.actionContentHash()));
       HearingFlowActionType actionType = HearingFlowActionType.valueOf(action.actionType());
@@ -263,9 +394,8 @@ public final class JdbcTargetHearingFormalizationActivities
           timeline.actionSchemaVersion(), requiredText(parse(timeline.actionPayload()), "schema_version"));
       require(action.contentHash().equals(timeline.actionContentHash())
               && action.participantRole().equals(command.actorRef().actorRole().name())
-              && canonical(action.payloadJson()).equals(timeline.actionPayload()),
+              && action.payloadJson().equals(timeline.actionPayload()),
           "timeline event and Hearing action disagree");
-      require(action.payloadJson().equals(canonical(action.payloadJson())), "party payload is not canonical");
       HearingFormalTransition transition = partyTransition(request.transition(), cursor, action);
       HearingAuthorityCommit commit = partyCommit(
           cursor.authority(), request.transition().operationKey(), command.commandId(), action,
@@ -307,15 +437,14 @@ public final class JdbcTargetHearingFormalizationActivities
       }
       Cursor cursor = lock(request.transition());
       require(cursor.authority().stage().hasSharedPartyDeadline(), "party timeout stage required");
+      require(cursor.authority().stage() == HearingFlowStage.PARTY_EVIDENCE_OPEN,
+          "answer timeout cannot create a terminal action");
       Instant deadline = expiredPartyDeadline(cursor);
       if (pendingSubmittedActionCount(cursor) > 0) {
         return new TimeoutResult(null, true);
       }
       String participantRole = timeoutParticipantRole(request);
-      HearingFlowActionType actionType =
-          cursor.authority().stage() == HearingFlowStage.PARTY_ANSWERS_OPEN
-              ? HearingFlowActionType.ANSWER_BUNDLE
-              : HearingFlowActionType.EVIDENCE_BATCH;
+      HearingFlowActionType actionType = HearingFlowActionType.EVIDENCE_BATCH;
       PartyAction action = timeoutAction(
           request, cursor, actionType, participantRole, deadline);
       HearingFormalTransition transition = partyTransition(
@@ -474,7 +603,7 @@ public final class JdbcTargetHearingFormalizationActivities
   @Override
   public StageResult freezeDossier(TransitionRequest request) {
     return required(() -> {
-      HearingStageReceipt replay = replayStage(request, HearingAuthorityCommit.OperationType.FINALIZE);
+      HearingStageReceipt replay = replayFinalizedDossier(request);
       if (replay != null) {
         commitTranscript(
             JdbcTargetHearingPublicTranscriptCommitter.CommitMode.STRICT_REPLAY,
@@ -502,8 +631,9 @@ public final class JdbcTargetHearingFormalizationActivities
       String requestHash = HearingFormalRequestHash.compute("DOSSIER", cursor.authority(), transition, dossierId,
           dossier.caseVersion(), dossier.caseHash(), dossier.evidenceVersion(), dossier.evidenceHash(),
           dossier.questionSetId(), dossier.requestSetId(), dossier.hash(), CONTROL_ACTOR);
+      String operationKey = dossierFinalizeOperationKey(cursor.authority(), requestHash);
       HearingAuthorityCommit commit = commit(cursor.authority(), HearingAuthorityCommit.OperationType.FINALIZE,
-          request.operationKey(), requestHash, committedAt);
+          operationKey, requestHash, committedAt);
       HearingStageReceipt receipt = completion.freezeDossier(new HearingFormalFinalizer.DossierCommand(commit, transition,
           dossierId, dossier.caseVersion(), dossier.caseHash(), dossier.evidenceVersion(), dossier.evidenceHash(),
           dossier.questionSetId(), dossier.requestSetId(), dossier.json(), dossier.hash(), CONTROL_ACTOR));
@@ -537,7 +667,7 @@ public final class JdbcTargetHearingFormalizationActivities
           for update of task, packet""", (row, ignored) -> new Parent(row.getString(1), row.getString(2)),
           review.id(), cursor.authority().caseId(), review.hash()));
       HearingFormalTransition transition = sameStage(cursor);
-      Instant committedAt = request.start().openedAt(); String handoffId = actionId("handoff", request.operationKey());
+      Instant committedAt = currentEpochBoundary(cursor); String handoffId = actionId("handoff", request.operationKey());
       String handoffHash = HearingFormalRequestHash.compute("HANDOFF_FACT", cursor.authority(), handoffId, dossier.id(), dossier.hash(),
           proposal.id(), proposal.hash(), report.id(), report.hash(), draft.id(), draft.hash(), lockedReview.id(), lockedReview.hash(), CONTROL_ACTOR, committedAt);
       String requestHash = HearingFormalRequestHash.compute("HANDOFF", cursor.authority(), transition, handoffId, dossier.id(), dossier.hash(),
@@ -555,18 +685,22 @@ public final class JdbcTargetHearingFormalizationActivities
     return required(() -> {
       HearingStageReceipt replay = replayStage(request, HearingAuthorityCommit.OperationType.CLOSE);
       if (replay != null) return new StageResult(replay);
+      lockCaseForReviewTransition(request);
       Cursor cursor = lock(request);
       require(cursor.authority().stage() == HearingFlowStage.HUMAN_REVIEW_OPEN, "review closure stage required");
       ClosureParent parent = one(jdbc.query("""
-          select handoff.id, handoff.review_task_id, receipt.receipt_id, receipt.receipt_hash
+          select handoff.id, handoff.review_task_id, receipt.receipt_id, receipt.receipt_hash,
+                 receipt.committed_at
           from hearing_review_handoff_fact handoff join hearing_domain_receipt receipt
             on receipt.result_ref = 'urn:hearing:handoff:' || handoff.id and receipt.operation_type = 'HANDOFF'
           where handoff.case_id = ? and handoff.flow_instance_id = ? for update of handoff, receipt""",
           (row, ignored) -> new ClosureParent(
-              row.getString(1), row.getString(2), row.getString(3), row.getString(4)),
+              row.getString(1), row.getString(2), row.getString(3), row.getString(4),
+              row.getObject(5, OffsetDateTime.class).toInstant()),
           cursor.authority().caseId(), cursor.flowId()));
       HearingFormalTransition transition = advancing(request, cursor, canonical(cursor.sourceOutputJson()));
-      Instant committedAt = request.start().openedAt(); String closureId = actionId("close", request.operationKey());
+      Instant committedAt = laterBoundary(currentEpochBoundary(cursor), parent.handoffCommittedAt());
+      String closureId = actionId("close", request.operationKey());
       String closureHash = HearingFormalRequestHash.compute("CLOSURE_FACT", cursor.authority(), closureId, parent.handoffId(),
           parent.receiptId(), parent.receiptHash(), CONTROL_ACTOR, committedAt);
       String requestHash = HearingFormalRequestHash.compute("CLOSURE", cursor.authority(), transition, closureId,
@@ -575,8 +709,16 @@ public final class JdbcTargetHearingFormalizationActivities
           "hearing.close:" + key(cursor.authority()) + parent.receiptHash(), requestHash, committedAt);
       HearingStageReceipt receipt = completion.commitClosure(new HearingFormalFinalizer.ClosureCommand(commit, transition, closureId,
           parent.handoffId(), parent.receiptId(), parent.receiptHash(), closureHash, CONTROL_ACTOR));
-      transitionToReview(
-          cursor, receipt, committedAt, parent.handoffId(), parent.reviewTaskId());
+      HearingDomainReceipt completed = ledger.completeCloseTransition(commit, closeReceipt -> {
+        HearingStageReceipt stageReceipt = HearingDomainReceiptAdapter.stage(closeReceipt);
+        require(stageReceipt.equals(receipt), "Hearing close receipt adapter drifted");
+        ReviewSequenceAuthority sequenceAuthority = lockReviewSequenceAuthority(cursor);
+        transitionToReview(
+            cursor, stageReceipt, committedAt, parent.handoffId(), parent.reviewTaskId(),
+            sequenceAuthority);
+      });
+      require(HearingDomainReceiptAdapter.stage(completed).equals(receipt),
+          "Hearing close transition receipt drifted");
       return new StageResult(receipt);
     });
   }
@@ -658,7 +800,32 @@ public final class JdbcTargetHearingFormalizationActivities
 
   /** Receipt-first retry path: no old source cursor is touched after a lost Activity response. */
   private HearingStageReceipt replayStage(TransitionRequest request, HearingAuthorityCommit.OperationType operation) {
-    return ledger.findCommitted(request.start().tenantSurrogate(), request.operationKey()).map(receipt -> {
+    return replayStage(request, operation, request.operationKey());
+  }
+
+  private HearingStageReceipt replayFinalizedDossier(TransitionRequest request) {
+    List<String> keys = jdbc.query(DOSSIER_FINALIZE_REPLAY_SQL,
+        (row, ignored) -> row.getString(1),
+        request.start().tenantSurrogate(), request.start().caseId(),
+        request.start().flowInstanceId(), request.start().epochId(),
+        request.start().roomEpoch(), request.expectedFencingToken(),
+        request.expectedStage().name(), request.expectedStageSequence(),
+        request.expectedProcessRevision(), request.expectedRoomRevision());
+    if (keys.isEmpty()) return null;
+    String operationKey = one(keys);
+    HearingStageReceipt replay = replayStage(
+        request, HearingAuthorityCommit.OperationType.FINALIZE, operationKey);
+    if (replay == null) {
+      throw new IllegalStateException("durable target Hearing dossier receipt is absent");
+    }
+    return replay;
+  }
+
+  private HearingStageReceipt replayStage(
+      TransitionRequest request,
+      HearingAuthorityCommit.OperationType operation,
+      String operationKey) {
+    return ledger.findCommitted(request.start().tenantSurrogate(), operationKey).map(receipt -> {
       require(receipt.operationType() == operation
           && receipt.caseId().equals(request.start().caseId())
           && receipt.flowInstanceId().equals(request.start().flowInstanceId())
@@ -670,6 +837,17 @@ public final class JdbcTargetHearingFormalizationActivities
           && receipt.sourceRoomRevision() == request.expectedRoomRevision(), "Hearing replay receipt conflicts");
       return HearingDomainReceiptAdapter.stage(receipt);
     }).orElse(null);
+  }
+
+  static String dossierFinalizeOperationKey(
+      HearingAuthorityExpectation authority, String requestHash) {
+    Objects.requireNonNull(authority, "authority");
+    if (authority.stage() != HearingFlowStage.DOSSIER_FREEZING) {
+      throw new IllegalArgumentException("dossier finalize key requires DOSSIER_FREEZING");
+    }
+    return HearingOperationKeys.finalizeArtifact(
+        authority.tenantSurrogate(), authority.caseId(), authority.roomEpoch(),
+        authority.stageSequence(), "trial_dossier.v2", requestHash);
   }
   private HearingPartyTerminalReceipt replayParty(PartyRequest request) {
     var command = request.command();
@@ -774,21 +952,8 @@ public final class JdbcTargetHearingFormalizationActivities
         cursor.authority().stageSequence()));
   }
   private int pendingSubmittedActionCount(Cursor cursor) {
-    Integer value = jdbc.queryForObject("""
-        select count(*)
-          from hearing_flow_action action
-         where action.flow_instance_id = ? and action.stage_id = ? and action.case_id = ?
-           and action.action_type = ? and action.submission_status = 'SUBMITTED'
-           and not exists (
-             select 1 from hearing_domain_receipt receipt
-              where receipt.tenant_surrogate = ? and receipt.case_id = action.case_id
-                and receipt.flow_instance_id = action.flow_instance_id
-                and receipt.epoch_id = ? and receipt.room_epoch = ?
-                and receipt.fencing_token = ? and receipt.writer_mode = 'TEMPORAL'
-                and receipt.operation_type = 'PARTY_TERMINAL'
-                and receipt.source_stage = ? and receipt.source_stage_sequence = ?
-                and receipt.result_ref = 'urn:hearing:party-action:' || action.id)
-        """, Integer.class, cursor.flowId(), cursor.sourceStageId(), cursor.authority().caseId(),
+    Integer value = jdbc.queryForObject(PENDING_SUBMITTED_ACTION_COUNT_SQL, Integer.class,
+        cursor.flowId(), cursor.sourceStageId(), cursor.authority().caseId(),
         cursor.authority().stage() == HearingFlowStage.PARTY_ANSWERS_OPEN
             ? HearingFlowActionType.ANSWER_BUNDLE.name()
             : HearingFlowActionType.EVIDENCE_BATCH.name(),
@@ -823,9 +988,7 @@ public final class JdbcTargetHearingFormalizationActivities
            and action.action_type = ? and action.participant_id = ?
            and action.participant_role = ? and action.agent_run_id is null
          for update
-        """, (row, ignored) -> new PartyAction(
-            row.getString(1), row.getString(2), row.getString(3), row.getString(4),
-            row.getString(5), row.getString(6), row.getString(7), row.getString(8)),
+        """, (row, ignored) -> persistedPartyAction(row),
         cursor.flowId(), cursor.sourceStageId(), cursor.authority().caseId(), actionType.name(),
         request.participantId(), participantRole);
     require(existing.size() <= 1, "timeout party action cardinality");
@@ -837,7 +1000,6 @@ public final class JdbcTargetHearingFormalizationActivities
         && action.participantId().equals(request.participantId())
         && action.participantRole().equals(participantRole)
         && "AUTO_TIMEOUT".equals(action.submissionStatus())
-        && action.payloadJson().equals(canonical(action.payloadJson()))
         && action.contentHash().equals(hashJson(action.payloadJson()))
         && requiredText(parse(action.payloadJson()), "schema_version").equals(action.schemaVersion()),
         "timeout party action authority");
@@ -884,43 +1046,36 @@ public final class JdbcTargetHearingFormalizationActivities
       JsonNode parent,
       String batchId) {
     ObjectNode payload = mapper.createObjectNode();
-    payload.put("schema_version", stage == HearingFlowStage.PARTY_ANSWERS_OPEN
-        ? "hearing_party_statement.v1" : "hearing_evidence_batch.v1");
+    if (stage != HearingFlowStage.PARTY_EVIDENCE_OPEN) {
+      throw new IllegalArgumentException("answer timeout payloads are forbidden");
+    }
+    payload.put("schema_version", "hearing_evidence_batch.v1");
     payload.put("participant_id", participantId);
     payload.put("participant_role", participantRole);
     payload.put("submission_status", HearingFlowSubmissionStatus.AUTO_TIMEOUT.name());
     payload.put("submitted_at", deadline.toString());
-    if (stage == HearingFlowStage.PARTY_ANSWERS_OPEN) {
-      String questionSetId = requiredText(parent, "question_set_id");
-      payload.put("question_set_id", questionSetId);
-      String issueSetId = parent.path("issue_set_id").asText(null);
-      payload.put("issue_set_id",
-          issueSetId == null || issueSetId.isBlank() ? questionSetId : issueSetId);
-      payload.putNull("statement_text");
-      payload.putArray("source_message_ids");
-    } else if (stage == HearingFlowStage.PARTY_EVIDENCE_OPEN) {
-      payload.put("request_set_id", requiredText(parent, "request_set_id"));
-      payload.put("batch_id", requiredValue(batchId, "timeout batch id"));
-      payload.putArray("request_ids");
-      payload.putArray("evidence_ids");
-      payload.put("batch_note", "");
-    } else {
-      throw new IllegalArgumentException("timeout payload requires a party-wait stage");
-    }
+    payload.put("request_set_id", requiredText(parent, "request_set_id"));
+    payload.put("batch_id", requiredValue(batchId, "timeout batch id"));
+    payload.putArray("request_ids");
+    payload.putArray("evidence_ids");
+    payload.put("batch_note", "");
     return payload;
   }
   private int committedTerminalCount(Cursor cursor) {
-    Integer value = jdbc.queryForObject("""
-        select count(*) from hearing_domain_receipt
-         where tenant_surrogate = ? and case_id = ? and flow_instance_id = ? and epoch_id = ?
-           and room_epoch = ? and writer_mode = 'TEMPORAL' and fencing_token = ?
-           and operation_type = 'PARTY_TERMINAL' and source_stage = ?
-           and source_stage_sequence = ?
-        """, Integer.class, cursor.authority().tenantSurrogate(), cursor.authority().caseId(),
+    Integer value = jdbc.queryForObject(COMMITTED_TERMINAL_COUNT_SQL, Integer.class,
+        cursor.authority().tenantSurrogate(), cursor.authority().caseId(),
         cursor.flowId(), cursor.authority().epochId(), cursor.authority().roomEpoch(),
         cursor.authority().fencingToken(), cursor.authority().stage().name(),
         cursor.authority().stageSequence());
     return value == null ? 0 : value;
+  }
+
+  static <C, H> OrderedPartyLocks<C, H> acquirePartyLocksInGlobalOrder(
+      Supplier<C> caseCommandLock,
+      Supplier<H> hearingCursorLock) {
+    C command = Objects.requireNonNull(caseCommandLock.get(), "caseCommandLock");
+    H hearing = Objects.requireNonNull(hearingCursorLock.get(), "hearingCursorLock");
+    return new OrderedPartyLocks<>(command, hearing);
   }
   private HearingAuthorityCommit stageCommit(HearingAuthorityExpectation authority, String operationKey, HearingFormalTransition transition, String sourceOutput) {
     String hash = hashJson(sourceOutput); String requestHash = HearingFormalRequestHash.compute("STAGE", authority, transition, hash, CONTROL_ACTOR);
@@ -955,7 +1110,7 @@ public final class JdbcTargetHearingFormalizationActivities
       command.commandId(), command.tenantSurrogate(), command.caseId(), command.roomEpoch(), command.requestHash(),
       command.payloadRef().uri(), command.payloadRef().sha256(), command.payloadRef().sizeBytes())); }
   private TimelinePartyEvent lockTimelinePartyEvent(Cursor cursor, com.example.dispute.workflow.contract.v1.CaseCommandRef command) {
-    String eventType = command.commandType() == CommandType.HEARING_STATEMENT ? "HEARING_ANSWER_BUNDLE_SUBMITTED" : "HEARING_EVIDENCE_BATCH_SUBMITTED";
+    String eventType = command.commandType() == CommandType.HEARING_ANSWER_BUNDLE ? "HEARING_ANSWER_BUNDLE_SUBMITTED" : "HEARING_EVIDENCE_BATCH_SUBMITTED";
     String prefix = "urn:case-timeline-event:";
     require(command.payloadRef().schemaVersion().equals("case-timeline-event.v1")
         && command.payloadRef().uri().startsWith(prefix), "party timeline payload reference");
@@ -1011,10 +1166,11 @@ public final class JdbcTargetHearingFormalizationActivities
   }
   private Parent ensureReviewProjection(Cursor cursor, Parent dossier, Parent proposal, Parent report,
       Parent formalDraft, String operationKey) {
-    String draftId = actionId("review-draft", operationKey);
+    String draftId = formalDraft.id();
     String remedyId = actionId("review-remedy", operationKey);
     String packetId = actionId("review-packet", operationKey);
     String taskId = actionId("review-task", operationKey);
+    reconcileTargetFullHearingRoute(cursor);
     ReviewPacketAuthority authority = one(jdbc.query("""
         select dispute.title, dispute.description, dispute.hearing_route, dispute.risk_level,
                dispute.version, frozen.case_matrix_version, frozen.case_matrix_hash,
@@ -1030,7 +1186,7 @@ public final class JdbcTargetHearingFormalizationActivities
            and proposal.trial_dossier_id = frozen.id
            and proposal.trial_dossier_hash = frozen.content_hash
            and proposal.artifact_type = 'JUDGE_PROPOSAL'
-           and proposal.schema_version = 'judge_proposal.v1'
+           and proposal.schema_version = 'judge_proposal.v2'
            and proposal.content_hash = ?
           join hearing_flow_artifact report
             on report.id = ?
@@ -1050,7 +1206,7 @@ public final class JdbcTargetHearingFormalizationActivities
            and draft.trial_dossier_id = frozen.id
            and draft.trial_dossier_hash = frozen.content_hash
            and draft.artifact_type = 'ADJUDICATION_DRAFT'
-           and draft.schema_version = 'adjudication_draft.v2'
+           and draft.schema_version = 'adjudication_draft.v3'
            and draft.proposal_id = proposal.id
            and draft.proposal_content_hash = proposal.content_hash
            and draft.report_id = report.id
@@ -1080,28 +1236,37 @@ public final class JdbcTargetHearingFormalizationActivities
            and draft_stage.stage_status = 'COMPLETED'
            and draft_stage.output_json = draft.payload_json
            and draft_stage.agent_run_id = draft.agent_run_id
-          join agent_run proposal_run
-            on proposal_run.id = proposal.agent_run_id
-           and proposal_run.case_id = frozen.case_id
-           and proposal_run.agent_role = 'PRESIDING_JUDGE'
-           and proposal_run.run_status = 'COMPLETED'
-           and proposal_run.completed_at is not null
-          join agent_run report_run
-            on report_run.id = report.agent_run_id
-           and report_run.case_id = frozen.case_id
-           and report_run.agent_role = 'JURY_PANEL'
-           and report_run.run_status = 'COMPLETED'
-           and report_run.completed_at is not null
-          join agent_run draft_run
-            on draft_run.id = draft.agent_run_id
-           and draft_run.case_id = frozen.case_id
-           and draft_run.agent_role = 'PRESIDING_JUDGE'
-           and draft_run.run_status = 'COMPLETED'
-           and draft_run.completed_at is not null
+           join agent_run proposal_run
+             on proposal_run.id = proposal.agent_run_id
+            and proposal_run.case_id = frozen.case_id
+            and proposal_run.agent_role = ?
+            and proposal_run.protocol = 'agent-stream.v3'
+            and proposal_run.executor_kind = 'TEMPORAL_ACTIVITY'
+            and proposal_run.room_type = 'HEARING'
+            and proposal_run.run_status = 'COMPLETED'
+            and proposal_run.completed_at is not null
+           join agent_run report_run
+             on report_run.id = report.agent_run_id
+            and report_run.case_id = frozen.case_id
+            and report_run.agent_role = ?
+            and report_run.protocol = 'agent-stream.v3'
+            and report_run.executor_kind = 'TEMPORAL_ACTIVITY'
+            and report_run.room_type = 'HEARING'
+            and report_run.run_status = 'COMPLETED'
+            and report_run.completed_at is not null
+           join agent_run draft_run
+             on draft_run.id = draft.agent_run_id
+            and draft_run.case_id = frozen.case_id
+            and draft_run.agent_role = ?
+            and draft_run.protocol = 'agent-stream.v3'
+            and draft_run.executor_kind = 'TEMPORAL_ACTIVITY'
+            and draft_run.room_type = 'HEARING'
+            and draft_run.run_status = 'COMPLETED'
+            and draft_run.completed_at is not null
          where frozen.id = ?
            and frozen.case_id = ?
            and frozen.flow_instance_id = ?
-           and frozen.schema_version = 'trial_dossier.v1'
+           and frozen.schema_version = 'trial_dossier.v2'
            and frozen.content_hash = ?
          for update of dispute, frozen, proposal, report, draft, proposal_stage, report_stage,
                        draft_stage, proposal_run, report_run, draft_run
@@ -1111,11 +1276,14 @@ public final class JdbcTargetHearingFormalizationActivities
             r.getString(9), r.getString(10), r.getString(11), r.getString(12),
             r.getString(13)),
         proposal.id(), proposal.hash(), report.id(), report.hash(), formalDraft.id(),
-        formalDraft.hash(), dossier.id(), cursor.authority().caseId(), cursor.flowId(), dossier.hash()));
+        formalDraft.hash(), TARGET_REVIEW_AGENT_RUN_ROLE, TARGET_REVIEW_AGENT_RUN_ROLE,
+        TARGET_REVIEW_AGENT_RUN_ROLE, dossier.id(), cursor.authority().caseId(), cursor.flowId(),
+        dossier.hash()));
     require(!authority.judgeV1RunId().equals(authority.juryRunId())
             && !authority.judgeV1RunId().equals(authority.judgeV2RunId())
             && !authority.juryRunId().equals(authority.judgeV2RunId()),
         "Target Hearing Review manifest requires three distinct completed AgentRuns");
+    requireFullHearingRoute(authority.routeType());
     JsonNode frozenDossier = parse(authority.dossierJson());
     require(requiredText(frozenDossier, "trial_dossier_id").equals(dossier.id())
             && requiredText(frozenDossier, "content_hash").equals(dossier.hash()),
@@ -1128,13 +1296,14 @@ public final class JdbcTargetHearingFormalizationActivities
     require(requiredText(evidenceMatrix, "content_hash").equals(authority.evidenceMatrixHash()),
         "Target Hearing Review evidence matrix authority");
     JsonNode source = parse(authority.draftJson());
-    require("adjudication_draft.v2".equals(requiredText(source, "schema_version"))
+    require("adjudication_draft.v3".equals(requiredText(source, "schema_version"))
             && requiredText(source, "draft_id").equals(formalDraft.id())
             && requiredText(source, "content_hash").equals(formalDraft.hash()),
         "Target Hearing Review draft binding");
     JsonNode decision = requiredObject(source, "draft");
     JsonNode issues = requiredNonEmptyArray(decision, "fact_findings");
-    JsonNode riskFlags = requiredNonEmptyArray(decision, "reviewer_attention");
+    JsonNode riskFlags = decision.path("reviewer_attention");
+    require(riskFlags.isArray(), "Target Hearing Review reviewer attention");
     ObjectNode caseSummary = mapper.createObjectNode();
     caseSummary.put("case_id", cursor.authority().caseId());
     caseSummary.put("title", requiredValue(authority.title(), "case title"));
@@ -1155,19 +1324,39 @@ public final class JdbcTargetHearingFormalizationActivities
           evidence_assessment_json, policy_application_json, reviewer_attention_json, recommended_decision,
           confidence, draft_text, created_by_agent, draft_status, non_final, created_by_agent_run_id,
           created_by, updated_by)
-        values (?, ?, null, 1, cast(? as jsonb), cast(? as jsonb), cast(? as jsonb), cast(? as jsonb),
-          ?, ?, ?, ?, 'PENDING_HUMAN_REVIEW', true, null, ?, ?)
+        select ?, ?, state.id, ?, cast(? as jsonb), cast(? as jsonb), cast(? as jsonb), cast(? as jsonb),
+          ?, ?, ?, 'PRESIDING_JUDGE', 'PENDING_HUMAN_REVIEW', true, ?, ?, ?
+          from hearing_state state
+         where state.case_id = ?
         on conflict (case_id, draft_version) do nothing
-        """, draftId, cursor.authority().caseId(), json(decision.path("fact_findings")),
-        json(decision.path("evidence_assessment")), json(decision.path("policy_application")),
-        json(decision.path("reviewer_attention")), requiredText(decision, "recommended_decision"),
-        decision.path("confidence").decimalValue(), requiredText(decision, "draft_text"), CONTROL_ACTOR,
-        CONTROL_ACTOR, CONTROL_ACTOR);
+        """, draftId, cursor.authority().caseId(), TARGET_REVIEW_DRAFT_VERSION,
+        json(decision.path("fact_findings")),
+        json(decision.path("fact_findings")), json(decision.path("rule_applications")),
+        json(decision.path("reviewer_attention")), requiredText(decision, "decision_action"),
+        0.5d, requiredText(source, "public_text"), authority.judgeV2RunId(),
+        CONTROL_ACTOR, CONTROL_ACTOR, cursor.authority().caseId());
     Parent authoritativeDraft = one(jdbc.query("""
-        select id, content_hash from (
-          select d.id, ? as content_hash from adjudication_draft d where d.id = ? and d.case_id = ? and d.draft_version = 1
-        ) value for update
-        """, (r, i) -> new Parent(r.getString(1), r.getString(2)), formalDraft.hash(), draftId, cursor.authority().caseId()));
+        select d.id, ? as content_hash
+          from adjudication_draft d
+          join hearing_state state
+            on state.id = d.hearing_state_id
+           and state.case_id = d.case_id
+         where d.id = ? and d.case_id = ? and d.draft_version = ?
+           and d.fact_findings_json = cast(? as jsonb)
+           and d.evidence_assessment_json = cast(? as jsonb)
+           and d.policy_application_json = cast(? as jsonb)
+           and d.reviewer_attention_json = cast(? as jsonb)
+           and d.recommended_decision = ? and d.confidence = 0.5
+           and d.draft_text = ? and d.created_by_agent = 'PRESIDING_JUDGE'
+           and d.draft_status = 'PENDING_HUMAN_REVIEW' and d.non_final = true
+           and d.created_by_agent_run_id = ?
+         for update of d, state
+        """, (r, i) -> new Parent(r.getString(1), r.getString(2)), formalDraft.hash(),
+        draftId, cursor.authority().caseId(), TARGET_REVIEW_DRAFT_VERSION,
+        json(decision.path("fact_findings")),
+        json(decision.path("fact_findings")), json(decision.path("rule_applications")),
+        json(decision.path("reviewer_attention")), requiredText(decision, "decision_action"),
+        requiredText(source, "public_text"), authority.judgeV2RunId()));
     String targetActionIdempotencyKey = "target-no-external-effect:" + ContractJson.sha256Hex(
         mapper.valueToTree(List.of(cursor.authority().caseId(), remedyId))).substring(0, 32);
     ObjectNode targetAction = mapper.createObjectNode();
@@ -1180,10 +1369,11 @@ public final class JdbcTargetHearingFormalizationActivities
         insert into remedy_plan (id, case_id, adjudication_draft_id, plan_version, source_route, plan_status,
           risk_level, total_amount, currency, actions_json, preconditions_json, notification_plan_json,
           requires_human_review, created_by, updated_by)
-        values (?, ?, ?, 1, 'HEARING_V2', 'PENDING_HUMAN_REVIEW', 'MEDIUM', 0, 'CNY', cast(? as jsonb),
+        values (?, ?, ?, 1, ?, 'PENDING_HUMAN_REVIEW', 'MEDIUM', 0, 'CNY', cast(? as jsonb),
            '[]'::jsonb, '[]'::jsonb, true, ?, ?)
         on conflict (case_id, plan_version) do nothing
-        """, remedyId, cursor.authority().caseId(), authoritativeDraft.id(), targetActionsJson,
+        """, remedyId, cursor.authority().caseId(), authoritativeDraft.id(),
+        TARGET_REVIEW_SOURCE_ROUTE, targetActionsJson,
         CONTROL_ACTOR, CONTROL_ACTOR);
     String planId = one(jdbc.query("select id from remedy_plan where id = ? and case_id = ? and adjudication_draft_id = ? and plan_version = 1 for update",
         (r, i) -> r.getString(1), remedyId, cursor.authority().caseId(), authoritativeDraft.id()));
@@ -1266,12 +1456,54 @@ public final class JdbcTargetHearingFormalizationActivities
     require(waiting == 1, "case human-review state");
     return new Parent(persistedTaskId, persistedPacketId);
   }
+  private void reconcileTargetFullHearingRoute(Cursor cursor) {
+    int reconciled = jdbc.update(RECONCILE_TARGET_FULL_HEARING_ROUTE_SQL,
+        CONTROL_ACTOR, cursor.authority().caseId(), cursor.authority().tenantSurrogate(),
+        cursor.flowId(), cursor.authority().epochId(), cursor.authority().roomEpoch(),
+        cursor.authority().processRevision(), cursor.authority().roomRevision(),
+        cursor.authority().fencingToken());
+    require(reconciled == 0 || reconciled == 1,
+        "Target Hearing route reconciliation affected an ambiguous case set");
+  }
+  private Instant currentEpochBoundary(Cursor cursor) {
+    return one(jdbc.query(
+        HEARING_EPOCH_TIME_BOUNDARY_SQL,
+        (row, ignored) -> row.getObject(1, OffsetDateTime.class).toInstant(),
+        cursor.authority().epochId(), cursor.authority().tenantSurrogate(),
+        cursor.authority().caseId(), cursor.authority().roomEpoch(),
+        cursor.authority().processRevision(), cursor.authority().roomRevision(),
+        cursor.authority().fencingToken()));
+  }
+  private void lockCaseForReviewTransition(TransitionRequest request) {
+    String lockedCaseId = one(jdbc.query(
+        REVIEW_TRANSITION_CASE_LOCK_SQL,
+        (row, ignored) -> row.getString(1),
+        request.start().caseId()));
+    require(lockedCaseId.equals(request.start().caseId()), "Review transition case lock");
+  }
+  private ReviewSequenceAuthority lockReviewSequenceAuthority(Cursor cursor) {
+    long lastCommandSequence = one(jdbc.query(
+        REVIEW_LAST_COMMAND_SEQUENCE_SQL,
+        (row, ignored) -> row.getLong(1),
+        cursor.authority().tenantSurrogate(), cursor.authority().caseId()));
+    long lastCaseEventSequence = one(jdbc.query(
+        REVIEW_LAST_CASE_EVENT_SEQUENCE_SQL,
+        (row, ignored) -> row.getLong(1),
+        cursor.authority().caseId()));
+    return new ReviewSequenceAuthority(lastCommandSequence, lastCaseEventSequence);
+  }
+  static Instant laterBoundary(Instant epochBoundary, Instant handoffBoundary) {
+    Objects.requireNonNull(epochBoundary, "epochBoundary");
+    Objects.requireNonNull(handoffBoundary, "handoffBoundary");
+    return epochBoundary.isBefore(handoffBoundary) ? handoffBoundary : epochBoundary;
+  }
   private void transitionToReview(
       Cursor cursor,
       HearingStageReceipt receipt,
       Instant committedAt,
       String handoffId,
-      String reviewTaskId) {
+      String reviewTaskId,
+      ReviewSequenceAuthority sequenceAuthority) {
     if (roomEpochAllocator == null) throw new IllegalStateException("target Hearing close requires RoomEpochAllocator wiring");
     String reviewRoomId = actionId("review-room", handoffId);
     jdbc.update("""
@@ -1280,12 +1512,17 @@ public final class JdbcTargetHearingFormalizationActivities
         """, reviewRoomId, cursor.authority().caseId(), java.sql.Timestamp.from(committedAt), CONTROL_ACTOR, CONTROL_ACTOR);
     String persistedRoomId = one(jdbc.query("select id from case_room where case_id = ? and room_type = 'REVIEW' for update",
         (r, i) -> r.getString(1), cursor.authority().caseId()));
-    RoomEpochAllocation allocation = roomEpochAllocator.transition(new TransitionRoomEpoch(cursor.authority().caseId(),
-        RoomType.HEARING, persistedRoomId, RoomType.REVIEW, "REVIEW_OPEN", "PROVISIONING", null,
-        OffsetDateTime.ofInstant(committedAt, ZoneOffset.UTC)));
+    RoomEpochAllocation allocation = roomEpochAllocator.transition(reviewTransitionCommand(
+        cursor.authority().caseId(), persistedRoomId, committedAt, sequenceAuthority));
     require(allocation.roomType() == RoomType.REVIEW && allocation.writerMode() == WriterMode.TEMPORAL
         && allocation.caseId().equals(cursor.authority().caseId()) && allocation.fencingToken() > 0
         && allocation.processRevision() == receipt.committed().processRevision(), "Review epoch allocation");
+    ReviewSequenceAuthority replayedSequenceAuthority = one(jdbc.query(
+        REVIEW_SEQUENCE_AUTHORITY_REPLAY_SQL,
+        (row, ignored) -> new ReviewSequenceAuthority(row.getLong(1), row.getLong(2)),
+        allocation.caseId(), allocation.processRevision(), allocation.roomEpoch(),
+        allocation.fencingToken()));
+    require(replayedSequenceAuthority.equals(sequenceAuthority), "Review sequence authority replay");
     Integer bindings = jdbc.queryForObject("""
         select count(*) from target_e2e_room_epoch_binding
          where epoch_id = ? and case_id = ? and room_type = 'REVIEW' and room_epoch = ?
@@ -1310,20 +1547,44 @@ public final class JdbcTargetHearingFormalizationActivities
         task.policyDecisionId(), handoffId));
     require(boundEpochId.equals(allocation.epochId()), "Review epoch task binding replay");
   }
+  static TransitionRoomEpoch reviewTransitionCommand(
+      String caseId,
+      String reviewRoomId,
+      Instant committedAt,
+      ReviewSequenceAuthority sequenceAuthority) {
+    Objects.requireNonNull(committedAt, "committedAt");
+    Objects.requireNonNull(sequenceAuthority, "sequenceAuthority");
+    return new TransitionRoomEpoch(
+        caseId, RoomType.HEARING, reviewRoomId, RoomType.REVIEW,
+        "REVIEW_OPEN", "PROVISIONING", null,
+        OffsetDateTime.ofInstant(committedAt, ZoneOffset.UTC), null, null,
+        sequenceAuthority.lastCommandSequence(), sequenceAuthority.lastCaseEventSequence());
+  }
   private String json(JsonNode value) { return ContractJson.canonicalString(value.isMissingNode() ? mapper.createArrayNode() : value); }
   private Parent parent(String sql, Cursor cursor) { return one(jdbc.query(sql, (r,i)->new Parent(r.getString(1), r.getString(2)), cursor.authority().caseId(), cursor.flowId())); }
   private JsonNode parse(String json) { try { return mapper.readTree(json); } catch (Exception failure) { throw new IllegalStateException("persisted Hearing JSON is invalid", failure); } }
-  private String canonical(String json) { return ContractJson.canonicalString(parse(json)); }
+  private PartyAction persistedPartyAction(ResultSet row) throws SQLException {
+    return new PartyAction(
+        row.getString(1), row.getString(2), row.getString(3), row.getString(4),
+        row.getString(5), row.getString(6), canonical(row.getString(7)), row.getString(8));
+  }
+  static String canonicalizePersistedPayload(ObjectMapper mapper, String json) {
+    try {
+      return ContractJson.canonicalString(mapper.readTree(json));
+    } catch (Exception failure) {
+      throw new IllegalStateException("persisted Hearing JSON is invalid", failure);
+    }
+  }
+  private String canonical(String json) { return canonicalizePersistedPayload(mapper, json); }
   private String hashJson(String json) { return ContractJson.sha256Hex(parse(json)); }
   static void requireExactPartySubmissionSchema(CommandType commandType, HearingFlowActionType actionType,
       String persistedActionSchema, String eventActionSchema, String payloadSchema) {
-    boolean commandAndActionMatch = (commandType == CommandType.HEARING_STATEMENT
+    boolean commandAndActionMatch = (commandType == CommandType.HEARING_ANSWER_BUNDLE
         && actionType == HearingFlowActionType.ANSWER_BUNDLE)
         || (commandType == CommandType.HEARING_EVIDENCE_BATCH
             && actionType == HearingFlowActionType.EVIDENCE_BATCH);
     boolean allowedSchema = switch (commandType) {
-      case HEARING_STATEMENT -> "hearing_answer_bundle.v1".equals(persistedActionSchema)
-          || "hearing_party_statement.v1".equals(persistedActionSchema);
+      case HEARING_ANSWER_BUNDLE -> "hearing_answer_bundle.v4".equals(persistedActionSchema);
       case HEARING_EVIDENCE_BATCH -> "hearing_evidence_batch.v1".equals(persistedActionSchema);
       default -> false;
     };
@@ -1337,11 +1598,16 @@ public final class JdbcTargetHearingFormalizationActivities
   private static JsonNode requiredNonEmptyObject(JsonNode node, String field) { JsonNode value = requiredObject(node, field); if (value.isEmpty()) throw new IllegalStateException("formal Hearing payload has empty object " + field); return value; }
   private static JsonNode requiredNonEmptyArray(JsonNode node, String field) { JsonNode value = node.path(field); if (!value.isArray() || value.isEmpty()) throw new IllegalStateException("formal Hearing payload omits nonempty array " + field); return value; }
   private static String requiredValue(String value, String field) { if (value == null || value.isBlank()) throw new IllegalStateException("formal Hearing authority omits " + field); return value; }
+  static void requireFullHearingRoute(String routeType) {
+    require("FULL_HEARING".equals(routeType),
+        "formal Hearing authority requires the FULL_HEARING case route");
+  }
   private static String key(HearingAuthorityExpectation authority) { return authority.tenantSurrogate() + ':' + authority.caseId() + ':' + authority.roomEpoch() + ':'; }
   private static String actionId(String kind, String seed) { return "hearing-" + kind + '-' + UUID.nameUUIDFromBytes((kind + ':' + seed).getBytes(StandardCharsets.UTF_8)).toString().replace("-", ""); }
   private static <T> T one(List<T> rows) { if (rows.size() != 1) throw new IllegalStateException("target Hearing row is absent or ambiguous"); return rows.getFirst(); }
   private static void require(boolean condition, String message) { if (!condition) throw new IllegalStateException(message); }
   private record Cursor(HearingAuthorityExpectation authority, String flowId, String sourceStageId, String sourceOutputJson) {}
+  record OrderedPartyLocks<C, H>(C caseCommand, H hearingCursor) {}
   private record PartyAction(String id, String actionType, String schemaVersion, String participantId, String participantRole, String submissionStatus, String payloadJson, String contentHash) {}
   private record CaseCommandLock(String commandId, String requestHash, String payloadUri, String payloadSha256, long payloadSizeBytes) {}
   private record TimelinePartyEvent(String actionId, String actionSchemaVersion, String actionContentHash, String actionPayload) {}
@@ -1363,6 +1629,14 @@ public final class JdbcTargetHearingFormalizationActivities
       String judgeV2RunId) {}
   private record Parent(String id, String hash) {}
   private record ClosureParent(
-      String handoffId, String reviewTaskId, String receiptId, String receiptHash) {}
+      String handoffId, String reviewTaskId, String receiptId, String receiptHash,
+      Instant handoffCommittedAt) {}
   private record ReviewEpochTask(String taskId, String planId, String policyDecisionId) {}
+  record ReviewSequenceAuthority(long lastCommandSequence, long lastCaseEventSequence) {
+    ReviewSequenceAuthority {
+      if (lastCommandSequence < 1 || lastCaseEventSequence < 1) {
+        throw new IllegalArgumentException("Review transition sequence authority must be positive");
+      }
+    }
+  }
 }

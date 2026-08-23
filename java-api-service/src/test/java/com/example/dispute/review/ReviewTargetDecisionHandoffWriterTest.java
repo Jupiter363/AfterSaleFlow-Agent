@@ -18,6 +18,50 @@ class ReviewTargetDecisionHandoffWriterTest {
   private final ObjectMapper mapper = new ObjectMapper();
 
   @Test
+  void unchangedApprovedActionReusesTheFrozenReference() {
+    String frozenRef = "review-packet:PACKET_1:action";
+    String frozenHash = "a".repeat(64);
+
+    assertThat(ReviewApprovedActionSnapshotRef.resolve(
+            ApprovalDecisionType.APPROVE,
+            "APPROVAL_1",
+            frozenRef,
+            frozenHash,
+            frozenHash))
+        .isEqualTo(frozenRef);
+    assertThat(ReviewApprovedActionSnapshotRef.resolve(
+            ApprovalDecisionType.MODIFY_AND_APPROVE,
+            "APPROVAL_2",
+            frozenRef,
+            frozenHash,
+            frozenHash))
+        .isEqualTo(frozenRef);
+  }
+
+  @Test
+  void changedApprovedActionUsesTheApprovalReferenceAndApproveFailsClosed() {
+    String frozenRef = "review-packet:PACKET_1:action";
+    String frozenHash = "a".repeat(64);
+    String changedHash = "b".repeat(64);
+
+    assertThat(ReviewApprovedActionSnapshotRef.resolve(
+            ApprovalDecisionType.MODIFY_AND_APPROVE,
+            "APPROVAL_2",
+            frozenRef,
+            frozenHash,
+            changedHash))
+        .isEqualTo("approval:APPROVAL_2:action");
+    assertThatThrownBy(() -> ReviewApprovedActionSnapshotRef.resolve(
+            ApprovalDecisionType.APPROVE,
+            "APPROVAL_1",
+            frozenRef,
+            frozenHash,
+            changedHash))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("preserve the frozen action snapshot");
+  }
+
+  @Test
   void approveReplaysTheExactFrozenActionAndReceiptBinding() throws Exception {
     JsonNode frozen = plan("frozen-key", "frozen");
     String frozenHash = ActionSnapshotHasher.hash(mapper, frozen);
@@ -73,6 +117,66 @@ class ReviewTargetDecisionHandoffWriterTest {
         "APPROVAL_OTHER", "b".repeat(64), "APPROVAL_4", approvedHash))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("human decision receipt");
+  }
+
+  @Test
+  void boundedApprovePreservesTheAiDecisionWithoutChangingTheFrozenOperation() throws Exception {
+    JsonNode frozen = plan("frozen-key", "frozen");
+    JsonNode original = withDecisionAction(frozen, "CONTINUE_FULFILLMENT");
+    JsonNode approved = original.deepCopy();
+    String frozenHash = ActionSnapshotHasher.hash(mapper, frozen);
+
+    JsonNode operation = ReviewTargetDecisionHandoffWriter.requireBoundedDecisionActionOperation(
+        mapper, ApprovalDecisionType.APPROVE, "APPROVAL_BOUNDED_1", frozenHash, frozenHash,
+        frozen, original, approved, "CONTINUE_FULFILLMENT", "CONTINUE_FULFILLMENT",
+        OutcomeWireTypes.ReviewDecision.APPROVE, "APPROVAL_BOUNDED_1", "c".repeat(64),
+        "APPROVAL_BOUNDED_1", frozenHash);
+
+    assertThat(operation.path("idempotency_key").asText()).isEqualTo("frozen-key");
+    assertThat(operation.path("marker").asText()).isEqualTo("frozen");
+  }
+
+  @Test
+  void boundedModifyReplacesOnlyTheDecisionCodeAndKeepsTheFrozenOperation() throws Exception {
+    JsonNode frozen = plan("frozen-key", "frozen");
+    JsonNode original = withDecisionAction(frozen, "CONTINUE_FULFILLMENT");
+    JsonNode approved = withDecisionAction(frozen, "REPLACE");
+    String frozenHash = ActionSnapshotHasher.hash(mapper, frozen);
+
+    JsonNode operation = ReviewTargetDecisionHandoffWriter.requireBoundedDecisionActionOperation(
+        mapper, ApprovalDecisionType.MODIFY_AND_APPROVE, "APPROVAL_BOUNDED_2", frozenHash,
+        frozenHash, frozen, original, approved, "CONTINUE_FULFILLMENT", "REPLACE",
+        OutcomeWireTypes.ReviewDecision.MODIFY_AND_APPROVE, "APPROVAL_BOUNDED_2",
+        "d".repeat(64), "APPROVAL_BOUNDED_2", frozenHash);
+
+    assertThat(operation.path("idempotency_key").asText()).isEqualTo("frozen-key");
+    assertThat(operation.path("marker").asText()).isEqualTo("frozen");
+  }
+
+  @Test
+  void boundedDecisionAuthorityFailsClosedWhenOnlyOneDecisionCodeIsPersisted() {
+    assertThatThrownBy(() -> ReviewTargetDecisionHandoffWriter
+        .usesBoundedDecisionActionContract("CONTINUE_FULFILLMENT", null))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("authority is incomplete");
+  }
+
+  @Test
+  void boundedModifyRejectsAnyPlanChangeBeyondTheDecisionCode() throws Exception {
+    JsonNode frozen = plan("frozen-key", "frozen");
+    JsonNode original = withDecisionAction(frozen, "CONTINUE_FULFILLMENT");
+    ObjectNode approved = (ObjectNode) withDecisionAction(frozen, "REPLACE");
+    approved.put("unreviewed_override", true);
+    String frozenHash = ActionSnapshotHasher.hash(mapper, frozen);
+
+    assertThatThrownBy(() -> ReviewTargetDecisionHandoffWriter
+        .requireBoundedDecisionActionOperation(
+            mapper, ApprovalDecisionType.MODIFY_AND_APPROVE, "APPROVAL_BOUNDED_3",
+            frozenHash, frozenHash, frozen, original, approved, "CONTINUE_FULFILLMENT",
+            "REPLACE", OutcomeWireTypes.ReviewDecision.MODIFY_AND_APPROVE,
+            "APPROVAL_BOUNDED_3", "1".repeat(64), "APPROVAL_BOUNDED_3", frozenHash))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("may only bind the persisted decision_action");
   }
 
   @Test
@@ -154,6 +258,12 @@ class ReviewTargetDecisionHandoffWriterTest {
           "notifications": []
         }
         """.formatted(idempotencyKey, marker));
+  }
+
+  private JsonNode withDecisionAction(JsonNode plan, String decisionAction) {
+    ObjectNode copy = (ObjectNode) plan.deepCopy();
+    copy.put("decision_action", decisionAction);
+    return copy;
   }
 
   private String handoff(long roomEpoch, String receiptId) {

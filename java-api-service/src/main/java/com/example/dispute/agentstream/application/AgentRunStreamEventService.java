@@ -25,6 +25,7 @@ import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunStreamProjection;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -150,7 +151,7 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
         AgentRunEntity run = requireVisibleRun(runId, actor);
         AgentRunProtocol protocol = protocol(run);
         AgentRunStreamCursor cursor = AgentRunStreamCursor.parse(rawCursor, protocol);
-        return replayAuthorized(run, cursor, REPLAY_BATCH_SIZE);
+        return replayAuthorized(run, cursor, REPLAY_BATCH_SIZE, actor);
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunStreamEventService.subscribe(String,long,AuthenticatedActor)」。
@@ -247,7 +248,9 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
                     subscription.emitter().send(
                             SseEmitter.event()
                                     .name(event.eventType().wireValue())
-                                    .data(transientV3View(event)));
+                                    .data(projectForActor(
+                                            transientV3View(event),
+                                            subscription.actor())));
                 } catch (IOException | RuntimeException failure) {
                     removeDisconnected(event.runId(), subscription, failure);
                 }
@@ -337,7 +340,10 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
                 // 长连接期间案件参与关系变化后，旧连接不能继续读取新事件。
                 AgentRunEntity run = requireVisibleRun(runId, subscription.actor());
                 List<AgentRunEventView> events = replayAuthorized(
-                        run, subscription.cursor(), SSE_CATCH_UP_BATCH_SIZE + 1);
+                        run,
+                        subscription.cursor(),
+                        SSE_CATCH_UP_BATCH_SIZE + 1,
+                        subscription.actor());
                 int sendCount = Math.min(events.size(), SSE_CATCH_UP_BATCH_SIZE);
                 for (int index = 0; index < sendCount; index++) {
                     if (sendLocked(subscription, events.get(index))) {
@@ -389,7 +395,10 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
     }
 
     private List<AgentRunEventView> replayAuthorized(
-            AgentRunEntity run, AgentRunStreamCursor cursor, int limit) {
+            AgentRunEntity run,
+            AgentRunStreamCursor cursor,
+            int limit,
+            AuthenticatedActor actor) {
         if (limit < 1 || limit > REPLAY_BATCH_SIZE + 1) {
             throw new IllegalArgumentException("stream replay limit is invalid");
         }
@@ -399,6 +408,7 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
                             run.getId(), cursor.sequence(), PageRequest.of(0, limit))
                     .stream()
                     .map(this::viewV1)
+                    .map(event -> projectForActor(event, actor))
                     .toList();
         }
 
@@ -471,7 +481,9 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
                 throw new IllegalStateException("V2 stream contains an attempt after a global terminal");
             }
         }
-        return List.copyOf(events);
+        return events.stream()
+                .map(event -> projectForActor(event, actor))
+                .toList();
     }
 
     private static List<AgentRunEventView> applyFinalCommitFence(
@@ -646,6 +658,14 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
                 || accessSession.getActorRole() == ActorRole.SYSTEM) {
             return true;
         }
+        if (run.getStreamProjection() == AgentRunStreamProjection.CASE_PARTICIPANTS) {
+            // The caller has already passed the case-access and room-read boundary. This explicit,
+            // persisted mode widens only the HTTP projection; the signed Graph audience and every
+            // stored stream event remain SYSTEM and continue to be hash-verified as such.
+            return accessSession.getActorRole() == ActorRole.USER
+                    || accessSession.getActorRole() == ActorRole.MERCHANT
+                    || accessSession.getActorRole() == ActorRole.PLATFORM_REVIEWER;
+        }
         try {
             List<String> roles =
                     objectMapper.readValue(
@@ -660,6 +680,20 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("invalid agent run audience", exception);
         }
+    }
+
+    private static AgentRunEventView projectForActor(
+            AgentRunEventView event, AuthenticatedActor actor) {
+        if (event.audience() == null || actor == null) {
+            return event;
+        }
+        String projected = switch (actor.role()) {
+            case USER -> "USER";
+            case MERCHANT -> "MERCHANT";
+            case PLATFORM_REVIEWER -> "PLATFORM_REVIEWER";
+            default -> event.audience();
+        };
+        return projected.equals(event.audience()) ? event : event.withAudience(projected);
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunStreamEventService.view(AgentRunStreamEventEntity)」。

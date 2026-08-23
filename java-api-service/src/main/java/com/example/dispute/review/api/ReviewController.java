@@ -214,13 +214,16 @@ public class ReviewController {
             String decision,
             String taskStatus,
             String caseStatus,
-            boolean executionAllowed) {
+            boolean executionAllowed,
+            String aiDecisionAction,
+            String reviewerDecisionAction) {
 
         private static LegacyDecisionResponse from(ReviewDecisionView decision) {
             return new LegacyDecisionResponse(
                     decision.approvalRecordId(),decision.taskId(),decision.caseId(),
                     decision.decision(),decision.taskStatus(),decision.caseStatus(),
-                    decision.executionAllowed());
+                    decision.executionAllowed(),decision.aiDecisionAction(),
+                    decision.reviewerDecisionAction());
         }
     }
     // 所属模块：【平台人工终审 / HTTP 接口层】类型「CopilotQueryRequest」。

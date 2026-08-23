@@ -8,7 +8,7 @@ and every proposal is written through the same object-store capability.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone

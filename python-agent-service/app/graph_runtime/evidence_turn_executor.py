@@ -719,7 +719,7 @@ class CompiledEvidenceTurnExecutor:
     ) -> None:
         if not callable(getattr(workflow, "arun", None)):
             raise GraphContractError("EVIDENCE_TURN_FORMAL_WORKFLOW_REQUIRED")
-        if getattr(workflow, "protocol_version", None) != "evidence-turn-result.v2":
+        if getattr(workflow, "protocol_version", None) != "evidence-turn-result.v3":
             raise GraphContractError("EVIDENCE_V2_FORMAL_WORKFLOW_REQUIRED")
         self._saver = saver
         self._workflow = workflow
@@ -1280,7 +1280,7 @@ class CompiledEvidenceTurnExecutor:
         observer = bridge.observer
         if observer is None:
             raise GraphContractError("EVIDENCE_PUBLIC_OUTPUT_OBSERVER_UNAVAILABLE")
-        v2_workflow = getattr(self._workflow, "protocol_version", None) == "evidence-turn-result.v2"
+        v2_workflow = getattr(self._workflow, "protocol_version", None) == "evidence-turn-result.v3"
         with bind_stream_observer(observer):
             raw_result = await self._workflow.arun(provider_request)
             result = (

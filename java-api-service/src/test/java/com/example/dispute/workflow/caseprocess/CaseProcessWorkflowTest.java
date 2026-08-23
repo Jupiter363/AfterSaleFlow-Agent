@@ -1655,59 +1655,74 @@ class CaseProcessWorkflowTest {
   }
 
   @Test
-  void hearingHandleConsumesChildProgressBeforeSecondPartyAndNextStageCommands() {
+  void hearingCommandsWaitForFormalProgressAndCarryExactChildPins() {
     startWorkflow();
     ProvisionRoomEpoch hearing = targetHearingProvisioning();
     provision(hearing);
 
     CaseCommandRef firstParty =
-        hearingCommand(1, CommandType.HEARING_STATEMENT, ActorRole.USER, 0);
+        hearingCommand(1, CommandType.HEARING_ANSWER_BUNDLE, ActorRole.USER, 0);
     ledger.put(firstParty);
     workflow().acceptCommand(firstParty);
-    awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2);
+    CaseProcessSnapshot firstRouted =
+        awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2);
+    assertThat(firstRouted.observedProcessRevision()).isZero();
+    assertThat(firstRouted.activeRoomRevision()).isZero();
 
-    TargetRoomProgressReceipt firstProgress = hearingProgress(2, 1);
+    TargetRoomProgressReceipt firstProgress = hearingProgress(1, 1);
     workflow().targetRoomProgressed(firstProgress);
     CaseProcessSnapshot afterFirst =
         awaitProcess(
             snapshot ->
-                snapshot.observedProcessRevision() == 2
+                snapshot.observedProcessRevision() == 1
                     && Long.valueOf(1).equals(snapshot.activeRoomRevision()));
     workflow().targetRoomProgressed(firstProgress);
     assertThat(awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2))
         .isEqualTo(afterFirst);
 
     CaseCommandRef secondParty =
-        hearingCommand(2, CommandType.HEARING_STATEMENT, ActorRole.MERCHANT, 2);
+        hearingCommand(2, CommandType.HEARING_ANSWER_BUNDLE, ActorRole.MERCHANT, 1);
     ledger.put(secondParty);
     workflow().acceptCommand(secondParty);
-    awaitProcess(snapshot -> snapshot.nextCommandSequence() == 3);
+    CaseProcessSnapshot secondRouted =
+        awaitProcess(snapshot -> snapshot.nextCommandSequence() == 3);
+    assertThat(secondRouted.observedProcessRevision()).isEqualTo(1);
+    assertThat(secondRouted.activeRoomRevision()).isEqualTo(1);
 
-    TargetRoomProgressReceipt secondProgress = hearingProgress(4, 2);
+    TargetRoomProgressReceipt secondProgress = hearingProgress(2, 2);
     workflow().targetRoomProgressed(secondProgress);
     awaitProcess(
         snapshot ->
-            snapshot.observedProcessRevision() == 4
+            snapshot.observedProcessRevision() == 2
                 && Long.valueOf(2).equals(snapshot.activeRoomRevision()));
 
     CaseCommandRef nextStage =
-        hearingCommand(3, CommandType.HEARING_EVIDENCE_BATCH, ActorRole.USER, 4);
+        hearingCommand(3, CommandType.HEARING_EVIDENCE_BATCH, ActorRole.USER, 2);
     ledger.put(nextStage);
     workflow().acceptCommand(nextStage);
-    CaseProcessSnapshot completed =
+    CaseProcessSnapshot nextStageRouted =
         awaitProcess(snapshot -> snapshot.nextCommandSequence() == 4);
 
     assertThat(RecoveryTargetCaseProcessWorkflow.hearingCommandCoordinates)
-        .containsExactly("0/0", "2/1", "4/2");
-    assertThat(completed.protocolErrorCode()).isNull();
-    assertThat(completed.observedProcessRevision()).isEqualTo(5);
-    assertThat(completed.activeRoomRevision()).isEqualTo(2);
+        .containsExactly("0/0", "1/1", "2/2");
+    assertThat(nextStageRouted.protocolErrorCode()).isNull();
+    assertThat(nextStageRouted.observedProcessRevision()).isEqualTo(2);
+    assertThat(nextStageRouted.activeRoomRevision()).isEqualTo(2);
 
-    workflow().targetRoomProgressed(hearingProgress(6, 3));
-    awaitProcess(
+    workflow().targetRoomProgressed(hearingProgress(3, 3));
+    CaseProcessSnapshot completed =
+        awaitProcess(
         snapshot ->
-            snapshot.observedProcessRevision() == 6
+            snapshot.observedProcessRevision() == 3
                 && Long.valueOf(3).equals(snapshot.activeRoomRevision()));
+
+    workflow().requestContinueAsNew();
+    CaseProcessSnapshot continued =
+        awaitProcess(snapshot -> snapshot.runGeneration() == completed.runGeneration() + 1);
+    assertThat(continued.observedProcessRevision()).isEqualTo(3);
+    assertThat(continued.activeRoomRevision()).isEqualTo(3);
+    assertThat(continued.protocolErrorCode()).isNull();
+
     provision(targetEvidenceAfterHearingProvisioning());
     CaseCommandRef adjacentEvidence = adjacentEvidenceCommand();
     ledger.put(adjacentEvidence);
@@ -1716,9 +1731,84 @@ class CaseProcessWorkflowTest {
         awaitProcess(snapshot -> snapshot.nextCommandSequence() == 5);
 
     assertThat(RecoveryTargetCaseProcessWorkflow.nonHearingCommandCoordinates)
-        .containsExactly("6/0->7/1");
+        .containsExactly("3/0->4/1");
     assertThat(adjacent.activeRoomType()).isEqualTo(RoomType.EVIDENCE);
+    assertThat(adjacent.observedProcessRevision()).isEqualTo(4);
+    assertThat(adjacent.activeRoomRevision()).isEqualTo(1);
     assertThat(adjacent.protocolErrorCode()).isNull();
+  }
+
+  @Test
+  void hearingProgressRejectsStaleAndCrossRoomAuthorityWithoutMovingPins() {
+    startWorkflow();
+    provision(targetHearingProvisioning());
+    CaseCommandRef firstParty =
+        hearingCommand(1, CommandType.HEARING_ANSWER_BUNDLE, ActorRole.USER, 0);
+    ledger.put(firstParty);
+    workflow().acceptCommand(firstParty);
+    awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2);
+    workflow().targetRoomProgressed(hearingProgress(1, 1));
+    awaitProcess(
+        snapshot ->
+            snapshot.observedProcessRevision() == 1
+                && Long.valueOf(1).equals(snapshot.activeRoomRevision()));
+
+    workflow().targetRoomProgressed(hearingProgress(0, 0));
+    CaseProcessSnapshot stale =
+        awaitProcess(
+            snapshot ->
+                "TARGET_ROOM_PROGRESS_REVISION_INVALID".equals(snapshot.protocolErrorCode()));
+    assertThat(stale.observedProcessRevision()).isEqualTo(1);
+    assertThat(stale.activeRoomRevision()).isEqualTo(1);
+
+    workflow()
+        .targetRoomProgressed(
+            new TargetRoomProgressReceipt(
+                RoomType.EVIDENCE,
+                0,
+                23,
+                2,
+                2,
+                "cross-room-hearing-receipt",
+                "2".repeat(64)));
+    CaseProcessSnapshot crossRoom =
+        awaitProcess(
+            snapshot ->
+                "TARGET_ROOM_PROGRESS_AUTHORITY_INVALID".equals(snapshot.protocolErrorCode()));
+    assertThat(crossRoom.observedProcessRevision()).isEqualTo(1);
+    assertThat(crossRoom.activeRoomRevision()).isEqualTo(1);
+  }
+
+  @Test
+  void hearingFormalProgressRemainsAcceptableDuringEventGapRecovery() {
+    startWorkflow();
+    provision(targetHearingProvisioning());
+    CaseCommandRef firstParty =
+        hearingCommand(1, CommandType.HEARING_ANSWER_BUNDLE, ActorRole.USER, 0);
+    ledger.put(firstParty);
+    workflow().acceptCommand(firstParty);
+    awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2);
+
+    workflow().domainEventCommitted(event(4, RoomType.HEARING, 0));
+    awaitProcess(snapshot -> "EVENT_GAP_MANUAL_RECOVERY".equals(snapshot.blockedReason()));
+
+    workflow().targetRoomProgressed(hearingProgress(1, 1));
+    CaseProcessSnapshot progressed =
+        awaitProcess(
+            snapshot ->
+                snapshot.observedProcessRevision() == 1
+                    && Long.valueOf(1).equals(snapshot.activeRoomRevision()));
+    assertThat(progressed.blockedReason()).isEqualTo("EVENT_GAP_MANUAL_RECOVERY");
+
+    for (int sequence = 1; sequence <= 4; sequence++) {
+      ledger.put(event(sequence, RoomType.HEARING, 0));
+    }
+    workflow().retrySequenceGap();
+    CaseProcessSnapshot recovered =
+        awaitProcess(snapshot -> snapshot.nextCaseEventSequence() == 5);
+    assertThat(recovered.blockedReason()).isEqualTo("NONE");
+    assertThat(recovered.observedProcessRevision()).isEqualTo(1);
+    assertThat(recovered.activeRoomRevision()).isEqualTo(1);
   }
 
   private PreparedProjectionRecovery prepareProjectionRecovery() {
@@ -2167,7 +2257,7 @@ class CaseProcessWorkflowTest {
         "room-evidence-after-hearing",
         base.roomType(),
         base.roomEpoch(),
-        6,
+        3,
         base.initialRoomRevision(),
         24,
         base.macroPhase(),
@@ -2355,7 +2445,7 @@ class CaseProcessWorkflowTest {
         roomType.name().toLowerCase() + ".v2",
         "1.0.0",
         "checkpoint.v1",
-        "agent-stream.v2",
+        "agent-stream.v3",
         lastCommandSequence,
         lastCaseEventSequence,
         lastCommandSequence + 1,
@@ -2603,7 +2693,7 @@ class CaseProcessWorkflowTest {
         TENANT,
         CASE_ID,
         4,
-        CommandType.EVIDENCE_SUBMIT,
+        CommandType.PARTY_EVIDENCE_COMPLETE,
         RoomType.EVIDENCE,
         0,
         new ActorRef("user-case-process", ActorRole.USER, List.of("case:evidence")),
@@ -2612,7 +2702,7 @@ class CaseProcessWorkflowTest {
             "urn:test:evidence-command-after-hearing",
             hash,
             32),
-        6,
+        3,
         OCCURRED_AT.plusSeconds(20),
         OCCURRED_AT.plusSeconds(3_620),
         "00-11111111111111111111111111111111-2222222222222222-01",
@@ -2972,7 +3062,7 @@ class CaseProcessWorkflowTest {
           if (command.roomType() != RoomType.HEARING
               || command.roomEpoch() != roomEpoch
               || command.expectedProcessRevision() != processRevision
-              || (command.commandType() != CommandType.HEARING_STATEMENT
+              || (command.commandType() != CommandType.HEARING_ANSWER_BUNDLE
                   && command.commandType() != CommandType.HEARING_EVIDENCE_BATCH)) {
             throw new IllegalStateException(
                 "HEARING_PARTY_COMMAND_STAGE_OR_COORDINATE_MISMATCH");

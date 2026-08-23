@@ -119,7 +119,7 @@ public class HearingReviewHandoffRecoveryScheduler {
 
     private void recoverLegacy() {
         artifactRepository
-                .findTop50ByArtifactTypeOrderByCreatedAtDesc(HearingArtifactType.ADJUDICATION_DRAFT)
+                .findTop50LegacyAdjudicationDrafts()
                 .forEach(this::recoverOne);
         observations.record(Event.HANDOFF_SCHEDULER, Outcome.EXECUTED);
     }

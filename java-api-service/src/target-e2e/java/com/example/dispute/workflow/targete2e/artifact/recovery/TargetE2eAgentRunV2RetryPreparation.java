@@ -193,10 +193,11 @@ public final class TargetE2eAgentRunV2RetryPreparation
     requirePredecessor(previous.material().request(), state);
     TargetE2EGraphCommandEnvelope sealed = seal(previous.admission(), command);
     CommandAdmission admission = admission(previous.admission(), command, sealed);
+    TargetHearingCommandMaterial source = previous.material();
     hearing.append(new TargetHearingCommandMaterial(
-        TargetHearingCommandMaterial.SCHEMA_VERSION, admission, request,
+        source.schemaVersion(), admission, request, source.partyStageAuthority(),
         sealed.commandHash(), sealed.commandEnvelopeHash()));
-    rebind(previous.admission(), previous.material().request().command(), admission, command, sealed);
+    rebind(previous.admission(), source.request().command(), admission, command, sealed);
   }
 
   private void persistReview(RecoveryState state, ExecuteAgentRunRequest request) {

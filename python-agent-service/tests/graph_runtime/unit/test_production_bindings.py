@@ -72,7 +72,10 @@ from app.graph_runtime.intake_exchange import (
     INTAKE_PROPOSAL_PUT_PATH,
     JavaIntakeExchangeClient,
 )
-from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
+from app.graph_runtime.intake_executor import (
+    CompiledIntakeGraphShadowExecutor,
+    _canonicalize_ordered_intake_section_score,
+)
 from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
@@ -830,6 +833,34 @@ def _target_snapshot_context(source_turn_hash: str) -> SimpleNamespace:
     )
 
 
+def test_visible_turn_evaluation_uses_the_six_component_total() -> None:
+    raw_section = json.dumps(
+        {
+            "sequence": 10,
+            "kind": "TURN_EVALUATION",
+            "value": {
+                "score_breakdown": {
+                    "references": 15,
+                    "event_story": 20,
+                    "party_positions": 20,
+                    "requested_resolution": 15,
+                    "risk_and_conflicts": 10,
+                    "next_action_clarity": 10,
+                },
+                "total_score": 9,
+                "threshold": 85,
+                "ready_for_next_step": False,
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    visible = json.loads(_canonicalize_ordered_intake_section_score(raw_section))
+
+    assert visible["value"]["total_score"] == 90
+    assert visible["value"]["ready_for_next_step"] is False
+
+
 @pytest.mark.asyncio
 async def test_manifest_resolver_and_input_authorizer_accept_only_the_exact_command() -> None:
     command = _command()
@@ -1399,6 +1430,29 @@ async def test_target_e2e_default_intake_uses_configured_structured_client(
     assert captured["exchange_closed"] is True
 
 
+def test_target_e2e_evidence_pixels_use_dedicated_java_content_origin() -> None:
+    settings = SimpleNamespace(
+        java_api_service_url="http://graph-exchange-proxy:8080",
+        java_evidence_content_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+    )
+    client = LiteLlmProxyClient(
+        "http://model-runtime:4000",
+        "qwen3.7-max",
+        "test-litellm-master-key",
+        120.0,
+        enable_thinking=False,
+    )
+
+    workflow = production_bindings._build_target_e2e_evidence_workflow(
+        settings=settings,
+        structured_client=client,
+    )
+
+    assert workflow._asset_loader._base_url == settings.java_evidence_content_service_url
+    assert workflow._asset_loader._base_url != settings.java_api_service_url
+
+
 def test_target_e2e_composite_registers_the_exact_intake_provider_binding() -> None:
     class Provider:
         def __init__(self, room_type: RoomType) -> None:
@@ -1592,7 +1646,7 @@ def test_target_evidence_invocation_binding_accepts_stable_capability_pair_for_o
         (submission_capability,),
         (submission_capability, opening_capability),
         (*stable_capabilities, f"case:{base.case_id}:command:PARTY_EVIDENCE_COMPLETE"),
-        (f"case:OTHER_CASE:command:EVIDENCE_OPENING", submission_capability),
+        ("case:OTHER_CASE:command:EVIDENCE_OPENING", submission_capability),
     )
     for capabilities in invalid_capabilities:
         invalid = command_with_capabilities(capabilities)

@@ -12,6 +12,7 @@ import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalR
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunStreamProjection;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -147,6 +148,11 @@ public class AgentRunEntity extends AbstractEntity {
             nullable = false,
             columnDefinition = "jsonb")
     private String streamAudienceActorIdsJson = "[]";
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "stream_projection_mode", length = 32, nullable = false)
+    private AgentRunStreamProjection streamProjection =
+            AgentRunStreamProjection.BOUND_AUDIENCE;
 
     @Column(name = "stream_idempotency_key", length = 128)
     private String streamIdempotencyKey;
@@ -408,6 +414,7 @@ public class AgentRunEntity extends AbstractEntity {
         run.streamRequestHash = requiredSha256(command.requestHash(), "requestHash");
         run.streamAudienceJson = "[]";
         run.streamAudienceActorIdsJson = "[]";
+        run.streamProjection = required(command.streamProjection(), "streamProjection");
         run.streamIdempotencyKey = required(command.logicalIdempotencyKey(), "logicalIdempotencyKey");
         run.streamRequestId = command.agentRunId();
         run.updatedAt = run.startedAt;
@@ -471,6 +478,7 @@ public class AgentRunEntity extends AbstractEntity {
         requireEqual(logicalIdempotencyKey, command.logicalIdempotencyKey(), "logicalIdempotencyKey");
         requireEqual(protocol, command.protocol().wireValue(), "protocol");
         requireEqual(executorKind, command.executorKind(), "executorKind");
+        requireEqual(streamProjection, command.streamProjection(), "streamProjection");
         requireEqual(roomEpochId, command.roomEpochId(), "roomEpochId");
         requireEqual(roomType, command.roomType(), "roomType");
         requireEqual(roomEpoch, command.roomEpoch(), "roomEpoch");
@@ -1030,6 +1038,10 @@ public class AgentRunEntity extends AbstractEntity {
     // 系统意义：「AgentRunEntity.getStreamAudienceActorIdsJson()」直接影响 PostgreSQL 事实投影；实体记录是 API 查询投影和审计依据，写入必须服从上层事务与状态机
     public String getStreamAudienceActorIdsJson() {
         return streamAudienceActorIdsJson;
+    }
+
+    public AgentRunStreamProjection getStreamProjection() {
+        return streamProjection;
     }
 
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「AgentRunEntity.getStreamIdempotencyKey()」。

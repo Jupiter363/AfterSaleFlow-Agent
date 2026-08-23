@@ -19,6 +19,7 @@ import com.example.dispute.hearing.api.HearingAnswerBundleRequest;
 import com.example.dispute.hearing.api.HearingEvidenceBatchRequest;
 import com.example.dispute.hearing.api.HearingPartyStatementRequest;
 import com.example.dispute.hearing.domain.HearingArtifactType;
+import com.example.dispute.hearing.domain.HearingDecisionAction;
 import com.example.dispute.hearing.domain.HearingFlowActionType;
 import com.example.dispute.hearing.domain.HearingFlowStage;
 import com.example.dispute.hearing.domain.HearingFlowStageStatus;
@@ -62,6 +63,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.workflow.application.command.AcceptCaseCommand;
 import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
@@ -92,7 +94,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.UUID;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -291,15 +292,14 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             String caseId,
             HearingAnswerBundleRequest request,
             AuthenticatedActor actor) {
-        if (request.isPartyStatement()) {
-            return submitStatement(caseId, request.toPartyStatement(), actor);
-        }
         FulfillmentCaseEntity dispute = lockedCase(caseId);
         assertCaseParty(dispute, actor);
         CaseRoomEpochEntity targetEpoch = targetHearingEpoch(caseId);
-        HearingFlowInstanceEntity instance = targetEpoch == null
-                ? ensureStarted(dispute)
-                : requireTargetBootstrappedInstance(caseId);
+        if (targetEpoch == null) {
+            throw new IllegalStateException(
+                    "hearing_answer_bundle.v4 requires a target Hearing epoch");
+        }
+        HearingFlowInstanceEntity instance = requireTargetBootstrappedInstance(caseId);
 
         HearingFlowStageEntity answerStage =
                 requireStage(instance, HearingFlowStage.PARTY_ANSWERS_OPEN);
@@ -312,35 +312,52 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         }
 
         requireCurrentStage(instance, HearingFlowStage.PARTY_ANSWERS_OPEN);
-        if (targetEpoch == null) {
-            expireIfDue(instance, dispute);
-        }
-        requireCurrentStage(instance, HearingFlowStage.PARTY_ANSWERS_OPEN);
         assertDeadlineOpen(instance);
 
         HearingFlowActionEntity questionSet =
                 requireSystemAction(instance, HearingFlowActionType.QUESTION_SET);
         ObjectNode questionPayload = object(read(questionSet.getPayloadJson()));
-        if (!request.questionSetId().equals(questionPayload.path("question_set_id").asText())) {
-            throw invalidArgument("question_set_id does not identify the active question set");
+        if (!"hearing_question_set.v4".equals(questionPayload.path("schema_version").asText())
+                || !request.questionSetId().equals(
+                        questionPayload.path("question_set_id").asText())
+                || !request.questionSetHash().equals(
+                        questionPayload.path("question_set_hash").asText())
+                || !request.formalIssueCatalogHash().equals(
+                        questionPayload.path("formal_issue_catalog_hash").asText())) {
+            throw invalidArgument("answer bundle does not bind the active V4 question set");
         }
         validateAnswers(questionPayload, request, actor.role());
 
         Instant now = clock.instant();
+        String actionId = id("HEARING_ACTION_");
         ObjectNode payload = objectMapper.createObjectNode();
-        payload.put("schema_version", "hearing_answer_bundle.v1");
+        payload.put("schema_version", "hearing_answer_bundle.v4");
+        payload.put("answer_bundle_id", actionId);
+        payload.put("answer_bundle_hash", "0".repeat(64));
         payload.put("question_set_id", request.questionSetId());
+        payload.put("question_set_hash", request.questionSetHash());
+        payload.put("formal_issue_catalog_hash", request.formalIssueCatalogHash());
         payload.put("participant_id", actor.actorId());
         payload.put("participant_role", actor.role().name());
         payload.put("submission_status", "SUBMITTED");
-        payload.put("submitted_at", now.toString());
-        payload.set("answers", objectMapper.valueToTree(request.answers()));
+        ArrayNode answerUnits = payload.putArray("answer_units");
+        for (HearingAnswerBundleRequest.Answer answer : request.answers()) {
+            ObjectNode unit = answerUnits.addObject();
+            unit.put(
+                    "answer_unit_id",
+                    stableId("ANSWER_UNIT_", actionId, answer.questionId(), answer.issueId()));
+            unit.put("question_id", answer.questionId());
+            unit.put("issue_id", answer.issueId());
+            unit.put("answer_text", answer.answerText());
+        }
         payload.set("source_message_ids", objectMapper.valueToTree(request.sourceMessageIds()));
+        String answerBundleHash = hashWithoutField(payload, "answer_bundle_hash");
+        payload.put("answer_bundle_hash", answerBundleHash);
 
         HearingFlowActionEntity saved =
                 actionRepository.save(
                         HearingFlowActionEntity.partyAction(
-                                id("HEARING_ACTION_"),
+                                actionId,
                                 instance.getId(),
                                 answerStage.getId(),
                                 caseId,
@@ -349,7 +366,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                                 actor.role(),
                                 HearingFlowSubmissionStatus.SUBMITTED,
                                 json(payload),
-                                contentHash(payload),
+                                answerBundleHash,
                                 now,
                                 actor.actorId()));
         RoomMessageEntity acknowledgement =
@@ -359,30 +376,21 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         actor,
                         MessageType.PARTY_TEXT,
                         answerSummary(request),
-                        objectMapper.valueToTree(attachmentRefs(request)),
+                        objectMapper.createArrayNode(),
                         saved.getId(),
                         now);
         CaseTimelineEventEntity event =
-                recordPartySubmissionEvent(dispute, answerStage, saved, actor, false, targetEpoch != null);
-        if (targetEpoch != null) {
-            admitTargetHearingCommand(
-                    dispute,
-                    answerStage,
-                    targetEpoch,
-                    saved,
-                    event,
-                    actor,
-                    CommandType.HEARING_STATEMENT,
-                    null,
-                    null);
-        } else {
-            afterPartyActionsIfComplete(
-                    dispute,
-                    instance,
-                    answerStage,
-                    HearingFlowActionType.ANSWER_BUNDLE,
-                    HearingFlowStage.INTAKE_SYNTHESIZING);
-        }
+                recordPartySubmissionEvent(dispute, answerStage, saved, actor, false, true);
+        admitTargetHearingCommand(
+                dispute,
+                answerStage,
+                targetEpoch,
+                saved,
+                event,
+                actor,
+                CommandType.HEARING_ANSWER_BUNDLE,
+                null,
+                null);
         return partyActionView(saved, acknowledgement);
     }
 
@@ -485,7 +493,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                     saved,
                     event,
                     actor,
-                    CommandType.HEARING_STATEMENT,
+                    CommandType.HEARING_ANSWER_BUNDLE,
                     traceId,
                     requestId);
         } else {
@@ -546,7 +554,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             throw invalidArgument("request_set_id does not identify the active evidence request set");
         }
         validateEvidenceRequestIds(requestPayload, request, actor.role());
-        List<EvidenceItemEntity> evidence = validateEvidenceIds(caseId, request, actor);
+        List<EvidenceItemEntity> evidence = validateEvidenceIds(caseId, request);
 
         Instant now = clock.instant();
         ObjectNode payload = objectMapper.createObjectNode();
@@ -993,7 +1001,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         for (JsonNode value : requests) {
             ObjectNode request = object(value);
             String requestId = requiredText(request, "request_id");
-            ArrayNode targetRoles = requiredPartyRoles(request);
+            ArrayNode targetRoles = canonicalEvidenceRequestTargetRoles(request);
             if (!requestIds.add(requestId)) {
                 throw new IllegalStateException("duplicate hearing evidence request_id");
             }
@@ -1071,7 +1079,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             AgentRunFinalizationContext finalization) {
         validateCommonResult(result, "hearing_evidence_synthesis.v1", hearingState, stage);
         ObjectNode workingMatrix = object(result.path("fact_evidence_matrix"));
-        requireSchema(workingMatrix, "fact_evidence_matrix.v2");
+        requireSchema(workingMatrix, "fact_evidence_matrix.v3");
         verifyEmbeddedHash(workingMatrix, "content_hash");
         Instant now = clock.instant();
         appendAgentResultMessage(dispute, stage, result, finalization, now);
@@ -1125,7 +1133,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             HearingFlowStageEntity stage,
             ObjectNode result,
             AgentRunFinalizationContext finalization) {
-        validateCommonResult(result, "hearing_judge_v1.v1", hearingState, stage);
+        validateCommonResult(result, "hearing_judge_v1.v2", hearingState, stage);
         HearingTrialDossierEntity dossier = requireFrozenDossier(dispute.getId());
         assertDossierBinding(result, dossier);
         verifyEmbeddedHash(result, "proposal_hash");
@@ -1221,7 +1229,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             HearingFlowStageEntity stage,
             ObjectNode result,
             AgentRunFinalizationContext finalization) {
-        validateCommonResult(result, "hearing_judge_v2.v1", hearingState, stage);
+        validateCommonResult(result, "hearing_judge_v2.v2", hearingState, stage);
         HearingTrialDossierEntity dossier = requireFrozenDossier(dispute.getId());
         assertDossierBinding(result, dossier);
         ObjectNode judgeV1 = stageOutput(instance, HearingFlowStage.JUDGE_V1_GENERATING);
@@ -1236,9 +1244,18 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         .equals(requiredText(result, "jury_review_hash"))) {
             throw new IllegalStateException("V2 draft is not bound to the persisted V1/review chain");
         }
-        if (!result.path("public_message").asText()
-                .equals(result.path("draft").path("draft_text").asText())) {
-            throw new IllegalStateException("displayed V2 text must equal the persisted draft text");
+        JsonNode structuredDraft = result.path("draft");
+        if (!structuredDraft.isObject()
+                || !structuredDraft.path("decision_action").isTextual()
+                || !HearingDecisionAction.supports(
+                        structuredDraft.path("decision_action").asText())
+                || !structuredDraft.path("remedy_orders").isArray()
+                || !structuredDraft.path("fact_findings").isArray()
+                || !structuredDraft.path("rule_applications").isArray()
+                || !structuredDraft.path("decision_reasoning").isTextual()
+                || !structuredDraft.path("reviewer_attention").isArray()
+                || !result.path("review_responses").isArray()) {
+            throw new IllegalStateException("V2 result does not contain the structured review draft");
         }
         verifyEmbeddedHash(result, "judge_v2_hash");
         HearingFlowArtifactEntity parent =
@@ -1302,7 +1319,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             AdjudicationDraftEntity value = existing.orElseThrow();
             if (!dispute.getId().equals(value.getCaseId())
                     || value.getDraftVersion() != 2
-                    || !requiredText(content, "draft_text").equals(value.getDraftText())
+                    || !requiredText(artifact, "public_text").equals(value.getDraftText())
                     || !agentRunId.equals(value.getCreatedByAgentRunId())) {
                 throw new IdempotencyConflictException(
                         "a different V2 adjudication projection already exists");
@@ -1323,15 +1340,15 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         hearingState.getId(),
                         2,
                         json(content.path("fact_findings")),
-                        json(content.path("evidence_assessment")),
-                        json(content.path("policy_application")),
+                        json(content.path("fact_findings")),
+                        json(content.path("rule_applications")),
                         json(content.path("reviewer_attention")),
-                        requiredText(content, "recommended_decision"),
-                        new BigDecimal(requiredText(content, "confidence")),
-                        requiredText(content, "draft_text"),
+                        requiredText(content, "decision_action"),
+                        new BigDecimal("0.5"),
+                        requiredText(artifact, "public_text"),
                         "PRESIDING_JUDGE",
                         agentRunId,
-                        requiredText(content, "draft_status"),
+                        "PENDING_HUMAN_REVIEW",
                         SYSTEM_ACTOR));
     }
 
@@ -1941,26 +1958,49 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             ObjectNode questionSet,
             HearingAnswerBundleRequest request,
             ActorRole role) {
-        assertUnique(request.answers().stream().map(HearingAnswerBundleRequest.Answer::questionId).toList(),
+        assertUnique(
+                request.answers().stream()
+                        .map(HearingAnswerBundleRequest.Answer::questionId)
+                        .toList(),
                 "question_id");
+        assertUnique(
+                request.answers().stream()
+                        .map(HearingAnswerBundleRequest.Answer::issueId)
+                        .toList(),
+                "issue_id");
         assertUnique(request.sourceMessageIds(), "source_message_id");
-        Set<String> expected = new LinkedHashSet<>();
+        List<String> expectedQuestions = new ArrayList<>();
+        List<String> expectedIssues = new ArrayList<>();
         for (JsonNode value : array(questionSet.path("questions"))) {
             ObjectNode question = object(value);
-            if (targetsRole(question, role)) {
-                expected.add(requiredText(question, "question_id"));
+            if (!targetsRole(question, role)) {
+                throw new IllegalStateException(
+                        "V4 shared Hearing questions must target both parties");
             }
+            expectedQuestions.add(requiredText(question, "question_id"));
+            expectedIssues.add(requiredText(question, "issue_id"));
         }
-        Set<String> supplied =
-                new LinkedHashSet<>(
-                        request.answers().stream()
-                                .map(HearingAnswerBundleRequest.Answer::questionId)
-                                .toList());
-        if (!supplied.equals(expected)) {
+        List<String> suppliedQuestions = request.answers().stream()
+                .map(HearingAnswerBundleRequest.Answer::questionId)
+                .toList();
+        List<String> suppliedIssues = request.answers().stream()
+                .map(HearingAnswerBundleRequest.Answer::issueId)
+                .toList();
+        int totalChars = request.answers().stream()
+                .mapToInt(answer -> answer.answerText().length())
+                .sum();
+        if (!suppliedQuestions.equals(expectedQuestions)
+                || !suppliedIssues.equals(expectedIssues)
+                || request.answers().stream().anyMatch(answer -> answer.answerText().isBlank())
+                || totalChars > 10_000) {
             throw new BusinessException(
                     ErrorCode.INVALID_ARGUMENT,
-                    "answers must cover every applicable question exactly once",
-                    Map.of("expected_question_ids", expected, "supplied_question_ids", supplied));
+                    "answers must cover the V4 issue catalog once, in order, within budget",
+                    Map.of(
+                            "expected_question_ids", expectedQuestions,
+                            "supplied_question_ids", suppliedQuestions,
+                            "expected_issue_ids", expectedIssues,
+                            "supplied_issue_ids", suppliedIssues));
         }
     }
 
@@ -1996,7 +2036,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
     }
 
     private List<EvidenceItemEntity> validateEvidenceIds(
-            String caseId, HearingEvidenceBatchRequest request, AuthenticatedActor actor) {
+            String caseId, HearingEvidenceBatchRequest request) {
         if (request.evidenceIds().isEmpty()) {
             return List.of();
         }
@@ -2013,12 +2053,6 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             EvidenceItemEntity item = byId.get(evidenceId);
             if (!caseId.equals(item.getCaseId())) {
                 throw invalidArgument("evidence belongs to another case");
-            }
-            if (!actor.actorId().equals(item.getSubmittedById())) {
-                throw new ForbiddenException("a party may submit only its own evidence batch");
-            }
-            if (item.getDeletedAt() != null) {
-                throw invalidArgument("deleted evidence cannot enter a hearing batch");
             }
         }
         return request.evidenceIds().stream().map(byId::get).toList();
@@ -2039,12 +2073,28 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
 
     private void assertSameAnswerRequest(
             HearingFlowActionEntity action, HearingAnswerBundleRequest request) {
-        JsonNode payload = read(action.getPayloadJson());
-        if (!request.questionSetId().equals(payload.path("question_set_id").asText())
-                || !objectMapper.valueToTree(request.answers()).equals(payload.path("answers"))
+        ObjectNode payload = object(read(action.getPayloadJson()));
+        ArrayNode units = array(payload.path("answer_units"));
+        boolean sameUnits = units.size() == request.answers().size();
+        for (int index = 0; sameUnits && index < units.size(); index++) {
+            ObjectNode unit = object(units.get(index));
+            HearingAnswerBundleRequest.Answer answer = request.answers().get(index);
+            sameUnits = answer.questionId().equals(unit.path("question_id").asText())
+                    && answer.issueId().equals(unit.path("issue_id").asText())
+                    && answer.answerText().equals(unit.path("answer_text").asText());
+        }
+        if (!"hearing_answer_bundle.v4".equals(action.getSchemaVersion())
+                || !request.questionSetId().equals(payload.path("question_set_id").asText())
+                || !request.questionSetHash().equals(payload.path("question_set_hash").asText())
+                || !request.formalIssueCatalogHash().equals(
+                        payload.path("formal_issue_catalog_hash").asText())
+                || !sameUnits
                 || !objectMapper
                         .valueToTree(request.sourceMessageIds())
-                        .equals(payload.path("source_message_ids"))) {
+                        .equals(payload.path("source_message_ids"))
+                || !action.getContentHash().equals(payload.path("answer_bundle_hash").asText())
+                || !action.getContentHash().equals(
+                        hashWithoutField(payload, "answer_bundle_hash"))) {
             throw new IdempotencyConflictException(
                     "the authenticated party already submitted a different answer bundle");
         }
@@ -2203,13 +2253,20 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         result.put("dossier_version", dossier.getDossierVersion());
         result.put("dossier_status", "FROZEN");
         ObjectNode matrixRoot = parseObjectOrEmpty(dossier.getMatrixSummaryJson());
-        JsonNode candidate = matrixRoot.path("fact_evidence_matrix");
-        ObjectNode matrix =
-                candidate.isObject()
-                                && "fact_evidence_matrix.v2"
-                                        .equals(candidate.path("schema_version").asText())
-                        ? object(candidate).deepCopy()
-                        : legacyEvidenceMatrix(caseId, dossier, caseMatrix, candidate);
+        requireSchema(matrixRoot, "evidence-dossier-matrix-summary.v3");
+        ObjectNode matrix = object(matrixRoot.path("fact_evidence_matrix")).deepCopy();
+        requireSchema(matrix, "fact_evidence_matrix.v3");
+        if (!caseId.equals(requiredText(matrix, "case_id"))
+                || !requiredText(caseMatrix, "matrix_id")
+                        .equals(requiredText(matrix, "case_fact_matrix_id"))
+                || caseMatrix.path("matrix_version").asInt()
+                        != matrix.path("case_fact_matrix_version").asInt()
+                || !requiredText(caseMatrix, "content_hash")
+                        .equals(requiredText(matrix, "case_fact_matrix_hash"))) {
+            throw new IllegalStateException(
+                    "frozen Evidence v3 matrix differs from the current case matrix authority");
+        }
+        verifyEmbeddedHash(matrix, "content_hash");
         result.set("fact_evidence_matrix", matrix);
         result.set("evidence_summary", parseObjectOrEmpty(dossier.getSummaryJson()));
         JsonNode gaps = result.path("evidence_summary").path("evidence_gaps");
@@ -2217,112 +2274,14 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         return result;
     }
 
-    private ObjectNode legacyEvidenceMatrix(
-            String caseId,
-            EvidenceDossierEntity dossier,
-            ObjectNode caseMatrix,
-            JsonNode legacyRows) {
-        Set<String> knownFacts = caseFactIds(caseMatrix);
-        ObjectNode matrix = objectMapper.createObjectNode();
-        matrix.put("schema_version", "fact_evidence_matrix.v2");
-        matrix.put(
-                "matrix_id",
-                stableId(
-                        "FACT_EVIDENCE_MATRIX_",
-                        caseId,
-                        Integer.toString(dossier.getDossierVersion()),
-                        dossier.getId()));
-        matrix.put("case_id", caseId);
-        matrix.put("matrix_version", dossier.getDossierVersion());
-        matrix.put("matrix_status", "FROZEN");
-        matrix.putNull("parent_ref");
-        matrix.put("case_fact_matrix_id", requiredText(caseMatrix, "matrix_id"));
-        matrix.put("case_fact_matrix_version", caseMatrix.path("matrix_version").asInt());
-        matrix.put("case_fact_matrix_hash", requiredText(caseMatrix, "content_hash"));
-        matrix.putArray("source_refs").add(dossier.getId());
-        ArrayNode links = matrix.putArray("links");
-        Map<String, ObjectNode> legacyByFact = new LinkedHashMap<>();
-        if (legacyRows.isArray()) {
-            for (JsonNode value : legacyRows) {
-                if (value.isObject() && knownFacts.contains(value.path("fact_id").asText())) {
-                    legacyByFact.put(value.path("fact_id").asText(), object(value));
-                }
-            }
-        }
-        for (ObjectNode row : legacyByFact.values()) {
-            appendLegacyLinks(links, row, "supporting_evidence", "SUPPORTS", 0.8);
-            appendLegacyLinks(links, row, "opposing_evidence", "OPPOSES", 0.8);
-            appendLegacyLinks(links, row, "inconclusive_evidence", "INCONCLUSIVE", 0.5);
-        }
-        ArrayNode coverage = matrix.putArray("fact_coverage");
-        for (String factId : knownFacts) {
-            ObjectNode row = legacyByFact.get(factId);
-            LinkedHashSet<String> ids = new LinkedHashSet<>();
-            boolean review = false;
-            if (row != null) {
-                for (String field :
-                        List.of("supporting_evidence", "opposing_evidence", "inconclusive_evidence")) {
-                    for (JsonNode id : array(row.path(field))) {
-                        if (id.isTextual() && !id.asText().isBlank()) {
-                            ids.add(id.asText());
-                        }
-                    }
-                }
-                review = row.path("requires_human_review").asBoolean(false);
-            }
-            ObjectNode item = objectMapper.createObjectNode();
-            item.put("fact_id", factId);
-            item.put(
-                    "coverage_status",
-                    review
-                            ? "REQUIRES_HUMAN_REVIEW"
-                            : ids.isEmpty()
-                                    ? "NOT_COVERED_BY_FROZEN_DOSSIER"
-                                    : "COVERED_BY_FROZEN_DOSSIER");
-            item.set("evidence_ids", objectMapper.valueToTree(ids));
-            item.put(
-                    "note",
-                    ids.isEmpty()
-                            ? "该事实尚未被庭前冻结证据卷宗覆盖。"
-                            : "该事实的覆盖状态来自庭前冻结证据卷宗。"
-                                    + (review ? "关联材料仍需人工复核。" : ""));
-            coverage.add(item);
-        }
-        matrix.put("content_hash", hashWithoutField(matrix, "content_hash"));
-        return matrix;
-    }
-
-    private void appendLegacyLinks(
-            ArrayNode target,
-            ObjectNode row,
-            String field,
-            String relation,
-            double confidence) {
-        for (JsonNode evidenceId : array(row.path(field))) {
-            if (!evidenceId.isTextual() || evidenceId.asText().isBlank()) {
-                continue;
-            }
-            ObjectNode link = objectMapper.createObjectNode();
-            link.put("fact_id", row.path("fact_id").asText());
-            link.put("evidence_id", evidenceId.asText());
-            link.put("relation", relation);
-            link.put("reason", "由庭前冻结证据矩阵兼容投影生成。");
-            link.put("confidence", confidence);
-            link.putNull("source_batch_id");
-            target.add(link);
-        }
-    }
-
     private ObjectNode canonicalJudgeProposal(
             ObjectNode result, HearingTrialDossierEntity dossier) {
         ObjectNode payload = objectMapper.createObjectNode();
-        payload.put("schema_version", "judge_proposal.v1");
+        payload.put("schema_version", "judge_proposal.v2");
         payload.put("proposal_id", requiredText(result, "proposal_id"));
         payload.put("trial_dossier_id", dossier.getId());
         payload.put("trial_dossier_hash", dossier.getContentHash());
-        payload.put("proposal_text", requiredText(result, "proposal_text"));
-        payload.put("recommended_decision", requiredText(result, "recommended_decision"));
-        payload.put("reasoning_summary", requiredText(result, "reasoning_summary"));
+        payload.set("draft", object(result.path("draft")).deepCopy());
         payload.set("review_focus", result.path("review_focus").deepCopy());
         payload.put("public_text", requiredText(result, "public_message"));
         payload.put("content_hash", hashWithoutField(payload, "content_hash"));
@@ -2353,7 +2312,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             HearingFlowArtifactEntity proposal,
             HearingFlowArtifactEntity report) {
         ObjectNode payload = objectMapper.createObjectNode();
-        payload.put("schema_version", "adjudication_draft.v2");
+        payload.put("schema_version", "adjudication_draft.v3");
         payload.put("draft_id", requiredText(result, "judge_v2_id"));
         payload.put("trial_dossier_id", dossier.getId());
         payload.put("trial_dossier_hash", dossier.getContentHash());
@@ -2362,6 +2321,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         payload.put("report_id", report.getId());
         payload.put("report_content_hash", report.getContentHash());
         payload.set("draft", result.path("draft").deepCopy());
+        payload.set("review_responses", result.path("review_responses").deepCopy());
         payload.put("public_text", requiredText(result, "public_message"));
         payload.put("content_hash", hashWithoutField(payload, "content_hash"));
         return payload;
@@ -2840,7 +2800,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         "urn:case-timeline-event:" + event.getId(),
                         sha256(canonicalEvent),
                         canonicalEvent.getBytes(StandardCharsets.UTF_8).length);
-        String commandId = "hearing-action:" + action.getId();
+        String commandId = "hearing-action-" + action.getId();
         String resolvedTraceId =
                 traceId != null && traceId.matches("[0-9a-f]{32}") && !"0".repeat(32).equals(traceId)
                         ? traceId
@@ -2871,7 +2831,6 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
     private HearingPartyActionView partyActionView(
             HearingFlowActionEntity action, RoomMessageEntity message) {
         ObjectNode payload = object(read(action.getPayloadJson()));
-        Instant submittedAt = Instant.parse(requiredText(payload, "submitted_at"));
         HearingPartyActionView.RoomMessageAcknowledgement acknowledgement =
                 message == null
                         ? null
@@ -2889,7 +2848,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                 action.getParticipantId(),
                 action.getParticipantRole().name(),
                 action.getSubmissionStatus().name(),
-                submittedAt,
+                action.getCreatedAt(),
                 payload,
                 acknowledgement);
     }
@@ -3104,31 +3063,15 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
     private String hashWithoutField(ObjectNode payload, String field) {
         ObjectNode copy = payload.deepCopy();
         copy.remove(field);
-        return sha256(canonicalJson(copy));
+        return ContractJson.sha256Hex(copy);
     }
 
     private String contentHash(JsonNode payload) {
-        return sha256(canonicalJson(payload));
+        return ContractJson.sha256Hex(payload);
     }
 
     private String canonicalJson(JsonNode value) {
-        return json(canonicalize(value));
-    }
-
-    private JsonNode canonicalize(JsonNode value) {
-        if (value.isObject()) {
-            ObjectNode result = objectMapper.createObjectNode();
-            TreeMap<String, JsonNode> fields = new TreeMap<>();
-            value.fields().forEachRemaining(entry -> fields.put(entry.getKey(), entry.getValue()));
-            fields.forEach((key, child) -> result.set(key, canonicalize(child)));
-            return result;
-        }
-        if (value.isArray()) {
-            ArrayNode result = objectMapper.createArrayNode();
-            value.forEach(child -> result.add(canonicalize(child)));
-            return result;
-        }
-        return value.deepCopy();
+        return ContractJson.canonicalString(value);
     }
 
     private HearingFlowActionEntity requireSystemAction(
@@ -3474,6 +3417,11 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         return normalized;
     }
 
+    private static ArrayNode canonicalEvidenceRequestTargetRoles(ObjectNode value) {
+        requiredPartyRoles(value);
+        return JsonNodeFactory.instance.arrayNode().add("USER").add("MERCHANT");
+    }
+
     private static String requiredText(JsonNode value, String field) {
         String result = value.path(field).asText();
         if (result.isBlank()) {
@@ -3499,13 +3447,6 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                 .map(HearingAnswerBundleRequest.Answer::answerText)
                 .reduce((left, right) -> left + "\n" + right)
                 .orElse("已提交本轮回答。");
-    }
-
-    private static List<String> attachmentRefs(HearingAnswerBundleRequest request) {
-        return request.answers().stream()
-                .flatMap(item -> item.attachmentRefs().stream())
-                .distinct()
-                .toList();
     }
 
     private static String evidenceSummary(ActorRole role, int count) {

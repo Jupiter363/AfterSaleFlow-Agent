@@ -106,10 +106,14 @@ public final class JdbcHearingFormalFinalizer implements HearingFormalFinalizer 
                     .addValue("payloadJson", command.payloadJson()).addValue("contentHash", command.contentHash());
             requireLockedPartyAction(parameters);
             if (command.transition().advances()) {
-                requireCount("""
+                String statuses = command.actionType()
+                                == com.example.dispute.hearing.domain.HearingFlowActionType.ANSWER_BUNDLE
+                        ? "and submission_status = 'SUBMITTED'"
+                        : "and submission_status in ('SUBMITTED','AUTO_TIMEOUT')";
+                requireCount(("""
                     select count(*) from hearing_flow_action where flow_instance_id = :flowId and stage_id = :sourceStageId
-                     and case_id = :caseId and action_type = :actionType and submission_status in ('SUBMITTED','AUTO_TIMEOUT')
-                    """, parameters, 2, "HEARING_PARTY_ACTIONS_NOT_TERMINAL");
+                     and case_id = :caseId and action_type = :actionType
+                    """ + statuses), parameters, 2, "HEARING_PARTY_ACTIONS_NOT_TERMINAL");
             }
             applyTransition(authority, command.transition(), command.authorityCommit().committedAt());
             return result(authority, command.transition(), "urn:hearing:party-action:" + command.actionId(), command.contentHash());
@@ -150,11 +154,111 @@ public final class JdbcHearingFormalFinalizer implements HearingFormalFinalizer 
             HearingAuthorityExpectation authority = command.authorityCommit().authority();
             requireSourceStage(authority, command.transition(), command.agentRunId(), command.authorityCommit().committedAt());
             requireTerminalAgentRun(authority, command.agentRunId(), command.agentResultHash());
+            if (command.matrixKind() == MatrixKind.INTAKE) {
+                persistIntakeIssueState(command);
+            }
             applyTransition(authority, command.transition(), command.authorityCommit().committedAt());
             return result(authority, command.transition(),
                     "urn:hearing:matrix:" + command.matrixKind().name().toLowerCase() + ':' + command.agentRunId(),
                     command.contentHash());
         });
+    }
+
+    private void persistIntakeIssueState(MatrixSynthesisCommand command) {
+        HearingAuthorityExpectation authority = command.authorityCommit().authority();
+        MapSqlParameterSource parameters = new MapSqlParameterSource()
+                .addValue("caseId", authority.caseId())
+                .addValue("flowId", authority.flowInstanceId())
+                .addValue("sourceStageId", command.transition().sourceStageId())
+                .addValue("agentRunId", command.agentRunId())
+                .addValue("payloadJson", command.payloadJson())
+                .addValue("committedAt", offset(command.authorityCommit().committedAt()))
+                .addValue("actorId", command.actorId());
+        requireOne(
+                """
+                select count(*)
+                  from hearing_flow_action question_set
+                  join case_intake_dossier dossier
+                    on dossier.case_id = question_set.case_id
+                   and dossier.room_type = 'INTAKE'
+                 where question_set.flow_instance_id = :flowId
+                   and question_set.case_id = :caseId
+                   and question_set.action_type = 'QUESTION_SET'
+                   and question_set.schema_version = 'hearing_question_set.v4'
+                   and question_set.id = cast(:payloadJson as jsonb)
+                       #>> '{issue_transition_set,question_set_id}'
+                   and question_set.content_hash = cast(:payloadJson as jsonb)
+                       #>> '{issue_transition_set,question_set_hash}'
+                   and question_set.payload_json ->> 'question_set_id' = question_set.id
+                   and question_set.payload_json ->> 'question_set_hash' = question_set.content_hash
+                   and dossier.dossier_json #>> '{case_fact_matrix,matrix_id}' =
+                       cast(:payloadJson as jsonb) #>> '{case_fact_matrix,parent_ref,matrix_id}'
+                   and dossier.dossier_json #>> '{case_fact_matrix,matrix_version}' =
+                       cast(:payloadJson as jsonb) #>> '{case_fact_matrix,parent_ref,matrix_version}'
+                   and dossier.dossier_json #>> '{case_fact_matrix,content_hash}' =
+                       cast(:payloadJson as jsonb) #>> '{case_fact_matrix,parent_ref,content_hash}'
+                   and (
+                       select count(*)
+                         from jsonb_array_elements_text(
+                                  cast(:payloadJson as jsonb)
+                                      #> '{issue_transition_set,answer_bundle_ids}')
+                              with ordinality bundle_id(value, ordinal)
+                         join jsonb_array_elements_text(
+                                  cast(:payloadJson as jsonb)
+                                      #> '{issue_transition_set,answer_bundle_hashes}')
+                              with ordinality bundle_hash(value, ordinal)
+                           on bundle_hash.ordinal = bundle_id.ordinal
+                         join hearing_flow_action answer
+                           on answer.flow_instance_id = question_set.flow_instance_id
+                          and answer.case_id = question_set.case_id
+                          and answer.action_type = 'ANSWER_BUNDLE'
+                          and answer.schema_version = 'hearing_answer_bundle.v4'
+                          and answer.submission_status = 'SUBMITTED'
+                          and answer.id = bundle_id.value
+                          and answer.content_hash = bundle_hash.value
+                          and answer.payload_json ->> 'answer_bundle_id' = answer.id
+                          and answer.payload_json ->> 'answer_bundle_hash' = answer.content_hash
+                          and answer.payload_json ->> 'question_set_id' = question_set.id
+                          and answer.payload_json ->> 'question_set_hash' = question_set.content_hash
+                          and answer.participant_role = case bundle_id.ordinal
+                              when 1 then 'USER' when 2 then 'MERCHANT' end
+                   ) = 2
+                """,
+                parameters,
+                "HEARING_INTAKE_V4_PARENTS_NOT_EXACT");
+        requireUpdated(
+                jdbc.update(
+                        """
+                        insert into hearing_issue_state_set (
+                            id, case_id, flow_instance_id, source_stage_id, agent_run_id,
+                            schema_version, transition_set_id, transition_hash,
+                            question_set_id, question_set_hash,
+                            user_answer_bundle_id, user_answer_bundle_hash,
+                            merchant_answer_bundle_id, merchant_answer_bundle_hash,
+                            matrix_id, matrix_version, matrix_hash,
+                            payload_json, content_hash, created_at, created_by
+                        ) values (
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,issue_state_set_id}',
+                            :caseId, :flowId, :sourceStageId, :agentRunId,
+                            'hearing_issue_state_set.v4',
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,transition_set_id}',
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,transition_hash}',
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,question_set_id}',
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,question_set_hash}',
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,answer_bundle_ids,0}',
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,answer_bundle_hashes,0}',
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,answer_bundle_ids,1}',
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,answer_bundle_hashes,1}',
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,matrix_id}',
+                            (cast(:payloadJson as jsonb) #>> '{issue_state_set,matrix_version}')::integer,
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,matrix_hash}',
+                            cast(:payloadJson as jsonb) -> 'issue_state_set',
+                            cast(:payloadJson as jsonb) #>> '{issue_state_set,content_hash}',
+                            :committedAt, :actorId
+                        )
+                        """,
+                        parameters),
+                "HEARING_ISSUE_STATE_INSERT_FAILED");
     }
 
     @Override
@@ -189,7 +293,7 @@ public final class JdbcHearingFormalFinalizer implements HearingFormalFinalizer 
                                 question_set_id, request_set_id, payload_json, content_hash,
                                 frozen_at, created_at, created_by
                             ) values (
-                                :dossierId, :caseId, :flowId, 'trial_dossier.v1',
+                                :dossierId, :caseId, :flowId, 'trial_dossier.v2',
                                 :caseMatrixVersion, :caseMatrixHash,
                                 :evidenceMatrixVersion, :evidenceMatrixHash,
                                 :questionSetId, :requestSetId, cast(:payloadJson as jsonb),
@@ -525,7 +629,7 @@ public final class JdbcHearingFormalFinalizer implements HearingFormalFinalizer 
                  where id = :dossierId
                    and case_id = :caseId
                    and flow_instance_id = :flowId
-                   and schema_version = 'trial_dossier.v1'
+                   and schema_version = 'trial_dossier.v2'
                    and content_hash = :dossierHash
                 """,
                 parameters,
@@ -536,29 +640,44 @@ public final class JdbcHearingFormalFinalizer implements HearingFormalFinalizer 
         requireOne(
                 """
                 select count(*)
-                  from hearing_flow_action question_set
+                  from hearing_flow_stage case_matrix_stage
+                  join hearing_flow_stage evidence_matrix_stage
+                    on evidence_matrix_stage.flow_instance_id = case_matrix_stage.flow_instance_id
+                   and evidence_matrix_stage.case_id = case_matrix_stage.case_id
+                   and evidence_matrix_stage.stage_code = 'EVIDENCE_SYNTHESIZING'
+                   and evidence_matrix_stage.stage_status = 'COMPLETED'
+                  join hearing_flow_action question_set
+                    on question_set.flow_instance_id = case_matrix_stage.flow_instance_id
+                   and question_set.case_id = case_matrix_stage.case_id
+                   and question_set.action_type = 'QUESTION_SET'
                   join hearing_flow_action request_set
                     on request_set.flow_instance_id = question_set.flow_instance_id
                    and request_set.case_id = question_set.case_id
                    and request_set.action_type = 'EVIDENCE_REQUEST_SET'
-                   and request_set.payload_json = cast(:payloadJson as jsonb)
-                       -> 'evidence_request_set'
-                 where question_set.flow_instance_id = :flowId
-                   and question_set.case_id = :caseId
-                   and question_set.action_type = 'QUESTION_SET'
-                   and question_set.payload_json = cast(:payloadJson as jsonb) -> 'question_set'
+                 where case_matrix_stage.flow_instance_id = :flowId
+                   and case_matrix_stage.case_id = :caseId
+                   and case_matrix_stage.stage_code = 'INTAKE_SYNTHESIZING'
+                   and case_matrix_stage.stage_status = 'COMPLETED'
+                   and case_matrix_stage.output_json -> 'case_fact_matrix'
+                       = cast(:payloadJson as jsonb) -> 'case_fact_matrix'
+                   and evidence_matrix_stage.output_json -> 'fact_evidence_matrix'
+                       = cast(:payloadJson as jsonb) -> 'fact_evidence_matrix'
+                   and cast(:payloadJson as jsonb) ->> 'case_matrix_hash' = :caseMatrixHash
+                   and (cast(:payloadJson as jsonb) ->> 'case_matrix_version')::integer
+                       = :caseMatrixVersion
+                   and cast(:payloadJson as jsonb) ->> 'evidence_matrix_hash'
+                       = :evidenceMatrixHash
+                   and (cast(:payloadJson as jsonb) ->> 'evidence_matrix_version')::integer
+                       = :evidenceMatrixVersion
                    and question_set.payload_json ->> 'question_set_id' = :questionSetId
                    and request_set.payload_json ->> 'request_set_id' = :requestSetId
-                   and jsonb_array_length(cast(:payloadJson as jsonb) -> 'answer_bundles') = 2
-                   and jsonb_array_length(cast(:payloadJson as jsonb) -> 'evidence_batches') = 2
                    and (
                        select count(*)
                          from hearing_flow_action answer
                         where answer.flow_instance_id = :flowId
                           and answer.case_id = :caseId
                           and answer.action_type = 'ANSWER_BUNDLE'
-                          and cast(:payloadJson as jsonb) -> 'answer_bundles'
-                              @> jsonb_build_array(answer.payload_json)
+                          and answer.submission_status = 'SUBMITTED'
                    ) = 2
                    and (
                        select count(*)
@@ -566,9 +685,60 @@ public final class JdbcHearingFormalFinalizer implements HearingFormalFinalizer 
                         where evidence.flow_instance_id = :flowId
                           and evidence.case_id = :caseId
                           and evidence.action_type = 'EVIDENCE_BATCH'
-                          and cast(:payloadJson as jsonb) -> 'evidence_batches'
-                              @> jsonb_build_array(evidence.payload_json)
+                          and evidence.submission_status in ('SUBMITTED', 'AUTO_TIMEOUT')
                    ) = 2
+                   and jsonb_typeof(cast(:payloadJson as jsonb) -> 'adjudication_rules')
+                       = 'array'
+                   and jsonb_array_length(
+                       cast(:payloadJson as jsonb) -> 'adjudication_rules') > 0
+                   and jsonb_array_length(
+                       cast(:payloadJson as jsonb) -> 'adjudication_rules') = (
+                       select count(*)
+                         from policy_rule rule
+                        where rule.rule_status = 'ACTIVE'
+                          and rule.deleted_at is null
+                          and rule.effective_from <= :committedAt
+                          and (rule.effective_to is null or rule.effective_to > :committedAt)
+                   )
+                   and (
+                       select count(distinct snapshot ->> 'policy_id')
+                         from jsonb_array_elements(
+                             cast(:payloadJson as jsonb) -> 'adjudication_rules') snapshot
+                   ) = jsonb_array_length(
+                       cast(:payloadJson as jsonb) -> 'adjudication_rules')
+                   and not exists (
+                       select 1
+                         from jsonb_array_elements(
+                             cast(:payloadJson as jsonb) -> 'adjudication_rules') snapshot
+                        where not exists (
+                            select 1
+                              from policy_rule rule
+                             where rule.id = snapshot ->> 'policy_id'
+                               and rule.rule_code = snapshot ->> 'rule_code'
+                               and to_jsonb(rule.rule_version) = snapshot -> 'rule_version'
+                               and rule.rule_name = snapshot ->> 'rule_name'
+                               and rule.rule_scope = snapshot ->> 'rule_scope'
+                               and rule.rule_status = snapshot ->> 'rule_status'
+                               and to_jsonb(rule.priority) = snapshot -> 'priority'
+                               and rule.condition_json = snapshot -> 'conditions'
+                               and rule.outcome_json = snapshot -> 'outcome'
+                               and rule.source_document_json = snapshot -> 'source_document'
+                               and rule.effective_from = cast(
+                                   snapshot ->> 'effective_from' as timestamptz)
+                               and (
+                                   (rule.effective_to is null
+                                       and snapshot -> 'effective_to' = 'null'::jsonb)
+                                   or (rule.effective_to is not null
+                                       and rule.effective_to = cast(
+                                           snapshot ->> 'effective_to' as timestamptz))
+                               )
+                               and rule.rule_status = 'ACTIVE'
+                               and rule.deleted_at is null
+                               and rule.effective_from <= :committedAt
+                               and (rule.effective_to is null
+                                   or rule.effective_to > :committedAt)
+                        )
+                   )
                 """,
                 parameters,
                 "HEARING_DOSSIER_SOURCES_NOT_EXACT");

@@ -24,7 +24,6 @@ from typing_extensions import TypedDict
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.agents.dispute_intake_officer.case_fact_matrix import (
-    case_fact_matrix_content_hash,
     finalize_case_fact_matrix,
     respondent_opening_carry_delta,
 )
@@ -42,12 +41,10 @@ from app.agents.dispute_intake_officer.schemas import (
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     DIRECT_RESPONDENT_CONFIDENCE,
     DIRECT_RESPONDENT_SOURCE,
-    RESPONDENT_AUTHORED_CURRENT_MESSAGE,
     SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
     SUBJECTIVE_RESPONDENT_SOURCE,
     _reported_attitude_position,
     attributed_reported_respondent_attitude,
-    detect_direct_respondent_attitude,
 )
 from app.harness.prompt_composer import PromptComposer
 from app.graphs.intake.baseline import (
@@ -89,7 +86,6 @@ from app.model_runtime.profiles import (
 from app.model_runtime.transports import ModelTransport
 from app.schemas.case_fact_matrix import (
     CaseFactMatrixDeltaV2 as FormalCaseFactMatrixDeltaV2,
-    CaseFactMatrixV2 as FormalCaseFactMatrixV2,
 )
 from app.schemas.final_agents import IntakeTurnRequest
 from app.schemas.intake_case_matrix import (
@@ -2302,6 +2298,37 @@ def _completed_generation_message(value: object) -> AIMessage:
     return converted
 
 
+def _rebind_unchanged_handoff_partition_to_matrix_successor(
+    public_dossier: Mapping[str, Any],
+    *,
+    authority_dossier: Mapping[str, Any],
+    successor_matrix: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Move an inherited partition only when its party authority is unchanged.
+
+    An incomplete turn intentionally omits a newly authored handoff partition,
+    so the recursive dossier merge carries the prior matrix binding forward.
+    Once the same turn has produced a validated immediate matrix successor, that
+    inherited binding must advance with it.  A ready turn already carries a
+    successor-bound partition with an actor-owned status transition and is left
+    untouched for the ordinary transition validator to check.
+    """
+
+    authority_partition = authority_dossier.get("handoff_remark_partition")
+    carried_partition = public_dossier.get("handoff_remark_partition")
+    if (
+        not isinstance(authority_partition, Mapping)
+        or not isinstance(carried_partition, Mapping)
+        or dict(carried_partition) != dict(authority_partition)
+    ):
+        return deepcopy(dict(public_dossier))
+    return rebind_matrix_successor_handoff_partition(
+        public_dossier,
+        authority_dossier=authority_dossier,
+        successor_matrix=successor_matrix,
+    )
+
+
 def _generation_parts_with_baseline_context(
     value: Mapping[str, Any],
     *,
@@ -2380,6 +2407,40 @@ def _generation_parts_with_baseline_context(
             )
         normalized_payload["matrix_patch"] = opening_patch
         normalized = IntakeCognitionDraft.model_validate(normalized_payload)
+    elif normalized.matrix_patch is not None:
+        previous_context = typed_state.get("baseline_previous_case_detail")
+        authority_dossier = (
+            _verified_previous_case_detail(typed_state)
+            if previous_context is not None
+            else typed_state["dossier_draft"]
+        )
+        authority_partition = authority_dossier.get("handoff_remark_partition")
+        if isinstance(authority_partition, Mapping):
+            materialized_public_dossier = (
+                _rebind_unchanged_handoff_partition_to_matrix_successor(
+                    materialized_public_dossier,
+                    authority_dossier=authority_dossier,
+                    successor_matrix=baseline_formal_matrix,
+                )
+            )
+            materialized_partition = materialized_public_dossier.get(
+                "handoff_remark_partition"
+            )
+            if isinstance(materialized_partition, Mapping):
+                normalized_payload = normalized.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                    exclude_unset=True,
+                )
+                dossier_patch = normalized_payload.get("dossier_patch")
+                if not isinstance(dossier_patch, dict):
+                    raise IntakeGraphContractError(
+                        "INTAKE_DOSSIER_HANDOFF_MATRIX_REBIND_INVALID"
+                    )
+                dossier_patch["handoff_remark_partition"] = deepcopy(
+                    dict(materialized_partition)
+                )
+                normalized = IntakeCognitionDraft.model_validate(normalized_payload)
     return (
         typed_state,
         message,
@@ -2675,7 +2736,7 @@ def _normalize_model_respondent_attitude(
 
     attitude = draft.dossier_patch.respondent_attitude
     if handoff_request is not None:
-        return _require_exact_handoff_inherited_respondent_attitude(
+        return _inherit_frozen_handoff_respondent_attitude(
             state,
             draft,
             request=handoff_request,
@@ -2689,6 +2750,16 @@ def _normalize_model_respondent_attitude(
             request=fresh_form_request,
         )
     grounded = _grounded_respondent_attitude(state, draft=draft)
+    if grounded is not None and grounded.current_message_id is not None:
+        return _pin_model_direct_respondent_attitude_authority(
+            draft,
+            respondent_role=grounded.respondent_role,
+            grounded_attitude=grounded.attitude,
+            grounded_position=grounded.position,
+            grounded_alternative_proposal=grounded.alternative_proposal,
+            grounded_confidence=grounded.confidence,
+            current_message_id=grounded.current_message_id,
+        )
     prior = _prior_authoritative_respondent_attitude(state)
     prior_is_substantive = _validate_prior_respondent_attitude_authority(state, prior)
     proposed = _respondent_attitude_discriminator(attitude)
@@ -2710,26 +2781,16 @@ def _normalize_model_respondent_attitude(
         raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING")
     if proposed != grounded.attitude:
         raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_CONFLICT")
-    if grounded.current_message_id is not None:
-        return _pin_model_direct_respondent_attitude_authority(
-            draft,
-            respondent_role=grounded.respondent_role,
-            grounded_attitude=grounded.attitude,
-            grounded_position=grounded.position,
-            grounded_alternative_proposal=grounded.alternative_proposal,
-            grounded_confidence=grounded.confidence,
-            current_message_id=grounded.current_message_id,
-        )
     return _pin_model_respondent_attitude_position(draft, grounded.position)
 
 
-def _require_exact_handoff_inherited_respondent_attitude(
+def _inherit_frozen_handoff_respondent_attitude(
     state: IntakeGraphStateV2,
     draft: IntakeCognitionDraft,
     *,
     request: IntakeTurnRequest,
 ) -> IntakeCognitionDraft:
-    """Carry only the exact frozen attitude; never ground it to remark text."""
+    """Mechanically carry the frozen attitude; never ask a remark to reproduce it."""
 
     if (
         intake_case_detail_output_type(request)
@@ -2741,72 +2802,17 @@ def _require_exact_handoff_inherited_respondent_attitude(
             "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
         )
 
-    attitude = draft.dossier_patch.respondent_attitude
     prior = _prior_authoritative_respondent_attitude(state)
-    if attitude is None and prior is None:
-        return draft
-    if (
-        not isinstance(attitude, Mapping)
-        or prior is None
-        or not _validate_prior_respondent_attitude_authority(state, prior)
-        or canonicalize(attitude) != canonicalize(prior)
-    ):
-        raise IntakeGraphContractError(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
-        )
-
-    previous = request.previous_case_detail
-    request_prior = (
-        previous.get("respondent_attitude")
-        if isinstance(previous, Mapping)
-        else None
-    )
-    matrix_payload = (
-        previous.get("case_fact_matrix")
-        if isinstance(previous, Mapping)
-        else None
-    )
-    if (
-        not isinstance(request_prior, Mapping)
-        or canonicalize(request_prior) != canonicalize(prior)
-        or not isinstance(matrix_payload, Mapping)
-    ):
-        raise IntakeGraphContractError(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
-        )
-    raw_matrix = deepcopy(dict(matrix_payload))
-    try:
-        matrix = FormalCaseFactMatrixV2.model_validate(raw_matrix)
-    except ValueError as error:
-        raise IntakeGraphContractError(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
-        ) from error
-    if matrix.content_hash != case_fact_matrix_content_hash(raw_matrix):
-        raise IntakeGraphContractError(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
-        )
-
-    if prior.get("source") == DIRECT_RESPONDENT_SOURCE:
-        direct = matrix.claims.respondent_direct
-        grounding = prior.get("grounding")
-        message_id = (
-            grounding.get("message_id")
-            if isinstance(grounding, Mapping)
-            else None
-        )
-        if (
-            direct is None
-            or direct.respondent_role != prior.get("respondent_role")
-            or direct.attitude != prior.get("attitude")
-            or direct.position_summary != prior.get("position")
-            or direct.alternative_proposal != prior.get("alternative_proposal")
-            or not isinstance(message_id, str)
-            or message_id not in direct.source_refs
-        ):
-            raise IntakeGraphContractError(
-                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
-            )
-    return _without_respondent_attitude_patch(draft)
+    normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+    dossier_patch = normalized.get("dossier_patch")
+    if not isinstance(dossier_patch, dict):
+        raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
+    if prior is None:
+        dossier_patch.pop("respondent_attitude", None)
+    else:
+        dossier_patch["respondent_attitude"] = deepcopy(prior)
+    normalized["dossier_patch"] = dossier_patch
+    return IntakeCognitionDraft.model_validate(normalized)
 
 
 def _require_deterministic_initial_form_respondent_attitude(
@@ -3230,32 +3236,12 @@ def _grounded_respondent_attitude(
             raise IntakeGraphContractError(
                 "INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID"
             )
-        detection = detect_direct_respondent_attitude(
-            source.text,
-            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
-            respondent_role=actor_role,
-        )
-        if detection.state == "UNRESOLVED":
-            raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
         if claim.attitude == "NOT_ADDRESSED":
-            if detection.state == "SUBSTANTIVE":
-                raise IntakeGraphContractError(
-                    "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
-                )
             return None
         if claim.attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDES:
             raise IntakeGraphContractError(
                 "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
             )
-        if detection.state == "SUBSTANTIVE":
-            candidate = detection.candidate
-            if (
-                not isinstance(candidate, Mapping)
-                or candidate.get("attitude") != claim.attitude
-            ):
-                raise IntakeGraphContractError(
-                    "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
-                )
         return _GroundedRespondentAttitude(
             attitude=claim.attitude,
             position=claim.position_summary,
@@ -3399,13 +3385,7 @@ def _pin_model_direct_respondent_attitude_authority(
         raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
     normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
     dossier_patch = normalized.get("dossier_patch")
-    attitude = dossier_patch.get("respondent_attitude") if isinstance(dossier_patch, dict) else None
-    if not isinstance(attitude, dict):
-        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
-    if not any(
-        isinstance(attitude.get(field), str) and attitude[field].strip()
-        for field in ("position_summary", "position", "note")
-    ):
+    if not isinstance(dossier_patch, dict):
         raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
     canonical: dict[str, Any] = {
         "respondent_role": respondent_role,
@@ -3420,14 +3400,6 @@ def _pin_model_direct_respondent_attitude_authority(
     }
     if grounded_alternative_proposal is not None:
         canonical["alternative_proposal"] = grounded_alternative_proposal
-    if "confidence" in attitude:
-        confidence = attitude["confidence"]
-        if (
-            isinstance(confidence, bool)
-            or not isinstance(confidence, int | float)
-            or not 0 <= confidence <= 1
-        ):
-            raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
     dossier_patch["respondent_attitude"] = canonical
     return IntakeCognitionDraft.model_validate(normalized)
 
@@ -3551,6 +3523,11 @@ def _validate_business_output(
         )
         previous_public = rebind_matrix_successor_handoff_partition(
             previous_public,
+            authority_dossier=authority_dossier,
+            successor_matrix=successor_matrix,
+        )
+        merged = _rebind_unchanged_handoff_partition_to_matrix_successor(
+            merged,
             authority_dossier=authority_dossier,
             successor_matrix=successor_matrix,
         )

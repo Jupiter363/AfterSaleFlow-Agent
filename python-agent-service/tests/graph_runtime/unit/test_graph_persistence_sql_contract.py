@@ -138,6 +138,11 @@ def test_lease_insert_starts_at_one_and_updates_keep_the_fence_monotonic() -> No
     lease_window = _constraint(sql_text, "ck_agent_graph_lease_window")
     assert "lease_expires_at <= renewed_at + interval '30 seconds'" in lease_window
 
+    lease_upgrade = _compact(_sql("G009_graph_lease_sixty_second_window.sql"))
+    assert "drop constraint ck_agent_graph_lease_window" in lease_upgrade
+    assert "add constraint ck_agent_graph_lease_window" in lease_upgrade
+    assert "lease_expires_at <= renewed_at + interval '60 seconds'" in lease_upgrade
+
 
 def test_cancelled_released_and_expired_leases_allow_exactly_one_fenced_takeover() -> None:
     sql_text = _sql("G001_graph_runtime.sql")

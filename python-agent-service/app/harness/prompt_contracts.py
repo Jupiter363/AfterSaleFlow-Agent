@@ -170,6 +170,76 @@ _CONTRACTS: dict[str, AgentContextContract] = {
             *_COMMON_DISPLAY_ONLY,
         ),
     ),
+    "hearing_intake_questions": AgentContextContract(
+        node_name="hearing_intake_questions",
+        configuration_profile_key="HEARING_INTAKE_CONTEXT_PACK_V4",
+        sections=(
+            ContextSectionSpec(
+                "hearing_intake_context_v4",
+                101,
+                True,
+                "hearing_committed_authority_v4",
+                prompt_order=1,
+            ),
+            *_COMMON_DISPLAY_ONLY,
+        ),
+    ),
+    "hearing_intake_synthesis": AgentContextContract(
+        node_name="hearing_intake_synthesis",
+        configuration_profile_key="HEARING_INTAKE_CONTEXT_PACK_V4",
+        sections=(
+            ContextSectionSpec(
+                "hearing_intake_context_v4",
+                101,
+                True,
+                "hearing_committed_authority_v4",
+                prompt_order=1,
+            ),
+            *_COMMON_DISPLAY_ONLY,
+        ),
+    ),
+    "hearing_evidence_requests": AgentContextContract(
+        node_name="hearing_evidence_requests",
+        configuration_profile_key="HEARING_EVIDENCE_CONTEXT_PACK_V3",
+        sections=(
+            ContextSectionSpec(
+                "hearing_room_context_v3",
+                101,
+                True,
+                "hearing_committed_authority_v3",
+                prompt_order=1,
+            ),
+            *_COMMON_DISPLAY_ONLY,
+        ),
+    ),
+    "hearing_evidence_file_assessment": AgentContextContract(
+        node_name="hearing_evidence_file_assessment",
+        configuration_profile_key="HEARING_EVIDENCE_CONTEXT_PACK_V3",
+        sections=(
+            ContextSectionSpec(
+                "hearing_room_context_v3",
+                101,
+                True,
+                "hearing_committed_authority_v3",
+                prompt_order=1,
+            ),
+            *_COMMON_DISPLAY_ONLY,
+        ),
+    ),
+    "hearing_evidence_synthesis": AgentContextContract(
+        node_name="hearing_evidence_synthesis",
+        configuration_profile_key="HEARING_EVIDENCE_CONTEXT_PACK_V3",
+        sections=(
+            ContextSectionSpec(
+                "hearing_room_context_v3",
+                101,
+                True,
+                "hearing_committed_authority_v3",
+                prompt_order=1,
+            ),
+            *_COMMON_DISPLAY_ONLY,
+        ),
+    ),
 }
 
 

@@ -41,7 +41,7 @@ public final class TargetE2eHearingInvocationPublisher {
       throw new IllegalArgumentException("Hearing invocation payload is invalid");
     }
     ObjectNode invocation = mapper.createObjectNode();
-    invocation.put("schema_version", "target-e2e-hearing-invocation.v2");
+    invocation.put("schema_version", "target-e2e-hearing-invocation.v4");
     invocation.put("operation", operation);
     invocation.put("shared_barrier_receipt_hash", sharedBarrierReceiptHash);
     invocation.set("request", request.deepCopy());

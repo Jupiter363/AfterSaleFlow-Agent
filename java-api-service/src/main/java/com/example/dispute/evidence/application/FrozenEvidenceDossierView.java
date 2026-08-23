@@ -21,5 +21,5 @@ public record FrozenEvidenceDossierView(
         String dossierStatus,
         Map<String, Object> summary,
         List<Map<String, Object>> timeline,
-        List<Map<String, Object>> matrix,
+        Map<String, Object> matrix,
         List<String> evidenceIds) {}

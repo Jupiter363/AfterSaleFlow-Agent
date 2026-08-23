@@ -50,7 +50,7 @@ final class JdbcTargetHearingPreludeAuthority {
                          'dossier_id', id,
                          'dossier_version', dossier_version,
                          'dossier_status', dossier_status,
-                         'fact_evidence_matrix', matrix_summary_json -> 'fact_evidence_matrix_v2',
+                         'fact_evidence_matrix', matrix_summary_json -> 'fact_evidence_matrix',
                          'evidence_summary', summary_json
                        )::text
                   from evidence_dossier
@@ -170,7 +170,7 @@ final class JdbcTargetHearingPreludeAuthority {
             && !evidenceDossier.path("dossier_id").asText().isBlank()
             && evidenceDossier.path("dossier_version").asInt(0) >= 1
             && "FROZEN".equals(evidenceDossier.path("dossier_status").asText())
-            && "fact_evidence_matrix.v2".equals(evidenceMatrix.path("schema_version").asText())
+            && "fact_evidence_matrix.v3".equals(evidenceMatrix.path("schema_version").asText())
             && start.caseId().equals(evidenceMatrix.path("case_id").asText())
             && "FROZEN".equals(evidenceMatrix.path("matrix_status").asText())
             && evidenceMatrix.path("matrix_id").isTextual()

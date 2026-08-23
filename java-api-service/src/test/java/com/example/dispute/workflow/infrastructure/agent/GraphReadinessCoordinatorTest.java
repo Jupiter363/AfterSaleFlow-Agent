@@ -49,11 +49,11 @@ class GraphReadinessCoordinatorTest {
         GraphReadinessCoordinator.Settings minimum = settings(
                 Duration.ofSeconds(5), MINIMUM_PROBE_TIMEOUT);
         GraphReadinessCoordinator.Settings maximum = settings(
-                Duration.ofSeconds(25), Duration.ofSeconds(5));
+                Duration.ofSeconds(25), Duration.ofSeconds(15));
 
         assertThat(minimum.freshness())
                 .isEqualTo(Duration.ofSeconds(5).plus(MINIMUM_PROBE_TIMEOUT));
-        assertThat(maximum.freshness()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(maximum.freshness()).isEqualTo(Duration.ofSeconds(40));
         assertThatThrownBy(() -> settings(Duration.ofSeconds(5).minusNanos(1), PROBE_TIMEOUT))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> settings(Duration.ofSeconds(25).plusNanos(1), PROBE_TIMEOUT))

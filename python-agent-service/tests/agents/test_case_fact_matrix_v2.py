@@ -15,7 +15,7 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
     SUBJECTIVE_RESPONDENT_SOURCE,
 )
-from app.contracts.v1.codec import canonical_sha256_omitting
+from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
 from app.llm import AgentOutputSchemaError
 from app.schemas import CaseFactMatrixDeltaV2, CaseFactMatrixV2, IntakeTurnRequest
 from app.harness.evidence_context_assembler import (
@@ -779,14 +779,7 @@ def test_unknown_fact_id_is_rebound_by_one_exact_normalized_fingerprint() -> Non
     assert corrected.content_hash == canonical.content_hash
     serialized = corrected.model_dump(mode="json")
     content_hash = serialized.pop("content_hash")
-    assert content_hash == hashlib.sha256(
-        json.dumps(
-            serialized,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    assert content_hash == canonical_sha256(serialized)
 
 
 def test_unknown_fact_id_without_a_matching_fingerprint_still_fails_closed() -> None:
@@ -857,11 +850,6 @@ def test_unknown_fact_id_with_an_ambiguous_fingerprint_still_fails_closed() -> N
             "INTAKE_MATRIX_FACT_DUPLICATE",
             id="duplicate",
         ),
-        pytest.param(
-            "membership",
-            "INTAKE_MATRIX_PRIOR_FACT_MISSING",
-            id="membership",
-        ),
     ],
 )
 def test_round_three_reachable_matrix_rejections_expose_safe_codes(
@@ -883,11 +871,8 @@ def test_round_three_reachable_matrix_rejections_expose_safe_codes(
         payload["fact_rows"].append(duplicate)
         payload["summary_source_fact_keys"].append(duplicate["fact_key"])
         delta = CaseFactMatrixDeltaV2.model_validate(payload)
-    else:
-        delta = _existing_fact_delta(
-            "NEW_SAFE_CODE_CURRENT_FACT",
-            fact_target="A distinct bounded synthetic current fact.",
-        )
+    else:  # pragma: no cover - the parametrization above is intentionally closed.
+        raise AssertionError(f"unexpected variant: {variant}")
 
     with pytest.raises(AgentOutputSchemaError) as failure:
         finalize_case_fact_matrix(
@@ -899,7 +884,7 @@ def test_round_three_reachable_matrix_rejections_expose_safe_codes(
     assert failure.value.safe_code == expected_code
 
 
-def test_changed_reported_claim_without_current_grounding_exposes_safe_code() -> None:
+def test_initiator_reported_counterparty_claim_is_not_frozen() -> None:
     case_id = "CASE_safe_code_reported_claim"
     previous = _single_fact_initiator_matrix(case_id)
     previous_row = previous.fact_rows[0]
@@ -932,20 +917,37 @@ def test_changed_reported_claim_without_current_grounding_exposes_safe_code() ->
         }
     )
 
-    with pytest.raises(AgentOutputSchemaError) as failure:
-        finalize_case_fact_matrix(
-            request=_initiator_follow_up_request(
-                case_id,
-                previous.model_dump(mode="json"),
-            ),
-            case_detail=detail,
-            delta=delta,
-        )
-
-    assert (
-        failure.value.safe_code
-        == "INTAKE_MATRIX_REPORTED_CLAIM_SOURCE_MISSING"
+    frozen = finalize_case_fact_matrix(
+        request=_initiator_follow_up_request(
+            case_id,
+            previous.model_dump(mode="json"),
+        ),
+        case_detail=detail,
+        delta=delta,
     )
+
+    assert frozen.claims.respondent_reported_by_initiator is None
+
+
+def test_omitted_prior_fact_is_carried_by_server_without_provider_restatement() -> None:
+    case_id = "CASE_server_carries_prior_fact"
+    previous = _single_fact_initiator_matrix(case_id)
+    delta = _existing_fact_delta(
+        "NEW_RESPONDENT_ONLY_FACT",
+        fact_target="商家是否提出本轮新的处理方案",
+    )
+
+    frozen = finalize_case_fact_matrix(
+        request=_respondent_request(case_id, previous.model_dump(mode="json")),
+        case_detail=_detail("商家提出本轮新的处理方案。"),
+        delta=delta,
+    )
+
+    assert [row.fact_id for row in frozen.fact_rows][0] == previous.fact_rows[0].fact_id
+    carried = frozen.fact_rows[0]
+    assert carried.positions.USER == previous.fact_rows[0].positions.USER
+    assert carried.positions.MERCHANT.stance == "NOT_ADDRESSED"
+    assert len(frozen.fact_rows) == 2
 
 
 def test_unified_matrix_evolves_from_initiator_to_bilateral_without_changing_fact_ids() -> None:
@@ -1078,14 +1080,7 @@ def test_unified_matrix_evolves_from_initiator_to_bilateral_without_changing_fac
     assert claim_state["source"] == "CASE_FACT_MATRIX_V2"
     assert claim_state["respondent_direct"]["attitude"] == "DISAGREE"
     content_hash = serialized.pop("content_hash")
-    assert content_hash == hashlib.sha256(
-        json.dumps(
-            serialized,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    assert content_hash == canonical_sha256(serialized)
 
 
 @pytest.mark.parametrize(
@@ -1271,6 +1266,11 @@ def test_respondent_fact_only_turn_does_not_invent_or_erase_a_claim() -> None:
                     }
                 ],
                 "summary_source_fact_keys": [fact_id],
+                "respondent_claim": {
+                    "attitude": "DISAGREE",
+                    "position_summary": "商家不同意退还安装费。",
+                    "alternative_proposal": None,
+                },
             }
         ),
     )
@@ -1325,7 +1325,7 @@ def test_respondent_fact_only_turn_does_not_invent_or_erase_a_claim() -> None:
     assert "MESSAGE_MERCHANT_LATER_FACT" not in carried.claims.respondent_direct.source_refs
 
 
-def test_historical_reported_attitude_exact_carry_does_not_append_neutral_current_source() -> None:
+def test_historical_reported_attitude_is_not_carried_into_frozen_matrix() -> None:
     case_id = "CASE_reported_attitude_exact_carry"
     prior_attitude = {
         "respondent_role": "MERCHANT",
@@ -1373,9 +1373,7 @@ def test_historical_reported_attitude_exact_carry_does_not_append_neutral_curren
             }
         ),
     )
-    prior_claim = first.claims.respondent_reported_by_initiator
-    assert prior_claim is not None
-    prior_refs = list(prior_claim.source_refs)
+    assert first.claims.respondent_reported_by_initiator is None
     fact_id = first.fact_rows[0].fact_id
 
     neutral_message_id = "MESSAGE_USER_NEUTRAL_FACT"
@@ -1421,11 +1419,7 @@ def test_historical_reported_attitude_exact_carry_does_not_append_neutral_curren
         ),
     )
 
-    reported = carried.claims.respondent_reported_by_initiator
-    assert reported is not None
-    assert reported.model_dump(mode="json") == prior_claim.model_dump(mode="json")
-    assert reported.source_refs == prior_refs
-    assert neutral_message_id not in reported.source_refs
+    assert carried.claims.respondent_reported_by_initiator is None
 
 
 def test_legacy_dossier_exact_attitude_carry_does_not_mint_a_current_reported_claim() -> None:
@@ -1514,8 +1508,8 @@ def test_legacy_dossier_exact_attitude_carry_does_not_mint_a_current_reported_cl
     variants.append(changed_grounding_message)
 
     for changed in variants:
-        with pytest.raises(AgentOutputSchemaError):
-            finalize(changed)
+        ignored = finalize(changed)
+        assert ignored.claims.respondent_reported_by_initiator is None
 
 
 def test_missing_delta_carries_the_prior_matrix_without_renumbering_facts() -> None:

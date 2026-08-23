@@ -15,7 +15,7 @@ from app.graphs.hearing.contracts import (
 )
 from app.graphs.hearing.graph import (
     build_hearing_evidence_v1_graph,
-    build_hearing_intake_v1_graph,
+    build_hearing_intake_v4_graph,
     build_hearing_judge_v1_graph,
     build_hearing_jury_v1_graph,
     compile_hearing_graph_candidates,
@@ -70,7 +70,7 @@ __all__ = [
     "HearingTargetE2EStoredPayload",
     "TARGET_E2E_HEARING_FAMILY_REGISTRY",
     "build_hearing_evidence_v1_graph",
-    "build_hearing_intake_v1_graph",
+    "build_hearing_intake_v4_graph",
     "build_hearing_judge_v1_graph",
     "build_hearing_jury_v1_graph",
     "compile_hearing_graph_candidates",

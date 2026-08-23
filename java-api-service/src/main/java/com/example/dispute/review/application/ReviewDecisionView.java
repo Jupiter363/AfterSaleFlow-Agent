@@ -19,7 +19,31 @@ public record ReviewDecisionView(
         String taskStatus,
         String caseStatus,
         boolean executionAllowed,
+        String aiDecisionAction,
+        String reviewerDecisionAction,
         ReviewDecisionReceiptView receipt) {
+
+    public ReviewDecisionView(
+            String approvalRecordId,
+            String taskId,
+            String caseId,
+            String decision,
+            String taskStatus,
+            String caseStatus,
+            boolean executionAllowed,
+            ReviewDecisionReceiptView receipt) {
+        this(
+                approvalRecordId,
+                taskId,
+                caseId,
+                decision,
+                taskStatus,
+                caseStatus,
+                executionAllowed,
+                null,
+                null,
+                receipt);
+    }
 
     public ReviewDecisionView(
             String approvalRecordId,
@@ -37,6 +61,8 @@ public record ReviewDecisionView(
                 taskStatus,
                 caseStatus,
                 executionAllowed,
+                null,
+                null,
                 null);
     }
 }

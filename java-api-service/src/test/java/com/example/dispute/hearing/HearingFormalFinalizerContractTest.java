@@ -22,10 +22,10 @@ import com.example.dispute.hearing.domain.HearingFormalRequestHash;
 import com.example.dispute.hearing.domain.HearingFormalTransition;
 import com.example.dispute.hearing.domain.HearingWriterMode;
 import com.example.dispute.hearing.infrastructure.persistence.JdbcHearingFormalFinalizer;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -36,10 +36,8 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.HexFormat;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -64,7 +62,7 @@ class HearingFormalFinalizerContractTest {
         HearingFormalTransition transition = advance(
                 "STAGE_13", HearingFlowStage.HUMAN_REVIEW_OPEN, "STAGE_14");
         ObjectNode payload = MAPPER.createObjectNode();
-        payload.put("schema_version", "adjudication_draft.v2");
+        payload.put("schema_version", "adjudication_draft.v3");
         payload.put("draft_id", "DRAFT_1");
         payload.put("trial_dossier_id", "DOSSIER_1");
         payload.put("trial_dossier_hash", HASH_A);
@@ -72,7 +70,29 @@ class HearingFormalFinalizerContractTest {
         payload.put("proposal_content_hash", HASH_B);
         payload.put("report_id", "REPORT_1");
         payload.put("report_content_hash", HASH_C);
-        payload.putObject("draft").put("draft_text", "formal V2");
+        ObjectNode draft = payload.putObject("draft");
+        draft.put("decision_action", "REFUND_ONLY");
+        draft.putArray("remedy_orders").addObject()
+                .put("remedy_type", "REFUND_ONLY")
+                .put("order_text", "Refund the supported amount.")
+                .putArray("fact_ids").add("FACT_1");
+        draft.putArray("fact_findings").addObject()
+                .put("fact_id", "FACT_1")
+                .put("finding", "The frozen evidence partly supports delivery.")
+                .putArray("evidence_ids").add("EVIDENCE_1");
+        draft.putArray("rule_applications").addObject()
+                .put("rule_code", "DELIVERY_PROOF")
+                .put("rule_version", 1)
+                .put("rule_name", "Delivery proof")
+                .putArray("fact_ids").add("FACT_1");
+        draft.put("decision_reasoning", "The frozen fact, evidence and rule support relief.");
+        draft.putArray("reviewer_attention").add("Confirm the exact amount.");
+        payload.putArray("review_responses").addObject()
+                .put("review_item_ref", "V1_FOCUS_01")
+                .put("review_source", "V1_REVIEW_FOCUS")
+                .put("disposition", "ACCEPTED")
+                .put("response", "The frozen authority supports this response.")
+                .putArray("affected_fields").add("decision_reasoning");
         payload.put("public_text", "formal V2");
         String contentHash = hashWithout(payload, "content_hash");
         payload.put("content_hash", contentHash);
@@ -96,7 +116,7 @@ class HearingFormalFinalizerContractTest {
         HearingAuthorityCommit commit = commit(
                 authority,
                 HearingAuthorityCommit.OperationType.FINALIZE,
-                "hearing.finalize:tenant-1:CASE_1:2:13:adjudication_draft.v2:" + requestHash,
+                "hearing.finalize:tenant-1:CASE_1:2:13:adjudication_draft.v3:" + requestHash,
                 requestHash);
 
         HearingFormalFinalizer.DecisionCommand command = new HearingFormalFinalizer.DecisionCommand(
@@ -142,6 +162,123 @@ class HearingFormalFinalizerContractTest {
     }
 
     @Test
+    void dossierV2CommandBindsTheDerivedFinalizeKeyAndExcludesProcessIntermediates() {
+        HearingAuthorityExpectation authority = authority(
+                HearingFlowStage.DOSSIER_FREEZING, 10, 6, 8);
+        HearingFormalTransition transition = advance(
+                "STAGE_10", HearingFlowStage.JUDGE_V1_GENERATING, "STAGE_11");
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("schema_version", "trial_dossier.v2");
+        payload.put("trial_dossier_id", "DOSSIER_1");
+        payload.put("case_id", "CASE_1");
+        payload.put("frozen_at", NOW.toString());
+        payload.put("case_matrix_version", 2);
+        payload.put("case_matrix_hash", HASH_A);
+        payload.putObject("case_fact_matrix")
+                .put("schema_version", "case_fact_matrix.v2")
+                .put("case_id", "CASE_1")
+                .put("matrix_id", "CASE_MATRIX_2")
+                .put("matrix_version", 2)
+                .put("content_hash", HASH_A);
+        payload.put("evidence_matrix_version", 3);
+        payload.put("evidence_matrix_hash", HASH_B);
+        payload.putObject("fact_evidence_matrix")
+                .put("schema_version", "fact_evidence_matrix.v3")
+                .put("case_id", "CASE_1")
+                .put("matrix_id", "EVIDENCE_MATRIX_3")
+                .put("matrix_version", 3)
+                .put("matrix_status", "FROZEN")
+                .put("case_fact_matrix_id", "CASE_MATRIX_2")
+                .put("case_fact_matrix_version", 2)
+                .put("case_fact_matrix_hash", HASH_A)
+                .put("content_hash", HASH_B);
+        payload.putArray("adjudication_rules").addObject()
+                .put("rule_code", "DELIVERY_PROOF")
+                .put("rule_version", 1);
+        String contentHash = hashWithout(payload, "content_hash");
+        payload.put("content_hash", contentHash);
+        String requestHash = HearingFormalRequestHash.compute(
+                "DOSSIER", authority, transition, "DOSSIER_1",
+                2, HASH_A, 3, HASH_B, "QUESTION_SET_1", "REQUEST_SET_1",
+                contentHash, ACTOR);
+        HearingAuthorityCommit commit = commit(
+                authority,
+                HearingAuthorityCommit.OperationType.FINALIZE,
+                "hearing.finalize:tenant-1:CASE_1:2:10:trial_dossier.v2:" + requestHash,
+                requestHash);
+
+        HearingFormalFinalizer.DossierCommand command =
+                new HearingFormalFinalizer.DossierCommand(
+                        commit,
+                        transition,
+                        "DOSSIER_1",
+                        2,
+                        HASH_A,
+                        3,
+                        HASH_B,
+                        "QUESTION_SET_1",
+                        "REQUEST_SET_1",
+                        json(payload),
+                        contentHash,
+                        ACTOR);
+
+        assertThat(command.authorityCommit().operationKey())
+                .contains(":trial_dossier.v2:" + requestHash);
+        assertThat(payload.has("question_set")).isFalse();
+        assertThat(payload.has("answer_bundles")).isFalse();
+        assertThat(payload.has("evidence_request_set")).isFalse();
+        assertThat(payload.has("evidence_batches")).isFalse();
+    }
+
+    @Test
+    void dossierV2PersistenceGuardBindsFrozenMatricesAndRulesWithoutRetiredPayloadFields() {
+        NamedParameterJdbcTemplate jdbc = mock(NamedParameterJdbcTemplate.class);
+        AtomicReference<String> sourceSql = new AtomicReference<>();
+        AtomicInteger matchedRows = new AtomicInteger(1);
+        when(jdbc.queryForObject(
+                        anyString(), any(MapSqlParameterSource.class), eq(Integer.class)))
+                .thenAnswer(invocation -> {
+                    sourceSql.set(invocation.getArgument(0));
+                    return matchedRows.get();
+                });
+        JdbcHearingFormalFinalizer finalizer =
+                new JdbcHearingFormalFinalizer(jdbc, mock(HearingAuthorityLedger.class));
+        MapSqlParameterSource parameters = new MapSqlParameterSource()
+                .addValue("caseId", "CASE_1")
+                .addValue("flowId", "FLOW_1")
+                .addValue("caseMatrixVersion", 2)
+                .addValue("caseMatrixHash", HASH_A)
+                .addValue("evidenceMatrixVersion", 3)
+                .addValue("evidenceMatrixHash", HASH_B)
+                .addValue("questionSetId", "QUESTION_SET_1")
+                .addValue("requestSetId", "REQUEST_SET_1")
+                .addValue("payloadJson", "{}")
+                .addValue("committedAt", NOW);
+
+        assertThatCode(() -> invokeDossierSourceGuard(finalizer, parameters))
+                .doesNotThrowAnyException();
+        assertThat(sourceSql.get())
+                .contains(
+                        "case_matrix_stage.output_json -> 'case_fact_matrix'",
+                        "evidence_matrix_stage.output_json -> 'fact_evidence_matrix'",
+                        "from policy_rule rule",
+                        "snapshot ->> 'policy_id'",
+                        "answer.submission_status = 'SUBMITTED'",
+                        "evidence.submission_status in ('SUBMITTED', 'AUTO_TIMEOUT')")
+                .doesNotContain(
+                        "-> 'question_set'",
+                        "-> 'answer_bundles'",
+                        "-> 'evidence_request_set'",
+                        "-> 'evidence_batches'");
+
+        matchedRows.set(0);
+        assertThatThrownBy(() -> invokeDossierSourceGuard(finalizer, parameters))
+                .isInstanceOf(HearingAuthorityRejectedException.class)
+                .extracting(failure -> ((HearingAuthorityRejectedException) failure).code())
+                .isEqualTo("HEARING_DOSSIER_SOURCES_NOT_EXACT");
+    }
+
+    @Test
     void handoffAndClosureKeysBindExactV2AndHandoffReceipt() {
         HearingAuthorityExpectation handoffAuthority = authority(
                 HearingFlowStage.HUMAN_REVIEW_OPEN, 14, 10, 12);
@@ -182,7 +319,13 @@ class HearingFormalFinalizerContractTest {
         HearingAuthorityCommit handoffCommit = commit(
                 handoffAuthority,
                 HearingAuthorityCommit.OperationType.HANDOFF,
-                "hearing.handoff:tenant-1:CASE_1:2:DRAFT_1:" + HASH_D,
+                HearingFormalRequestHash.handoffOperationKey(
+                        handoffAuthority.tenantSurrogate(),
+                        handoffAuthority.caseId(),
+                        handoffAuthority.epochId(),
+                        handoffAuthority.roomEpoch(),
+                        "DRAFT_1",
+                        HASH_D),
                 handoffRequestHash);
         HearingFormalFinalizer.HandoffCommand handoff = new HearingFormalFinalizer.HandoffCommand(
                 handoffCommit,
@@ -201,6 +344,29 @@ class HearingFormalFinalizerContractTest {
                 handoffHash,
                 ACTOR);
         assertThat(handoff.judgeV2Hash()).isEqualTo(HASH_D);
+        HearingAuthorityCommit legacyHandoffKey = commit(
+                handoffAuthority,
+                HearingAuthorityCommit.OperationType.HANDOFF,
+                "hearing.handoff:tenant-1:CASE_1:2:DRAFT_1:" + HASH_D,
+                handoffRequestHash);
+        assertThatThrownBy(() -> new HearingFormalFinalizer.HandoffCommand(
+                        legacyHandoffKey,
+                        handoffTransition,
+                        "HANDOFF_1",
+                        "DOSSIER_1",
+                        HASH_A,
+                        "PROPOSAL_1",
+                        HASH_B,
+                        "REPORT_1",
+                        HASH_C,
+                        "DRAFT_1",
+                        HASH_D,
+                        "TASK_1",
+                        "PACKET_1",
+                        handoffHash,
+                        ACTOR))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("operation key");
 
         HearingAuthorityExpectation closureAuthority = authority(
                 HearingFlowStage.HUMAN_REVIEW_OPEN, 14, 11, 13);
@@ -278,8 +444,10 @@ class HearingFormalFinalizerContractTest {
                 "STAGE_5", "{}", "{}", ACTOR);
         ObjectNode payload = MAPPER.createObjectNode();
         payload.put("schema_version", HearingFlowActionType.QUESTION_SET.schemaVersion());
+        payload.put("question_set_hash", HASH_A);
+        String contentHash = hashWithout(payload, "question_set_hash");
+        payload.put("question_set_hash", contentHash);
         String payloadJson = json(payload);
-        String contentHash = sha256(canonicalJson(payload));
         String actionId = "ACTION_QUESTION_SET_FINALIZABLE";
         String requestHash = HearingFormalRequestHash.compute(
                 "ACTION", authority, transition, actionId, HearingFlowActionType.QUESTION_SET,
@@ -344,7 +512,7 @@ class HearingFormalFinalizerContractTest {
         assertThat(lifecycleSql.get())
                 .contains(
                         "join agent_run_attempt attempt",
-                        "run.protocol = 'agent-stream.v2'",
+                        "run.protocol = 'agent-stream.v3'",
                         "run.run_status = 'RESULT_READY'",
                         "run.finalization_status = 'UNCOMMITTED'",
                         "run.result_ready_attempt_id = attempt.id",
@@ -472,28 +640,7 @@ class HearingFormalFinalizerContractTest {
     }
 
     private static String canonicalJson(JsonNode value) {
-        try {
-            return MAPPER.writeValueAsString(canonicalNode(value));
-        } catch (JsonProcessingException impossible) {
-            throw new IllegalStateException(impossible);
-        }
-    }
-
-    private static JsonNode canonicalNode(JsonNode value) {
-        if (value.isObject()) {
-            ObjectNode sorted = MAPPER.createObjectNode();
-            Map<String, JsonNode> fields = new TreeMap<>();
-            Iterator<Map.Entry<String, JsonNode>> iterator = value.fields();
-            iterator.forEachRemaining(entry -> fields.put(entry.getKey(), entry.getValue()));
-            fields.forEach((name, child) -> sorted.set(name, canonicalNode(child)));
-            return sorted;
-        }
-        if (value.isArray()) {
-            ArrayNode array = MAPPER.createArrayNode();
-            value.forEach(child -> array.add(canonicalNode(child)));
-            return array;
-        }
-        return value.deepCopy();
+        return ContractJson.canonicalString(value);
     }
 
     private static String json(JsonNode value) {
@@ -524,6 +671,23 @@ class HearingFormalFinalizerContractTest {
                     HearingAuthorityExpectation.class, String.class, String.class);
             guard.setAccessible(true);
             guard.invoke(finalizer, authority, agentRunId, resultHash);
+        } catch (InvocationTargetException failure) {
+            if (failure.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new IllegalStateException(failure.getCause());
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
+    private static void invokeDossierSourceGuard(
+            JdbcHearingFormalFinalizer finalizer, MapSqlParameterSource parameters) {
+        try {
+            Method guard = JdbcHearingFormalFinalizer.class.getDeclaredMethod(
+                    "requireDossierSources", MapSqlParameterSource.class);
+            guard.setAccessible(true);
+            guard.invoke(finalizer, parameters);
         } catch (InvocationTargetException failure) {
             if (failure.getCause() instanceof RuntimeException runtime) {
                 throw runtime;
@@ -570,7 +734,7 @@ class HearingFormalFinalizerContractTest {
         }
 
         private void resultReadyUncommitted() {
-            protocol = "agent-stream.v2";
+            protocol = "agent-stream.v3";
             runStatus = "RESULT_READY";
             finalizationStatus = "UNCOMMITTED";
             resultReadyAttemptId = expectedAttemptId;
@@ -615,7 +779,7 @@ class HearingFormalFinalizerContractTest {
                         && !sql.contains("run_status = 'RESULT_READY'");
             }
             boolean exactSql = sql.contains("join agent_run_attempt attempt")
-                    && sql.contains("run.protocol = 'agent-stream.v2'")
+                    && sql.contains("run.protocol = 'agent-stream.v3'")
                     && sql.contains("run.result_ready_attempt_id = attempt.id")
                     && sql.contains("attempt.result_hash = run.final_result_hash")
                     && sql.contains("attempt.final_frame_observed = true")

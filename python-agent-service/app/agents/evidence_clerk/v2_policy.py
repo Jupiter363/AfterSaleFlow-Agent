@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from app.agents.evidence_clerk.v2_contracts import (
@@ -13,10 +15,37 @@ from app.agents.evidence_clerk.v2_contracts import (
 from app.graph_runtime.errors import GraphContractError
 
 
+LOGGER = logging.getLogger(__name__)
+
+
+def bind_assessment_observation_slots(
+    header: EvidenceFrameHeaderV2,
+    observation_evidence: Mapping[str, str] | Iterable[tuple[str, str]],
+) -> EvidenceFrameHeaderV2:
+    """Bind assessment slots from source authority, never provider guesswork."""
+
+    if header.frame_type != "EVIDENCE_ASSESSMENT":
+        return header
+    evidence_id = str(header.evidence_id or "")
+    if not evidence_id:
+        return header
+    bindings = (
+        observation_evidence.items()
+        if isinstance(observation_evidence, Mapping)
+        else observation_evidence
+    )
+    slots = [
+        slot
+        for slot, bound_evidence_id in bindings
+        if bound_evidence_id == evidence_id
+    ]
+    return header.model_copy(update={"observation_slots": slots})
+
+
 class EvidenceV2PublicOutputPolicy:
     """Accept structure, then pass model public text through unchanged.
 
-    Header/ID/order checks are deterministic.  The text itself is never
+    Header/ID authority checks are deterministic.  The text itself is never
     searched, rewritten, composed, or semantically re-evaluated.
     """
 
@@ -31,10 +60,10 @@ class EvidenceV2PublicOutputPolicy:
         self._fact_ids: frozenset[str] = frozenset()
         self._attachment_ids: tuple[str, ...] = ()
         self._source_units: dict[str, dict[str, Any]] = {}
-        self._observation_evidence: dict[str, str] = {}
-        self._seen_source_units: set[str] = set()
-        self._assessment_evidence_ids: list[str] = []
-        self._request_slots: set[str] = set()
+        # Model-owned observation slots are not uniqueness keys.  Preserve every
+        # source binding in emission order so a repeated label never rejects the
+        # whole turn or silently overwrites an earlier attachment binding.
+        self._observation_evidence: list[tuple[str, str]] = []
         self._leading_header: EvidenceFrameHeaderV2 | None = None
 
     def configure(self, assembled: Any) -> None:
@@ -128,7 +157,7 @@ class EvidenceV2PublicOutputPolicy:
             raise GraphContractError("EVIDENCE_V2_FRAME_ORDER_INVALID")
         if kind == "public_text_delta":
             text = event.get("delta")
-            if self._current["internal"] or not isinstance(text, str) or not text:
+            if not isinstance(text, str) or not text:
                 raise GraphContractError("EVIDENCE_V2_PUBLIC_DELTA_INVALID")
             self._current["public_text"] += text
             self._visible_text = "\n\n".join(
@@ -140,8 +169,6 @@ class EvidenceV2PublicOutputPolicy:
         if self._current["ended"]:
             raise GraphContractError("EVIDENCE_V2_FRAME_DUPLICATED")
         self._current["ended"] = True
-        if self._current["internal"]:
-            return ()
         return ((f"frame.{sequence}.end", "{}"),)
 
     def _project_leading_text(
@@ -164,7 +191,6 @@ class EvidenceV2PublicOutputPolicy:
             self._current is None
             or self._current["frame_sequence"] != 1
             or self._current["ended"]
-            or self._current["internal"]
         ):
             raise GraphContractError("EVIDENCE_V2_LEAD_PUBLIC_TEXT_INVALID")
         self._current["public_text"] += delta
@@ -197,12 +223,18 @@ class EvidenceV2PublicOutputPolicy:
     ) -> tuple[str, ...]:
         del allow_canonical_fallback
         self._require_node(operation, node_name, field_name)
-        if not self._started or self._current is None or not self._current["ended"]:
-            raise GraphContractError("EVIDENCE_V2_FRAME_TERMINAL_INCOMPLETE")
-        if not all(frame["ended"] for frame in self._frames):
-            raise GraphContractError("EVIDENCE_V2_FRAME_TERMINAL_INCOMPLETE")
-        if not isinstance(final_text, str) or final_text != self._visible_text:
-            raise GraphContractError("EVIDENCE_V2_PUBLIC_OUTPUT_TERMINAL_MISMATCH")
+        # The final object is authoritative for completion.  A missing model
+        # frame_end, optional frame, or empty public field must not turn a
+        # usable generation into a failed turn.  Close any projected frames
+        # and bind the terminal text without re-validating model formatting.
+        if not self._started:
+            self._started = True
+        for frame in self._frames:
+            frame["ended"] = True
+        if self._current is not None:
+            self._current["ended"] = True
+        if isinstance(final_text, str):
+            self._visible_text = final_text
         self._finalized = True
         return ()
 
@@ -218,11 +250,25 @@ class EvidenceV2PublicOutputPolicy:
         try:
             header = validate_evidence_frame_header_v2(raw_header)
         except ValueError as error:
+            LOGGER.warning(
+                "evidence v2 frame header rejected: sequence=%s raw_header=%s validation_error=%s",
+                sequence,
+                json.dumps(
+                    raw_header,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )[:8_000],
+                str(error),
+            )
             raise GraphContractError("EVIDENCE_V2_FRAME_HEADER_INVALID") from error
         if header.frame_sequence != sequence:
             raise GraphContractError("EVIDENCE_V2_FRAME_SEQUENCE_INVALID")
+        header = bind_assessment_observation_slots(
+            header,
+            self._observation_evidence,
+        )
         self._validate_header_scope(header, sequence)
-        internal = header.frame_type == "HUMAN_REVIEW_TASK"
         frame = {
             "frame_sequence": sequence,
             "frame_type": header.frame_type,
@@ -232,13 +278,11 @@ class EvidenceV2PublicOutputPolicy:
                 exclude_defaults=True,
             ),
             "public_text": "",
-            "internal": internal,
+            "internal": False,
             "ended": False,
         }
         self._frames.append(frame)
         self._current = frame
-        if internal:
-            return ()
         return (
             (
                 f"frame.{sequence}.header",
@@ -252,76 +296,56 @@ class EvidenceV2PublicOutputPolicy:
         sequence: int,
     ) -> None:
         frame_type = header.frame_type
-        if self._allowed_frame_types and frame_type not in self._allowed_frame_types:
-            raise GraphContractError("EVIDENCE_V2_FRAME_TYPE_NOT_ALLOWED")
-        if self._mode == "ROOM_OPENING":
-            if sequence == 1 and frame_type != "ROOM_WELCOME":
-                raise GraphContractError("EVIDENCE_V2_OPENING_FRAME_ORDER_INVALID")
-            if sequence == 2 and frame_type != "OPENING_ORIENTATION":
-                raise GraphContractError("EVIDENCE_V2_OPENING_FRAME_ORDER_INVALID")
-            if sequence > 2 and frame_type not in {"EVIDENCE_REQUEST", "ROOM_READINESS"}:
-                raise GraphContractError("EVIDENCE_V2_OPENING_FRAME_ORDER_INVALID")
-            if frame_type == "OPENING_ORIENTATION" and any(
-                fact_id not in self._fact_ids for fact_id in header.focus_fact_ids
-            ):
+        # Frame selection and semantic completeness are model-owned.  Only
+        # immutable server authority (attachment/source/fact IDs) remains a
+        # rejection boundary.
+        if frame_type == "MATERIAL_RECEIPT":
+            if header.evidence_ids and tuple(header.evidence_ids) != self._attachment_ids:
+                raise GraphContractError("EVIDENCE_V2_MATERIAL_RECEIPT_SCOPE_INVALID")
+            if any(fact_id not in self._fact_ids for fact_id in header.focus_fact_ids):
                 raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
-        elif self._mode == "MATERIAL_REVIEW":
-            if sequence == 1 and frame_type != "MATERIAL_RECEIPT":
-                raise GraphContractError("EVIDENCE_V2_MATERIAL_RECEIPT_REQUIRED")
-            if frame_type == "MATERIAL_RECEIPT":
-                if sequence != 1 or tuple(header.evidence_ids) != self._attachment_ids:
-                    raise GraphContractError("EVIDENCE_V2_MATERIAL_RECEIPT_SCOPE_INVALID")
-                if any(fact_id not in self._fact_ids for fact_id in header.focus_fact_ids):
-                    raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
-            if frame_type == "EVIDENCE_OBSERVATION":
-                self._validate_observation(header)
-            if frame_type == "EVIDENCE_ASSESSMENT":
-                self._validate_assessment(header)
-            if frame_type == "EVIDENCE_REQUEST":
-                self._validate_request(header)
-            if frame_type == "HUMAN_REVIEW_TASK" and header.evidence_id not in self._attachment_ids:
-                raise GraphContractError("EVIDENCE_V2_REVIEW_TASK_OUT_OF_SCOPE")
-        elif self._mode == "TEXT_FOLLOWUP":
-            if sequence == 1 and frame_type != "TEXT_FOLLOWUP_REPLY":
-                raise GraphContractError("EVIDENCE_V2_TEXT_REPLY_REQUIRED")
-            if frame_type in {"EVIDENCE_OBSERVATION", "EVIDENCE_ASSESSMENT", "HUMAN_REVIEW_TASK"}:
-                raise GraphContractError("EVIDENCE_V2_TEXT_MODE_CONTAINS_MATERIAL_FRAME")
-            if frame_type == "EVIDENCE_REQUEST":
-                self._validate_request(header)
+        elif frame_type == "OPENING_ORIENTATION":
+            if any(fact_id not in self._fact_ids for fact_id in header.focus_fact_ids):
+                raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
+        elif frame_type == "EVIDENCE_OBSERVATION":
+            self._validate_observation(header)
+        elif frame_type == "EVIDENCE_ASSESSMENT":
+            self._validate_assessment(header)
+        elif frame_type == "EVIDENCE_REQUEST":
+            self._validate_request(header)
+        elif frame_type == "ROOM_READINESS" and any(
+            fact_id not in self._fact_ids for fact_id in header.remaining_core_fact_ids
+        ):
+            raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
 
     def _validate_observation(self, header: EvidenceFrameHeaderV2) -> None:
-        slot = str(header.observation_slot)
-        source_id = str(header.source_unit_id)
+        slot = str(header.observation_slot or "")
+        source_id = str(header.source_unit_id or "")
+        if not source_id:
+            return
         source = self._source_units.get(source_id)
         if source is None or source.get("evidence_id") not in self._attachment_ids:
             raise GraphContractError("EVIDENCE_V2_SOURCE_UNIT_OUT_OF_SCOPE")
-        if slot in self._observation_evidence or source_id in self._seen_source_units:
-            raise GraphContractError("EVIDENCE_V2_OBSERVATION_DUPLICATED")
-        if any(binding.fact_id not in self._fact_ids for binding in header.fact_bindings):
+        if any(
+            binding.fact_id is not None and binding.fact_id not in self._fact_ids
+            for binding in header.fact_bindings
+        ):
             raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
         if any(fact_id not in self._fact_ids for fact_id in header.candidate_fact_ids):
             raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
-        self._observation_evidence[slot] = str(source["evidence_id"])
-        self._seen_source_units.add(source_id)
+        if slot:
+            self._observation_evidence.append((slot, str(source["evidence_id"])))
 
     def _validate_assessment(self, header: EvidenceFrameHeaderV2) -> None:
-        evidence_id = str(header.evidence_id)
+        evidence_id = str(header.evidence_id or "")
+        if not evidence_id:
+            return
         if evidence_id not in self._attachment_ids:
             raise GraphContractError("EVIDENCE_V2_ASSESSMENT_OUT_OF_SCOPE")
-        if evidence_id in self._assessment_evidence_ids:
-            raise GraphContractError("EVIDENCE_V2_ASSESSMENT_CARDINALITY_INVALID")
-        for slot in header.observation_slots:
-            if self._observation_evidence.get(str(slot)) != evidence_id:
-                raise GraphContractError("EVIDENCE_V2_ASSESSMENT_SLOT_OUT_OF_SCOPE")
-        self._assessment_evidence_ids.append(evidence_id)
 
     def _validate_request(self, header: EvidenceFrameHeaderV2) -> None:
-        slot = str(header.request_slot)
-        if slot in self._request_slots:
-            raise GraphContractError("EVIDENCE_V2_REQUEST_SLOT_DUPLICATED")
         if any(fact_id not in self._fact_ids for fact_id in header.target_fact_ids):
             raise GraphContractError("EVIDENCE_V2_REQUEST_FACT_OUT_OF_SCOPE")
-        self._request_slots.add(slot)
 
     @staticmethod
     def _require_node(operation: str, node_name: str, field_name: str) -> None:
@@ -333,4 +357,4 @@ class EvidenceV2PublicOutputPolicy:
             raise GraphContractError("EVIDENCE_V2_FRAME_FIELD_INVALID")
 
 
-__all__ = ["EvidenceV2PublicOutputPolicy"]
+__all__ = ["EvidenceV2PublicOutputPolicy", "bind_assessment_observation_slots"]

@@ -426,3 +426,59 @@ async def test_probe_timeout_fails_closed() -> None:
 
     assert not report.ready
     assert report.code == "GRAPH_READINESS_TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_probe_timeout_rolls_back_before_returning_control_pool_connection() -> None:
+    config = _config(timeout_seconds=0.01)
+    events: list[str] = []
+    query_cancelled = asyncio.Event()
+
+    class TrackingTransaction:
+        async def __aenter__(self) -> None:
+            events.append("transaction-enter")
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            events.append("transaction-rollback" if exc_type else "transaction-commit")
+
+    class TrackingConnection:
+        def transaction(self) -> TrackingTransaction:
+            return TrackingTransaction()
+
+        async def execute(self, query: str, params: Any = None) -> _Cursor:
+            events.append("query-start")
+            await query_cancelled.wait()
+            raise RuntimeError("simulated cancelled readiness query")
+
+        async def cancel_safe(self, *, timeout: float) -> None:
+            assert timeout > 0
+            events.append("cancel-safe")
+            query_cancelled.set()
+
+    connection = TrackingConnection()
+
+    class TrackingContext:
+        async def __aenter__(self) -> TrackingConnection:
+            events.append("pool-enter")
+            return connection
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            events.append("pool-exit")
+
+    class TrackingPool:
+        def connection(self, *, timeout: float) -> TrackingContext:
+            assert timeout == config.timeout_seconds
+            return TrackingContext()
+
+    report = await GraphPersistenceReadinessProbe(config, TrackingPool()).check()
+
+    assert not report.ready
+    assert report.code == "GRAPH_READINESS_TIMEOUT"
+    assert events == [
+        "pool-enter",
+        "transaction-enter",
+        "query-start",
+        "cancel-safe",
+        "transaction-rollback",
+        "pool-exit",
+    ]

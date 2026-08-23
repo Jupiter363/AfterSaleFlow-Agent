@@ -19,6 +19,8 @@ import java.util.Objects;
 import java.util.Optional;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -83,12 +85,44 @@ public final class JdbcHearingAuthorityLedger implements HearingAuthorityLedger 
                     authority.temporalRunId(),
                     authority.temporalBuildOrDeployment());
             insertReceipt(committed);
-            advanceCaseProjection(committed);
-            advanceEpoch(committed);
-            acknowledgeProjection(committed);
+            if (committed.operationType() == HearingAuthorityCommit.OperationType.CLOSE) {
+                registerCloseCompletionGuard(committed);
+            } else {
+                advanceCaseProjection(committed);
+                advanceEpoch(committed);
+                acknowledgeProjection(committed);
+            }
             return committed;
         });
         return Objects.requireNonNull(receipt, "Hearing receipt transaction returned no result");
+    }
+
+    @Override
+    public HearingDomainReceipt completeCloseTransition(
+            HearingAuthorityCommit command, CloseTransitionAction closeTransitionAction) {
+        Objects.requireNonNull(command, "command");
+        Objects.requireNonNull(closeTransitionAction, "closeTransitionAction");
+        if (command.operationType() != HearingAuthorityCommit.OperationType.CLOSE) {
+            throw new IllegalArgumentException("only a CLOSE receipt can complete a room transition");
+        }
+        HearingDomainReceipt receipt = transactions.execute(ignored -> {
+            lockSemanticOperation(command);
+            HearingDomainReceipt committed = findCommitted(command)
+                    .orElseThrow(() -> rejected(
+                            "HEARING_CLOSE_RECEIPT_NOT_COMMITTED",
+                            "the close room transition has no durable receipt"));
+            committed.requireReplayOf(command);
+            if (isCloseTransitionComplete(committed)) {
+                return committed;
+            }
+            requirePendingCloseTransition(committed);
+            closeTransitionAction.transition(committed);
+            requireSuccessorRoomAuthority(committed);
+            acknowledgeProjection(committed);
+            requireCompletedCloseTransition(committed);
+            return committed;
+        });
+        return Objects.requireNonNull(receipt, "Hearing close transition returned no receipt");
     }
 
     @Override
@@ -371,6 +405,216 @@ public final class JdbcHearingAuthorityLedger implements HearingAuthorityLedger 
                 """,
                 parameters(receipt));
         requireUpdated(updated, "HEARING_PROJECTION_CAS_FAILED");
+    }
+
+    private void registerCloseCompletionGuard(HearingDomainReceipt receipt) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            throw rejected(
+                    "HEARING_CLOSE_TRANSACTION_REQUIRED",
+                    "a close receipt requires an atomic room-transition transaction");
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void beforeCommit(boolean readOnly) {
+                requireCompletedCloseTransition(receipt);
+            }
+        });
+    }
+
+    private void requirePendingCloseTransition(HearingDomainReceipt receipt) {
+        Integer matches = jdbc.queryForObject(
+                """
+                select count(*)
+                  from hearing_temporal_projection projection
+                  join hearing_flow_instance flow
+                    on flow.id = projection.flow_instance_id
+                   and flow.case_id = projection.case_id
+                  join case_room_epoch epoch
+                    on epoch.id = projection.epoch_id
+                   and epoch.tenant_surrogate = projection.tenant_surrogate
+                   and epoch.case_id = projection.case_id
+                   and epoch.room_type = 'HEARING'
+                   and epoch.room_epoch = projection.hearing_epoch
+                   and epoch.fencing_token = projection.fencing_token
+                  join case_process_projection process
+                    on process.case_id = projection.case_id
+                 where projection.tenant_surrogate = :tenant
+                   and projection.case_id = :caseId
+                   and projection.flow_instance_id = :flowInstanceId
+                   and projection.epoch_id = :epochId
+                   and (
+                       (projection.current_stage = :sourceStage
+                           and projection.stage_sequence = :sourceStageSequence)
+                       or
+                       (projection.writer_mode = 'LEGACY'
+                           and projection.current_stage = :stage
+                           and projection.stage_sequence = :stageSequence)
+                   )
+                   and projection.process_revision = :sourceProcessRevision
+                   and projection.room_revision = :sourceRoomRevision
+                   and projection.fencing_token = :fencingToken
+                   and flow.current_stage = :stage
+                   and flow.stage_sequence = :stageSequence
+                   and flow.flow_status = 'CLOSED'
+                   and epoch.lifecycle_status = 'ACTIVE'
+                   and epoch.process_revision = :sourceProcessRevision
+                   and epoch.room_revision = :sourceRoomRevision
+                   and process.current_room = 'HEARING'
+                   and process.process_revision = :sourceProcessRevision
+                   and process.room_epoch = :roomEpoch
+                   and process.fencing_token = :fencingToken
+                """,
+                parameters(receipt),
+                Integer.class);
+        if (!Integer.valueOf(1).equals(matches)) {
+            throw rejected(
+                    "HEARING_CLOSE_SOURCE_AUTHORITY_NOT_EXACT",
+                    "the close receipt no longer owns the exact source room authority");
+        }
+    }
+
+    private void requireSuccessorRoomAuthority(HearingDomainReceipt receipt) {
+        Integer matches = jdbc.queryForObject(
+                """
+                select count(*)
+                  from case_room_epoch source
+                  join case_process_projection process
+                    on process.case_id = source.case_id
+                 where source.id = :epochId
+                   and source.tenant_surrogate = :tenant
+                   and source.case_id = :caseId
+                   and source.room_type = 'HEARING'
+                   and source.room_epoch = :roomEpoch
+                   and source.fencing_token = :fencingToken
+                   and source.lifecycle_status = 'TERMINAL'
+                   and source.process_revision = :processRevision
+                   and source.room_revision = :roomRevision
+                   and process.current_room = 'REVIEW'
+                   and process.process_revision = :processRevision
+                   and (
+                       (source.writer_mode = 'LEGACY'
+                           and process.writer_mode = 'LEGACY'
+                           and process.writer_activation_status = 'READY')
+                       or
+                       (source.writer_mode = 'TEMPORAL'
+                           and process.writer_mode = 'TEMPORAL'
+                           and process.writer_activation_status = 'PREPARING')
+                   )
+                   and exists (
+                       select 1
+                         from case_room_epoch successor
+                        where successor.case_id = source.case_id
+                          and successor.tenant_surrogate = source.tenant_surrogate
+                          and successor.room_type = 'REVIEW'
+                          and successor.process_revision = :processRevision
+                          and successor.fencing_token = process.fencing_token
+                          and (
+                              (source.writer_mode = 'LEGACY'
+                                  and successor.writer_mode = 'LEGACY'
+                                  and successor.lifecycle_status = 'ACTIVE'
+                                  and successor.provisioning_status = 'NOT_REQUIRED')
+                              or
+                              (source.writer_mode = 'TEMPORAL'
+                                  and successor.writer_mode = 'TEMPORAL'
+                                  and successor.lifecycle_status = 'PREPARING'
+                                  and successor.provisioning_status = 'PENDING')
+                          )
+                   )
+                """,
+                parameters(receipt),
+                Integer.class);
+        if (!Integer.valueOf(1).equals(matches)) {
+            throw rejected(
+                    "HEARING_CLOSE_SUCCESSOR_AUTHORITY_NOT_EXACT",
+                    "the close receipt did not create the exact Review room authority");
+        }
+    }
+
+    private boolean isCloseTransitionComplete(HearingDomainReceipt receipt) {
+        Integer matches = completedCloseTransitionCount(receipt);
+        if (matches == null || matches < 0 || matches > 1) {
+            throw rejected(
+                    "HEARING_DURABLE_INTEGRITY_VIOLATION",
+                    "the close receipt has ambiguous room-transition authority");
+        }
+        return matches == 1;
+    }
+
+    private void requireCompletedCloseTransition(HearingDomainReceipt receipt) {
+        if (!isCloseTransitionComplete(receipt)) {
+            throw rejected(
+                    "HEARING_CLOSE_TRANSITION_INCOMPLETE",
+                    "the close receipt and Review room transition must commit atomically");
+        }
+    }
+
+    private Integer completedCloseTransitionCount(HearingDomainReceipt receipt) {
+        return jdbc.queryForObject(
+                """
+                select count(*)
+                  from hearing_temporal_projection projection
+                  join case_room_epoch source
+                    on source.id = projection.epoch_id
+                   and source.tenant_surrogate = projection.tenant_surrogate
+                   and source.case_id = projection.case_id
+                   and source.room_type = 'HEARING'
+                   and source.room_epoch = projection.hearing_epoch
+                   and source.fencing_token = projection.fencing_token
+                  join case_process_projection process
+                    on process.case_id = projection.case_id
+                 where projection.tenant_surrogate = :tenant
+                   and projection.case_id = :caseId
+                   and projection.flow_instance_id = :flowInstanceId
+                   and projection.epoch_id = :epochId
+                   and projection.current_stage = :stage
+                   and projection.stage_sequence = :stageSequence
+                   and projection.process_revision = :processRevision
+                   and projection.room_revision = :roomRevision
+                   and projection.last_acknowledged_receipt_id = :receiptId
+                   and projection.last_acknowledged_receipt_hash = :receiptHash
+                   and source.lifecycle_status = 'TERMINAL'
+                   and source.process_revision = :processRevision
+                   and source.room_revision = :roomRevision
+                   and process.current_room = 'REVIEW'
+                   and process.process_revision = :processRevision
+                   and exists (
+                       select 1
+                         from case_room_epoch successor
+                        where successor.case_id = source.case_id
+                          and successor.tenant_surrogate = source.tenant_surrogate
+                          and successor.room_type = 'REVIEW'
+                          and successor.process_revision = :processRevision
+                          and successor.fencing_token = process.fencing_token
+                          and (
+                              (source.writer_mode = 'LEGACY'
+                                  and process.writer_mode = 'LEGACY'
+                                  and process.writer_activation_status = 'READY'
+                                  and successor.writer_mode = 'LEGACY'
+                                  and successor.lifecycle_status = 'ACTIVE'
+                                  and successor.provisioning_status = 'NOT_REQUIRED')
+                              or
+                              (source.writer_mode = 'TEMPORAL'
+                                  and process.writer_mode = 'TEMPORAL'
+                                  and successor.writer_mode = 'TEMPORAL'
+                                  and (
+                                      (process.writer_activation_status = 'PREPARING'
+                                          and successor.lifecycle_status = 'PREPARING'
+                                          and successor.provisioning_status = 'PENDING')
+                                      or
+                                      (process.writer_activation_status = 'PROVISIONING'
+                                          and successor.lifecycle_status = 'PROVISIONING'
+                                          and successor.provisioning_status = 'PROVISIONING')
+                                      or
+                                      (process.writer_activation_status = 'READY'
+                                          and successor.lifecycle_status = 'ACTIVE'
+                                          and successor.provisioning_status = 'READY')
+                                  )
+                              )
+                          )
+                   )
+                """,
+                parameters(receipt),
+                Integer.class);
     }
 
     private static MapSqlParameterSource parameters(HearingDomainReceipt receipt) {

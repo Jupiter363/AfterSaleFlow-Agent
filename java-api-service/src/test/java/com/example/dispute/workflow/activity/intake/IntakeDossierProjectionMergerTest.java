@@ -985,7 +985,13 @@ class IntakeDossierProjectionMergerTest {
                         List.of("respondent_supporting_evidence")),
                 matrixAuthority(ActorRole.MERCHANT));
 
-        assertThat(result.dossier().path("case_fact_matrix")).isEqualTo(parent);
+        JsonNode successor = result.dossier().path("case_fact_matrix");
+        assertThat(successor).isNotEqualTo(parent);
+        assertThat(successor.at("/parent_ref/content_hash"))
+                .isEqualTo(parent.path("content_hash"));
+        assertThat(result.matrixVersion())
+                .isEqualTo(parent.path("matrix_version").asLong() + 1);
+        assertThat(result.readyForNextStep()).isFalse();
         assertThat(result.dossier().has("unilateral_case_matrix")).isFalse();
     }
 
@@ -1093,7 +1099,8 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
-    void validatesRespondentDeltasButFreezesOnlyACompleteReadyProposal() throws Exception {
+    void everyRespondentDeltaAdvancesWorkingMatrixWhileReadinessOnlyGatesConfirmation()
+            throws Exception {
         ObjectNode current = dossierWithInitiatorMatrix();
         ObjectNode parent = ((ObjectNode) current.path("case_fact_matrix")).deepCopy();
         JsonNode delta = respondentDelta(parent.at("/fact_rows/0/fact_id").asText());
@@ -1107,8 +1114,12 @@ class IntakeDossierProjectionMergerTest {
                         List.of("respondent_supporting_evidence")),
                 matrixAuthority(ActorRole.MERCHANT));
 
-        assertThat(incomplete.dossier().path("case_fact_matrix")).isEqualTo(parent);
-        assertThat(incomplete.matrixVersion()).isNull();
+        JsonNode incompleteMatrix = incomplete.dossier().path("case_fact_matrix");
+        assertThat(incompleteMatrix).isNotEqualTo(parent);
+        assertThat(incompleteMatrix.at("/parent_ref/content_hash"))
+                .isEqualTo(parent.path("content_hash"));
+        assertThat(incomplete.matrixVersion()).isEqualTo(2);
+        assertThat(incomplete.readyForNextStep()).isFalse();
 
         var needsReview = merger.merge(
                 current,
@@ -1119,8 +1130,10 @@ class IntakeDossierProjectionMergerTest {
                         List.of()),
                 matrixAuthority(ActorRole.MERCHANT));
 
-        assertThat(needsReview.dossier().path("case_fact_matrix")).isEqualTo(parent);
-        assertThat(needsReview.matrixVersion()).isNull();
+        JsonNode needsReviewMatrix = needsReview.dossier().path("case_fact_matrix");
+        assertThat(needsReviewMatrix).isEqualTo(incompleteMatrix);
+        assertThat(needsReview.matrixVersion()).isEqualTo(2);
+        assertThat(needsReview.readyForNextStep()).isFalse();
 
         assertRejected(
                 "INTAKE_RESPONDENT_MATRIX_NOT_READY",
@@ -1147,6 +1160,7 @@ class IntakeDossierProjectionMergerTest {
         assertThat(ready.dossier().at("/case_fact_matrix/parent_ref/content_hash"))
                 .isEqualTo(parent.path("content_hash"));
         assertThat(ready.matrixVersion()).isEqualTo(2);
+        assertThat(ready.readyForNextStep()).isTrue();
     }
 
     @Test
@@ -1175,7 +1189,8 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
-    void ordinaryOrLegacyIncompleteRespondentCarryCannotGainOpeningPrivilege() throws Exception {
+    void ordinaryIncompleteRespondentCarryAdvancesWithoutGainingOpeningPrivilege()
+            throws Exception {
         ObjectNode current = dossierWithInitiatorMatrixVersion(5);
         ObjectNode parent = ((ObjectNode) current.path("case_fact_matrix")).deepCopy();
         JsonNode carry = respondentOpeningCarry(parent);
@@ -1189,8 +1204,12 @@ class IntakeDossierProjectionMergerTest {
                 matrixAuthority(ActorRole.MERCHANT),
                 matrixAuthority(ActorRole.MERCHANT, SourceType.ROOM_MESSAGE))) {
             var result = merger.merge(current, incomplete, authority);
-            assertThat(result.dossier().path("case_fact_matrix")).isEqualTo(parent);
-            assertThat(result.matrixVersion()).isNull();
+            JsonNode successor = result.dossier().path("case_fact_matrix");
+            assertThat(successor).isNotEqualTo(parent);
+            assertThat(successor.at("/parent_ref/content_hash"))
+                    .isEqualTo(parent.path("content_hash"));
+            assertThat(result.matrixVersion()).isEqualTo(6);
+            assertThat(result.readyForNextStep()).isFalse();
         }
 
         assertThatThrownBy(() -> merger.merge(
@@ -1475,6 +1494,34 @@ class IntakeDossierProjectionMergerTest {
         assertThat(second.dossier().path("intake_quality"))
                 .isEqualTo(second.dossier().at("/party_intake_state/MERCHANT/intake_quality"));
         assertThat(second.dossier().at("/intake_quality/score").asInt()).isEqualTo(55);
+    }
+
+    @Test
+    void persistsTheSixComponentTotalInsteadOfTheModelTotalScore() {
+        ObjectNode userEntry = partyIntakeEntry(80);
+        ObjectNode breakdown = userEntry.withObject("intake_quality").withObject("score_breakdown");
+        breakdown.put("references", 15);
+        breakdown.put("event_story", 18);
+        breakdown.put("party_positions", 15);
+        breakdown.put("requested_resolution", 12);
+        breakdown.put("risk_and_conflicts", 13);
+        breakdown.put("next_action_clarity", 12);
+        ObjectNode patch = partyIntakePatch("USER", userEntry, partyIntakeEntry(0));
+        MatrixAuthority authority = matrixAuthority(ActorRole.USER);
+
+        MergeResult first = merger.merge(
+                JSON.createObjectNode(), proposal(patch, null), authority);
+        MergeResult replay = merger.merge(first.dossier(), proposal(patch, null), authority);
+
+        assertThat(first.dossier().at("/party_intake_state/USER/intake_quality/score").asInt())
+                .isEqualTo(85);
+        assertThat(first.dossier().at("/intake_quality/score").asInt()).isEqualTo(85);
+        int explanatoryTotal = breakdown.properties().stream()
+                .mapToInt(entry -> entry.getValue().intValue())
+                .sum();
+        assertThat(explanatoryTotal).isEqualTo(85);
+        assertThat(replay.dossier()).isEqualTo(first.dossier());
+        assertThat(replay.qualityScore()).isEqualTo(85);
     }
 
     @Test

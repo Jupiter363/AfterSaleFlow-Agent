@@ -18,6 +18,7 @@ from app.model_runtime.governed_chat_model import (
 )
 from app.model_runtime.transports import (
     ModelTransportCompleted,
+    ModelTransportGenerationReset,
     ModelTransportVisibleDelta,
     TransientModelTransportError,
 )
@@ -120,6 +121,39 @@ def test_stream_retries_only_before_any_visible_delta() -> None:
     assert failure.value.retryable is True
     assert failure.value.safe_code == "MODEL_PROVIDER_STREAM_INTERRUPTED"
     assert late.stream_calls == 1
+
+
+def test_stream_relays_one_generation_reset_between_provisional_outputs() -> None:
+    transport = RecordingTransport()
+    transport.stream_attempts = [[
+        ModelTransportVisibleDelta(field="answer", delta="invalid-first"),
+        ModelTransportGenerationReset(
+            generation=2,
+            reason_code="OUTPUT_SCHEMA_INVALID",
+        ),
+        ModelTransportVisibleDelta(field="answer", delta="accepted"),
+        ModelTransportCompleted(
+            result=transport_result(provider_attempts_used=2),
+        ),
+    ]]
+
+    chunks = list(_model(transport, attempts=2).stream(_messages()))
+    events = [
+        event
+        for chunk in chunks
+        for event in governed_events_from_chunk(chunk)
+    ]
+
+    assert [event["event_type"] for event in events] == [
+        "visible_delta",
+        "generation_reset",
+        "visible_delta",
+    ]
+    assert events[1]["generation"] == 2
+    assert events[1]["reason_code"] == "OUTPUT_SCHEMA_INVALID"
+    assert [chunk.content for chunk in chunks if chunk.content] == [
+        Answer(answer="accepted").model_dump_json()
+    ]
 
 
 @pytest.mark.asyncio

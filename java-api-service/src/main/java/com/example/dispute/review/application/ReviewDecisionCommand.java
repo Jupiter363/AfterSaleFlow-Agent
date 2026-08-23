@@ -49,6 +49,12 @@ public record ReviewDecisionCommand(
         if (!confirmed) {
             throw new IllegalArgumentException("review decision confirmation is required");
         }
+        if (decision != ApprovalDecisionType.APPROVE
+                && decision != ApprovalDecisionType.MODIFY_AND_APPROVE
+                && decision != ApprovalDecisionType.ESCALATE_MANUAL) {
+            throw new IllegalArgumentException(
+                    "current review decision must be APPROVE, MODIFY_AND_APPROVE, or ESCALATE_MANUAL");
+        }
         approvedPlan = approvedPlan == null ? null : approvedPlan.deepCopy();
     }
 

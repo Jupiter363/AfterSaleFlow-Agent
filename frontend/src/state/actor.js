@@ -28,8 +28,13 @@ function storedActor() {
     if (!parsed) return null;
     const demoActor = demoActorByRole[parsed.role];
     if (!demoActor) return null;
-    if (demoActor.id !== parsed.id) return demoActor;
-    return parsed;
+    const actorId = typeof parsed.id === "string" ? parsed.id.trim() : "";
+    if (!actorId) return null;
+    return {
+      id: actorId,
+      role: demoActor.role,
+      label: demoActor.label,
+    };
   } catch {
     localStorage.removeItem("dispute-actor");
     return null;

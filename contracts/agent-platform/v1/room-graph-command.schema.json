@@ -29,6 +29,25 @@
     "traceparent",
     "request_hash"
   ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "retry_budget": {
+            "properties": {
+              "provider_attempts_remaining": {"minimum": 3}
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "room_type": {"const": "HEARING"},
+          "stage_code": {"const": "EVIDENCE_SYNTHESIZING"}
+        }
+      }
+    }
+  ],
   "properties": {
     "schema_version": {"type": "string", "const": "room-graph-command.v1"},
     "command_id": {"$ref": "#/$defs/identifier"},
@@ -137,7 +156,7 @@
       "additionalProperties": false,
       "required": ["provider_attempts_remaining", "activity_attempts_remaining", "repairs_remaining"],
       "properties": {
-        "provider_attempts_remaining": {"type": "integer", "minimum": 0, "maximum": 2},
+        "provider_attempts_remaining": {"type": "integer", "minimum": 0, "maximum": 202},
         "activity_attempts_remaining": {"type": "integer", "minimum": 0, "maximum": 3},
         "repairs_remaining": {"type": "integer", "minimum": 0, "maximum": 1}
       }

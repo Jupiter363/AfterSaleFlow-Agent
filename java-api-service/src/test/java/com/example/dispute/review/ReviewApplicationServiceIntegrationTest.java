@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -378,6 +379,16 @@ class ReviewApplicationServiceIntegrationTest {
         assertThat(decision.taskStatus()).isEqualTo("APPROVED");
         assertThat(decision.caseStatus()).isEqualTo("APPROVED_FOR_EXECUTION");
         assertThat(decision.executionAllowed()).isTrue();
+        assertThat(decision.caseId()).isEqualTo(fixture.caseId());
+        assertThat(decision.aiDecisionAction()).isEqualTo("CANCEL_ORDER");
+        assertThat(decision.reviewerDecisionAction()).isEqualTo("CANCEL_ORDER");
+        JsonNode durableDecision = new ObjectMapper().readTree(
+                tasks.findById(taskId).orElseThrow().getDecisionJson());
+        assertThat(durableDecision.path("outcome_epoch").asLong()).isEqualTo(1L);
+        assertThat(durableDecision.path("fencing_token").asLong()).isEqualTo(17L);
+        assertThat(durableDecision.path("process_revision").asLong()).isEqualTo(9L);
+        assertThat(durableDecision.path("request_hash").asText())
+                .matches("[0-9a-f]{64}");
         assertThat(packetBeforeReplay.promptVersion()).isEqualTo("hearing-flow.v2");
         assertThat(packetBeforeReplay.profileVersion()).isEqualTo("hearing-judge-v2");
         assertThat(packetBeforeReplay.adjudicationDraftVersion()).isEqualTo(2);
@@ -390,6 +401,36 @@ class ReviewApplicationServiceIntegrationTest {
         assertThat(packetBeforeReplay.issues()).isEqualTo(fixture.issues());
         assertThat(packetBeforeReplay.evidenceMatrix()).isEqualTo(fixture.evidenceMatrix());
         assertThat(packetBeforeReplay.riskFlags()).isEqualTo(fixture.riskFlags());
+        assertThat(packetBeforeReplay.reviewSourceItems()).hasSize(3);
+        assertThat(packetBeforeReplay.reviewSourceItems().get(0).path("review_item_ref").asText())
+                .isEqualTo("V1_FOCUS_01");
+        assertThat(packetBeforeReplay.reviewSourceItems().get(1).path("review_item_ref").asText())
+                .isEqualTo("JURY_FINDING_FACT_COMPLETENESS");
+        assertThat(packetBeforeReplay.reviewSourceItems().get(1).path("review_item_text").asText())
+                .isEqualTo("locked jury fact-completeness opinion");
+        assertThat(packetBeforeReplay.reviewSourceItems().get(2).path("review_item_ref").asText())
+                .isEqualTo("JURY_MANDATORY_01");
+        verify(caseEventService).recordLifecycleEvent(
+                eq(fixture.caseId()), anyString(), eq("TARGET_REVIEW_DECISION_COMMITTED"),
+                any(), anyString(), eq(reviewer.actorId()));
+        verify(targetHandoffWriter).record(
+                any(), any(), anyString(),
+                argThat(receipt -> receipt.outcomeReceipt().approvedActionSnapshotRef()
+                        .equals(receipt.outcomeReceipt().actionSnapshotRef())
+                        && receipt.outcomeReceipt().approvedActionSnapshotHash()
+                                .equals(receipt.outcomeReceipt().actionSnapshotHash())
+                        && receipt.outcomeReceipt().epoch() == 1L
+                        && receipt.outcomeReceipt().fence() == 17L
+                        && receipt.outcomeReceipt().requestHash()
+                                .equals(durableDecision.path("request_hash").asText())),
+                any(), any(), any());
+        verify(targetRoomCommandIngress).materialize(
+                eq(fixture.caseId()),
+                anyString(),
+                argThat(command -> command.commandType().name().equals("REVIEW_DECISION")
+                        && command.roomType() == RoomType.REVIEW),
+                eq(reviewer),
+                anyString());
         verify(postReviewOrchestration, never()).orchestrate(anyString(), any(), anyString());
     }
 
@@ -722,20 +763,21 @@ class ReviewApplicationServiceIntegrationTest {
         String caseMatrixHash = "a".repeat(64);
         String evidenceMatrixHash = "b".repeat(64);
         ObjectNode claims = mapper.createObjectNode();
-        claims.put("schema_version", "case-fact-matrix.v1");
+        claims.put("schema_version", "case_fact_matrix.v2");
         claims.put("content_hash", caseMatrixHash);
         claims.putArray("fact_rows").addObject()
-                .put("fact_key", "FACT_TARGET_HEARING")
-                .put("summary", "locked substantive claim");
+                .put("fact_id", "FACT_TARGET_HEARING")
+                .put("fact_target", "locked substantive claim");
         ObjectNode evidenceMatrix = mapper.createObjectNode();
-        evidenceMatrix.put("schema_version", "fact-evidence-matrix.v1");
+        evidenceMatrix.put("schema_version", "fact_evidence_matrix.v3");
         evidenceMatrix.put("content_hash", evidenceMatrixHash);
         evidenceMatrix.put("matrix_status", "FROZEN");
-        evidenceMatrix.putArray("entries").addObject()
-                .put("fact_key", "FACT_TARGET_HEARING")
-                .put("evidence_ref", "EVIDENCE_TARGET_HEARING");
+        evidenceMatrix.putArray("coverage").addObject()
+                .put("fact_id", "FACT_TARGET_HEARING")
+                .putArray("evidence_ids")
+                .add("EVIDENCE_TARGET_HEARING");
         ObjectNode dossier = mapper.createObjectNode();
-        dossier.put("schema_version", "trial_dossier.v1");
+        dossier.put("schema_version", "trial_dossier.v2");
         dossier.put("trial_dossier_id", dossierId);
         dossier.put("case_id", caseId);
         dossier.put("frozen_at", "2026-08-15T00:00:00Z");
@@ -745,22 +787,19 @@ class ReviewApplicationServiceIntegrationTest {
         dossier.put("evidence_matrix_version", 3);
         dossier.put("evidence_matrix_hash", evidenceMatrixHash);
         dossier.set("fact_evidence_matrix", evidenceMatrix.deepCopy());
-        dossier.put("question_set_id", "QUESTION_SET_REVIEW_TARGET");
-        dossier.set("question_set", mapper.createObjectNode().put("question", "locked question"));
-        dossier.putArray("answer_bundles").addObject().put("party", "USER");
-        dossier.withArray("answer_bundles").addObject().put("party", "MERCHANT");
-        dossier.put("request_set_id", "REQUEST_SET_REVIEW_TARGET");
-        dossier.set("evidence_request_set", mapper.createObjectNode().put("request", "locked request"));
-        dossier.putArray("evidence_batches").addObject().put("party", "USER");
-        dossier.withArray("evidence_batches").addObject().put("party", "MERCHANT");
+        dossier.putArray("adjudication_rules").addObject()
+                .put("rule_code", "REVIEW_TARGET_PRODUCER")
+                .put("rule_version", 1)
+                .put("rule_name", "Target Review producer policy");
         String dossierHash = seal(dossier);
 
         ObjectNode proposal = mapper.createObjectNode();
-        proposal.put("schema_version", "judge_proposal.v1");
+        proposal.put("schema_version", "judge_proposal.v2");
         proposal.put("proposal_id", proposalId);
         proposal.put("trial_dossier_id", dossierId);
         proposal.put("trial_dossier_hash", dossierHash);
         proposal.put("public_text", "locked Judge V1 proposal");
+        proposal.putArray("review_focus").add("locked V1 review focus");
         String proposalHash = seal(proposal);
         ObjectNode report = mapper.createObjectNode();
         report.put("schema_version", "jury_review_report.v1");
@@ -770,28 +809,41 @@ class ReviewApplicationServiceIntegrationTest {
         report.put("proposal_id", proposalId);
         report.put("proposal_content_hash", proposalHash);
         report.put("public_text", "locked jury review");
+        ObjectNode juryProposal = report.putObject("proposal");
+        juryProposal.putArray("findings")
+                .addObject()
+                .put("dimension", "FACT_COMPLETENESS")
+                .put("assessment", "locked jury fact-completeness opinion");
+        juryProposal.putArray("mandatory_revisions")
+                .add("[FACT_COMPLETENESS] locked mandatory revision");
         String reportHash = seal(report);
         var issues = mapper.createArrayNode();
         issues.addObject()
-                .put("issue_key", "ISSUE_TARGET_HEARING")
-                .put("finding", "locked issue finding");
+                .put("fact_id", "FACT_TARGET_HEARING")
+                .put("finding", "CONFIRMED")
+                .put("confidence", 0.93)
+                .putNull("evidence_gap")
+                .putArray("evidence_ids")
+                .add("EVIDENCE_TARGET_HEARING");
         var riskFlags = mapper.createArrayNode();
-        riskFlags.addObject()
-                .put("risk_code", "RISK_TARGET_HEARING")
-                .put("reason", "locked reviewer attention");
+        riskFlags.add("locked reviewer attention");
         ObjectNode draftDecision = mapper.createObjectNode();
         draftDecision.set("fact_findings", issues.deepCopy());
-        draftDecision.putArray("evidence_assessment").addObject()
-                .put("evidence_ref", "EVIDENCE_TARGET_HEARING")
-                .put("assessment", "locked assessment");
-        draftDecision.putArray("policy_application").addObject()
-                .put("policy_ref", "POLICY_TARGET_HEARING");
+        draftDecision.putArray("remedy_orders").addObject()
+                .put("remedy_type", "CANCEL_ORDER")
+                .put("order_text", "cancel the locked target order")
+                .putArray("fact_ids")
+                .add("FACT_TARGET_HEARING");
+        draftDecision.putArray("rule_applications").addObject()
+                .put("rule_code", "REVIEW_TARGET_PRODUCER")
+                .put("rule_version", 1)
+                .put("applicable", true)
+                .put("rationale", "the frozen target fact satisfies the bound rule");
         draftDecision.set("reviewer_attention", riskFlags.deepCopy());
-        draftDecision.put("recommended_decision", "APPROVE");
-        draftDecision.put("confidence", 0.93);
-        draftDecision.put("draft_text", "locked Judge V2 draft");
+        draftDecision.put("decision_reasoning", "the frozen fact and rule support cancellation");
+        draftDecision.put("decision_action", "CANCEL_ORDER");
         ObjectNode draft = mapper.createObjectNode();
-        draft.put("schema_version", "adjudication_draft.v2");
+        draft.put("schema_version", "adjudication_draft.v3");
         draft.put("draft_id", draftId);
         draft.put("trial_dossier_id", dossierId);
         draft.put("trial_dossier_hash", dossierHash);
@@ -870,9 +922,9 @@ class ReviewApplicationServiceIntegrationTest {
                 """, dossierId, caseId, flowId, caseMatrixHash, evidenceMatrixHash,
                 "QUESTION_SET_REVIEW_TARGET", "REQUEST_SET_REVIEW_TARGET",
                 ContractJson.canonicalString(dossier), dossierHash);
-        insertCompletedAgentRun(jdbc, caseId, "RUN_REVIEW_JUDGE_V1", "PRESIDING_JUDGE");
-        insertCompletedAgentRun(jdbc, caseId, "RUN_REVIEW_JURY", "JURY_PANEL");
-        insertCompletedAgentRun(jdbc, caseId, "RUN_REVIEW_JUDGE_V2", "PRESIDING_JUDGE");
+        insertCompletedAgentRun(jdbc, caseId, "RUN_REVIEW_JUDGE_V1", "SYSTEM");
+        insertCompletedAgentRun(jdbc, caseId, "RUN_REVIEW_JURY", "SYSTEM");
+        insertCompletedAgentRun(jdbc, caseId, "RUN_REVIEW_JUDGE_V2", "SYSTEM");
         insertCompletedHearingStage(jdbc, flowId, caseId, "STAGE_REVIEW_JUDGE_V1", 11,
                 "JUDGE_V1_GENERATING", "PRESIDING_JUDGE", "RUN_REVIEW_JUDGE_V1", proposal);
         insertCompletedHearingStage(jdbc, flowId, caseId, "STAGE_REVIEW_JURY", 12,
@@ -913,10 +965,11 @@ class ReviewApplicationServiceIntegrationTest {
         jdbc.update("""
                 insert into agent_run (
                     id, case_id, agent_id, agent_role, profile_version, prompt_version,
-                    skill_version, ruleset_version, run_status, started_at, completed_at,
-                    trace_id, created_by
+                    skill_version, ruleset_version, protocol, executor_kind, room_type,
+                    run_status, started_at, completed_at, trace_id, created_by
                 ) values (?, ?, ?, ?, 'hearing-judge-v2', 'hearing-flow.v2',
-                    'hearing-skill-v2', 'ruleset-current', 'COMPLETED',
+                    'hearing-skill-v2', 'ruleset-current', 'agent-stream.v3',
+                    'TEMPORAL_ACTIVITY', 'HEARING', 'COMPLETED',
                     now() - interval '1 second', now(), ?, 'test')
                 """, runId, caseId, "agent:" + runId, role, "trace:" + runId);
     }
@@ -944,7 +997,7 @@ class ReviewApplicationServiceIntegrationTest {
                     id, case_id, flow_instance_id, trial_dossier_id, trial_dossier_hash,
                     artifact_type, schema_version, content_hash, payload_json, agent_run_id,
                     created_at, created_by
-                ) values (?, ?, ?, ?, ?, 'JUDGE_PROPOSAL', 'judge_proposal.v1', ?, cast(? as jsonb), ?, now(), 'test')
+                ) values (?, ?, ?, ?, ?, 'JUDGE_PROPOSAL', 'judge_proposal.v2', ?, cast(? as jsonb), ?, now(), 'test')
                 """, proposalId, caseId, flowId, dossierId, dossierHash, proposalHash,
                 ContractJson.canonicalString(proposal), "RUN_REVIEW_JUDGE_V1");
         jdbc.update("""
@@ -961,7 +1014,7 @@ class ReviewApplicationServiceIntegrationTest {
                     artifact_type, schema_version, proposal_id, proposal_content_hash,
                     report_id, report_content_hash, content_hash, payload_json, agent_run_id,
                     created_at, created_by
-                ) values (?, ?, ?, ?, ?, 'ADJUDICATION_DRAFT', 'adjudication_draft.v2',
+                ) values (?, ?, ?, ?, ?, 'ADJUDICATION_DRAFT', 'adjudication_draft.v3',
                     ?, ?, ?, ?, ?, cast(? as jsonb), ?, now(), 'test')
                 """, draftId, caseId, flowId, dossierId, dossierHash, proposalId, proposalHash,
                 reportId, reportHash, draftHash, ContractJson.canonicalString(draft),

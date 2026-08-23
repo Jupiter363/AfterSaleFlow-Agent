@@ -55,8 +55,15 @@ public final class ReviewOutcomeProtocolAdapter {
             throw new IllegalArgumentException(
                     "receipt must carry the next revision and a positive committed event sequence");
         OutcomeWireTypes.ReviewDecision decision=reviewDecision(receipt.decision());
+        boolean boundedDecisionActionReview="hearing-decision-action.v1".equals(
+                context.authorization().authorizedArtifactRefs().get("decision_contract"));
         boolean approval=decision==OutcomeWireTypes.ReviewDecision.APPROVE
                 || decision==OutcomeWireTypes.ReviewDecision.MODIFY_AND_APPROVE;
+        if(boundedDecisionActionReview
+                && decision!=OutcomeWireTypes.ReviewDecision.APPROVE
+                && decision!=OutcomeWireTypes.ReviewDecision.MODIFY_AND_APPROVE
+                && decision!=OutcomeWireTypes.ReviewDecision.ESCALATE_MANUAL)
+            throw new IllegalArgumentException("bounded review decision is unsupported");
         if(receipt.operationEligible()!=approval)
             throw new IllegalArgumentException("operation eligibility does not match the decision");
         if(receipt.operationRequestEmitted())
@@ -68,8 +75,14 @@ public final class ReviewOutcomeProtocolAdapter {
                 && !receipt.frozenActionHash().equals(receipt.approvedActionHash()))
             throw new IllegalArgumentException("APPROVE must retain the frozen action hash");
         if(decision==OutcomeWireTypes.ReviewDecision.MODIFY_AND_APPROVE
+                && !boundedDecisionActionReview
                 && receipt.frozenActionHash().equals(receipt.approvedActionHash()))
             throw new IllegalArgumentException("MODIFY_AND_APPROVE must carry a changed action hash");
+        if(decision==OutcomeWireTypes.ReviewDecision.MODIFY_AND_APPROVE
+                && boundedDecisionActionReview
+                && !receipt.frozenActionHash().equals(receipt.approvedActionHash()))
+            throw new IllegalArgumentException(
+                    "bounded MODIFY_AND_APPROVE must retain frozen execution actions");
         ReviewPacketAuthorizationView authorization=context.authorization();
         boolean authorityMatches=receipt.caseId().equals(authorization.caseId())
                 && receipt.taskId().equals(authorization.reviewTaskId())

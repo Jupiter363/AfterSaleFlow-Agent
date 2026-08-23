@@ -96,13 +96,23 @@ class CaseOutcomeControllerTest {
                                         "HUMAN_REVIEW",
                                         true,
                                         objectMapper.readTree(
-                                                "{\"actions\":[{\"type\":\"REFUND\"}]}")),
+                                                "{\"actions\":[{\"type\":\"REFUND\"}]}"),
+                                        "APPROVAL_1",
+                                        "APPROVE",
+                                        "REFUND_ONLY",
+                                        "REFUND_ONLY",
+                                        OffsetDateTime.parse("2026-07-03T05:18:00Z")),
                                 new AdjudicationDraftView(
                                         "DRAFT_1",
                                         2,
                                         "支持用户退款请求",
                                         new BigDecimal("0.9200"),
                                         "AI 法官形成非最终裁决草案。",
+                                        "物流记录与双方陈述表明签收主体仍待核验。",
+                                        objectMapper.readTree(
+                                                "[{\"remedy_type\":\"REFUND_ONLY\",\"order_text\":\"核验完成后执行退款。\"}]"),
+                                        objectMapper.readTree(
+                                                "[{\"review_item_ref\":\"JURY_FINDING_FACT_COMPLETENESS\",\"item_type\":\"FINDING\",\"dimension\":\"FACT_COMPLETENESS\",\"jury_opinion\":\"签收主体事实仍有缺口。\",\"basis\":[\"签收底单未记载身份。\"],\"severity\":\"HIGH\",\"requires_revision\":true,\"judge_response\":\"已补充签收主体证据缺口。\",\"disposition\":\"ACCEPTED\",\"affected_fields\":[\"fact_findings\"]}]"),
                                         "READY",
                                         objectMapper.readTree(
                                                 "[{\"fact_id\":\"FACT_DELIVERY\",\"finding\":\"物流记录显示已签收\",\"evidence_ids\":[\"EVIDENCE_WAYBILL\"],\"confidence\":0.88}]"),
@@ -128,7 +138,31 @@ class CaseOutcomeControllerTest {
                 .andExpect(
                         jsonPath("$.data.final_decision.human_confirmed")
                                 .value(true))
+                .andExpect(
+                        jsonPath("$.data.final_decision.approval_record_id")
+                                .value("APPROVAL_1"))
+                .andExpect(
+                        jsonPath("$.data.final_decision.decision_type")
+                                .value("APPROVE"))
+                .andExpect(
+                        jsonPath("$.data.final_decision.ai_decision_action")
+                                .value("REFUND_ONLY"))
+                .andExpect(
+                        jsonPath("$.data.final_decision.reviewer_decision_action")
+                                .value("REFUND_ONLY"))
                 .andExpect(jsonPath("$.data.adjudication_draft.id").value("DRAFT_1"))
+                .andExpect(
+                        jsonPath("$.data.adjudication_draft.decision_reasoning")
+                                .value("物流记录与双方陈述表明签收主体仍待核验。"))
+                .andExpect(
+                        jsonPath("$.data.adjudication_draft.remedy_orders[0].remedy_type")
+                                .value("REFUND_ONLY"))
+                .andExpect(
+                        jsonPath("$.data.adjudication_draft.jury_review_exchanges[0].jury_opinion")
+                                .value("签收主体事实仍有缺口。"))
+                .andExpect(
+                        jsonPath("$.data.adjudication_draft.jury_review_exchanges[0].judge_response")
+                                .value("已补充签收主体证据缺口。"))
                 .andExpect(
                         jsonPath("$.data.adjudication_draft.fact_findings[0].fact_id")
                                 .value("FACT_DELIVERY"))

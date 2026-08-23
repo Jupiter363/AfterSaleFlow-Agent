@@ -93,12 +93,15 @@ import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIng
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterial;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterialStore;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnResultV2;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -911,7 +914,7 @@ class EvidenceAgentTurnServiceTest {
                 ArgumentCaptor.forClass(RoomMessageEntity.class);
         verify(messageRepository).save(agentMessage.capture());
         assertThat(agentMessage.getValue().getSequenceNo()).isEqualTo(8);
-        assertThat(agentMessage.getValue().getSenderRole()).isEqualTo("CUSTOMER_SERVICE");
+        assertThat(agentMessage.getValue().getSenderRole()).isEqualTo("EVIDENCE_CLERK");
         assertThat(agentMessage.getValue().getSenderId()).isEqualTo("evidence-clerk");
         assertThat(agentMessage.getValue().getMessageType()).isEqualTo(MessageType.AGENT_MESSAGE);
         List<String> audience =
@@ -951,31 +954,13 @@ class EvidenceAgentTurnServiceTest {
             throws Exception {
         FulfillmentCaseEntity dispute = evidenceCase();
         CaseRoomEntity room = evidenceRoom(dispute);
-        RoomMessageEntity existingOpening =
-                RoomMessageEntity.create(
-                        "MESSAGE_EXISTING_OPENING",
-                        dispute.getId(),
-                        room.getId(),
-                        9,
-                        com.example.dispute.room.domain.MessageSenderType.AGENT,
-                        "CUSTOMER_SERVICE",
-                        "evidence-clerk",
-                        "[\"USER\",\"CUSTOMER_SERVICE\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]",
-                        "[\"user-local\"]",
-                        MessageType.AGENT_MESSAGE,
-                        "Existing opening question.",
-                        "[]",
-                        "agent-evidence-opening:" + dispute.getId() + ":AGENT_SESSION_user-local_EVIDENCE",
-                        Instant.parse("2026-07-06T00:01:00Z"),
-                        "TRACE_OPENING");
+        AtomicReference<RoomMessageEntity> persistedOpening = new AtomicReference<>();
         when(caseRepository.findByIdForUpdate(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
                 .thenReturn(Optional.of(room));
         when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
-                .thenReturn(Optional.empty())
-                .thenReturn(Optional.empty())
-                .thenReturn(Optional.of(existingOpening));
+                .thenAnswer(ignored -> Optional.ofNullable(persistedOpening.get()));
         when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
                 .thenReturn(List.of());
         when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
@@ -1019,7 +1004,12 @@ class EvidenceAgentTurnServiceTest {
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(8L);
         when(messageRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+                .thenAnswer(
+                        invocation -> {
+                            RoomMessageEntity saved = invocation.getArgument(0);
+                            persistedOpening.set(saved);
+                            return saved;
+                        });
 
         var created =
                 service.ensureOpening(
@@ -1070,7 +1060,7 @@ class EvidenceAgentTurnServiceTest {
         assertThat(savedMessage.getValue().getAudienceActorIdsJson())
                 .contains("user-local");
         assertThat(created.messageText()).contains("划痕照片原图");
-        assertThat(reused.id()).isEqualTo("MESSAGE_EXISTING_OPENING");
+        assertThat(reused.id()).isEqualTo(created.id());
     }
 
     @Test
@@ -1372,6 +1362,155 @@ class EvidenceAgentTurnServiceTest {
     }
 
     @Test
+    void targetV3AssessmentPersistsScoresAndDerivesOrderedReviewReasons() throws Exception {
+        EvidenceItemEntity attached =
+                evidenceItem("EVIDENCE_V2_PROJECTION", "USER", "user-local", "PARTIES");
+        CaseAccessSessionEntity accessSession = mock(CaseAccessSessionEntity.class);
+        when(accessSession.privileged()).thenReturn(false);
+        when(accessSession.getActorRole()).thenReturn(ActorRole.USER);
+        when(accessSession.getActorId()).thenReturn("user-local");
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                "CASE_EVIDENCE_AGENT"))
+                .thenReturn(List.of(attached));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        attached.getId()))
+                .thenReturn(Optional.empty());
+        when(verificationRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        TargetEvidenceTurnResultV2 result = targetV3AssessmentResult(
+                attached.getId(), 0.49, 0.48, 0.47, 0.46, "HIGH");
+        ReflectionTestUtils.invokeMethod(
+                service,
+                "persistTargetV2Assessments",
+                "CASE_EVIDENCE_AGENT",
+                accessSession,
+                List.of(attached.getId()),
+                result,
+                "target-evidence-run:v2-projection",
+                "TRACE_V2_PROJECTION");
+
+        ArgumentCaptor<EvidenceVerificationEntity> saved =
+                ArgumentCaptor.forClass(EvidenceVerificationEntity.class);
+        verify(verificationRepository).save(saved.capture());
+        JsonNode findings = objectMapper.readTree(saved.getValue().getAgentFindingsJson());
+        JsonNode reasons = objectMapper.readTree(saved.getValue().getReasonsJson());
+        assertThat(findings.path("schema_version").asText())
+                .isEqualTo("evidence-turn-result.v3");
+        assertThat(findings.path("assessment_public_text").asText())
+                .isEqualTo("材料文本可读，但缺少签收人身份和交付照片。");
+        assertThat(findings.path("verification_feedback").asText())
+                .isEqualTo(findings.path("assessment_public_text").asText());
+        assertThat(findings.path("authenticity_score").doubleValue()).isEqualTo(0.49);
+        assertThat(findings.path("relevance_score").doubleValue()).isEqualTo(0.48);
+        assertThat(findings.path("completeness_score").doubleValue()).isEqualTo(0.47);
+        assertThat(findings.path("assessment_confidence").doubleValue()).isEqualTo(0.46);
+        assertThat(findings.path("risk_level").asText()).isEqualTo("HIGH");
+        assertThat(findings.has("human_review")).isFalse();
+        assertThat(findings.has("review_target")).isFalse();
+        assertThat(findings.has("review_instruction")).isFalse();
+        assertThat(reasons.path("summary").asText())
+                .isEqualTo("材料文本可读，但缺少签收人身份和交付照片。");
+        assertThat(reasons.path("reason_details").findValuesAsText("code"))
+                .containsExactly(
+                        "LOW_AUTHENTICITY_SUSPECTED_FORGERY",
+                        "LOW_RELEVANCE_SCORE",
+                        "LOW_COMPLETENESS_SCORE",
+                        "LOW_ASSESSMENT_CONFIDENCE",
+                        "HIGH_RISK_FLAG");
+        assertThat(reasons.path("reason_details").findValuesAsText("explanation"))
+                .containsExactly(
+                        "真实性解释：缺少原始导出。",
+                        "关联性解释：仅部分对应待证事实。",
+                        "完整性解释：缺少关键上下文。",
+                        "置信度解释：可读取信息有限。",
+                        "综合风险解释：存在必须人工确认的重大风险。");
+        assertThat(saved.getValue().getVerificationStatus())
+                .isEqualTo(EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW);
+        assertThat(saved.getValue().isRequiresHumanReview()).isTrue();
+    }
+
+    @Test
+    void targetV3ScoresAtHalfDoNotTriggerReviewAndMediumRiskStaysSuspicious() {
+        EvidenceItemEntity attached =
+                evidenceItem("EVIDENCE_V2_PENDING", "USER", "user-local", "PARTIES");
+        CaseAccessSessionEntity accessSession = mock(CaseAccessSessionEntity.class);
+        when(accessSession.privileged()).thenReturn(false);
+        when(accessSession.getActorRole()).thenReturn(ActorRole.USER);
+        when(accessSession.getActorId()).thenReturn("user-local");
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                "CASE_EVIDENCE_AGENT"))
+                .thenReturn(List.of(attached));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        attached.getId()))
+                .thenReturn(Optional.empty());
+        when(verificationRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        ReflectionTestUtils.invokeMethod(
+                service,
+                "persistTargetV2Assessments",
+                "CASE_EVIDENCE_AGENT",
+                accessSession,
+                List.of(attached.getId()),
+                targetV3AssessmentResult(attached.getId(), 0.50, 0.50, 0.50, 0.50, "MEDIUM"),
+                "target-evidence-run:v2-pending",
+                "TRACE_V2_PENDING");
+
+        ArgumentCaptor<EvidenceVerificationEntity> saved =
+                ArgumentCaptor.forClass(EvidenceVerificationEntity.class);
+        verify(verificationRepository).save(saved.capture());
+        assertThat(saved.getValue().getVerificationStatus())
+                .isEqualTo(EvidenceVerificationStatus.SUSPICIOUS);
+        assertThat(saved.getValue().isRequiresHumanReview()).isFalse();
+        assertThat(objectMapper.valueToTree(saved.getValue().getReasonsJson()).toString())
+                .doesNotContain("review_target", "review_instruction", "HUMAN_REVIEW_TASK");
+    }
+
+    @Test
+    void targetV3HighRiskAloneRequiresReview() throws Exception {
+        EvidenceItemEntity attached =
+                evidenceItem("EVIDENCE_V3_HIGH_RISK", "USER", "user-local", "PARTIES");
+        CaseAccessSessionEntity accessSession = mock(CaseAccessSessionEntity.class);
+        when(accessSession.privileged()).thenReturn(false);
+        when(accessSession.getActorRole()).thenReturn(ActorRole.USER);
+        when(accessSession.getActorId()).thenReturn("user-local");
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                "CASE_EVIDENCE_AGENT"))
+                .thenReturn(List.of(attached));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        attached.getId()))
+                .thenReturn(Optional.empty());
+        when(verificationRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        ReflectionTestUtils.invokeMethod(
+                service,
+                "persistTargetV2Assessments",
+                "CASE_EVIDENCE_AGENT",
+                accessSession,
+                List.of(attached.getId()),
+                targetV3AssessmentResult(attached.getId(), 0.88, 0.91, 0.79, 0.84, "HIGH"),
+                "target-evidence-run:v3-high-risk",
+                "TRACE_V3_HIGH_RISK");
+
+        ArgumentCaptor<EvidenceVerificationEntity> saved =
+                ArgumentCaptor.forClass(EvidenceVerificationEntity.class);
+        verify(verificationRepository).save(saved.capture());
+        JsonNode reasons = objectMapper.readTree(saved.getValue().getReasonsJson());
+        assertThat(saved.getValue().getVerificationStatus())
+                .isEqualTo(EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW);
+        assertThat(saved.getValue().isRequiresHumanReview()).isTrue();
+        assertThat(reasons.path("reason_details").findValuesAsText("code"))
+                .containsExactly("HIGH_RISK_FLAG");
+        assertThat(reasons.path("reason_details").get(0).path("explanation").asText())
+                .isEqualTo("综合风险解释：存在必须人工确认的重大风险。");
+    }
+
+    @Test
     void terminalNoCommitOpeningAdvancesDeterministicGenerationsAndRejectsDriftBeforeAllocation()
             throws Exception {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -1652,7 +1791,7 @@ class EvidenceAgentTurnServiceTest {
                                             ExecuteAgentRunRequest.SCHEMA_VERSION,
                                             logicalRunId,
                                             1,
-                                            "agent-stream.v2",
+                                            "agent-stream.v3",
                                             "c".repeat(64),
                                             null,
                                             false,
@@ -3159,6 +3298,134 @@ class EvidenceAgentTurnServiceTest {
         ReflectionTestUtils.setField(memory, "agentSessionId", agentSession.getId());
         ReflectionTestUtils.setField(
                 memory, "conversationScope", agentSession.getConversationScope());
+    }
+
+    private TargetEvidenceTurnResultV2 targetV3AssessmentResult(
+            String evidenceId,
+            double authenticityScore,
+            double relevanceScore,
+            double completenessScore,
+            double assessmentConfidence,
+            String riskLevel) {
+        ArrayNode manifest = objectMapper.createArrayNode();
+
+        ObjectNode receipt = targetV2Header(1, "MATERIAL_RECEIPT");
+        receipt.set("evidence_ids", targetV2Array(evidenceId));
+        manifest.add(targetV2Frame(1, "MATERIAL_RECEIPT", receipt, "已收到本批材料。"));
+
+        ObjectNode assessment = targetV2Header(2, "EVIDENCE_ASSESSMENT");
+        assessment.put("evidence_id", evidenceId);
+        assessment.set("observation_slots", objectMapper.createArrayNode());
+        assessment.put("authenticity_score", authenticityScore);
+        assessment.put("authenticity_score_explanation", "真实性解释：缺少原始导出。");
+        assessment.put("relevance_score", relevanceScore);
+        assessment.put("relevance_score_explanation", "关联性解释：仅部分对应待证事实。");
+        assessment.put("completeness_score", completenessScore);
+        assessment.put("completeness_score_explanation", "完整性解释：缺少关键上下文。");
+        assessment.put("assessment_confidence", assessmentConfidence);
+        assessment.put("assessment_confidence_explanation", "置信度解释：可读取信息有限。");
+        assessment.put("risk_level", riskLevel);
+        assessment.put(
+                "risk_explanation", "综合风险解释：存在必须人工确认的重大风险。");
+        assessment.set("source_basis", targetV2Array("材料解析文本"));
+        assessment.put("formation_time_assessment", "形成时间只能部分确认");
+        ObjectNode finding = objectMapper.createObjectNode();
+        finding.put("finding_type", "PARSED_RECORD");
+        finding.put("description", "读取到材料中的关键记录");
+        assessment.set("findings", objectMapper.createArrayNode().add(finding));
+        assessment.set("limitations", targetV2Array("缺少签收人身份"));
+        assessment.set("unsupported_claims", targetV2Array("不能单独确认签收主体"));
+        manifest.add(targetV2Frame(
+                2,
+                "EVIDENCE_ASSESSMENT",
+                assessment,
+                "材料文本可读，但缺少签收人身份和交付照片。"));
+
+        int readinessSequence = 3;
+        ObjectNode readiness = targetV2Header(readinessSequence, "ROOM_READINESS");
+        readiness.put("core_fact_coverage", "PARTIAL");
+        readiness.put("source_chain_coverage", "PARTIAL");
+        readiness.put("time_integrity_coverage", "UNKNOWN");
+        readiness.set("remaining_core_fact_ids", objectMapper.createArrayNode());
+        readiness.put("overall_readiness", "PARTIAL");
+        String readinessText = "本批材料核验完成。";
+        manifest.add(targetV2Frame(
+                readinessSequence,
+                "ROOM_READINESS",
+                readiness,
+                readinessText));
+
+        ObjectNode result = objectMapper.createObjectNode();
+        result.put("schema_version", TargetEvidenceTurnResultV2.SCHEMA_VERSION);
+        result.put("frame_authority_schema", TargetEvidenceTurnResultV2.FRAME_SCHEMA_VERSION);
+        result.set("frame_manifest", manifest);
+        result.put("frame_manifest_sha256", ContractJson.sha256Hex(manifest));
+        result.put(
+                "room_utterance",
+                "已收到本批材料。\n\n材料文本可读，但缺少签收人身份和交付照片。"
+                        + "\n\n"
+                        + readinessText);
+        result.set("referenced_evidence_ids", targetV2Array(evidenceId));
+        result.set("observation_graph", objectMapper.createArrayNode());
+        result.set(
+                "evidence_assessments",
+                objectMapper.createArrayNode().add(assessment));
+        result.set("evidence_requests", objectMapper.createArrayNode());
+        result.set("room_readiness", readiness);
+        return TargetEvidenceTurnResultV2.parse(objectMapper, result);
+    }
+
+    private ObjectNode targetV2Header(int sequence, String frameType) {
+        ObjectNode header = objectMapper.createObjectNode();
+        header.put("frame_sequence", sequence);
+        header.put("frame_type", frameType);
+        return header;
+    }
+
+    private ObjectNode targetV2Frame(
+            int sequence, String frameType, ObjectNode header, String publicText) {
+        ObjectNode frame = objectMapper.createObjectNode();
+        frame.put(
+                "frame_id",
+                TargetEvidenceTurnResultV2.frameId(
+                        "evidence-command-v2-projection",
+                        "evidence-attempt-v2-projection",
+                        sequence,
+                        frameType));
+        frame.put("frame_sequence", sequence);
+        frame.put("frame_type", frameType);
+        frame.set("header", header);
+        frame.put("header_sha256", ContractJson.sha256Hex(header));
+        if (publicText == null) {
+            frame.putNull("public_text");
+        } else {
+            frame.put("public_text", publicText);
+        }
+        String persistedText = publicText == null ? "" : publicText;
+        frame.put("public_text_sha256", targetV2TextSha256(persistedText));
+        frame.put(
+                "public_text_length",
+                persistedText.codePointCount(0, persistedText.length()));
+        frame.put("frame_sha256", ContractJson.sha256Hex(frame.deepCopy()));
+        return frame;
+    }
+
+    private ArrayNode targetV2Array(String... values) {
+        ArrayNode array = objectMapper.createArrayNode();
+        for (String value : values) {
+            array.add(value);
+        }
+        return array;
+    }
+
+    private static String targetV2TextSha256(String value) {
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException exception) {
+            throw new IllegalStateException(exception);
+        }
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.evidenceItem(String,String,String,String)」。

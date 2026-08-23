@@ -56,6 +56,9 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
 
   private static final String CASE_ID = "CASE_EVIDENCE_MATRIX";
   private static final String SHARED_BARRIER_RECEIPT_HASH = "3".repeat(64);
+  private static final String HEARING_REFERENCE_BATCH_ID = "opaque-hearing-reference";
+  private static final String ORIGINAL_EVIDENCE_SUBMISSION_BATCH_ID =
+      "opaque-original-evidence-submission";
 
   @Test
   void frozenEvidenceDossierBindsExactSharedBarrierToCanonicalHearingInvocation()
@@ -116,7 +119,8 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
             preHearingMatrix,
             successorMatrix,
             frozen,
-            List.of(terminalReceipt.toString()));
+            List.of(terminalReceipt.toString()),
+            ORIGINAL_EVIDENCE_SUBMISSION_BATCH_ID);
     JdbcTargetHearingAgentStageInputFactory factory =
         new JdbcTargetHearingAgentStageInputFactory(dataSource, mapper);
     JdbcTargetHearingAgentStageInputFactory.StageInput intakeQuestionsInput =
@@ -133,10 +137,21 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
 
     assertThat(intakeQuestions.path("case_fact_matrix")).isEqualTo(preHearingMatrix);
     assertThat(intakeSynthesis.path("case_fact_matrix")).isEqualTo(preHearingMatrix);
+    assertThat(intakeQuestions.path("context_schema_version").asText())
+        .isEqualTo("hearing_intake_context.v4");
+    assertThat(intakeQuestions.path("question_slots")).hasSize(5);
+    assertThat(intakeSynthesis.path("question_set").path("schema_version").asText())
+        .isEqualTo("hearing_question_set.v4");
+    assertThat(intakeSynthesis.path("party_answer_bundles")).hasSize(2);
+    assertThat(intakeSynthesis.path("party_answer_bundles").path(0)
+        .path("participant_role").asText()).isEqualTo("USER");
+    assertThat(intakeSynthesis.path("party_answer_bundles").path(1)
+        .path("participant_role").asText()).isEqualTo("MERCHANT");
+    assertThat(intakeSynthesis.has("party_submissions")).isFalse();
     assertThat(requestCaseMatrix).isEqualTo(successorMatrix);
     assertThat(synthesis.path("case_fact_matrix")).isEqualTo(successorMatrix);
-    assertThat(matrix.isObject()).as("frozen fact_evidence_matrix must be a v2 object").isTrue();
-    assertThat(matrix.path("schema_version").asText()).isEqualTo("fact_evidence_matrix.v2");
+    assertThat(matrix.isObject()).as("frozen fact_evidence_matrix must be a v3 object").isTrue();
+    assertThat(matrix.path("schema_version").asText()).isEqualTo("fact_evidence_matrix.v3");
     assertThat(matrix.path("case_id").asText()).isEqualTo(CASE_ID);
     assertThat(matrix.path("matrix_version").asInt()).isEqualTo(1);
     assertThat(matrix.path("matrix_status").asText()).isEqualTo("FROZEN");
@@ -166,6 +181,9 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     JsonNode merchantBatch = synthesis.path("party_batches").path(1);
     assertThat(userBatch.path("participant_role").asText()).isEqualTo("USER");
     assertThat(userBatch.path("terminal_status").asText()).isEqualTo("COMPLETED");
+    assertThat(userBatch.path("batch_id").asText()).isEqualTo(HEARING_REFERENCE_BATCH_ID);
+    assertThat(userBatch.path("batch_id").asText())
+        .isNotEqualTo(ORIGINAL_EVIDENCE_SUBMISSION_BATCH_ID);
     assertThat(userBatch.path("evidence")).hasSize(1);
     assertThat(userBatch.path("evidence").path(0).path("evidence_id").asText())
         .isEqualTo("EVIDENCE_HEARING_SUPPLEMENT_1");
@@ -174,7 +192,11 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     assertThat(userBatch.path("evidence").path(0).path("claimed_fact").asText())
         .isEqualTo("物流系统记录包裹已签收");
     assertThat(merchantBatch.path("participant_role").asText()).isEqualTo("MERCHANT");
-    assertThat(merchantBatch.path("terminal_status").asText()).isEqualTo("TIMED_OUT");
+    assertThat(merchantBatch.path("terminal_status").asText()).isEqualTo("COMPLETED");
+    assertThat(userBatch.path("source_refs").path(0).asText())
+        .isEqualTo("EVIDENCE_HEARING_SUPPLEMENT_1");
+    assertThat(merchantBatch.path("source_refs").path(0).asText())
+        .isEqualTo("EVIDENCE_HEARING_SUPPLEMENT_1");
     assertThat(merchantBatch.path("evidence")).isEmpty();
 
     MinioTargetE2eRoomCommandPayloadPublisher payloadPublisher =
@@ -230,7 +252,7 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     JsonNode invocation = publishedDocuments.getAllValues().get(0);
     JsonNode replayInvocation = publishedDocuments.getAllValues().get(2);
     assertThat(invocation.path("schema_version").asText())
-        .isEqualTo("target-e2e-hearing-invocation.v2");
+        .isEqualTo("target-e2e-hearing-invocation.v4");
     assertThat(invocation.path("shared_barrier_receipt_hash").asText())
         .isEqualTo(terminalReceipt.path("receipt_hash").asText())
         .isEqualTo(SHARED_BARRIER_RECEIPT_HASH);
@@ -251,7 +273,24 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
                             preHearingMatrix,
                             successorMatrix,
                             frozen,
-                            List.of()),
+                            List.of(terminalReceipt.toString()),
+                            ORIGINAL_EVIDENCE_SUBMISSION_BATCH_ID,
+                            0),
+                        mapper)
+                    .load(start, HearingWorkflowStage.EVIDENCE_SYNTHESIZING))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("bound supplemental Hearing evidence")
+        .hasMessageContaining("is absent or ambiguous");
+    assertThatThrownBy(
+            () ->
+                new JdbcTargetHearingAgentStageInputFactory(
+                        dataSource(
+                            mapper,
+                            preHearingMatrix,
+                            successorMatrix,
+                            frozen,
+                            List.of(),
+                            ORIGINAL_EVIDENCE_SUBMISSION_BATCH_ID),
                         mapper)
                     .load(start, HearingWorkflowStage.INTAKE_QUESTIONS_GENERATING))
         .isInstanceOf(IllegalStateException.class)
@@ -264,7 +303,8 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
                             preHearingMatrix,
                             successorMatrix,
                             frozen,
-                            List.of(terminalReceipt.toString(), terminalReceipt.toString())),
+                            List.of(terminalReceipt.toString(), terminalReceipt.toString()),
+                            ORIGINAL_EVIDENCE_SUBMISSION_BATCH_ID),
                         mapper)
                     .load(start, HearingWorkflowStage.INTAKE_QUESTIONS_GENERATING))
         .isInstanceOf(IllegalStateException.class)
@@ -279,7 +319,8 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
                             preHearingMatrix,
                             successorMatrix,
                             frozen,
-                            List.of(mismatchedReceipt.toString())),
+                            List.of(mismatchedReceipt.toString()),
+                            ORIGINAL_EVIDENCE_SUBMISSION_BATCH_ID),
                         mapper)
                     .load(start, HearingWorkflowStage.INTAKE_QUESTIONS_GENERATING))
         .isInstanceOf(IllegalStateException.class)
@@ -295,7 +336,7 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("shared barrier receipt hash");
     assertThat(publishedDocuments.getAllValues()).hasSize(4);
-    validateStrictPythonRequests(request, synthesis);
+    validateStrictPythonRequests(intakeQuestions, intakeSynthesis, request, synthesis);
   }
 
   private static EvidenceItemEntity evidence() {
@@ -321,9 +362,17 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     when(value.getAgentFindingsJson())
         .thenReturn(
             """
-            {"authenticity_score":0.95,"relevance_score":0.9,"completeness_score":0.85,
-             "assessment_confidence":0.9,"fact_links":[{"fact_id":"FACT_DELIVERY",
-             "relation":"SUPPORTS","reason":"物流签收记录与该正式事实直接关联。","confidence":0.94}]}
+            {"authenticity_score":0.95,"authenticity_score_explanation":"来源可追溯。",
+             "relevance_score":0.9,"relevance_score_explanation":"直接关联物流事实。",
+             "completeness_score":0.85,"completeness_score_explanation":"主要节点完整。",
+             "assessment_confidence":0.9,"assessment_confidence_explanation":"材料可读。",
+             "risk_level":"LOW","risk_explanation":"未见明显异常。",
+             "source_basis":["物流签收记录"],"formation_time_assessment":"时间可读。",
+             "findings":[{"finding_type":"LOGISTICS_RECORD","description":"可见签收节点"}],
+             "limitations":[],"unsupported_claims":[],"assessment_public_text":"物流记录已核验。",
+             "reason_details":[],"fact_links":[{"fact_id":"FACT_DELIVERY",
+             "relation":"CONTENT_SUPPORTS","reason":"物流签收记录与该正式事实直接关联。",
+             "source_unit_id":"SOURCE_UNIT_DELIVERY","observation_slot":"OBS_DELIVERY"}]}
             """);
     when(value.isRequiresHumanReview()).thenReturn(false);
     return value;
@@ -432,7 +481,27 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
       ObjectNode preHearingMatrix,
       ObjectNode successorMatrix,
       EvidenceDossierEntity frozen,
-      List<String> terminalReceiptRows)
+      List<String> terminalReceiptRows,
+      String originalEvidenceSubmissionBatchId)
+      throws Exception {
+    return dataSource(
+        mapper,
+        preHearingMatrix,
+        successorMatrix,
+        frozen,
+        terminalReceiptRows,
+        originalEvidenceSubmissionBatchId,
+        1);
+  }
+
+  private static DataSource dataSource(
+      ObjectMapper mapper,
+      ObjectNode preHearingMatrix,
+      ObjectNode successorMatrix,
+      EvidenceDossierEntity frozen,
+      List<String> terminalReceiptRows,
+      String originalEvidenceSubmissionBatchId,
+      int supplementalEvidenceRowCount)
       throws Exception {
     DataSource dataSource = mock(DataSource.class);
     Connection connection = mock(Connection.class);
@@ -456,7 +525,9 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
                       preHearingMatrix,
                       successorMatrix,
                       frozen,
-                      terminalReceiptRows));
+                      terminalReceiptRows,
+                      originalEvidenceSubmissionBatchId,
+                      supplementalEvidenceRowCount));
             });
     return dataSource;
   }
@@ -467,7 +538,9 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
       ObjectNode preHearingMatrix,
       ObjectNode successorMatrix,
       EvidenceDossierEntity frozen,
-      List<String> terminalReceiptRows)
+      List<String> terminalReceiptRows,
+      String originalEvidenceSubmissionBatchId,
+      int supplementalEvidenceRowCount)
       throws Exception {
     if (sql.contains("select dossier_json from case_intake_dossier")) {
       return List.of(
@@ -476,15 +549,13 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     if (sql.contains("from evidence_dossier")) {
       ObjectNode value = mapper.createObjectNode();
       JsonNode matrixSummary = mapper.readTree(frozen.getMatrixSummaryJson());
-      JsonNode frozenMatrix = matrixSummary.path("fact_evidence_matrix_v2");
+      JsonNode frozenMatrix = matrixSummary.path("fact_evidence_matrix");
       value.put("dossier_id", frozen.getId());
       value.put("dossier_version", frozen.getDossierVersion());
       value.put("dossier_status", frozen.getDossierStatus());
       value.set(
           "fact_evidence_matrix",
-          frozenMatrix.isObject()
-              ? frozenMatrix
-              : matrixSummary.path("fact_evidence_matrix"));
+          frozenMatrix);
       value.set("evidence_summary", mapper.readTree(frozen.getSummaryJson()));
       return List.of(value.toString());
     }
@@ -500,7 +571,7 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     }
     if (sql.contains("select output_json from hearing_flow_stage")) {
       ObjectNode value = mapper.createObjectNode();
-      value.putObject("proposal").set("case_fact_matrix", successorMatrix);
+      value.set("case_fact_matrix", successorMatrix);
       return List.of(value.toString());
     }
     if (sql.contains("from hearing_flow_instance")) {
@@ -512,14 +583,22 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
       value.putObject("stage_output");
       value.putObject("trial_dossier");
       var actions = value.putArray("actions");
-      actions
-          .addObject()
-          .put("action_type", "QUESTION_SET")
-          .putObject("payload")
-          .putObject("proposal")
-          .putArray("questions");
-      addPartyAction(actions.addObject(), "ANSWER_BUNDLE", "USER", "user-local");
-      addPartyAction(actions.addObject(), "ANSWER_BUNDLE", "MERCHANT", "merchant-local");
+      ObjectNode questionSet = v4QuestionSet(
+          mapper, preHearingMatrix,
+          ContractJson.sha256Hex(preludePayload(mapper, preHearingMatrix, frozen)));
+      ObjectNode questionAction = actions.addObject();
+      questionAction.put("id", questionSet.path("question_set_id").asText());
+      questionAction.put("action_type", "QUESTION_SET");
+      questionAction.put("schema_version", "hearing_question_set.v4");
+      questionAction.putNull("participant_id");
+      questionAction.putNull("participant_role");
+      questionAction.putNull("submission_status");
+      questionAction.put("content_hash", questionSet.path("question_set_hash").asText());
+      questionAction.set("payload", questionSet);
+      addV4AnswerAction(
+          mapper, actions.addObject(), "USER", "user-local", questionSet);
+      addV4AnswerAction(
+          mapper, actions.addObject(), "MERCHANT", "merchant-local", questionSet);
       actions
           .addObject()
           .put("action_type", "EVIDENCE_REQUEST_SET")
@@ -530,21 +609,35 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
       addPartyAction(userEvidence, "EVIDENCE_BATCH", "USER", "user-local");
       ObjectNode userEvidencePayload = (ObjectNode) userEvidence.path("payload");
       userEvidencePayload.put("submission_status", "SUBMITTED");
-      userEvidencePayload.put("batch_id", "BATCH_USER");
+      userEvidencePayload.put("batch_id", HEARING_REFERENCE_BATCH_ID);
       ((com.fasterxml.jackson.databind.node.ArrayNode) userEvidencePayload.path("evidence_ids"))
           .add("EVIDENCE_HEARING_SUPPLEMENT_1");
-      addPartyAction(actions.addObject(), "EVIDENCE_BATCH", "MERCHANT", "merchant-local");
+      ObjectNode merchantEvidence = actions.addObject();
+      addPartyAction(merchantEvidence, "EVIDENCE_BATCH", "MERCHANT", "merchant-local");
+      ObjectNode merchantEvidencePayload = (ObjectNode) merchantEvidence.path("payload");
+      merchantEvidencePayload.put("submission_status", "SUBMITTED");
+      merchantEvidencePayload.put("batch_id", "opaque-merchant-hearing-reference");
+      ((com.fasterxml.jackson.databind.node.ArrayNode)
+              merchantEvidencePayload.path("evidence_ids"))
+          .add("EVIDENCE_HEARING_SUPPLEMENT_1");
       return List.of(value.toString());
     }
     if (sql.contains("from evidence_item")) {
+      assertThat(originalEvidenceSubmissionBatchId)
+          .isNotEqualTo(HEARING_REFERENCE_BATCH_ID);
       assertThat(sql)
           .contains(
-              "evidence.case_id = ?",
-              "evidence.submitted_by_id = ?",
-              "evidence.submitted_by_role = ?",
-              "evidence.submission_batch_id = ?",
-              "evidence.submission_status = 'SUBMITTED'",
-              "evidence.deleted_at is null");
+              "evidence.id = ?",
+              "evidence.case_id = ?")
+          .doesNotContain(
+              "evidence.submitted_by_id",
+              "evidence.submitted_by_role",
+              "evidence.submission_batch_id",
+              "evidence.submission_status",
+              "evidence.visibility",
+              "evidence.submitted_at",
+              "evidence.deleted_at",
+              "and jsonb_typeof(evidence.metadata_json)");
       ObjectNode value = mapper.createObjectNode();
       value.put("evidence_id", "EVIDENCE_HEARING_SUPPLEMENT_1");
       value.put("evidence_type", "DELIVERY_RECORD");
@@ -555,14 +648,20 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
       value.put("parsed_text", "补充物流轨迹显示包裹已在驿站签收。");
       value.put("claimed_fact", "物流系统记录包裹已签收");
       value.putObject("metadata").put("claimed_fact", "物流系统记录包裹已签收");
-      return List.of(value.toString());
+      return java.util.Collections.nCopies(supplementalEvidenceRowCount, value.toString());
     }
     throw new IllegalArgumentException("unexpected SQL in focused contract fixture: " + sql);
   }
 
   private static void addPartyAction(
       ObjectNode action, String actionType, String role, String participantId) {
+    action.put("id", "ACTION_" + actionType + "_" + role);
     action.put("action_type", actionType);
+    action.put("schema_version", "hearing_evidence_batch.v1");
+    action.put("participant_id", participantId);
+    action.put("participant_role", role);
+    action.put("submission_status", "AUTO_TIMEOUT");
+    action.put("content_hash", "e".repeat(64));
     ObjectNode payload = action.putObject("payload");
     payload.put("participant_id", participantId);
     payload.put("participant_role", role);
@@ -572,6 +671,101 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     payload.putArray("request_ids");
     payload.put("batch_note", "");
     payload.putArray("evidence_ids");
+  }
+
+  private static void addV4AnswerAction(
+      ObjectMapper mapper,
+      ObjectNode action,
+      String role,
+      String participantId,
+      ObjectNode questionSet) {
+    String bundleId = "ANSWER_BUNDLE_" + role;
+    ObjectNode payload = mapper.createObjectNode();
+    payload.put("schema_version", "hearing_answer_bundle.v4");
+    payload.put("answer_bundle_id", bundleId);
+    payload.put("answer_bundle_hash", "0".repeat(64));
+    payload.put("question_set_id", questionSet.path("question_set_id").asText());
+    payload.put("question_set_hash", questionSet.path("question_set_hash").asText());
+    payload.put("formal_issue_catalog_hash",
+        questionSet.path("formal_issue_catalog_hash").asText());
+    payload.put("participant_id", participantId);
+    payload.put("participant_role", role);
+    payload.put("submission_status", "SUBMITTED");
+    JsonNode question = questionSet.path("questions").get(0);
+    payload.putArray("answer_units").addObject()
+        .put("answer_unit_id", "ANSWER_UNIT_" + role)
+        .put("question_id", question.path("question_id").asText())
+        .put("issue_id", question.path("issue_id").asText())
+        .put("answer_text", role + " current answer");
+    payload.putArray("source_message_ids").add("MESSAGE_" + role);
+    payload.put("answer_bundle_hash",
+        JdbcTargetHearingAgentStageInputFactory.pythonContentHash(
+            mapper, payload, "answer_bundle_hash"));
+    action.put("id", bundleId);
+    action.put("action_type", "ANSWER_BUNDLE");
+    action.put("schema_version", "hearing_answer_bundle.v4");
+    action.put("participant_id", participantId);
+    action.put("participant_role", role);
+    action.put("submission_status", "SUBMITTED");
+    action.put("content_hash", payload.path("answer_bundle_hash").asText());
+    action.set("payload", payload);
+  }
+
+  private static ObjectNode v4QuestionSet(
+      ObjectMapper mapper, ObjectNode matrix, String preludeHash) {
+    ObjectNode baseline = mapper.createObjectNode();
+    baseline.put("issue_statement", "包裹是否实际交付");
+    baseline.putArray("source_fact_ids").add("FACT_DELIVERY");
+    ObjectNode positions = baseline.putObject("effective_party_positions");
+    positions.putObject("USER")
+        .put("position_source", "M1")
+        .put("position_summary", "用户否认收到包裹。");
+    positions.putObject("MERCHANT")
+        .put("position_source", "M1")
+        .put("position_summary", "商家认为包裹已签收。");
+    baseline.putObject("alignment")
+        .put("status", "CONTESTED")
+        .putNull("agreed_statement")
+        .put("conflict_summary", "双方对实际交付存在争议。");
+    ObjectNode question = mapper.createObjectNode();
+    question.put("question_slot_id", "QUESTION_SLOT_01");
+    question.put("question_id", "QUESTION_V4_01");
+    question.put("issue_id", "ISSUE_V4_01");
+    question.put("issue_version", 1);
+    question.put("issue_state_hash", "a".repeat(64));
+    question.putArray("target_roles").add("USER").add("MERCHANT");
+    question.putArray("fact_ids").add("FACT_DELIVERY");
+    question.put("question_text", "请双方说明包裹是否实际交付。");
+    question.set("issue_baseline", baseline.deepCopy());
+    question.putObject("party_prompts")
+        .put("USER", "请说明收货情况。")
+        .put("MERCHANT", "请说明交付情况。");
+    ObjectNode catalog = mapper.createObjectNode();
+    catalog.put("schema_version", "hearing_formal_issue_catalog.v4");
+    ObjectNode issue = catalog.putArray("issues").addObject();
+    issue.put("question_slot_id", "QUESTION_SLOT_01");
+    issue.put("question_id", "QUESTION_V4_01");
+    issue.put("issue_id", "ISSUE_V4_01");
+    issue.put("issue_version", 1);
+    issue.put("issue_state_hash", question.path("issue_state_hash").asText());
+    issue.set("issue_baseline", baseline);
+    ObjectNode result = mapper.createObjectNode();
+    result.put("schema_version", "hearing_question_set.v4");
+    result.put("question_set_id", "QUESTION_SET_V4");
+    result.put("question_set_hash", "0".repeat(64));
+    result.put("formal_issue_catalog_hash",
+        JdbcTargetHearingAgentStageInputFactory.pythonContentHash(
+            mapper, catalog, "__absent_hash_field__"));
+    result.put("case_id", CASE_ID);
+    result.put("source_matrix_id", matrix.path("matrix_id").asText());
+    result.put("source_matrix_version", matrix.path("matrix_version").asInt());
+    result.put("source_matrix_hash", matrix.path("content_hash").asText());
+    result.put("prelude_authority_hash", preludeHash);
+    result.putArray("questions").add(question);
+    result.put("question_set_hash",
+        JdbcTargetHearingAgentStageInputFactory.pythonContentHash(
+            mapper, result, "question_set_hash"));
+    return result;
   }
 
   private static ObjectNode terminalReceipt(
@@ -604,26 +798,7 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
       ObjectNode preHearingMatrix,
       EvidenceDossierEntity frozen)
       throws Exception {
-    HearingRoomStart start = hearingStart();
-    ObjectNode evidenceDossier = mapper.createObjectNode();
-    JsonNode matrixSummary = mapper.readTree(frozen.getMatrixSummaryJson());
-    evidenceDossier.put("dossier_id", frozen.getId());
-    evidenceDossier.put("dossier_version", frozen.getDossierVersion());
-    evidenceDossier.put("dossier_status", frozen.getDossierStatus());
-    evidenceDossier.set(
-        "fact_evidence_matrix",
-        matrixSummary.path("fact_evidence_matrix_v2").deepCopy());
-    evidenceDossier.set("evidence_summary", mapper.readTree(frozen.getSummaryJson()));
-    ObjectNode prelude = mapper.createObjectNode();
-    prelude.put("schema_version", JdbcTargetHearingPreludeAuthority.SCHEMA_VERSION);
-    prelude.put("tenant_surrogate", start.tenantSurrogate());
-    prelude.put("case_id", start.caseId());
-    prelude.put("flow_instance_id", start.flowInstanceId());
-    prelude.put("epoch_id", start.epochId());
-    prelude.put("room_epoch", start.roomEpoch());
-    prelude.put("fencing_token", start.fencingToken());
-    prelude.set("case_fact_matrix", preHearingMatrix.deepCopy());
-    prelude.set("evidence_dossier", evidenceDossier);
+    ObjectNode prelude = preludePayload(mapper, preHearingMatrix, frozen);
     List<String> columns =
         List.of(
             prelude.toString(),
@@ -641,18 +816,56 @@ class JdbcTargetHearingAgentStageInputFactoryContractTest {
     return statement;
   }
 
+  private static ObjectNode preludePayload(
+      ObjectMapper mapper,
+      ObjectNode preHearingMatrix,
+      EvidenceDossierEntity frozen) {
+    try {
+      HearingRoomStart start = hearingStart();
+      ObjectNode evidenceDossier = mapper.createObjectNode();
+      JsonNode matrixSummary = mapper.readTree(frozen.getMatrixSummaryJson());
+      evidenceDossier.put("dossier_id", frozen.getId());
+      evidenceDossier.put("dossier_version", frozen.getDossierVersion());
+      evidenceDossier.put("dossier_status", frozen.getDossierStatus());
+      evidenceDossier.set(
+          "fact_evidence_matrix",
+          matrixSummary.path("fact_evidence_matrix").deepCopy());
+      evidenceDossier.set("evidence_summary", mapper.readTree(frozen.getSummaryJson()));
+      ObjectNode prelude = mapper.createObjectNode();
+      prelude.put("schema_version", JdbcTargetHearingPreludeAuthority.SCHEMA_VERSION);
+      prelude.put("tenant_surrogate", start.tenantSurrogate());
+      prelude.put("case_id", start.caseId());
+      prelude.put("flow_instance_id", start.flowInstanceId());
+      prelude.put("epoch_id", start.epochId());
+      prelude.put("room_epoch", start.roomEpoch());
+      prelude.put("fencing_token", start.fencingToken());
+      prelude.set("case_fact_matrix", preHearingMatrix.deepCopy());
+      prelude.set("evidence_dossier", evidenceDossier);
+      return prelude;
+    } catch (Exception failure) {
+      throw new IllegalStateException(failure);
+    }
+  }
+
   private static void validateStrictPythonRequests(
-      ObjectNode requests, ObjectNode synthesis) throws Exception {
+      ObjectNode intakeQuestions,
+      ObjectNode intakeSynthesis,
+      ObjectNode requests,
+      ObjectNode synthesis) throws Exception {
     Path pythonService = Path.of("..", "python-agent-service").toAbsolutePath().normalize();
     ProcessBuilder builder =
         new ProcessBuilder(
             "D:\\miniconda\\python.exe",
             "-c",
-            "from app.schemas.hearing_flow import HearingEvidenceRequestsRequest, HearingEvidenceSynthesisRequest; "
-                + "import os; HearingEvidenceRequestsRequest.model_validate_json(os.environ['HEARING_REQUEST_JSON']); "
+            "from app.schemas.hearing_flow import HearingIntakeQuestionsRequestV4, HearingIntakeSynthesisRequestV4, HearingEvidenceRequestsRequest, HearingEvidenceSynthesisRequest; "
+                + "import os; HearingIntakeQuestionsRequestV4.model_validate_json(os.environ['HEARING_INTAKE_QUESTIONS_JSON']); "
+                + "HearingIntakeSynthesisRequestV4.model_validate_json(os.environ['HEARING_INTAKE_SYNTHESIS_JSON']); "
+                + "HearingEvidenceRequestsRequest.model_validate_json(os.environ['HEARING_REQUEST_JSON']); "
                 + "HearingEvidenceSynthesisRequest.model_validate_json(os.environ['HEARING_SYNTHESIS_JSON'])");
     builder.directory(pythonService.toFile());
     builder.redirectErrorStream(true);
+    builder.environment().put("HEARING_INTAKE_QUESTIONS_JSON", intakeQuestions.toString());
+    builder.environment().put("HEARING_INTAKE_SYNTHESIS_JSON", intakeSynthesis.toString());
     builder.environment().put("HEARING_REQUEST_JSON", requests.toString());
     builder.environment().put("HEARING_SYNTHESIS_JSON", synthesis.toString());
     Process process = builder.start();

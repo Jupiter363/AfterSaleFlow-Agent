@@ -33,7 +33,7 @@ public record SyntheticClosedOutcomeSnapshot(
                 || snapshotHash == null
                 || !snapshotHash.matches("[0-9a-f]{64}")
                 || !"CLOSED".equals(state)
-                || epoch < 1
+                || epoch < 0
                 || revision < 0
                 || fence < 1
                 || !syntheticOnly

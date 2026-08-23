@@ -17,6 +17,7 @@ import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEnti
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,10 +26,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Clock;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -78,25 +77,6 @@ public class EvidenceDossierFreezer {
         this.intakeDossierRepository = intakeDossierRepository;
         this.objectMapper = objectMapper;
         this.clock = clock;
-    }
-
-    /** Legacy unit-construction seam; Spring production wiring always supplies matrix authority. */
-    @Deprecated(forRemoval = false)
-    public EvidenceDossierFreezer(
-            EvidenceDossierRepository dossierRepository,
-            EvidenceDossierItemRepository dossierItemRepository,
-            EvidenceItemRepository evidenceRepository,
-            EvidenceVerificationRepository verificationRepository,
-            ObjectMapper objectMapper,
-            Clock clock) {
-        this(
-                dossierRepository,
-                dossierItemRepository,
-                evidenceRepository,
-                verificationRepository,
-                null,
-                objectMapper,
-                clock);
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.targetVersion(String)」。
@@ -169,39 +149,23 @@ public class EvidenceDossierFreezer {
         List<Map<String, Object>> evidenceItems = new ArrayList<>();
         List<String> unmappedEvidence = new ArrayList<>();
         List<FrozenFactEvidenceLink> frozenLinks = new ArrayList<>();
-        Map<String, MatrixAccumulator> matrixByFact = new LinkedHashMap<>();
         Map<String, PartySummaryAccumulator> partySummary = new LinkedHashMap<>();
         partySummary.put("USER", new PartySummaryAccumulator());
         partySummary.put("MERCHANT", new PartySummaryAccumulator());
         for (IncludedEvidence item : included) {
             EvidenceItemEntity evidence = item.evidence();
-            // 四个分数各自保留业务含义，composite 只用于矩阵排序。
-            // requiresHumanReview 单独保存，不能被较高平均分抵消。
-            double authenticityScore =
-                    verificationScore(
-                            item,
-                            "authenticity_score",
-                            authenticityScore(item.status()));
-            double relevanceScore =
-                    verificationScore(item, "relevance_score", relevanceScore(evidence));
-            double completenessScore =
-                    verificationScore(
-                            item,
-                            "completeness_score",
-                            completenessScore(evidence));
-            double assessmentConfidence =
-                    verificationScore(item, "assessment_confidence", authenticityScore);
+            JsonNode assessment = agentFindings(item);
+            // v3 scores are independent model authority.  The freezer copies them
+            // verbatim and never supplies a default, normalizes, clamps or combines them.
+            double authenticityScore = verificationScore(item, "authenticity_score");
+            double relevanceScore = verificationScore(item, "relevance_score");
+            double completenessScore = verificationScore(item, "completeness_score");
+            double assessmentConfidence = verificationScore(item, "assessment_confidence");
             String claimedFact = claimedFact(evidence);
             List<FactLinkSnapshot> factLinks = factLinks(item);
             boolean structuredFactLinks = hasStructuredFactLinks(item);
             boolean requiresHumanReview =
                     item.verification() != null && item.verification().isRequiresHumanReview();
-            double compositeScore =
-                    compositeEvidenceScore(
-                            authenticityScore,
-                            relevanceScore,
-                            completenessScore,
-                            assessmentConfidence);
             Map<String, Object> timelineEntry = new LinkedHashMap<>();
             timelineEntry.put("evidence_id", evidence.getId());
             timelineEntry.put("evidence_type", evidence.getEvidenceType());
@@ -234,22 +198,47 @@ public class EvidenceDossierFreezer {
             evidenceItem.put(
                     "supports_fact_ids",
                     factLinks.stream()
-                            .filter(link -> "SUPPORTS".equals(link.relation()))
+                            .filter(link -> "CONTENT_SUPPORTS".equals(link.relation()))
                             .map(FactLinkSnapshot::factId)
                             .toList());
             evidenceItem.put(
                     "opposes_fact_ids",
                     factLinks.stream()
-                            .filter(link -> "OPPOSES".equals(link.relation()))
+                            .filter(link -> "CONTENT_CONTRADICTS".equals(link.relation()))
                             .map(FactLinkSnapshot::factId)
                             .toList());
             evidenceItem.put("authenticity_score", authenticityScore);
+            evidenceItem.put(
+                    "authenticity_score_explanation",
+                    assessment.path("authenticity_score_explanation").asText());
             evidenceItem.put("relevance_score", relevanceScore);
+            evidenceItem.put(
+                    "relevance_score_explanation",
+                    assessment.path("relevance_score_explanation").asText());
             evidenceItem.put("completeness_score", completenessScore);
+            evidenceItem.put(
+                    "completeness_score_explanation",
+                    assessment.path("completeness_score_explanation").asText());
             evidenceItem.put("assessment_confidence", assessmentConfidence);
+            evidenceItem.put(
+                    "assessment_confidence_explanation",
+                    assessment.path("assessment_confidence_explanation").asText());
+            evidenceItem.put("risk_level", assessment.path("risk_level").asText());
+            evidenceItem.put("risk_explanation", assessment.path("risk_explanation").asText());
+            evidenceItem.put("source_basis", assessment.path("source_basis").deepCopy());
+            evidenceItem.put(
+                    "formation_time_assessment",
+                    assessment.path("formation_time_assessment").asText());
+            evidenceItem.put("findings", assessment.path("findings").deepCopy());
+            evidenceItem.put("limitations", assessment.path("limitations").deepCopy());
+            evidenceItem.put(
+                    "unsupported_claims", assessment.path("unsupported_claims").deepCopy());
+            evidenceItem.put(
+                    "assessment_public_text",
+                    assessment.path("assessment_public_text").asText());
             evidenceItem.put("requires_human_review", requiresHumanReview);
+            evidenceItem.put("reason_details", assessment.path("reason_details").deepCopy());
             evidenceItem.put("verification_status", statusName(item.status()));
-            evidenceItem.put("risk_flags", riskFlags(item, evidence));
             evidenceItems.add(evidenceItem);
 
             if (structuredFactLinks) {
@@ -265,19 +254,6 @@ public class EvidenceDossierFreezer {
                                     evidence.getSubmissionBatchId(),
                                     link,
                                     requiresHumanReview));
-                    double linkScore = compositeScore * link.confidence();
-                    matrixByFact
-                            .computeIfAbsent(
-                                    link.factId(),
-                                    ignored ->
-                                            new MatrixAccumulator(
-                                                    link.factId(),
-                                                    defaultText(link.reason(), link.factId())))
-                            .add(
-                                    item,
-                                    link.relation(),
-                                    linkScore,
-                                    requiresHumanReview);
                 }
             } else {
                 // 正式版不再为缺少结构化映射的历史结果合成事实行。该材料仍保留在
@@ -291,7 +267,6 @@ public class EvidenceDossierFreezer {
                     .add(
                             evidence,
                             item.status(),
-                            compositeScore,
                             requiresHumanReview);
         }
 
@@ -304,36 +279,28 @@ public class EvidenceDossierFreezer {
                 "verification_statuses",
                 included.stream().map(item -> statusName(item.status())).toList());
         summary.put("party_evidence_summary", partyEvidenceSummary(partySummary));
-        summary.put("verified_facts", verifiedFacts(matrixByFact));
-        summary.put("contested_facts", contestedFacts(matrixByFact));
         summary.put("evidence_gaps", evidenceGaps(partySummary));
-        summary.put("authenticity_flags", authenticityFlags(included));
-        summary.put("overall_confidence_score", overallConfidenceScore(evidenceItems));
         summary.put("handoff_notes", evidenceHandoffNotes(included));
         summary.put("frozen", true);
 
         String dossierId = "DOSSIER_" + compactUuid();
         Map<String, Object> matrixSummary = new LinkedHashMap<>();
+        matrixSummary.put("schema_version", "evidence-dossier-matrix-summary.v3");
         matrixSummary.put(
                 "fact_evidence_matrix",
-                matrixByFact.values().stream().map(MatrixAccumulator::toMap).toList());
-        if (caseMatrix != null) {
-            matrixSummary.put(
-                    "fact_evidence_matrix_v2",
-                    frozenFactEvidenceMatrix(
-                            caseId,
-                            targetVersion,
-                            dossierId,
-                            caseMatrix,
-                            frozenLinks));
-        }
+                frozenFactEvidenceMatrix(
+                        caseId,
+                        targetVersion,
+                        dossierId,
+                        caseMatrix,
+                        frozenLinks));
         matrixSummary.put(
                 "unmapped_evidence",
                 unmappedEvidence);
         matrixSummary.put(
                 "handoff_notes",
                 summary.get("handoff_notes"));
-        matrixSummary.put("human_review_tasks", humanReviewTasks(included));
+        matrixSummary.put("human_review_reasons", humanReviewReasons(included));
         matrixSummary.put("internal_handoffs", internalHandoffs(included));
 
         EvidenceDossierEntity dossier =
@@ -353,6 +320,7 @@ public class EvidenceDossierFreezer {
         List<EvidenceDossierItemEntity> snapshots = new ArrayList<>();
         for (IncludedEvidence item : included) {
             EvidenceItemEntity evidence = item.evidence();
+            JsonNode assessment = agentFindings(item);
             Map<String, Object> snapshot = new LinkedHashMap<>();
             snapshot.put("evidence_type", evidence.getEvidenceType());
             snapshot.put("source_type", evidence.getSourceType());
@@ -372,30 +340,39 @@ public class EvidenceDossierFreezer {
                     "enforcement_gate",
                     evidenceMetadata(evidence).path("enforcement_gate").asText(null));
             snapshot.put("verification_status", statusName(item.status()));
+            snapshot.put("authenticity_score", verificationScore(item, "authenticity_score"));
             snapshot.put(
-                    "authenticity_score",
-                    verificationScore(
-                            item,
-                            "authenticity_score",
-                            authenticityScore(item.status())));
+                    "authenticity_score_explanation",
+                    assessment.path("authenticity_score_explanation").asText());
+            snapshot.put("relevance_score", verificationScore(item, "relevance_score"));
             snapshot.put(
-                    "relevance_score",
-                    verificationScore(
-                            item,
-                            "relevance_score",
-                            relevanceScore(evidence)));
+                    "relevance_score_explanation",
+                    assessment.path("relevance_score_explanation").asText());
+            snapshot.put("completeness_score", verificationScore(item, "completeness_score"));
             snapshot.put(
-                    "completeness_score",
-                    verificationScore(
-                            item,
-                            "completeness_score",
-                            completenessScore(evidence)));
+                    "completeness_score_explanation",
+                    assessment.path("completeness_score_explanation").asText());
             snapshot.put(
                     "assessment_confidence",
-                    verificationScore(
-                            item,
-                            "assessment_confidence",
-                            authenticityScore(item.status())));
+                    verificationScore(item, "assessment_confidence"));
+            snapshot.put(
+                    "assessment_confidence_explanation",
+                    assessment.path("assessment_confidence_explanation").asText());
+            snapshot.put("risk_level", assessment.path("risk_level").asText());
+            snapshot.put("risk_explanation", assessment.path("risk_explanation").asText());
+            snapshot.put("source_basis", assessment.path("source_basis").deepCopy());
+            snapshot.put(
+                    "formation_time_assessment",
+                    assessment.path("formation_time_assessment").asText());
+            snapshot.put("findings", assessment.path("findings").deepCopy());
+            snapshot.put("limitations", assessment.path("limitations").deepCopy());
+            snapshot.put(
+                    "unsupported_claims", assessment.path("unsupported_claims").deepCopy());
+            snapshot.put(
+                    "assessment_public_text",
+                    assessment.path("assessment_public_text").asText());
+            snapshot.put("requires_human_review", item.verification().isRequiresHumanReview());
+            snapshot.put("reason_details", assessment.path("reason_details").deepCopy());
             snapshots.add(
                     EvidenceDossierItemEntity.snapshot(
                             "DOSSIER_ITEM_" + compactUuid(),
@@ -416,7 +393,8 @@ public class EvidenceDossierFreezer {
 
     private ObjectNode authoritativeCaseFactMatrix(String caseId) {
         if (intakeDossierRepository == null) {
-            return null;
+            throw new IllegalStateException(
+                    "formal intake dossier authority is required for evidence freeze");
         }
         String dossierJson =
                 intakeDossierRepository
@@ -466,7 +444,7 @@ public class EvidenceDossierFreezer {
         ObjectNode previous = previousFactEvidenceMatrix(caseId, targetVersion);
         int matrixVersion = previous == null ? 1 : previous.path("matrix_version").asInt() + 1;
         ObjectNode matrix = objectMapper.createObjectNode();
-        matrix.put("schema_version", "fact_evidence_matrix.v2");
+        matrix.put("schema_version", "fact_evidence_matrix.v3");
         matrix.put("case_id", caseId);
         matrix.put(
                 "matrix_id",
@@ -506,16 +484,24 @@ public class EvidenceDossierFreezer {
                         "frozen evidence link references unknown formal fact_id: "
                                 + link.factId());
             }
-            if (!linkKeys.add(link.factId() + '\u0000' + frozenLink.evidenceId())) {
+            if (!linkKeys.add(
+                    link.factId()
+                            + '\u0000'
+                            + frozenLink.evidenceId()
+                            + '\u0000'
+                            + link.sourceUnitId()
+                            + '\u0000'
+                            + link.observationSlot())) {
                 throw new IllegalStateException(
-                        "frozen evidence links contain a duplicate fact/evidence pair");
+                        "frozen evidence links contain a duplicate formal binding");
             }
             ObjectNode item = links.addObject();
             item.put("fact_id", link.factId());
             item.put("evidence_id", frozenLink.evidenceId());
             item.put("relation", link.relation());
             item.put("reason", defaultText(link.reason(), link.factId()));
-            item.put("confidence", link.confidence());
+            item.put("source_unit_id", link.sourceUnitId());
+            item.put("observation_slot", link.observationSlot());
             if (frozenLink.sourceBatchId() == null
                     || frozenLink.sourceBatchId().isBlank()) {
                 item.putNull("source_batch_id");
@@ -571,7 +557,7 @@ public class EvidenceDossierFreezer {
             JsonNode candidate =
                     objectMapper
                             .readTree(dossier.getMatrixSummaryJson())
-                            .path("fact_evidence_matrix_v2");
+                            .path("fact_evidence_matrix");
             if (candidate.isMissingNode() || candidate.isNull()) {
                 return null;
             }
@@ -579,7 +565,7 @@ public class EvidenceDossierFreezer {
                 throw new IllegalStateException("previous frozen evidence matrix is not an object");
             }
             ObjectNode matrix = (ObjectNode) candidate;
-            if (!"fact_evidence_matrix.v2".equals(matrix.path("schema_version").asText())
+            if (!"fact_evidence_matrix.v3".equals(matrix.path("schema_version").asText())
                     || !caseId.equals(matrix.path("case_id").asText())
                     || !"FROZEN".equals(matrix.path("matrix_status").asText())
                     || matrix.path("matrix_id").asText("").isBlank()
@@ -599,30 +585,7 @@ public class EvidenceDossierFreezer {
     private String pythonContentHash(ObjectNode value, String hashField) {
         ObjectNode unsigned = value.deepCopy();
         unsigned.remove(hashField);
-        try {
-            byte[] canonical = objectMapper.writeValueAsBytes(sortObjectMembers(unsigned));
-            return HexFormat.of()
-                    .formatHex(MessageDigest.getInstance("SHA-256").digest(canonical));
-        } catch (Exception exception) {
-            throw new IllegalStateException("cannot hash frozen evidence matrix", exception);
-        }
-    }
-
-    private JsonNode sortObjectMembers(JsonNode value) {
-        if (value.isObject()) {
-            ObjectNode sorted = objectMapper.createObjectNode();
-            List<String> fields = new ArrayList<>();
-            value.fieldNames().forEachRemaining(fields::add);
-            fields.sort(String::compareTo);
-            fields.forEach(field -> sorted.set(field, sortObjectMembers(value.get(field))));
-            return sorted;
-        }
-        if (value.isArray()) {
-            ArrayNode sorted = objectMapper.createArrayNode();
-            value.forEach(item -> sorted.add(sortObjectMembers(item)));
-            return sorted;
-        }
-        return value.deepCopy();
+        return ContractJson.sha256Hex(unsigned);
     }
 
     private static boolean isContentHash(String value) {
@@ -647,10 +610,10 @@ public class EvidenceDossierFreezer {
     // 上游调用：「EvidenceDossierFreezer.verificationScore(IncludedEvidence,String,double)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
     // 下游影响：「EvidenceDossierFreezer.verificationScore(IncludedEvidence,String,double)」向下依次触达 「Double.isFinite」、「Math.max」、「Math.min」、「item.verification」；计算结果以「double」交给调用方。
     // 系统意义：「EvidenceDossierFreezer.verificationScore(IncludedEvidence,String,double)」负责主链路中的“核验分数”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private double verificationScore(
-            IncludedEvidence item, String fieldName, double fallback) {
+    private double verificationScore(IncludedEvidence item, String fieldName) {
         if (item.verification() == null) {
-            return fallback;
+            throw new IllegalStateException(
+                    "frozen Evidence material has no v3 model assessment");
         }
         try {
             var value =
@@ -658,15 +621,12 @@ public class EvidenceDossierFreezer {
                             .readTree(item.verification().getAgentFindingsJson())
                             .path(fieldName);
             if (!value.isNumber()) {
-                return fallback;
+                throw new IllegalStateException(
+                        "frozen Evidence v3 assessment score is absent: " + fieldName);
             }
-            double score = value.asDouble();
-            if (!Double.isFinite(score)) {
-                return fallback;
-            }
-            return Math.max(0.0, Math.min(1.0, score > 1.0 ? score / 100.0 : score));
+            return value.asDouble();
         } catch (JsonProcessingException exception) {
-            return fallback;
+            throw new IllegalStateException("frozen Evidence assessment is invalid JSON", exception);
         }
     }
 
@@ -680,7 +640,7 @@ public class EvidenceDossierFreezer {
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.factLinks(IncludedEvidence)」。
-    // 具体功能：「EvidenceDossierFreezer.factLinks(IncludedEvidence)」：优先读取 Agent 提供的结构化 fact_links，校验 fact_id/relation/score 并钳制分数；缺失时才由证据类型和解析文本生成可解释的确定性事实关联，最终返回「List<FactLinkSnapshot>」。
+    // 具体功能：「EvidenceDossierFreezer.factLinks(IncludedEvidence)」：原样投影 Evidence v3 已正式绑定的 fact_links；不执行文本匹配、关系重判或分数换算，最终返回「List<FactLinkSnapshot>」。
     // 上游调用：「EvidenceDossierFreezer.factLinks(IncludedEvidence)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
     // 下游影响：「EvidenceDossierFreezer.factLinks(IncludedEvidence)」向下依次触达 「Double.isFinite」、「Math.max」、「Math.min」、「rawLinks.isArray」；计算结果以「List<FactLinkSnapshot>」交给调用方。
     // 系统意义：「EvidenceDossierFreezer.factLinks(IncludedEvidence)」负责主链路中的“事实关联”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
@@ -693,22 +653,22 @@ public class EvidenceDossierFreezer {
         for (JsonNode rawLink : rawLinks) {
             String factId = rawLink.path("fact_id").asText("").trim();
             String relation = rawLink.path("relation").asText("").trim();
+            String sourceUnitId = rawLink.path("source_unit_id").asText("").trim();
+            String observationSlot = rawLink.path("observation_slot").asText("").trim();
             if (factId.isBlank()
-                    || !("SUPPORTS".equals(relation)
-                            || "OPPOSES".equals(relation)
-                            || "INCONCLUSIVE".equals(relation))) {
-                continue;
-            }
-            double confidence = rawLink.path("confidence").asDouble(0.0);
-            if (!Double.isFinite(confidence)) {
-                confidence = 0.0;
+                    || relation.isBlank()
+                    || sourceUnitId.isBlank()
+                    || observationSlot.isBlank()) {
+                throw new IllegalStateException(
+                        "frozen Evidence v3 fact binding identity is incomplete");
             }
             links.add(
                     new FactLinkSnapshot(
                             factId,
                             relation,
                             abbreviate(rawLink.path("reason").asText(""), 180),
-                            Math.max(0.0, Math.min(1.0, confidence))));
+                            sourceUnitId,
+                            observationSlot));
         }
         return List.copyOf(links);
     }
@@ -764,67 +724,22 @@ public class EvidenceDossierFreezer {
                 : "证据室已将正式提交材料装订为基础证明矩阵，庭审应围绕证明强度、来源链路和缺口继续核验。";
     }
 
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.humanReviewTasks(List)」。
-    // 具体功能：「EvidenceDossierFreezer.humanReviewTasks(List)」：合并各证据 Agent findings 中的人审任务并深拷贝；需要人工核验但 Agent 未给任务时补建兜底任务，避免风险静默丢失，最终返回「List<JsonNode>」。
-    // 上游调用：「EvidenceDossierFreezer.humanReviewTasks(List)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
-    // 下游影响：「EvidenceDossierFreezer.humanReviewTasks(List)」向下依次触达 「rawTasks.isArray」、「task.deepCopy」、「agentFindings」、「tasks.stream().anyMatch」；计算结果以「List<JsonNode>」交给调用方。
-    // 系统意义：「EvidenceDossierFreezer.humanReviewTasks(List)」负责主链路中的“人工审核Tasks”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+    // 汇总后端由四项分数与综合风险派生的人工复核原因；不生成审核任务、目标或指引。
     // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
-    private List<JsonNode> humanReviewTasks(List<IncludedEvidence> included) {
-        List<JsonNode> tasks = new ArrayList<>();
-        for (IncludedEvidence item : included) {
-            JsonNode rawTasks = agentFindings(item).path("human_review_tasks");
-            if (!rawTasks.isArray()) {
-                continue;
-            }
-            for (JsonNode task : rawTasks) {
-                boolean duplicate = tasks.stream().anyMatch(existing -> existing.equals(task));
-                if (!duplicate) {
-                    tasks.add(task.deepCopy());
-                }
-            }
-        }
+    private List<JsonNode> humanReviewReasons(List<IncludedEvidence> included) {
+        List<JsonNode> reasons = new ArrayList<>();
         for (IncludedEvidence item : included) {
             if (item.verification() == null || !item.verification().isRequiresHumanReview()) {
                 continue;
             }
-            String evidenceId = item.evidence().getId();
-            boolean alreadyPresent =
-                    tasks.stream()
-                            .anyMatch(
-                                    task ->
-                                            evidenceId.equals(
-                                                    task.path("evidence_id").asText(null)));
-            if (alreadyPresent) {
-                continue;
-            }
-            boolean suspectedForgery =
-                    agentFindings(item)
-                                    .path("suspected_forgery")
-                                    .asBoolean(false)
-                            || verificationHasReason(item, "SUSPECTED_FORGERY");
-            var task = objectMapper.createObjectNode();
-            task.put("evidence_id", evidenceId);
-            task.put(
-                    "task_type",
-                    suspectedForgery
-                            ? "SUSPECTED_FORGERY_REVIEW"
-                            : "EVIDENCE_MANUAL_REVIEW");
-            task.put("risk_label", suspectedForgery ? "疑似造假" : "待人工复核");
-            task.put("claimed_fact", claimedFact(item.evidence()));
-            task.put(
-                    "instruction",
-                    suspectedForgery
-                            ? "核对原始文件、形成链路、完整上下文及其与声明证明目标的关联性。模型低分不得直接认定造假或触发处罚。"
-                            : "按证据书记官记录的限制条件完成人工复核。");
-            task.put(
-                    "enforcement_gate",
-                    suspectedForgery
-                            ? "HUMAN_CONFIRMED_FORGERY_REQUIRED"
-                            : "HUMAN_REVIEW_REQUIRED");
-            tasks.add(task);
+            ObjectNode reason = objectMapper.createObjectNode();
+            reason.put("evidence_id", item.evidence().getId());
+            reason.set(
+                    "reason_details",
+                    agentFindings(item).path("reason_details").deepCopy());
+            reasons.add(reason);
         }
-        return List.copyOf(tasks);
+        return List.copyOf(reasons);
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.internalHandoffs(List)」。
@@ -844,22 +759,6 @@ public class EvidenceDossierFreezer {
             }
         }
         return List.copyOf(handoffs);
-    }
-
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.compositeEvidenceScore(double,double,double,double)」。
-    // 具体功能：「EvidenceDossierFreezer.compositeEvidenceScore(double,double,double,double)」：构建composite证据分数，最终返回「double」。
-    // 上游调用：「EvidenceDossierFreezer.compositeEvidenceScore(double,double,double,double)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
-    // 下游影响：「EvidenceDossierFreezer.compositeEvidenceScore(double,double,double,double)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「double」交给调用方。
-    // 系统意义：「EvidenceDossierFreezer.compositeEvidenceScore(double,double,double,double)」负责主链路中的“composite证据分数”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static double compositeEvidenceScore(
-            double authenticity,
-            double relevance,
-            double completeness,
-            double assessmentConfidence) {
-        return authenticity * 0.30
-                + relevance * 0.30
-                + completeness * 0.20
-                + assessmentConfidence * 0.20;
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.json(Object)」。
@@ -898,59 +797,16 @@ public class EvidenceDossierFreezer {
     // 上游调用：「EvidenceDossierFreezer.authenticityScore(EvidenceVerificationStatus)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
     // 下游影响：「EvidenceDossierFreezer.authenticityScore(EvidenceVerificationStatus)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「double」交给调用方。
     // 系统意义：「EvidenceDossierFreezer.authenticityScore(EvidenceVerificationStatus)」负责主链路中的“真实性分数”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static double authenticityScore(EvidenceVerificationStatus status) {
-        return switch (status == null ? EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW : status) {
-            case VERIFIED -> 0.90;
-            case PLAUSIBLE -> 0.76;
-            case NEEDS_HUMAN_REVIEW -> 0.55;
-            case SUSPICIOUS -> 0.35;
-            case REJECTED -> 0.0;
-        };
-    }
-
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.relevanceScore(EvidenceItemEntity)」。
     // 具体功能：「EvidenceDossierFreezer.relevanceScore(EvidenceItemEntity)」：构建相关性分数；实际协作者为 「evidence.getEvidenceType」、「evidence.getSourceType」、「evidence.getOriginalFilename」、「evidence.getParsedText」；处理的关键状态/协议值包括 「logistics」、「signed」、「delivery」、「物流」，最终返回「double」。
     // 上游调用：「EvidenceDossierFreezer.relevanceScore(EvidenceItemEntity)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
     // 下游影响：「EvidenceDossierFreezer.relevanceScore(EvidenceItemEntity)」向下依次触达 「evidence.getEvidenceType」、「evidence.getSourceType」、「evidence.getOriginalFilename」、「evidence.getParsedText」；计算结果以「double」交给调用方。
     // 系统意义：「EvidenceDossierFreezer.relevanceScore(EvidenceItemEntity)」负责主链路中的“相关性分数”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static double relevanceScore(EvidenceItemEntity evidence) {
-        String haystack =
-                (defaultText(evidence.getEvidenceType(), "")
-                                + " "
-                                + defaultText(evidence.getSourceType(), "")
-                                + " "
-                                + defaultText(evidence.getOriginalFilename(), "")
-                                + " "
-                                + defaultText(evidence.getParsedText(), ""))
-                        .toLowerCase();
-        if (containsAny(haystack, "logistics", "signed", "delivery", "物流", "签收", "快递")) {
-            return 0.88;
-        }
-        if (containsAny(haystack, "image", "photo", "video", "图片", "照片", "视频", "监控")) {
-            return 0.80;
-        }
-        return 0.68;
-    }
-
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.completenessScore(EvidenceItemEntity)」。
     // 具体功能：「EvidenceDossierFreezer.completenessScore(EvidenceItemEntity)」：完成completeness分数；实际协作者为 「Math.min」、「evidence.getParseStatus」、「evidence.getOccurredAt」、「evidence.getFileHash」，最终返回「double」。
     // 上游调用：「EvidenceDossierFreezer.completenessScore(EvidenceItemEntity)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
     // 下游影响：「EvidenceDossierFreezer.completenessScore(EvidenceItemEntity)」向下依次触达 「Math.min」、「evidence.getParseStatus」、「evidence.getOccurredAt」、「evidence.getFileHash」；计算结果以「double」交给调用方。
     // 系统意义：「EvidenceDossierFreezer.completenessScore(EvidenceItemEntity)」负责主链路中的“completeness分数”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static double completenessScore(EvidenceItemEntity evidence) {
-        double score = 0.45;
-        if (evidence.getParseStatus() == ParseStatus.SUCCEEDED) {
-            score += 0.25;
-        }
-        if (evidence.getOccurredAt() != null) {
-            score += 0.15;
-        }
-        if (evidence.getFileHash() != null && !evidence.getFileHash().isBlank()) {
-            score += 0.10;
-        }
-        return Math.min(0.95, score);
-    }
-
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」。
     // 具体功能：「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」：只读取提交方在上传声明中填写的证明目标；缺失时明确标记未声明，不再按文件类型或 OCR 文本推断事实。
     // 上游调用：「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
@@ -999,72 +855,6 @@ public class EvidenceDossierFreezer {
     // 上游调用：「EvidenceDossierFreezer.riskFlags(EvidenceVerificationStatus,EvidenceItemEntity)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
     // 下游影响：「EvidenceDossierFreezer.riskFlags(EvidenceVerificationStatus,EvidenceItemEntity)」向下依次触达 「evidence.getParseStatus」；计算结果以「List<String>」交给调用方。
     // 系统意义：「EvidenceDossierFreezer.riskFlags(EvidenceVerificationStatus,EvidenceItemEntity)」负责主链路中的“风险标记”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private List<String> riskFlags(
-            IncludedEvidence item, EvidenceItemEntity evidence) {
-        EvidenceVerificationStatus status = item.status();
-        List<String> flags = new ArrayList<>();
-        if (status == null || status == EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW) {
-            flags.add("仍需人工复核");
-        }
-        JsonNode agentRiskFlags = agentFindings(item).path("risk_flags");
-        if (agentRiskFlags.isArray()) {
-            for (JsonNode flag : agentRiskFlags) {
-                String code = flag.isTextual() ? flag.asText() : flag.path("code").asText("");
-                if (!code.isBlank() && !flags.contains(code)) {
-                    flags.add(code);
-                }
-            }
-        }
-        if ((agentFindings(item).path("suspected_forgery").asBoolean(false)
-                        || verificationHasReason(item, "SUSPECTED_FORGERY"))
-                && !flags.contains("SUSPECTED_FORGERY")) {
-            flags.add("SUSPECTED_FORGERY");
-            flags.add("证据真实性存在疑点");
-        }
-        if (evidence.getParseStatus() != ParseStatus.SUCCEEDED) {
-            flags.add("材料解析不完整");
-        }
-        return flags;
-    }
-
-    private boolean verificationHasReason(IncludedEvidence item, String reasonCode) {
-        if (item.verification() == null
-                || item.verification().getReasonsJson() == null
-                || item.verification().getReasonsJson().isBlank()) {
-            return false;
-        }
-        try {
-            JsonNode reasons = objectMapper.readTree(item.verification().getReasonsJson());
-            if (reasons.isArray()) {
-                for (JsonNode reason : reasons) {
-                    if (reasonCode.equals(reason.asText())) {
-                        return true;
-                    }
-                }
-            }
-            JsonNode riskFlags = reasons.path("risk_flags");
-            if (riskFlags.isArray()) {
-                for (JsonNode flag : riskFlags) {
-                    if (reasonCode.equals(flag.asText())
-                            || reasonCode.equals(flag.path("code").asText())) {
-                        return true;
-                    }
-                }
-            }
-            JsonNode reviewCodes = reasons.path("human_review_reason_codes");
-            if (reviewCodes.isArray()) {
-                for (JsonNode code : reviewCodes) {
-                    if (reasonCode.equals(code.asText())) {
-                        return true;
-                    }
-                }
-            }
-        } catch (JsonProcessingException ignored) {
-            return false;
-        }
-        return false;
-    }
-
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.partyEvidenceSummary(Map)」。
     // 具体功能：「EvidenceDossierFreezer.partyEvidenceSummary(Map)」：构建当事方证据Summary；实际协作者为 「summary.toMap」，最终返回「Map<String, Object>」。
     // 上游调用：「EvidenceDossierFreezer.partyEvidenceSummary(Map)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
@@ -1076,32 +866,6 @@ public class EvidenceDossierFreezer {
         Map<String, Object> result = new LinkedHashMap<>();
         partySummary.forEach((role, summary) -> result.put(role, summary.toMap()));
         return result;
-    }
-
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.verifiedFacts(Map)」。
-    // 具体功能：「EvidenceDossierFreezer.verifiedFacts(Map)」：构建已确认事实；实际协作者为 「matrixByFact.values」，最终返回「List<String>」。
-    // 上游调用：「EvidenceDossierFreezer.verifiedFacts(Map)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
-    // 下游影响：「EvidenceDossierFreezer.verifiedFacts(Map)」向下依次触达 「matrixByFact.values」；计算结果以「List<String>」交给调用方。
-    // 系统意义：「EvidenceDossierFreezer.verifiedFacts(Map)」负责主链路中的“已确认事实”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
-    private static List<String> verifiedFacts(Map<String, MatrixAccumulator> matrixByFact) {
-        return matrixByFact.values().stream()
-                .filter(MatrixAccumulator::strongEnough)
-                .map(accumulator -> accumulator.fact)
-                .toList();
-    }
-
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.contestedFacts(Map)」。
-    // 具体功能：「EvidenceDossierFreezer.contestedFacts(Map)」：构建争议中事实；实际协作者为 「matrixByFact.values」、「accumulator.strongEnough」，最终返回「List<String>」。
-    // 上游调用：「EvidenceDossierFreezer.contestedFacts(Map)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
-    // 下游影响：「EvidenceDossierFreezer.contestedFacts(Map)」向下依次触达 「matrixByFact.values」、「accumulator.strongEnough」；计算结果以「List<String>」交给调用方。
-    // 系统意义：「EvidenceDossierFreezer.contestedFacts(Map)」负责主链路中的“争议中事实”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
-    private static List<String> contestedFacts(Map<String, MatrixAccumulator> matrixByFact) {
-        return matrixByFact.values().stream()
-                .filter(accumulator -> !accumulator.strongEnough())
-                .map(accumulator -> accumulator.fact)
-                .toList();
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.evidenceGaps(Map)」。
@@ -1126,41 +890,12 @@ public class EvidenceDossierFreezer {
     // 下游影响：「EvidenceDossierFreezer.authenticityFlags(List)」向下依次触达 「item.status」、「item.evidence」、「item.evidence().getId」；计算结果以「List<String>」交给调用方。
     // 系统意义：「EvidenceDossierFreezer.authenticityFlags(List)」负责主链路中的“真实性标记”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
     // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
-    private static List<String> authenticityFlags(List<IncludedEvidence> included) {
-        return included.stream()
-                .filter(item -> item.status() == EvidenceVerificationStatus.SUSPICIOUS)
-                .map(item -> item.evidence().getId() + " 真实性存疑")
-                .toList();
-    }
-
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.overallConfidenceScore(List)」。
     // 具体功能：「EvidenceDossierFreezer.overallConfidenceScore(List)」：构建总体可信度分数；实际协作者为 「Math.round」、「average」、「evidenceItems.stream().mapToDouble」、「((Number)item.get("authenticity_score")).doubleValue」；处理的关键状态/协议值包括 「authenticity_score」、「relevance_score」、「completeness_score」、「assessment_confidence」，最终返回「int」。
     // 上游调用：「EvidenceDossierFreezer.overallConfidenceScore(List)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
     // 下游影响：「EvidenceDossierFreezer.overallConfidenceScore(List)」向下依次触达 「Math.round」、「average」、「evidenceItems.stream().mapToDouble」、「((Number)item.get("authenticity_score")).doubleValue」；计算结果以「int」交给调用方。
     // 系统意义：「EvidenceDossierFreezer.overallConfidenceScore(List)」负责主链路中的“总体可信度分数”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
     // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
-    private static int overallConfidenceScore(List<Map<String, Object>> evidenceItems) {
-        if (evidenceItems.isEmpty()) {
-            return 0;
-        }
-        double average =
-                evidenceItems.stream()
-                        .mapToDouble(
-                                item ->
-                                        ((Number) item.get("authenticity_score")).doubleValue()
-                                                * 0.30
-                                                + ((Number) item.get("relevance_score")).doubleValue()
-                                                        * 0.30
-                                                + ((Number) item.get("completeness_score")).doubleValue()
-                                                        * 0.20
-                                                + ((Number) item.get("assessment_confidence"))
-                                                                .doubleValue()
-                                                        * 0.20)
-                        .average()
-                        .orElse(0.0);
-        return (int) Math.round(average * 100);
-    }
-
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.abbreviate(String,int)」。
     // 具体功能：「EvidenceDossierFreezer.abbreviate(String,int)」：构建摘要；实际协作者为 「Math.max」、「defaultText」、「defaultText(value,"").replaceAll」；处理的关键状态/协议值包括 「\\s+」、「…」，最终返回「String」。
     // 上游调用：「EvidenceDossierFreezer.abbreviate(String,int)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」、「EvidenceDossierFreezer.factLinks」、「EvidenceDossierFreezer.claimedFact」。
@@ -1231,137 +966,17 @@ public class EvidenceDossierFreezer {
     // 边界意义：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
     // Java 语法：record 用于不可变数据载体，编译器会生成组件访问器和值语义方法。
     private record FactLinkSnapshot(
-            String factId, String relation, String reason, double confidence) {}
+            String factId,
+            String relation,
+            String reason,
+            String sourceUnitId,
+            String observationSlot) {}
 
     private record FrozenFactEvidenceLink(
             String evidenceId,
             String sourceBatchId,
             FactLinkSnapshot link,
             boolean requiresHumanReview) {}
-
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】类型「MatrixAccumulator」。
-    // 类型职责：承载矩阵Accumulator在当前业务模块中的规则与协作边界；本类型显式提供 「MatrixAccumulator」、「add」、「strongEnough」、「toMap」、「evidenceStrength」、「judgeAttention」。
-    // 协作关系：主要由 「EvidenceDossierFreezer.createFrozen」 使用。
-    // 边界意义：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
-    private static final class MatrixAccumulator {
-        private final String factId;
-        private final String fact;
-        private final List<String> supportingEvidence = new ArrayList<>();
-        private final List<String> opposingEvidence = new ArrayList<>();
-        private final List<String> inconclusiveEvidence = new ArrayList<>();
-        private double strongestSupportScore;
-        private double strongestOppositionScore;
-        private boolean requiresHumanReview;
-
-        // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.MatrixAccumulator.MatrixAccumulator(String,String)」。
-        // 具体功能：「EvidenceDossierFreezer.MatrixAccumulator.MatrixAccumulator(String,String)」：使用 「factId」(String)、「fact」(String) 初始化「MatrixAccumulator」的不可变状态或协作参数，使后续方法不必依赖半初始化对象。
-        // 上游调用：「EvidenceDossierFreezer.MatrixAccumulator.MatrixAccumulator(String,String)」的上游创建点包括 「EvidenceDossierFreezer.createFrozen」。
-        // 下游影响：「EvidenceDossierFreezer.MatrixAccumulator.MatrixAccumulator(String,String)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
-        // 系统意义：「EvidenceDossierFreezer.MatrixAccumulator.MatrixAccumulator(String,String)」负责主链路中的“矩阵Accumulator”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-        // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
-        private MatrixAccumulator(String factId, String fact) {
-            this.factId = factId;
-            this.fact = fact;
-        }
-
-        // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.MatrixAccumulator.add(IncludedEvidence,String,double,boolean)」。
-        // 具体功能：「EvidenceDossierFreezer.MatrixAccumulator.add(IncludedEvidence,String,double,boolean)」：添加矩阵Accumulator：先更新内部状态 「strongestSupportScore」、「strongestOppositionScore」；实际协作者为 「Math.max」、「item.evidence」、「item.evidence().getId」；处理的关键状态/协议值包括 「SUPPORTS」、「OPPOSES」，最终返回「void」。
-        // 上游调用：「EvidenceDossierFreezer.MatrixAccumulator.add(IncludedEvidence,String,double,boolean)」只由「MatrixAccumulator」内部流程使用，负责封装“矩阵Accumulator”这一步校验、映射或状态转换。
-        // 下游影响：「EvidenceDossierFreezer.MatrixAccumulator.add(IncludedEvidence,String,double,boolean)」向下依次触达 「Math.max」、「item.evidence」、「item.evidence().getId」。
-        // 系统意义：「EvidenceDossierFreezer.MatrixAccumulator.add(IncludedEvidence,String,double,boolean)」负责主链路中的“矩阵Accumulator”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-        private void add(
-                IncludedEvidence item,
-                String relation,
-                double score,
-                boolean requiresHumanReview) {
-            if ("SUPPORTS".equals(relation)) {
-                supportingEvidence.add(item.evidence().getId());
-                strongestSupportScore = Math.max(strongestSupportScore, score);
-            } else if ("OPPOSES".equals(relation)) {
-                opposingEvidence.add(item.evidence().getId());
-                strongestOppositionScore = Math.max(strongestOppositionScore, score);
-            } else {
-                inconclusiveEvidence.add(item.evidence().getId());
-            }
-            this.requiresHumanReview |= requiresHumanReview;
-        }
-
-        // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.MatrixAccumulator.strongEnough()」。
-        // 具体功能：「EvidenceDossierFreezer.MatrixAccumulator.strongEnough()」：判断证明力足够，最终返回「boolean」。
-        // 上游调用：「EvidenceDossierFreezer.MatrixAccumulator.strongEnough()」只由「MatrixAccumulator」内部流程使用，负责封装“证明力足够”这一步校验、映射或状态转换。
-        // 下游影响：「EvidenceDossierFreezer.MatrixAccumulator.strongEnough()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「boolean」交给调用方。
-        // 系统意义：「EvidenceDossierFreezer.MatrixAccumulator.strongEnough()」负责主链路中的“证明力足够”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-        private boolean strongEnough() {
-            return !requiresHumanReview
-                    && !supportingEvidence.isEmpty()
-                    && strongestSupportScore >= 0.75
-                    && strongestOppositionScore < 0.60;
-        }
-
-        // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.MatrixAccumulator.toMap()」。
-        // 具体功能：「EvidenceDossierFreezer.MatrixAccumulator.toMap()」：转换映射；实际协作者为 「Math.max」、「evidenceStrength」、「judgeAttention」；处理的关键状态/协议值包括 「fact_id」、「fact」、「supporting_evidence」、「opposing_evidence」，最终返回「Map<String, Object>」。
-        // 上游调用：「EvidenceDossierFreezer.MatrixAccumulator.toMap()」只由「MatrixAccumulator」内部流程使用，负责封装“映射”这一步校验、映射或状态转换。
-        // 下游影响：「EvidenceDossierFreezer.MatrixAccumulator.toMap()」向下依次触达 「Math.max」、「evidenceStrength」、「judgeAttention」；计算结果以「Map<String, Object>」交给调用方。
-        // 系统意义：「EvidenceDossierFreezer.MatrixAccumulator.toMap()」统一“映射”的跨层表示，避免不同入口产生不兼容字段；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-        private Map<String, Object> toMap() {
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("fact_id", factId);
-            row.put("fact", fact);
-            row.put("supporting_evidence", supportingEvidence);
-            row.put("opposing_evidence", opposingEvidence);
-            row.put("inconclusive_evidence", inconclusiveEvidence);
-            row.put("requires_human_review", requiresHumanReview);
-            double strongestScore = Math.max(strongestSupportScore, strongestOppositionScore);
-            row.put("evidence_strength", evidenceStrength(strongestScore));
-            row.put(
-                    "judge_attention",
-                    judgeAttention(
-                            strongestSupportScore,
-                            strongestOppositionScore,
-                            requiresHumanReview));
-            return row;
-        }
-
-        // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.MatrixAccumulator.evidenceStrength(double)」。
-        // 具体功能：「EvidenceDossierFreezer.MatrixAccumulator.evidenceStrength(double)」：构建证据证明力；处理的关键状态/协议值包括 「HIGH」、「MEDIUM」、「LOW」，最终返回「String」。
-        // 上游调用：「EvidenceDossierFreezer.MatrixAccumulator.evidenceStrength(double)」的上游调用点包括 「MatrixAccumulator.toMap」。
-        // 下游影响：「EvidenceDossierFreezer.MatrixAccumulator.evidenceStrength(double)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「String」交给调用方。
-        // 系统意义：「EvidenceDossierFreezer.MatrixAccumulator.evidenceStrength(double)」负责主链路中的“证据证明力”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-        private static String evidenceStrength(double score) {
-            if (score >= 0.85) {
-                return "HIGH";
-            }
-            if (score >= 0.60) {
-                return "MEDIUM";
-            }
-            return "LOW";
-        }
-
-        // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.MatrixAccumulator.judgeAttention(double,double,boolean)」。
-        // 具体功能：「EvidenceDossierFreezer.MatrixAccumulator.judgeAttention(double,double,boolean)」：构建法官关注提示；处理的关键状态/协议值包括 「该事实已有较强证据支撑，庭审中仍需确认来源链路和双方解释。」、「该事实已有一定证据支撑，但仍需核验证据形成时间、来源和完整性。」、「该事实证明强度偏弱，庭审中应要求当事人补充说明或接受人工复核。」，最终返回「String」。
-        // 上游调用：「EvidenceDossierFreezer.MatrixAccumulator.judgeAttention(double,double,boolean)」的上游调用点包括 「MatrixAccumulator.toMap」。
-        // 下游影响：「EvidenceDossierFreezer.MatrixAccumulator.judgeAttention(double,double,boolean)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「String」交给调用方。
-        // 系统意义：「EvidenceDossierFreezer.MatrixAccumulator.judgeAttention(double,double,boolean)」负责主链路中的“法官关注提示”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-        private static String judgeAttention(
-                double supportScore,
-                double oppositionScore,
-                boolean requiresHumanReview) {
-            if (requiresHumanReview) {
-                return "该事实关联证据仍需人工复核，庭审不得直接将模型观察写成已验证事实。";
-            }
-            if (oppositionScore >= 0.60) {
-                return "该事实同时存在较强反向证据，庭审应重点核对双方证据来源、时间与完整上下文。";
-            }
-            if (supportScore >= 0.85) {
-                return "该事实已有较强证据支撑，庭审中仍需确认来源链路和双方解释。";
-            }
-            if (supportScore >= 0.60) {
-                return "该事实已有一定证据支撑，但仍需核验证据形成时间、来源和完整性。";
-            }
-            return "该事实证明强度偏弱，庭审中应要求当事人补充说明或接受人工复核。";
-        }
-    }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】类型「PartySummaryAccumulator」。
     // 类型职责：承载当事方SummaryAccumulator在当前业务模块中的规则与协作边界；本类型显式提供 「add」、「toMap」。
@@ -1382,7 +997,6 @@ public class EvidenceDossierFreezer {
         private void add(
                 EvidenceItemEntity evidence,
                 EvidenceVerificationStatus status,
-                double compositeScore,
                 boolean requiresHumanReview) {
             total++;
             String label =
@@ -1390,7 +1004,7 @@ public class EvidenceDossierFreezer {
                             + "（"
                             + statusName(status)
                             + "）";
-            if (!requiresHumanReview && compositeScore >= 0.75) {
+            if (!requiresHumanReview && status == EvidenceVerificationStatus.PLAUSIBLE) {
                 strongPoints.add(label);
             } else {
                 weakPoints.add(label);

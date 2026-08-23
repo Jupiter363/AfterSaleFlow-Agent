@@ -791,16 +791,10 @@ function validPartyIntakeQuality(value) {
     typeof value.improvement_reason !== "string" ||
     !hasExactObjectKeys(value.score_breakdown, Object.keys(PARTY_INTAKE_SCORE_COMPONENTS))
   ) return false;
-  const score = Object.entries(PARTY_INTAKE_SCORE_COMPONENTS).reduce(
-    (sum, [component, maximum]) => {
-      const componentScore = value.score_breakdown[component];
-      return isBoundedInteger(componentScore, 0, maximum)
-        ? sum + componentScore
-        : Number.NaN;
-    },
-    0,
+  return Object.entries(PARTY_INTAKE_SCORE_COMPONENTS).every(
+    ([component, maximum]) =>
+      isBoundedInteger(value.score_breakdown[component], 0, maximum),
   );
-  return score === value.score;
 }
 
 function validPartyIntakeMissingInformation(value) {

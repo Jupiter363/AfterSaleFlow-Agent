@@ -7,6 +7,7 @@
 package com.example.dispute.outcome.application;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import java.time.OffsetDateTime;
 
 // 所属模块：【裁决结果查询 / 应用编排层】类型「FinalDecisionView」。
 // 类型职责：定义终态决定跨层传递时使用的不可变数据契约；本类型显式提供 框架生成的默认访问器。
@@ -19,4 +20,31 @@ public record FinalDecisionView(
         String reviewReason,
         String source,
         boolean humanConfirmed,
-        JsonNode approvedPlan) {}
+        JsonNode approvedPlan,
+        String approvalRecordId,
+        String decisionType,
+        String aiDecisionAction,
+        String reviewerDecisionAction,
+        OffsetDateTime decidedAt) {
+
+    public FinalDecisionView(
+            String conclusion,
+            String explanation,
+            String reviewReason,
+            String source,
+            boolean humanConfirmed,
+            JsonNode approvedPlan) {
+        this(
+                conclusion,
+                explanation,
+                reviewReason,
+                source,
+                humanConfirmed,
+                approvedPlan,
+                null,
+                null,
+                null,
+                null,
+                null);
+    }
+}

@@ -34,7 +34,7 @@ import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/** Validates every collaboration binding and freezes one immutable trial_dossier.v1. */
+/** Freezes the final matrices and bound adjudication rules as one trial_dossier.v2. */
 @Service
 public class HearingTrialDossierService {
 
@@ -78,23 +78,11 @@ public class HearingTrialDossierService {
                 flowInstanceRepository
                         .findByCaseId(caseId)
                         .orElseThrow(() -> new IllegalStateException("hearing flow instance not found"));
-        FulfillmentCaseEntity dispute = requireCase(caseId);
         ObjectNode questionSet =
                 persistedActionPayload(flow.getId(), HearingFlowActionType.QUESTION_SET, null);
         ObjectNode requestSet =
                 persistedActionPayload(
                         flow.getId(), HearingFlowActionType.EVIDENCE_REQUEST_SET, null);
-        ArrayNode answerBundles = objectMapper.createArrayNode();
-        ArrayNode evidenceBatches = objectMapper.createArrayNode();
-        for (ActorRole role : partyRoles()) {
-            String participantId = participantId(dispute, role);
-            answerBundles.add(
-                    persistedActionPayload(
-                            flow.getId(), HearingFlowActionType.ANSWER_BUNDLE, participantId));
-            evidenceBatches.add(
-                    persistedActionPayload(
-                            flow.getId(), HearingFlowActionType.EVIDENCE_BATCH, participantId));
-        }
         ArrayNode policyRules = policyRuleSnapshots();
         return freeze(
                 new FreezeTrialDossierCommand(
@@ -105,9 +93,9 @@ public class HearingTrialDossierService {
                         requireObject(evidenceSynthesis, "evidenceSynthesis")
                                 .path("fact_evidence_matrix"),
                         questionSet,
-                        answerBundles,
+                        objectMapper.createArrayNode(),
                         requestSet,
-                        evidenceBatches,
+                        objectMapper.createArrayNode(),
                         policyRules,
                         actorId));
     }
@@ -122,8 +110,7 @@ public class HearingTrialDossierService {
         if (!flow.getId().equals(command.flowInstanceId())) {
             throw new IllegalStateException("trial dossier belongs to another hearing flow");
         }
-        FulfillmentCaseEntity dispute = requireCase(command.caseId());
-        Map<ActorRole, String> participantIds = participantIds(dispute);
+        requireCase(command.caseId());
         if (flow.getCurrentStage() != HearingFlowStage.DOSSIER_FREEZING) {
             throw new IllegalStateException(
                     "trial dossier can freeze only during DOSSIER_FREEZING, current stage is "
@@ -140,7 +127,7 @@ public class HearingTrialDossierService {
         Set<String> factIds = factIds(caseMatrix);
 
         ObjectNode evidenceMatrix = requireObject(command.factEvidenceMatrix(), "factEvidenceMatrix");
-        requireSchema(evidenceMatrix, "fact_evidence_matrix.v2");
+        requireSchema(evidenceMatrix, "fact_evidence_matrix.v3");
         requireCase(evidenceMatrix, command.caseId(), "fact evidence matrix");
         requireTextEquals(
                 evidenceMatrix,
@@ -167,39 +154,20 @@ public class HearingTrialDossierService {
         validateEvidenceFactIds(evidenceMatrix, factIds);
 
         ObjectNode questionSet = requireObject(command.questionSet(), "questionSet");
-        requireSchema(questionSet, "hearing_question_set.v1");
+        String questionSchema = requiredText(questionSet, "schema_version", "question set");
+        if (!Set.of("hearing_question_set.v1", "hearing_question_set.v4")
+                .contains(questionSchema)) {
+            throw new IllegalStateException("question set schema is not supported for lineage");
+        }
         requireCase(questionSet, command.caseId(), "question set");
-        requireQuestionMatrixBinding(questionSet, caseMatrix);
         String questionSetId = requiredText(questionSet, "question_set_id", "question set");
-        Map<String, Set<ActorRole>> questionTargets = questionTargets(questionSet, factIds);
-
-        ArrayNode answerBundles = requireArray(command.answerBundles(), "answerBundles");
-        Map<ActorRole, ObjectNode> answersByRole =
-                validateAnswerBundles(
-                        answerBundles, questionSetId, questionTargets, participantIds);
 
         ObjectNode requestSet = requireObject(command.evidenceRequestSet(), "evidenceRequestSet");
         requireSchema(requestSet, "hearing_evidence_request_set.v1");
         requireMatrixBinding(requestSet, caseMatrixVersion, caseMatrixHash, "evidence request set");
         String requestSetId = requiredText(requestSet, "request_set_id", "evidence request set");
-        Map<String, Set<ActorRole>> requestTargets = requestTargets(requestSet, factIds);
-
-        ArrayNode evidenceBatches = requireArray(command.evidenceBatches(), "evidenceBatches");
-        Map<ActorRole, ObjectNode> batchesByRole =
-                validateEvidenceBatches(
-                        evidenceBatches, requestSetId, requestTargets, participantIds);
         ArrayNode policyRules = requireArray(command.policyRules(), "policyRules");
         validatePolicyRules(policyRules);
-
-        verifyPersistedActions(
-                flow,
-                questionSetId,
-                questionSet,
-                answersByRole,
-                requestSetId,
-                requestSet,
-                batchesByRole,
-                participantIds);
 
         var existing = trialDossierRepository.findByCaseId(command.caseId());
         if (existing.isPresent()) {
@@ -209,10 +177,6 @@ public class HearingTrialDossierService {
                     evidenceMatrixHash,
                     questionSetId,
                     requestSetId,
-                    questionSet,
-                    answerBundles,
-                    requestSet,
-                    evidenceBatches,
                     policyRules);
             return existing.orElseThrow();
         }
@@ -220,7 +184,7 @@ public class HearingTrialDossierService {
         String dossierId = "TRIAL_DOSSIER_" + compactUuid();
         Instant frozenAt = clock.instant();
         ObjectNode payload = objectMapper.createObjectNode();
-        payload.put("schema_version", "trial_dossier.v1");
+        payload.put("schema_version", "trial_dossier.v2");
         payload.put("trial_dossier_id", dossierId);
         payload.put("case_id", command.caseId());
         payload.put("frozen_at", frozenAt.toString());
@@ -230,13 +194,7 @@ public class HearingTrialDossierService {
         payload.put("evidence_matrix_version", evidenceMatrixVersion);
         payload.put("evidence_matrix_hash", evidenceMatrixHash);
         payload.set("fact_evidence_matrix", evidenceMatrix.deepCopy());
-        payload.put("question_set_id", questionSetId);
-        payload.set("question_set", questionSet.deepCopy());
-        payload.set("answer_bundles", answerBundles.deepCopy());
-        payload.put("request_set_id", requestSetId);
-        payload.set("evidence_request_set", requestSet.deepCopy());
-        payload.set("evidence_batches", evidenceBatches.deepCopy());
-        payload.set("policy_rules", policyRules.deepCopy());
+        payload.set("adjudication_rules", policyRules.deepCopy());
         String contentHash = sha256(canonicalJson(payload));
         payload.put("content_hash", contentHash);
 
@@ -261,8 +219,8 @@ public class HearingTrialDossierService {
     public HearingTrialDossierEntity requireFrozen(String caseId) {
         return trialDossierRepository
                 .findByCaseId(caseId)
-                .filter(item -> "trial_dossier.v1".equals(item.getSchemaVersion()))
-                .orElseThrow(() -> new IllegalStateException("trial_dossier.v1 is not frozen"));
+                .filter(item -> "trial_dossier.v2".equals(item.getSchemaVersion()))
+                .orElseThrow(() -> new IllegalStateException("trial_dossier.v2 is not frozen"));
     }
 
     private void verifyPersistedActions(
@@ -381,10 +339,6 @@ public class HearingTrialDossierService {
             String evidenceMatrixHash,
             String questionSetId,
             String requestSetId,
-            JsonNode questionSet,
-            JsonNode answerBundles,
-            JsonNode requestSet,
-            JsonNode evidenceBatches,
             JsonNode policyRules) {
         JsonNode payload = parse(existing.getPayloadJson(), "trial dossier");
         boolean same =
@@ -392,15 +346,8 @@ public class HearingTrialDossierService {
                         && evidenceMatrixHash.equals(existing.getEvidenceMatrixHash())
                         && questionSetId.equals(existing.getQuestionSetId())
                         && requestSetId.equals(existing.getRequestSetId())
-                        && canonicalJson(questionSet).equals(canonicalJson(payload.path("question_set")))
-                        && canonicalJson(answerBundles)
-                                .equals(canonicalJson(payload.path("answer_bundles")))
-                        && canonicalJson(requestSet)
-                                .equals(canonicalJson(payload.path("evidence_request_set")))
-                        && canonicalJson(evidenceBatches)
-                                .equals(canonicalJson(payload.path("evidence_batches")))
                         && canonicalJson(policyRules)
-                                .equals(canonicalJson(payload.path("policy_rules")));
+                                .equals(canonicalJson(payload.path("adjudication_rules")));
         if (!same) {
             throw new IllegalStateException("trial dossier is already frozen with different inputs");
         }

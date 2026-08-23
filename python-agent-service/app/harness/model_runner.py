@@ -69,6 +69,15 @@ class HarnessStreamDelta:
 
 
 @dataclass(frozen=True)
+class HarnessStreamReset:
+    """The prior provisional generation is invalid and must be cleared."""
+
+    kind: Literal["generation_reset"]
+    generation: int
+    reason_code: Literal["OUTPUT_SCHEMA_INVALID"]
+
+
+@dataclass(frozen=True)
 class HarnessStreamCompleted(Generic[T]):
     """同一次流式模型调用在完整 JSON 通过 Pydantic 校验后的最终结果。"""
 
@@ -76,7 +85,7 @@ class HarnessStreamCompleted(Generic[T]):
     generation: HarnessGeneration[T]
 
 
-HarnessStreamUpdate = HarnessStreamDelta | HarnessStreamCompleted[T]
+HarnessStreamUpdate = HarnessStreamDelta | HarnessStreamReset | HarnessStreamCompleted[T]
 
 
 class _HarnessPromptInput(TypedDict):
@@ -258,6 +267,7 @@ class HarnessModelRunner:
             visible_fields = observer.visible_fields_for(node_name)
             if visible_fields:
                 generation: HarnessGeneration[T] | None = None
+                provisional_output_emitted = False
                 async for update in self.ainvoke_structured_stream(
                     node_name=node_name,
                     case_data=case_data,
@@ -272,6 +282,15 @@ class HarnessModelRunner:
                 ):
                     if isinstance(update, HarnessStreamDelta):
                         observer.visible_delta(node_name, update.field, update.delta)
+                        provisional_output_emitted = True
+                    elif isinstance(update, HarnessStreamReset):
+                        if provisional_output_emitted:
+                            observer.generation_reset(
+                                node_name=node_name,
+                                generation=update.generation,
+                                reason_code=update.reason_code,
+                            )
+                        provisional_output_emitted = False
                     elif isinstance(update, HarnessStreamCompleted):
                         if generation is not None:
                             raise RuntimeError(
@@ -413,11 +432,18 @@ class HarnessModelRunner:
             config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
         ):
             for event in governed_events_from_chunk(chunk):
-                yield HarnessStreamDelta(
-                    kind="visible_delta",
-                    field=event["field"],
-                    delta=event["delta"],
-                )
+                if event["event_type"] == "generation_reset":
+                    yield HarnessStreamReset(
+                        kind="generation_reset",
+                        generation=event["generation"],
+                        reason_code=event["reason_code"],
+                    )
+                else:
+                    yield HarnessStreamDelta(
+                        kind="visible_delta",
+                        field=event["field"],
+                        delta=event["delta"],
+                    )
             if chunk.content:
                 if not isinstance(chunk.content, str) or final_document is not None:
                     raise RuntimeError(
@@ -495,11 +521,18 @@ class HarnessModelRunner:
             config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
         ):
             for event in governed_events_from_chunk(chunk):
-                yield HarnessStreamDelta(
-                    kind="visible_delta",
-                    field=event["field"],
-                    delta=event["delta"],
-                )
+                if event["event_type"] == "generation_reset":
+                    yield HarnessStreamReset(
+                        kind="generation_reset",
+                        generation=event["generation"],
+                        reason_code=event["reason_code"],
+                    )
+                else:
+                    yield HarnessStreamDelta(
+                        kind="visible_delta",
+                        field=event["field"],
+                        delta=event["delta"],
+                    )
             if chunk.content:
                 if not isinstance(chunk.content, str) or final_document is not None:
                     raise RuntimeError("governed stream must emit one final JSON document")

@@ -166,6 +166,43 @@ class AgentRunV2RecoveryTerminalEventTest {
     }
 
     @Test
+    void activityFailureAdoptsMatchingErrorOneSequenceAfterTheActivityHeartbeat() {
+        ActivityFailureHarness harness = activityFailureHarness(
+                true,
+                13,
+                Audience.SYSTEM,
+                StreamEventType.ERROR,
+                "GRAPH_GATEWAY_NOT_READY",
+                false);
+        ExecuteAgentRunResult source = activityFailureResult(
+                harness.attempt().getId(),
+                12,
+                true,
+                AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+
+        ExecuteAgentRunResult first = harness.ledger().recordAttemptFailureResult(
+                AgentRunAttemptStatus.ABORTED, source);
+        ExecuteAgentRunResult replayed = harness.ledger().recordAttemptFailureResult(
+                AgentRunAttemptStatus.ABORTED, first);
+        assertThatThrownBy(() -> harness.ledger().recordAttemptFailureResult(
+                        AgentRunAttemptStatus.ABORTED, source))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("durableFailureResultSequence");
+
+        assertThat(first.lastSequenceNo()).isEqualTo(13);
+        assertThat(replayed).isEqualTo(first);
+        assertThat(harness.attempt().getLastSequenceNo()).isEqualTo(13);
+        assertThat(harness.attempt().getAttemptStatus())
+                .isEqualTo(AgentRunAttemptStatus.ABORTED);
+        harness.attempt().requireDurableFailureResult(first);
+        verify(harness.eventRepository(), times(2))
+                .findMaxV2Sequence(harness.run().getId(), harness.attempt().getId());
+        verify(harness.recoveryEventStore(), never())
+                .appendRecoveryErrorInCurrentTransaction(any());
+        verify(harness.entityManager(), never()).flush();
+    }
+
+    @Test
     void failureResultProjectsExactParentTerminalAuthorityAndKeepsRetryableRunOpen() {
         ActivityFailureHarness terminal = activityFailureHarness(
                 false,

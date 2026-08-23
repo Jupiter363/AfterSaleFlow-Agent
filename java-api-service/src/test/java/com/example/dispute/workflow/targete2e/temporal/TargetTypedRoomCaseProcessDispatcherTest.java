@@ -3,6 +3,8 @@ package com.example.dispute.workflow.targete2e.temporal;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.example.dispute.workflow.activity.domain.ProcessProjectionActivities;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
@@ -110,6 +112,65 @@ class TargetTypedRoomCaseProcessDispatcherTest {
             Arrays.stream(TargetTypedRoomCaseProcessDispatcher.class.getDeclaredClasses())
                 .map(Class::getSimpleName))
         .contains("ReviewHandle");
+  }
+
+  @Test
+  void firstReviewEpochZeroIsAcceptedButNegativeCoordinatesRemainInvalid() {
+    ProvisionRoomEpoch first = mock(ProvisionRoomEpoch.class);
+    when(first.roomType()).thenReturn(RoomType.REVIEW);
+    when(first.roomEpoch()).thenReturn(0L);
+    assertThatCode(() -> TargetTypedRoomCaseProcessDispatcher.requireNonNegativeEpoch(first))
+        .doesNotThrowAnyException();
+
+    ProvisionRoomEpoch negative = mock(ProvisionRoomEpoch.class);
+    when(negative.roomType()).thenReturn(RoomType.REVIEW);
+    when(negative.roomEpoch()).thenReturn(-1L);
+    assertThatThrownBy(
+            () -> TargetTypedRoomCaseProcessDispatcher.requireNonNegativeEpoch(negative))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("must not be negative");
+  }
+
+  @Test
+  void terminalProgressAllowsExactRecoveryReplayButRejectsPartialOrStaleCoordinates() {
+    TargetRoomProgressReceipt exact = terminalProgress(41, 6);
+    assertThatCode(
+            () ->
+                TargetTypedRoomCaseProcessDispatcher.requireTerminalAdvanceOrExactReplay(
+                    41, 6, exact))
+        .doesNotThrowAnyException();
+
+    TargetRoomProgressReceipt forward = terminalProgress(41, 6);
+    assertThatCode(
+            () ->
+                TargetTypedRoomCaseProcessDispatcher.requireTerminalAdvanceOrExactReplay(
+                    36, 1, forward))
+        .doesNotThrowAnyException();
+
+    assertThatThrownBy(
+            () ->
+                TargetTypedRoomCaseProcessDispatcher.requireTerminalAdvanceOrExactReplay(
+                    41, 5, terminalProgress(41, 6)))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("terminal acknowledgement coordinates are invalid");
+    assertThatThrownBy(
+            () ->
+                TargetTypedRoomCaseProcessDispatcher.requireTerminalAdvanceOrExactReplay(
+                    41, 6, terminalProgress(40, 5)))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("terminal acknowledgement coordinates are invalid");
+  }
+
+  private static TargetRoomProgressReceipt terminalProgress(
+      long processRevision, long roomRevision) {
+    return new TargetRoomProgressReceipt(
+        RoomType.REVIEW,
+        0,
+        4,
+        processRevision,
+        roomRevision,
+        "target-outcome-terminal-receipt",
+        "a".repeat(64));
   }
 
   @Test
@@ -340,6 +401,10 @@ class TargetTypedRoomCaseProcessDispatcherTest {
             TargetTypedRoomCaseProcessDispatcher
                 .TARGET_EVIDENCE_RETURNED_AGENT_RUN_TERMINAL_NO_COMMIT_CHANGE_ID)
         .isEqualTo("target-evidence-returned-agent-run-terminal-no-commit-v1");
+    assertThat(
+            TargetTypedRoomCaseProcessDispatcher
+                .TARGET_EVIDENCE_TERMINAL_PROJECTION_CURSOR_CHANGE_ID)
+        .isEqualTo("target-evidence-terminal-projection-cursor-v1");
 
     EvidenceTerminalScenario returned =
         runEvidenceTerminalScenario(RecordingAgentRunWorkflow.Mode.RETURNED_FAILED);
@@ -349,7 +414,7 @@ class TargetTypedRoomCaseProcessDispatcherTest {
     assertThat(returned.snapshot().protocolErrorCode()).isNull();
     assertThat(returned.commandState()).isEqualTo(CaseCommandLedgerState.FAILED);
     assertThat(returned.convergenceCalls()).isEqualTo(1);
-    assertThat(returned.resolutionCalls()).isZero();
+    assertThat(returned.resolutionCalls()).isEqualTo(1);
     assertThat(returned.completedRoutingCalls()).isZero();
     assertThat(returned.agentRunCalls()).isEqualTo(1);
     assertThat(returned.roomFinalizationCalls()).isZero();
@@ -364,6 +429,12 @@ class TargetTypedRoomCaseProcessDispatcherTest {
                 returned.history(),
                 TargetTypedRoomCaseProcessDispatcher
                     .TARGET_EVIDENCE_RETURNED_AGENT_RUN_TERMINAL_NO_COMMIT_CHANGE_ID))
+        .isEqualTo(1);
+    assertThat(
+            versionMarkerCount(
+                returned.history(),
+                TargetTypedRoomCaseProcessDispatcher
+                    .TARGET_EVIDENCE_TERMINAL_PROJECTION_CURSOR_CHANGE_ID))
         .isEqualTo(1);
 
     EvidenceTerminalScenario childThrow =
@@ -386,6 +457,12 @@ class TargetTypedRoomCaseProcessDispatcherTest {
                 childThrow.history(),
                 TargetTypedRoomCaseProcessDispatcher
                     .TARGET_EVIDENCE_RETURNED_AGENT_RUN_TERMINAL_NO_COMMIT_CHANGE_ID))
+        .isZero();
+    assertThat(
+            versionMarkerCount(
+                childThrow.history(),
+                TargetTypedRoomCaseProcessDispatcher
+                    .TARGET_EVIDENCE_TERMINAL_PROJECTION_CURSOR_CHANGE_ID))
         .isZero();
   }
 
@@ -1610,7 +1687,7 @@ class TargetTypedRoomCaseProcessDispatcherTest {
           ExecuteAgentRunRequest.SCHEMA_VERSION,
           logicalRunId,
           1,
-          "agent-stream.v2",
+          "agent-stream.v3",
           "e".repeat(64),
           null,
           false,

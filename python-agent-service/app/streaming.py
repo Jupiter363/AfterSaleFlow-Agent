@@ -120,6 +120,15 @@ class StreamUsageEvent(StreamEventBase):
     token_usage: dict[str, int]
 
 
+class StreamGenerationResetEvent(StreamEventBase):
+    """Invalidate the current provisional model generation before retrying."""
+
+    type: Literal["generation_reset"] = "generation_reset"
+    node_name: str
+    generation: int = Field(ge=2, le=2)
+    reason_code: Literal["OUTPUT_SCHEMA_INVALID"] = "OUTPUT_SCHEMA_INVALID"
+
+
 class StreamFinalEvent(StreamEventBase):
     type: Literal["final"] = "final"
     operation: str
@@ -139,6 +148,7 @@ AgentStreamEvent = (
     StreamStartEvent
     | StreamVisibleDeltaEvent
     | StreamUsageEvent
+    | StreamGenerationResetEvent
     | StreamFinalEvent
     | StreamErrorEvent
 )
@@ -340,7 +350,13 @@ class V2DeltaCoalescer:
 
 
 VISIBLE_FIELD_VALUE_MODES = frozenset(
-    {"string_prefix", "json_value", "json_array_items", "json_frame_objects"}
+    {
+        "string_prefix",
+        "json_value",
+        "json_array_items",
+        "json_array_string_prefixes",
+        "json_frame_objects",
+    }
 )
 
 
@@ -363,11 +379,13 @@ class VisibleFieldSpec:
         "string_prefix",
         "json_value",
         "json_array_items",
+        "json_array_string_prefixes",
         "json_frame_objects",
     ] = (
         "string_prefix"
     )
     requires_completed_root_property: str | None = None
+    requires_completed_json_property: str | None = None
     max_array_items: int = STREAM_MAX_VISIBLE_ARRAY_ITEMS
     max_array_item_bytes: int = STREAM_MAX_VISIBLE_ARRAY_ITEM_BYTES
     max_array_bytes: int = STREAM_MAX_VISIBLE_ARRAY_BYTES
@@ -392,6 +410,12 @@ class _ProjectedJsonFrameObject:
     frame_sequence: int
     value_kind: Literal["unknown", "public", "internal"]
     public_text: str
+    complete: bool
+
+
+@dataclass(frozen=True)
+class _ProjectedJsonArrayString:
+    value: str
     complete: bool
 
 
@@ -698,12 +722,34 @@ VISIBLE_FIELD_REGISTRY: dict[str, dict[str, tuple[VisibleFieldSpec, ...]]] = {
     },
     "hearing_intake_questions": {
         "hearing_intake_questions": (
-            VisibleFieldSpec("public_message", "public_message"),
+            VisibleFieldSpec("lead_public_text", "lead_public_text"),
+            VisibleFieldSpec(
+                "frames",
+                "frames",
+                "json_frame_objects",
+                requires_completed_root_property="lead_public_text",
+                requires_leading_property_order=True,
+                max_array_items=5,
+                max_array_item_bytes=16 * 1024,
+                max_array_bytes=96 * 1024,
+                frame_sequence_start=2,
+            ),
         ),
     },
     "hearing_intake_synthesis": {
         "hearing_intake_synthesis": (
-            VisibleFieldSpec("public_message", "public_message"),
+            VisibleFieldSpec("lead_public_text", "lead_public_text"),
+            VisibleFieldSpec(
+                "frames",
+                "frames",
+                "json_frame_objects",
+                requires_completed_root_property="lead_public_text",
+                requires_leading_property_order=True,
+                max_array_items=10,
+                max_array_item_bytes=16 * 1024,
+                max_array_bytes=192 * 1024,
+                frame_sequence_start=2,
+            ),
         ),
     },
     "hearing_evidence_requests": {
@@ -759,7 +805,11 @@ class IncrementalVisibleJsonProjector:
     # 系统意义：没有 spec 就不会投影任何字段；已发送长度防止每次扫描累计缓冲时重复向前端发送旧文本。
     def __init__(self, specs: tuple[VisibleFieldSpec, ...]) -> None:
         for spec in specs:
-            if spec.value_mode not in {"json_array_items", "json_frame_objects"}:
+            if spec.value_mode not in {
+                "json_array_items",
+                "json_array_string_prefixes",
+                "json_frame_objects",
+            }:
                 continue
             if (
                 isinstance(spec.max_array_items, bool)
@@ -799,6 +849,16 @@ class IncrementalVisibleJsonProjector:
             for spec in specs
             if spec.value_mode == "json_frame_objects"
         }
+        self._emitted_array_string_lengths: dict[str, list[int]] = {
+            spec.field: []
+            for spec in specs
+            if spec.value_mode == "json_array_string_prefixes"
+        }
+        self._emitted_array_string_ends: dict[str, set[int]] = {
+            spec.field: set()
+            for spec in specs
+            if spec.value_mode == "json_array_string_prefixes"
+        }
 
     # 所属模块：Agent 流式协议 > JSON 可见投影 > 增量消费入口。
     # 具体功能：`feed` 在追加 content_delta 前检查完整模型文档上限，对每个精确属性扫描当前可解码字符串前缀，仅返回相对 emitted_length 新增长的 `(field, delta)`。
@@ -832,6 +892,22 @@ class IncrementalVisibleJsonProjector:
                 # 不可见；这样客户端永远先得到左侧接待官文本，再收到右侧展板更新。
                 specs = (self._root_projection_gate.leading_spec,)
         for spec in specs:
+            if spec.requires_completed_json_property is not None:
+                dependency = spec.requires_completed_json_property
+                dependency_start = _find_json_path_value_start(
+                    self._buffer, dependency
+                )
+                current_start = _find_json_path_value_start(self._buffer, spec.field)
+                if (
+                    spec.requires_leading_property_order
+                    and current_start is not None
+                    and (dependency_start is None or current_start < dependency_start)
+                ):
+                    raise AgentStreamProjectionError(
+                        "visible stream JSON dependency is out of order"
+                    )
+                if _find_complete_json_path_value(self._buffer, dependency) is None:
+                    continue
             if _json_path_has_duplicate_property(self._buffer, spec.field):
                 raise AgentStreamProjectionError(
                     "visible stream JSON path is duplicated"
@@ -901,6 +977,70 @@ class IncrementalVisibleJsonProjector:
                                 _frame_projection_event(
                                     "frame_end",
                                     frame_sequence=frame.frame_sequence,
+                                ),
+                            )
+                        )
+                continue
+            if spec.value_mode == "json_array_string_prefixes":
+                values = _find_incremental_json_array_strings(
+                    self._buffer,
+                    spec.field,
+                    max_items=spec.max_array_items,
+                    max_item_bytes=spec.max_array_item_bytes,
+                    max_array_bytes=spec.max_array_bytes,
+                )
+                emitted_lengths = self._emitted_array_string_lengths[spec.field]
+                emitted_ends = self._emitted_array_string_ends[spec.field]
+                if len(values) < len(emitted_lengths):
+                    raise AgentStreamProjectionError(
+                        "visible array-string projection regressed"
+                    )
+                for index, item in enumerate(values):
+                    frame_sequence = spec.frame_sequence_start + index
+                    if index == len(emitted_lengths):
+                        emitted_lengths.append(0)
+                        deltas.append(
+                            (
+                                spec.field,
+                                _array_string_projection_event(
+                                    "array_string_start",
+                                    array_index=index,
+                                    frame_sequence=frame_sequence,
+                                ),
+                            )
+                        )
+                    emitted_length = emitted_lengths[index]
+                    if len(item.value) < emitted_length:
+                        raise AgentStreamProjectionError(
+                            "visible array-string text regressed"
+                        )
+                    if len(item.value) > emitted_length:
+                        text_delta = item.value[emitted_length:]
+                        emitted_lengths[index] = len(item.value)
+                        deltas.append(
+                            (
+                                spec.field,
+                                _array_string_projection_event(
+                                    "array_string_delta",
+                                    array_index=index,
+                                    frame_sequence=frame_sequence,
+                                    delta=text_delta,
+                                ),
+                            )
+                        )
+                    if item.complete and index not in emitted_ends:
+                        if not item.value:
+                            raise AgentStreamProjectionError(
+                                "visible array string must be non-empty"
+                            )
+                        emitted_ends.add(index)
+                        deltas.append(
+                            (
+                                spec.field,
+                                _array_string_projection_event(
+                                    "array_string_end",
+                                    array_index=index,
+                                    frame_sequence=frame_sequence,
                                 ),
                             )
                         )
@@ -1227,6 +1367,26 @@ class AgentStreamObserver:
                 model=model,
                 latency_ms=latency_ms,
                 token_usage=token_usage,
+            )
+        )
+
+    def generation_reset(
+        self,
+        *,
+        node_name: str,
+        generation: int,
+        reason_code: Literal["OUTPUT_SCHEMA_INVALID"] = "OUTPUT_SCHEMA_INVALID",
+    ) -> None:
+        """Tell downstream consumers to discard one provisional generation."""
+
+        if generation != 2 or reason_code != "OUTPUT_SCHEMA_INVALID":
+            raise ValueError("generation reset violates the bounded retry contract")
+        self._emit(
+            StreamGenerationResetEvent(
+                **self._base_fields(),
+                node_name=node_name,
+                generation=generation,
+                reason_code=reason_code,
             )
         )
 
@@ -1682,6 +1842,87 @@ def _frame_projection_event(
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _array_string_projection_event(
+    kind: Literal["array_string_start", "array_string_delta", "array_string_end"],
+    *,
+    array_index: int,
+    frame_sequence: int,
+    delta: str | None = None,
+) -> str:
+    value: dict[str, Any] = {
+        "kind": kind,
+        "array_index": array_index,
+        "frame_sequence": frame_sequence,
+    }
+    if delta is not None:
+        value["delta"] = delta
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _find_incremental_json_array_strings(
+    document: str,
+    field: str,
+    *,
+    max_items: int,
+    max_item_bytes: int,
+    max_array_bytes: int,
+) -> tuple[_ProjectedJsonArrayString, ...]:
+    """Decode ordered string prefixes without waiting for the array closing bracket."""
+
+    start = _find_json_path_value_start(document, field)
+    if start is None:
+        return ()
+    if start >= len(document):
+        return ()
+    if document[start] != "[":
+        raise AgentStreamProjectionError("visible array-string field is not an array")
+    try:
+        observed_bytes = len(document[start:].encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise AgentStreamProjectionError(
+            "visible array-string field has invalid Unicode"
+        ) from error
+    if observed_bytes > max_array_bytes:
+        raise AgentStreamLimitExceeded("visible array-string field exceeds its limit")
+
+    cursor = _skip_whitespace(document, start + 1)
+    values: list[_ProjectedJsonArrayString] = []
+    if cursor >= len(document) or document[cursor] == "]":
+        return ()
+    while True:
+        if len(values) >= max_items:
+            raise AgentStreamLimitExceeded("visible array-string count exceeds its limit")
+        if cursor >= len(document):
+            return tuple(values)
+        if document[cursor] != '"':
+            raise AgentStreamProjectionError("visible array-string item must be a string")
+        value, value_end, complete = _decode_json_string(document, cursor)
+        try:
+            value_bytes = len(value.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise AgentStreamProjectionError(
+                "visible array string has invalid Unicode"
+            ) from error
+        if value_bytes > max_item_bytes:
+            raise AgentStreamLimitExceeded("visible array string exceeds its limit")
+        values.append(_ProjectedJsonArrayString(value=value, complete=complete))
+        if not complete:
+            return tuple(values)
+        cursor = _skip_whitespace(document, value_end)
+        if cursor >= len(document):
+            return tuple(values)
+        token = document[cursor]
+        if token == "]":
+            return tuple(values)
+        if token != ",":
+            raise AgentStreamProjectionError(
+                "visible array-string item is not comma-delimited"
+            )
+        cursor = _skip_whitespace(document, cursor + 1)
+        if cursor >= len(document):
+            return tuple(values)
+
+
 def _find_incremental_json_frame_objects(
     document: str,
     field: str,
@@ -1841,12 +2082,7 @@ def _find_incremental_json_frame_objects(
 
         token = document[value_start]
         value_end = value_start
-        internal_frame = frame_type == "HUMAN_REVIEW_TASK"
         if token == '"':
-            if internal_frame:
-                raise AgentStreamProjectionError(
-                    "internal frame object must use a null public_text"
-                )
             public_text, value_end, text_complete = _decode_json_string(
                 document,
                 value_start,
@@ -1868,28 +2104,12 @@ def _find_incremental_json_frame_objects(
                 )
                 frames.append(frame)
                 return tuple(frames)
-            if not public_text:
-                raise AgentStreamProjectionError(
-                    "public frame object must use non-empty public_text"
-                )
         elif token == "n":
-            if not internal_frame:
-                raise AgentStreamProjectionError(
-                    "public frame object must use non-empty public_text"
-                )
-            remaining = document[value_start:]
-            if len(remaining) < 4:
-                if not "null".startswith(remaining):
-                    raise AgentStreamProjectionError(
-                        "visible frame public_text is invalid"
-                    )
-                frames.append(frame)
-                return tuple(frames)
-            if not remaining.startswith("null"):
+            available = document[value_start : min(len(document), value_start + 4)]
+            if not "null".startswith(available):
                 raise AgentStreamProjectionError(
                     "visible frame public_text is invalid"
                 )
-            value_end = value_start + 4
             frame = _ProjectedJsonFrameObject(
                 header=header,
                 canonical_header=canonical_header,
@@ -1898,9 +2118,13 @@ def _find_incremental_json_frame_objects(
                 public_text="",
                 complete=False,
             )
+            if len(available) < 4:
+                frames.append(frame)
+                return tuple(frames)
+            value_end = value_start + 4
         else:
             raise AgentStreamProjectionError(
-                "visible frame public_text must be a string or null"
+                "visible frame public_text must be a string"
             )
 
         object_end = _skip_whitespace(document, value_end)

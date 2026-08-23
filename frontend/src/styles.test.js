@@ -12,4 +12,12 @@ describe("global responsive width", () => {
     expect(source).not.toMatch(/html\s*\{[^}]*min-width:\s*320px/);
     expect(source).not.toMatch(/body\s*\{[^}]*min-width:\s*320px/);
   });
+
+  it("uses one light scrollbar treatment across the frontend", () => {
+    const source = readFileSync("src/styles.css", "utf8");
+    expect(source).toContain("--app-scrollbar-size: 8px");
+    expect(source).toContain("--app-scrollbar-thumb: #cbd8e8");
+    expect(source).toMatch(/\*::\-webkit\-scrollbar\s*\{/);
+    expect(source).toMatch(/scrollbar-color:\s*var\(--app-scrollbar-thumb\)/);
+  });
 });

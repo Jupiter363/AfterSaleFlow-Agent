@@ -24,87 +24,50 @@ class JdbcTargetReviewNonExecutionActivitiesTest {
   private static final Instant NOW = Instant.parse("2026-07-30T03:00:00Z");
 
   @Test
-  void acceptsExactlyTheThreeNonExecutableHumanDecisions() {
-    for (OutcomeWireTypes.ReviewDecision decision :
-        List.of(
-            OutcomeWireTypes.ReviewDecision.REJECT,
-            OutcomeWireTypes.ReviewDecision.REQUEST_MORE_EVIDENCE,
-            OutcomeWireTypes.ReviewDecision.ESCALATE_MANUAL)) {
-      OutcomeReviewDecisionReceipt receipt = decision(decision);
-      assertThatCode(
-              () ->
-                  JdbcTargetReviewNonExecutionActivities.requireRequest(
-                      start(), receipt, command(receipt)))
-          .doesNotThrowAnyException();
-    }
-  }
+  void acceptsOnlyManualEscalationAsTheNonExecutionDecision() {
+    OutcomeReviewDecisionReceipt receipt =
+        decision(OutcomeWireTypes.ReviewDecision.ESCALATE_MANUAL);
 
-  @Test
-  void rejectsExecutableDecisionBeforeAnyDatabaseWrite() {
-    OutcomeReviewDecisionReceipt receipt = decision(OutcomeWireTypes.ReviewDecision.APPROVE);
-
-    assertThatThrownBy(
+    assertThatCode(
             () ->
                 JdbcTargetReviewNonExecutionActivities.requireRequest(
                     start(), receipt, command(receipt)))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("inconsistent");
+        .doesNotThrowAnyException();
   }
 
   @Test
-  void requestMoreEvidenceReceiptKeepsTheSourceReviewProgressNonTerminal() {
-    String receiptHash = hash("disposition");
-    DispositionReceipt receipt =
-        disposition(
-            OutcomeWireTypes.ReviewDecision.REQUEST_MORE_EVIDENCE,
-            new EvidenceTransition(
-                "epoch-evidence-2",
-                "room-evidence",
-                2,
-                18,
-                8,
-                0,
-                "room-workflow:CASE_1:EVIDENCE:2",
-                NOW.plusSeconds(7200)));
-
-    CompletionResult result = new CompletionResult(receipt, receiptHash);
-
-    assertThat(result.terminalCaseProcess()).isFalse();
-    assertThat(result.sourceProgressReceipt().roomType()).isEqualTo(RoomType.REVIEW);
-    assertThat(result.sourceProgressReceipt().processRevision()).isEqualTo(8);
-    assertThat(result.sourceProgressReceipt().roomRevision()).isEqualTo(4);
-    assertThat(result.sourceProgressReceipt().javaReceiptHash()).isEqualTo(receiptHash);
-    assertThat(JdbcTargetReviewNonExecutionActivities.validEvidenceTransition(receipt)).isTrue();
-  }
-
-  @Test
-  void requestMoreEvidenceRejectsAReceiptBoundToTheCaseWorkflowInsteadOfTheRoomWorkflow() {
-    DispositionReceipt receipt =
-        disposition(
-            OutcomeWireTypes.ReviewDecision.REQUEST_MORE_EVIDENCE,
-            new EvidenceTransition(
-                "epoch-evidence-2",
-                "room-evidence",
-                2,
-                18,
-                8,
-                0,
-                "case:tenant-1:CASE_1",
-                NOW.plusSeconds(7200)));
-
-    assertThat(JdbcTargetReviewNonExecutionActivities.validEvidenceTransition(receipt)).isFalse();
-  }
-
-  @Test
-  void rejectAndManualEscalationAreTerminalWithoutEvidenceCoordinates() {
+  void rejectsRemovedAndExecutableDecisionsBeforeAnyDatabaseWrite() {
     for (OutcomeWireTypes.ReviewDecision decision :
         List.of(
             OutcomeWireTypes.ReviewDecision.REJECT,
-            OutcomeWireTypes.ReviewDecision.ESCALATE_MANUAL)) {
-      CompletionResult result = new CompletionResult(disposition(decision, null), hash(decision.name()));
-      assertThat(result.terminalCaseProcess()).isTrue();
-      assertThat(result.receipt().evidenceTransition()).isNull();
+            OutcomeWireTypes.ReviewDecision.REQUEST_MORE_EVIDENCE,
+            OutcomeWireTypes.ReviewDecision.APPROVE)) {
+      OutcomeReviewDecisionReceipt receipt = decision(decision);
+      assertThatThrownBy(
+              () ->
+                  JdbcTargetReviewNonExecutionActivities.requireRequest(
+                      start(), receipt, command(receipt)))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("inconsistent");
     }
+  }
+
+  @Test
+  void manualEscalationIsTerminalAndRejectsEvidenceCoordinates() {
+    CompletionResult result = new CompletionResult(
+        disposition(OutcomeWireTypes.ReviewDecision.ESCALATE_MANUAL, null),
+        hash("ESCALATE_MANUAL"));
+    assertThat(result.terminalCaseProcess()).isTrue();
+    assertThat(result.receipt().evidenceTransition()).isNull();
+    assertThat(result.sourceProgressReceipt().roomType()).isEqualTo(RoomType.REVIEW);
+
+    EvidenceTransition forbidden = new EvidenceTransition(
+        "epoch-evidence-2", "room-evidence", 2, 18, 8, 0,
+        "room-workflow:CASE_1:EVIDENCE:2", NOW.plusSeconds(7200));
+    assertThatThrownBy(() -> disposition(
+            OutcomeWireTypes.ReviewDecision.ESCALATE_MANUAL, forbidden))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("branch is invalid");
   }
 
   @Test
@@ -112,7 +75,12 @@ class JdbcTargetReviewNonExecutionActivitiesTest {
     assertThat(JdbcTargetReviewNonExecutionActivities.AUTHORITY_SQL)
         .contains("'ACTIVE', 'DRAIN_ONLY', 'DRAINED', 'REVOKED_TERMINAL'")
         .contains("activation.expires_at > clock_timestamp()")
-        .contains("as accepts_new_write");
+        .contains("as accepts_new_write")
+        .contains("approval.decision_type = 'ESCALATE_MANUAL'")
+        .contains("approval.reviewer_decision_action = 'ESCALATE_MANUAL'")
+        .doesNotContain(
+            "approval.decision_type in ('REJECT', 'REQUEST_MORE_EVIDENCE'",
+            "material.material_canonical_json::jsonb #>> '{request,command,request_hash}'");
     assertThat(JdbcTargetReviewNonExecutionActivities.resultUri(hash("receipt")))
         .isEqualTo(JdbcTargetReviewNonExecutionActivities.RESULT_URI_PREFIX + hash("receipt"));
   }
@@ -152,7 +120,7 @@ class JdbcTargetReviewNonExecutionActivitiesTest {
         "DECISION_1",
         hash("decision"),
         decision,
-        4,
+        0,
         17,
         8,
         4,
@@ -175,7 +143,7 @@ class JdbcTargetReviewNonExecutionActivitiesTest {
         "review-packet:PACKET_1:operations",
         hash("operations"),
         1,
-        4,
+        0,
         2,
         17,
         NOW.minusSeconds(60),
@@ -221,7 +189,7 @@ class JdbcTargetReviewNonExecutionActivitiesTest {
         hash("request"),
         hash("idempotency"),
         "policy.v1",
-        4,
+        0,
         2,
         3,
         17,
@@ -239,7 +207,7 @@ class JdbcTargetReviewNonExecutionActivitiesTest {
         9,
         CommandType.REVIEW_DECISION,
         RoomType.REVIEW,
-        4,
+        0,
         new ActorRef("reviewer-1", ActorRole.PLATFORM_REVIEWER, List.of("review:decide")),
         new PayloadRef(
             "target-e2e-review-human-decision-event.v1",

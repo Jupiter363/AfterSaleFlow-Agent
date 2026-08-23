@@ -178,6 +178,40 @@ class HearingProjectionQueryServiceTest {
     }
 
     @Test
+    void projectsTheCompletedM2AndIssueStateAuthoritiesWithoutLegacyAliases() throws Exception {
+        stubBaseline(HearingFlowStage.EVIDENCE_REQUESTS_GENERATING, 7, List.of());
+        HearingFlowStageEntity synthesis = mock(HearingFlowStageEntity.class);
+        when(synthesis.getStageStatus()).thenReturn(HearingFlowStageStatus.COMPLETED);
+        var output = objectMapper.createObjectNode();
+        output.put("schema_version", "hearing_intake_synthesis.v5");
+        output.putObject("case_fact_matrix")
+                .put("schema_version", "case_fact_matrix.v2")
+                .put("matrix_id", "MATRIX_M2")
+                .put("content_hash", "a".repeat(64));
+        output.putObject("issue_state_set")
+                .put("schema_version", "hearing_issue_state_set.v4")
+                .put("issue_state_set_id", "ISSUE_STATE_M2")
+                .put("content_hash", "b".repeat(64));
+        when(synthesis.getOutputJson()).thenReturn(objectMapper.writeValueAsString(output));
+        when(stageRepository.findByFlowInstanceIdAndStageCode(
+                        FLOW_ID, HearingFlowStage.INTAKE_SYNTHESIZING))
+                .thenReturn(Optional.of(synthesis));
+
+        HearingFlowView view =
+                service.get(CASE_ID, new AuthenticatedActor("user-1", ActorRole.USER));
+
+        assertThat(view.projectionSchemaVersion()).isEqualTo("hearing-flow-projection.v4");
+        assertThat(view.caseFactMatrix())
+                .isEqualTo(new HearingFlowView.Reference(
+                        "MATRIX_M2", "case_fact_matrix.v2", "a".repeat(64)));
+        assertThat(view.issueStateSet())
+                .isEqualTo(new HearingFlowView.Reference(
+                        "ISSUE_STATE_M2", "hearing_issue_state_set.v4", "b".repeat(64)));
+        assertThat(objectMapper.writeValueAsString(view)).doesNotContain("issue_set");
+        assertNoWritesOrWriteLocks();
+    }
+
+    @Test
     void rejectsAnUnauthorizedActorBeforeReadingAnyHearingProjection() {
         FulfillmentCaseEntity dispute = caseFixture();
         when(caseRepository.findById(CASE_ID)).thenReturn(Optional.of(dispute));

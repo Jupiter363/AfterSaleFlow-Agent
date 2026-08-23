@@ -161,7 +161,7 @@ public final class OutcomeClosureEvaluationProtocolGate {
                     || snapshotHash == null
                     || !snapshotHash.matches("[0-9a-f]{64}")
                     || closedAt == null
-                    || epoch < 1
+                    || epoch < 0
                     || revision < 0
                     || fence < 1
                     || closureReceiptId == null

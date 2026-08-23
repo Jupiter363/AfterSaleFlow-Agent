@@ -11,9 +11,11 @@ from typing import Any
 from app.contracts.v1.codec import canonical_sha256
 from app.graph_runtime.errors import GraphContractError
 from app.harness.context_pack import build_context_pack
+from app.harness.evidence_asset_loader import validated_evidence_asset_manifest
 from app.harness.evidence_room_context_v2 import (
     AssembledEvidenceRoomContextV2,
     assemble_evidence_room_context_v2,
+    finalize_evidence_room_sources_v2,
 )
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.model_runner import HarnessStreamCompleted, HarnessStreamDelta
@@ -22,6 +24,7 @@ from app.streaming import current_stream_observer
 from app.agents.evidence_clerk.v2_contracts import (
     CommittedEvidenceFrameV2,
     EvidenceFrameObjectV2,
+    EvidenceMaterialReviewNoObservationStreamV2,
     EvidenceMaterialReviewStreamV2,
     EvidenceRoomOpeningStreamV2,
     EvidenceTextFollowupStreamV2,
@@ -29,7 +32,10 @@ from app.agents.evidence_clerk.v2_contracts import (
     EvidenceTurnStreamV2,
     leading_evidence_frame_header_v2,
 )
-from app.agents.evidence_clerk.v2_policy import EvidenceV2PublicOutputPolicy
+from app.agents.evidence_clerk.v2_policy import (
+    EvidenceV2PublicOutputPolicy,
+    bind_assessment_observation_slots,
+)
 
 
 @dataclass(frozen=True)
@@ -41,7 +47,7 @@ class EvidenceV2Generation:
 class EvidenceTurnWorkflowV2:
     """Generate one frame stream; no semantic rewrite or second model call."""
 
-    protocol_version = "evidence-turn-result.v2"
+    protocol_version = "evidence-turn-result.v3"
 
     def __init__(self, *, model_runner: Any, asset_loader: Any | None = None) -> None:
         self._model_runner = model_runner
@@ -59,8 +65,17 @@ class EvidenceTurnWorkflowV2:
         mode = assembled.payload["turn_contract"]["turn_mode"]
         if mode == "REENTRY_REPLAY":
             raise GraphContractError("EVIDENCE_V2_REENTRY_REQUIRES_DURABLE_REPLAY")
+        loaded_assets = None
+        asset_manifest = None
+        if self._asset_loader is not None:
+            loaded_assets = await _load_assets(self._asset_loader, assembled)
+            asset_manifest = validated_evidence_asset_manifest(loaded_assets)
+        assembled = finalize_evidence_room_sources_v2(assembled, asset_manifest)
         output_type = _authority_bound_output_type(
-            _output_type_for_mode(mode),
+            _output_type_for_mode(
+                mode,
+                allow_observation=bool(assembled.source_units),
+            ),
             assembled,
         )
         context_pack = build_context_pack(
@@ -70,9 +85,6 @@ class EvidenceTurnWorkflowV2:
         agent_context = AgentInvocationContext.model_validate(
             request.agent_context.model_dump(mode="python")
         )
-        loaded_assets = None
-        if self._asset_loader is not None:
-            loaded_assets = await _load_assets(self._asset_loader, assembled)
         observer = current_stream_observer()
         if observer is not None:
             policy = observer.public_output_policy
@@ -105,7 +117,9 @@ class EvidenceTurnWorkflowV2:
         stream = EvidenceTurnStreamV2.model_validate(
             generation.value.model_dump(mode="json")
         )
-        _validate_v2_frames(stream, assembled)
+        stream = _bind_v2_transport_sequences(stream)
+        _validate_v2_authority(stream, assembled)
+        stream = _bind_v2_assessment_observation_slots(stream, assembled)
         return _materialize_result(stream, assembled, request)
 
 
@@ -140,11 +154,19 @@ async def _load_assets(loader: Any, assembled: AssembledEvidenceRoomContextV2) -
     return await asyncio.to_thread(loader.load, assembled.base.raw_envelope)
 
 
-def _output_type_for_mode(mode: str) -> type[EvidenceTurnStreamV2]:
+def _output_type_for_mode(
+    mode: str,
+    *,
+    allow_observation: bool = True,
+) -> type[EvidenceTurnStreamV2]:
     if mode == "ROOM_OPENING":
         return EvidenceRoomOpeningStreamV2
     if mode == "MATERIAL_REVIEW":
-        return EvidenceMaterialReviewStreamV2
+        return (
+            EvidenceMaterialReviewStreamV2
+            if allow_observation
+            else EvidenceMaterialReviewNoObservationStreamV2
+        )
     if mode == "TEXT_FOLLOWUP":
         return EvidenceTextFollowupStreamV2
     raise GraphContractError("EVIDENCE_V2_TURN_MODE_INVALID")
@@ -174,9 +196,13 @@ def _authority_bound_output_type(
     required_fact_arrays = {
         "ROOM_OPENING": ("focus_fact_ids", "target_fact_ids", "remaining_core_fact_ids"),
         "MATERIAL_REVIEW": (
-            "candidate_fact_ids",
-            "target_fact_ids",
-            "remaining_core_fact_ids",
+            (
+                "candidate_fact_ids",
+                "target_fact_ids",
+                "remaining_core_fact_ids",
+            )
+            if source_unit_ids
+            else ("target_fact_ids", "remaining_core_fact_ids")
         ),
         "TEXT_FOLLOWUP": ("target_fact_ids", "remaining_core_fact_ids"),
     }.get(mode)
@@ -200,20 +226,21 @@ def _authority_bound_output_type(
             array_items=False,
         ) < 1:
             raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
-        if _bind_schema_enum(
-            schema,
-            "fact_id",
-            fact_ids,
-            array_items=False,
-        ) < 1:
-            raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
-        if source_unit_ids and _bind_schema_enum(
-            schema,
-            "source_unit_id",
-            source_unit_ids,
-            array_items=False,
-        ) < 1:
-            raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
+        if source_unit_ids:
+            if _bind_schema_enum(
+                schema,
+                "fact_id",
+                fact_ids,
+                array_items=False,
+            ) < 1:
+                raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
+            if _bind_schema_enum(
+                schema,
+                "source_unit_id",
+                source_unit_ids,
+                array_items=False,
+            ) < 1:
+                raise GraphContractError("EVIDENCE_V2_PROVIDER_SCHEMA_BINDING_INVALID")
 
     _strip_schema_titles(schema)
 
@@ -289,126 +316,103 @@ def _strip_schema_titles(value: Any) -> None:
             _strip_schema_titles(nested)
 
 
-def _validate_v2_frames(
+def _validate_v2_authority(
     stream: EvidenceTurnStreamV2,
     assembled: AssembledEvidenceRoomContextV2,
 ) -> None:
-    mode = assembled.payload["turn_contract"]["turn_mode"]
+    """Enforce only immutable ID, attachment and actor authority.
+
+    Frame order, cardinality, budgets and semantic quality belong to the
+    provider Scheme/prompt contract.  This post-provider boundary must not
+    reinterpret or repair model output.
+    """
+
     attachment_ids = tuple(assembled.base.raw_envelope.current_event.attachment_refs)
-    leading_header = leading_evidence_frame_header_v2(
-        mode,
-        attachment_ids=attachment_ids,
-    )
-    headers = [leading_header, *(frame.header for frame in stream.frames)]
-    types = [header.frame_type for header in headers]
-    if not headers:
-        raise GraphContractError("EVIDENCE_V2_FRAME_STREAM_EMPTY")
-    allowed = set(assembled.payload["turn_contract"]["allowed_frame_types"])
-    if any(frame_type not in allowed for frame_type in types):
-        raise GraphContractError("EVIDENCE_V2_FRAME_TYPE_NOT_ALLOWED")
-    if headers[-1].frame_type != "ROOM_READINESS":
-        raise GraphContractError("EVIDENCE_V2_READINESS_NOT_LAST")
     fact_ids = {item["fact_id"] for item in assembled.base.working_set.allowed_fact_targets}
     source_units = {item["source_unit_id"]: item for item in assembled.source_units}
     attachment_set = set(attachment_ids)
-    if len(attachment_set) != len(attachment_ids):
-        raise GraphContractError("EVIDENCE_V2_ATTACHMENT_SCOPE_DUPLICATED")
+    actor_role = str(assembled.payload["authority_scope"]["actor_role"])
+    current_batch = {
+        str(item["evidence_id"]): item
+        for item in assembled.payload["current_evidence_batch"]
+    }
+    if attachment_set != set(current_batch):
+        raise GraphContractError("EVIDENCE_V2_ATTACHMENT_SCOPE_INVALID")
+    if any(str(item.get("submitted_by_role")) != actor_role for item in current_batch.values()):
+        raise GraphContractError("EVIDENCE_V2_ATTACHMENT_ROLE_AUTHORITY_INVALID")
 
-    if mode == "ROOM_OPENING":
-        request_count = types.count("EVIDENCE_REQUEST")
-        if (
-            len(types) != request_count + 3
-            or types[0] != "ROOM_WELCOME"
-            or types[1] != "OPENING_ORIENTATION"
-            or request_count not in {2, 3}
-            or types[-1] != "ROOM_READINESS"
-            or any(frame_type != "EVIDENCE_REQUEST" for frame_type in types[2:-1])
-        ):
-            raise GraphContractError("EVIDENCE_V2_OPENING_FRAME_ORDER_INVALID")
-        if any(fact_id not in fact_ids for fact_id in headers[1].focus_fact_ids):
-            raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
-    elif mode == "MATERIAL_REVIEW":
-        if types[0] != "MATERIAL_RECEIPT":
-            raise GraphContractError("EVIDENCE_V2_MATERIAL_RECEIPT_REQUIRED")
-        assessment_headers = [
-            header for header in headers if header.frame_type == "EVIDENCE_ASSESSMENT"
-        ]
-        if tuple(headers[0].evidence_ids) != attachment_ids:
-            raise GraphContractError("EVIDENCE_V2_MATERIAL_RECEIPT_SCOPE_INVALID")
-        if any(fact_id not in fact_ids for fact_id in headers[0].focus_fact_ids):
-            raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
-        if [header.evidence_id for header in assessment_headers] != list(attachment_ids):
-            raise GraphContractError("EVIDENCE_V2_ASSESSMENT_CARDINALITY_INVALID")
-        if len(assessment_headers) != len(attachment_ids):
-            raise GraphContractError("EVIDENCE_V2_ASSESSMENT_CARDINALITY_INVALID")
-        first_assessment = types.index("EVIDENCE_ASSESSMENT")
-        assessment_end = first_assessment + len(attachment_ids)
-        if types[first_assessment:assessment_end] != [
-            "EVIDENCE_ASSESSMENT"
-        ] * len(attachment_ids):
-            raise GraphContractError("EVIDENCE_V2_MATERIAL_FRAME_ORDER_INVALID")
-        if any(frame_type != "EVIDENCE_OBSERVATION" for frame_type in types[1:first_assessment]):
-            raise GraphContractError("EVIDENCE_V2_MATERIAL_FRAME_ORDER_INVALID")
-        tail = types[assessment_end:-1]
-        seen_review = False
-        for frame_type in tail:
-            if frame_type == "HUMAN_REVIEW_TASK":
-                seen_review = True
-            elif frame_type == "EVIDENCE_REQUEST" and seen_review:
-                raise GraphContractError("EVIDENCE_V2_MATERIAL_FRAME_ORDER_INVALID")
-            elif frame_type != "EVIDENCE_REQUEST":
-                raise GraphContractError("EVIDENCE_V2_MATERIAL_FRAME_ORDER_INVALID")
-    elif mode == "TEXT_FOLLOWUP":
-        if types[0] != "TEXT_FOLLOWUP_REPLY":
-            raise GraphContractError("EVIDENCE_V2_TEXT_REPLY_REQUIRED")
-        if any(
-            frame_type in {"EVIDENCE_OBSERVATION", "EVIDENCE_ASSESSMENT", "HUMAN_REVIEW_TASK"}
-            for frame_type in types
-        ):
-            raise GraphContractError("EVIDENCE_V2_TEXT_MODE_CONTAINS_MATERIAL_FRAME")
-
-    observation_slots: set[str] = set()
-    observation_evidence: dict[str, str] = {}
-    assessment_slots: set[tuple[str, str]] = set()
-    request_slots: set[str] = set()
+    headers = [frame.header for frame in stream.frames]
     for header in headers:
+        if header.frame_type == "OPENING_ORIENTATION":
+            if any(fact_id not in fact_ids for fact_id in header.focus_fact_ids):
+                raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
         if header.frame_type == "EVIDENCE_OBSERVATION":
-            if header.observation_slot in observation_slots:
-                raise GraphContractError("EVIDENCE_V2_OBSERVATION_SLOT_DUPLICATED")
-            observation_slots.add(str(header.observation_slot))
-            source = source_units.get(str(header.source_unit_id))
-            if source is None or source["evidence_id"] not in attachment_set:
+            source_id = str(header.source_unit_id or "")
+            source = source_units.get(source_id) if source_id else None
+            if source_id and (source is None or source["evidence_id"] not in attachment_set):
                 raise GraphContractError("EVIDENCE_V2_SOURCE_UNIT_OUT_OF_SCOPE")
-            observation_evidence[str(header.observation_slot)] = source["evidence_id"]
-            if any(binding.fact_id not in fact_ids for binding in header.fact_bindings):
+            if any(
+                binding.fact_id is not None and binding.fact_id not in fact_ids
+                for binding in header.fact_bindings
+            ):
                 raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
             if any(fact_id not in fact_ids for fact_id in header.candidate_fact_ids):
                 raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
         elif header.frame_type == "EVIDENCE_ASSESSMENT":
-            if header.evidence_id not in attachment_set:
+            if header.evidence_id is not None and header.evidence_id not in attachment_set:
                 raise GraphContractError("EVIDENCE_V2_ASSESSMENT_OUT_OF_SCOPE")
-            for slot in header.observation_slots:
-                if slot not in observation_slots:
-                    raise GraphContractError("EVIDENCE_V2_ASSESSMENT_SLOT_UNKNOWN")
-                if observation_evidence.get(slot) != header.evidence_id:
-                    raise GraphContractError("EVIDENCE_V2_ASSESSMENT_SLOT_OUT_OF_SCOPE")
-                pair = (str(header.evidence_id), str(slot))
-                if pair in assessment_slots:
-                    raise GraphContractError("EVIDENCE_V2_ASSESSMENT_SLOT_DUPLICATED")
-                assessment_slots.add(pair)
         elif header.frame_type == "EVIDENCE_REQUEST":
-            if header.request_slot in request_slots:
-                raise GraphContractError("EVIDENCE_V2_REQUEST_SLOT_DUPLICATED")
-            request_slots.add(str(header.request_slot))
             if any(fact_id not in fact_ids for fact_id in header.target_fact_ids):
                 raise GraphContractError("EVIDENCE_V2_REQUEST_FACT_OUT_OF_SCOPE")
-        elif header.frame_type == "HUMAN_REVIEW_TASK":
-            if header.evidence_id not in attachment_set:
-                raise GraphContractError("EVIDENCE_V2_REVIEW_TASK_OUT_OF_SCOPE")
-    if mode == "MATERIAL_REVIEW" and {
-        slot for _, slot in assessment_slots
-    } != observation_slots:
-        raise GraphContractError("EVIDENCE_V2_ASSESSMENT_SLOT_COVERAGE_INVALID")
+        elif header.frame_type == "ROOM_READINESS":
+            if any(fact_id not in fact_ids for fact_id in header.remaining_core_fact_ids):
+                raise GraphContractError("EVIDENCE_V2_FACT_ID_OUT_OF_SCOPE")
+
+
+def _bind_v2_transport_sequences(stream: EvidenceTurnStreamV2) -> EvidenceTurnStreamV2:
+    """Replace model sequence guesses with deterministic transport order."""
+
+    frames = []
+    for sequence, frame in enumerate(stream.frames, start=2):
+        frames.append(
+            frame.model_copy(
+                update={
+                    "header": frame.header.model_copy(
+                        update={"frame_sequence": sequence}
+                    )
+                }
+            )
+        )
+    return stream.model_copy(update={"frames": frames})
+
+
+def _bind_v2_assessment_observation_slots(
+    stream: EvidenceTurnStreamV2,
+    assembled: AssembledEvidenceRoomContextV2,
+) -> EvidenceTurnStreamV2:
+    """Project immutable source-unit ownership into assessment transport bindings."""
+
+    source_units = {
+        str(item["source_unit_id"]): str(item["evidence_id"])
+        for item in assembled.source_units
+    }
+    observation_evidence: list[tuple[str, str]] = []
+    frames = []
+    for frame in stream.frames:
+        header = frame.header
+        if header.frame_type == "EVIDENCE_OBSERVATION":
+            source_id = str(header.source_unit_id or "")
+            slot = str(header.observation_slot or "")
+            evidence_id = source_units.get(source_id)
+            if slot and evidence_id is not None:
+                observation_evidence.append((slot, evidence_id))
+        elif header.frame_type == "EVIDENCE_ASSESSMENT":
+            header = bind_assessment_observation_slots(
+                header,
+                observation_evidence,
+            )
+        frames.append(frame.model_copy(update={"header": header}))
+    return stream.model_copy(update={"frames": frames})
 
 
 def _materialize_result(
@@ -422,7 +426,6 @@ def _materialize_result(
     observations: list[dict[str, Any]] = []
     assessments: list[dict[str, Any]] = []
     requests: list[dict[str, Any]] = []
-    review_tasks: list[dict[str, Any]] = []
     readiness: dict[str, Any] = {}
     mode = assembled.payload["turn_contract"]["turn_mode"]
     leading_frame = EvidenceFrameObjectV2(
@@ -469,7 +472,7 @@ def _materialize_result(
                 frame_sha256=canonical_sha256(frame_document),
             )
         )
-        if text is not None:
+        if text:
             public_parts.append(text)
         if header.frame_type == "EVIDENCE_OBSERVATION":
             observations.append(header_doc)
@@ -477,8 +480,6 @@ def _materialize_result(
             assessments.append(header_doc)
         elif header.frame_type == "EVIDENCE_REQUEST":
             requests.append(header_doc)
-        elif header.frame_type == "HUMAN_REVIEW_TASK":
-            review_tasks.append(header_doc)
         elif header.frame_type == "ROOM_READINESS":
             readiness = header_doc
     manifest = [item.model_dump(mode="json") for item in committed]
@@ -491,7 +492,6 @@ def _materialize_result(
         observation_graph=observations,
         evidence_assessments=assessments,
         evidence_requests=requests,
-        human_review_tasks=review_tasks,
         room_readiness=readiness,
     )
 

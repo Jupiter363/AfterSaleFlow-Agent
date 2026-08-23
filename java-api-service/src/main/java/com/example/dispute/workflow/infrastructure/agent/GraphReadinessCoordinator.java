@@ -18,7 +18,7 @@ public final class GraphReadinessCoordinator implements AutoCloseable {
     private static final Duration MINIMUM_INTERVAL = Duration.ofSeconds(5);
     private static final Duration MAXIMUM_INTERVAL = Duration.ofSeconds(25);
     private static final Duration MINIMUM_PROBE_TIMEOUT = Duration.ofMillis(100);
-    private static final Duration MAXIMUM_PROBE_TIMEOUT = Duration.ofSeconds(5);
+    private static final Duration MAXIMUM_PROBE_TIMEOUT = Duration.ofSeconds(15);
     private static final Duration MAXIMUM_RECONCILIATION_WAIT_SLICE = Duration.ofMillis(100);
     private static final AtomicInteger THREAD_SEQUENCE = new AtomicInteger();
 
@@ -542,7 +542,7 @@ public final class GraphReadinessCoordinator implements AutoCloseable {
                     || probeTimeout.compareTo(MAXIMUM_PROBE_TIMEOUT) > 0
                     || probeTimeout.compareTo(interval) >= 0) {
                 throw new IllegalArgumentException(
-                        "Graph readiness timeout must be between 100ms and 5s and less than interval");
+                        "Graph readiness timeout must be between 100ms and 15s and less than interval");
             }
             if (!"SHADOW".equals(expectedMode)
                     && !"TARGET_E2E_CANDIDATE".equals(expectedMode)) {

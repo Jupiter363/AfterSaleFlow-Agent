@@ -23,8 +23,48 @@ public record HearingProjectionSnapshot(
         String latestDraftId,
         JsonNode questionSet,
         JsonNode evidenceRequestSet,
+        HearingFlowView.Reference caseFactMatrix,
+        HearingFlowView.Reference issueStateSet,
         HearingFlowView.Reference trialDossier,
+        JsonNode juryReviewReport,
         Map<String, HearingFlowView.Reference> decisionChain) {
+
+    public HearingProjectionSnapshot(
+            String flowSchemaVersion,
+            HearingFlowStage stageCode,
+            long stageSequence,
+            String stageStatus,
+            String flowStatus,
+            Instant stageDeadlineAt,
+            Instant sharedDeadlineAt,
+            Map<String, String> partyStatuses,
+            List<HearingFlowView.ParticipantStatus> participantStatuses,
+            boolean reviewGateReady,
+            String latestDraftId,
+            JsonNode questionSet,
+            JsonNode evidenceRequestSet,
+            HearingFlowView.Reference trialDossier,
+            Map<String, HearingFlowView.Reference> decisionChain) {
+        this(
+                flowSchemaVersion,
+                stageCode,
+                stageSequence,
+                stageStatus,
+                flowStatus,
+                stageDeadlineAt,
+                sharedDeadlineAt,
+                partyStatuses,
+                participantStatuses,
+                reviewGateReady,
+                latestDraftId,
+                questionSet,
+                evidenceRequestSet,
+                null,
+                null,
+                trialDossier,
+                null,
+                decisionChain);
+    }
 
     public HearingProjectionSnapshot {
         if (flowSchemaVersion == null || flowSchemaVersion.isBlank()) {
@@ -45,6 +85,7 @@ public record HearingProjectionSnapshot(
                 participantStatuses == null ? List.of() : List.copyOf(participantStatuses);
         questionSet = copy(questionSet);
         evidenceRequestSet = copy(evidenceRequestSet);
+        juryReviewReport = copy(juryReviewReport);
         decisionChain = decisionChain == null ? Map.of() : Map.copyOf(decisionChain);
     }
 
@@ -56,6 +97,11 @@ public record HearingProjectionSnapshot(
     @Override
     public JsonNode evidenceRequestSet() {
         return copy(evidenceRequestSet);
+    }
+
+    @Override
+    public JsonNode juryReviewReport() {
+        return copy(juryReviewReport);
     }
 
     private static JsonNode copy(JsonNode value) {

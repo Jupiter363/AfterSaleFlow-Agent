@@ -216,6 +216,7 @@ public class HearingFlowActionEntity extends AbstractEntity {
     public String getPayloadJson() { return payloadJson; }
     public String getContentHash() { return contentHash; }
     public String getAgentRunId() { return agentRunId; }
+    public Instant getCreatedAt() { return createdAt; }
 
     private static String requiredHash(String value) {
         String hash = required(value, "contentHash");

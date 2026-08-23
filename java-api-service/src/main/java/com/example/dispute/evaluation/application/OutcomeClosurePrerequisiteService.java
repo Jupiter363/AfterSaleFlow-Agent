@@ -110,7 +110,7 @@ public final class OutcomeClosurePrerequisiteService {
                     || !operationId.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
                     || kind == null
                     || status == null
-                    || epoch < 1
+                    || epoch < 0
                     || revision < 0
                     || fence < 1
                     || requestHash == null
@@ -130,7 +130,7 @@ public final class OutcomeClosurePrerequisiteService {
             Map<String, String> requiredCompensationRequestHashes,
             List<Observation> observations) {
         public Request {
-            if (epoch < 1 || revision < 0 || fence < 1) {
+            if (epoch < 0 || revision < 0 || fence < 1) {
                 throw new IllegalArgumentException("invalid closure revision or fence");
             }
             requiredOperationRequestHashes = copyHashes(requiredOperationRequestHashes);

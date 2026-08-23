@@ -146,6 +146,80 @@ class CaseProcessLedgerActivitiesImplTest {
     }
 
     @Test
+    void evidenceTerminalSourceTreatsWorkflowTimelineAsObservedUpperBound() {
+        CaseCommandRef command = evidenceOpeningCommand();
+        long expectedRoomRevision = 6L;
+        long projectionLastCaseEventSequence = 18L;
+        String caseWorkflowId =
+                CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID);
+        String roomWorkflowId =
+                CaseProcessWorkflowProtocol.roomWorkflowId(
+                        CASE_ID, RoomType.EVIDENCE, command.roomEpoch());
+
+        CaseRoomEpochEntity epoch = mock(CaseRoomEpochEntity.class);
+        when(epoch.getTenantSurrogate()).thenReturn(TENANT);
+        when(epoch.getCaseId()).thenReturn(CASE_ID);
+        when(epoch.getRoomType()).thenReturn(RoomType.EVIDENCE);
+        when(epoch.getRoomEpoch()).thenReturn(command.roomEpoch());
+        when(epoch.getWriterMode()).thenReturn(WriterMode.TEMPORAL);
+        when(epoch.getLifecycleStatus()).thenReturn(EpochLifecycleStatus.ACTIVE);
+        when(epoch.getProvisioningStatus()).thenReturn(EpochProvisioningStatus.READY);
+        when(epoch.getFencingToken()).thenReturn(11L);
+        when(epoch.getProcessRevision()).thenReturn(command.expectedProcessRevision());
+        when(epoch.getRoomRevision()).thenReturn(expectedRoomRevision);
+        when(epoch.getTemporalWorkflowId()).thenReturn(caseWorkflowId);
+        when(epoch.getTemporalRunId()).thenReturn("case-run-evidence-upper-bound");
+        when(epoch.getTemporalBuildId()).thenReturn("case-build-evidence-upper-bound");
+        when(epoch.getRoomTemporalWorkflowId()).thenReturn(roomWorkflowId);
+        when(epoch.getRoomTemporalRunId()).thenReturn("room-run-evidence-upper-bound");
+
+        CaseProcessProjectionEntity projection = mock(CaseProcessProjectionEntity.class);
+        when(projection.getCaseId()).thenReturn(CASE_ID);
+        when(projection.getTenantSurrogate()).thenReturn(TENANT);
+        when(projection.getWriterMode()).thenReturn(WriterMode.TEMPORAL);
+        when(projection.getWriterActivationStatus()).thenReturn(WriterActivationStatus.READY);
+        when(projection.getRoomEpoch()).thenReturn(command.roomEpoch());
+        when(projection.getFencingToken()).thenReturn(11L);
+        when(projection.getProcessRevision()).thenReturn(command.expectedProcessRevision());
+        when(projection.getTemporalWorkflowId()).thenReturn(caseWorkflowId);
+        when(projection.getTemporalRunId()).thenReturn("case-run-evidence-upper-bound");
+        when(projection.getTemporalBuildId()).thenReturn("case-build-evidence-upper-bound");
+        when(projection.getLastCommandSequence())
+                .thenReturn(command.caseCommandSequence() - 1L);
+        when(projection.getLastCaseEventSequence())
+                .thenReturn(projectionLastCaseEventSequence);
+
+        assertThat(
+                        CaseProcessLedgerActivitiesImpl
+                                .requireTargetEvidenceObservedSourceCoordinates(
+                                        epoch,
+                                        projection,
+                                        command,
+                                        expectedRoomRevision,
+                                        projectionLastCaseEventSequence + 3L))
+                .isEqualTo(projectionLastCaseEventSequence);
+        assertThat(
+                        CaseProcessLedgerActivitiesImpl
+                                .requireTargetEvidenceObservedSourceCoordinates(
+                                        epoch,
+                                        projection,
+                                        command,
+                                        expectedRoomRevision,
+                                        projectionLastCaseEventSequence))
+                .isEqualTo(projectionLastCaseEventSequence);
+        assertApplicationFailureType(
+                () ->
+                        CaseProcessLedgerActivitiesImpl
+                                .requireTargetEvidenceObservedSourceCoordinates(
+                                        epoch,
+                                        projection,
+                                        command,
+                                        expectedRoomRevision,
+                                        projectionLastCaseEventSequence - 1L),
+                "TARGET_EVIDENCE_TERMINAL_NO_COMMIT_SOURCE_STALE");
+    }
+
+    @Test
     void absentTargetAuthorityBeansAllowWiringAndRoutingButRecoveryFailsClosed() {
         CaseCommandRepository commandRepository = mock(CaseCommandRepository.class);
         CaseCommandEntity command = mock(CaseCommandEntity.class);

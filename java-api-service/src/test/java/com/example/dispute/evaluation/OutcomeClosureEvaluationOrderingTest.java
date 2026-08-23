@@ -64,7 +64,7 @@ class OutcomeClosureEvaluationOrderingTest {
                         new OutcomeClosurePrerequisiteService());
         Request request =
                 new Request(
-                        3,
+                        0,
                         5,
                         7,
                         Map.of("operation.1", "a".repeat(64)),
@@ -75,7 +75,7 @@ class OutcomeClosureEvaluationOrderingTest {
                                         Kind.OPERATION,
                                         Status.AMBIGUOUS,
                                         true,
-                                        3,
+                                        0,
                                         5,
                                         7,
                                         "a".repeat(64),
@@ -84,6 +84,16 @@ class OutcomeClosureEvaluationOrderingTest {
         assertThatThrownBy(() -> service.evaluateAfterClosure(request, snapshot(Map.of())))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("UNRESOLVED_AMBIGUOUS");
+    }
+
+    @Test
+    void firstZeroEpochIsAcceptedButNegativeOutcomeCoordinatesAreRejected() {
+        assertThat(successfulRequest().epoch()).isZero();
+        assertThat(snapshot(Map.of()).epoch()).isZero();
+
+        assertThatThrownBy(
+                        () -> new Request(-1, 0, 1, Map.of(), Map.of(), List.of()))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -255,7 +265,7 @@ class OutcomeClosureEvaluationOrderingTest {
 
     private static Request successfulRequest() {
         return new Request(
-                3,
+                0,
                 5,
                 7,
                 Map.of("operation.1", "a".repeat(64)),
@@ -266,7 +276,7 @@ class OutcomeClosureEvaluationOrderingTest {
                                 Kind.OPERATION,
                                 Status.SUCCEEDED,
                                 true,
-                                3,
+                                0,
                                 5,
                                 7,
                                 "a".repeat(64),
@@ -276,7 +286,7 @@ class OutcomeClosureEvaluationOrderingTest {
     private static SyntheticClosedOutcomeSnapshot snapshot(Map<String, String> projection) {
         return SyntheticClosedOutcomeSnapshot.create(
                 "synthetic/snapshot/P7E1",
-                3,
+                0,
                 5,
                 7,
                 Instant.parse("2026-07-24T05:00:00Z"),
@@ -288,7 +298,7 @@ class OutcomeClosureEvaluationOrderingTest {
                 "OUTCOME_CLOSURE_PROJECTION",
                 "OUTCOME_FIXTURE_TENANT",
                 "OUTCOME_CLOSURE_FIXTURE",
-                3,
+                0,
                 7,
                 4,
                 5);
@@ -324,7 +334,7 @@ class OutcomeClosureEvaluationOrderingTest {
                 0,
                 0,
                 Instant.parse("2026-07-24T05:00:00Z"),
-                3,
+                0,
                 5,
                 6,
                 7,

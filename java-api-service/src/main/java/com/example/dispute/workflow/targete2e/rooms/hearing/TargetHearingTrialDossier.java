@@ -3,12 +3,11 @@ package com.example.dispute.workflow.targete2e.rooms.hearing;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
 import java.util.Objects;
 
-/** Builds the exact Python {@code TrialDossierV1} wire shape from locked formal parents. */
+/** Builds the exact Python {@code TrialDossierV2} wire shape from locked formal parents. */
 final class TargetHearingTrialDossier {
   private TargetHearingTrialDossier() {}
 
@@ -30,30 +29,22 @@ final class TargetHearingTrialDossier {
         && caseHash.equals(text(evidenceMatrix, "case_fact_matrix_hash")), "matrix parent binding");
     String questionId = text(questionSet, "question_set_id");
     String requestId = text(requestSet, "request_set_id");
-    JsonNode questionParent = caseMatrix.path("parent_ref");
-    require("hearing_question_set.v1".equals(text(questionSet, "schema_version"))
-        && caseId.equals(text(questionSet, "case_id")) && questionParent.isObject()
-        && positiveInt(questionParent, "matrix_version") + 1 == caseVersion
-        && questionSet.path("case_matrix_version").asInt(-1)
-            == positiveInt(questionParent, "matrix_version")
-        && text(questionParent, "content_hash").equals(text(questionSet, "case_matrix_hash")),
-        "question set binding");
+    require(("hearing_question_set.v4".equals(text(questionSet, "schema_version"))
+            || "hearing_question_set.v1".equals(text(questionSet, "schema_version")))
+        && caseId.equals(text(questionSet, "case_id")), "question set lineage");
     require("hearing_evidence_request_set.v1".equals(text(requestSet, "schema_version"))
         && requestSet.path("case_matrix_version").asInt(-1) == caseVersion
         && caseHash.equals(text(requestSet, "case_matrix_hash")), "request set binding");
     require(answers.isArray() && answers.size() == 2 && evidenceBatches.isArray()
         && evidenceBatches.size() == 2 && policyRules.isArray() && !policyRules.isEmpty(), "dossier parents");
     ObjectNode value = mapper.createObjectNode();
-    value.put("schema_version", "trial_dossier.v1"); value.put("trial_dossier_id", dossierId);
+    value.put("schema_version", "trial_dossier.v2"); value.put("trial_dossier_id", dossierId);
     value.put("case_id", caseId); value.put("frozen_at", frozenAt.toString());
     value.put("case_matrix_version", caseVersion); value.put("case_matrix_hash", caseHash);
     value.set("case_fact_matrix", caseMatrix.deepCopy());
     value.put("evidence_matrix_version", evidenceVersion); value.put("evidence_matrix_hash", evidenceHash);
     value.set("fact_evidence_matrix", evidenceMatrix.deepCopy());
-    value.put("question_set_id", questionId); value.set("question_set", questionSet.deepCopy());
-    value.set("answer_bundles", answers.deepCopy()); value.put("request_set_id", requestId);
-    value.set("evidence_request_set", requestSet.deepCopy());
-    value.set("evidence_batches", evidenceBatches.deepCopy()); value.set("policy_rules", policyRules.deepCopy());
+    value.set("adjudication_rules", policyRules.deepCopy());
     String hash = JdbcTargetHearingAgentStageInputFactory.pythonContentHash(
         mapper, value, "content_hash");
     value.put("content_hash", hash);

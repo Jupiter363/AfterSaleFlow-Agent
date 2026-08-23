@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
+import hashlib
+import json
 import re
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import Lock
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
 
@@ -53,6 +59,12 @@ from app.graphs.hearing.state import (
     HearingScopeBindingV1,
     new_hearing_graph_state,
     request_hash,
+)
+from app.streaming import (
+    STREAM_MAX_VISIBLE_OUTPUT_CHARS,
+    AgentStreamObserver,
+    StreamVisibleDeltaEvent,
+    bind_stream_observer,
 )
 
 
@@ -707,6 +719,384 @@ class _HearingTargetE2EExecutionPlan:
     bundle: HearingTargetE2ERuntimeBundle
 
 
+class _HearingV5ObserverBridge:
+    """Bounded thread-safe handoff from native Provider deltas to Target stream."""
+
+    def __init__(self) -> None:
+        self._pending: deque[StreamVisibleDeltaEvent] = deque()
+        self._available = asyncio.Event()
+        self._loop = asyncio.get_running_loop()
+        self._lock = Lock()
+        self._observer: AgentStreamObserver | None = None
+        self._pending_chars = 0
+        self._completed = False
+        self._wake_scheduled = False
+
+    def bind(self, observer: AgentStreamObserver) -> None:
+        if self._observer is not None:
+            raise HearingGraphContractError("HEARING_TARGET_V5_OBSERVER_DUPLICATED")
+        self._observer = observer
+
+    def publish(self, event: Any) -> None:
+        if not isinstance(event, StreamVisibleDeltaEvent):
+            return
+        with self._lock:
+            next_pending_chars = self._pending_chars + len(event.delta)
+            if next_pending_chars > STREAM_MAX_VISIBLE_OUTPUT_CHARS:
+                raise HearingGraphContractError(
+                    "HEARING_TARGET_V5_STREAM_BACKPRESSURE_EXCEEDED"
+                )
+            self._pending.append(event)
+            self._pending_chars = next_pending_chars
+            should_wake = not self._wake_scheduled
+            self._wake_scheduled = True
+        if should_wake:
+            self._wake_consumer()
+
+    async def next_event(self) -> StreamVisibleDeltaEvent | None:
+        while True:
+            with self._lock:
+                if self._pending:
+                    event = self._pending.popleft()
+                    self._pending_chars -= len(event.delta)
+                    return event
+                if self._completed:
+                    return None
+                self._wake_scheduled = False
+                self._available.clear()
+            await self._available.wait()
+
+    def finish(self) -> None:
+        with self._lock:
+            self._completed = True
+            should_wake = not self._wake_scheduled
+            self._wake_scheduled = True
+        if should_wake:
+            self._wake_consumer()
+
+    def cancel(self) -> None:
+        if self._observer is not None:
+            self._observer.cancel()
+
+    def _wake_consumer(self) -> None:
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self._loop:
+            self._available.set()
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._available.set)
+        except RuntimeError as error:
+            raise HearingGraphContractError(
+                "HEARING_TARGET_V5_STREAM_LOOP_CLOSED"
+            ) from error
+
+
+class _HearingV5FrameStream:
+    """Translate self-contained V5 public frames into agent-stream.v3 events."""
+
+    def __init__(self, execution: GatewayExecution, operation: HearingOperation) -> None:
+        self.command = execution.admission.command
+        self.operation = operation
+        self.graph_node = operation.value
+        self.model_node = HEARING_TARGET_E2E_OPERATION_BINDINGS[operation].model_nodes[-1]
+        self.frame_ids: dict[int, str] = {}
+        self.headers: dict[int, dict[str, Any]] = {}
+        self.texts: dict[int, str] = {}
+        self.delta_indexes: dict[int, int] = {}
+        self.committed: set[int] = set()
+
+    def accept(self, candidate: Any) -> tuple[tuple[str, AgentStreamPayload], ...]:
+        events = _governed_hearing_events(
+            candidate,
+            graph_node=self.graph_node,
+            model_node=self.model_node,
+        )
+        projected: list[tuple[str, AgentStreamPayload]] = []
+        for event in events:
+            projected.extend(self._accept_projector_event(event))
+        return tuple(projected)
+
+    def accept_visible(
+        self, event: StreamVisibleDeltaEvent
+    ) -> tuple[tuple[str, AgentStreamPayload], ...]:
+        if event.node_name != self.model_node:
+            raise HearingGraphContractError("HEARING_TARGET_VISIBLE_DELTA_INVALID")
+        return self._accept_projector_event(
+            {"field": event.field, "delta": event.delta}
+        )
+
+    def _accept_projector_event(
+        self, event: Mapping[str, Any]
+    ) -> tuple[tuple[str, AgentStreamPayload], ...]:
+        field = event.get("field")
+        delta = event.get("delta")
+        if not isinstance(delta, str) or not delta:
+            raise HearingGraphContractError("HEARING_TARGET_VISIBLE_DELTA_INVALID")
+        if field == "lead_public_text":
+            if 1 in self.committed or any(sequence > 1 for sequence in self.frame_ids):
+                raise HearingGraphContractError("HEARING_TARGET_V5_LEAD_ORDER_INVALID")
+            projected = [] if 1 in self.frame_ids else [self._start_lead()]
+            projected.append(self._delta(1, delta))
+            return tuple(projected)
+        if field != "frames" or 1 not in self.frame_ids:
+            raise HearingGraphContractError("HEARING_TARGET_V5_STREAM_FIELD_INVALID")
+        try:
+            item = json.loads(delta)
+        except (TypeError, ValueError) as error:
+            raise HearingGraphContractError(
+                "HEARING_TARGET_V5_FRAME_EVENT_INVALID"
+            ) from error
+        if not isinstance(item, dict):
+            raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_EVENT_INVALID")
+        sequence = item.get("frame_sequence")
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence < 2
+        ):
+            raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_IDENTITY_INVALID")
+        kind = item.get("kind")
+        if kind == "frame_start":
+            header = item.get("header")
+            if not isinstance(header, dict):
+                raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_EVENT_INVALID")
+            projected: list[tuple[str, AgentStreamPayload]] = []
+            if 1 not in self.committed:
+                projected.append(self._commit(1))
+            projected.append(self._start_frame(sequence, header))
+            return tuple(projected)
+        if kind == "public_text_delta":
+            text_delta = item.get("delta")
+            if not isinstance(text_delta, str) or not text_delta:
+                raise HearingGraphContractError(
+                    "HEARING_TARGET_V5_FRAME_EVENT_INVALID"
+                )
+            return (self._delta(sequence, text_delta),)
+        if kind == "frame_end":
+            return (self._commit(sequence),)
+        raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_EVENT_INVALID")
+
+    def require_terminal(self, state: Mapping[str, Any]) -> None:
+        proposal = state.get("proposal")
+        if not isinstance(proposal, Mapping):
+            raise HearingGraphContractError("HEARING_TARGET_V5_TERMINAL_INVALID")
+        public_frames = proposal.get("public_frames")
+        if not isinstance(public_frames, list) or len(public_frames) != len(self.headers):
+            raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_TERMINAL_MISMATCH")
+        if self.committed != set(range(1, len(public_frames) + 1)):
+            raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_TERMINAL_INCOMPLETE")
+        for sequence, frame in enumerate(public_frames, start=1):
+            text = self.texts.get(sequence)
+            if (
+                not isinstance(frame, Mapping)
+                or frame.get("frame_sequence") != sequence
+                or frame.get("frame_type") != self.headers[sequence].get("frame_type")
+                or frame.get("public_text") != text
+                or frame.get("public_text_hash")
+                != hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+            ):
+                raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_TERMINAL_MISMATCH")
+        if proposal.get("lead_public_text") != self.texts.get(1):
+            raise HearingGraphContractError("HEARING_TARGET_V5_LEAD_TERMINAL_MISMATCH")
+
+    def _validate_header(self, sequence: int, header: Mapping[str, Any]) -> None:
+        maximum = 5 if self.operation is HearingOperation.INTAKE_QUESTIONS else 10
+        expected_sequence = len(self.headers) + 1
+        if sequence != expected_sequence or sequence > maximum + 1:
+            raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_HEADER_INVALID")
+        if self.operation is HearingOperation.INTAKE_QUESTIONS:
+            expected_keys = {
+                "frame_sequence",
+                "frame_type",
+                "question_slot_id",
+                "fact_ids",
+            }
+            fact_ids = header.get("fact_ids")
+            valid = (
+                set(header) == expected_keys
+                and header.get("frame_sequence") == sequence
+                and header.get("frame_type") == "SHARED_ISSUE_QUESTION"
+                and isinstance(header.get("question_slot_id"), str)
+                and bool(header.get("question_slot_id"))
+                and isinstance(fact_ids, list)
+                and bool(fact_ids)
+                and all(isinstance(fact_id, str) and fact_id for fact_id in fact_ids)
+                and len(fact_ids) == len(set(fact_ids))
+            )
+        else:
+            expected_keys = {"frame_sequence", "frame_type", "issue_ref"}
+            valid = (
+                set(header) == expected_keys
+                and header.get("frame_sequence") == sequence
+                and header.get("frame_type")
+                in {"REBIND_ISSUE_SYNTHESIS", "NEW_ISSUE_SYNTHESIS"}
+                and isinstance(header.get("issue_ref"), str)
+                and bool(header.get("issue_ref"))
+            )
+        if not valid:
+            raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_HEADER_INVALID")
+
+    def _start_lead(self) -> tuple[str, AgentStreamPayload]:
+        frame_type = (
+            "HEARING_INTAKE_QUESTION_LEAD"
+            if self.operation is HearingOperation.INTAKE_QUESTIONS
+            else "HEARING_INTAKE_SYNTHESIS_LEAD"
+        )
+        header = {
+            "schema_version": "hearing-public-frame.v5",
+            "frame_sequence": 1,
+            "frame_type": frame_type,
+            "stage_code": self.command.stage_code,
+            "operation": self.operation.value,
+        }
+        return self._start(1, header)
+
+    def _start_frame(
+        self, sequence: int, source_header: Mapping[str, Any]
+    ) -> tuple[str, AgentStreamPayload]:
+        if sequence in self.frame_ids or sequence - 1 not in self.committed:
+            raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_ORDER_INVALID")
+        self._validate_header(sequence, source_header)
+        header = {
+            "schema_version": "hearing-public-frame.v5",
+            **source_header,
+        }
+        return self._start(sequence, header)
+
+    def _start(
+        self, sequence: int, header: dict[str, Any]
+    ) -> tuple[str, AgentStreamPayload]:
+        frame_type = header["frame_type"]
+        frame_id = _hearing_frame_id(
+            command_id=self.command.command_id,
+            attempt_id=self.command.attempt_id,
+            stage_sequence=self.command.stage_sequence,
+            frame_sequence=sequence,
+            frame_type=frame_type,
+        )
+        self.frame_ids[sequence] = frame_id
+        self.headers[sequence] = header
+        self.texts[sequence] = ""
+        self.delta_indexes[sequence] = 0
+        return (
+            "public_frame_start",
+            AgentStreamPayload(
+                frame_id=frame_id,
+                frame_sequence=sequence,
+                frame_type=frame_type,
+                public_header=header,
+            ),
+        )
+
+    def _delta(self, sequence: int, delta: str) -> tuple[str, AgentStreamPayload]:
+        if sequence not in self.frame_ids or sequence in self.committed:
+            raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_DELTA_ORDER_INVALID")
+        delta_index = self.delta_indexes[sequence]
+        self.delta_indexes[sequence] = delta_index + 1
+        self.texts[sequence] += delta
+        return (
+            "public_text_delta",
+            AgentStreamPayload(
+                frame_id=self.frame_ids[sequence],
+                frame_sequence=sequence,
+                delta_index=delta_index,
+                delta=delta,
+            ),
+        )
+
+    def _commit(self, sequence: int) -> tuple[str, AgentStreamPayload]:
+        if (
+            sequence not in self.frame_ids
+            or sequence in self.committed
+            or not self.texts[sequence]
+        ):
+            raise HearingGraphContractError("HEARING_TARGET_V5_FRAME_COMMIT_INVALID")
+        self.committed.add(sequence)
+        frame_id = self.frame_ids[sequence]
+        header = self.headers[sequence]
+        text = self.texts[sequence]
+        header_hash = canonical_sha256(header)
+        text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        frame_hash = canonical_sha256(
+            {
+                "frame_id": frame_id,
+                "frame_sequence": sequence,
+                "frame_type": header["frame_type"],
+                "header": header,
+                "header_sha256": header_hash,
+                "public_text": text,
+                "public_text_sha256": text_hash,
+                "public_text_length": len(text),
+            }
+        )
+        return (
+            "public_frame_committed",
+            AgentStreamPayload(
+                frame_id=frame_id,
+                frame_sequence=sequence,
+                durable_cursor=f"v3:{self.command.attempt_id}:FRAME:{sequence}",
+                header_sha256=header_hash,
+                public_text_sha256=text_hash,
+                frame_sha256=frame_hash,
+                public_text_chars=len(text),
+            ),
+        )
+
+
+def _governed_hearing_events(
+    candidate: Any,
+    *,
+    graph_node: str,
+    model_node: str,
+) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(candidate, tuple) or len(candidate) != 2:
+        raise HearingGraphContractError("HEARING_TARGET_STREAM_EVENT_INVALID")
+    mode, value = candidate
+    if mode == "updates":
+        return ()
+    if mode != "messages" or not isinstance(value, tuple) or len(value) != 2:
+        raise HearingGraphContractError("HEARING_TARGET_STREAM_EVENT_INVALID")
+    chunk, metadata = value
+    if not isinstance(chunk, AIMessageChunk):
+        return ()
+    governed = governed_events_from_chunk(chunk)
+    if not governed:
+        return ()
+    if not isinstance(metadata, Mapping) or metadata.get("langgraph_node") != graph_node:
+        raise HearingGraphContractError("HEARING_TARGET_STREAM_METADATA_INVALID")
+    for event in governed:
+        if (
+            event.get("schema_version") != "governed-model-event.v1"
+            or event.get("event_type") != "visible_delta"
+            or event.get("node_name") != model_node
+        ):
+            raise HearingGraphContractError("HEARING_TARGET_VISIBLE_DELTA_INVALID")
+    return tuple(cast(Mapping[str, Any], event) for event in governed)
+
+
+def _hearing_frame_id(
+    *,
+    command_id: str,
+    attempt_id: str,
+    stage_sequence: int,
+    frame_sequence: int,
+    frame_type: str,
+) -> str:
+    digest = canonical_sha256(
+        {
+            "command_id": command_id,
+            "attempt_id": attempt_id,
+            "stage_sequence": stage_sequence,
+            "frame_sequence": frame_sequence,
+            "frame_type": frame_type,
+        }
+    )
+    return "HFRM_" + digest[:24].upper()
+
+
 class HearingTargetE2ERuntimeAdapter:
     """Execute a verified candidate Hearing command and emit only a proposal source."""
 
@@ -746,25 +1136,125 @@ class HearingTargetE2ERuntimeAdapter:
         plan = await self._prepare_execution(execution)
         operation_binding = plan.registration.operation_bindings[plan.loaded.operation]
         visible_deltas: list[str] = []
-        source = plan.bundle.astream()
-        close = getattr(source, "aclose", None)
-        if not callable(close):
-            raise HearingGraphContractError("HEARING_TARGET_GRAPH_STREAM_NOT_CLOSABLE")
-        try:
-            async for candidate in source:
-                for payload in self._visible_payloads(candidate, operation_binding):
-                    visible_deltas.append(cast(str, payload.delta))
-                    yield self._event(
-                        execution,
-                        sequence_no=sequence,
-                        event_type="visible_delta",
-                        payload=payload,
-                    )
-                    sequence += 1
-        finally:
-            await cast(Callable[[], Awaitable[None]], close)()
+        generation_reset_seen = False
+        frame_stream = (
+            _HearingV5FrameStream(execution, plan.loaded.operation)
+            if plan.loaded.operation
+            in {HearingOperation.INTAKE_QUESTIONS, HearingOperation.INTAKE_SYNTHESIS}
+            else None
+        )
+        if frame_stream is not None:
+            bridge = _HearingV5ObserverBridge()
+            observer = AgentStreamObserver(
+                # The public registry is keyed by the governed model operation,
+                # while HearingOperation.value names the enclosing graph node.
+                operation=frame_stream.model_node,
+                run_id=execution.admission.command.attempt_id,
+                publish=bridge.publish,
+            )
+            bridge.bind(observer)
+
+            async def run_v5_graph() -> None:
+                source: AsyncIterator[Any] | None = None
+                close: Callable[[], Awaitable[None]] | None = None
+                try:
+                    source = plan.bundle.astream()
+                    candidate_close = getattr(source, "aclose", None)
+                    if not callable(candidate_close):
+                        raise HearingGraphContractError(
+                            "HEARING_TARGET_GRAPH_STREAM_NOT_CLOSABLE"
+                        )
+                    close = cast(Callable[[], Awaitable[None]], candidate_close)
+                    with bind_stream_observer(observer):
+                        async for candidate in source:
+                            # V5 has exactly one public source: the observer fed by
+                            # HarnessModelRunner's native Provider stream.  Receiving
+                            # governed bytes from the outer LangGraph stream as well
+                            # would duplicate public text and is therefore rejected.
+                            if _governed_hearing_events(
+                                candidate,
+                                graph_node=frame_stream.graph_node,
+                                model_node=frame_stream.model_node,
+                            ):
+                                raise HearingGraphContractError(
+                                    "HEARING_TARGET_V5_STREAM_SOURCE_DUPLICATED"
+                                )
+                finally:
+                    try:
+                        if close is not None:
+                            await close()
+                    finally:
+                        bridge.finish()
+
+            run_task = asyncio.create_task(run_v5_graph())
+            try:
+                while True:
+                    visible = await bridge.next_event()
+                    if visible is None:
+                        break
+                    for event_type, payload in frame_stream.accept_visible(visible):
+                        yield self._event(
+                            execution,
+                            sequence_no=sequence,
+                            event_type=cast(Any, event_type),
+                            payload=payload,
+                        )
+                        sequence += 1
+                await run_task
+            finally:
+                if not run_task.done():
+                    bridge.cancel()
+                    run_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await run_task
+        else:
+            source = plan.bundle.astream()
+            close = getattr(source, "aclose", None)
+            if not callable(close):
+                raise HearingGraphContractError("HEARING_TARGET_GRAPH_STREAM_NOT_CLOSABLE")
+            try:
+                async for candidate in source:
+                    for event_type, payload in self._visible_events(
+                        candidate,
+                        operation_binding,
+                    ):
+                        if event_type == "generation_reset":
+                            if generation_reset_seen or not visible_deltas:
+                                raise HearingGraphContractError(
+                                    "HEARING_TARGET_GENERATION_RESET_INVALID"
+                                )
+                            generation_reset_seen = True
+                            visible_deltas.clear()
+                        else:
+                            visible_deltas.append(cast(str, payload.delta))
+                        yield self._event(
+                            execution,
+                            sequence_no=sequence,
+                            event_type=cast(Any, event_type),
+                            payload=payload,
+                        )
+                        sequence += 1
+            finally:
+                await cast(Callable[[], Awaitable[None]], close)()
         state = await plan.bundle.completed_state()
-        self._require_visible_terminal(state, visible_deltas)
+        if frame_stream is not None:
+            frame_stream.require_terminal(state)
+        else:
+            self._require_visible_terminal(state, visible_deltas)
+            for payload in self._validated_terminal_visible_deltas(
+                state,
+                operation_binding,
+                visible_deltas,
+            ):
+                visible_deltas.append(cast(str, payload.delta))
+                yield self._event(
+                    execution,
+                    sequence_no=sequence,
+                    event_type="visible_delta",
+                    payload=payload,
+                )
+                sequence += 1
+            self._require_visible_terminal(state, visible_deltas)
         material = await self._proposal_material(execution, plan, state)
         result = await self._commit_terminal(execution, material)
         yield self._event(
@@ -978,10 +1468,10 @@ class HearingTargetE2ERuntimeAdapter:
         )
 
     @staticmethod
-    def _visible_payloads(
+    def _visible_events(
         candidate: Any,
         operation_binding: HearingTargetE2EOperationBinding,
-    ) -> tuple[AgentStreamPayload, ...]:
+    ) -> tuple[tuple[str, AgentStreamPayload], ...]:
         if not isinstance(candidate, tuple) or len(candidate) != 2:
             raise HearingGraphContractError("HEARING_TARGET_STREAM_EVENT_INVALID")
         mode, value = candidate
@@ -997,28 +1487,54 @@ class HearingTargetE2ERuntimeAdapter:
             return ()
         if not isinstance(metadata, Mapping):
             raise HearingGraphContractError("HEARING_TARGET_STREAM_METADATA_INVALID")
-        public_node = operation_binding.model_nodes[-1]
-        payloads: list[AgentStreamPayload] = []
+        graph_node = operation_binding.operation.value
+        model_node = operation_binding.model_nodes[-1]
+        projected: list[tuple[str, AgentStreamPayload]] = []
         for event in governed:
+            if event.get("event_type") == "generation_reset":
+                if (
+                    event.get("schema_version") != "governed-model-event.v1"
+                    or event.get("node_name") != model_node
+                    or metadata.get("langgraph_node") != graph_node
+                    or event.get("generation") != 2
+                    or event.get("reason_code") != "OUTPUT_SCHEMA_INVALID"
+                ):
+                    raise HearingGraphContractError(
+                        "HEARING_TARGET_GENERATION_RESET_INVALID"
+                    )
+                projected.append(
+                    (
+                        "generation_reset",
+                        AgentStreamPayload(
+                            node=model_node,
+                            generation=2,
+                            reason_code="OUTPUT_SCHEMA_INVALID",
+                        ),
+                    )
+                )
+                continue
             delta = event.get("delta")
             if (
                 event.get("schema_version") != "governed-model-event.v1"
                 or event.get("event_type") != "visible_delta"
-                or event.get("node_name") != public_node
-                or metadata.get("langgraph_node") != public_node
+                or event.get("node_name") != model_node
+                or metadata.get("langgraph_node") != graph_node
                 or event.get("field") != "public_message"
                 or not isinstance(delta, str)
                 or not delta
             ):
                 raise HearingGraphContractError("HEARING_TARGET_VISIBLE_DELTA_INVALID")
-            payloads.append(
-                AgentStreamPayload(
-                    node=public_node,
-                    field="public_message",
-                    delta=delta,
+            projected.append(
+                (
+                    "visible_delta",
+                    AgentStreamPayload(
+                        node=model_node,
+                        field="public_message",
+                        delta=delta,
+                    ),
                 )
             )
-        return tuple(payloads)
+        return tuple(projected)
 
     @staticmethod
     def _require_visible_terminal(
@@ -1034,12 +1550,57 @@ class HearingTargetE2ERuntimeAdapter:
         ):
             raise HearingGraphContractError("HEARING_TARGET_VISIBLE_TERMINAL_MISMATCH")
 
+    @staticmethod
+    def _validated_terminal_visible_deltas(
+        state: Mapping[str, Any],
+        operation_binding: HearingTargetE2EOperationBinding,
+        visible_deltas: list[str],
+    ) -> tuple[AgentStreamPayload, ...]:
+        """Project a validated terminal public message when native deltas are absent.
+
+        Some structured Hearing models only expose ``public_message`` after their
+        complete schema has passed validation.  The Target stream must still hand
+        that public field to the actor as standard incremental events before the
+        formal terminal commit; otherwise Java can only publish one final snapshot
+        and the courtroom replaces the whole message in a single paint.
+
+        Native Provider deltas always remain authoritative.  This projection is
+        therefore enabled only when no visible delta was received for the current
+        generation, and it is derived exclusively from the validated proposal.
+        """
+        if visible_deltas:
+            return ()
+        proposal = state.get("proposal")
+        if not isinstance(proposal, Mapping):
+            return ()
+        public_message = proposal.get("public_message")
+        if not isinstance(public_message, str) or not public_message:
+            return ()
+        model_node = operation_binding.model_nodes[-1]
+        chunk_size = 48
+        return tuple(
+            AgentStreamPayload(
+                node=model_node,
+                field="public_message",
+                delta=public_message[offset : offset + chunk_size],
+            )
+            for offset in range(0, len(public_message), chunk_size)
+        )
+
     def _event(
         self,
         execution: GatewayExecution,
         *,
         sequence_no: int,
-        event_type: Literal["attempt_started", "visible_delta", "final"],
+        event_type: Literal[
+            "attempt_started",
+            "visible_delta",
+            "generation_reset",
+            "public_frame_start",
+            "public_text_delta",
+            "public_frame_committed",
+            "final",
+        ],
         payload: AgentStreamPayload,
     ) -> AgentStreamEvent:
         occurred_at = self._clock()

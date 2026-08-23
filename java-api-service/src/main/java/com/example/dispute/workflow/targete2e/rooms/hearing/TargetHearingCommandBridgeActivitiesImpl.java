@@ -13,7 +13,7 @@ public final class TargetHearingCommandBridgeActivitiesImpl implements TargetHea
   @Override public TargetHearingAgentRunTrigger bind(BindRequest request) {
     CaseCommandRef command = request.command();
     if (command.roomType().name().equals("HEARING") == false
-        || (command.commandType() != CommandType.HEARING_STATEMENT
+        || (command.commandType() != CommandType.HEARING_ANSWER_BUNDLE
             && command.commandType() != CommandType.HEARING_EVIDENCE_BATCH)
         || command.expectedProcessRevision() < 0) {
       throw new IllegalArgumentException("unsupported target Hearing command");

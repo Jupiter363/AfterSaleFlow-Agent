@@ -43,6 +43,7 @@ from app.graph_runtime.ledger import (
     PostgresCommandLedger,
     ResultRecord,
 )
+from app.graph_runtime.lease import LEASE_DURATION_SECONDS, LEASE_DURATION_SQL
 from app.graph_runtime.target_e2e import (
     TargetE2ERoomProposalSource,
     build_target_e2e_result_envelope,
@@ -60,7 +61,7 @@ FENCE_CONTEXT_KEY: Final[str] = "__trusted_graph_fence_context__"
 TERMINAL_RESULT_CONTEXT_KEY: Final[str] = "__trusted_graph_terminal_result__"
 ROOM_GRAPH_RESULT_SCHEMA_VERSION: Final[str] = "room-graph-result.v1"
 PENDING_WRITE_OWNER_PREFIX: Final[str] = "grt.pending-write.v1."
-FENCED_LEASE_HORIZON_SECONDS: Final[float] = 30.0
+FENCED_LEASE_HORIZON_SECONDS: Final[float] = float(LEASE_DURATION_SECONDS)
 FENCED_LEASE_SUFFIX_BODY_TIMEOUT_SECONDS: Final[float] = 15.0
 FENCED_LEASE_SUFFIX_MINIMUM_SAFETY_MARGIN_SECONDS: Final[float] = 1.0
 
@@ -81,11 +82,11 @@ select fencing_token
  for update
 """
 
-REFRESH_LOCKED_FENCE_LEASE_SQL: Final[str] = """
+REFRESH_LOCKED_FENCE_LEASE_SQL: Final[str] = f"""
 with db_clock as materialized (select clock_timestamp() as now)
 update agent_graph_lease lease
    set renewed_at = db_clock.now,
-       lease_expires_at = db_clock.now + interval '30 seconds',
+       lease_expires_at = db_clock.now + {LEASE_DURATION_SQL},
        lease_revision = lease.lease_revision + 1
   from db_clock
  where lease.thread_id = %s
@@ -285,24 +286,30 @@ def create_graph_pool(
     )
 
 
-def _runtime_pool_configs(config: GraphPoolConfig) -> tuple[GraphPoolConfig, GraphPoolConfig]:
-    """Reserve a pre-warmed control lane without increasing the connection cap.
+def _runtime_pool_configs(
+    config: GraphPoolConfig,
+) -> tuple[GraphPoolConfig, GraphPoolConfig, GraphPoolConfig]:
+    """Reserve pre-warmed control and readiness lanes within the connection cap.
 
     Checkpoint persistence may temporarily consume its entire pool while graph work is
     streaming.  Lease and durable-provider-intent writes must still be able to make
-    progress, so they run through a separate, small pool.  The two maxima always add
-    up to the configured process budget.
+    progress, so they run through a separate, small pool.  Readiness performs a full
+    integrity transaction and can be cancelled by an outer HTTP deadline; it therefore
+    owns a third pool and can never consume or poison a lease-renewal connection.  The
+    three maxima always add up to the configured process budget.
     """
 
-    if config.max_size < 2:
+    if config.max_size < 3:
         raise GraphPersistenceConfigurationError(
-            "Graph runtime requires at least two connections for checkpoint and control pools"
+            "Graph runtime requires at least three connections for checkpoint, control, "
+            "and readiness pools"
         )
-    control_max_size = 2 if config.max_size >= 4 else 1
-    checkpoint_max_size = config.max_size - control_max_size
-    # Preserve existing checkpoint pre-warming, then add the reserved control lane.
-    # This deliberately raises the startup minimum by one while keeping the maximum
-    # process connection budget unchanged.
+    readiness_max_size = 1
+    control_max_size = 2 if config.max_size >= 5 else 1
+    checkpoint_max_size = config.max_size - control_max_size - readiness_max_size
+    # Preserve existing checkpoint pre-warming, then add the reserved control and
+    # readiness lanes.  This raises the startup minimum by two while keeping the
+    # maximum process connection budget unchanged.
     checkpoint_min_size = min(config.min_size, checkpoint_max_size)
 
     def role_config(
@@ -327,6 +334,7 @@ def _runtime_pool_configs(config: GraphPoolConfig) -> tuple[GraphPoolConfig, Gra
             max_size=checkpoint_max_size,
         ),
         role_config(role="control", min_size=1, max_size=control_max_size),
+        role_config(role="readiness", min_size=1, max_size=readiness_max_size),
     )
 
 
@@ -1989,10 +1997,11 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
 
 @dataclass(slots=True)
 class GraphCheckpointRuntime:
-    """Process-lifetime checkpoint and control pools for FastAPI lifespan integration."""
+    """Process-lifetime checkpoint, control, and readiness pools."""
 
     pool: AsyncConnectionPool
     control_pool: AsyncConnectionPool
+    readiness_pool: AsyncConnectionPool
     saver: FencedPostgresSaver
     close_timeout_seconds: float = 5.0
 
@@ -2003,12 +2012,17 @@ class GraphCheckpointRuntime:
         config: GraphPoolConfig | None = None,
     ) -> "GraphCheckpointRuntime":
         selected = config or GraphPoolConfig()
-        checkpoint_config, control_config = _runtime_pool_configs(selected)
+        checkpoint_config, control_config, readiness_config = _runtime_pool_configs(selected)
         pool = create_graph_pool(connection_string, checkpoint_config)
         control_pool = create_graph_pool(connection_string, control_config)
+        readiness_pool = create_graph_pool(connection_string, readiness_config)
         try:
             await pool.open(wait=True, timeout=checkpoint_config.acquire_timeout_seconds)
             await control_pool.open(wait=True, timeout=control_config.acquire_timeout_seconds)
+            await readiness_pool.open(
+                wait=True,
+                timeout=readiness_config.acquire_timeout_seconds,
+            )
             saver = FencedPostgresSaver(
                 pool,
                 statement_timeout_ms=selected.statement_timeout_ms,
@@ -2016,18 +2030,25 @@ class GraphCheckpointRuntime:
             )
         except BaseException:
             try:
-                await control_pool.close(timeout=control_config.acquire_timeout_seconds)
+                await readiness_pool.close(timeout=readiness_config.acquire_timeout_seconds)
             finally:
-                await pool.close(timeout=checkpoint_config.acquire_timeout_seconds)
+                try:
+                    await control_pool.close(timeout=control_config.acquire_timeout_seconds)
+                finally:
+                    await pool.close(timeout=checkpoint_config.acquire_timeout_seconds)
             raise
         return cls(
             pool=pool,
             control_pool=control_pool,
+            readiness_pool=readiness_pool,
             saver=saver,
         )
 
     async def close(self) -> None:
         try:
-            await self.control_pool.close(timeout=self.close_timeout_seconds)
+            await self.readiness_pool.close(timeout=self.close_timeout_seconds)
         finally:
-            await self.pool.close(timeout=self.close_timeout_seconds)
+            try:
+                await self.control_pool.close(timeout=self.close_timeout_seconds)
+            finally:
+                await self.pool.close(timeout=self.close_timeout_seconds)

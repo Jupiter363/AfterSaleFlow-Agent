@@ -108,6 +108,22 @@ class TargetReviewOutcomeStartBindingActivityTest {
         .doesNotContain("on task.case_id = epoch.case_id");
   }
 
+  @Test
+  void targetReviewDeadlineNeverOutlivesItsSignedActivation() {
+    Instant packet = OPENED.plusSeconds(7_200);
+    Instant activation = OPENED.plusSeconds(3_600);
+
+    assertThat(JdbcTargetReviewOutcomeStartBindingPort.earliestDeadline(
+            OPENED.plusSeconds(5_400), packet, activation))
+        .isEqualTo(activation);
+    assertThat(JdbcTargetReviewOutcomeStartBindingPort.earliestDeadline(
+            OPENED.plusSeconds(1_800), packet, activation))
+        .isEqualTo(OPENED.plusSeconds(1_800));
+    assertThat(JdbcTargetReviewOutcomeStartBindingPort.earliestDeadline(
+            null, OPENED.plusSeconds(900), activation))
+        .isEqualTo(OPENED.plusSeconds(900));
+  }
+
   private static OutcomeWorkflowStart start() {
     return new OutcomeWorkflowStart(
         OutcomeWorkflowStart.SCHEMA_VERSION, "outcome:CASE_1:4", "CASE_1", "REVIEW_1", "PACKET_1",

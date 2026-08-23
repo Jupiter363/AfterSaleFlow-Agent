@@ -209,7 +209,7 @@ class GraphTargetE2ERuntimeContextSettings(BaseModel):
             self.issuedAt.tzinfo is None
             or self.expiresAt.tzinfo is None
             or self.expiresAt <= self.issuedAt
-            or (self.expiresAt - self.issuedAt).total_seconds() > 7200
+            or (self.expiresAt - self.issuedAt).total_seconds() > 2_592_000
         ):
             raise ValueError("target-E2E runtime context time window is invalid")
         if len(set(self.allowedRoomTypes)) != len(self.allowedRoomTypes):
@@ -336,7 +336,7 @@ class Settings(BaseSettings):
     例如 litellm_base_url 可由 LITELLM_BASE_URL 覆盖。
     """
 
-    QWEN_MODEL: ClassVar[str] = "qwen3.7-plus"
+    QWEN_MODEL: ClassVar[str] = "qwen3.8-max"
 
     model_config = SettingsConfigDict(
         # .env 是本地开发配置文件；生产环境通常由容器环境变量注入。
@@ -353,11 +353,18 @@ class Settings(BaseSettings):
     litellm_master_key: str = Field(min_length=16)
     # Field(...) 可以声明校验规则；这里要求超时 >0 且 <=300 秒。
     llm_timeout_seconds: float = Field(default=120.0, gt=0, le=300)
+    llm_enable_thinking: bool = False
+    # 默认只要求模型输出 JSON，并由本地 Pydantic 做最终验收；
+    # 供应商侧 strict JSON Schema 仅在显式开启时使用。
+    llm_strict_json_schema_enabled: bool = False
     langfuse_host: str = "http://langfuse:3000"
     langfuse_public_key: str = Field(min_length=8)
     langfuse_secret_key: str = Field(min_length=8)
     langfuse_enabled: bool = True
+    # 图交换代理与证据原件接口是两个独立信任边界：前者只承载图协议，
+    # 后者必须直连提供 /internal/evidence/.../content 的 Java API。
     java_api_service_url: str = "http://java-api-service:8080"
+    java_evidence_content_service_url: str = "http://java-api-service:8080"
     java_service_secret: str = Field(min_length=16)
     python_agent_service_secret: str = Field(min_length=16)
     prompt_version: str = "hearing-v1"

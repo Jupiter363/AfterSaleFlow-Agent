@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -19,8 +20,12 @@ import com.example.dispute.workflow.application.intake.IntakeInitiatorMatrixFree
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -129,6 +134,99 @@ class IntakeMatrixLifecycleServiceTest {
     }
 
     @Test
+    void initiatorConfirmationUpgradesVerifiedHistoricPythonHashToJcsOnce()
+            throws Exception {
+        ObjectNode matrix = strictInitiatorMatrix();
+        matrix.withArray("fact_rows")
+                .forEach(row -> ((ObjectNode) row).putNull("evidence_coverage_status"));
+        ((ObjectNode) matrix.at("/claims/initiator_claim"))
+                .put("requested_amount", new BigDecimal("150.0"));
+        matrix.remove("content_hash");
+        String historicHash = historicPythonSha256(matrix);
+        assertThat(historicHash).isNotEqualTo(ContractJson.sha256Hex(matrix));
+        matrix.put("content_hash", historicHash);
+        CaseIntakeDossierEntity dossier = dossierWithPartition(matrix);
+        FulfillmentCaseEntity dispute = dispute();
+        when(repository.findByCaseIdAndRoomType(CASE_ID, RoomType.INTAKE))
+                .thenReturn(Optional.of(dossier));
+
+        var first = service.freezeInitiatorIfPossible(dispute, "user-local");
+
+        JsonNode firstPersisted = objectMapper.readTree(dossier.getDossierJson());
+        ObjectNode upgraded = (ObjectNode) firstPersisted.path("case_fact_matrix");
+        ObjectNode hashInput = upgraded.deepCopy();
+        String jcsHash = hashInput.remove("content_hash").asText();
+        assertThat(first.created()).isFalse();
+        assertThat(first.contentHash()).isEqualTo(jcsHash);
+        assertThat(jcsHash).isEqualTo(ContractJson.sha256Hex(hashInput));
+        assertThat(jcsHash).isNotEqualTo(historicHash);
+        assertThat(upgraded.at("/fact_rows/0/evidence_coverage_status").asText())
+                .isEqualTo("PENDING_EVIDENCE_REVIEW");
+        assertThat(firstPersisted.at("/handoff_remark_partition/case_fact_matrix_hash").asText())
+                .isEqualTo(jcsHash);
+        new IntakeInitiatorMatrixFreezer()
+                .validateFrozen(
+                        upgraded,
+                        CASE_ID,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole.USER,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole.MERCHANT);
+
+        var replay = service.freezeInitiatorIfPossible(dispute, "user-local");
+
+        assertThat(replay.contentHash()).isEqualTo(jcsHash);
+        assertThat(objectMapper.readTree(dossier.getDossierJson()))
+                .isEqualTo(firstPersisted);
+        verify(repository, times(1)).save(dossier);
+        verify(dispute, never()).refreshIntakeResult(dossier.getDossierJson(), "user-local");
+    }
+
+    @Test
+    void initiatorConfirmationNormalizesHistoricCoverageWhenHashBytesAlreadyMatchJcs()
+            throws Exception {
+        ObjectNode matrix = strictInitiatorMatrix();
+        matrix.withArray("fact_rows")
+                .forEach(row -> ((ObjectNode) row).putNull("evidence_coverage_status"));
+        matrix.remove("content_hash");
+        String historicHash = historicPythonSha256(matrix);
+        assertThat(historicHash).isEqualTo(ContractJson.sha256Hex(matrix));
+        matrix.put("content_hash", historicHash);
+        CaseIntakeDossierEntity dossier = dossier(matrix);
+        when(repository.findByCaseIdAndRoomType(CASE_ID, RoomType.INTAKE))
+                .thenReturn(Optional.of(dossier));
+
+        var result = service.freezeInitiatorIfPossible(dispute(), "user-local");
+
+        JsonNode persisted = objectMapper.readTree(dossier.getDossierJson());
+        assertThat(persisted.at("/case_fact_matrix/fact_rows/0/evidence_coverage_status").asText())
+                .isEqualTo("PENDING_EVIDENCE_REVIEW");
+        assertThat(result.contentHash())
+                .isEqualTo(persisted.at("/case_fact_matrix/content_hash").asText());
+        assertThat(result.contentHash()).isNotEqualTo(historicHash);
+        verify(repository).save(dossier);
+    }
+
+    @Test
+    void initiatorConfirmationRejectsTamperedHistoricPythonHashWithoutPersistence()
+            throws Exception {
+        ObjectNode matrix = strictInitiatorMatrix();
+        matrix.withArray("fact_rows")
+                .forEach(row -> ((ObjectNode) row).putNull("evidence_coverage_status"));
+        matrix.remove("content_hash");
+        String historicHash = historicPythonSha256(matrix);
+        matrix.put("content_hash", historicHash);
+        ((ObjectNode) matrix.path("case_overview"))
+                .put("neutral_summary", "tampered after historic hash");
+        CaseIntakeDossierEntity dossier = dossier(matrix);
+        when(repository.findByCaseIdAndRoomType(CASE_ID, RoomType.INTAKE))
+                .thenReturn(Optional.of(dossier));
+
+        assertThatThrownBy(() -> service.freezeInitiatorIfPossible(dispute(), "user-local"))
+                .isInstanceOf(IntakeFinalizationRejectedException.class);
+
+        verify(repository, never()).save(dossier);
+    }
+
+    @Test
     void initiatorConfirmationRemovesAStaleUnilateralCompatibilityBranch() throws Exception {
         ObjectNode matrix = strictInitiatorMatrix();
         CaseIntakeDossierEntity dossier = dossier(matrix, true);
@@ -144,7 +242,7 @@ class IntakeMatrixLifecycleServiceTest {
                 .isEqualTo("INITIATOR_FROZEN");
         assertThat(persisted.has("unilateral_case_matrix")).isFalse();
         verify(repository).save(dossier);
-        verify(dispute).refreshIntakeResult(dossier.getDossierJson(), "user-local");
+        verify(dispute, never()).refreshIntakeResult(dossier.getDossierJson(), "user-local");
     }
 
     @Test
@@ -219,6 +317,26 @@ class IntakeMatrixLifecycleServiceTest {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("schema_version", "intake_case_detail.v1");
         root.set("unilateral_case_matrix", legacy);
+        return dossierRoot(root);
+    }
+
+    private CaseIntakeDossierEntity dossierWithPartition(ObjectNode matrix) throws Exception {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("schema_version", "intake_case_detail.v1");
+        root.set("case_fact_matrix", matrix);
+        ObjectNode partition = root.putObject("handoff_remark_partition");
+        partition.put("schema_version", "handoff_remark_partition.v1");
+        partition.set("case_fact_matrix_id", matrix.path("matrix_id").deepCopy());
+        partition.set("case_fact_matrix_version", matrix.path("matrix_version").deepCopy());
+        partition.set("case_fact_matrix_hash", matrix.path("content_hash").deepCopy());
+        ObjectNode parties = partition.putObject("parties");
+        for (String role : List.of("USER", "MERCHANT")) {
+            ObjectNode party = parties.putObject(role);
+            party.put("party_role", role);
+            party.put("remark_status", "NOT_READY");
+            party.put("latest_remark", "");
+            party.putArray("remarks");
+        }
         return dossierRoot(root);
     }
 
@@ -351,5 +469,28 @@ class IntakeMatrixLifecycleServiceTest {
         alignment.putNull("conflict_summary");
         row.put("requires_resolution", false);
         return row;
+    }
+
+    private String historicPythonSha256(JsonNode value) throws Exception {
+        byte[] serialized = objectMapper.writeValueAsBytes(sortObjectMembers(value));
+        return HexFormat.of()
+                .formatHex(MessageDigest.getInstance("SHA-256").digest(serialized));
+    }
+
+    private JsonNode sortObjectMembers(JsonNode value) {
+        if (value.isObject()) {
+            ObjectNode sorted = objectMapper.createObjectNode();
+            List<String> names = new java.util.ArrayList<>();
+            value.fieldNames().forEachRemaining(names::add);
+            names.sort(String::compareTo);
+            names.forEach(name -> sorted.set(name, sortObjectMembers(value.get(name))));
+            return sorted;
+        }
+        if (value.isArray()) {
+            ArrayNode sorted = objectMapper.createArrayNode();
+            value.forEach(item -> sorted.add(sortObjectMembers(item)));
+            return sorted;
+        }
+        return value.deepCopy();
     }
 }

@@ -68,22 +68,6 @@ public class HearingFlowController {
         return success(runtimeService.submitAnswers(caseId, body, actor(authentication)), request);
     }
 
-    @PostMapping("/statements")
-    public ApiResponse<HearingPartyActionView> statements(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
-            @Valid @RequestBody HearingPartyStatementRequest body,
-            Authentication authentication,
-            HttpServletRequest request) {
-        return success(
-                runtimeService.submitStatement(
-                        caseId,
-                        body,
-                        actor(authentication),
-                        correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE),
-                        correlationId(request, TraceIdFilter.REQUEST_ATTRIBUTE)),
-                request);
-    }
-
     @PostMapping("/evidence-batches")
     public ApiResponse<HearingPartyActionView> evidenceBatches(
             @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
@@ -148,11 +132,14 @@ public class HearingFlowController {
 
     private static Map<String, Object> projection(HearingFlowView flow, Object settlements) {
         Map<String, Object> result = new LinkedHashMap<>();
+        result.put("projection_schema_version", flow.projectionSchemaVersion());
         result.put("status", flow.status());
         result.put("question_set", flow.questionSet());
-        result.put("issue_set", flow.questionSet());
         result.put("evidence_request_set", flow.evidenceRequestSet());
+        result.put("case_fact_matrix", flow.caseFactMatrix());
+        result.put("issue_state_set", flow.issueStateSet());
         result.put("trial_dossier", flow.trialDossier());
+        result.put("jury_review_report", flow.juryReviewReport());
         result.put("decision_chain", flow.decisionChain());
         result.put("settlements", settlements);
         return result;

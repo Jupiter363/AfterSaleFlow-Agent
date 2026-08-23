@@ -24,7 +24,7 @@ public interface AuthoritativeEvaluationReceiptReader {
                     || workflowId.isBlank()
                     || caseId == null
                     || caseId.isBlank()
-                    || epoch < 1
+                    || epoch < 0
                     || sourceRevision < 0
                     || sourceRevision >= MAX_SAFE_INTEGER
                     || fence < 1

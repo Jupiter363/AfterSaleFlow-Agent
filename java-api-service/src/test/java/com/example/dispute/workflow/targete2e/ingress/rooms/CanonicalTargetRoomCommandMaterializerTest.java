@@ -64,6 +64,30 @@ class CanonicalTargetRoomCommandMaterializerTest {
     private static final Instant NOW = Instant.parse("2026-08-07T02:00:00Z");
 
     @Test
+    void reviewThreadIdsMatchGraphContractAndRemainReplayStable() {
+        CaseRoomEpochEntity epoch = matchingEpoch();
+        AuthenticatedActor reviewer =
+                new AuthenticatedActor("reviewer-local", ActorRole.PLATFORM_REVIEWER);
+
+        String first = CanonicalTargetRoomCommandMaterializer.graphThreadId(
+                epoch, reviewer, RoomType.REVIEW, "review-command-1");
+        String replay = CanonicalTargetRoomCommandMaterializer.graphThreadId(
+                epoch, reviewer, RoomType.REVIEW, "review-command-1");
+        String sameRoomNextCommand = CanonicalTargetRoomCommandMaterializer.graphThreadId(
+                epoch, reviewer, RoomType.REVIEW, "review-command-2");
+        String otherReviewer = CanonicalTargetRoomCommandMaterializer.graphThreadId(
+                epoch,
+                new AuthenticatedActor("reviewer-other", ActorRole.PLATFORM_REVIEWER),
+                RoomType.REVIEW,
+                "review-command-1");
+
+        assertThat(first).matches("^grt\\.v1\\.[0-9a-f]{32}$");
+        assertThat(replay).isEqualTo(first);
+        assertThat(sameRoomNextCommand).isEqualTo(first);
+        assertThat(otherReviewer).isNotEqualTo(first);
+    }
+
+    @Test
     void targetEvidenceMaterializesPersistedClerkTurnWithFrozenMatrixAuthority() throws Exception {
         Map<String, byte[]> objects = new LinkedHashMap<>();
         MinioClient minio = mock(MinioClient.class);

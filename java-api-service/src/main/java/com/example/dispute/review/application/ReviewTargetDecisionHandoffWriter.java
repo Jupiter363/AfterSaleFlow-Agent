@@ -2,6 +2,7 @@ package com.example.dispute.review.application;
 
 import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.domain.model.RiskLevel;
+import com.example.dispute.hearing.domain.HearingDecisionAction;
 import com.example.dispute.infrastructure.persistence.entity.ActionRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.ReviewPacketEntity;
@@ -168,31 +169,58 @@ public final class ReviewTargetDecisionHandoffWriter {
             throw new IllegalStateException("target ActionRecord parents do not match the approval");
         }
         JsonNode frozenPlan = parse(packet.getRemedyJson());
+        JsonNode originalPlan = parse(approval.getOriginalPlanJson());
         JsonNode approvedPlan = parse(approval.getApprovedPlanJson());
         var outcomeReceipt = decision.outcomeReceipt();
+        String frozenActionRef = "review-packet:" + packet.getId() + ":action";
+        String approvedActionRef = ReviewApprovedActionSnapshotRef.resolve(
+                approval.getDecisionType(),
+                approval.getId(),
+                frozenActionRef,
+                packet.getActionHash(),
+                approval.getActionSnapshotHash());
         if (!approval.getId().equals(decision.decisionRecordId())
                 || !decision.decisionRecordHash().equals(outcomeReceipt.receiptHash())
                 || !task.getId().equals(outcomeReceipt.reviewTaskId())
                 || !task.getCaseId().equals(outcomeReceipt.caseId())
                 || !packet.getId().equals(outcomeReceipt.frozenReviewPacketRef())
+                || !frozenActionRef.equals(outcomeReceipt.actionSnapshotRef())
                 || !packet.getActionHash().equals(outcomeReceipt.actionSnapshotHash())
-                || !("approval:" + approval.getId() + ":action")
-                        .equals(outcomeReceipt.approvedActionSnapshotRef())) {
+                || !approvedActionRef.equals(outcomeReceipt.approvedActionSnapshotRef())) {
             throw new IllegalStateException("target approved action does not bind its human decision receipt");
         }
-        JsonNode operation = requireApprovedOperation(
-                mapper,
-                approval.getDecisionType(),
-                approval.getId(),
-                approval.getActionSnapshotHash(),
-                packet.getActionHash(),
-                frozenPlan,
-                approvedPlan,
-                outcomeReceipt.decision(),
-                outcomeReceipt.receiptId(),
-                outcomeReceipt.receiptHash(),
-                outcomeReceipt.decisionRecordRef(),
-                outcomeReceipt.approvedActionSnapshotHash());
+        boolean boundedDecisionAction = usesBoundedDecisionActionContract(
+                approval.getAiDecisionAction(), approval.getReviewerDecisionAction());
+        JsonNode operation = boundedDecisionAction
+                ? requireBoundedDecisionActionOperation(
+                        mapper,
+                        approval.getDecisionType(),
+                        approval.getId(),
+                        approval.getActionSnapshotHash(),
+                        packet.getActionHash(),
+                        frozenPlan,
+                        originalPlan,
+                        approvedPlan,
+                        approval.getAiDecisionAction(),
+                        approval.getReviewerDecisionAction(),
+                        outcomeReceipt.decision(),
+                        outcomeReceipt.receiptId(),
+                        outcomeReceipt.receiptHash(),
+                        outcomeReceipt.decisionRecordRef(),
+                        outcomeReceipt.approvedActionSnapshotHash())
+                : requireApprovedOperation(
+                        mapper,
+                        approval.getDecisionType(),
+                        approval.getId(),
+                        approval.getActionSnapshotHash(),
+                        packet.getActionHash(),
+                        frozenPlan,
+                        approvedPlan,
+                        outcomeReceipt.decision(),
+                        outcomeReceipt.receiptId(),
+                        outcomeReceipt.receiptHash(),
+                        outcomeReceipt.decisionRecordRef(),
+                        outcomeReceipt.approvedActionSnapshotHash());
         String idempotencyKey = operation.path("idempotency_key").asText();
         ObjectNode request = mapper.createObjectNode();
         request.put("action_record_schema", "target-no-external-effect-action-record.v1");
@@ -217,6 +245,96 @@ public final class ReviewTargetDecisionHandoffWriter {
                 throw new IllegalStateException("target ActionRecord idempotency key is bound to another approval");
             }
         }, () -> actions.save(expected));
+    }
+
+    static boolean usesBoundedDecisionActionContract(
+            String aiDecisionAction, String reviewerDecisionAction) {
+        boolean hasAiDecisionAction = aiDecisionAction != null && !aiDecisionAction.isBlank();
+        boolean hasReviewerDecisionAction =
+                reviewerDecisionAction != null && !reviewerDecisionAction.isBlank();
+        if (hasAiDecisionAction != hasReviewerDecisionAction) {
+            throw new IllegalStateException(
+                    "target bounded decision-action authority is incomplete");
+        }
+        return hasAiDecisionAction;
+    }
+
+    static JsonNode requireBoundedDecisionActionOperation(
+            ObjectMapper mapper,
+            ApprovalDecisionType approvalDecision,
+            String approvalId,
+            String approvedActionSnapshotHash,
+            String frozenActionSnapshotHash,
+            JsonNode frozenPlan,
+            JsonNode originalPlan,
+            JsonNode approvedPlan,
+            String aiDecisionAction,
+            String reviewerDecisionAction,
+            OutcomeWireTypes.ReviewDecision receiptDecision,
+            String receiptId,
+            String receiptHash,
+            String receiptDecisionRecordRef,
+            String receiptApprovedActionSnapshotHash) {
+        Objects.requireNonNull(mapper, "mapper");
+        Objects.requireNonNull(approvalDecision, "approvalDecision");
+        Objects.requireNonNull(frozenPlan, "frozenPlan");
+        Objects.requireNonNull(originalPlan, "originalPlan");
+        Objects.requireNonNull(approvedPlan, "approvedPlan");
+        if (!usesBoundedDecisionActionContract(aiDecisionAction, reviewerDecisionAction)
+                || !HearingDecisionAction.supports(aiDecisionAction)
+                || !HearingDecisionAction.supports(reviewerDecisionAction)) {
+            throw new IllegalStateException(
+                    "target bounded decision-action authority is invalid");
+        }
+        if (!Objects.equals(approvalId, receiptId)
+                || !Objects.equals(approvalId, receiptDecisionRecordRef)
+                || receiptHash == null
+                || !receiptHash.matches("[0-9a-f]{64}")
+                || receiptDecision != OutcomeWireTypes.ReviewDecision.valueOf(approvalDecision.name())
+                || !Objects.equals(approvedActionSnapshotHash, receiptApprovedActionSnapshotHash)) {
+            throw new IllegalStateException(
+                    "target approved action does not bind its human decision receipt");
+        }
+        if (!frozenPlan.isObject() || !originalPlan.isObject() || !approvedPlan.isObject()) {
+            throw new IllegalStateException(
+                    "target bounded decision-action remedy must be an object");
+        }
+        String actualFrozenHash = ActionSnapshotHasher.hash(mapper, frozenPlan);
+        String actualOriginalHash = ActionSnapshotHasher.hash(mapper, originalPlan);
+        String actualApprovedHash = ActionSnapshotHasher.hash(mapper, approvedPlan);
+        if (!Objects.equals(frozenActionSnapshotHash, actualFrozenHash)
+                || !Objects.equals(frozenActionSnapshotHash, actualOriginalHash)
+                || !Objects.equals(approvedActionSnapshotHash, actualApprovedHash)
+                || !Objects.equals(frozenActionSnapshotHash, approvedActionSnapshotHash)) {
+            throw new IllegalStateException("target approved action snapshot hash is stale");
+        }
+        if (frozenPlan.path("id").asText().isBlank()
+                || !frozenPlan.path("version").isIntegralNumber()) {
+            throw new IllegalStateException("target approved remedy identity is invalid");
+        }
+
+        ObjectNode expectedOriginal = ((ObjectNode) frozenPlan).deepCopy();
+        expectedOriginal.put("decision_action", aiDecisionAction);
+        ObjectNode expectedApproved = expectedOriginal.deepCopy();
+        expectedApproved.put("decision_action", reviewerDecisionAction);
+        if (!expectedOriginal.equals(originalPlan) || !expectedApproved.equals(approvedPlan)) {
+            throw new IllegalStateException(
+                    "target bounded review may only bind the persisted decision_action");
+        }
+        if (approvalDecision == ApprovalDecisionType.APPROVE) {
+            if (!aiDecisionAction.equals(reviewerDecisionAction)) {
+                throw new IllegalStateException(
+                        "target bounded APPROVE must preserve the frozen AI decision_action");
+            }
+        } else if (approvalDecision == ApprovalDecisionType.MODIFY_AND_APPROVE) {
+            if (aiDecisionAction.equals(reviewerDecisionAction)) {
+                throw new IllegalStateException(
+                        "target bounded MODIFY_AND_APPROVE must replace decision_action");
+            }
+        } else {
+            throw new IllegalStateException("target action requires an approving human decision");
+        }
+        return requireNoExternalEffectOperation(approvedPlan);
     }
 
     static JsonNode requireApprovedOperation(
@@ -271,6 +389,10 @@ public final class ReviewTargetDecisionHandoffWriter {
         } else {
             throw new IllegalStateException("target action requires an approving human decision");
         }
+        return requireNoExternalEffectOperation(approvedPlan);
+    }
+
+    private static JsonNode requireNoExternalEffectOperation(JsonNode approvedPlan) {
         JsonNode operations = approvedPlan.path("actions");
         if (!operations.isArray() || operations.size() != 1
                 || !approvedPlan.path("notifications").isArray()

@@ -4,66 +4,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { actor } from "../../state/actor";
 import OutcomeView from "./OutcomeView.vue";
 
-const actionOnlyPlan = {
-  actions: [
-    {
-      action_type: "REFUND",
-      description: "向用户原支付渠道退还订单实付金额 299 元，并关闭本次争议。",
-      amount: 299,
-      currency: "CNY",
-    },
-  ],
-};
-
-const approvedOutcome = {
+const publishedOutcome = {
   case_id: "CASE_OUTCOME_1",
-  title: "签收未收到争议",
-  case_status: "CLOSED",
-  closed_at: "2026-07-03T13:20:00+08:00",
+  title: "未发货订单取消",
+  case_status: "APPROVED_FOR_EXECUTION",
+  closed_at: null,
+  review_task_status: "APPROVED",
   adjudication_draft: {
-    id: "DRAFT_V2_7",
-    draft_version: 7,
-    recommended_decision: "建议支持用户退款请求",
-    draft_text: "庭审认为现有证据不足以证明包裹由用户本人或授权人签收。",
+    draft_text: "这段内部裁决草案不应出现在最终事件页。",
   },
   final_decision: {
-    conclusion: "支持用户退款请求",
-    explanation: "最终处理方案已经审核生效。",
-    review_reason: "管理员确认现有证据链完整，裁决适用规则准确。",
-    approved_plan: actionOnlyPlan,
+    conclusion: "这段内部审核结论不应出现在最终事件页。",
+    explanation: "这段内部审核说明不应出现在最终事件页。",
+    review_reason: "这段审核员意见不应出现在最终事件页。",
     source: "HUMAN_REVIEW",
     human_confirmed: true,
-  },
-  actions: [
-    {
-      action_record_id: "ACTION_1",
-      action_type: "REFUND",
-      execution_status: "SUCCEEDED",
-      result: { amount: 299, currency: "CNY" },
-      external_result_ref: "REFUND-20260703-1",
-    },
-    {
-      action_record_id: "ACTION_2",
-      action_type: "NOTIFY_MERCHANT",
-      execution_status: "SUCCEEDED",
-      result: { delivered: true },
-    },
-  ],
-};
-
-const unapprovedOutcome = {
-  ...approvedOutcome,
-  case_status: "WAITING_HUMAN_REVIEW",
-  closed_at: null,
-  final_decision: {
-    conclusion: "这是一条尚未审批的内部草案结论",
-    explanation: "这是一条尚未审批的内部草案说明",
-    review_reason: "这是一条尚未审批的内部审核意见",
+    approval_record_id: "APPROVAL_1",
+    decision_type: "APPROVE",
+    ai_decision_action: "CANCEL_ORDER",
+    reviewer_decision_action: "CANCEL_ORDER",
+    decided_at: "2026-08-21T22:00:00+08:00",
     approved_plan: {
-      handling_direction: "REFUND",
-      execution_plan: "这是一条尚未审批的内部执行方案",
+      id: "PLAN_1",
+      version: 1,
+      decision_action: "CANCEL_ORDER",
+      actions: [],
     },
-    human_confirmed: false,
   },
   actions: [],
 };
@@ -84,10 +50,16 @@ function apiFailure(code, message) {
   };
 }
 
-async function mountOutcome(initialOutcome) {
+async function mountOutcome(initialOutcome = publishedOutcome) {
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: "/disputes/:caseId/outcome", component: { template: "<div />" } }],
+    routes: [
+      {
+        path: "/disputes/:caseId/outcome",
+        name: "dispute-outcome",
+        component: { template: "<div />" },
+      },
+    ],
   });
   await router.push("/disputes/CASE_OUTCOME_1/outcome");
   await router.isReady();
@@ -100,303 +72,140 @@ async function mountOutcome(initialOutcome) {
 
 describe("OutcomeView", () => {
   beforeEach(() => {
-    actor.id = "user-local";
-    actor.role = "USER";
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
-  it("uses the shared room header for the read-only execution result page", async () => {
-    const wrapper = await mountOutcome(approvedOutcome);
+  it("renders one published final execution event and removes the old result chain", async () => {
+    const wrapper = await mountOutcome();
 
     expect(wrapper.get(".room-shell__header h1").text()).toBe("执行结果");
+    expect(wrapper.findAll("[data-final-execution-event]")).toHaveLength(1);
+    expect(wrapper.get("[data-final-execution-event]").attributes("data-state")).toBe("published");
+    expect(wrapper.text()).toContain("取消订单执行事件已发布");
+    expect(wrapper.text()).toContain("订单取消决定已经发布");
+    expect(wrapper.find("[data-outcome-hearing]").exists()).toBe(false);
+    expect(wrapper.find("[data-outcome-review]").exists()).toBe(false);
+    expect(wrapper.find("[data-outcome-plan]").exists()).toBe(false);
+    expect(wrapper.find("[data-outcome-closure]").exists()).toBe(false);
+    expect(wrapper.find("[data-mock-execution]").exists()).toBe(false);
   });
 
-  it("shows the V2 hearing adjudication and its actual draft version", async () => {
-    const wrapper = await mountOutcome(approvedOutcome);
-    const hearing = wrapper.get("[data-outcome-hearing]");
-
-    expect(hearing.text()).toContain("庭审法官 V2");
-    expect(hearing.text()).toMatch(/v7|V7|版本\s*7/);
-    expect(hearing.text()).toContain("建议支持用户退款请求");
-    expect(hearing.text()).toContain(
-      "庭审认为现有证据不足以证明包裹由用户本人或授权人签收。",
-    );
-  });
-
-  it("shows the administrator review opinion without exposing review operations", async () => {
-    actor.id = "reviewer-local";
-    actor.role = "PLATFORM_REVIEWER";
-    const wrapper = await mountOutcome(approvedOutcome);
-    const review = wrapper.get("[data-outcome-review]");
-
-    expect(review.text()).toContain("管理员审核意见");
-    expect(review.text()).toContain(
-      "管理员确认现有证据链完整，裁决适用规则准确。",
-    );
-    expect(wrapper.find("[data-outcome-review-panel]").exists()).toBe(false);
-    expect(wrapper.find("[data-review-confirm]").exists()).toBe(false);
-    expect(wrapper.find("[data-review-modify]").exists()).toBe(false);
-    expect(wrapper.text()).not.toContain("审核员操作");
-  });
-
-  it("derives the approved plan type and description from an action-only plan", async () => {
-    const wrapper = await mountOutcome(approvedOutcome);
-    const plan = wrapper.get("[data-outcome-plan]");
-
-    expect(plan.text()).toContain("最终执行方案");
-    expect(plan.text()).toMatch(/退款|REFUND/);
-    expect(plan.text()).toContain(
-      "向用户原支付渠道退还订单实付金额 299 元，并关闭本次争议。",
-    );
-  });
-
-  it("supports the handling direction and natural-language execution plan contract", async () => {
+  it("uses the reviewer decision action as the authoritative execution action", async () => {
     const wrapper = await mountOutcome({
-      ...approvedOutcome,
+      ...publishedOutcome,
       final_decision: {
-        ...approvedOutcome.final_decision,
-        approved_plan: {
-          handling_direction: "RETURN_AND_REFUND",
-          execution_plan: "用户寄回商品后，原支付渠道退还 299 元，并向双方发送结案通知。",
-        },
+        ...publishedOutcome.final_decision,
+        reviewer_decision_action: "REFUND_ONLY",
+        approved_plan: { decision_action: "CANCEL_ORDER" },
       },
     });
-    const plan = wrapper.get("[data-outcome-plan]");
 
-    expect(plan.text()).toMatch(/退货退款|RETURN_AND_REFUND/);
-    expect(plan.text()).toContain(
-      "用户寄回商品后，原支付渠道退还 299 元，并向双方发送结案通知。",
-    );
+    expect(wrapper.text()).toContain("仅退款执行事件已发布");
+    expect(wrapper.text()).not.toContain("取消订单执行事件已发布");
   });
 
-  it("animates a frontend mock execution when no real action receipt exists", async () => {
-    vi.useFakeTimers();
-    const wrapper = await mountOutcome({
-      ...approvedOutcome,
-      case_status: "APPROVED_FOR_EXECUTION",
-      closed_at: null,
-      actions: [],
-    });
+  it("does not expose the adjudication draft or review reasoning", async () => {
+    const wrapper = await mountOutcome();
 
-    const execution = wrapper.get("[data-outcome-execution]");
-    expect(execution.attributes("data-execution-mode")).toBe("SIMULATED");
-    expect(execution.find("[data-mock-execution]").exists()).toBe(true);
-    expect(execution.text()).toContain("方案下发");
-    expect(execution.text()).not.toContain("模拟执行完成");
-
-    await vi.advanceTimersByTimeAsync(4_999);
-    await flushPromises();
-    expect(execution.get(".mock-execution__summary strong").text()).toBe("方案下发");
-
-    await vi.advanceTimersByTimeAsync(1);
-    await flushPromises();
-    expect(execution.get(".mock-execution__summary strong").text()).toBe("执行准备");
-
-    await vi.advanceTimersByTimeAsync(15_000);
-    await flushPromises();
-
-    expect(execution.text()).toContain("模拟执行完成");
-    expect(wrapper.find("[data-execution-receipt]").exists()).toBe(false);
-    expect(wrapper.get("[data-outcome-closure]").text()).toContain("尚未确认结案");
+    expect(wrapper.text()).not.toContain("内部裁决草案");
+    expect(wrapper.text()).not.toContain("内部审核结论");
+    expect(wrapper.text()).not.toContain("内部审核说明");
+    expect(wrapper.text()).not.toContain("审核员意见");
   });
 
-  it("keeps structured real execution receipts when actions are available", async () => {
+  it("shows the real completed action reference and execution time", async () => {
     const wrapper = await mountOutcome({
-      ...approvedOutcome,
+      ...publishedOutcome,
+      case_status: "CLOSED",
+      final_decision: {
+        ...publishedOutcome.final_decision,
+        reviewer_decision_action: "REFUND_ONLY",
+      },
       actions: [
         {
-          action_record_id: "ACTION_RESHIP",
-          action_type: "RESHIP",
+          action_record_id: "ACTION_REFUND_1",
+          action_type: "REFUND_ONLY",
           execution_status: "SUCCEEDED",
-          external_result_ref: "RESHIP-20260703-1",
-          result: {
-            operation: "reship",
-            simulated: false,
-            tool_name: "warehouse_tool",
-            response: {
-              status: "SUCCEEDED",
-              action_type: "RESHIP",
-              idempotency_key: "REMEDY:CASE:1:0:RESHIP",
-            },
-          },
+          external_result_ref: "REFUND-20260821-1",
+          execution_time: "2026-08-21T22:18:00+08:00",
         },
       ],
     });
 
-    const execution = wrapper.get("[data-outcome-execution]");
-    const receipt = execution.get("[data-execution-receipt]");
-    expect(execution.attributes("data-execution-mode")).toBe("REAL");
-    expect(execution.find("[data-mock-execution]").exists()).toBe(false);
-    expect(receipt.text()).toContain("RESHIP-20260703-1");
-    expect(receipt.text()).toContain("warehouse_tool");
-    expect(receipt.text()).toContain("REMEDY:CASE:1:0:RESHIP");
-    expect(receipt.find("pre").exists()).toBe(false);
-    expect(receipt.text()).not.toContain('"response"');
-    expect(receipt.text()).not.toContain("{");
+    const event = wrapper.get("[data-final-execution-event]");
+    expect(event.attributes("data-state")).toBe("complete");
+    expect(event.text()).toContain("仅退款已完成");
+    expect(event.text()).toContain("REFUND-20260821-1");
+    expect(event.text()).toContain("2026");
   });
 
-  it("renders a zero-effect synthetic projection as simulated and never as closure", async () => {
+  it("maps an escalated review to the manual handoff event", async () => {
     const wrapper = await mountOutcome({
-      ...approvedOutcome,
-      case_status: "APPROVED_FOR_EXECUTION",
-      closed_at: null,
-      actions: [],
-      execution: {
-        mode: "SIMULATED",
-        status: "OBSERVED_NO_EFFECT",
-        actions: [],
-        receipts: [{
-          operation_id: "OP_SYNTHETIC_1",
-          request_hash: "a".repeat(64),
-          receipt_hash: "b".repeat(64),
-        }],
-        synthetic_only: true,
-        formal_receipt_present: false,
-      },
-      closure: { status: "NOT_CLOSURE_ELIGIBLE", closed_at: null },
-    });
-
-    const execution = wrapper.get("[data-outcome-execution]");
-    expect(execution.attributes("data-execution-mode")).toBe("SIMULATED");
-    expect(execution.get("[data-execution-mode-label]").text()).toContain("不是正式回执");
-    expect(execution.get("[data-synthetic-receipt-state]").text()).toContain("1 条零影响观察记录");
-    expect(execution.find("[data-execution-receipt]").exists()).toBe(false);
-    expect(wrapper.get("[data-outcome-closure]").attributes("data-closure-status"))
-      .toBe("NOT_CLOSURE_ELIGIBLE");
-    expect(wrapper.get("[data-outcome-closure]").text()).toContain("尚未确认结案");
-    expect(wrapper.text()).not.toContain("案件已结案");
-  });
-
-  it("shows explicit NONE without starting the mock animation", async () => {
-    const wrapper = await mountOutcome({
-      ...approvedOutcome,
-      actions: [],
-      execution: { mode: "NONE", status: "NOT_APPLICABLE" },
-      closure: { status: "OPEN", closed_at: null },
-    });
-
-    const execution = wrapper.get("[data-outcome-execution]");
-    expect(execution.attributes("data-execution-mode")).toBe("NONE");
-    expect(execution.find("[data-mock-execution]").exists()).toBe(false);
-    expect(execution.get("[data-no-execution]").text()).toContain("不会用动画或模型文本推断执行成功");
-  });
-
-  it("keeps a real failed receipt visible and never covers it with animation", async () => {
-    const wrapper = await mountOutcome({
-      ...approvedOutcome,
-      case_status: "APPROVED_FOR_EXECUTION",
-      closed_at: null,
-      actions: [],
-      execution: {
-        mode: "REAL",
-        status: "FAILED",
-        failure_code: "TOOL_REJECTED",
-        failure_message: "退款通道拒绝请求",
-        receipts: [{
-          receipt_id: "RECEIPT_FAILED_1",
-          operation_id: "OP_REAL_1",
-          action_type: "REFUND",
-          terminal_status: "FAILED",
-          failure_code: "TOOL_REJECTED",
-          failure_message: "退款通道拒绝请求",
-        }],
-        formal_receipt_present: true,
-      },
-      closure: { status: "BLOCKED", closed_at: null },
-    });
-
-    const execution = wrapper.get("[data-outcome-execution]");
-    expect(execution.attributes("data-execution-mode")).toBe("REAL");
-    expect(execution.find("[data-mock-execution]").exists()).toBe(false);
-    expect(execution.get("[data-execution-failure]").text()).toContain("退款通道拒绝请求");
-    expect(execution.get("[data-execution-receipt]").text()).toContain("执行失败");
-    expect(wrapper.get("[data-outcome-closure]").text()).toContain("尚未确认结案");
-  });
-
-  it("does not treat a rejected human review as an approved final result", async () => {
-    const wrapper = await mountOutcome({
-      ...approvedOutcome,
-      review_task_status: "REJECTED",
-      actions: [],
-    });
-
-    expect(wrapper.get("[data-outcome-waiting]").text()).toContain("等待最终结果");
-    expect(wrapper.find("[data-outcome-hearing]").exists()).toBe(false);
-    expect(wrapper.find("[data-outcome-plan]").exists()).toBe(false);
-    expect(wrapper.find("[data-mock-execution]").exists()).toBe(false);
-  });
-
-  it("keeps every result section behind the approved-result boundary", async () => {
-    const wrapper = await mountOutcome(unapprovedOutcome);
-
-    expect(wrapper.get("[data-outcome-waiting]").text()).toContain("等待最终结果");
-    expect(wrapper.find("[data-outcome-hearing]").exists()).toBe(false);
-    expect(wrapper.find("[data-outcome-review]").exists()).toBe(false);
-    expect(wrapper.find("[data-outcome-plan]").exists()).toBe(false);
-    expect(wrapper.find("[data-outcome-execution]").exists()).toBe(false);
-    expect(wrapper.find("[data-mock-execution]").exists()).toBe(false);
-    expect(wrapper.text()).not.toContain("这是一条尚未审批的内部草案结论");
-    expect(wrapper.text()).not.toContain("这是一条尚未审批的内部审核意见");
-    expect(wrapper.text()).not.toContain("这是一条尚未审批的内部执行方案");
-  });
-
-  it("loads a persisted closed outcome without querying an active hearing run", async () => {
-    const historicalOutcome = {
-      case_id: "CASE_OUTCOME_1",
-      title: "退款履约争议已结案",
-      case_status: "CLOSED",
-      closed_at: null,
+      ...publishedOutcome,
+      case_status: "MANUAL_HANDOFF",
+      review_task_status: "ESCALATED",
       final_decision: {
-        conclusion: "历史结案记录",
-        explanation: "平台终审完成，确定性执行记录可以查看。",
-        source: "EXTERNAL_IMPORT",
-        human_confirmed: false,
-        approved_plan: null,
+        ...publishedOutcome.final_decision,
+        reviewer_decision_action: "ESCALATE_MANUAL",
       },
-      adjudication_draft: null,
-      review_task_status: null,
-      actions: [],
-    };
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url === "/api/disputes/CASE_OUTCOME_1/outcome") {
-        return apiResponse(historicalOutcome);
-      }
-      throw new Error(`unexpected fetch: ${url}`);
     });
+
+    const event = wrapper.get("[data-final-execution-event]");
+    expect(event.attributes("data-state")).toBe("manual");
+    expect(event.text()).toContain("案件已升级人工接管");
+  });
+
+  it("keeps unapproved internal content hidden while waiting for final review", async () => {
+    const wrapper = await mountOutcome({
+      ...publishedOutcome,
+      case_status: "WAITING_HUMAN_REVIEW",
+      review_task_status: "IN_REVIEW",
+      final_decision: {
+        ...publishedOutcome.final_decision,
+        human_confirmed: false,
+        reviewer_decision_action: null,
+        conclusion: "未审批敏感结论",
+        approved_plan: { decision_action: "CANCEL_ORDER" },
+      },
+      actions: [],
+    });
+
+    const event = wrapper.get("[data-final-execution-event]");
+    expect(event.attributes("data-state")).toBe("waiting");
+    expect(event.text()).toContain("终审决定尚未发布");
+    expect(wrapper.text()).not.toContain("未审批敏感结论");
+  });
+
+  it("loads only the case outcome endpoint when opened after the redirect", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(apiResponse(publishedOutcome));
+    vi.stubGlobal("fetch", fetchMock);
 
     const wrapper = await mountOutcome(null);
     await flushPromises();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(wrapper.get("[data-outcome-summary-layout]").text()).toContain("历史结案记录");
-    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/disputes/CASE_OUTCOME_1/outcome");
+    expect(wrapper.text()).toContain("取消订单执行事件已发布");
   });
 
-  it("still reports an active-run failure while an outcome is not final", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url === "/api/disputes/CASE_OUTCOME_1/outcome") {
-        return apiResponse(unapprovedOutcome);
-      }
-      if (
-        url ===
-        "/api/disputes/CASE_OUTCOME_1/rooms/HEARING/agent-runs/active"
-      ) {
-        return apiFailure("ROOM_PHASE_MISMATCH", "当前案件阶段不能读取庭审任务");
-      }
-      throw new Error(`unexpected fetch: ${url}`);
-    });
+  it("shows a retryable event notification when the outcome request fails", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      apiFailure("OUTCOME_UNAVAILABLE", "执行事件暂不可用"),
+    );
+    vi.stubGlobal("fetch", fetchMock);
 
     const wrapper = await mountOutcome(null);
     await flushPromises();
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(wrapper.get('[role="alert"]').text()).toContain("最终结果暂时无法更新");
-    expect(wrapper.find("[data-outcome-summary-layout]").exists()).toBe(false);
+    const event = wrapper.get("[data-final-execution-event]");
+    expect(event.attributes("data-state")).toBe("error");
+    expect(event.text()).toContain("执行事件暂不可用");
+    expect(wrapper.get(".execution-event__retry").text()).toBe("重新读取");
   });
 });

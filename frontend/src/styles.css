@@ -4,6 +4,10 @@
  */
 
 :root {
+  --app-scrollbar-size: 8px;
+  --app-scrollbar-thumb: #cbd8e8;
+  --app-scrollbar-thumb-hover: #b7c9dc;
+  --app-scrollbar-track: transparent;
   font-family: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: #31405a;
   background: #f7fbff;
@@ -11,7 +15,28 @@
   text-rendering: optimizeLegibility;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+  scrollbar-color: var(--app-scrollbar-thumb) var(--app-scrollbar-track) !important;
+  scrollbar-width: thin !important;
+}
+*::-webkit-scrollbar {
+  width: var(--app-scrollbar-size) !important;
+  height: var(--app-scrollbar-size) !important;
+}
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: var(--app-scrollbar-track) !important;
+}
+*::-webkit-scrollbar-thumb {
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 999px !important;
+  background: var(--app-scrollbar-thumb) !important;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--app-scrollbar-thumb-hover) !important;
+}
 html { min-height: 100%; background: #f7fbff; }
 body {
   min-height: 100vh;

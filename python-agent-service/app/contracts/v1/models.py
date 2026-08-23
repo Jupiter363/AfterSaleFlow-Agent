@@ -41,6 +41,18 @@ ActorRole = Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "ADMIN", "SYSTEM"]
 Audience = Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "SYSTEM"]
 RoomType = Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]
 
+MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT: Final[int] = 2
+HEARING_EVIDENCE_SYNTHESIS_PROVIDER_ATTEMPT_LIMIT: Final[int] = 202
+
+
+def command_provider_attempt_limit(
+    room_type: str | None,
+    stage_code: str | None,
+) -> int:
+    if room_type == "HEARING" and stage_code == "EVIDENCE_SYNTHESIZING":
+        return HEARING_EVIDENCE_SYNTHESIS_PROVIDER_ATTEMPT_LIMIT
+    return MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT
+
 
 class StrictContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -147,6 +159,7 @@ class Usage(StrictContractModel):
 
 class AgentStreamPayload(StrictContractModel):
     node: Identifier | None = None
+    generation: int | None = Field(default=None, ge=2, le=2)
     field: Identifier | None = None
     delta: Annotated[str, StringConstraints(min_length=1, max_length=4096)] | None = None
     frame_id: Identifier | None = None
@@ -182,6 +195,7 @@ class AgentStreamPayload(StrictContractModel):
 StreamEventType = Literal[
     "attempt_started",
     "visible_delta",
+    "generation_reset",
     "public_frame_start",
     "public_text_delta",
     "active_frame_snapshot",
@@ -199,6 +213,7 @@ AGENT_STREAM_PAYLOAD_FIELDS: Final[Mapping[str, frozenset[str]]] = MappingProxyT
     {
         "attempt_started": frozenset({"node"}),
         "visible_delta": frozenset({"node", "field", "delta"}),
+        "generation_reset": frozenset({"node", "generation", "reason_code"}),
         "public_frame_start": frozenset(
             {"frame_id", "frame_sequence", "frame_type", "public_header"}
         ),
@@ -260,6 +275,11 @@ class AgentStreamEvent(StrictContractModel):
                 f"{self.event_type} payload contains incompatible fields "
                 f"{sorted(unexpected)}"
             )
+        if (
+            self.event_type == "generation_reset"
+            and self.payload.reason_code != "OUTPUT_SCHEMA_INVALID"
+        ):
+            raise ValueError("generation_reset reason_code is invalid")
         return self
 
 
@@ -291,7 +311,10 @@ class InvocationContext(StrictContractModel):
 
 
 class RetryBudget(StrictContractModel):
-    provider_attempts_remaining: int = Field(ge=0, le=2)
+    provider_attempts_remaining: int = Field(
+        ge=0,
+        le=HEARING_EVIDENCE_SYNTHESIS_PROVIDER_ATTEMPT_LIMIT,
+    )
     activity_attempts_remaining: int = Field(ge=0, le=3)
     repairs_remaining: int = Field(ge=0, le=1)
 
@@ -320,6 +343,17 @@ class RoomGraphCommand(StrictContractModel):
     deadline_at: AwareDatetime
     traceparent: Traceparent
     request_hash: Sha256
+
+    @model_validator(mode="after")
+    def bind_aggregate_provider_budget_to_stage(self) -> "RoomGraphCommand":
+        if self.retry_budget.provider_attempts_remaining > command_provider_attempt_limit(
+            self.room_type,
+            self.stage_code,
+        ):
+            raise ValueError(
+                "aggregate provider budget is reserved for Hearing evidence synthesis"
+            )
+        return self
 
 
 class ArtifactPointer(StrictContractModel):

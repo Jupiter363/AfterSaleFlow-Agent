@@ -17,14 +17,19 @@ public final class JdbcTargetTemporalOutcomeBindingResolver {
   static final String BINDING_SQL = """
       select epoch.id as epoch_id, epoch.tenant_surrogate, epoch.process_revision, epoch.room_revision,
              packet.id as packet_id, packet.packet_version, packet.action_hash as packet_action_hash,
-             approval.id as approval_id,
-             approval.action_snapshot_hash as approval_action_hash
+             approval.id as approval_id, approval.action_hash as approval_hash,
+             approval.action_snapshot_hash as approval_action_snapshot_hash
         from case_room_epoch epoch
         join human_review_record approval on approval.id = ? and approval.case_id = epoch.case_id
         join review_packet packet on packet.id = approval.review_packet_id and packet.case_id = epoch.case_id
        where epoch.case_id = ? and epoch.room_type = 'REVIEW' and epoch.room_epoch = ?
          and epoch.fencing_token = ? and epoch.writer_mode = 'TEMPORAL'
          and epoch.lifecycle_status = 'ACTIVE' and approval.decision_type in ('APPROVE', 'MODIFY_AND_APPROVE')
+         and approval.reviewer_decision_action in (
+             'CANCEL_ORDER', 'RETURN_AND_REFUND', 'REFUND_ONLY', 'RESHIP', 'REPLACE',
+             'REPAIR', 'COMPENSATE', 'CONTINUE_FULFILLMENT', 'REJECT_CLAIM')
+         and approval.approved_plan_json ->> 'decision_action' =
+             approval.reviewer_decision_action
        for update of epoch, approval, packet
       """;
   private final JdbcTemplate jdbc;
@@ -49,13 +54,13 @@ public final class JdbcTargetTemporalOutcomeBindingResolver {
     List<Row> rows = jdbc.query(BINDING_SQL, (row, ignored) -> new Row(row.getString("epoch_id"), row.getString("tenant_surrogate"),
         row.getLong("process_revision"), row.getLong("room_revision"), row.getString("packet_id"),
         row.getInt("packet_version"), row.getString("packet_action_hash"), row.getString("approval_id"),
-        row.getString("approval_action_hash")), decision.decisionRecordRef(),
+        row.getString("approval_hash"), row.getString("approval_action_snapshot_hash")), decision.decisionRecordRef(),
         start.caseId(), start.epoch(), start.fence());
     if (rows.isEmpty()) throw new IllegalStateException("target Outcome ledger authority is absent");
     Row first = rows.getFirst();
     if (!first.packetId().equals(start.frozenReviewPacketRef())
         || !first.approvalId().equals(decision.decisionRecordRef())
-        || !first.approvalActionHash().equals(decision.approvedActionSnapshotHash())
+        || !first.approvalActionSnapshotHash().equals(decision.approvedActionSnapshotHash())
         || !first.packetActionHash().equals(decision.actionSnapshotHash())) {
       throw new IllegalStateException("target Outcome review facts conflict with its frozen start");
     }
@@ -77,11 +82,11 @@ public final class JdbcTargetTemporalOutcomeBindingResolver {
         first.approvalId(), decision.requestHash(), decision.approvedActionSnapshotHash(), start.requiredOperationCount(),
         OutcomeProcessProjection.ProcessState.DECISION_RECORDED, now, now);
     return new TargetTemporalOutcomeLedgerAdapter.Binding(projection, first.packetId(), first.packetVersion(),
-        start.frozenReviewPacketHash(), first.packetActionHash(), first.approvalId(), first.approvalActionHash(),
+        start.frozenReviewPacketHash(), first.packetActionHash(), first.approvalId(), first.approvalHash(),
         decision.requestHash(), start.policyVersion(), actions);
   }
 
   private record Row(String epochId, String tenant, long processRevision, long roomRevision,
       String packetId, int packetVersion, String packetActionHash, String approvalId,
-      String approvalActionHash) {}
+      String approvalHash, String approvalActionSnapshotHash) {}
 }

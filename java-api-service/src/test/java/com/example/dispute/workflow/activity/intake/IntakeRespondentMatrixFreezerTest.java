@@ -451,6 +451,20 @@ class IntakeRespondentMatrixFreezerTest {
                         .asText())
                 .isEqualTo("MESSAGE_RESPONDENT_2");
 
+        ObjectNode proposalLocalAlias = (ObjectNode) completeDelta();
+        ObjectNode proposalLocalAliasRow = (ObjectNode) proposalLocalAlias.at("/fact_rows/0");
+        proposalLocalAliasRow.put("fact_key", "NEW_DELIVERY_SCOPE");
+        proposalLocalAlias.withArray("summary_source_fact_keys")
+                .set(0, JSON.getNodeFactory().textNode("NEW_DELIVERY_SCOPE"));
+        ObjectNode proposalLocalAliasCandidate =
+                freezer.deriveCandidate(parent, proposalLocalAlias, respondentAuthority());
+        assertThat(proposalLocalAliasCandidate.at("/fact_rows/0/fact_id").asText())
+                .isEqualTo(canonicalId);
+        assertThat(proposalLocalAliasCandidate.at("/fact_rows/0/origin/source_refs/0").asText())
+                .isEqualTo("MESSAGE_INITIATOR_1");
+        assertThat(proposalLocalAliasCandidate.at("/fact_rows/0/origin/source_refs/1").asText())
+                .isEqualTo("MESSAGE_RESPONDENT_2");
+
         ObjectNode unknown = (ObjectNode) completeDelta();
         ObjectNode unknownRow = (ObjectNode) unknown.at("/fact_rows/0");
         unknownRow.put("fact_key", "FACT_UNKNOWN");
@@ -484,7 +498,7 @@ class IntakeRespondentMatrixFreezerTest {
         newRow.put("category", "FULFILLMENT");
         newRow.put("fact_target", "Whether the promised installation was delivered.");
         assertRejected(
-                "INTAKE_RESPONDENT_MATRIX_NEW_FACT_COLLISION",
+                "INTAKE_RESPONDENT_MATRIX_FACT_DUPLICATE",
                 () -> freezer.deriveCandidate(parent, collision, respondentAuthority()));
 
         ObjectNode duplicateAlias = (ObjectNode) completeDelta();

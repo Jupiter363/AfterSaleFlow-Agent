@@ -16,7 +16,6 @@ from pydantic import (
     Field,
     TypeAdapter,
     field_serializer,
-    model_validator,
 )
 
 
@@ -40,24 +39,20 @@ FrameType = Literal[
     "EVIDENCE_OBSERVATION",
     "EVIDENCE_ASSESSMENT",
     "EVIDENCE_REQUEST",
-    "HUMAN_REVIEW_TASK",
     "ROOM_READINESS",
 ]
 
+EvidenceScore = Annotated[float, Field(ge=0.0, le=1.0)]
+
 
 class EvidenceV2Model(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="ignore", frozen=True)
 
 
 class EvidenceFactBindingV2(EvidenceV2Model):
-    fact_id: Identifier
-    relation: Literal[
-        "CONTENT_SUPPORTS",
-        "CONTENT_CONTRADICTS",
-        "CONTEXT_ONLY",
-        "INCONCLUSIVE",
-    ]
-    reason: ReasonText
+    fact_id: str | None = None
+    relation: str | None = None
+    reason: str | None = None
 
 
 class EvidenceFrameHeaderBaseV2(EvidenceV2Model):
@@ -70,13 +65,13 @@ class EvidenceRoomWelcomeFrameHeaderV2(EvidenceFrameHeaderBaseV2):
 
 class EvidenceOpeningOrientationFrameHeaderV2(EvidenceFrameHeaderBaseV2):
     frame_type: Literal["OPENING_ORIENTATION"]
-    focus_fact_ids: list[Identifier] = Field(min_length=1, max_length=20)
+    focus_fact_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
 class EvidenceMaterialReceiptFrameHeaderV2(EvidenceFrameHeaderBaseV2):
     frame_type: Literal["MATERIAL_RECEIPT"]
-    evidence_ids: list[Identifier] = Field(min_length=1, max_length=50)
-    focus_fact_ids: list[Identifier] = Field(default_factory=list, max_length=20)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=50)
+    focus_fact_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
 class EvidenceTextFollowupFrameHeaderV2(EvidenceFrameHeaderBaseV2):
@@ -85,123 +80,64 @@ class EvidenceTextFollowupFrameHeaderV2(EvidenceFrameHeaderBaseV2):
 
 class EvidenceObservationFrameHeaderV2(EvidenceFrameHeaderBaseV2):
     frame_type: Literal["EVIDENCE_OBSERVATION"]
-    observation_slot: Identifier
-    source_unit_id: Identifier
-    binding_status: Literal["BOUND", "UNRELATED", "AMBIGUOUS"]
+    observation_slot: str | None = None
+    source_unit_id: str | None = None
+    binding_status: str | None = None
     fact_bindings: list[EvidenceFactBindingV2] = Field(default_factory=list, max_length=20)
-    candidate_fact_ids: list[Identifier] = Field(default_factory=list, max_length=20)
-    binding_reason: ReasonText | None = None
-    observation_kind: Literal[
-        "PARSED_RECORD",
-        "PARSED_PARTY_STATEMENT",
-        "PARSED_TRANSACTION_STATUS",
-        "OCR_TEXT",
-        "IMAGE_PIXELS",
-        "PLATFORM_RECORD",
-    ]
-    epistemic_status: Literal["PENDING_VERIFICATION", "PROVISIONAL"]
+    candidate_fact_ids: list[str] = Field(default_factory=list, max_length=20)
+    binding_reason: str | None = None
+    # Source vocabulary is model-owned.  In particular PARSED_TEXT is a valid
+    # source basis even though older releases only enumerated semantic aliases
+    # such as PARSED_RECORD.
+    observation_kind: str | None = None
+    epistemic_status: str | None = None
 
-    @model_validator(mode="after")
-    def validate_binding_authority(self) -> "EvidenceObservationFrameHeaderV2":
-        if self.binding_status == "BOUND" and not self.fact_bindings:
-            raise ValueError("bound observation requires fact bindings")
-        if self.binding_status == "UNRELATED" and self.fact_bindings:
-            raise ValueError("unrelated observation cannot bind facts")
-        if self.binding_status == "AMBIGUOUS" and not self.candidate_fact_ids:
-            raise ValueError("ambiguous observation requires candidate facts")
-        return self
+
+class EvidenceAssessmentFindingV2(EvidenceV2Model):
+    finding_type: str | None = None
+    description: str | None = None
 
 
 class EvidenceAssessmentFrameHeaderV2(EvidenceFrameHeaderBaseV2):
     frame_type: Literal["EVIDENCE_ASSESSMENT"]
-    evidence_id: Identifier
-    observation_slots: list[Identifier] = Field(default_factory=list, max_length=20)
-    relevance: Literal[
-        "DIRECT",
-        "PARTIAL",
-        "CONTEXTUAL",
-        "UNRELATED",
-        "UNAVAILABLE",
-    ]
-    source_chain_status: Literal[
-        "TRACEABLE",
-        "PARTIAL",
-        "UNTRACEABLE",
-        "UNAVAILABLE",
-    ]
-    formation_time_status: Literal[
-        "CONFIRMED",
-        "PARTIAL",
-        "UNKNOWN",
-        "CONFLICTING",
-    ]
-    integrity_status: Literal[
-        "INTACT",
-        "PARTIAL",
-        "ANOMALY_DETECTED",
-        "UNAVAILABLE",
-    ]
-    readability: Literal["CLEAR", "PARTIAL", "UNREADABLE", "UNAVAILABLE"]
-    cross_source_consistency: Literal[
-        "CONSISTENT",
-        "MIXED",
-        "CONFLICTING",
-        "NOT_ASSESSED",
-    ]
-    authenticity_status: Literal[
-        "UNVERIFIED",
-        "PROVISIONALLY_CONSISTENT",
-        "ANOMALY_DETECTED",
-        "UNAVAILABLE",
-        "REQUIRES_HUMAN_REVIEW",
-    ]
-    capability_status: Literal[
-        "FULL_CONTENT",
-        "TEXT_ONLY",
-        "OCR_ONLY",
-        "PIXELS_LOADED",
-        "PARTIAL",
-        "UNAVAILABLE",
-    ]
-    limitations: list[ShortText] = Field(default_factory=list, max_length=20)
-    conflict_findings: list[ShortText] = Field(default_factory=list, max_length=20)
+    evidence_id: str | None = None
+    observation_slots: list[str] = Field(default_factory=list, max_length=20)
+    authenticity_score: float | None = None
+    authenticity_score_explanation: str | None = None
+    relevance_score: float | None = None
+    relevance_score_explanation: str | None = None
+    completeness_score: float | None = None
+    completeness_score_explanation: str | None = None
+    assessment_confidence: float | None = None
+    assessment_confidence_explanation: str | None = None
+    risk_level: str | None = None
+    risk_explanation: str | None = None
+    source_basis: list[str] = Field(default_factory=list, max_length=20)
+    formation_time_assessment: str | None = None
+    findings: list[EvidenceAssessmentFindingV2] = Field(default_factory=list, max_length=20)
+    limitations: list[str] = Field(default_factory=list, max_length=20)
+    unsupported_claims: list[str] = Field(default_factory=list, max_length=20)
 
 
 class EvidenceRequestFrameHeaderV2(EvidenceFrameHeaderBaseV2):
     frame_type: Literal["EVIDENCE_REQUEST"]
-    request_slot: Identifier
-    target_fact_ids: list[Identifier] = Field(default_factory=list, max_length=20)
-    gap_codes: list[Identifier] = Field(default_factory=list, max_length=10)
-    requested_material_kind: ShortText
-    priority: Literal["LOW", "MEDIUM", "HIGH"]
-    reason: ReasonText | None = None
-
-    @model_validator(mode="after")
-    def validate_request_authority(self) -> "EvidenceRequestFrameHeaderV2":
-        if not self.target_fact_ids and not self.gap_codes:
-            raise ValueError("request must identify a fact or gap")
-        return self
-
-
-class EvidenceHumanReviewFrameHeaderV2(EvidenceFrameHeaderBaseV2):
-    frame_type: Literal["HUMAN_REVIEW_TASK"]
-    evidence_id: Identifier
-    trigger_code: Identifier
-    review_target: ShortText
-    review_instruction: ShortText
-    priority: Literal["LOW", "MEDIUM", "HIGH"]
+    request_slot: str | None = None
+    target_fact_ids: list[str] = Field(default_factory=list, max_length=20)
+    gap_codes: list[str] = Field(default_factory=list, max_length=10)
+    requested_material_kind: str | None = None
+    priority: str | None = None
+    reason: str | None = None
 
 
 class EvidenceRoomReadinessFrameHeaderV2(EvidenceFrameHeaderBaseV2):
     frame_type: Literal["ROOM_READINESS"]
-    core_fact_coverage: Literal["COMPLETE", "PARTIAL", "NONE", "UNKNOWN"]
-    source_chain_coverage: Literal["COMPLETE", "PARTIAL", "NONE", "UNKNOWN"]
-    time_integrity_coverage: Literal["COMPLETE", "PARTIAL", "NONE", "UNKNOWN"]
-    unresolved_conflicts: list[ShortText] = Field(default_factory=list, max_length=20)
-    remaining_core_fact_ids: list[Identifier] = Field(default_factory=list, max_length=50)
-    human_review_status: Literal["NONE", "PENDING", "REQUIRED"]
-    overall_readiness: Literal["READY", "PARTIAL", "NOT_READY", "UNKNOWN"]
-    readiness_reasons: list[ShortText] = Field(default_factory=list, max_length=20)
+    core_fact_coverage: str | None = None
+    source_chain_coverage: str | None = None
+    time_integrity_coverage: str | None = None
+    unresolved_conflicts: list[str] = Field(default_factory=list, max_length=20)
+    remaining_core_fact_ids: list[str] = Field(default_factory=list, max_length=50)
+    overall_readiness: str | None = None
+    readiness_reasons: list[str] = Field(default_factory=list, max_length=20)
 
 EvidenceFrameHeaderV2 = Annotated[
     EvidenceRoomWelcomeFrameHeaderV2
@@ -211,7 +147,6 @@ EvidenceFrameHeaderV2 = Annotated[
     | EvidenceObservationFrameHeaderV2
     | EvidenceAssessmentFrameHeaderV2
     | EvidenceRequestFrameHeaderV2
-    | EvidenceHumanReviewFrameHeaderV2
     | EvidenceRoomReadinessFrameHeaderV2,
     Field(discriminator="frame_type"),
 ]
@@ -262,14 +197,7 @@ class EvidenceFrameObjectV2(EvidenceV2Model):
     """Generic ordered frame object used only by the shared result model."""
 
     header: EvidenceFrameHeaderV2
-    public_text: PublicText | None
-
-    @model_validator(mode="after")
-    def validate_public_slot(self) -> "EvidenceFrameObjectV2":
-        internal = self.header.frame_type == "HUMAN_REVIEW_TASK"
-        if internal != (self.public_text is None):
-            raise ValueError("frame public_text slot conflicts with frame type")
-        return self
+    public_text: str | None = None
 
 
 EvidenceRoomOpeningFrameHeaderV2 = Annotated[
@@ -284,7 +212,7 @@ class EvidenceRoomOpeningFrameObjectV2(EvidenceV2Model):
     """Opening semantic frame after the state-machine-owned welcome frame."""
 
     header: EvidenceRoomOpeningFrameHeaderV2
-    public_text: PublicText
+    public_text: str | None = None
 
 
 EvidenceMaterialReviewPublicFrameHeaderV2 = Annotated[
@@ -298,19 +226,25 @@ class EvidenceMaterialReviewPublicFrameObjectV2(EvidenceV2Model):
     """Material-review public branch with an explicit string slot."""
 
     header: EvidenceMaterialReviewPublicFrameHeaderV2
-    public_text: PublicText
+    public_text: str | None = None
 
 
-class EvidenceHumanReviewFrameObjectV2(EvidenceV2Model):
-    """Material-review internal branch; no public bytes are permitted."""
-
-    header: EvidenceHumanReviewFrameHeaderV2
-    public_text: None
+EvidenceMaterialReviewFrameObjectV2 = EvidenceMaterialReviewPublicFrameObjectV2
 
 
-EvidenceMaterialReviewFrameObjectV2 = (
-    EvidenceMaterialReviewPublicFrameObjectV2 | EvidenceHumanReviewFrameObjectV2
-)
+EvidenceMaterialReviewNoObservationFrameHeaderV2 = Annotated[
+    EvidenceAssessmentFrameHeaderV2
+    | EvidenceRequestFrameHeaderV2
+    | EvidenceRoomReadinessFrameHeaderV2,
+    Field(discriminator="frame_type"),
+]
+
+
+class EvidenceMaterialReviewNoObservationFrameObjectV2(EvidenceV2Model):
+    """Material review when no parsed text or loaded pixels own source authority."""
+
+    header: EvidenceMaterialReviewNoObservationFrameHeaderV2
+    public_text: str | None = None
 
 
 EvidenceTextFollowupModeFrameHeaderV2 = Annotated[
@@ -324,29 +258,20 @@ class EvidenceTextFollowupFrameObjectV2(EvidenceV2Model):
     """Text-followup wire object; every allowed frame is public."""
 
     header: EvidenceTextFollowupModeFrameHeaderV2
-    public_text: PublicText
+    public_text: str | None = None
 
 
 class EvidenceTurnStreamV2(EvidenceV2Model):
-    schema_version: Literal["evidence_turn_stream.v2"] = "evidence_turn_stream.v2"
-    lead_public_text: PublicText
-    frames: list[EvidenceFrameObjectV2] = Field(min_length=1, max_length=128)
-
-    @model_validator(mode="after")
-    def validate_sequence(self) -> "EvidenceTurnStreamV2":
-        sequences = [frame.header.frame_sequence for frame in self.frames]
-        if sequences != list(range(2, len(sequences) + 2)):
-            raise ValueError("evidence frame sequences must be contiguous")
-        if self.frames[-1].header.frame_type != "ROOM_READINESS":
-            raise ValueError("evidence stream must end with room readiness")
-        return self
+    schema_version: Literal["evidence_turn_stream.v3"] = "evidence_turn_stream.v3"
+    lead_public_text: str | None = None
+    frames: list[EvidenceFrameObjectV2] = Field(default_factory=list, max_length=128)
 
 
 class EvidenceRoomOpeningStreamV2(EvidenceTurnStreamV2):
     """Opening-specific provider contract; cardinality is checked by the executor."""
 
     frames: list[EvidenceRoomOpeningFrameObjectV2] = Field(
-        min_length=1, max_length=128
+        default_factory=list, max_length=128
     )
 
 
@@ -354,7 +279,15 @@ class EvidenceMaterialReviewStreamV2(EvidenceTurnStreamV2):
     """Attachment review-specific provider contract."""
 
     frames: list[EvidenceMaterialReviewFrameObjectV2] = Field(
-        min_length=1, max_length=128
+        default_factory=list, max_length=128
+    )
+
+
+class EvidenceMaterialReviewNoObservationStreamV2(EvidenceTurnStreamV2):
+    """Attachment review contract that makes observations provider-inaccessible."""
+
+    frames: list[EvidenceMaterialReviewNoObservationFrameObjectV2] = Field(
+        default_factory=list, max_length=128
     )
 
 
@@ -362,7 +295,7 @@ class EvidenceTextFollowupStreamV2(EvidenceTurnStreamV2):
     """Text-only follow-up provider contract."""
 
     frames: list[EvidenceTextFollowupFrameObjectV2] = Field(
-        min_length=1, max_length=128
+        default_factory=list, max_length=128
     )
 
 
@@ -387,16 +320,15 @@ class CommittedEvidenceFrameV2(EvidenceV2Model):
 
 
 class EvidenceTurnResultV2(EvidenceV2Model):
-    schema_version: Literal["evidence-turn-result.v2"] = "evidence-turn-result.v2"
-    frame_authority_schema: Literal["evidence-turn-frame.v2"] = "evidence-turn-frame.v2"
+    schema_version: Literal["evidence-turn-result.v3"] = "evidence-turn-result.v3"
+    frame_authority_schema: Literal["evidence-turn-frame.v3"] = "evidence-turn-frame.v3"
     frame_manifest: list[CommittedEvidenceFrameV2] = Field(min_length=1, max_length=128)
     frame_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    room_utterance: PublicText
+    room_utterance: str = Field(default="", max_length=100_000)
     referenced_evidence_ids: list[Identifier] = Field(default_factory=list, max_length=50)
     observation_graph: list[dict[str, Any]] = Field(default_factory=list, max_length=50)
     evidence_assessments: list[dict[str, Any]] = Field(default_factory=list, max_length=50)
     evidence_requests: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
-    human_review_tasks: list[dict[str, Any]] = Field(default_factory=list, max_length=50)
     room_readiness: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -405,6 +337,7 @@ __all__ = [
     "EvidenceFactBindingV2",
     "EvidenceFrameHeaderV2",
     "EvidenceFrameObjectV2",
+    "EvidenceMaterialReviewNoObservationStreamV2",
     "EvidenceMaterialReviewStreamV2",
     "EvidenceRoomOpeningStreamV2",
     "EvidenceTextFollowupStreamV2",

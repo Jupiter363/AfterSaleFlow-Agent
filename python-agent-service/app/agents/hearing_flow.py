@@ -14,10 +14,16 @@ from app.graphs.hearing import (
 )
 from app.graphs.hearing.lcel import ainvoke_hearing_lcel, invoke_hearing_lcel
 from app.graphs.hearing.state import HearingGraphInvocation, new_hearing_graph_state
+from app.agents.hearing_intake_v4 import (
+    materialize_hearing_questions_v5,
+    materialize_hearing_synthesis_v5,
+)
+from app.harness.invocation_context import AgentInvocationContext
 from app.schemas import (
+    HEARING_DECISION_ACTION_MEANINGS,
     CaseAlignmentStatus,
     FactEvidenceCoverageStatus,
-    FactEvidenceMatrixV2,
+    FactEvidenceMatrixV3,
     FactStance,
     HearingBatchEvidenceAssessment,
     HearingCaseFactMatrixDelta,
@@ -30,13 +36,14 @@ from app.schemas import (
     HearingEvidenceSynthesisLlmOutput,
     HearingEvidenceSynthesisRequest,
     HearingEvidenceSynthesisResult,
-    HearingIntakeQuestion,
     HearingIntakeQuestionsLlmOutput,
-    HearingIntakeQuestionsRequest,
-    HearingIntakeQuestionsResult,
-    HearingIntakeSynthesisLlmOutput,
+    HearingIntakeQuestionsLlmOutputV5,
+    HearingIntakeQuestionsRequestV4,
+    HearingIntakeQuestionsResultV5,
+    HearingIntakeSynthesisLlmOutputV5,
     HearingIntakeSynthesisRequest,
-    HearingIntakeSynthesisResult,
+    HearingIntakeSynthesisRequestV4,
+    HearingIntakeSynthesisResultV5,
     HearingIssueMapping,
     HearingJudgeV1Request,
     HearingJudgeV1Result,
@@ -54,6 +61,9 @@ from app.schemas import (
 
 
 _HEARING_GRAPH_CANDIDATES = compile_hearing_graph_candidates()
+_DETERMINISTIC_EVIDENCE_GAP = (
+    "冻结 E2 中本事实认定未引用任何与该 fact_id 绑定的证据，需人工复核。"
+)
 
 
 class HearingFlowWorkflows:
@@ -64,175 +74,106 @@ class HearingFlowWorkflows:
         self._hearing_graphs = _HEARING_GRAPH_CANDIDATES
 
     def intake_questions(
-        self, request: HearingIntakeQuestionsRequest
-    ) -> HearingIntakeQuestionsResult:
+        self, request: HearingIntakeQuestionsRequestV4
+    ) -> HearingIntakeQuestionsResultV5:
         return self._run_operation(
             HearingOperation.INTAKE_QUESTIONS,
             request,
             self._intake_questions_proposal,
-            HearingIntakeQuestionsResult,
+            HearingIntakeQuestionsResultV5,
         )
 
     def _intake_questions_proposal(
         self,
-        request: HearingIntakeQuestionsRequest,
+        request: HearingIntakeQuestionsRequestV4,
         *,
-        _output: HearingIntakeQuestionsLlmOutput | None = None,
-    ) -> HearingIntakeQuestionsResult:
+        _output: HearingIntakeQuestionsLlmOutputV5 | None = None,
+        agent_context: AgentInvocationContext | None = None,
+    ) -> HearingIntakeQuestionsResultV5:
         _assert_case_matrix_integrity(
             request.case_fact_matrix,
             expected_case_id=request.case_id,
             node_name="hearing_intake_questions",
         )
-        known = _case_fact_ids(request.case_fact_matrix)
         output = _output or self._invoke(
             "hearing_intake_questions",
             request,
-            HearingIntakeQuestionsLlmOutput,
-            semantic_validator=lambda value: _validate_intake_question_fact_membership(
-                value,
-                known,
-            ),
+            HearingIntakeQuestionsLlmOutputV5,
+            agent_context=agent_context,
         )
-        questions: list[HearingIntakeQuestion] = []
-        seen: set[tuple[tuple[str, ...], str]] = set()
-        for item in output.questions:
-            fact_ids = sorted(_validated_fact_ids(item.fact_ids, known))
-            key = (
-                tuple(fact_ids),
-                _normalized_issue_statement(item.issue_statement),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            issue_id = _stable_id(
-                "HEARING_ISSUE",
-                request.case_id,
-                str(request.stage_sequence),
-                *fact_ids,
-                _normalized_issue_statement(item.issue_statement),
-            )
-            questions.append(
-                HearingIntakeQuestion(
-                    # The shared issue also acts as the legacy question identifier, so a
-                    # Java v1 envelope that drops additive fields can still recover it.
-                    question_id=issue_id,
-                    issue_id=issue_id,
-                    target_roles=["USER", "MERCHANT"],
-                    fact_ids=fact_ids,
-                    question_text=item.issue_statement,
-                    issue_statement=item.issue_statement,
-                    party_prompts=item.party_prompts,
-                )
-            )
-            if len(questions) >= request.max_questions:
-                break
-        return HearingIntakeQuestionsResult(
-            case_id=request.case_id,
-            workflow_id=request.workflow_id,
-            stage_sequence=request.stage_sequence,
-            questions=questions,
-            public_message=output.public_message,
-        )
+        return materialize_hearing_questions_v5(request, output)
 
     async def _aintake_questions_proposal(
-        self, request: HearingIntakeQuestionsRequest
-    ) -> HearingIntakeQuestionsResult:
+        self,
+        request: HearingIntakeQuestionsRequestV4,
+        *,
+        agent_context: AgentInvocationContext | None = None,
+    ) -> HearingIntakeQuestionsResultV5:
         _assert_case_matrix_integrity(
             request.case_fact_matrix,
             expected_case_id=request.case_id,
             node_name="hearing_intake_questions",
         )
-        known = _case_fact_ids(request.case_fact_matrix)
         output = await self._ainvoke(
             "hearing_intake_questions",
             request,
-            HearingIntakeQuestionsLlmOutput,
-            semantic_validator=lambda value: _validate_intake_question_fact_membership(
-                value,
-                known,
-            ),
+            HearingIntakeQuestionsLlmOutputV5,
+            agent_context=agent_context,
         )
-        return self._intake_questions_proposal(request, _output=output)
+        return self._intake_questions_proposal(
+            request, _output=output, agent_context=agent_context
+        )
 
     def intake_synthesis(
-        self, request: HearingIntakeSynthesisRequest
-    ) -> HearingIntakeSynthesisResult:
+        self, request: HearingIntakeSynthesisRequestV4
+    ) -> HearingIntakeSynthesisResultV5:
         return self._run_operation(
             HearingOperation.INTAKE_SYNTHESIS,
             request,
             self._intake_synthesis_proposal,
-            HearingIntakeSynthesisResult,
+            HearingIntakeSynthesisResultV5,
         )
 
     def _intake_synthesis_proposal(
         self,
-        request: HearingIntakeSynthesisRequest,
+        request: HearingIntakeSynthesisRequestV4,
         *,
-        _output: HearingIntakeSynthesisLlmOutput | None = None,
-    ) -> HearingIntakeSynthesisResult:
+        _output: HearingIntakeSynthesisLlmOutputV5 | None = None,
+        agent_context: AgentInvocationContext | None = None,
+    ) -> HearingIntakeSynthesisResultV5:
         _assert_case_matrix_integrity(
             request.case_fact_matrix,
             expected_case_id=request.case_id,
             node_name="hearing_intake_synthesis",
         )
-        issue_contexts = _intake_issue_contexts(request)
-        party_statements = _party_statement_contexts(request)
-        existing_fact_keys = sorted(row.fact_id for row in request.case_fact_matrix.fact_rows)
-        output = _output or self._invoke_payload(
+        output = _output or self._invoke(
             "hearing_intake_synthesis",
-            {
-                "request": request.model_dump(mode="json"),
-                "intake_issues": issue_contexts,
-                "party_statements": party_statements,
-                "existing_fact_keys": existing_fact_keys,
-            },
-            HearingIntakeSynthesisLlmOutput,
-        )
-        issue_mappings = _resolved_issue_mappings(
             request,
-            issue_contexts,
-            party_statements,
-            output.issue_mappings,
+            HearingIntakeSynthesisLlmOutputV5,
+            agent_context=agent_context,
         )
-        matrix = _merge_hearing_case_matrix(
-            request,
-            output.case_fact_matrix_delta,
-        )
-        points = _hearing_dispute_points(matrix)
-        return HearingIntakeSynthesisResult(
-            case_id=request.case_id,
-            workflow_id=request.workflow_id,
-            stage_sequence=request.stage_sequence,
-            case_fact_matrix=matrix,
-            dispute_points=points,
-            issue_mappings=issue_mappings,
-            public_message=output.public_message,
-        )
+        return materialize_hearing_synthesis_v5(request, output)
 
     async def _aintake_synthesis_proposal(
-        self, request: HearingIntakeSynthesisRequest
-    ) -> HearingIntakeSynthesisResult:
+        self,
+        request: HearingIntakeSynthesisRequestV4,
+        *,
+        agent_context: AgentInvocationContext | None = None,
+    ) -> HearingIntakeSynthesisResultV5:
         _assert_case_matrix_integrity(
             request.case_fact_matrix,
             expected_case_id=request.case_id,
             node_name="hearing_intake_synthesis",
         )
-        issue_contexts = _intake_issue_contexts(request)
-        party_statements = _party_statement_contexts(request)
-        output = await self._ainvoke_payload(
+        output = await self._ainvoke(
             "hearing_intake_synthesis",
-            {
-                "request": request.model_dump(mode="json"),
-                "intake_issues": issue_contexts,
-                "party_statements": party_statements,
-                "existing_fact_keys": sorted(
-                    row.fact_id for row in request.case_fact_matrix.fact_rows
-                ),
-            },
-            HearingIntakeSynthesisLlmOutput,
+            request,
+            HearingIntakeSynthesisLlmOutputV5,
+            agent_context=agent_context,
         )
-        return self._intake_synthesis_proposal(request, _output=output)
+        return self._intake_synthesis_proposal(
+            request, _output=output, agent_context=agent_context
+        )
 
     def evidence_requests(
         self, request: HearingEvidenceRequestsRequest
@@ -269,7 +210,7 @@ class HearingFlowWorkflows:
         seen: set[tuple[tuple[str, ...], tuple[str, ...], str, str, bool]] = set()
         for item in output.requests:
             fact_ids = sorted(_validated_fact_ids(item.fact_ids, known_facts))
-            target_roles = _canonical_roles(item.target_roles)
+            target_roles = ["USER", "MERCHANT"]
             key = (
                 tuple(target_roles),
                 tuple(fact_ids),
@@ -307,7 +248,10 @@ class HearingFlowWorkflows:
         )
 
     async def _aevidence_requests_proposal(
-        self, request: HearingEvidenceRequestsRequest
+        self,
+        request: HearingEvidenceRequestsRequest,
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> HearingEvidenceRequestsResult:
         _assert_case_matrix_integrity(
             request.case_fact_matrix,
@@ -322,6 +266,7 @@ class HearingFlowWorkflows:
             "hearing_evidence_requests",
             request,
             HearingEvidenceRequestsLlmOutput,
+            agent_context=agent_context,
         )
         return self._evidence_requests_proposal(request, _output=output)
 
@@ -374,23 +319,31 @@ class HearingFlowWorkflows:
         )
 
     async def _aevidence_synthesis_proposal(
-        self, request: HearingEvidenceSynthesisRequest
+        self,
+        request: HearingEvidenceSynthesisRequest,
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> HearingEvidenceSynthesisResult:
         _assert_case_matrix_integrity(
             request.case_fact_matrix,
             expected_case_id=request.case_id,
             node_name="hearing_evidence_synthesis",
         )
-        assessments = await self._aassess_evidence_files(request)
+        assessments = await self._aassess_evidence_files(
+            request, agent_context=agent_context
+        )
         return await self._aevidence_synthesis_from_assessments(
             request,
             assessments,
+            agent_context=agent_context,
         )
 
     async def _aevidence_synthesis_from_assessments(
         self,
         request: HearingEvidenceSynthesisRequest,
         assessments: list[HearingBatchEvidenceAssessment],
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> HearingEvidenceSynthesisResult:
         matrix = _merge_evidence_batch(request, assessments)
         output = await self._ainvoke_payload(
@@ -403,6 +356,7 @@ class HearingFlowWorkflows:
                 "merged_fact_evidence_matrix": matrix.model_dump(mode="json"),
             },
             HearingEvidenceSynthesisLlmOutput,
+            agent_context=agent_context,
         )
         return self._evidence_synthesis_from_assessments(
             request,
@@ -420,10 +374,17 @@ class HearingFlowWorkflows:
         ]
 
     async def _aassess_evidence_files(
-        self, request: HearingEvidenceSynthesisRequest
+        self,
+        request: HearingEvidenceSynthesisRequest,
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> list[HearingBatchEvidenceAssessment]:
         return [
-            await self._aassess_evidence_file(request, evidence.evidence_id)
+            await self._aassess_evidence_file(
+                request,
+                evidence.evidence_id,
+                agent_context=agent_context,
+            )
             for batch in request.party_batches
             for evidence in batch.evidence
         ]
@@ -441,6 +402,8 @@ class HearingFlowWorkflows:
         self,
         request: HearingEvidenceSynthesisRequest,
         evidence_id: str,
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> HearingBatchEvidenceAssessment:
         matches = [
             (batch, evidence)
@@ -468,6 +431,7 @@ class HearingFlowWorkflows:
                 },
                 "participant_role": batch.participant_role,
                 "batch_id": batch.batch_id,
+                "request_ids": list(batch.request_ids),
                 "evidence_file": evidence.model_dump(mode="json"),
                 "requests": [value.model_dump(mode="json") for value in request.requests],
                 "case_fact_matrix": request.case_fact_matrix.model_dump(mode="json"),
@@ -478,6 +442,7 @@ class HearingFlowWorkflows:
                 ),
             },
             HearingEvidenceFileAssessmentLlmOutput,
+            agent_context=agent_context,
         )
         return HearingBatchEvidenceAssessment(
             evidence_id=evidence.evidence_id,
@@ -490,6 +455,8 @@ class HearingFlowWorkflows:
         self,
         request: HearingEvidenceSynthesisRequest,
         evidence_id: str,
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> HearingBatchEvidenceAssessment:
         matches = [
             (batch, evidence)
@@ -517,6 +484,7 @@ class HearingFlowWorkflows:
                 },
                 "participant_role": batch.participant_role,
                 "batch_id": batch.batch_id,
+                "request_ids": list(batch.request_ids),
                 "evidence_file": evidence.model_dump(mode="json"),
                 "requests": [
                     value.model_dump(mode="json") for value in request.requests
@@ -529,6 +497,7 @@ class HearingFlowWorkflows:
                 ),
             },
             HearingEvidenceFileAssessmentLlmOutput,
+            agent_context=agent_context,
         )
         return HearingBatchEvidenceAssessment(
             evidence_id=evidence.evidence_id,
@@ -552,15 +521,33 @@ class HearingFlowWorkflows:
         _output: JudgeV1Draft | None = None,
     ) -> HearingJudgeV1Result:
         _validate_dossier_request(request, "hearing_judge_v1")
-        output = _output or self._invoke("hearing_judge_v1", request, JudgeV1Draft)
+        output = _output or self._invoke_payload(
+            "hearing_judge_v1",
+            _judge_v1_model_context(request),
+            JudgeV1Draft,
+        )
+        output = output.model_copy(
+            update={
+                "draft": _normalize_adjudication_draft(
+                    output.draft, request.trial_dossier
+                )
+            }
+        )
+        _validate_adjudication_draft(
+            "hearing_judge_v1", output.draft, request.trial_dossier
+        )
+        public_message = _render_adjudication_draft(
+            output.draft,
+            heading="法官 V1 裁决草案（非终局）",
+        )
         proposal_id = _stable_id(
             "JUDGE_PROPOSAL",
             request.case_id,
             request.trial_dossier.content_hash,
-            output.proposal_text,
+            content_hash(output.draft, hash_field="__no_hash_field__"),
         )
         payload = {
-            "schema_version": "hearing_judge_v1.v1",
+            "schema_version": "hearing_judge_v1.v2",
             "case_id": request.case_id,
             "workflow_id": request.workflow_id,
             "stage_sequence": request.stage_sequence,
@@ -569,16 +556,25 @@ class HearingFlowWorkflows:
             "proposal_id": proposal_id,
             "proposal_hash": "0" * 64,
             **output.model_dump(mode="json"),
+            "public_message": public_message,
             "is_final_decision": False,
         }
         payload["proposal_hash"] = content_hash(payload, hash_field="proposal_hash")
         return HearingJudgeV1Result.model_validate(payload)
 
     async def _ajudge_v1_proposal(
-        self, request: HearingJudgeV1Request
+        self,
+        request: HearingJudgeV1Request,
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> HearingJudgeV1Result:
         _validate_dossier_request(request, "hearing_judge_v1")
-        output = await self._ainvoke("hearing_judge_v1", request, JudgeV1Draft)
+        output = await self._ainvoke_payload(
+            "hearing_judge_v1",
+            _judge_v1_model_context(request),
+            JudgeV1Draft,
+            agent_context=agent_context,
+        )
         return self._judge_v1_proposal(request, _output=output)
 
     def jury_review(self, request: HearingJuryReviewRequest) -> HearingJuryReviewResult:
@@ -628,13 +624,17 @@ class HearingFlowWorkflows:
         return HearingJuryReviewResult.model_validate(payload)
 
     async def _ajury_review_proposal(
-        self, request: HearingJuryReviewRequest
+        self,
+        request: HearingJuryReviewRequest,
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> HearingJuryReviewResult:
         _validate_v1_binding(request)
         output = await self._ainvoke(
             "hearing_jury_review",
             request,
             HearingJuryReviewLlmOutput,
+            agent_context=agent_context,
         )
         return self._jury_review_proposal(request, _output=output)
 
@@ -653,70 +653,39 @@ class HearingFlowWorkflows:
         _output: HearingJudgeV2Draft | None = None,
     ) -> HearingJudgeV2Result:
         _validate_v2_binding(request)
-        output = _output or self._invoke(
-            "hearing_judge_v2", request, HearingJudgeV2Draft
+        output = _output or self._invoke_payload(
+            "hearing_judge_v2",
+            _judge_v2_model_context(request),
+            HearingJudgeV2Draft,
+            semantic_validator=lambda candidate: _validate_v2_model_output(
+                request, candidate
+            ),
         )
-        known_facts = _case_fact_ids(request.trial_dossier.case_fact_matrix)
-        known_fact_evidence_links = {
-            (link.fact_id, link.evidence_id)
-            for link in request.trial_dossier.fact_evidence_matrix.links
-        }
-        assessed_evidence_ids: set[str] = set()
-        for assessment in output.draft.evidence_assessment:
-            fact_ids = _validated_fact_ids(assessment.fact_ids, known_facts)
-            if assessment.evidence_id is None:
-                continue
-            unbound = {
-                fact_id
-                for fact_id in fact_ids
-                if (fact_id, assessment.evidence_id) not in known_fact_evidence_links
+        output = output.model_copy(
+            update={
+                "draft": _normalize_adjudication_draft(
+                    output.draft, request.trial_dossier
+                )
             }
-            if unbound:
-                _schema_error(
-                    "hearing_judge_v2",
-                    "evidence assessment references facts not linked to its evidence: "
-                    f"{sorted(unbound)}",
-                )
-            assessed_evidence_ids.add(assessment.evidence_id)
-        for finding in output.draft.fact_findings:
-            _validated_fact_ids([finding.fact_id], known_facts)
-            unbound = {
-                evidence_id
-                for evidence_id in finding.evidence_ids
-                if (finding.fact_id, evidence_id) not in known_fact_evidence_links
-            }
-            if unbound:
-                _schema_error(
-                    "hearing_judge_v2",
-                    f"fact finding references evidence not linked to its fact: {sorted(unbound)}",
-                )
-            unassessed = set(finding.evidence_ids) - assessed_evidence_ids
-            if unassessed:
-                _schema_error(
-                    "hearing_judge_v2",
-                    f"fact finding references evidence without an assessment: {sorted(unassessed)}",
-                )
-        known_policy_refs = {
-            (item.rule_code, item.rule_version) for item in request.trial_dossier.policy_rules
-        }
-        for application in output.draft.policy_application:
-            _validated_fact_ids(application.fact_ids, known_facts)
-            policy_ref = (application.rule_code, application.rule_version)
-            if policy_ref not in known_policy_refs:
-                _schema_error(
-                    "hearing_judge_v2",
-                    "policy application references a rule version absent from the frozen dossier: "
-                    f"{policy_ref[0]}@{policy_ref[1]}",
-                )
+        )
+        _validate_adjudication_draft(
+            "hearing_judge_v2", output.draft, request.trial_dossier
+        )
+        _validate_review_responses(request, output)
+        public_message = _render_adjudication_draft(
+            output.draft,
+            heading="法官 V2 裁决草案（待人工审核）",
+            review_responses=output.review_responses,
+        )
         v2_id = _stable_id(
             "JUDGE_V2",
             request.case_id,
             request.judge_v1.proposal_hash,
             request.jury_review.review_hash,
-            output.draft.draft_text,
+            content_hash(output.draft, hash_field="__no_hash_field__"),
         )
         payload = {
-            "schema_version": "hearing_judge_v2.v1",
+            "schema_version": "hearing_judge_v2.v2",
             "case_id": request.case_id,
             "workflow_id": request.workflow_id,
             "stage_sequence": request.stage_sequence,
@@ -729,18 +698,29 @@ class HearingFlowWorkflows:
             "jury_review_id": request.jury_review.review_id,
             "jury_review_hash": request.jury_review.review_hash,
             **output.model_dump(mode="json"),
+            "public_message": public_message,
+            "draft_status": "PENDING_HUMAN_REVIEW",
+            "requires_human_review": True,
+            "is_final_decision": False,
         }
         payload["judge_v2_hash"] = content_hash(payload, hash_field="judge_v2_hash")
         return HearingJudgeV2Result.model_validate(payload)
 
     async def _ajudge_v2_proposal(
-        self, request: HearingJudgeV2Request
+        self,
+        request: HearingJudgeV2Request,
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> HearingJudgeV2Result:
         _validate_v2_binding(request)
-        output = await self._ainvoke(
+        output = await self._ainvoke_payload(
             "hearing_judge_v2",
-            request,
+            _judge_v2_model_context(request),
             HearingJudgeV2Draft,
+            semantic_validator=lambda candidate: _validate_v2_model_output(
+                request, candidate
+            ),
+            agent_context=agent_context,
         )
         return self._judge_v2_proposal(request, _output=output)
 
@@ -757,7 +737,12 @@ class HearingFlowWorkflows:
             operation=operation,
             request=request,
         )
-        invocation = self._invocation(operation, request, execute)
+        invocation = self._invocation(
+            operation,
+            request,
+            execute,
+            async_execution=False,
+        )
         result = self._hearing_graphs[identity.identity].invoke(
             state,
             context=invocation,
@@ -769,6 +754,8 @@ class HearingFlowWorkflows:
         self,
         operation: HearingOperation,
         request: Any,
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> HearingGraphInvocation:
         """Bind a frozen target-E2E request to the governed Hearing model operation."""
 
@@ -783,22 +770,44 @@ class HearingFlowWorkflows:
         }.get(operation)
         if execute is None:
             raise AgentOutputSchemaError("hearing_target_e2e", "unsupported Hearing operation")
-        return self._invocation(operation, request, execute)
+        return self._invocation(
+            operation,
+            request,
+            execute,
+            agent_context=agent_context,
+            async_execution=True,
+        )
 
     def _invocation(
         self,
         operation: HearingOperation,
         request: Any,
         execute: Any,
+        *,
+        agent_context: AgentInvocationContext | None = None,
+        async_execution: bool,
     ) -> HearingGraphInvocation:
-        invocation = HearingGraphInvocation(request=request, execute=execute)
+        invocation = HearingGraphInvocation(
+            request=request,
+            execute=execute,
+            agent_context=agent_context,
+        )
         if operation is HearingOperation.EVIDENCE_SYNTHESIS:
             invocation = HearingGraphInvocation(
                 request=request,
                 execute=execute,
+                agent_context=agent_context,
                 plan_work_items=self._evidence_work_item_keys,
-                execute_work_item=self._aassess_evidence_file,
-                execute_with_work_results=self._aevidence_synthesis_from_work_results,
+                execute_work_item=(
+                    self._aassess_evidence_file
+                    if async_execution
+                    else self._assess_evidence_file
+                ),
+                execute_with_work_results=(
+                    self._aevidence_synthesis_from_work_results
+                    if async_execution
+                    else self._evidence_synthesis_from_work_results
+                ),
             )
         return invocation
 
@@ -809,12 +818,14 @@ class HearingFlowWorkflows:
         output_type: Any,
         *,
         semantic_validator: Callable[[Any], Any] | None = None,
+        agent_context: AgentInvocationContext | None = None,
     ) -> Any:
         return self._invoke_payload(
             node_name,
             {"request": request.model_dump(mode="json")},
             output_type,
             semantic_validator=semantic_validator,
+            agent_context=agent_context,
         )
 
     def _invoke_payload(
@@ -824,6 +835,7 @@ class HearingFlowWorkflows:
         output_type: Any,
         *,
         semantic_validator: Callable[[Any], Any] | None = None,
+        agent_context: AgentInvocationContext | None = None,
     ) -> Any:
         if self._model_runner is None:
             raise AgentServiceUnavailable(f"{node_name} model runner is unavailable")
@@ -833,6 +845,7 @@ class HearingFlowWorkflows:
             case_data=case_data,
             output_type=output_type,
             semantic_validator=semantic_validator,
+            agent_context=agent_context,
         )
 
     async def _ainvoke(
@@ -842,12 +855,14 @@ class HearingFlowWorkflows:
         output_type: Any,
         *,
         semantic_validator: Callable[[Any], Any] | None = None,
+        agent_context: AgentInvocationContext | None = None,
     ) -> Any:
         return await self._ainvoke_payload(
             node_name,
             {"request": request.model_dump(mode="json")},
             output_type,
             semantic_validator=semantic_validator,
+            agent_context=agent_context,
         )
 
     async def _ainvoke_payload(
@@ -857,6 +872,7 @@ class HearingFlowWorkflows:
         output_type: Any,
         *,
         semantic_validator: Callable[[Any], Any] | None = None,
+        agent_context: AgentInvocationContext | None = None,
     ) -> Any:
         if self._model_runner is None:
             raise AgentServiceUnavailable(f"{node_name} model runner is unavailable")
@@ -866,14 +882,31 @@ class HearingFlowWorkflows:
             case_data=case_data,
             output_type=output_type,
             semantic_validator=semantic_validator,
+            agent_context=agent_context,
         )
 
     async def _aevidence_synthesis_from_work_results(
         self,
         request: HearingEvidenceSynthesisRequest,
         results: dict[str, dict[str, Any]],
+        *,
+        agent_context: AgentInvocationContext | None = None,
     ) -> HearingEvidenceSynthesisResult:
         return await self._aevidence_synthesis_from_assessments(
+            request,
+            [
+                HearingBatchEvidenceAssessment.model_validate(results[key])
+                for key in sorted(results)
+            ],
+            agent_context=agent_context,
+        )
+
+    def _evidence_synthesis_from_work_results(
+        self,
+        request: HearingEvidenceSynthesisRequest,
+        results: dict[str, dict[str, Any]],
+    ) -> HearingEvidenceSynthesisResult:
+        return self._evidence_synthesis_from_assessments(
             request,
             [
                 HearingBatchEvidenceAssessment.model_validate(results[key])
@@ -1347,7 +1380,7 @@ def _normalized_fact_target(value: str) -> str:
 def _merge_evidence_batch(
     request: HearingEvidenceSynthesisRequest,
     assessments: list[HearingBatchEvidenceAssessment],
-) -> FactEvidenceMatrixV2:
+) -> FactEvidenceMatrixV3:
     case_matrix = request.case_fact_matrix
     known_facts = _case_fact_ids(case_matrix)
     new_files = [item for batch in request.party_batches for item in batch.evidence]
@@ -1367,7 +1400,12 @@ def _merge_evidence_batch(
         item.fact_id: item for item in (prior.fact_coverage if prior is not None else [])
     }
     links_by_key = {
-        (item.fact_id, item.evidence_id): item.model_dump(mode="json")
+        (
+            item.fact_id,
+            item.evidence_id,
+            item.source_unit_id,
+            item.observation_slot,
+        ): item.model_dump(mode="json")
         for item in (prior.links if prior is not None else [])
     }
     batch_by_evidence = {
@@ -1382,9 +1420,24 @@ def _merge_evidence_batch(
             review_ids.add(evidence_id)
         for link in assessment.fact_links:
             _validated_fact_ids([link.fact_id], known_facts)
-            links_by_key[(link.fact_id, evidence_id)] = {
-                **link.model_dump(mode="json"),
+            matrix_relation = {
+                "SUPPORTS": "CONTENT_SUPPORTS",
+                "OPPOSES": "CONTENT_CONTRADICTS",
+                "INCONCLUSIVE": "INCONCLUSIVE",
+            }[link.relation.value]
+            source_unit_id = _stable_id("HEARING_SOURCE_UNIT", evidence_id)
+            observation_slot = _stable_id(
+                "HEARING_OBSERVATION", evidence_id, link.fact_id
+            )
+            links_by_key[
+                (link.fact_id, evidence_id, source_unit_id, observation_slot)
+            ] = {
+                "fact_id": link.fact_id,
                 "evidence_id": evidence_id,
+                "relation": matrix_relation,
+                "reason": link.reason,
+                "source_unit_id": source_unit_id,
+                "observation_slot": observation_slot,
                 "source_batch_id": batch_by_evidence[evidence_id],
             }
     links = list(links_by_key.values())
@@ -1431,7 +1484,7 @@ def _merge_evidence_batch(
         *new_ids,
     )
     payload = {
-        "schema_version": "fact_evidence_matrix.v2",
+        "schema_version": "fact_evidence_matrix.v3",
         "case_id": request.case_id,
         "matrix_id": matrix_id,
         "matrix_version": version,
@@ -1461,7 +1514,285 @@ def _merge_evidence_batch(
         "fact_coverage": coverage,
     }
     payload["content_hash"] = content_hash(payload, hash_field="content_hash")
-    return FactEvidenceMatrixV2.model_validate(payload)
+    return FactEvidenceMatrixV3.model_validate(payload)
+
+
+def _frozen_adjudication_context(dossier: Any) -> dict[str, Any]:
+    """Return the exact model-visible frozen authority allowlist."""
+
+    return {
+        "case_fact_matrix": dossier.case_fact_matrix.model_dump(mode="json"),
+        "fact_evidence_matrix": dossier.fact_evidence_matrix.model_dump(mode="json"),
+        "adjudication_rules": [
+            item.model_dump(mode="json") for item in dossier.adjudication_rules
+        ],
+    }
+
+
+def _decision_action_catalog() -> list[dict[str, str]]:
+    """Return the shared closed business-decision vocabulary in display order."""
+
+    return [
+        {"code": action.value, "meaning": meaning}
+        for action, meaning in HEARING_DECISION_ACTION_MEANINGS.items()
+    ]
+
+
+def _judge_v1_model_context(request: HearingJudgeV1Request) -> dict[str, Any]:
+    return {
+        "frozen_adjudication_context": _frozen_adjudication_context(
+            request.trial_dossier
+        ),
+        # Keep the closed decision vocabulary closest to model generation.
+        "decision_action_catalog": _decision_action_catalog(),
+    }
+
+
+def _v1_review_focus_pack(request: HearingJudgeV2Request) -> list[dict[str, str]]:
+    return [
+        {
+            "review_item_ref": f"V1_FOCUS_{index:02d}",
+            "review_source": "V1_REVIEW_FOCUS",
+            "review_text": text,
+        }
+        for index, text in enumerate(request.judge_v1.review_focus, start=1)
+    ]
+
+
+def _jury_opinion_pack(request: HearingJudgeV2Request) -> dict[str, Any]:
+    findings = [
+        {
+            "review_item_ref": f"JURY_FINDING_{item.dimension}",
+            "review_source": "JURY_FINDING",
+            **item.model_dump(mode="json"),
+        }
+        for item in request.jury_review.findings
+    ]
+    mandatory = [
+        {
+            "review_item_ref": f"JURY_MANDATORY_{index:02d}",
+            "review_source": "MANDATORY_REVISION",
+            "review_text": text,
+        }
+        for index, text in enumerate(
+            request.jury_review.mandatory_revisions, start=1
+        )
+    ]
+    return {"findings": findings, "mandatory_revisions": mandatory}
+
+
+def _review_requirements_pack(request: HearingJudgeV2Request) -> dict[str, Any]:
+    jury = _jury_opinion_pack(request)
+    review_items = [
+        *_v1_review_focus_pack(request),
+        *[
+            {
+                "review_item_ref": item["review_item_ref"],
+                "review_source": item["review_source"],
+                "review_text": item["assessment"],
+            }
+            for item in jury["findings"]
+        ],
+        *jury["mandatory_revisions"],
+    ]
+    return {
+        "response_rule": "ONE_RESPONSE_PER_REVIEW_ITEM",
+        "required_response_count": len(review_items),
+        "review_items": review_items,
+    }
+
+
+def _judge_v2_model_context(request: HearingJudgeV2Request) -> dict[str, Any]:
+    return {
+        "frozen_adjudication_context": _frozen_adjudication_context(
+            request.trial_dossier
+        ),
+        "v1_draft_pack": {
+            "draft": request.judge_v1.draft.model_dump(mode="json"),
+        },
+        "review_requirements_pack": _review_requirements_pack(request),
+        "jury_opinion_pack": _jury_opinion_pack(request),
+        # Keep the closed decision vocabulary closest to model generation.
+        "decision_action_catalog": _decision_action_catalog(),
+    }
+
+
+def _normalize_adjudication_draft(draft: Any, dossier: Any) -> Any:
+    """Materialize an explicit gap for every finding that cites no frozen E2 evidence."""
+
+    known_facts = _case_fact_ids(dossier.case_fact_matrix)
+    findings = []
+    for finding in draft.fact_findings:
+        if (
+            finding.fact_id in known_facts
+            and not finding.evidence_ids
+            and finding.evidence_gap is None
+        ):
+            finding = finding.model_copy(
+                update={"evidence_gap": _DETERMINISTIC_EVIDENCE_GAP}
+            )
+        findings.append(finding)
+    return draft.model_copy(update={"fact_findings": findings})
+
+
+def _validate_adjudication_draft(
+    node_name: str, draft: Any, dossier: Any
+) -> None:
+    known_facts = _case_fact_ids(dossier.case_fact_matrix)
+    finding_facts = {item.fact_id for item in draft.fact_findings}
+    if finding_facts != known_facts:
+        missing = sorted(known_facts - finding_facts)
+        extra = sorted(finding_facts - known_facts)
+        _schema_error(
+            node_name,
+            f"fact findings must cover the frozen M2 exactly; missing={missing}, extra={extra}",
+        )
+
+    known_links = {
+        (link.fact_id, link.evidence_id)
+        for link in dossier.fact_evidence_matrix.links
+    }
+    for finding in draft.fact_findings:
+        if not finding.evidence_ids and finding.evidence_gap is None:
+            _schema_error(
+                node_name,
+                f"fact finding without frozen E2 evidence requires an explicit gap: "
+                f"{finding.fact_id}",
+            )
+        unbound = {
+            evidence_id
+            for evidence_id in finding.evidence_ids
+            if (finding.fact_id, evidence_id) not in known_links
+        }
+        if unbound:
+            _schema_error(
+                node_name,
+                "fact finding references evidence not bound to its fact in frozen E2: "
+                f"{finding.fact_id} -> {sorted(unbound)}",
+            )
+
+    for order in draft.remedy_orders:
+        _validated_fact_ids(order.fact_ids, known_facts)
+
+    frozen_rules = {
+        (item.rule_code, item.rule_version): item
+        for item in dossier.adjudication_rules
+    }
+    applications = {
+        (item.rule_code, item.rule_version): item for item in draft.rule_applications
+    }
+    if set(applications) != set(frozen_rules):
+        missing = sorted(set(frozen_rules) - set(applications))
+        extra = sorted(set(applications) - set(frozen_rules))
+        _schema_error(
+            node_name,
+            "rule applications must assess every frozen adjudication rule exactly once; "
+            f"missing={missing}, extra={extra}",
+        )
+    for rule_ref, application in applications.items():
+        _validated_fact_ids(application.fact_ids, known_facts)
+        if application.rule_name != frozen_rules[rule_ref].rule_name:
+            _schema_error(
+                node_name,
+                f"rule application name differs from frozen rule: {rule_ref[0]}@{rule_ref[1]}",
+            )
+
+
+def _expected_review_items(request: HearingJudgeV2Request) -> dict[str, str]:
+    return {
+        item["review_item_ref"]: item["review_source"]
+        for item in _review_requirements_pack(request)["review_items"]
+    }
+
+
+def _validate_review_responses(
+    request: HearingJudgeV2Request, output: HearingJudgeV2Draft
+) -> None:
+    actual = [item.review_item_ref for item in output.review_responses]
+    if len(actual) != len(set(actual)):
+        _schema_error("hearing_judge_v2", "review responses must use unique refs")
+    expected = _expected_review_items(request)
+    actual_refs = set(actual)
+    expected_refs = set(expected)
+    if actual_refs != expected_refs:
+        _schema_error(
+            "hearing_judge_v2",
+            "review responses must address every assembled V1/Jury review item exactly once; "
+            f"missing={sorted(expected_refs - actual_refs)}, "
+            f"extra={sorted(actual_refs - expected_refs)}",
+        )
+    mismatched_sources = sorted(
+        item.review_item_ref
+        for item in output.review_responses
+        if expected.get(item.review_item_ref) != item.review_source
+    )
+    if mismatched_sources:
+        _schema_error(
+            "hearing_judge_v2",
+            "review responses must preserve the assembled review_source binding; "
+            f"mismatched={mismatched_sources}",
+        )
+
+
+def _validate_v2_model_output(
+    request: HearingJudgeV2Request, output: HearingJudgeV2Draft
+) -> HearingJudgeV2Draft:
+    try:
+        _validate_review_responses(request, output)
+    except AgentOutputSchemaError as error:
+        raise ValueError(str(error)) from error
+    return output
+
+
+def _render_adjudication_draft(
+    draft: Any,
+    *,
+    heading: str,
+    review_responses: Iterable[Any] = (),
+) -> str:
+    action_meaning = HEARING_DECISION_ACTION_MEANINGS[draft.decision_action]
+    remedies = "\n".join(
+        f"{index}. [{item.remedy_type}] {item.order_text}"
+        + (f"（条件：{'；'.join(item.conditions)}）" if item.conditions else "")
+        for index, item in enumerate(draft.remedy_orders, start=1)
+    )
+    findings = "\n".join(
+        f"{item.fact_id}：{item.finding}"
+        + (
+            f"（证据：{', '.join(item.evidence_ids)}）"
+            if item.evidence_ids
+            else f"（证据缺口：{item.evidence_gap}）"
+        )
+        for item in draft.fact_findings
+    )
+    applications = "\n".join(
+        f"{item.rule_code}@{item.rule_version} {item.rule_name}："
+        f"{'适用' if item.applicable else '不适用'}。{item.rationale}"
+        for item in draft.rule_applications
+    )
+    attention = (
+        "\n".join(f"{index}. {text}" for index, text in enumerate(
+            draft.reviewer_attention, start=1
+        ))
+        or "无新增人工关注事项。"
+    )
+    sections = [
+        heading,
+        f"处理事项\n{remedies}",
+        f"事实认定\n{findings}",
+        f"规则适用\n{applications}",
+        f"裁决理由\n{draft.decision_reasoning}",
+        f"人工关注事项\n{attention}",
+        f"裁决执行方式\n{draft.decision_action.value}（{action_meaning}）",
+    ]
+    responses = list(review_responses)
+    if responses:
+        rendered = "\n".join(
+            f"{item.review_item_ref} [{item.disposition}]：{item.response}"
+            for item in responses
+        )
+        sections.append(f"复审回应\n{rendered}")
+    return "\n\n".join(sections)[:20_000]
 
 
 def _normalize_jury_review(
@@ -1676,11 +2007,6 @@ def _validated_fact_ids(values: Iterable[str], known: set[str]) -> list[str]:
     if not result:
         _schema_error("hearing_flow", "at least one fact id is required")
     return result
-
-
-def _canonical_roles(values: Iterable[str]) -> list[str]:
-    roles = set(values)
-    return [role for role in ("USER", "MERCHANT") if role in roles]
 
 
 def _stable_id(prefix: str, *parts: str) -> str:

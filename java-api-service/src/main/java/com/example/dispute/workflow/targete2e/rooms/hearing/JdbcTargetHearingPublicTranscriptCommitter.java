@@ -295,7 +295,7 @@ public final class JdbcTargetHearingPublicTranscriptCommitter {
             jdbc.query(
                 """
                 select id from agent_run
-                 where id = ? and case_id = ? and workflow_id = ?
+                 where id = ? and case_id = ? and room_id = ?
                  for update
                 """,
                 (row, ignored) -> row.getString(1),

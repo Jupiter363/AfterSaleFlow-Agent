@@ -25,6 +25,7 @@
       "enum": [
         "attempt_started",
         "visible_delta",
+        "generation_reset",
         "public_frame_start",
         "public_text_delta",
         "active_frame_snapshot",
@@ -47,6 +48,7 @@
   "oneOf": [
     {"properties": {"event_type": {"const": "attempt_started"}, "payload": {"required": ["node"]}}},
     {"properties": {"event_type": {"const": "visible_delta"}, "payload": {"required": ["node", "field", "delta"]}}},
+    {"properties": {"event_type": {"const": "generation_reset"}, "payload": {"required": ["node", "generation", "reason_code"], "properties": {"generation": {"const": 2}, "reason_code": {"const": "OUTPUT_SCHEMA_INVALID"}}}}},
     {"properties": {"event_type": {"const": "public_frame_start"}, "payload": {"required": ["frame_id", "frame_sequence", "frame_type", "public_header"]}}},
     {"properties": {"event_type": {"const": "public_text_delta"}, "payload": {"required": ["frame_id", "frame_sequence", "delta_index", "delta"]}}},
     {"properties": {"event_type": {"const": "active_frame_snapshot"}, "payload": {"required": ["frame_id", "frame_sequence", "delta_index", "public_text"]}}},
@@ -81,6 +83,7 @@
       "additionalProperties": false,
       "properties": {
         "node": {"$ref": "#/$defs/identifier"},
+        "generation": {"type": "integer", "minimum": 2, "maximum": 2},
         "field": {"$ref": "#/$defs/identifier"},
         "delta": {"type": "string", "minLength": 1, "maxLength": 4096},
         "usage": {"$ref": "#/$defs/usage"},

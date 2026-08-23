@@ -38,6 +38,7 @@ public record ReviewPacketView(
         JsonNode issues,
         JsonNode evidenceMatrix,
         JsonNode draft,
+        JsonNode reviewSourceItems,
         JsonNode remedy,
         JsonNode riskFlags,
         String status,
@@ -52,6 +53,7 @@ public record ReviewPacketView(
         issues = copy(issues);
         evidenceMatrix = copy(evidenceMatrix);
         draft = copy(draft);
+        reviewSourceItems = copy(reviewSourceItems);
         remedy = copy(remedy);
         riskFlags = copy(riskFlags);
     }
@@ -62,6 +64,7 @@ public record ReviewPacketView(
     @Override public JsonNode issues() { return copy(issues); }
     @Override public JsonNode evidenceMatrix() { return copy(evidenceMatrix); }
     @Override public JsonNode draft() { return copy(draft); }
+    @Override public JsonNode reviewSourceItems() { return copy(reviewSourceItems); }
     @Override public JsonNode remedy() { return copy(remedy); }
     @Override public JsonNode riskFlags() { return copy(riskFlags); }
 

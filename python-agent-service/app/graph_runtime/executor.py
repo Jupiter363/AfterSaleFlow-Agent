@@ -47,7 +47,7 @@ class TargetE2ESpecializedRoomProviderFactory:
             not callable(getattr(workflow, "run", None))
             or not callable(getattr(workflow, "arun", None))
             or getattr(workflow, "protocol_version", None)
-            != "evidence-turn-result.v2"
+            != "evidence-turn-result.v3"
         ):
             raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
         return replace(self, evidence_workflow=workflow)
@@ -72,7 +72,7 @@ class TargetE2ESpecializedRoomProviderFactory:
             not callable(getattr(self.evidence_workflow, "run", None))
             or not callable(getattr(self.evidence_workflow, "arun", None))
             or getattr(self.evidence_workflow, "protocol_version", None)
-            != "evidence-turn-result.v2"
+            != "evidence-turn-result.v3"
         ):
             raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
         if self.hearing_decoder is None:

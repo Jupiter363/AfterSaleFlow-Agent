@@ -28,4 +28,34 @@ public record AgentRunEventView(
         String message,
         Boolean retryable,
         Boolean visibleOutputEmitted,
-        OffsetDateTime timestamp) {}
+        OffsetDateTime timestamp) {
+
+    /** Re-labels only the authorized HTTP projection; the stored event remains hash-bound. */
+    public AgentRunEventView withAudience(String projectedAudience) {
+        return new AgentRunEventView(
+                schemaVersion,
+                protocol,
+                runId,
+                attemptId,
+                attemptNo,
+                sequence,
+                cursor,
+                type,
+                projectedAudience,
+                resetAttemptId,
+                payload,
+                operation,
+                nodeName,
+                field,
+                delta,
+                tokenUsage,
+                model,
+                latencyMs,
+                response,
+                code,
+                message,
+                retryable,
+                visibleOutputEmitted,
+                timestamp);
+    }
+}

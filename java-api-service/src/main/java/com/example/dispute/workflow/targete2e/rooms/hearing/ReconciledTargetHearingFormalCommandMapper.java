@@ -51,9 +51,16 @@ public final class ReconciledTargetHearingFormalCommandMapper implements TargetH
     }
     String operation = operation(loaded.payloadSchemaVersion());
     verifyOperation(command, authority, proposal, operation);
-    String formalId = stable(command.request().command().commandId(), evidence.proposalHash(), authority.authority().stageSequence(), operation);
+    String formalId = switch (operation) {
+      case "intake_questions" -> requiredText(
+          proposal.path("question_set"), "question_set_id", "V4 question set");
+      case "intake_synthesis" -> requiredText(
+          proposal.path("issue_state_set"), "issue_state_set_id", "V4 issue state set");
+      default -> stable(command.request().command().commandId(), evidence.proposalHash(),
+          authority.authority().stageSequence(), operation);
+    };
     var formal = payloads.project(operation, proposal, formalId, authority);
-    var transition = authority.transitionFor(formal.json());
+    var transition = authority.transitionFor(formal.stageOutputJson());
     var result = switch (operation) {
       case "intake_questions" -> action(command, authority, transition, formal, formalId, HearingFlowActionType.QUESTION_SET, evidence.committedAt());
       case "evidence_requests" -> action(command, authority, transition, formal, formalId, HearingFlowActionType.EVIDENCE_REQUEST_SET, evidence.committedAt());
@@ -151,7 +158,14 @@ public final class ReconciledTargetHearingFormalCommandMapper implements TargetH
         && proposal.path("stage_sequence").asLong() == graph.stageSequence(),
         "operation stage binding");
   }
-  private static String operation(String schema) { return switch (schema) { case "hearing_intake_questions.v1" -> "intake_questions"; case "hearing_intake_synthesis.v1" -> "intake_synthesis"; case "hearing_evidence_requests.v1" -> "evidence_requests"; case "hearing_evidence_synthesis.v1" -> "evidence_synthesis"; case "hearing_judge_v1.v1" -> "judge_v1"; case "hearing_jury_review.v1" -> "jury_review"; case "hearing_judge_v2.v1" -> "judge_v2"; default -> throw new IllegalArgumentException("unsupported target Hearing payload schema"); }; }
+  private static String operation(String schema) { return switch (schema) { case "hearing_intake_questions.v5" -> "intake_questions"; case "hearing_intake_synthesis.v5" -> "intake_synthesis"; case "hearing_evidence_requests.v1" -> "evidence_requests"; case "hearing_evidence_synthesis.v1" -> "evidence_synthesis"; case "hearing_judge_v1.v2" -> "judge_v1"; case "hearing_jury_review.v1" -> "jury_review"; case "hearing_judge_v2.v2" -> "judge_v2"; default -> throw new IllegalArgumentException("unsupported target Hearing payload schema"); }; }
+  private static String requiredText(JsonNode source, String field, String label) {
+    if (!source.isObject() || !source.path(field).isTextual()
+        || source.path(field).asText().isBlank()) {
+      throw new IllegalArgumentException("target Hearing " + label + " identity is invalid");
+    }
+    return source.path(field).asText();
+  }
   private static JdbcTargetHearingFormalAuthorityLoader.Ref required(JdbcTargetHearingFormalAuthorityLoader.Ref value, String label) { if (value == null) throw new IllegalStateException("target Hearing " + label + " parent is absent"); return value; }
   private static String stable(String commandId, String proposalHash, int stage, String operation) { return "hearing-" + operation + '-' + ContractJson.sha256Hex(new ObjectMapper().valueToTree(List.of(commandId, proposalHash, stage, operation))).substring(0, 32); }
   private static void require(boolean condition, String label) { if (!condition) throw new IllegalStateException("target Hearing " + label + " drifted"); }

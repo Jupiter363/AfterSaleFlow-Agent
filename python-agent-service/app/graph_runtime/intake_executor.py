@@ -72,6 +72,7 @@ from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
 from app.graphs.intake.validators import validate_state
 from app.model_runtime.callbacks import (
+    bind_governed_generation_reset_sink,
     bind_governed_visible_delta_sink,
     governed_events_from_chunk,
 )
@@ -101,6 +102,14 @@ _INTAKE_TERMINAL_DOSSIER_FIELDS = tuple(
     )
 )
 _AGENT_STREAM_DELTA_MAX_LENGTH = 4096
+_INTAKE_QUALITY_COMPONENT_MAXIMA = {
+    "references": 15,
+    "event_story": 20,
+    "party_positions": 20,
+    "requested_resolution": 15,
+    "risk_and_conflicts": 15,
+    "next_action_clarity": 15,
+}
 # Replaying a terminal, baseline-finalized Intake proposal is deliberately much
 # smaller than the protocol maximum.  Python slices are code-point safe and the
 # projector retains incomplete JSON escape sequences between slices, so a
@@ -118,6 +127,13 @@ class _IntakeLiveVisibleDelta:
 
 
 @dataclass(frozen=True)
+class _IntakeLiveGenerationReset:
+    node_name: str
+    generation: int
+    reason_code: str
+
+
+@dataclass(frozen=True)
 class _IntakeGraphCandidate:
     value: Any
     consumed: asyncio.Event
@@ -131,9 +147,38 @@ class _IntakeGraphFailure:
 _INTAKE_GRAPH_DONE = object()
 
 
+def _canonicalize_ordered_intake_section_score(delta: object) -> object:
+    """Project the same component-derived score used by the durable reducer."""
+
+    if not isinstance(delta, str):
+        return delta
+    try:
+        section = json.loads(delta)
+    except (TypeError, ValueError):
+        return delta
+    if not isinstance(section, dict) or section.get("kind") != "TURN_EVALUATION":
+        return delta
+    value = section.get("value")
+    if not isinstance(value, dict):
+        return delta
+    breakdown = value.get("score_breakdown")
+    if (
+        not isinstance(breakdown, dict)
+        or set(breakdown) != set(_INTAKE_QUALITY_COMPONENT_MAXIMA)
+        or any(
+            type(breakdown.get(component)) is not int
+            or not 0 <= breakdown[component] <= maximum
+            for component, maximum in _INTAKE_QUALITY_COMPONENT_MAXIMA.items()
+        )
+    ):
+        return delta
+    value["total_score"] = sum(breakdown.values())
+    return json.dumps(section, ensure_ascii=False, separators=(",", ":"))
+
+
 def _governed_candidate_signatures(
     candidate: Any,
-) -> tuple[tuple[str, str, str], ...]:
+) -> tuple[tuple[str, str, str, str], ...]:
     if not isinstance(candidate, tuple) or len(candidate) != 2:
         return ()
     mode, payload = candidate
@@ -142,10 +187,27 @@ def _governed_candidate_signatures(
     chunk, _ = payload
     if not isinstance(chunk, AIMessageChunk):
         return ()
-    return tuple(
-        (event["node_name"], event["field"], event["delta"])
-        for event in governed_events_from_chunk(chunk)
-    )
+    signatures: list[tuple[str, str, str, str]] = []
+    for event in governed_events_from_chunk(chunk):
+        if event["event_type"] == "generation_reset":
+            signatures.append(
+                (
+                    "generation_reset",
+                    event["node_name"],
+                    str(event["generation"]),
+                    event["reason_code"],
+                )
+            )
+        else:
+            signatures.append(
+                (
+                    "visible_delta",
+                    event["node_name"],
+                    event["field"],
+                    event["delta"],
+                )
+            )
+    return tuple(signatures)
 
 
 async def _live_target_intake_graph_stream(
@@ -156,12 +218,24 @@ async def _live_target_intake_graph_stream(
     queue: asyncio.Queue[object] = asyncio.Queue(
         maxsize=_INTAKE_LIVE_STREAM_QUEUE_LIMIT
     )
-    pending_echoes: deque[tuple[str, str, str]] = deque()
+    pending_echoes: deque[tuple[str, str, str, str]] = deque()
 
     def publish(node_name: str, field: str, delta: str) -> None:
-        signature = (node_name, field, delta)
+        signature = ("visible_delta", node_name, field, delta)
         try:
-            queue.put_nowait(_IntakeLiveVisibleDelta(*signature))
+            queue.put_nowait(_IntakeLiveVisibleDelta(node_name, field, delta))
+        except asyncio.QueueFull as error:
+            raise GraphContractError(
+                "INTAKE_LIVE_STREAM_BACKPRESSURE_EXCEEDED"
+            ) from error
+        pending_echoes.append(signature)
+
+    def publish_reset(node_name: str, generation: int, reason_code: str) -> None:
+        signature = ("generation_reset", node_name, str(generation), reason_code)
+        try:
+            queue.put_nowait(
+                _IntakeLiveGenerationReset(node_name, generation, reason_code)
+            )
         except asyncio.QueueFull as error:
             raise GraphContractError(
                 "INTAKE_LIVE_STREAM_BACKPRESSURE_EXCEEDED"
@@ -171,25 +245,31 @@ async def _live_target_intake_graph_stream(
     async def pump() -> None:
         cancelled = False
         try:
-            with bind_governed_visible_delta_sink(publish):
-                async with aclosing(source):
-                    async for candidate in source:
-                        signatures = _governed_candidate_signatures(candidate)
-                        if signatures and pending_echoes:
-                            mirrored = tuple(
-                                pending_echoes[index]
-                                for index in range(min(len(signatures), len(pending_echoes)))
-                            )
-                            if len(mirrored) != len(signatures) or mirrored != signatures:
-                                raise GraphContractError(
-                                    "INTAKE_LIVE_STREAM_ECHO_DIVERGED"
+            with bind_governed_generation_reset_sink(publish_reset):
+                with bind_governed_visible_delta_sink(publish):
+                    async with aclosing(source):
+                        async for candidate in source:
+                            signatures = _governed_candidate_signatures(candidate)
+                            if signatures and pending_echoes:
+                                mirrored = tuple(
+                                    pending_echoes[index]
+                                    for index in range(
+                                        min(len(signatures), len(pending_echoes))
+                                    )
                                 )
-                            for _ in signatures:
-                                pending_echoes.popleft()
-                            continue
-                        consumed = asyncio.Event()
-                        await queue.put(_IntakeGraphCandidate(candidate, consumed))
-                        await consumed.wait()
+                                if (
+                                    len(mirrored) != len(signatures)
+                                    or mirrored != signatures
+                                ):
+                                    raise GraphContractError(
+                                        "INTAKE_LIVE_STREAM_ECHO_DIVERGED"
+                                    )
+                                for _ in signatures:
+                                    pending_echoes.popleft()
+                                continue
+                            consumed = asyncio.Event()
+                            await queue.put(_IntakeGraphCandidate(candidate, consumed))
+                            await consumed.wait()
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -208,6 +288,9 @@ async def _live_target_intake_graph_stream(
             if isinstance(item, _IntakeGraphFailure):
                 raise item.error
             if isinstance(item, _IntakeLiveVisibleDelta):
+                yield item
+                continue
+            if isinstance(item, _IntakeLiveGenerationReset):
                 yield item
                 continue
             if not isinstance(item, _IntakeGraphCandidate):
@@ -355,6 +438,7 @@ class CompiledIntakeGraphShadowExecutor:
         } and self._context_is_respondent_opening(context)
         room_utterance_completed = False
         case_detail_seen_before_room_utterance = False
+        generation_reset_seen = False
         target_reply_then_board = self._uses_target_reply_then_board_boundary(execution)
         target_source_turn_hash = (
             self._context_source_turn_hash(context)
@@ -380,7 +464,50 @@ class CompiledIntakeGraphShadowExecutor:
                 live_visible_delta = (
                     candidate if isinstance(candidate, _IntakeLiveVisibleDelta) else None
                 )
-                if target_reply_then_board and live_visible_delta is None:
+                live_generation_reset = (
+                    candidate
+                    if isinstance(candidate, _IntakeLiveGenerationReset)
+                    else None
+                )
+                if live_generation_reset is not None:
+                    if (
+                        not target_reply_then_board
+                        or generation_reset_seen
+                        or live_generation_reset.node_name != BASELINE_INTAKE_NODE_NAME
+                        or live_generation_reset.generation != 2
+                        or live_generation_reset.reason_code
+                        != "OUTPUT_SCHEMA_INVALID"
+                    ):
+                        raise GraphContractError("INTAKE_GENERATION_RESET_INVALID")
+                    generation_reset_seen = True
+                    yield self._event(
+                        execution,
+                        sequence,
+                        "generation_reset",
+                        AgentStreamPayload(
+                            node=live_generation_reset.node_name,
+                            generation=live_generation_reset.generation,
+                            reason_code=live_generation_reset.reason_code,
+                        ),
+                    )
+                    sequence += 1
+                    emitted_usage.clear()
+                    pending_usage_update = None
+                    streamed_room_utterance_parts.clear()
+                    target_terminal_visible_updates.clear()
+                    target_action_gate = None
+                    target_gate_update_observed = False
+                    target_room_synthesized_from_gate = False
+                    room_utterance_received = False
+                    target_room_released = False
+                    room_utterance_completed = False
+                    case_detail_seen_before_room_utterance = False
+                    continue
+                if (
+                    target_reply_then_board
+                    and live_visible_delta is None
+                    and live_generation_reset is None
+                ):
                     (
                         is_update,
                         observed_gate,
@@ -429,13 +556,7 @@ class CompiledIntakeGraphShadowExecutor:
                             target_room_synthesized_from_gate = True
                         continue
                 updates = (
-                    (
-                        GraphPublicUpdate.visible_delta(
-                            node=live_visible_delta.node_name,
-                            field=live_visible_delta.field,
-                            delta=live_visible_delta.delta,
-                        ),
-                    )
+                    self._live_public_updates(live_visible_delta)
                     if live_visible_delta is not None
                     else self._public_updates(candidate)
                 )
@@ -820,6 +941,54 @@ class CompiledIntakeGraphShadowExecutor:
         )
 
     @staticmethod
+    def _live_public_updates(
+        candidate: _IntakeLiveVisibleDelta,
+    ) -> tuple[GraphPublicUpdate, ...]:
+        """Apply AgentStreamV2 sizing to the callback-fast-path projection.
+
+        The governed callback can carry an atomic structured card up to the model
+        transport limit, which is intentionally larger than AgentStreamV2's
+        per-delta limit.  The mirrored LangGraph message path already suppresses
+        oversized atomic JSON and chunks string prefixes; the live callback must
+        use the same projection rules before constructing ``AgentStreamPayload``.
+        """
+
+        field = candidate.field
+        delta: object = candidate.delta
+        if field not in _INTAKE_VISIBLE_FIELDS or not isinstance(delta, str) or not delta:
+            raise GraphContractError("compiled Intake Graph visible update is invalid")
+        if field == "ordered_sections":
+            delta = _canonicalize_ordered_intake_section_score(delta)
+        assert isinstance(delta, str)
+        if field == _INTAKE_ROOM_UTTERANCE_FIELD:
+            return CompiledIntakeGraphShadowExecutor._streamed_room_utterance_updates(
+                node=candidate.node_name,
+                delta=delta,
+            )
+        if CompiledIntakeGraphShadowExecutor._is_oversized_root_dossier_snapshot(
+            field,
+            delta,
+        ):
+            return ()
+        if field == "ordered_sections" and len(delta) > _AGENT_STREAM_DELTA_MAX_LENGTH:
+            # An array item is an atomic JSON card. Splitting it would expose
+            # invalid JSON, so the terminal dossier refresh supplies this card.
+            return ()
+        if _INTAKE_MODEL_VISIBLE_FIELD_MODES[field] == "string_prefix":
+            return CompiledIntakeGraphShadowExecutor._string_prefix_dossier_updates(
+                node=candidate.node_name,
+                field=field,
+                delta=delta,
+            )
+        return (
+            GraphPublicUpdate.visible_delta(
+                node=candidate.node_name,
+                field=field,
+                delta=delta,
+            ),
+        )
+
+    @staticmethod
     def _public_updates(candidate: Any) -> tuple[GraphPublicUpdate, ...]:
         if isinstance(candidate, GraphPublicUpdate):
             # A graph-local object is not evidence that a user-visible field came
@@ -863,6 +1032,8 @@ class CompiledIntakeGraphShadowExecutor:
                 raise GraphContractError("compiled Intake Graph governed event is invalid")
             field = event["field"]
             delta = event["delta"]
+            if field == "ordered_sections":
+                delta = _canonicalize_ordered_intake_section_score(delta)
             if field == _INTAKE_ROOM_UTTERANCE_FIELD:
                 if not delta:
                     raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
@@ -1757,7 +1928,13 @@ class CompiledIntakeGraphShadowExecutor:
         self,
         execution: GatewayExecution,
         sequence: int,
-        event_type: Literal["attempt_started", "visible_delta", "usage", "final"],
+        event_type: Literal[
+            "attempt_started",
+            "visible_delta",
+            "generation_reset",
+            "usage",
+            "final",
+        ],
         payload: AgentStreamPayload,
     ) -> AgentStreamEvent:
         occurred_at = self._clock()

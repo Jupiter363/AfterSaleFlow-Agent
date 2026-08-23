@@ -55,7 +55,11 @@ class JdbcTargetReviewInvocationFactsLoaderTest {
             "packet.adjudication_draft_version",
             "packet.deliberation_report_version",
             "packet.remedy_plan_version",
+            "packet.prompt_version",
+            "packet.profile_version",
             "approval.decision_type",
+            "approval.ai_decision_action",
+            "approval.reviewer_decision_action",
             "approval.original_plan_json::text as approval_original_plan_json",
             "approval.approved_plan_json::text as approval_approved_plan_json");
   }
@@ -102,6 +106,44 @@ class JdbcTargetReviewInvocationFactsLoaderTest {
     assertThatCode(() -> JdbcTargetReviewInvocationFactsLoader.requireActionBinding(
         new ObjectMapper(), "MODIFY_AND_APPROVE", frozenHash, approvedHash, frozen,
         frozen.deepCopy(), approved, event))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void boundedReviewBindsAiAndReviewerCodesWithoutChangingExecutionActions() throws Exception {
+    ObjectMapper mapper = new ObjectMapper();
+    JsonNode frozen = plan("frozen-key", "frozen");
+    var original = ((com.fasterxml.jackson.databind.node.ObjectNode) frozen.deepCopy())
+        .put("decision_action", "REFUND_ONLY");
+    var approved = original.deepCopy().put("decision_action", "REPLACE");
+    String frozenHash = ActionSnapshotHasher.hash(mapper, frozen);
+    var event = (com.fasterxml.jackson.databind.node.ObjectNode) decisionEvent(
+        "MODIFY_AND_APPROVE", original, approved, frozenHash, frozenHash);
+    event.put("ai_decision_action", "REFUND_ONLY");
+    event.put("reviewer_decision_action", "REPLACE");
+
+    assertThatCode(() -> JdbcTargetReviewInvocationFactsLoader.requireActionBinding(
+        mapper, "MODIFY_AND_APPROVE", frozenHash, frozenHash, frozen, original,
+        approved, event, true, "REFUND_ONLY", "REPLACE"))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void boundedManualEscalationKeepsAiCodeButCarriesNoExecutablePlan() throws Exception {
+    ObjectMapper mapper = new ObjectMapper();
+    JsonNode frozen = plan("frozen-key", "frozen");
+    var original = ((com.fasterxml.jackson.databind.node.ObjectNode) frozen.deepCopy())
+        .put("decision_action", "REFUND_ONLY");
+    var empty = mapper.createObjectNode();
+    String frozenHash = ActionSnapshotHasher.hash(mapper, frozen);
+    var event = (com.fasterxml.jackson.databind.node.ObjectNode) decisionEvent(
+        "ESCALATE_MANUAL", original, empty, frozenHash, frozenHash);
+    event.put("ai_decision_action", "REFUND_ONLY");
+    event.put("reviewer_decision_action", "ESCALATE_MANUAL");
+
+    assertThatCode(() -> JdbcTargetReviewInvocationFactsLoader.requireActionBinding(
+        mapper, "ESCALATE_MANUAL", frozenHash, frozenHash, frozen, original,
+        empty, event, true, "REFUND_ONLY", "ESCALATE_MANUAL"))
         .doesNotThrowAnyException();
   }
 

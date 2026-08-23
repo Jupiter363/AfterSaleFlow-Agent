@@ -110,6 +110,56 @@ class AgentNdjsonStreamClientV2Test {
     }
 
     @Test
+    void parsesOneV3GenerationResetOnlyAfterVisibleOutput() {
+        var state = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1",
+                "attempt-1",
+                Audience.USER,
+                Map.of("intake_turn_case_detail", Set.of("room_utterance")));
+        parseV3(state, v3Event(
+                0, "attempt_started", "{\"node\":\"intake_turn_case_detail\"}"));
+        parseV3(state, v3Event(
+                1,
+                "visible_delta",
+                "{\"node\":\"intake_turn_case_detail\","
+                        + "\"field\":\"room_utterance\",\"delta\":\"第一代\"}"));
+
+        var reset = parseV3(state, v3Event(
+                2,
+                "generation_reset",
+                "{\"node\":\"intake_turn_case_detail\",\"generation\":2,"
+                        + "\"reason_code\":\"OUTPUT_SCHEMA_INVALID\"}"));
+        parseV3(state, v3Event(
+                3,
+                "visible_delta",
+                "{\"node\":\"intake_turn_case_detail\","
+                        + "\"field\":\"room_utterance\",\"delta\":\"第二代\"}"));
+        parseV3(state, v3Event(
+                4,
+                "final",
+                "{\"final_result_ref\":\"urn:result:1\",\"final_result_hash\":\""
+                        + "a".repeat(64)
+                        + "\"}"));
+
+        assertThat(reset.eventType()).isEqualTo(StreamEventType.GENERATION_RESET);
+        assertThat(reset.payload().generation()).isEqualTo(2);
+        assertThat(reset.payload().reasonCode()).isEqualTo("OUTPUT_SCHEMA_INVALID");
+        state.assertComplete();
+
+        var withoutVisible = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Map.of());
+        parseV3(withoutVisible, v3Event(
+                0, "attempt_started", "{\"node\":\"intake_turn_case_detail\"}"));
+        assertThatThrownBy(() -> parseV3(withoutVisible, v3Event(
+                        1,
+                        "generation_reset",
+                        "{\"node\":\"intake_turn_case_detail\",\"generation\":2,"
+                                + "\"reason_code\":\"OUTPUT_SCHEMA_INVALID\"}")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("generation reset is invalid");
+    }
+
+    @Test
     void parsesAttemptScopedAllowlistedEventsAndHashBoundFinal() {
         var state = new AgentNdjsonStreamClient.V2ProtocolState(
                 "run-1", "attempt-1", Audience.USER, Set.of("room_utterance"));

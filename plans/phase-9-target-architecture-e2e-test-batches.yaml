@@ -68,7 +68,7 @@ authority:
 activation:
   contract_version: target-e2e-activation.v1
   activation_id_pattern: '^p9act\.v1\.[0-9a-f]{32}$'
-  maximum_lifetime_seconds: 7200
+  maximum_lifetime_seconds: 2592000
   future_issued_at_tolerance_seconds: 0
   replay_identity: [environmentId, environmentGeneration, activationId, nonce, manifestHash]
   unique_grant_keys: [activationId, nonce]

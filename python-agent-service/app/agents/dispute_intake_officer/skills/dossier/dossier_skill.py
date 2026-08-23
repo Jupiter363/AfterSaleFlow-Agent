@@ -641,12 +641,11 @@ class CaseDetailDossierSkill:
                 if isinstance(field, str)
             ]
             score_breakdown = _quality_mapping(quality.get("score_breakdown"))
-            score = quality.get("score")
-            if type(score) is not int:
-                raise _party_intake_state_error(
-                    "INTAKE_PARTY_STATE_QUALITY_INVALID",
-                    "the ordered Intake model output must carry its typed total score",
-                )
+            # The six bounded components are the only score authority.  Provider
+            # ``total_score`` remains an input-shape field, but it is deliberately
+            # discarded here so a model arithmetic slip cannot become durable state.
+            score = sum(score_breakdown.values())
+            quality["score"] = score
         else:
             actor_source_records = _authoritative_intake_source_records(
                 request,
@@ -1755,11 +1754,6 @@ def _legacy_party_intake_entry(
     quality = previous.get("intake_quality")
     if isinstance(quality, dict):
         raw_score = quality.get("score")
-        score = (
-            max(0, min(100, raw_score))
-            if type(raw_score) is int
-            else 0
-        )
         raw_breakdown = quality.get("score_breakdown")
         if (
             isinstance(raw_breakdown, dict)
@@ -1769,10 +1763,15 @@ def _legacy_party_intake_entry(
                 and 0 <= raw_breakdown[component] <= maximum
                 for component, maximum in _QUALITY_SCORE_COMPONENT_MAXIMA.items()
             )
-            and sum(raw_breakdown.values()) == score
         ):
             breakdown = copy.deepcopy(raw_breakdown)
+            score = sum(breakdown.values())
         else:
+            score = (
+                max(0, min(100, raw_score))
+                if type(raw_score) is int
+                else 0
+            )
             breakdown = _score_breakdown_for_total(score)
         ready = quality.get("ready_for_next_step") is True and score >= 85
         entry["intake_quality"] = {
@@ -1995,6 +1994,7 @@ def _validated_party_intake_entry(
             "INTAKE_PARTY_STATE_QUALITY_INVALID",
             f"{source}.{role}.intake_quality violates the canonical score contract",
         )
+    canonical_score = sum(breakdown.values())
 
     missing = value.get("missing_information")
     missing_fields = {"blocking_gaps", "nice_to_have_gaps", "next_questions"}
@@ -2092,24 +2092,9 @@ def _validated_party_intake_entry(
             f"{source}.{role}.admission is malformed",
         )
 
-    if ready:
-        valid_cross_state = (
-            score >= 85
-            and not missing["blocking_gaps"]
-            and admission["recommendation"] == "ACCEPTED"
-            and notes["remark_status"] in _PARTY_INTAKE_READY_REMARK_STATUSES
-        )
-    else:
-        valid_cross_state = (
-            admission["recommendation"] != "ACCEPTED"
-            and notes["remark_status"] == "NOT_READY"
-        )
-    if not valid_cross_state:
-        raise _party_intake_state_error(
-            "INTAKE_PARTY_STATE_OUTCOME_CONFLICT",
-            f"{source}.{role} readiness, handoff, and admission disagree",
-        )
-    return copy.deepcopy(value)
+    normalized = copy.deepcopy(value)
+    normalized["intake_quality"]["score"] = canonical_score
+    return normalized
 
 
 def _set_party_intake_mirror(
@@ -2136,19 +2121,19 @@ def _canonical_party_intake_entry(
     breakdown = quality.get("score_breakdown")
     if not isinstance(breakdown, dict):
         breakdown = {component: 0 for component in _QUALITY_SCORE_COMPONENT_MAXIMA}
-    score = quality.get("score")
+    canonical_breakdown = {
+        component: (
+            breakdown.get(component)
+            if type(breakdown.get(component)) is int
+            else 0
+        )
+        for component in _QUALITY_SCORE_COMPONENT_MAXIMA
+    }
     canonical_quality = {
-        "score": score if type(score) is int else 0,
+        "score": sum(canonical_breakdown.values()),
         "threshold": 85,
         "ready_for_next_step": quality.get("ready_for_next_step") is True,
-        "score_breakdown": {
-            component: (
-                breakdown.get(component)
-                if type(breakdown.get(component)) is int
-                else 0
-            )
-            for component in _QUALITY_SCORE_COMPONENT_MAXIMA
-        },
+        "score_breakdown": canonical_breakdown,
         "improvement_reason": str(quality.get("improvement_reason") or ""),
     }
     missing = _quality_mapping(detail.get("missing_information"))
@@ -2911,7 +2896,7 @@ def _bind_model_trusted_respondent_attitude(
     matrix_delta: CaseFactMatrixDeltaV2 | UnilateralCaseMatrixDraftV1 | None,
     source_binding: Mapping[str, Any] | None,
 ) -> None:
-    """Attach server-owned provenance to V3 model semantics without reclassifying it."""
+    """Bind typed V3 model semantics to the authenticated current message."""
 
     actor_role = _require_party_actor_role(request.agent_context.actor_role)
     initiator_role = _proven_initiator_role(request, previous)
@@ -2921,42 +2906,17 @@ def _bind_model_trusted_respondent_attitude(
             "ordered Intake output requires a proven initiator role",
         )
     respondent_role = _opposite_party(initiator_role)
-    attitude = _quality_mapping(detail.get("respondent_attitude"))
-    if str(attitude.get("respondent_role") or "").upper() != respondent_role:
-        raise _party_intake_state_error(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-            "model respondent role conflicts with formal party authority",
-        )
 
     if actor_role == initiator_role:
-        if source_binding is not None:
-            raise _party_intake_state_error(
-                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-                "an initiator turn cannot create a direct respondent source binding",
-            )
-        attitude_code = str(attitude.get("attitude") or "")
-        if attitude_code in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES:
-            current = request.current_user_message
-            attitude["source"] = SUBJECTIVE_RESPONDENT_SOURCE
-            attitude["confidence"] = DIRECT_RESPONDENT_CONFIDENCE
-            attitude["confidence_note"] = SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE
-            attitude["grounding"] = {
-                "source": "PARTICIPANT_MESSAGE" if current is not None else "INITIAL_FORM",
-                "message_id": current.message_id if current is not None else "",
-            }
-        else:
-            # A model may summarize what the initiator reported while still
-            # classifying the direct-response state as NOT_RESPONDED.  Keeping that
-            # summary beside source=尚未回应 produces contradictory public authority.
-            # With no substantive reported-attitude classification, publish only the
-            # neutral no-direct-response object.  Explicit reported attitudes remain
-            # in the substantive branch above and retain their subjective source.
-            attitude = _default_respondent_attitude(
-                request.initial_case_facts,
-                allow_subjective_seed=False,
-                initiator_role=initiator_role,
-            )
-        detail["respondent_attitude"] = attitude
+        # The initiator Provider Schema owns no counterparty field.  Always bind a
+        # server-authored neutral placeholder, even when a legacy payload or old
+        # dossier happens to carry an initiator-reported counterparty opinion.
+        detail["respondent_attitude"] = _default_respondent_attitude(
+            request.initial_case_facts,
+            allow_subjective_seed=False,
+            initiator_role=initiator_role,
+        )
+        _clear_ungrounded_counterparty_position(detail, initiator_role)
         return
 
     current = request.current_user_message
@@ -2978,77 +2938,15 @@ def _bind_model_trusted_respondent_attitude(
             "direct respondent semantics require the typed case matrix delta",
         )
     claim = matrix_delta.respondent_claim
-    if claim is None or source_binding is None:
+    if claim is None:
         raise _party_intake_state_error(
             "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-            "respondent output is missing its typed source binding",
-        )
-    if set(source_binding) != {
-        "schema_version",
-        "binding_kind",
-        "subject_role",
-        "source_quote",
-        "linked_fact_keys",
-    } or source_binding.get("schema_version") != "respondent-claim-binding.v1":
-        raise _party_intake_state_error(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-            "respondent source binding is malformed",
+            "respondent output is missing its typed claim",
         )
 
     claim_payload = claim.model_dump(mode="json")
     if claim_payload["attitude"] == "NOT_ADDRESSED":
-        if (
-            source_binding.get("binding_kind") != "NO_DIRECT_POSITION"
-            or source_binding.get("subject_role") is not None
-            or source_binding.get("source_quote") is not None
-            or source_binding.get("linked_fact_keys") != []
-        ):
-            raise _party_intake_state_error(
-                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-                "NOT_ADDRESSED cannot carry direct current-message authority",
-            )
         return
-
-    quote = source_binding.get("source_quote")
-    linked_keys = source_binding.get("linked_fact_keys")
-    if (
-        source_binding.get("binding_kind") != "CURRENT_ACTOR_DIRECT"
-        or source_binding.get("subject_role") != actor_role
-        or not isinstance(quote, str)
-        or not quote.strip()
-        or quote not in current.text
-        or not isinstance(linked_keys, list)
-        or not linked_keys
-        or any(not isinstance(key, str) for key in linked_keys)
-        or len(set(linked_keys)) != len(linked_keys)
-    ):
-        raise _party_intake_state_error(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-            "direct respondent source binding does not match the current actor message",
-        )
-    rows_by_key = {row.fact_key: row for row in matrix_delta.fact_rows}
-    if any(key not in rows_by_key for key in linked_keys):
-        raise _party_intake_state_error(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-            "direct respondent binding references an unknown matrix fact",
-        )
-    # The provider owns the semantic link selection, while the server owns fact
-    # identity and source authority.  A carried previous fact is therefore a
-    # known, harmless over-selection rather than authority for the current
-    # statement.  Preserve provider order and project the transient binding to
-    # the current substantive subset; at least one such row remains mandatory.
-    current_linked_keys = [
-        key
-        for key in linked_keys
-        if rows_by_key[key].source_scope.value
-        in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
-        and rows_by_key[key].stance.value != "NOT_ADDRESSED"
-    ]
-    if not current_linked_keys:
-        raise _party_intake_state_error(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-            "direct respondent binding lacks a current-source substantive matrix fact",
-        )
     model_claim = _current_respondent_model_claim(
         request,
         initiator_role=initiator_role,
@@ -3135,31 +3033,7 @@ def _enforce_respondent_attitude_source(
             matrix_delta=matrix_delta,
             llm_case_detail=llm_case_detail,
         )
-        detection = detect_direct_respondent_attitude(
-            current.text,
-            source_authority=RESPONDENT_AUTHORED_CURRENT_MESSAGE,
-            respondent_role=actor_role,
-        )
-        if detection.state == "UNRESOLVED":
-            raise AgentOutputSchemaError(
-                "intake_turn_case_detail",
-                "respondent attitude signal unresolved",
-                safe_code="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-            )
         if model_claim is not None:
-            candidate = detection.candidate
-            if (
-                detection.state == "SUBSTANTIVE"
-                and (
-                    candidate is None
-                    or candidate.get("attitude") != model_claim["attitude"]
-                )
-            ):
-                raise AgentOutputSchemaError(
-                    "intake_turn_case_detail",
-                    "respondent attitude detector conflicts with matrix claim",
-                    safe_code="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-                )
             direct_attitude = {
                 "respondent_role": actor_role,
                 "attitude": model_claim["attitude"],
@@ -3177,95 +3051,25 @@ def _enforce_respondent_attitude_source(
                 ]
             detail["respondent_attitude"] = direct_attitude
             return
-        if detection.state == "SUBSTANTIVE":
-            raise AgentOutputSchemaError(
-                "intake_turn_case_detail",
-                "respondent attitude detector conflicts with absent matrix claim",
-                safe_code="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+        detail["respondent_attitude"] = (
+            copy.deepcopy(carried_previous_attitude)
+            if carried_previous_attitude is not None
+            else _default_respondent_attitude(
+                initial,
+                allow_subjective_seed=False,
+                initiator_role=initiator_role,
             )
-        if detection.state == "NONE":
-            detail["respondent_attitude"] = (
-                copy.deepcopy(carried_previous_attitude)
-                if carried_previous_attitude is not None
-                else _default_respondent_attitude(
-                    initial,
-                    allow_subjective_seed=False,
-                    initiator_role=initiator_role,
-                )
-            )
-            return
-        raise AgentOutputSchemaError(
-            "intake_turn_case_detail",
-            "respondent attitude detector returned an invalid state",
-            safe_code="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
         )
-    form_description = str(getattr(initial, "form_description", None) or "")
-    current_reported_attitude = (
-        attributed_reported_respondent_attitude(current.text, initiator_role)
-        if current is not None
-        else None
+        return
+    # Initiator-authored messages never create or carry a counterparty opinion.
+    # This legacy reducer follows the same actor-local ownership rule as the V3
+    # Provider contract so alternate/replay paths cannot revive old extraction.
+    detail["respondent_attitude"] = _default_respondent_attitude(
+        initial,
+        allow_subjective_seed=False,
+        initiator_role=initiator_role,
     )
-    llm_attitude = _nested_attitude(llm_case_detail)
-
-    if current is not None and current_reported_attitude is None:
-        if carried_previous_attitude is not None:
-            detail["respondent_attitude"] = copy.deepcopy(carried_previous_attitude)
-            return
-        candidate = None
-        grounding_source = ""
-        grounding_message_id = ""
-    elif current_reported_attitude is not None:
-        candidate = copy.deepcopy(current_reported_attitude)
-        grounding_source = "PARTICIPANT_MESSAGE"
-        grounding_message_id = current.message_id if current is not None else ""
-    elif form_description and _has_explicit_respondent_report(
-        form_description,
-        initiator_role,
-    ):
-        candidate = _reported_attitude(llm_attitude)
-        if candidate is None:
-            candidate = _subjective_seed_attitude(initial)
-        if candidate is None:
-            candidate = _reported_attitude_from_text(
-                form_description,
-                initiator_role,
-            )
-        candidate = _pin_attitude_position_to_source(
-            candidate,
-            form_description,
-            initiator_role,
-        )
-        grounding_source = "INITIAL_FORM"
-        grounding_message_id = ""
-    elif carried_previous_attitude is not None:
-        detail["respondent_attitude"] = copy.deepcopy(carried_previous_attitude)
-        return
-    else:
-        candidate = None
-        grounding_source = ""
-        grounding_message_id = ""
-
-    if candidate is None:
-        detail["respondent_attitude"] = _default_respondent_attitude(
-            initial,
-            allow_subjective_seed=False,
-            initiator_role=initiator_role,
-        )
-        _clear_ungrounded_counterparty_position(detail, initiator_role)
-        return
-
-    detail["respondent_attitude"] = {
-        "respondent_role": _opposite_party(initiator_role),
-        "attitude": candidate["attitude"],
-        "position": candidate["position"],
-        "source": SUBJECTIVE_RESPONDENT_SOURCE,
-        "confidence": _clamp_confidence(candidate.get("confidence", 0.5)),
-        "confidence_note": SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
-        "grounding": {
-            "source": grounding_source,
-            "message_id": grounding_message_id,
-        },
-    }
+    _clear_ungrounded_counterparty_position(detail, initiator_role)
 
 
 def _current_respondent_model_claim(
@@ -3303,65 +3107,15 @@ def _current_respondent_model_claim(
             )
         return None
 
-    dossier_attitude = _current_case_detail_respondent_comparison(
-        llm_case_detail,
-        actor_role=actor_role,
-    )
     matrix_claim = matrix_delta.respondent_claim
     if matrix_claim is None:
-        if dossier_attitude is not None:
-            raise _party_intake_state_error(
-                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-                "dossier respondent attitude lacks typed matrix authority",
-            )
         return None
 
     matrix_claim_payload = matrix_claim.model_dump(mode="json")
     matrix_attitude = matrix_claim_payload["attitude"]
     if matrix_attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES:
-        if dossier_attitude is not None:
-            raise _party_intake_state_error(
-                "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-                "dossier respondent attitude conflicts with absent matrix claim",
-            )
         return None
-    if dossier_attitude is not None and matrix_attitude != dossier_attitude:
-        raise _party_intake_state_error(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-            "model respondent attitude conflicts with matrix claim",
-        )
     return matrix_claim_payload
-
-
-def _current_case_detail_respondent_comparison(
-    llm_case_detail: dict[str, Any] | None,
-    *,
-    actor_role: str,
-) -> str | None:
-    """Read only role and attitude when matrix authority is canonical."""
-
-    candidate = _nested_attitude(llm_case_detail)
-    if not candidate:
-        return None
-    proposed_role = candidate.get("respondent_role")
-    if proposed_role is not None and (
-        not isinstance(proposed_role, str)
-        or proposed_role.upper() != actor_role
-    ):
-        raise _party_intake_state_error(
-            "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
-            "model respondent role conflicts with the current actor",
-        )
-    attitude = candidate.get("attitude")
-    if attitude is None:
-        return None
-    if not isinstance(attitude, str):
-        return None
-    return (
-        attitude
-        if attitude in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES
-        else None
-    )
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
@@ -4408,7 +4162,10 @@ def _clear_ungrounded_counterparty_position(
     initiator_role: str,
 ) -> None:
     positions = _ensure_dict(detail, "party_positions")
-    positions["user_claim" if initiator_role == "MERCHANT" else "merchant_claim"] = ""
+    positions["user_claim" if initiator_role == "MERCHANT" else "merchant_claim"] = (
+        "尚未直接陈述"
+    )
+    positions["respondent_position"] = "尚未直接陈述"
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
@@ -4570,7 +4327,7 @@ def _grounded_prior_respondent_attitude(
 def _default_respondent_attitude(
     lobby_seed: Any,
     *,
-    allow_subjective_seed: bool = True,
+    allow_subjective_seed: bool = False,
     initiator_role: str | None = None,
 ) -> dict[str, Any]:
     seed = getattr(lobby_seed, "respondent_attitude_seed", None)
@@ -4598,7 +4355,7 @@ def _default_respondent_attitude(
     return {
         "respondent_role": respondent_role,
         "attitude": "NOT_RESPONDED",
-        "position": f"{_role_label(respondent_role)}尚未在接待室表达态度。",
+        "position": "尚未直接陈述",
         "source": "尚未回应",
         "confidence": 0.5,
     }

@@ -56,4 +56,29 @@ describe("normalizeVerificationFocus", () => {
       ]),
     ).toEqual(["核验商品异常照片或开箱视频，确认商品状态及形成时间"]);
   });
+
+  it("receives localized intake identifiers without exposing role or field tokens", () => {
+    expect(
+      normalizeVerificationFocus([
+        "用户主张的具体性能指标",
+        "用户与商家的沟通详情",
+        "核验用户是否已与商家沟通",
+      ]),
+    ).toEqual([
+      "核验用户主张的具体性能指标",
+      "核验用户与商家的完整沟通记录",
+    ]);
+  });
+
+  it("maps mixed-language model prose to stable Chinese verification actions", () => {
+    expect(
+      normalizeVerificationFocus([
+        "核验用户 claimed third-party testing report details and methodology",
+        "核验logistics delivery confirmation timestamp matching 用户 receipt claim",
+      ]),
+    ).toEqual([
+      "核验第三方检测报告、机构资质、检测方法和环境条件",
+      "核验物流签收及投递记录，确认签收人身份、位置、时间与开箱检查间隔",
+    ]);
+  });
 });

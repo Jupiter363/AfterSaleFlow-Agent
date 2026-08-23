@@ -16,7 +16,9 @@ from app.graph_runtime.errors import (
 from app.graph_runtime.identity import THREAD_ID_PATTERN, _identifier
 
 
-LEASE_DURATION: Final = timedelta(seconds=30)
+LEASE_DURATION_SECONDS: Final[int] = 60
+LEASE_DURATION_SQL: Final[str] = f"interval '{LEASE_DURATION_SECONDS} seconds'"
+LEASE_DURATION: Final = timedelta(seconds=LEASE_DURATION_SECONDS)
 LEASE_RENEWAL_INTERVAL: Final = timedelta(seconds=10)
 
 
@@ -50,7 +52,9 @@ class LeaseRecord:
         if self.lease_expires_at <= self.renewed_at:
             raise GraphContractError("lease expiry must follow its database renewal time")
         if self.lease_expires_at - self.renewed_at > LEASE_DURATION:
-            raise GraphContractError("lease window cannot exceed 30 seconds")
+            raise GraphContractError(
+                f"lease window cannot exceed {LEASE_DURATION_SECONDS} seconds"
+            )
         if self.acquired_at > self.renewed_at:
             raise GraphContractError("lease acquisition cannot follow renewal")
         if (self.cancelled_at is None) != (self.cancelled_by_command_id is None):
@@ -133,7 +137,7 @@ insert into agent_graph_lease (
     thread_id, command_id, owner_id, fencing_token, lease_expires_at,
     acquired_at, renewed_at, lease_revision
 )
-select %s, %s, %s, 1, now + interval '30 seconds', now, now, 0
+select %s, %s, %s, 1, now + {LEASE_DURATION_SQL}, now, now, 0
   from db_clock
 on conflict (thread_id) do nothing
 returning {LEASE_COLUMNS}
@@ -160,7 +164,7 @@ update agent_graph_lease lease
    set command_id = %s,
        owner_id = %s,
        fencing_token = lease.fencing_token + 1,
-       lease_expires_at = db_clock.now + interval '30 seconds',
+       lease_expires_at = db_clock.now + {LEASE_DURATION_SQL},
        acquired_at = db_clock.now,
        renewed_at = db_clock.now,
        released_at = null,
@@ -213,7 +217,7 @@ db_clock as materialized (
 )
 update agent_graph_lease lease
    set renewed_at = db_clock.now,
-       lease_expires_at = db_clock.now + interval '30 seconds',
+       lease_expires_at = db_clock.now + {LEASE_DURATION_SQL},
        lease_revision = lease.lease_revision + 1
   from locked_lease, db_clock
  where lease.ctid = locked_lease.lease_ctid

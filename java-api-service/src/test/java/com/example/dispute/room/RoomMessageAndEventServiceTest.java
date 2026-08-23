@@ -26,6 +26,12 @@ import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
+import com.example.dispute.hearing.domain.HearingFlowStage;
+import com.example.dispute.hearing.domain.HearingFlowStageStatus;
+import com.example.dispute.hearing.infrastructure.persistence.entity.HearingFlowInstanceEntity;
+import com.example.dispute.hearing.infrastructure.persistence.entity.HearingFlowStageEntity;
+import com.example.dispute.hearing.infrastructure.persistence.repository.HearingFlowInstanceRepository;
+import com.example.dispute.hearing.infrastructure.persistence.repository.HearingFlowStageRepository;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.CaseEventService;
@@ -109,6 +115,10 @@ class RoomMessageAndEventServiceTest {
     @Mock private LegacyIntakeWriterGuard legacyIntakeWriterGuard;
     @Mock private CaseRoomEpochRepository roomEpochRepository;
     @Mock private CaseRoomEpochEntity evidenceEpoch;
+    @Mock private HearingFlowInstanceRepository hearingFlowInstanceRepository;
+    @Mock private HearingFlowStageRepository hearingFlowStageRepository;
+    @Mock private HearingFlowInstanceEntity hearingFlowInstance;
+    @Mock private HearingFlowStageEntity hearingAnswerStage;
 
     private CaseEventService eventService;
     private RoomMessageService messageService;
@@ -145,7 +155,9 @@ class RoomMessageAndEventServiceTest {
                         intakeMessageIngressRouter,
                         legacyIntakeWriterGuard,
                         CLOCK,
-                        roomEpochRepository);
+                        roomEpochRepository,
+                        hearingFlowInstanceRepository,
+                        hearingFlowStageRepository);
         lenient()
                 .when(intakeMessageIngressRouter.select(any()))
                 .thenReturn(IntakeIngressSelection.legacy());
@@ -157,6 +169,143 @@ class RoomMessageAndEventServiceTest {
                             AuthenticatedActor actor = invocation.getArgument(1);
                             return accessSession(caseId, actor);
                         });
+    }
+
+    @Test
+    void completedHearingAnswerStageDisclosesBothPrivatePartyAnswersToEachPartyWithoutReplayDuplication() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "user-local", ActorRole.USER))
+                .thenReturn(true);
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "merchant-local", ActorRole.MERCHANT))
+                .thenReturn(true);
+        when(hearingFlowInstanceRepository.findByCaseId(dispute.getId()))
+                .thenReturn(Optional.of(hearingFlowInstance));
+        when(hearingFlowInstance.getId()).thenReturn("HEARING_FLOW_TEST");
+        when(hearingFlowStageRepository.findByFlowInstanceIdAndStageCode(
+                        "HEARING_FLOW_TEST", HearingFlowStage.PARTY_ANSWERS_OPEN))
+                .thenReturn(Optional.of(hearingAnswerStage));
+        when(hearingAnswerStage.getStageStatus())
+                .thenReturn(HearingFlowStageStatus.COMPLETED);
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(
+                        List.of(
+                                roomMessage(
+                                        "MESSAGE_USER_ANSWER",
+                                        room.getId(),
+                                        15,
+                                        ActorRole.USER,
+                                        "user-local",
+                                        MessageType.PARTY_TEXT,
+                                        "user sealed answer",
+                                        "[]",
+                                        "[\"user-local\"]"),
+                                roomMessage(
+                                        "MESSAGE_MERCHANT_ANSWER",
+                                        room.getId(),
+                                        16,
+                                        ActorRole.MERCHANT,
+                                        "merchant-local",
+                                        MessageType.PARTY_TEXT,
+                                        "merchant sealed answer",
+                                        "[]",
+                                        "[\"merchant-local\"]")));
+
+        var userFirst =
+                messageService.list(
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+        var userReplay =
+                messageService.list(
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+        var merchant =
+                messageService.list(
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT));
+
+        assertThat(userFirst)
+                .extracting(RoomMessageView::messageText)
+                .containsExactly("user sealed answer", "merchant sealed answer");
+        assertThat(userReplay)
+                .extracting(RoomMessageView::id)
+                .containsExactly("MESSAGE_USER_ANSWER", "MESSAGE_MERCHANT_ANSWER");
+        assertThat(merchant)
+                .extracting(RoomMessageView::messageText)
+                .containsExactly("user sealed answer", "merchant sealed answer");
+    }
+
+    @Test
+    void openHearingAnswerStageKeepsCounterpartyAnswerPrivate() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "user-local", ActorRole.USER))
+                .thenReturn(true);
+        when(hearingFlowInstanceRepository.findByCaseId(dispute.getId()))
+                .thenReturn(Optional.of(hearingFlowInstance));
+        when(hearingFlowInstance.getId()).thenReturn("HEARING_FLOW_TEST");
+        when(hearingFlowStageRepository.findByFlowInstanceIdAndStageCode(
+                        "HEARING_FLOW_TEST", HearingFlowStage.PARTY_ANSWERS_OPEN))
+                .thenReturn(Optional.of(hearingAnswerStage));
+        when(hearingAnswerStage.getStageStatus())
+                .thenReturn(HearingFlowStageStatus.WAITING_PARTIES);
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(
+                        List.of(
+                                roomMessage(
+                                        "MESSAGE_USER_ANSWER",
+                                        room.getId(),
+                                        15,
+                                        ActorRole.USER,
+                                        "user-local",
+                                        MessageType.PARTY_TEXT,
+                                        "user sealed answer",
+                                        "[]",
+                                        "[\"user-local\"]"),
+                                roomMessage(
+                                        "MESSAGE_MERCHANT_ANSWER",
+                                        room.getId(),
+                                        16,
+                                        ActorRole.MERCHANT,
+                                        "merchant-local",
+                                        MessageType.PARTY_TEXT,
+                                        "merchant sealed answer",
+                                        "[]",
+                                        "[\"merchant-local\"]")));
+
+        var history =
+                messageService.list(
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+
+        assertThat(history)
+                .extracting(RoomMessageView::messageText)
+                .containsExactly("user sealed answer");
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords()」。
@@ -1590,6 +1739,7 @@ class RoomMessageAndEventServiceTest {
         assertThat(history)
                 .extracting(RoomMessageView::messageText)
                 .containsExactly("current user's private evidence chat");
+        verifyNoInteractions(hearingFlowInstanceRepository, hearingFlowStageRepository);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.replayFiltersPrivateEventsByExactActorWithinTheSameRole()」。

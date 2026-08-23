@@ -52,6 +52,7 @@ _MAX_COMPLETION_TOKENS = 16_384
 _MAX_MODEL_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_STREAM_EVENT_BYTES = 128 * 1024
 _MAX_STREAM_DELTA_BYTES = 64 * 1024
+_MAX_STRUCTURED_STREAM_GENERATIONS = 2
 _MODEL_HEALTH_SUCCESS_TTL_SECONDS = 60.0
 _MODEL_HEALTH_FAILURE_TTL_SECONDS = 10.0
 _SCHEMA_REPAIR_BEGIN = "<<<SERVER_OWNED_JSON_SCHEMA_REPAIR_V1>>>"
@@ -80,7 +81,11 @@ _NODE_GENERATION_BUDGETS: dict[str, ModelGenerationBudget] = {
     "external_import_simulator": ModelGenerationBudget(4_096),
     "intake_analyze": ModelGenerationBudget(4_096),
     "intake_turn_dialogue": ModelGenerationBudget(4_096),
-    "intake_turn_case_detail": ModelGenerationBudget(6_144),
+    # Qwen thinking usage is reported inside completion_tokens. The Intake
+    # document itself is bounded by the strict Schema and byte limit, so the
+    # governed token ceiling must also cover the server-enabled reasoning
+    # budget instead of rejecting an otherwise valid completed document.
+    "intake_turn_case_detail": ModelGenerationBudget(16_384),
     "evidence_turn": ModelGenerationBudget(8_192),
     "evaluation_analyze": ModelGenerationBudget(8_192),
     "hearing_intake_questions": ModelGenerationBudget(4_096),
@@ -130,6 +135,31 @@ def governed_max_output_tokens(node_name: str) -> int:
     return _generation_budget_for(node_name).max_completion_tokens
 
 
+def _structured_stream_generation_limit(
+    governed_request: GovernedProviderRequest | None,
+    visible_fields: tuple[VisibleFieldSpec, ...],
+) -> int:
+    """Return the bounded full-generation count for a stream-safe public shape."""
+
+    # V3 public-frame streams persist frame authority before root-model validation.
+    # They require a separate generation dimension and therefore remain single-call.
+    if any(spec.value_mode == "json_frame_objects" for spec in visible_fields):
+        return 1
+    # Missing governance is not retry authority. Production regeneration is enabled
+    # only after the immutable invocation policy explicitly grants two attempts.
+    if governed_request is None or governed_request.provider_attempts_remaining < 2:
+        return 1
+    return _MAX_STRUCTURED_STREAM_GENERATIONS
+
+
+def _accumulate_stream_usage(
+    aggregate: dict[str, int],
+    current: dict[str, int],
+) -> None:
+    for key in ("input", "output", "total"):
+        aggregate[key] = aggregate.get(key, 0) + current.get(key, 0)
+
+
 # 所属模块：LLM 网关 > Provider 结构化输出 > Schema 名称规范化。
 # 具体功能：`_response_schema_name` 把 node_name 中供应商不接受的字符替换为下划线、去首尾下划线、为空时回退 agent_output，并限制 64 字符。
 # 上下游：上游是 `_completion_request_body` 当前业务节点名；下游是 response_format.json_schema.name，Schema 正文本身仍来自 output_type.model_json_schema()。
@@ -152,10 +182,16 @@ class AgentOutputSchemaError(RuntimeError):
         message: str,
         *,
         safe_code: str = "AGENT_OUTPUT_SCHEMA_INVALID",
+        diagnostic_code: str | None = None,
     ) -> None:
+        if diagnostic_code is not None and re.fullmatch(
+            r"[A-Z][A-Z0-9_]{2,95}", diagnostic_code
+        ) is None:
+            raise ValueError("diagnostic_code must be a stable uppercase identifier")
         super().__init__(message)
         self.node_name = node_name
         self.safe_code = safe_code
+        self.diagnostic_code = diagnostic_code
 
 
 class AgentServiceUnavailable(RuntimeError):
@@ -311,7 +347,28 @@ class StructuredStreamCompleted:
     generation: StructuredGeneration
 
 
-StructuredStreamUpdate = StructuredStreamDelta | StructuredStreamCompleted
+@dataclass(frozen=True)
+class StructuredStreamReset:
+    """Invalidate one provisional generation before a full same-input retry."""
+
+    kind: Literal["generation_reset"]
+    generation: int
+    reason_code: Literal["OUTPUT_SCHEMA_INVALID"] = "OUTPUT_SCHEMA_INVALID"
+
+
+StructuredStreamUpdate = (
+    StructuredStreamDelta | StructuredStreamReset | StructuredStreamCompleted
+)
+
+
+@dataclass(frozen=True)
+class _StructuredStreamFinalValidationFailure(Exception):
+    """Private metadata boundary for a completed provider stream that failed Schema."""
+
+    error: AgentOutputSchemaError
+    model: str
+    latency_ms: int
+    token_usage: dict[str, int]
 
 
 class StructuredLlmClient(Protocol):
@@ -404,11 +461,15 @@ class LiteLlmProxyClient:
         timeout_seconds: float = 120.0,
         transport: httpx.BaseTransport | None = None,
         async_transport: httpx.AsyncBaseTransport | None = None,
+        enable_thinking: bool = False,
+        strict_json_schema_enabled: bool = True,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key = api_key
         self._timeout = timeout_seconds
+        self._enable_thinking = enable_thinking
+        self._strict_json_schema_enabled = strict_json_schema_enabled
         self._transport = transport
         self._async_transport = async_transport or (
             transport if isinstance(transport, httpx.AsyncBaseTransport) else None
@@ -724,6 +785,7 @@ class LiteLlmProxyClient:
             or _public_output_policy_enabled(observer, node_name)
         ):
             completed: StructuredGeneration | None = None
+            provisional_output_emitted = False
             try:
                 for update in self.generate_stream(
                     node_name=node_name,
@@ -740,6 +802,15 @@ class LiteLlmProxyClient:
                             update.field,
                             update.delta,
                         )
+                        provisional_output_emitted = True
+                    elif isinstance(update, StructuredStreamReset):
+                        if provisional_output_emitted:
+                            observer.generation_reset(
+                                node_name=node_name,
+                                generation=update.generation,
+                                reason_code=update.reason_code,
+                            )
+                        provisional_output_emitted = False
                     else:
                         completed = update.generation
             except AgentServiceUnavailable as error:
@@ -761,10 +832,9 @@ class LiteLlmProxyClient:
             with httpx.Client(
                 timeout=self._timeout, transport=self._transport
             ) as client:
-                # allow_json_extraction=False 表示当前期待供应商按 strict JSON Schema 直接返回纯 JSON；
-                # 一旦 response_format 被网关拒绝，才允许从普通文本中截取 JSON 对象。
-                allow_json_extraction = False
-                # 第一请求要求供应商执行 strict JSON Schema；只有明确兼容性问题才允许第二请求，不对认证、限流等错误盲目重试。
+                # 关闭供应商 strict JSON Schema 时，允许从普通文本中提取完整 JSON；
+                # 最终业务对象仍必须通过本地 Pydantic 验收。
+                allow_json_extraction = not self._strict_json_schema_enabled
                 try:
                     provider_attempts_used += 1
                     payload = self._request_completion(
@@ -774,7 +844,7 @@ class LiteLlmProxyClient:
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         user_content_parts=user_content_parts,
-                        json_mode=True,
+                        json_mode=self._strict_json_schema_enabled,
                         governed_request=governed_request,
                     )
                 except httpx.HTTPStatusError as exception:
@@ -913,6 +983,7 @@ class LiteLlmProxyClient:
         observer = current_stream_observer()
         if observer is not None and _public_output_policy_enabled(observer, node_name):
             completed: StructuredGeneration | None = None
+            provisional_output_emitted = False
             try:
                 async for update in self.agenerate_stream(
                     node_name=node_name,
@@ -926,6 +997,15 @@ class LiteLlmProxyClient:
                     observer.raise_if_cancelled()
                     if isinstance(update, StructuredStreamDelta):
                         observer.visible_delta(node_name, update.field, update.delta)
+                        provisional_output_emitted = True
+                    elif isinstance(update, StructuredStreamReset):
+                        if provisional_output_emitted:
+                            observer.generation_reset(
+                                node_name=node_name,
+                                generation=update.generation,
+                                reason_code=update.reason_code,
+                            )
+                        provisional_output_emitted = False
                     else:
                         completed = update.generation
             except AgentServiceUnavailable as error:
@@ -939,7 +1019,7 @@ class LiteLlmProxyClient:
         repairs_used = 0
         try:
             async with self._lease_async_client() as client:
-                allow_json_extraction = False
+                allow_json_extraction = not self._strict_json_schema_enabled
                 try:
                     provider_attempts_used += 1
                     payload = await self._arequest_completion(
@@ -949,7 +1029,7 @@ class LiteLlmProxyClient:
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         user_content_parts=user_content_parts,
-                        json_mode=True,
+                        json_mode=self._strict_json_schema_enabled,
                         governed_request=governed_request,
                     )
                 except httpx.HTTPStatusError as exception:
@@ -1066,7 +1146,66 @@ class LiteLlmProxyClient:
         user_content_parts: list[dict[str, Any]] | None = None,
         governed_request: GovernedProviderRequest | None = None,
     ) -> AsyncIterator[StructuredStreamUpdate]:
-        """Perform one native async provider stream and parse one final JSON document."""
+        """Regenerate once, with the exact same request, only after final Schema failure."""
+
+        generation_limit = _structured_stream_generation_limit(
+            governed_request,
+            visible_fields,
+        )
+        started = time.perf_counter()
+        cumulative_usage = {"input": 0, "output": 0, "total": 0}
+        for generation_number in range(1, generation_limit + 1):
+            try:
+                async for update in self._agenerate_stream_once(
+                    node_name=node_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    output_type=output_type,
+                    visible_fields=visible_fields,
+                    user_content_parts=user_content_parts,
+                    governed_request=governed_request,
+                ):
+                    if isinstance(update, StructuredStreamCompleted):
+                        _accumulate_stream_usage(
+                            cumulative_usage,
+                            update.generation.token_usage,
+                        )
+                        yield StructuredStreamCompleted(
+                            kind="completed",
+                            generation=StructuredGeneration(
+                                value=update.generation.value,
+                                model=update.generation.model,
+                                latency_ms=int((time.perf_counter() - started) * 1_000),
+                                token_usage=dict(cumulative_usage),
+                                provider_attempts_used=generation_number,
+                                repairs_used=0,
+                            ),
+                        )
+                    else:
+                        yield update
+                return
+            except _StructuredStreamFinalValidationFailure as failure:
+                _accumulate_stream_usage(cumulative_usage, failure.token_usage)
+                if generation_number >= generation_limit:
+                    raise failure.error from failure.error.__cause__
+                yield StructuredStreamReset(
+                    kind="generation_reset",
+                    generation=generation_number + 1,
+                )
+        raise AssertionError("bounded async structured regeneration loop did not terminate")
+
+    async def _agenerate_stream_once(
+        self,
+        *,
+        node_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        output_type: type[T],
+        visible_fields: tuple[VisibleFieldSpec, ...] = (),
+        user_content_parts: list[dict[str, Any]] | None = None,
+        governed_request: GovernedProviderRequest | None = None,
+    ) -> AsyncIterator[StructuredStreamDelta | StructuredStreamCompleted]:
+        """Perform exactly one native async provider stream."""
 
         stream_observer = current_stream_observer()
         state = _AsyncStructuredStreamState(
@@ -1086,7 +1225,7 @@ class LiteLlmProxyClient:
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     user_content_parts=user_content_parts,
-                    json_mode=True,
+                    json_mode=self._strict_json_schema_enabled,
                     governed_request=governed_request,
                 )
                 request_body["stream"] = True
@@ -1129,11 +1268,33 @@ class LiteLlmProxyClient:
                             raise AgentServiceUnavailable(
                                 "LiteLLM proxy returned an invalid stream event"
                             ) from exception
-                        for update in state.accept(payload):
+                        # Projection rescans the accumulated structured document and
+                        # final fields can be large.  Keeping that CPU work on the
+                        # event-loop thread can starve the independent Graph lease
+                        # heartbeat while a provider has already buffered many SSE
+                        # events.  Process each event sequentially in the default
+                        # executor: ordering and backpressure stay unchanged, while
+                        # lease/readiness tasks retain a scheduling opportunity.
+                        projected_updates = await asyncio.to_thread(state.accept, payload)
+                        for update in projected_updates:
                             yield update
         except httpx.HTTPError as exception:
             raise AgentServiceUnavailable("LLM streaming request failed") from exception
-        yield state.completed()
+        try:
+            # Pydantic validation is authoritative but may traverse the complete
+            # response.  It follows the same isolation rule as incremental
+            # projection so terminal validation cannot consume a lease horizon.
+            yield await asyncio.to_thread(state.completed)
+        except AgentOutputSchemaError as error:
+            raise _StructuredStreamFinalValidationFailure(
+                error=error,
+                model=state.model,
+                latency_ms=int(state.elapsed_seconds() * 1_000),
+                token_usage=_validated_usage_mapping(
+                    state.usage,
+                    required=state.require_usage,
+                ),
+            ) from error
 
     # 所属模块：LLM 网关 > LiteLLM 适配器 > 单请求 SSE 结构化流。
     # 具体功能：`generate_stream` 发起一次 provider strict JSON Schema 流请求，逐行限长解析 SSE，仅累计 delta.content；同时经 IncrementalVisibleJsonProjector 投影白名单字段，完整收齐后再用 output_type 校验并产出唯一 completed。
@@ -1150,6 +1311,65 @@ class LiteLlmProxyClient:
         user_content_parts: list[dict[str, Any]] | None = None,
         governed_request: GovernedProviderRequest | None = None,
     ) -> Iterator[StructuredStreamUpdate]:
+        """Regenerate once, with the exact same request, only after final Schema failure."""
+
+        generation_limit = _structured_stream_generation_limit(
+            governed_request,
+            visible_fields,
+        )
+        started = time.perf_counter()
+        cumulative_usage = {"input": 0, "output": 0, "total": 0}
+        for generation_number in range(1, generation_limit + 1):
+            try:
+                for update in self._generate_stream_once(
+                    node_name=node_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    output_type=output_type,
+                    visible_fields=visible_fields,
+                    user_content_parts=user_content_parts,
+                    governed_request=governed_request,
+                ):
+                    if isinstance(update, StructuredStreamCompleted):
+                        _accumulate_stream_usage(
+                            cumulative_usage,
+                            update.generation.token_usage,
+                        )
+                        yield StructuredStreamCompleted(
+                            kind="completed",
+                            generation=StructuredGeneration(
+                                value=update.generation.value,
+                                model=update.generation.model,
+                                latency_ms=int((time.perf_counter() - started) * 1_000),
+                                token_usage=dict(cumulative_usage),
+                                provider_attempts_used=generation_number,
+                                repairs_used=0,
+                            ),
+                        )
+                    else:
+                        yield update
+                return
+            except _StructuredStreamFinalValidationFailure as failure:
+                _accumulate_stream_usage(cumulative_usage, failure.token_usage)
+                if generation_number >= generation_limit:
+                    raise failure.error from failure.error.__cause__
+                yield StructuredStreamReset(
+                    kind="generation_reset",
+                    generation=generation_number + 1,
+                )
+        raise AssertionError("bounded structured regeneration loop did not terminate")
+
+    def _generate_stream_once(
+        self,
+        *,
+        node_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        output_type: type[T],
+        visible_fields: tuple[VisibleFieldSpec, ...] = (),
+        user_content_parts: list[dict[str, Any]] | None = None,
+        governed_request: GovernedProviderRequest | None = None,
+    ) -> Iterator[StructuredStreamDelta | StructuredStreamCompleted]:
         """Perform one real provider stream and validate its final JSON.
 
         This path intentionally has no response-format retry, schema retry, or
@@ -1184,7 +1404,7 @@ class LiteLlmProxyClient:
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     user_content_parts=user_content_parts,
-                    json_mode=True,
+                    json_mode=self._strict_json_schema_enabled,
                     governed_request=governed_request,
                 )
                 request_body["stream"] = True
@@ -1377,10 +1597,19 @@ class LiteLlmProxyClient:
                 len(content),
                 validation_details,
             )
-            raise AgentOutputSchemaError(
+            schema_error = AgentOutputSchemaError(
                 node_name,
                 f"{node_name} returned invalid streamed structured output",
-            ) from exception
+            )
+            raise _StructuredStreamFinalValidationFailure(
+                error=schema_error,
+                model=model,
+                latency_ms=int((time.perf_counter() - started) * 1_000),
+                token_usage=_validated_usage_mapping(
+                    usage,
+                    required=governed_request is not None,
+                ),
+            ) from schema_error
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         yield StructuredStreamCompleted(
@@ -1525,7 +1754,7 @@ class LiteLlmProxyClient:
             await recorder.arecord_provider_call(intent)
 
     # 所属模块：LLM 网关 > LiteLLM 适配器 > OpenAI 兼容请求体构造。
-    # 具体功能：`_completion_request_body` 固定 system/user 消息、temperature=0、节点输出预算并关闭 Thinking；有图片时先二次校验，json_mode 时把 output_type 的 Pydantic JSON Schema 作为 strict provider response_format。
+    # 具体功能：`_completion_request_body` 固定 system/user 消息、temperature=0 并关闭 Thinking；有图片时先二次校验，json_mode 时把 output_type 的 Pydantic JSON Schema 作为 strict provider response_format，普通兼容模式才携带节点输出预算。
     # 上下游：上游是非流式与流式请求路径；下游是 LiteLLM `/chat/completions` HTTP JSON body。
     # 系统意义：所有业务节点统一关闭隐藏推理；外部调用者不能通过 case_data 覆盖模型、温度、预算或 response_format。
     def _completion_request_body(
@@ -1579,9 +1808,9 @@ class LiteLlmProxyClient:
                 {"role": "user", "content": user_content},
             ],
             "temperature": temperature,
-            "max_tokens": max_output_tokens,
-            # 当前正式调用统一关闭 Qwen 隐藏推理；不再传 thinking_budget，避免网关或供应商误判为仍需推理。
-            "enable_thinking": False,
+            # Thinking 只能由服务端受信配置决定，案件输入不得覆盖。
+            # 不传 thinking_budget，由供应商在当前输出上限内管理推理预算。
+            "enable_thinking": self._enable_thinking,
         }
         if json_mode:
             # 普通 json_object 只保证语法是 JSON；供应商侧 strict Schema 可提前限制枚举、额外字段和标量类型，
@@ -1594,6 +1823,10 @@ class LiteLlmProxyClient:
                     "schema": output_type.model_json_schema(),
                 },
             }
+        else:
+            # 百炼严格结构化输出要求不设置 max_tokens，避免完整 JSON 在闭合前被截断；
+            # 只有供应商拒绝 response_format 后的普通文本兼容调用保留受控输出预算。
+            request_body["max_tokens"] = max_output_tokens
         return request_body
 
     def _effective_model(

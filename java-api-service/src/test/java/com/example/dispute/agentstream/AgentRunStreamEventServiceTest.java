@@ -17,6 +17,7 @@ import static org.mockito.ArgumentMatchers.any;
 
 import com.example.dispute.agentstream.application.AgentRunStreamEventService;
 import com.example.dispute.agentstream.application.AgentRunEventView;
+import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventEntity;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventRepository;
 import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeup;
@@ -37,6 +38,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunStreamProjection;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures;
 import java.time.Instant;
@@ -913,6 +915,81 @@ class AgentRunStreamEventServiceTest {
                 .hasMessageContaining("cannot read");
     }
 
+    @Test
+    void caseParticipantProjectionKeepsSystemAuthorityButReturnsRoleLocalEvents()
+            throws Exception {
+        AgentRunEntity run = systemV3Run(AgentRunStreamProjection.CASE_PARTICIPANTS);
+        String attemptId = "ATTEMPT_CASE_PARTICIPANT_STREAM";
+        AgentRunAttemptEntity attempt = v2Attempt(1, attemptId);
+        AuthenticatedActor user = new AuthenticatedActor("user-persistence", ActorRole.USER);
+        when(runRepository.findById(run.getId())).thenReturn(Optional.of(run));
+        when(accessSessionResolver.resolve(run.getCaseId(), user))
+                .thenReturn(sessionForCase(
+                        run.getCaseId(),
+                        user.actorId(),
+                        ActorRole.USER,
+                        PermissionLevel.PARTY_USER));
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attemptId),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v2Event(
+                                run.getId(),
+                                attemptId,
+                                0,
+                                StreamEventType.ATTEMPT_STARTED,
+                                Audience.SYSTEM,
+                                emptyV2Payload()),
+                        v2Event(
+                                run.getId(),
+                                attemptId,
+                                1,
+                                StreamEventType.VISIBLE_DELTA,
+                                Audience.SYSTEM,
+                                new AgentStreamEvent.Payload(
+                                        "hearing_judge_v1",
+                                        "room_utterance",
+                                        "公开裁决增量",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        null))));
+
+        List<AgentRunEventView> replay = service.replay(run.getId(), "-1", user);
+
+        assertThat(replay).extracting(AgentRunEventView::audience)
+                .containsOnly("USER");
+        assertThat(replay.get(1).delta()).isEqualTo("公开裁决增量");
+        assertThat(run.getStreamAudienceJson()).isEqualTo("[\"SYSTEM\"]");
+        assertThat(run.getStreamProjection())
+                .isEqualTo(AgentRunStreamProjection.CASE_PARTICIPANTS);
+    }
+
+    @Test
+    void boundSystemRunRemainsInvisibleToCaseParticipant() {
+        AgentRunEntity run = systemV3Run(AgentRunStreamProjection.BOUND_AUDIENCE);
+        AuthenticatedActor user = new AuthenticatedActor("user-persistence", ActorRole.USER);
+        when(runRepository.findById(run.getId())).thenReturn(Optional.of(run));
+        when(accessSessionResolver.resolve(run.getCaseId(), user))
+                .thenReturn(sessionForCase(
+                        run.getCaseId(),
+                        user.actorId(),
+                        ActorRole.USER,
+                        PermissionLevel.PARTY_USER));
+
+        assertThatThrownBy(() -> service.replay(run.getId(), "-1", user))
+                .isInstanceOf(ForbiddenException.class)
+                .hasMessageContaining("cannot read");
+        verifyNoInteractions(attemptRepository);
+    }
+
     // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunStreamEventServiceTest.administratorCanReadAnActorScopedRun()」。
     // 具体功能：「AgentRunStreamEventServiceTest.administratorCanReadAnActorScopedRun()」：复现“核对完整业务行为（场景方法「administratorCanReadAnActorScopedRun」）”场景：驱动 「eventRepository.findAllByAgentRunIdAndSequenceNoGreaterThanOrderBySequenceNoAsc」、「service.replay」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「admin-local」、「USER」、「user-local」。
     // 上游调用：「AgentRunStreamEventServiceTest.administratorCanReadAnActorScopedRun()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
@@ -1272,6 +1349,32 @@ class AgentRunStreamEventServiceTest {
         AgentRunEntity run =
                 AgentRunEntity.logicalV3(AgentRunPersistenceFixtures.logicalRunV3());
         run.bindV3Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
+        return run;
+    }
+
+    private AgentRunEntity systemV3Run(AgentRunStreamProjection projection) {
+        CreateLogicalRun source = AgentRunPersistenceFixtures.logicalRunV3();
+        AgentRunEntity run = AgentRunEntity.logicalV3(new CreateLogicalRun(
+                source.agentRunId(),
+                source.tenantSurrogate(),
+                source.caseId(),
+                source.roomId(),
+                "HEARING_JUDGE_V1",
+                source.logicalIdempotencyKey(),
+                source.protocol(),
+                source.executorKind(),
+                source.roomEpochId(),
+                source.roomType(),
+                source.roomEpoch(),
+                source.processRevision(),
+                source.fencingToken(),
+                source.requestHash(),
+                source.logicalInputHash(),
+                source.attemptLimit(),
+                source.deadlineAt(),
+                source.createdAt(),
+                projection));
+        run.bindV3Audience("SYSTEM", "[\"SYSTEM\"]", "[\"hearing-control\"]");
         return run;
     }
 

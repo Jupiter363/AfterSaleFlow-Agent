@@ -71,10 +71,10 @@ class GraphTransportConfigurationTest {
     void httpsReadinessFailurePreventsTransportBundlePublication() {
         URI baseUri = URI.create("https://graph.example.test:8443/graph-base/");
         Duration connectTimeout = Duration.ofSeconds(2);
-        Duration readinessTimeout = Duration.ofSeconds(5);
+        Duration readinessTimeout = Duration.ofSeconds(15);
         GraphReadinessCoordinator.Settings readinessSettings =
                 new GraphReadinessCoordinator.Settings(
-                        Duration.ofSeconds(15), readinessTimeout, "SHADOW");
+                        Duration.ofSeconds(20), readinessTimeout, "SHADOW");
         GraphTransportBundle bundle = mock(GraphTransportBundle.class);
         doThrow(new IllegalStateException("Graph readiness handshake failed"))
                 .when(bundle)
@@ -122,7 +122,7 @@ class GraphTransportConfigurationTest {
         Duration connectTimeout = Duration.ofSeconds(2);
         GraphReadinessCoordinator.Settings readinessSettings =
                 new GraphReadinessCoordinator.Settings(
-                        Duration.ofSeconds(15), Duration.ofSeconds(5), "SHADOW");
+                        Duration.ofSeconds(20), Duration.ofSeconds(15), "SHADOW");
         GraphTransportBundle bundle = mock(GraphTransportBundle.class);
 
         try (MockedStatic<TrustedGraphTransportFactory> factory =
@@ -146,7 +146,7 @@ class GraphTransportConfigurationTest {
                             "app.agent-run-v2.graph-client.tls.connect-timeout=PT2S")
                     .run(context -> assertThat(context).hasNotFailed());
 
-            verify(bundle).verifyReadiness(Duration.ofSeconds(5), "SHADOW");
+            verify(bundle).verifyReadiness(Duration.ofSeconds(15), "SHADOW");
             verify(bundle, never()).bindWorkerPolling(any(), any());
         }
     }
@@ -203,10 +203,10 @@ class GraphTransportConfigurationTest {
                         .freshness())
                 .isEqualTo(Duration.ofMillis(5100));
         assertThat(new GraphContinuousReadinessProperties(
-                        Duration.ofSeconds(25), Duration.ofSeconds(5))
+                        Duration.ofSeconds(25), Duration.ofSeconds(15))
                         .settings("TARGET_E2E_CANDIDATE")
                         .freshness())
-                .isEqualTo(Duration.ofSeconds(30));
+                .isEqualTo(Duration.ofSeconds(40));
         assertThatThrownBy(() -> new GraphContinuousReadinessProperties(
                         Duration.ofSeconds(5).minusNanos(1), Duration.ofSeconds(1)))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -223,7 +223,7 @@ class GraphTransportConfigurationTest {
                         Duration.ofSeconds(5), Duration.ofSeconds(5)))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new GraphContinuousReadinessProperties(
-                        Duration.ofSeconds(6), Duration.ofSeconds(5).plusNanos(1)))
+                        Duration.ofSeconds(25), Duration.ofSeconds(15).plusNanos(1)))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 

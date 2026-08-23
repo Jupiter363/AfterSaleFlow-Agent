@@ -114,6 +114,40 @@ class TargetEvidenceTerminalActivitiesTest {
   }
 
   @Test
+  void targetEvidenceTerminalPersistsTheFullHearingRouteWithTheHearingTransition()
+      throws Exception {
+    Connection connection = mock(Connection.class);
+    PreparedStatement statement = mock(PreparedStatement.class);
+    when(connection.prepareStatement(anyString())).thenReturn(statement);
+    var transition =
+        JdbcTargetEvidenceTerminalActivities.class.getDeclaredMethod(
+            "sealEvidenceAndOpenHearing",
+            Connection.class,
+            TargetEvidenceTerminalActivities.TerminalRequest.class,
+            String.class,
+            Instant.class);
+    transition.setAccessible(true);
+
+    transition.invoke(
+        subject(),
+        connection,
+        request(),
+        "ROOM_HEARING_E2E",
+        Instant.parse("2026-08-15T12:49:41.123456Z"));
+
+    ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+    verify(connection, times(6)).prepareStatement(sql.capture());
+    String caseTransition = sql.getAllValues().getLast().replaceAll("\\s+", " ").trim();
+    assertThat(caseTransition)
+        .contains(
+            "case_status = 'HEARING_OPEN'",
+            "current_room = 'HEARING'",
+            "hearing_route = 'FULL_HEARING'",
+            "hearing_route is null or hearing_route = 'FULL_HEARING'")
+        .doesNotContain("coalesce(hearing_route");
+  }
+
+  @Test
   void bothPartyCompletionsFinalizeAgainstPartialTimelineEventKeyIndexExactlyOnce()
       throws Exception {
     Connection connection = mock(Connection.class);
@@ -1280,6 +1314,11 @@ class TargetEvidenceTerminalActivitiesTest {
       EvidenceItemRepository evidenceRepository = mock(EvidenceItemRepository.class);
       EvidenceVerificationRepository verificationRepository =
           mock(EvidenceVerificationRepository.class);
+      com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository
+          intakeDossierRepository =
+              mock(
+                  com.example.dispute.room.infrastructure.persistence.repository
+                      .CaseIntakeDossierRepository.class);
 
       EvidenceItemEntity evidence =
           EvidenceItemEntity.uploaded(
@@ -1309,13 +1348,76 @@ class TargetEvidenceTerminalActivitiesTest {
           .thenReturn(java.util.List.of(evidence));
       when(verificationRepository
               .findTopByEvidenceIdOrderByVerificationVersionDesc(EVIDENCE_ID))
-          .thenReturn(java.util.Optional.empty());
+          .thenReturn(
+              java.util.Optional.of(
+                  com.example.dispute.evidence.infrastructure.persistence.entity
+                      .EvidenceVerificationEntity.create(
+                          "VERIFY_DOSSIER_VISIBILITY",
+                          CASE_ID,
+                          EVIDENCE_ID,
+                          1,
+                          com.example.dispute.evidence.domain.EvidenceVerificationStatus.PLAUSIBLE,
+                          "{}",
+                          """
+                          {
+                            "authenticity_score":0.90,
+                            "authenticity_score_explanation":"测试材料来源清晰。",
+                            "relevance_score":0.90,
+                            "relevance_score_explanation":"测试材料关联退款事实。",
+                            "completeness_score":0.90,
+                            "completeness_score_explanation":"测试材料字段完整。",
+                            "assessment_confidence":0.90,
+                            "assessment_confidence_explanation":"测试材料可读。",
+                            "risk_level":"LOW",
+                            "risk_explanation":"测试材料未见明显异常。",
+                            "source_basis":["测试退款记录"],
+                            "formation_time_assessment":"测试时间可读。",
+                            "findings":[{"finding_type":"PAYMENT_RECORD","description":"可见退款记录"}],
+                            "limitations":[],
+                            "unsupported_claims":[],
+                            "assessment_public_text":"测试材料已完成核验。",
+                            "reason_details":[],
+                            "fact_links":[]
+                          }
+                          """,
+                          "{}",
+                          false,
+                          Instant.parse("2026-08-16T00:01:30Z"),
+                          "evidence-clerk",
+                          "trace-dossier-visibility")));
+      when(intakeDossierRepository.findByCaseIdAndRoomType(
+              CASE_ID, com.example.dispute.room.domain.RoomType.INTAKE))
+          .thenReturn(
+              java.util.Optional.of(
+                  com.example.dispute.room.infrastructure.persistence.entity
+                      .CaseIntakeDossierEntity.create(
+                          "INTAKE_DOSSIER_VISIBILITY",
+                          CASE_ID,
+                          com.example.dispute.room.domain.RoomType.INTAKE,
+                          """
+                          {
+                            "case_fact_matrix":{
+                              "schema_version":"case_fact_matrix.v2",
+                              "case_id":"CASE_DOSSIER_VISIBILITY",
+                              "matrix_id":"CASE_FACT_MATRIX_VISIBILITY",
+                              "matrix_version":1,
+                              "content_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                              "fact_rows":[{"fact_id":"FACT_REFUND"}]
+                            }
+                          }
+                          """,
+                          90,
+                          true,
+                          "ACCEPTED",
+                          1,
+                          "dispute-intake-officer")));
       this.freezer =
           new EvidenceDossierFreezer(
               dossierRepository,
               dossierItemRepository,
               evidenceRepository,
               verificationRepository,
+              intakeDossierRepository,
               new ObjectMapper().findAndRegisterModules(),
               Clock.fixed(Instant.parse("2026-08-16T00:02:00Z"), ZoneOffset.UTC));
     }

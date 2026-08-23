@@ -72,15 +72,12 @@ class HearingTrialDossierServiceTest {
                         objectMapper,
                         Clock.fixed(NOW, ZoneOffset.UTC));
         when(caseRepository.findById(CASE_ID)).thenReturn(Optional.of(dispute));
-        when(dispute.getUserId()).thenReturn("user-1");
-        when(dispute.getMerchantId()).thenReturn("merchant-1");
         flow = flowAtDossierFreezing();
     }
 
     @Test
-    void freezesExactMatricesQuestionsAnswersRequestsAndBatchesOnce() throws Exception {
+    void freezesOnlyExactMatricesAndAdjudicationRulesOnce() throws Exception {
         Fixture fixture = fixture();
-        stubPersistedActions(fixture);
         when(flowRepository.findByCaseIdForUpdate(CASE_ID)).thenReturn(Optional.of(flow));
         when(dossierRepository.findByCaseId(CASE_ID)).thenReturn(Optional.empty());
         when(dossierRepository.save(any(HearingTrialDossierEntity.class)))
@@ -89,21 +86,20 @@ class HearingTrialDossierServiceTest {
         HearingTrialDossierEntity frozen = service.freeze(fixture.command());
 
         JsonNode payload = objectMapper.readTree(frozen.getPayloadJson());
-        assertThat(payload.path("schema_version").asText()).isEqualTo("trial_dossier.v1");
+        assertThat(payload.path("schema_version").asText()).isEqualTo("trial_dossier.v2");
         assertThat(payload.path("case_fact_matrix").path("matrix_status").asText())
                 .isEqualTo("WORKING");
         assertThat(payload.path("fact_evidence_matrix").path("matrix_status").asText())
                 .isEqualTo("FROZEN");
-        assertThat(payload.path("answer_bundles")).hasSize(2);
-        assertThat(payload.path("evidence_batches")).hasSize(2);
-        assertThat(payload.path("question_set_id").asText()).isEqualTo("QUESTION_SET_1");
-        assertThat(payload.path("question_set").path("case_matrix_version").asInt())
-                .isEqualTo(1);
         assertThat(payload.path("case_matrix_version").asInt()).isEqualTo(2);
-        assertThat(payload.path("policy_rules")).hasSize(1);
-        assertThat(payload.path("policy_rules").path(0).path("rule_code").asText())
+        assertThat(payload.path("adjudication_rules")).hasSize(1);
+        assertThat(payload.path("adjudication_rules").path(0).path("rule_code").asText())
                 .isEqualTo("DELIVERY_PROOF");
-        assertThat(payload.path("request_set_id").asText()).isEqualTo("REQUEST_SET_1");
+        assertThat(payload.has("question_set")).isFalse();
+        assertThat(payload.has("answer_bundles")).isFalse();
+        assertThat(payload.has("evidence_request_set")).isFalse();
+        assertThat(payload.has("evidence_batches")).isFalse();
+        assertThat(payload.has("policy_rules")).isFalse();
         assertThat(frozen.getContentHash()).matches("[0-9a-f]{64}");
         verify(dossierRepository).save(any(HearingTrialDossierEntity.class));
     }
@@ -141,7 +137,8 @@ class HearingTrialDossierServiceTest {
         HearingTrialDossierEntity frozen =
                 service.freeze(CASE_ID, intakeSynthesis, evidenceSynthesis, "system");
 
-        JsonNode policy = objectMapper.readTree(frozen.getPayloadJson()).path("policy_rules").path(0);
+        JsonNode policy =
+                objectMapper.readTree(frozen.getPayloadJson()).path("adjudication_rules").path(0);
         assertThat(policy.path("policy_id").asText()).isEqualTo("POLICY_DELIVERY_PROOF_V1");
         assertThat(policy.path("rule_code").asText()).isEqualTo("DELIVERY_PROOF");
         assertThat(policy.path("rule_version").asInt()).isEqualTo(1);
@@ -150,31 +147,40 @@ class HearingTrialDossierServiceTest {
     }
 
     @Test
-    void rejectsSubmittedAnswerBundleThatOmitsAnApplicableQuestion() {
+    void doesNotValidateOrEmbedIntermediateAnswers() throws Exception {
         Fixture fixture = fixture();
         ((ArrayNode) fixture.answerBundles().get(0).path("answers")).removeAll();
         when(flowRepository.findByCaseIdForUpdate(CASE_ID)).thenReturn(Optional.of(flow));
+        when(dossierRepository.findByCaseId(CASE_ID)).thenReturn(Optional.empty());
+        when(dossierRepository.save(any(HearingTrialDossierEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
 
-        assertThatThrownBy(() -> service.freeze(fixture.command()))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("applicable question");
+        HearingTrialDossierEntity frozen = service.freeze(fixture.command());
+
+        JsonNode payload = objectMapper.readTree(frozen.getPayloadJson());
+        assertThat(payload.has("answer_bundles")).isFalse();
     }
 
     @Test
-    void rejectsQuestionSetBoundToFinalMatrixInsteadOfItsParent() {
+    void retainsQuestionSetAsBackendLineageWithoutEmbeddingItsProtocol() throws Exception {
         Fixture fixture = fixture();
         fixture.questionSet().put("case_matrix_version", 2);
         fixture.questionSet()
                 .put("case_matrix_hash", fixture.caseMatrix().path("content_hash").asText());
         when(flowRepository.findByCaseIdForUpdate(CASE_ID)).thenReturn(Optional.of(flow));
+        when(dossierRepository.findByCaseId(CASE_ID)).thenReturn(Optional.empty());
+        when(dossierRepository.save(any(HearingTrialDossierEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
 
-        assertThatThrownBy(() -> service.freeze(fixture.command()))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("question set case_matrix_version binding mismatch");
+        HearingTrialDossierEntity frozen = service.freeze(fixture.command());
+
+        JsonNode payload = objectMapper.readTree(frozen.getPayloadJson());
+        assertThat(frozen.getQuestionSetId()).isEqualTo("QUESTION_SET_1");
+        assertThat(payload.has("question_set")).isFalse();
     }
 
     @Test
-    void freezesNewStatementAlongsideReadableLegacyAnswerBundle() throws Exception {
+    void excludesNaturalLanguageStatementsFromTheFrozenAdjudicationPayload() throws Exception {
         Fixture fixture = fixture();
         ObjectNode statement = objectMapper.createObjectNode();
         statement.put("schema_version", "hearing_party_statement.v1");
@@ -187,7 +193,6 @@ class HearingTrialDossierServiceTest {
         statement.putArray("source_message_ids").add("MESSAGE_USER_1");
         fixture.answerBundles().set(0, statement);
 
-        stubPersistedActions(fixture);
         when(flowRepository.findByCaseIdForUpdate(CASE_ID)).thenReturn(Optional.of(flow));
         when(dossierRepository.findByCaseId(CASE_ID)).thenReturn(Optional.empty());
         when(dossierRepository.save(any(HearingTrialDossierEntity.class)))
@@ -196,10 +201,8 @@ class HearingTrialDossierServiceTest {
         HearingTrialDossierEntity frozen = service.freeze(fixture.command());
 
         JsonNode payload = objectMapper.readTree(frozen.getPayloadJson());
-        assertThat(payload.path("answer_bundles").get(0).path("schema_version").asText())
-                .isEqualTo("hearing_party_statement.v1");
-        assertThat(payload.path("answer_bundles").get(1).path("schema_version").asText())
-                .isEqualTo("hearing_answer_bundle.v1");
+        assertThat(payload.has("answer_bundles")).isFalse();
+        assertThat(payload.toString()).doesNotContain("完整自然语言陈述", "statement_text");
     }
 
     private void stubPersistedActions(Fixture fixture) {
@@ -215,18 +218,6 @@ class HearingTrialDossierServiceTest {
                         "AGENT_RUN_Q",
                         NOW,
                         "intake-officer");
-        HearingFlowActionEntity userAnswer =
-                partyAction(
-                        "ANSWER_USER",
-                        HearingFlowActionType.ANSWER_BUNDLE,
-                        ActorRole.USER,
-                        fixture.answerBundles().get(0));
-        HearingFlowActionEntity merchantAnswer =
-                partyAction(
-                        "ANSWER_MERCHANT",
-                        HearingFlowActionType.ANSWER_BUNDLE,
-                        ActorRole.MERCHANT,
-                        fixture.answerBundles().get(1));
         HearingFlowActionEntity request =
                 HearingFlowActionEntity.agentOutput(
                         "REQUEST_SET_1",
@@ -239,37 +230,12 @@ class HearingTrialDossierServiceTest {
                         "AGENT_RUN_R",
                         NOW,
                         "evidence-clerk");
-        HearingFlowActionEntity userBatch =
-                partyAction(
-                        "BATCH_USER",
-                        HearingFlowActionType.EVIDENCE_BATCH,
-                        ActorRole.USER,
-                        fixture.evidenceBatches().get(0));
-        HearingFlowActionEntity merchantBatch =
-                partyAction(
-                        "BATCH_MERCHANT",
-                        HearingFlowActionType.EVIDENCE_BATCH,
-                        ActorRole.MERCHANT,
-                        fixture.evidenceBatches().get(1));
-
         when(actionRepository.findByFlowInstanceIdAndActionType(
                         FLOW_ID, HearingFlowActionType.QUESTION_SET))
                 .thenReturn(Optional.of(question));
         when(actionRepository.findByFlowInstanceIdAndActionType(
                         FLOW_ID, HearingFlowActionType.EVIDENCE_REQUEST_SET))
                 .thenReturn(Optional.of(request));
-        when(actionRepository.findByFlowInstanceIdAndActionTypeAndParticipantId(
-                        FLOW_ID, HearingFlowActionType.ANSWER_BUNDLE, "user-1"))
-                .thenReturn(Optional.of(userAnswer));
-        when(actionRepository.findByFlowInstanceIdAndActionTypeAndParticipantId(
-                        FLOW_ID, HearingFlowActionType.ANSWER_BUNDLE, "merchant-1"))
-                .thenReturn(Optional.of(merchantAnswer));
-        when(actionRepository.findByFlowInstanceIdAndActionTypeAndParticipantId(
-                        FLOW_ID, HearingFlowActionType.EVIDENCE_BATCH, "user-1"))
-                .thenReturn(Optional.of(userBatch));
-        when(actionRepository.findByFlowInstanceIdAndActionTypeAndParticipantId(
-                        FLOW_ID, HearingFlowActionType.EVIDENCE_BATCH, "merchant-1"))
-                .thenReturn(Optional.of(merchantBatch));
     }
 
     private HearingFlowActionEntity partyAction(
@@ -305,7 +271,7 @@ class HearingTrialDossierServiceTest {
         putEmbeddedHash(caseMatrix);
 
         ObjectNode evidenceMatrix = objectMapper.createObjectNode();
-        evidenceMatrix.put("schema_version", "fact_evidence_matrix.v2");
+        evidenceMatrix.put("schema_version", "fact_evidence_matrix.v3");
         evidenceMatrix.put("case_id", CASE_ID);
         evidenceMatrix.put("matrix_id", "EVIDENCE_MATRIX_1");
         evidenceMatrix.put("matrix_version", 3);

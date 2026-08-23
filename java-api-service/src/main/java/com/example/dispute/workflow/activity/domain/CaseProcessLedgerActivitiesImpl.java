@@ -368,7 +368,7 @@ public class CaseProcessLedgerActivitiesImpl
         }
 
         CaseRoomEpochEntity epoch = activeRoutingEpoch(request);
-        OffsetDateTime routedAt = routingTime(request);
+        OffsetDateTime routedAt = routingTime(request, command);
         if (!command.getDeadlineAt().isAfter(routedAt)) {
             command.markExpired("COMMAND_DEADLINE_EXPIRED", routedAt);
             return routingResult(EXPIRED);
@@ -400,7 +400,7 @@ public class CaseProcessLedgerActivitiesImpl
             return routingResult(ORCHESTRATION_ACCEPTED);
         }
         requireActiveEpoch(epoch);
-        OffsetDateTime routedAt = routingTime(request);
+        OffsetDateTime routedAt = routingTime(request, command);
         if (epoch.getWriterMode() == WriterMode.SHADOW) {
             command.markShadowCompleted(routedAt);
             return routingResult(SHADOW_COMPLETED);
@@ -453,14 +453,15 @@ public class CaseProcessLedgerActivitiesImpl
                         request.caseWorkflowId(),
                         request.caseWorkflowRunId(),
                         request.caseWorkflowBuildId());
-        requireTargetEvidenceSourceCoordinates(
+        long projectionLastCaseEventSequence = requireTargetEvidenceObservedSourceCoordinates(
                 epoch,
                 projection,
                 request.command(),
                 request.expectedRoomRevision(),
                 request.expectedLastCaseEventSequence());
         TargetRoomAgentRunTerminalNoCommit authority =
-                resolveTargetEvidenceTerminalAuthority(request, material);
+                resolveTargetEvidenceTerminalAuthority(
+                        request, material, projectionLastCaseEventSequence);
         requireTargetEvidenceTerminalRun(authority, material);
         return new ResolveTargetEvidenceTerminalNoCommitResult(
                 "resolve-target-evidence-terminal-no-commit-result.v1",
@@ -601,7 +602,7 @@ public class CaseProcessLedgerActivitiesImpl
         long expectedLastEventSequence =
                 Math.decrementExact(recovery.expectedNextCaseEventSequence());
         if (expired) {
-            requireTargetEvidenceSourceCoordinates(
+            requireTargetEvidenceObservedSourceCoordinates(
                     epoch,
                     projection,
                     source,
@@ -627,7 +628,8 @@ public class CaseProcessLedgerActivitiesImpl
                         recovery.firstExecutionRunId(),
                         request.caseWorkflowBuildId());
         TargetRoomAgentRunTerminalNoCommit authority =
-                resolveTargetEvidenceTerminalAuthority(resolve, material);
+                resolveTargetEvidenceTerminalAuthority(
+                        resolve, material, projection.getLastCaseEventSequence());
         requireExpiredTargetEvidenceTerminalChronology(command, recovery, authority);
         ReceiptIdentity receipt =
                 new ReceiptIdentity(authority.receiptUri(), authority.receiptSha256());
@@ -1167,6 +1169,34 @@ public class CaseProcessLedgerActivitiesImpl
         }
     }
 
+    /**
+     * The Room workflow can already have consumed append-only submission/message events that do
+     * not advance the formal process projection. Treat that workflow cursor as an observed upper
+     * bound and bind the terminal receipt to the locked projection cursor instead of requiring the
+     * two independent cursors to be equal.
+     */
+    static long requireTargetEvidenceObservedSourceCoordinates(
+            CaseRoomEpochEntity epoch,
+            CaseProcessProjectionEntity projection,
+            CaseCommandRef command,
+            long expectedRoomRevision,
+            long observedLastCaseEventSequence) {
+        long projectionLastCaseEventSequence =
+                projection == null ? Long.MAX_VALUE : projection.getLastCaseEventSequence();
+        if (!RoomEpochReadiness.isTemporalReady(epoch, projection)
+                || epoch.getProcessRevision() != command.expectedProcessRevision()
+                || epoch.getRoomRevision() != expectedRoomRevision
+                || projection.getProcessRevision() != command.expectedProcessRevision()
+                || projection.getLastCommandSequence()
+                        != Math.decrementExact(command.caseCommandSequence())
+                || projectionLastCaseEventSequence > observedLastCaseEventSequence) {
+            throw permanentFailure(
+                    "TARGET_EVIDENCE_TERMINAL_NO_COMMIT_SOURCE_STALE",
+                    "target Evidence terminal source coordinates are stale");
+        }
+        return projectionLastCaseEventSequence;
+    }
+
     private static void requireTargetEvidenceConvergedCoordinates(
             CaseRoomEpochEntity epoch,
             CaseProcessProjectionEntity projection,
@@ -1187,7 +1217,8 @@ public class CaseProcessLedgerActivitiesImpl
 
     private TargetRoomAgentRunTerminalNoCommit resolveTargetEvidenceTerminalAuthority(
             ResolveTargetEvidenceTerminalNoCommit request,
-            TargetEvidenceCommandMaterialStore.MaterialSnapshot material) {
+            TargetEvidenceCommandMaterialStore.MaterialSnapshot material,
+            long expectedProjectionLastCaseEventSequence) {
         EvidenceTerminalLedger terminal =
                 targetEvidenceTerminalLedger(request.rootRequest().logicalRunId());
         ExecuteAgentRunResult result = terminal.result();
@@ -1226,7 +1257,7 @@ public class CaseProcessLedgerActivitiesImpl
                             request.command(),
                             request.roomFencingToken(),
                             request.expectedRoomRevision(),
-                            request.expectedLastCaseEventSequence(),
+                            expectedProjectionLastCaseEventSequence,
                             request.roomWorkflowId(),
                             request.roomWorkflowRunId(),
                             request.roomWorkflowBuildId(),
@@ -2336,8 +2367,13 @@ public class CaseProcessLedgerActivitiesImpl
         };
     }
 
-    private static OffsetDateTime routingTime(RecordCaseCommandRouted request) {
-        return OffsetDateTime.ofInstant(request.routedAt(), ZoneOffset.UTC);
+    private static OffsetDateTime routingTime(
+            RecordCaseCommandRouted request, CaseCommandEntity command) {
+        OffsetDateTime workflowRoutedAt =
+                OffsetDateTime.ofInstant(request.routedAt(), ZoneOffset.UTC);
+        return workflowRoutedAt.isBefore(command.getAcceptedAt())
+                ? command.getAcceptedAt()
+                : workflowRoutedAt;
     }
 
     private CaseCommandEntity lockedCommand(String tenantSurrogate, String commandId) {

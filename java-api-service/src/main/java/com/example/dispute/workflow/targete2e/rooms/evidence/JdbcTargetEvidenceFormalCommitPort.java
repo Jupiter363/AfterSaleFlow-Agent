@@ -78,13 +78,13 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       }
       require("ORCHESTRATION_ACCEPTED".equals(command.status()),
           "case command is not ready for Evidence formalization");
-      requireInitialCoordinates(request, epoch, projection);
+      requireInitialCoordinates(request, command, epoch, projection);
 
       persistOrVerifyFrameAuthority(transaction, request, true);
       persistOrVerifyTurnProjection(transaction, request, formalMessage, true);
 
       advanceEpoch(transaction, epoch.id(), request);
-      advanceProjection(transaction, graph.caseId(), request);
+      advanceProjection(transaction, graph.caseId(), request, command);
       applyCommand(transaction, command, request, graph, resultUri, formalCommitHash);
       return new CommitResult(formalObjectId, formalCommitHash);
     } catch (SQLException failure) {
@@ -337,7 +337,7 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       throws SQLException {
     try (PreparedStatement statement = transaction.prepareStatement("""
         select tenant_surrogate, macro_phase, current_room, room_phase, writer_mode,
-               process_revision, room_epoch, fencing_token
+               process_revision, room_epoch, fencing_token, last_command_sequence
           from case_process_projection
          where case_id = ?
          for update
@@ -354,7 +354,8 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
                 row.getString(5),
                 row.getLong(6),
                 row.getLong(7),
-                row.getLong(8));
+                row.getLong(8),
+                row.getLong(9));
         require(!row.next(), "target Evidence process projection is ambiguous");
         return value;
       }
@@ -375,7 +376,10 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
   }
 
   private static void requireInitialCoordinates(
-      TargetEvidenceFinalizationRequest request, Epoch epoch, Projection projection) {
+      TargetEvidenceFinalizationRequest request,
+      Command command,
+      Epoch epoch,
+      Projection projection) {
     require(
         epoch.processRevision() == request.expectedProcessRevision()
             && epoch.roomRevision() == request.expectedRoomRevision(),
@@ -383,6 +387,9 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
     require(
         projection.processRevision() == request.expectedProcessRevision(),
         "Evidence projection revision drifted before formalization");
+    require(
+        projection.lastCommandSequence() == Math.decrementExact(command.sequence()),
+        "Evidence projection command cursor drifted before formalization");
   }
 
   private static void requireReplayState(
@@ -402,6 +409,9 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
     require(
         projection.processRevision() == Math.incrementExact(request.expectedProcessRevision()),
         "Evidence replay projection revision drifted");
+    require(
+        projection.lastCommandSequence() == command.sequence(),
+        "Evidence replay projection command cursor drifted");
   }
 
   private static String lockEvidenceRoom(
@@ -544,18 +554,25 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
   }
 
   private static void advanceProjection(
-      Connection transaction, String caseId, TargetEvidenceFinalizationRequest request)
+      Connection transaction,
+      String caseId,
+      TargetEvidenceFinalizationRequest request,
+      Command command)
       throws SQLException {
     try (PreparedStatement statement = transaction.prepareStatement("""
         update case_process_projection
-           set process_revision = ?, updated_at = now(), version = version + 1
+           set process_revision = ?, last_command_sequence = ?,
+               updated_at = now(), version = version + 1
          where case_id = ? and current_room = 'EVIDENCE' and room_phase = 'OPEN'
            and writer_mode = 'TEMPORAL' and process_revision = ? and fencing_token = ?
+           and last_command_sequence = ?
         """)) {
       statement.setLong(1, Math.incrementExact(request.expectedProcessRevision()));
-      statement.setString(2, caseId);
-      statement.setLong(3, request.expectedProcessRevision());
-      statement.setLong(4, request.roomFencingToken());
+      statement.setLong(2, command.sequence());
+      statement.setString(3, caseId);
+      statement.setLong(4, request.expectedProcessRevision());
+      statement.setLong(5, request.roomFencingToken());
+      statement.setLong(6, Math.decrementExact(command.sequence()));
       require(statement.executeUpdate() == 1, "target Evidence projection revision CAS failed");
     }
   }
@@ -723,8 +740,9 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
         objectMapper.valueToTree(result.evidenceAssessments()));
     String requests = ContractJson.canonicalString(
         objectMapper.valueToTree(result.evidenceRequests()));
-    String reviews = ContractJson.canonicalString(
-        objectMapper.valueToTree(result.humanReviewTasks()));
+    // The v3 protocol has no model-authored review task.  The retained column is
+    // written as an empty transport projection until the schema migration drops it.
+    String reviews = ContractJson.canonicalString(objectMapper.createArrayNode());
     String readiness = ContractJson.canonicalString(result.roomReadiness());
     if (allowInsert) {
       try (PreparedStatement statement = transaction.prepareStatement("""
@@ -808,15 +826,22 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       }
       String slot = observation.path("observation_slot").asText("");
       String evidenceId = evidenceByObservation.get(slot);
-      require(evidenceId != null && !evidenceId.isBlank(),
-          "bound Evidence observation has no assessment attachment");
+      if (slot.isBlank() || evidenceId == null || evidenceId.isBlank()) {
+        // A model may omit an optional binding.  Persist the public frame but
+        // do not synthesize an unauthorised formal fact edge from missing data.
+        continue;
+      }
       String sourceUnitId = observation.path("source_unit_id").asText("");
       for (var binding : observation.path("fact_bindings")) {
+        String factId = binding.path("fact_id").asText("");
+        if (sourceUnitId.isBlank() || factId.isBlank()) {
+          continue;
+        }
         edges.add(new FactEdge(
             evidenceId,
             sourceUnitId,
             slot,
-            binding.path("fact_id").asText(""),
+            factId,
             binding.path("relation").asText(""),
             binding.path("reason").asText("")));
       }
@@ -1014,7 +1039,8 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       String writerMode,
       long processRevision,
       long roomEpoch,
-      long fencingToken) {}
+      long fencingToken,
+      long lastCommandSequence) {}
 
   private record Existing(
       String id,

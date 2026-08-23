@@ -12,6 +12,7 @@ from app.graph_runtime.errors import (
 )
 from app.graph_runtime.lease import (
     LEASE_DURATION,
+    LEASE_DURATION_SECONDS,
     LEASE_RENEWAL_INTERVAL,
     LeaseAcquisitionKind,
     PostgresLeaseRepository,
@@ -40,7 +41,7 @@ def _row(
         "command_id": command_id,
         "owner_id": owner_id,
         "fencing_token": fencing_token,
-        "lease_expires_at": expires_at or NOW + timedelta(seconds=30),
+        "lease_expires_at": expires_at or NOW + LEASE_DURATION,
         "acquired_at": NOW,
         "renewed_at": NOW,
         "released_at": NOW if released else None,
@@ -94,7 +95,7 @@ async def test_first_lease_uses_database_clock_and_token_one() -> None:
     assert acquisition.lease.lease_expires_at - acquisition.lease.renewed_at == LEASE_DURATION
     assert acquisition.lease.renewal_due_at == NOW + LEASE_RENEWAL_INTERVAL
     assert "clock_timestamp()" in connection.calls[0][0]
-    assert "interval '30 seconds'" in connection.calls[0][0]
+    assert f"interval '{LEASE_DURATION_SECONDS} seconds'" in connection.calls[0][0]
 
 
 @pytest.mark.asyncio

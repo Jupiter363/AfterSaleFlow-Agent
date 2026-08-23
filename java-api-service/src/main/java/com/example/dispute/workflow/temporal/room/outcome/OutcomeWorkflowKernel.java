@@ -101,7 +101,7 @@ final class OutcomeWorkflowKernel {
     Start {
       requireComponent(workflowId, "workflowId");
       requireComponent(caseId, "caseId");
-      requirePositive(outcomeEpoch, "outcomeEpoch");
+      requireNonNegative(outcomeEpoch, "outcomeEpoch");
       requirePositive(fence, "fence");
       requireNonNegative(initialRevision, "initialRevision");
       Objects.requireNonNull(openedAt, "openedAt must not be null");
@@ -146,7 +146,7 @@ final class OutcomeWorkflowKernel {
     Authority {
       requireComponent(workflowId, "workflowId");
       requireComponent(caseId, "caseId");
-      requirePositive(outcomeEpoch, "outcomeEpoch");
+      requireNonNegative(outcomeEpoch, "outcomeEpoch");
       requirePositive(fence, "fence");
     }
 

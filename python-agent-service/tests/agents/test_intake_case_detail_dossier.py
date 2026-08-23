@@ -1006,7 +1006,7 @@ def test_direct_respondent_conditional_alternative_requires_disjoint_remedy_scop
         ),
     ],
 )
-def test_direct_respondent_adversarial_unresolved_signal_fails_closed(
+def test_direct_respondent_adversarial_text_does_not_override_typed_claim_or_prior(
     text: str,
 ) -> None:
     case_id = "CASE_direct_attitude_unresolved"
@@ -1058,16 +1058,15 @@ def test_direct_respondent_adversarial_unresolved_signal_fails_closed(
     )
     detail = {"respondent_attitude": dict(prior_attitude)}
 
-    with pytest.raises(
-        AgentOutputSchemaError,
-        match="respondent attitude signal unresolved",
-    ):
-        _enforce_respondent_attitude_source(
-            detail,
-            request,
-            previous,
-            None,
-        )
+    _enforce_respondent_attitude_source(
+        detail,
+        request,
+        previous,
+        None,
+        None,
+    )
+
+    assert detail["respondent_attitude"] == prior_attitude
 
 
 def test_intake_model_output_requires_a_complete_case_summary_each_turn() -> None:
@@ -2088,6 +2087,139 @@ def test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail(
         result.scroll_snapshot["handoff_notes"]["remark_status"]
         == "WAITING_FOR_REMARK"
     )
+
+
+def test_intake_turn_uses_six_component_sum_when_model_total_is_wrong() -> None:
+    result = CaseDetailDossierSkill().render(
+        request=_request(),
+        conversation_action="ASK_SUBSTANTIVE",
+        room_utterance="已记录本轮补充，请继续说明商家的具体回应。",
+        llm_case_detail={
+            "claim_resolution": {
+                "initiator_role": "USER",
+                "requested_resolution": "REFUND",
+                "requested_amount": None,
+                "requested_items": None,
+                "request_reason": "用户称物流显示签收但本人没有收到商品。",
+                "normalized_statement": "用户请求对未收到的商品退款。",
+            },
+            "respondent_attitude": {"respondent_role": "MERCHANT"},
+            "missing_information": {
+                "blocking_gaps": ["商家的具体回应"],
+                "nice_to_have_gaps": [],
+                "next_questions": ["请补充商家的具体回应？"],
+            },
+            "intake_quality": {
+                "score": 9,
+                "threshold": 85,
+                "ready_for_next_step": False,
+                "score_breakdown": {
+                    "references": 15,
+                    "event_story": 20,
+                    "party_positions": 20,
+                    "requested_resolution": 15,
+                    "risk_and_conflicts": 10,
+                    "next_action_clarity": 10,
+                },
+                "improvement_reason": "仍需补充商家的具体回应。",
+            },
+            "handoff_notes": {
+                "remark_status": "NOT_READY",
+                "latest_remark": "",
+                "instruction": "信息尚不完整，继续实质问询。",
+            },
+            "admission": {
+                "recommendation": "NEED_MORE_INFO",
+                "reasoning": "仍有案情信息需要补充。",
+                "confidence": 0.9,
+            },
+        },
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.9,
+        model_semantics_authoritative=True,
+    )
+
+    quality = result.scroll_snapshot["intake_quality"]
+    assert quality["score"] == sum(quality["score_breakdown"].values()) == 90
+    assert (
+        result.scroll_snapshot["party_intake_state"]["USER"]["intake_quality"]
+        == quality
+    )
+    score_operation = next(
+        operation
+        for operation in result.canvas_operations
+        if operation["type"] == "SET_QUALITY_SCORE"
+    )
+    assert score_operation["value"] == 90
+
+
+def test_ordered_intake_preserves_typed_outcome_without_a_second_semantic_gate() -> None:
+    result = CaseDetailDossierSkill().render(
+        request=_request(),
+        conversation_action="INVITE_OPTIONAL_REMARK",
+        room_utterance="已记录本轮说明；如有补充可继续备注。",
+        llm_case_detail={
+            "claim_resolution": {
+                "initiator_role": "USER",
+                "requested_resolution": "REFUND",
+                "requested_amount": None,
+                "requested_items": None,
+                "request_reason": "用户称物流显示签收但本人没有收到商品。",
+                "normalized_statement": "用户请求对未收到的商品退款。",
+            },
+            "respondent_attitude": {"respondent_role": "MERCHANT"},
+            "missing_information": {
+                "blocking_gaps": [],
+                "nice_to_have_gaps": [],
+                "next_questions": [],
+            },
+            "intake_quality": {
+                "score": 85,
+                "threshold": 85,
+                "ready_for_next_step": True,
+                "score_breakdown": {
+                    "references": 15,
+                    "event_story": 18,
+                    "party_positions": 15,
+                    "requested_resolution": 5,
+                    "risk_and_conflicts": 12,
+                    "next_action_clarity": 15,
+                },
+                "improvement_reason": "商家仍可补充退款处理立场。",
+            },
+            "handoff_notes": {
+                "remark_status": "WAITING_FOR_REMARK",
+                "latest_remark": "",
+                "instruction": "如有补充可继续备注。",
+            },
+            "admission": {
+                "recommendation": "ACCEPTED",
+                "reasoning": "模型已选择收束本轮。",
+                "confidence": 0.85,
+            },
+        },
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="ACCEPTED",
+        llm_missing_fields=[],
+        llm_confidence=0.85,
+        model_semantics_authoritative=True,
+    )
+
+    quality = result.scroll_snapshot["party_intake_state"]["USER"][
+        "intake_quality"
+    ]
+    assert quality["score"] == 80
+    assert quality["ready_for_next_step"] is True
+    assert result.scroll_snapshot["handoff_notes"]["remark_status"] == (
+        "WAITING_FOR_REMARK"
+    )
+    assert result.admission_recommendation == "ACCEPTED"
 
 
 # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。

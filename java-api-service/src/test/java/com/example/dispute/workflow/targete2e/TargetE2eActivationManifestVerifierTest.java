@@ -163,7 +163,8 @@ class TargetE2eActivationManifestVerifierTest {
         },
         Reason.NOT_YET_VALID);
     assertDenied(
-        value -> value.put("expiresAt", NOW.plusSeconds(7_201).toString()), Reason.WRONG_CONTRACT);
+        value -> value.put("expiresAt", NOW.plusSeconds(2_592_001).toString()),
+        Reason.WRONG_CONTRACT);
   }
 
   @Test
@@ -1659,5 +1660,15 @@ class TargetE2eActivationManifestVerifierTest {
     public Instant instant() {
       return current;
     }
+  }
+
+  @Test
+  void permitsThirtyDayActivationButRejectsAnyLongerLifetime() {
+    assertThat(TargetE2eActivationManifestVerifier.isPermittedLifetime(Duration.ofDays(30)))
+        .isTrue();
+    assertThat(
+            TargetE2eActivationManifestVerifier.isPermittedLifetime(
+                Duration.ofDays(30).plusSeconds(1)))
+        .isFalse();
   }
 }

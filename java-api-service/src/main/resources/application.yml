@@ -4,6 +4,11 @@
 spring:
   application:
     name: java-api-service
+  task:
+    scheduling:
+      pool:
+        size: ${SPRING_TASK_SCHEDULING_POOL_SIZE:4}
+      thread-name-prefix: java-api-scheduling-
   profiles:
     active: ${APP_ENV:local}
   jackson:

@@ -95,10 +95,10 @@ from app.harness.prompt_composer import PromptRepository
 
 # ---- 请求 / 响应 Schema ----
 from app.schemas import (
-    HearingIntakeQuestionsRequest,
-    HearingIntakeQuestionsResult,
-    HearingIntakeSynthesisRequest,
-    HearingIntakeSynthesisResult,
+    HearingIntakeQuestionsRequestV4,
+    HearingIntakeQuestionsResultV5,
+    HearingIntakeSynthesisRequestV4,
+    HearingIntakeSynthesisResultV5,
     HearingEvidenceRequestsRequest,
     HearingEvidenceRequestsResult,
     HearingEvidenceSynthesisRequest,
@@ -374,12 +374,15 @@ def create_app(
     @app.exception_handler(AgentOutputSchemaError)
     async def schema_error(request: Request, exception: AgentOutputSchemaError):
         """Agent 输出 schema 验证失败 —— LLM 返回的结构化输出不符合预期（502）。"""
+        details = {"node_name": exception.node_name}
+        if exception.diagnostic_code is not None:
+            details["diagnostic_code"] = exception.diagnostic_code
         return _error_response(
             request,
             502,
             "AGENT_OUTPUT_SCHEMA_INVALID",
             "agent returned invalid structured output",
-            {"node_name": exception.node_name},
+            details,
         )
 
     # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
@@ -524,12 +527,12 @@ def create_app(
 
     @app.post(
         "/internal/agents/hearing-flow/intake/questions",
-        response_model=HearingIntakeQuestionsResult,
+        response_model=HearingIntakeQuestionsResultV5,
     )
     async def hearing_intake_questions(
-        payload: HearingIntakeQuestionsRequest,
+        payload: HearingIntakeQuestionsRequestV4,
         x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
-    ) -> HearingIntakeQuestionsResult:
+    ) -> HearingIntakeQuestionsResultV5:
         _authorize(x_service_secret, resolved.python_agent_service_secret)
         return await run_in_threadpool(
             resolved_hearing_flow_workflows.intake_questions, payload
@@ -537,12 +540,12 @@ def create_app(
 
     @app.post(
         "/internal/agents/hearing-flow/intake/synthesis",
-        response_model=HearingIntakeSynthesisResult,
+        response_model=HearingIntakeSynthesisResultV5,
     )
     async def hearing_intake_synthesis(
-        payload: HearingIntakeSynthesisRequest,
+        payload: HearingIntakeSynthesisRequestV4,
         x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
-    ) -> HearingIntakeSynthesisResult:
+    ) -> HearingIntakeSynthesisResultV5:
         _authorize(x_service_secret, resolved.python_agent_service_secret)
         return await run_in_threadpool(
             resolved_hearing_flow_workflows.intake_synthesis, payload
@@ -836,7 +839,7 @@ def create_app(
 
     @app.post("/internal/agents/hearing-flow/intake/questions/stream")
     async def hearing_intake_questions_stream(
-        payload: HearingIntakeQuestionsRequest,
+        payload: HearingIntakeQuestionsRequestV4,
         x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
         x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
     ):
@@ -849,7 +852,7 @@ def create_app(
 
     @app.post("/internal/agents/hearing-flow/intake/synthesis/stream")
     async def hearing_intake_synthesis_stream(
-        payload: HearingIntakeSynthesisRequest,
+        payload: HearingIntakeSynthesisRequestV4,
         x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
         x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
     ):
@@ -1109,7 +1112,7 @@ def _build_evidence_turn_workflow(settings: Settings) -> EvidenceTurnWorkflowV2:
             prompts=PromptRepository(),
         ),
         asset_loader=EvidenceAssetLoader(
-            java_api_service_url=settings.java_api_service_url,
+            java_api_service_url=settings.java_evidence_content_service_url,
             java_service_secret=settings.java_service_secret,
         ),
     )
@@ -1199,6 +1202,8 @@ def _build_llm_client(settings: Settings) -> LiteLlmProxyClient:
         settings.resolved_llm_model,
         settings.resolved_llm_api_key,
         settings.llm_timeout_seconds,
+        enable_thinking=settings.llm_enable_thinking,
+        strict_json_schema_enabled=settings.llm_strict_json_schema_enabled,
     )
 
 

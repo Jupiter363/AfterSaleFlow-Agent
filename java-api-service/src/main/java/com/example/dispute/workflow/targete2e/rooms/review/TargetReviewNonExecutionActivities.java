@@ -10,7 +10,7 @@ import io.temporal.activity.ActivityMethod;
 import java.time.Instant;
 import java.util.Objects;
 
-/** Java-owned disposition of a formal Review decision which authorizes no execution. */
+/** Java-owned disposition of a formal manual-escalation decision which authorizes no execution. */
 @ActivityInterface
 public interface TargetReviewNonExecutionActivities {
   @ActivityMethod(name = "CompleteTargetReviewNonExecution")
@@ -104,12 +104,12 @@ public interface TargetReviewNonExecutionActivities {
       requireHash(decisionRecordHash, "decisionRecordHash");
       decision = Objects.requireNonNull(decision, "decision");
       committedAt = Objects.requireNonNull(committedAt, "committedAt");
-      if (sourceRoomEpoch < 1
+      if (sourceRoomEpoch < 0
           || sourceFencingToken < 1
           || terminalProcessRevision < 0
           || terminalRoomRevision < 0
           || !isNonExecutable(decision)
-          || (decision == ReviewDecision.REQUEST_MORE_EVIDENCE) != (evidenceTransition != null)) {
+          || evidenceTransition != null) {
         throw new IllegalArgumentException("target Review disposition branch is invalid");
       }
     }
@@ -122,7 +122,7 @@ public interface TargetReviewNonExecutionActivities {
     }
 
     public boolean terminalCaseProcess() {
-      return receipt.decision() != ReviewDecision.REQUEST_MORE_EVIDENCE;
+      return true;
     }
 
     public TargetRoomProgressReceipt sourceProgressReceipt() {
@@ -144,9 +144,7 @@ public interface TargetReviewNonExecutionActivities {
   }
 
   private static boolean isNonExecutable(ReviewDecision decision) {
-    return decision == ReviewDecision.REJECT
-        || decision == ReviewDecision.REQUEST_MORE_EVIDENCE
-        || decision == ReviewDecision.ESCALATE_MANUAL;
+    return decision == ReviewDecision.ESCALATE_MANUAL;
   }
 
   private static void requireText(String value, String field) {

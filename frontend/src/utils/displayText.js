@@ -58,6 +58,37 @@ const FIELD_LABELS = {
   proof_of_delivery: "签收凭证",
   after_sales_record: "售后记录",
   communication_record: "沟通记录",
+  user_claimed_specific_performance_metrics: "用户主张的具体性能指标",
+  user_merchant_communication_details: "用户与商家的沟通详情",
+  decision_action: "执行动作",
+  recommended_decision: "总体建议",
+  remedy_orders: "处理事项",
+  fact_findings: "事实认定",
+  rule_applications: "规则适用",
+  decision_reasoning: "裁决理由",
+  reviewer_attention: "人工关注事项",
+  review_focus: "复核重点",
+  review_responses: "复审回应",
+  mandatory_revisions: "强制修订项",
+  requires_revision: "是否需要修订",
+  evidence_gap: "证据缺口",
+  truth_status: "事实认定状态",
+  evidence_coverage_status: "证据覆盖状态",
+  evidence_relation: "证据关联性",
+  evidence_ids: "证据引用",
+  fact_id: "事实编号",
+  fact_ids: "关联事实编号",
+  review_item_ref: "复审事项编号",
+  review_source: "复审来源",
+  requires_human_review: "是否需要人工复核",
+  source_fact_ids: "来源事实编号",
+  target_roles: "目标参与方",
+  requested_material: "所需材料",
+  verification_goal: "核验目标",
+  satisfied_conditions: "已满足条件",
+  unmet_conditions: "未满足条件",
+  applicability_status: "规则适用状态",
+  application_result: "适用结果",
 };
 
 const VALUE_LABELS = {
@@ -74,7 +105,6 @@ const VALUE_LABELS = {
   POLICY_REVIEW: "规则复核",
   WAITING: "等待补充",
   NEED_MORE_INFO: "继续补充信息",
-  ACCEPTED: "建议受理",
   NOT_ADMISSIBLE: "暂不受理",
   ADMISSIBLE: "可受理",
   USER: "用户",
@@ -103,6 +133,186 @@ const VALUE_LABELS = {
   NON_RECEIPT: "用户称未收到包裹",
   RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW: "先核验签收凭证；若签收依据不足，建议补发或退款",
   RESHIP_IF_SIGNATURE_PROOF_MISSING: "若签收凭证缺失，建议补发",
+  user: "用户",
+  merchant: "商家",
+  platform: "平台",
+  TRUE: "是",
+  FALSE: "否",
+  true: "是",
+  false: "否",
+  NONE: "无",
+  CREATED: "已创建",
+  PREPARING: "生成中",
+  COMPLETED: "已完成",
+  FAILED: "失败",
+  TIMED_OUT: "已超时",
+  FROZEN: "已冻结",
+  EXPIRED: "已过期",
+  DECIDED: "已终审",
+  APPROVED: "已批准",
+  REJECTED: "已驳回",
+  ASSIGNED: "已分配",
+  IN_REVIEW: "审核中",
+  ESCALATED: "已升级人工接管",
+  MANUAL_HANDOFF: "人工接管中",
+  CLOSED: "已关闭",
+  APPROVED_FOR_EXECUTION: "已批准执行",
+  EXECUTING: "执行中",
+  SUCCEEDED: "执行成功",
+  CANCELLED: "已取消",
+  INTAKE_PENDING: "等待接待",
+  INTAKE_ACTIVE: "接待处理中",
+  EVIDENCE_PENDING: "等待举证",
+  HEARING_PENDING: "等待庭审",
+  DRAFT_READY: "裁决草案已生成",
+  DELIBERATION_RUNNING: "裁决生成中",
+  REVIEW_PENDING: "等待人工终审",
+  REMEDY_PLANNED: "执行方案已形成",
+  PENDING_SUBMISSION: "待提交",
+  SUBMITTED: "已提交",
+  VOIDED: "已作废",
+  UNVERIFIED: "待核验",
+  VERIFIED: "已核验",
+  PLAUSIBLE: "初步可信",
+  PARTIALLY_VERIFIED: "部分核验",
+  QUESTIONABLE: "存在疑点",
+  SUSPICIOUS: "存在疑点",
+  INCONCLUSIVE: "无法确认",
+  ESTABLISHED: "已认定",
+  PARTIALLY_ESTABLISHED: "部分认定",
+  UNESTABLISHED: "未认定",
+  CONFIRMED: "已确认",
+  PARTIALLY_CONFIRMED: "部分确认",
+  NOT_EVALUATED: "尚未认定",
+  NOT_ESTABLISHED: "未能认定",
+  NOT_PROVEN: "未证实",
+  CLAIMED_BY_USER: "用户单方主张",
+  CLAIMED_BY_MERCHANT: "商家单方主张",
+  CLAIMED_BY_BOTH: "双方均有主张",
+  CONTESTED: "双方有争议",
+  DISPUTED: "双方有争议",
+  COVERED: "已有证据覆盖",
+  PARTIALLY_COVERED: "部分证据覆盖",
+  UNCOVERED: "证据未覆盖",
+  PENDING_EVIDENCE_REVIEW: "待证据审查",
+  COVERED_BY_SUBMITTED_EVIDENCE: "已有提交证据覆盖",
+  COVERED_BY_FROZEN_DOSSIER: "已有冻结证据覆盖",
+  PARTIALLY_COVERED_BY_FROZEN_DOSSIER: "部分证据覆盖",
+  NOT_COVERED_BY_FROZEN_DOSSIER: "冻结证据未覆盖",
+  CONTENT_SUPPORTS: "支持该事实",
+  CONTENT_CONTRADICTS: "反驳该事实",
+  CONTEXT_ONLY: "仅作背景参考",
+  SUPPORTS: "支持该事实",
+  OPPOSES: "反驳该事实",
+  NOT_COMPUTED: "尚未比对",
+  AGREED: "双方一致",
+  PARTIALLY_AGREED: "部分一致",
+  ONE_SIDED: "仅一方陈述",
+  UNRESOLVED: "尚未解决",
+  CONFIRM: "确认",
+  AGREE: "同意",
+  ACCEPT: "认可",
+  DENY: "否认",
+  DISAGREE: "不同意",
+  REJECT: "不认可",
+  PARTIAL: "部分认可",
+  PARTIALLY_AGREE: "部分认可",
+  NOT_ADDRESSED: "未回应",
+  CORE: "核心事实",
+  SUPPORTING: "辅助事实",
+  CONTEXT: "背景事实",
+  ORDER: "订单",
+  PRODUCT_PAGE: "商品信息",
+  PRODUCT_STATE: "商品状态",
+  AFTER_SALES: "售后诉求",
+  LOGISTICS: "物流",
+  PAYMENT: "支付",
+  TIME: "时间",
+  PARTY: "当事人",
+  CANCEL_ORDER: "取消订单",
+  RETURN_AND_REFUND: "退货退款",
+  REFUND_ONLY: "仅退款",
+  RESHIP: "补发商品",
+  REPLACE: "更换商品",
+  CONTINUE_FULFILLMENT: "继续履约",
+  REJECT_CLAIM: "驳回诉求",
+  ESCALATE_MANUAL: "升级人工接管",
+  MERCHANT_APPROVED_REFUND: "商家同意退款规则",
+  UNSHIPPED_CANCEL: "未发货订单取消规则",
+  APPLICABLE: "适用",
+  NOT_APPLICABLE: "不适用",
+  PARTIALLY_APPLICABLE: "部分适用",
+  SATISFIED: "已满足",
+  UNSATISFIED: "未满足",
+  ACCEPTED: "已采纳",
+  PARTIALLY_ACCEPTED: "部分采纳",
+  BLOCKER: "阻断",
+  CRITICAL: "极高风险",
+  FACT_COMPLETENESS: "事实完整性",
+  EVIDENCE_CONSISTENCY: "证据一致性",
+  RULE_APPLICABILITY: "规则适用性",
+  PROCEDURAL_FAIRNESS: "程序公平性",
+  REMEDY_FEASIBILITY: "执行方案可行性",
+  RISK_AND_OMISSIONS: "风险与遗漏",
+  JURY_FINDING_FACT_COMPLETENESS: "陪审意见：事实完整性",
+  JURY_FINDING_EVIDENCE_CONSISTENCY: "陪审意见：证据一致性",
+  JURY_FINDING_RULE_APPLICABILITY: "陪审意见：规则适用性",
+  JURY_FINDING_PROCEDURAL_FAIRNESS: "陪审意见：程序公平性",
+  JURY_FINDING_REMEDY_FEASIBILITY: "陪审意见：执行方案可行性",
+  JURY_FINDING_RISK_AND_OMISSIONS: "陪审意见：风险与遗漏",
+  JURY_REVIEW_REPORT: "陪审复核报告",
+  JUDGE_PROPOSAL: "法官裁决草案",
+  ADJUDICATION_DRAFT: "裁决草案",
+  AGENT_LLM: "AI 模型生成",
+  AGENT_MESSAGE: "AI 消息",
+  PARTY_ACTION: "当事人操作",
+  PARTY_EVIDENCE_REFERENCE: "当事人证据引用",
+  PARTY_TEXT: "当事人陈述",
+  SYSTEM_STAGE_EVENT: "阶段系统通知",
+  ROLE_TEMPLATE: "角色模板",
+  USER_UPLOAD: "用户上传",
+  MERCHANT_UPLOAD: "商家上传",
+  PLATFORM_UPLOAD: "平台上传",
+  CHAT_SCREENSHOT: "沟通截图",
+  LOGISTICS_PROOF: "物流凭证",
+  DELIVERY_RECORD: "履约记录",
+  VIDEO: "视频证据",
+  IMAGE: "图片证据",
+  DOCUMENT: "文档材料",
+  LOW_AUTHENTICITY_SUSPECTED_FORGERY: "真实性较低，疑似造假",
+  LOW_RELEVANCE_SCORE: "关联度较低",
+  LOW_COMPLETENESS_SCORE: "完整度较低",
+  LOW_ASSESSMENT_CONFIDENCE: "核验把握较低",
+  HIGH_RISK_FLAG: "高风险提示",
+  COMPLETE_INTAKE: "完成受理确认",
+  SUBMIT_EVIDENCE: "提交证据",
+  ENTER_HEARING: "进入庭审",
+  PARTICIPATE_HEARING: "参与庭审",
+  REVIEW_SETTLEMENT: "确认一致方案",
+  AWAIT_REVIEW: "等待平台终审",
+  TRACK_EXECUTION: "跟踪执行",
+  VIEW_OUTCOME: "查看处理结果",
+  CONTINUE_CASE: "继续处理",
+  CONTINUE_PROCESSING: "继续处理",
+  TARGET_NO_EXTERNAL_EFFECT: "仅形成裁决结论，不直接执行外部操作",
+  NO_EXTERNAL_EFFECT: "不直接执行外部操作",
+  maximum_risk_level: "最高风险等级",
+  conditions_met: "已满足条件",
+  conditions_unmet: "未满足条件",
+  INTAKE: "案情接待",
+  EVIDENCE: "证据核验",
+  HEARING: "智能庭审",
+  DRAFT: "裁决草案",
+  REVIEW: "人工终审",
+  OUTCOME: "执行结果",
+  EXTERNAL_IMPORT: "外部导入",
+  INTAKE_CREATED: "接待官创建",
+  healthy: "运行正常",
+  attention: "需要关注",
+  offline: "已离线",
+  draft: "草稿",
+  published: "生产中",
+  archived: "历史版本",
 };
 
 const ENGLISH_PHRASE_LABELS = {
@@ -128,9 +338,14 @@ const ENGLISH_PHRASE_LABELS = {
     "结构化草案未通过校验，系统未采纳自动结论，需由终审人工复核。",
   "Review the failed final-convergence structured output manually.":
     "请人工复核未通过校验的终局结构化输出。",
+  "Merchant-approved refund policy": "商家同意退款规则",
+  "Unshipped order cancellation policy": "未发货订单取消规则",
+  "在 finding 中": "在事实认定中",
+  finding: "事实认定",
 };
 
 const TOKEN_LABELS = {
+  ...ROLE_LABELS,
   ...VALUE_LABELS,
   ...FIELD_LABELS,
   ...ENGLISH_PHRASE_LABELS,
@@ -165,12 +380,21 @@ export function humanizeDossierText(value, options = {}) {
   const raw = String(value).trim();
   if (!raw) return fallback;
 
-  const exact = TOKEN_LABELS[raw];
+  const exact = TOKEN_LABELS[raw] ?? TOKEN_LABELS[raw.toUpperCase()];
   if (exact) return exact;
   if (options.kind === "title") return humanizeTitle(raw, fallback);
   if (options.kind === "summary") return humanizeSummary(raw, fallback);
 
   return replaceInternalTokens(raw);
+}
+
+// 将单个后端枚举转换为展示文案。未知值不在此处猜测业务含义，由调用方提供安全回退。
+export function domainCodeLabel(value, fallback = "") {
+  if (value === null || value === undefined) return fallback;
+  const raw = String(value).trim();
+  if (!raw) return fallback;
+  if (CHINESE_RE.test(raw)) return raw;
+  return TOKEN_LABELS[raw] ?? TOKEN_LABELS[raw.toUpperCase()] ?? fallback;
 }
 
 // 业务位置：【前端应用】humanizeDossierList：围绕 案件卷宗 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
@@ -334,12 +558,28 @@ function humanizeSummary(raw, fallback) {
 // 业务位置：【前端应用】replaceInternalTokens：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function replaceInternalTokens(raw) {
   const source = String(raw || "");
-  const exact = TOKEN_LABELS[source.trim()];
+  const exact = TOKEN_LABELS[source.trim()] ?? TOKEN_LABELS[source.trim().toUpperCase()];
   if (exact !== undefined) return exact;
 
   let output = source;
   for (const [token, label] of TOKEN_REPLACEMENTS) {
-    output = output.split(token).join(label);
+    if (/^[A-Za-z][A-Za-z0-9_]*$/.test(token)) {
+      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rightBoundary = token.includes("_")
+        ? "(?=$|[^A-Za-z_]|\\d+%)"
+        : "(?=$|[^A-Za-z0-9_])";
+      output = output.replace(
+        new RegExp(`(^|[^A-Za-z0-9_])${escaped}${rightBoundary}`, "g"),
+        (_match, prefix) => `${prefix}${label}`,
+      );
+    } else {
+      output = output.split(token).join(label);
+    }
   }
-  return output;
+  return output
+    .replace(/(商家同意退款规则|未发货订单取消规则)@(\d+)\s+\1/gu, "$1（版本 $2）")
+    .replace(/(是否需要修订)\s*=\s*(是|否)/gu, "$1：$2")
+    .replace(/(是否需要人工复核)\s*=\s*(是|否)/gu, "$1：$2")
+    .replace(/\bJURY_MANDATORY_(\d+)\b/gu, "陪审必改项 $1")
+    .replace(/\bV1_FOCUS_(\d+)\b/gu, "法官 V1 复核重点 $1");
 }

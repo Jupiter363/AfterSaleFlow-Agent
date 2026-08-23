@@ -67,7 +67,7 @@ public record SyntheticNoopExecutionReceipt(
                 || !packetHash.matches("[0-9a-f]{64}")
                 || requestHash == null
                 || !requestHash.matches("[0-9a-f]{64}")
-                || epoch < 1
+                || epoch < 0
                 || revision < 0
                 || fence < 1) {
             throw new IllegalArgumentException("synthetic receipt binding is invalid");

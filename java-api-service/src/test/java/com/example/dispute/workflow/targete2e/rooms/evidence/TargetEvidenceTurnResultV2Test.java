@@ -24,7 +24,7 @@ class TargetEvidenceTurnResultV2Test {
 
     @Test
     void acceptsTheOrderedMaterialScopeAndReplaysItsExactProjection() {
-        JsonNode raw = materialResult(true, true);
+        JsonNode raw = materialResult(true, true, true);
         TargetEvidenceTurnResultV2 first = TargetEvidenceTurnResultV2.parse(MAPPER, raw);
         first.requireCommandBinding(COMMAND_ID, ATTEMPT_ID);
         first.requireFormalScope(
@@ -40,27 +40,92 @@ class TargetEvidenceTurnResultV2Test {
     }
 
     @Test
-    void rejectsWrongAttachmentOrderUncoveredObservationsAndOutOfScopeFacts() {
+    void rejectsWrongReceiptAuthorityAndOutOfScopeFactsButTrustsAssessmentCoverage() {
         TargetEvidenceTurnResultV2 ordered = TargetEvidenceTurnResultV2.parse(
-                MAPPER, materialResult(true, true));
+                MAPPER, materialResult(true, true, true));
         assertThatThrownBy(() -> ordered.requireFormalScope(
                 "PARTY_MESSAGE", List.of("E2", "E1"), Set.of("F1", "F2")))
                 .isInstanceOf(IllegalStateException.class);
 
-        TargetEvidenceTurnResultV2 uncovered = TargetEvidenceTurnResultV2.parse(
-                MAPPER, materialResult(false, true));
-        assertThatThrownBy(() -> uncovered.requireFormalScope(
-                "PARTY_MESSAGE", List.of("E1", "E2"), Set.of("F1", "F2")))
-                .isInstanceOf(IllegalStateException.class);
+        TargetEvidenceTurnResultV2 modelSelectedCoverage = TargetEvidenceTurnResultV2.parse(
+                MAPPER, materialResult(false, true, true));
+        modelSelectedCoverage.requireFormalScope(
+                "PARTY_MESSAGE", List.of("E1", "E2"), Set.of("F1", "F2"));
 
         TargetEvidenceTurnResultV2 outOfScope = TargetEvidenceTurnResultV2.parse(
-                MAPPER, materialResult(true, true));
+                MAPPER, materialResult(true, true, true));
         assertThatThrownBy(() -> outOfScope.requireFormalScope(
                 "PARTY_MESSAGE", List.of("E1", "E2"), Set.of("F1")))
                 .isInstanceOf(IllegalStateException.class);
     }
 
-    private static JsonNode materialResult(boolean coverEveryObservation, boolean ordered) {
+    @Test
+    void acceptsUnrelatedObservationWithoutAssessmentReference() {
+        TargetEvidenceTurnResultV2 result = TargetEvidenceTurnResultV2.parse(
+                MAPPER, materialResult(false, true, false));
+
+        result.requireFormalScope(
+                "PARTY_MESSAGE", List.of("E1", "E2"), Set.of("F1", "F2"));
+    }
+
+    @Test
+    void acceptsModelDefinedKindsAndMissingSemanticHeaderFields() {
+        ObjectNode raw = (ObjectNode) materialResult(true, true, true);
+        ArrayNode manifest = (ArrayNode) raw.get("frame_manifest");
+        ObjectNode observationFrame = (ObjectNode) manifest.get(1);
+        ObjectNode observationHeader = base(2, "EVIDENCE_OBSERVATION");
+        observationHeader.put("observation_kind", "PARSED_TEXT");
+        observationHeader.put("model_optional_note", "模型自由字段");
+        replaceHeader(observationFrame, observationHeader);
+        ((ArrayNode) raw.get("observation_graph")).set(0, observationHeader);
+
+        ObjectNode assessmentFrame = (ObjectNode) manifest.get(3);
+        ObjectNode assessmentHeader = base(4, "EVIDENCE_ASSESSMENT");
+        assessmentHeader.put("evidence_id", "E1");
+        assessmentHeader.put("risk_level", "MODEL_DEFINED_LEVEL");
+        replaceHeader(assessmentFrame, assessmentHeader);
+        ((ArrayNode) raw.get("evidence_assessments")).set(0, assessmentHeader);
+        raw.put("frame_manifest_sha256", ContractJson.sha256Hex(manifest));
+
+        TargetEvidenceTurnResultV2 result = TargetEvidenceTurnResultV2.parse(MAPPER, raw);
+
+        result.requireCommandBinding(COMMAND_ID, ATTEMPT_ID);
+        result.requireFormalScope(
+                "PARTY_MESSAGE", List.of("E1", "E2"), Set.of("F1", "F2"));
+        assertThat(result.observationGraph().getFirst().path("observation_kind").asText())
+                .isEqualTo("PARSED_TEXT");
+        assertThat(result.evidenceAssessments().getFirst().path("authenticity_score").isMissingNode())
+                .isTrue();
+    }
+
+    @Test
+    void bindsMissingReadinessFrameToAnEmptyReplayStableProjection() {
+        JsonNode raw = materialResultWithoutReadiness(true);
+
+        TargetEvidenceTurnResultV2 first = TargetEvidenceTurnResultV2.parse(MAPPER, raw);
+        first.requireCommandBinding(COMMAND_ID, ATTEMPT_ID);
+        first.requireFormalScope(
+                "PARTY_MESSAGE", List.of("E1", "E2"), Set.of("F1", "F2"));
+        TargetEvidenceTurnResultV2 replay = TargetEvidenceTurnResultV2.parse(MAPPER, raw);
+
+        assertThat(first.roomReadiness()).isEqualTo(MAPPER.createObjectNode());
+        assertThat(replay.roomReadiness()).isEqualTo(first.roomReadiness());
+        assertThat(replay.document()).isEqualTo(first.document());
+        assertThat(first.frames())
+                .extracting(TargetEvidenceTurnResultV2.Frame::frameType)
+                .doesNotContain("ROOM_READINESS");
+    }
+
+    @Test
+    void rejectsNonEmptyReadinessProjectionWhenItsSourceFrameIsMissing() {
+        assertThatThrownBy(() -> TargetEvidenceTurnResultV2.parse(
+                        MAPPER, materialResultWithoutReadiness(false)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("derived projections differ from the frame manifest");
+    }
+
+    private static JsonNode materialResult(
+            boolean coverEveryObservation, boolean ordered, boolean secondObservationBound) {
         ArrayNode manifest = MAPPER.createArrayNode();
         manifest.add(frame(1, "MATERIAL_RECEIPT", receiptHeader(1), "已收到两份材料"));
         manifest.add(frame(
@@ -71,7 +136,7 @@ class TargetEvidenceTurnResultV2Test {
         manifest.add(frame(
                 3,
                 "EVIDENCE_OBSERVATION",
-                observationHeader(3, "O2", "S2", "F2"),
+                observationHeader(3, "O2", "S2", "F2", secondObservationBound),
                 "观察第二份材料"));
         manifest.add(frame(
                 4,
@@ -110,8 +175,22 @@ class TargetEvidenceTurnResultV2Test {
                         .add(manifest.get(3).get("header"))
                         .add(manifest.get(4).get("header")));
         result.set("evidence_requests", MAPPER.createArrayNode().add(manifest.get(5).get("header")));
-        result.set("human_review_tasks", MAPPER.createArrayNode());
         result.set("room_readiness", manifest.get(6).get("header"));
+        return result;
+    }
+
+    private static JsonNode materialResultWithoutReadiness(boolean emptyProjection) {
+        ObjectNode result = (ObjectNode) materialResult(true, true, true);
+        ArrayNode manifest = (ArrayNode) result.get("frame_manifest");
+        JsonNode readiness = manifest.get(manifest.size() - 1).get("header").deepCopy();
+        manifest.remove(manifest.size() - 1);
+        result.put("frame_manifest_sha256", ContractJson.sha256Hex(manifest));
+        result.put(
+                "room_utterance",
+                result.get("room_utterance").textValue().replace("\n\n本轮核验完成", ""));
+        result.set(
+                "room_readiness",
+                emptyProjection ? MAPPER.createObjectNode() : readiness);
         return result;
     }
 
@@ -123,16 +202,27 @@ class TargetEvidenceTurnResultV2Test {
 
     private static ObjectNode observationHeader(
             int sequence, String slot, String sourceUnit, String factId) {
+        return observationHeader(sequence, slot, sourceUnit, factId, true);
+    }
+
+    private static ObjectNode observationHeader(
+            int sequence,
+            String slot,
+            String sourceUnit,
+            String factId,
+            boolean bound) {
         ObjectNode header = base(sequence, "EVIDENCE_OBSERVATION");
         header.put("observation_slot", slot);
         header.put("source_unit_id", sourceUnit);
-        header.put("binding_status", "BOUND");
+        header.put("binding_status", bound ? "BOUND" : "UNRELATED");
         ArrayNode bindings = MAPPER.createArrayNode();
-        ObjectNode binding = MAPPER.createObjectNode();
-        binding.put("fact_id", factId);
-        binding.put("relation", "CONTENT_SUPPORTS");
-        binding.put("reason", "材料内容与冻结事实存在明确关联");
-        bindings.add(binding);
+        if (bound) {
+            ObjectNode binding = MAPPER.createObjectNode();
+            binding.put("fact_id", factId);
+            binding.put("relation", "CONTENT_SUPPORTS");
+            binding.put("reason", "材料内容与冻结事实存在明确关联");
+            bindings.add(binding);
+        }
         header.set("fact_bindings", bindings);
         header.put("observation_kind", "PARSED_RECORD");
         header.put("epistemic_status", "PENDING_VERIFICATION");
@@ -143,14 +233,24 @@ class TargetEvidenceTurnResultV2Test {
         ObjectNode header = base(sequence, "EVIDENCE_ASSESSMENT");
         header.put("evidence_id", evidenceId);
         if (slot != null) header.set("observation_slots", array(slot));
-        header.put("relevance", "DIRECT");
-        header.put("source_chain_status", "TRACEABLE");
-        header.put("formation_time_status", "CONFIRMED");
-        header.put("integrity_status", "INTACT");
-        header.put("readability", "CLEAR");
-        header.put("cross_source_consistency", "CONSISTENT");
-        header.put("authenticity_status", "UNVERIFIED");
-        header.put("capability_status", "FULL_CONTENT");
+        header.put("authenticity_score", 0.78);
+        header.put("authenticity_score_explanation", "材料来源能够识别，但缺少平台原始导出。");
+        header.put("relevance_score", 0.91);
+        header.put("relevance_score_explanation", "材料内容直接对应冻结事实。");
+        header.put("completeness_score", 0.67);
+        header.put("completeness_score_explanation", "主要内容可见，但缺少完整上下文。");
+        header.put("assessment_confidence", 0.83);
+        header.put("assessment_confidence_explanation", "当前文本清晰，能够完成范围内判断。");
+        header.put("risk_level", "MEDIUM");
+        header.put("risk_explanation", "来源链仍不完整，综合判断为中风险。");
+        header.set("source_basis", array("解析文本"));
+        header.put("formation_time_assessment", "形成时间只能部分确认");
+        ObjectNode finding = MAPPER.createObjectNode();
+        finding.put("finding_type", "PARSED_RECORD");
+        finding.put("description", "读取到与冻结事实相关的记录");
+        header.set("findings", MAPPER.createArrayNode().add(finding));
+        header.set("limitations", array("缺少原始导出来源"));
+        header.set("unsupported_claims", array("不能单独确认完整事件链"));
         return header;
     }
 
@@ -170,7 +270,6 @@ class TargetEvidenceTurnResultV2Test {
         header.put("source_chain_coverage", "PARTIAL");
         header.put("time_integrity_coverage", "PARTIAL");
         header.set("remaining_core_fact_ids", array("F2"));
-        header.put("human_review_status", "NONE");
         header.put("overall_readiness", "PARTIAL");
         return header;
     }
@@ -192,14 +291,21 @@ class TargetEvidenceTurnResultV2Test {
         frame.put("frame_type", frameType);
         frame.set("header", header);
         frame.put("header_sha256", ContractJson.sha256Hex(header));
-        if ("HUMAN_REVIEW_TASK".equals(frameType)) frame.putNull("public_text");
-        else frame.put("public_text", publicText);
-        String text = "HUMAN_REVIEW_TASK".equals(frameType) ? "" : publicText;
+        frame.put("public_text", publicText);
+        String text = publicText;
         frame.put("public_text_sha256", sha256(text));
         frame.put("public_text_length", text.codePointCount(0, text.length()));
         ObjectNode preimage = frame.deepCopy();
         frame.put("frame_sha256", ContractJson.sha256Hex(preimage));
         return frame;
+    }
+
+    private static void replaceHeader(ObjectNode frame, ObjectNode header) {
+        frame.set("header", header);
+        frame.put("header_sha256", ContractJson.sha256Hex(header));
+        ObjectNode preimage = frame.deepCopy();
+        preimage.remove("frame_sha256");
+        frame.put("frame_sha256", ContractJson.sha256Hex(preimage));
     }
 
     private static ArrayNode array(String... values) {

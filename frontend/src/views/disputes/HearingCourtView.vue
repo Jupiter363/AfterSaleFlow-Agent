@@ -105,6 +105,8 @@ const courtLedgerDrawer = ref(null);
 const courtLedgerCloseButton = ref(null);
 const proposalText = ref("");
 const answerTexts = reactive({});
+const activeAnswerIssueIndex = ref(0);
+const activeAnswerTextarea = ref(null);
 const proposing = ref(false);
 const supplementing = ref(false);
 const checkingDraftStatus = ref(false);
@@ -139,6 +141,23 @@ let draftStatusSyncPromise = null;
 let draftStatusRetryTimer = null;
 let draftStatusRetryResolve = null;
 let draftStatusSyncEnabled = true;
+const PRELUDE_ROLE_ORDER = Object.freeze(["judge", "intake", "clerk"]);
+const PRELUDE_SEEN_STORAGE_PREFIX = "hearing-prelude-seen.v1";
+const PRELUDE_FRAME_MS = 28;
+const PRELUDE_GAP_MS = 360;
+const PRELUDE_TARGET_DURATION_MS = Object.freeze({
+  judge: 20000,
+  intake: 20000,
+  clerk: 20000,
+});
+const preludeReplay = reactive({
+  active: false,
+  complete: false,
+  currentIndex: -1,
+  charactersShown: 0,
+});
+let preludeReplayStarted = false;
+let preludeReplayTimer = null;
 const mountedCaseId = String(route.params.caseId || "");
 const caseId = computed(() => String(route.params.caseId || mountedCaseId));
 const historyMode = computed(() => route.query.view === "history");
@@ -164,6 +183,36 @@ const effectiveActor = computed(() => {
     role: role.value,
   };
 });
+
+function preludeReplayStorageKey() {
+  const actorRole = String(effectiveActor.value.role || "").toUpperCase();
+  if (!["USER", "MERCHANT"].includes(actorRole)) return "";
+  const actorId = String(effectiveActor.value.id || "");
+  const currentCaseId = String(caseId.value || "");
+  if (!actorId || !currentCaseId) return "";
+  return `${PRELUDE_SEEN_STORAGE_PREFIX}:${currentCaseId}:${actorRole}:${actorId}`;
+}
+
+function hasSeenPreludeReplay() {
+  const key = preludeReplayStorageKey();
+  if (!key) return false;
+  try {
+    return globalThis.sessionStorage?.getItem(key) === "seen";
+  } catch {
+    return false;
+  }
+}
+
+function markPreludeReplaySeen() {
+  const key = preludeReplayStorageKey();
+  if (!key) return;
+  try {
+    globalThis.sessionStorage?.setItem(key, "seen");
+  } catch {
+    // Storage can be unavailable in privacy-restricted webviews. The current
+    // component-local guard still prevents a duplicate replay until remount.
+  }
+}
 const hearingStreamingRuns = computed(() =>
   historyMode.value
     ? []
@@ -201,6 +250,9 @@ const visibleHearingStreamingRuns = computed(() =>
 const isReviewer = computed(() => role.value === "PLATFORM_REVIEWER");
 const settlements = computed(() => hearing.value?.settlements || []);
 const hearingStatus = computed(() => hearing.value?.status || {});
+const juryReviewReport = computed(() =>
+  hearing.value?.jury_review_report || hearing.value?.juryReviewReport || null,
+);
 const flowStageCode = computed(() => hearingFlowStage(hearingStatus.value));
 const flowStageMeta = computed(() => hearingFlowStageDefinition(flowStageCode.value));
 const emptyTranscriptCopy = computed(() => {
@@ -549,6 +601,49 @@ const issueGuidanceItems = computed(() => {
   }
   return [...groups.values()];
 });
+function issueAnswerKey(issue) {
+  return issue?.questionId || issue?.id || "";
+}
+const activeAnswerIssue = computed(
+  () => issueGuidanceItems.value[activeAnswerIssueIndex.value] || null,
+);
+const completedAnswerCount = computed(
+  () =>
+    issueGuidanceItems.value.filter((issue) =>
+      Boolean(String(answerTexts[issueAnswerKey(issue)] || "").trim()),
+    ).length,
+);
+const hasPreviousAnswerIssue = computed(() => activeAnswerIssueIndex.value > 0);
+const hasNextAnswerIssue = computed(
+  () => activeAnswerIssueIndex.value < issueGuidanceItems.value.length - 1,
+);
+
+watch(
+  issueGuidanceItems,
+  (items) => {
+    activeAnswerIssueIndex.value = items.length
+      ? Math.min(activeAnswerIssueIndex.value, items.length - 1)
+      : 0;
+  },
+  { immediate: true },
+);
+
+async function focusActiveAnswerTextarea() {
+  await nextTick();
+  activeAnswerTextarea.value?.focus();
+}
+
+function showPreviousAnswerIssue() {
+  if (!hasPreviousAnswerIssue.value) return;
+  activeAnswerIssueIndex.value -= 1;
+  focusActiveAnswerTextarea();
+}
+
+function showNextAnswerIssue() {
+  if (!hasNextAnswerIssue.value) return;
+  activeAnswerIssueIndex.value += 1;
+  focusActiveAnswerTextarea();
+}
 const evidenceRequestSet = computed(
   () => hearing.value?.evidence_request_set || hearing.value?.evidenceRequestSet || null,
 );
@@ -944,7 +1039,7 @@ const statementComplete = computed(
   () =>
     issueGuidanceItems.value.length > 0 &&
     issueGuidanceItems.value.every((issue) =>
-      Boolean(String(answerTexts[issue.questionId] || "").trim()),
+      Boolean(String(answerTexts[issueAnswerKey(issue)] || "").trim()),
     ),
 );
 const stageDockMode = computed(() => {
@@ -1122,6 +1217,12 @@ const liveTranscriptItems = computed(() => {
       .map((message) => transcriptTextForMessage(message))
       .filter(Boolean)
       .join("\n\n");
+    const isFormalJuryReport = group.messages.some(
+      (message) => messageType(message) === "JURY_REVIEW_REPORT",
+    );
+    const juryPayload = isFormalJuryReport
+      ? juryReviewPayloadForMessage(lastMessage)
+      : null;
     return {
       id:
         group.groupable && group.runId
@@ -1135,13 +1236,18 @@ const liveTranscriptItems = computed(() => {
       badge: transcriptBadgeForMessage(firstMessage),
       time: transcriptTime(firstMessage.created_at || firstMessage.createdAt),
       text,
-      riskLevel: juryRiskLabel(messagePayload(lastMessage)?.risk_level),
-      confidenceScore: juryConfidenceLabel(messagePayload(lastMessage)?.confidence_score),
-      isFormalJuryReport: group.messages.some(
-        (message) => messageType(message) === "JURY_REVIEW_REPORT",
+      riskLevel: juryRiskLabel(juryReviewSource(juryPayload)?.risk_level),
+      confidenceScore: juryConfidenceLabel(
+        juryReviewSource(juryPayload)?.confidence_score,
       ),
+      juryHighestSeverity: juryHighestSeverity(juryPayload),
+      juryFindingCount: juryFindingCount(juryPayload),
+      juryRevisionCount: juryRevisionCount(juryPayload),
+      isFormalJuryReport,
       runId: group.runId || "",
       messageCount: group.messages.length,
+      messageType: type,
+      sequenceNo: messageSequence(firstMessage),
     };
   });
 });
@@ -1184,6 +1290,152 @@ const courtTranscriptItems = computed(() => [
   ...liveTranscriptItems.value,
   ...streamingTranscriptItems.value,
 ]);
+const preludeAgentItems = computed(() => {
+  const durablePrelude = liveTranscriptItems.value.filter(
+    (item) =>
+      item.messageType === "AGENT_MESSAGE" &&
+      !item.runId &&
+      PRELUDE_ROLE_ORDER.includes(item.type),
+  );
+  return PRELUDE_ROLE_ORDER.map((type) =>
+    durablePrelude.find((item) => item.type === type),
+  ).filter(Boolean);
+});
+const currentPreludeItem = computed(
+  () => preludeAgentItems.value[preludeReplay.currentIndex] || null,
+);
+const presentedCourtTranscriptItems = computed(() => {
+  if (!preludeReplay.active || !currentPreludeItem.value) {
+    return courtTranscriptItems.value;
+  }
+
+  const currentSequence = currentPreludeItem.value.sequenceNo;
+  const currentId = currentPreludeItem.value.id;
+  const preludeIndexById = new Map(
+    preludeAgentItems.value.map((item, index) => [item.id, index]),
+  );
+
+  return courtTranscriptItems.value
+    .filter(
+      (item) =>
+        Number.isFinite(item.sequenceNo) && item.sequenceNo <= currentSequence,
+    )
+    .map((item) => {
+      const preludeIndex = preludeIndexById.get(item.id);
+      if (item.id === currentId) {
+        return {
+          ...item,
+          text: transcriptCharacters(item.text)
+            .slice(0, preludeReplay.charactersShown)
+            .join(""),
+          presentationStreaming: true,
+          preludeState: "streaming",
+        };
+      }
+      return {
+        ...item,
+        presentationPrelude: true,
+        preludeState:
+          preludeIndex !== undefined && preludeIndex < preludeReplay.currentIndex
+            ? "complete"
+            : "context",
+      };
+    });
+});
+
+function clearPreludeReplayTimer() {
+  if (preludeReplayTimer !== null) {
+    window.clearTimeout(preludeReplayTimer);
+    preludeReplayTimer = null;
+  }
+}
+
+function reducedMotionRequested() {
+  if (typeof globalThis.matchMedia !== "function") return true;
+  return globalThis.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function finishPreludeReplay() {
+  clearPreludeReplayTimer();
+  preludeReplay.active = false;
+  preludeReplay.complete = true;
+  preludeReplay.currentIndex = PRELUDE_ROLE_ORDER.length - 1;
+  preludeReplay.charactersShown = transcriptCharacters(
+    preludeAgentItems.value.at(-1)?.text,
+  ).length;
+}
+
+function advancePreludeReplay() {
+  const nextIndex = preludeReplay.currentIndex + 1;
+  if (nextIndex >= preludeAgentItems.value.length) {
+    finishPreludeReplay();
+    return;
+  }
+  preludeReplay.currentIndex = nextIndex;
+  preludeReplay.charactersShown = 0;
+  void scrollTranscriptToLatest();
+  schedulePreludeReplayFrame();
+}
+
+function schedulePreludeReplayFrame() {
+  clearPreludeReplayTimer();
+  const item = currentPreludeItem.value;
+  if (!preludeReplay.active || !item) {
+    finishPreludeReplay();
+    return;
+  }
+  const characters = transcriptCharacters(item.text);
+  const targetDuration = PRELUDE_TARGET_DURATION_MS[item.type] || 1600;
+  const targetFrames = Math.max(1, Math.round(targetDuration / PRELUDE_FRAME_MS));
+  const charactersPerFrame = Math.max(1, Math.ceil(characters.length / targetFrames));
+
+  preludeReplayTimer = window.setTimeout(() => {
+    preludeReplay.charactersShown = Math.min(
+      characters.length,
+      preludeReplay.charactersShown + charactersPerFrame,
+    );
+    void scrollTranscriptToLatest();
+    if (preludeReplay.charactersShown >= characters.length) {
+      preludeReplayTimer = window.setTimeout(
+        advancePreludeReplay,
+        PRELUDE_GAP_MS,
+      );
+      return;
+    }
+    schedulePreludeReplayFrame();
+  }, PRELUDE_FRAME_MS);
+}
+
+function startPreludeReplay() {
+  if (historyMode.value) {
+    finishPreludeReplay();
+    return;
+  }
+  if (preludeReplayStarted || loadingState.messages) return;
+  if (hasSeenPreludeReplay()) {
+    preludeReplayStarted = true;
+    finishPreludeReplay();
+    return;
+  }
+  if (preludeAgentItems.value.length !== PRELUDE_ROLE_ORDER.length) {
+    preludeReplay.complete = true;
+    return;
+  }
+  preludeReplayStarted = true;
+  markPreludeReplaySeen();
+  if (reducedMotionRequested()) {
+    finishPreludeReplay();
+    return;
+  }
+  preludeReplay.active = true;
+  preludeReplay.complete = false;
+  preludeReplay.currentIndex = 0;
+  preludeReplay.charactersShown = 0;
+  void nextTick().then(() => {
+    if (courtTranscriptRail.value) courtTranscriptRail.value.scrollTop = 0;
+    schedulePreludeReplayFrame();
+  });
+}
 const juryAgentState = computed(() => {
   if (courtTranscriptItems.value.some((item) => item.isFormalJuryReport)) {
     return "HANDOFF";
@@ -1463,6 +1715,41 @@ function rawMessageText(message) {
   return message?.message_text || message?.messageText || message?.text || message?.content || "";
 }
 
+const FACT_REFERENCE_PATTERN = /\bFACT_[A-Za-z0-9]+\b/gu;
+const hearingFactDisplayById = computed(() => {
+  const orderedIds = [];
+  const labels = new Map();
+  const seen = new Set();
+  for (const message of hearingTranscriptMessages.value) {
+    const text = String(rawMessageText(message) || "");
+    for (const match of text.matchAll(
+      /\b(FACT_[A-Za-z0-9]+)\s*[（(]([^（）()\n]{2,48})[）)]/gu,
+    )) {
+      const label = match[2].trim();
+      if (label && !/^证据缺口/u.test(label)) labels.set(match[1], label);
+    }
+    for (const id of text.match(FACT_REFERENCE_PATTERN) || []) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      orderedIds.push(id);
+    }
+  }
+  return new Map(
+    orderedIds.map((id, index) => {
+      const ordinal = String(index + 1).padStart(2, "0");
+      const label = labels.get(id);
+      return [id, label ? `事实 ${ordinal}「${label}」` : `事实 ${ordinal}`];
+    }),
+  );
+});
+
+function displayHearingFactReferences(value) {
+  return String(value || "").replace(
+    FACT_REFERENCE_PATTERN,
+    (reference) => hearingFactDisplayById.value.get(reference) || "关联事实",
+  );
+}
+
 // 业务位置：【前端庭审】messagePayload：读取 房间消息和对话记录，并依据当前案件、角色和会话权限裁剪成可用输入。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function messagePayload(message) {
   const rawText = rawMessageText(message);
@@ -1536,21 +1823,80 @@ function juryRiskLabel(value) {
     LOW: "低风险",
     MEDIUM: "中风险",
     HIGH: "高风险",
-  }[normalized] || "中风险";
+  }[normalized] || "";
 }
 
 // 业务位置：【前端庭审】juryConfidenceLabel：围绕 人工审核关注点和陪审团提示 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function juryConfidenceLabel(value) {
   const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return "75/100";
+  if (!Number.isFinite(numeric)) return "";
   const score = numeric <= 1 ? numeric * 100 : numeric;
   return `${Math.round(score)}/100`;
+}
+
+const JURY_DIMENSION_LABELS = {
+  FACT_COMPLETENESS: "事实完整性",
+  EVIDENCE_CONSISTENCY: "证据一致性",
+  RULE_APPLICABILITY: "规则适用性",
+  PROCEDURAL_FAIRNESS: "程序公平性",
+  REMEDY_FEASIBILITY: "执行方案可行性",
+  RISK_AND_OMISSIONS: "风险与遗漏",
+};
+const JURY_SEVERITY_LABELS = {
+  BLOCKER: "阻断",
+  HIGH: "高",
+  MEDIUM: "中",
+  LOW: "低",
+};
+const JURY_SEVERITY_ORDER = { BLOCKER: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+
+function juryReviewSource(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  return payload.proposal && typeof payload.proposal === "object"
+    ? payload.proposal
+    : payload;
+}
+
+function juryReviewPayloadForMessage(message) {
+  return juryReviewReport.value || messagePayload(message);
+}
+
+function juryFindingCount(payload) {
+  const source = juryReviewSource(payload);
+  return Array.isArray(source?.findings) ? source.findings.length : 0;
+}
+
+function juryRevisionCount(payload) {
+  const source = juryReviewSource(payload);
+  return Array.isArray(source?.mandatory_revisions)
+    ? source.mandatory_revisions.length
+    : 0;
+}
+
+function juryHighestSeverity(payload) {
+  const source = juryReviewSource(payload);
+  const severities = Array.isArray(source?.findings)
+    ? source.findings.map((item) => String(item?.severity || "").toUpperCase())
+    : [];
+  const highest = severities.reduce(
+    (current, candidate) =>
+      (JURY_SEVERITY_ORDER[candidate] || 0) > (JURY_SEVERITY_ORDER[current] || 0)
+        ? candidate
+        : current,
+    "",
+  );
+  return JURY_SEVERITY_LABELS[highest] || "";
 }
 
 // 业务位置：【前端庭审】transcriptTextForMessage：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptTextForMessage(message) {
   if (messageType(message) === "JURY_REVIEW_REPORT") {
-    return formatJuryReviewReport(messagePayload(message), rawMessageText(message));
+    return displayHearingFactReferences(
+      formatJuryReviewReport(
+        juryReviewPayloadForMessage(message),
+        rawMessageText(message),
+      ),
+    );
   }
   const caseMatrix = embeddedReportPayload(message, "现宣读庭前双方案情矩阵");
   if (caseMatrix) return formatCaseMatrixReport(caseMatrix);
@@ -1561,9 +1907,9 @@ function transcriptTextForMessage(message) {
     messageSenderRole(message) === "EVIDENCE_CLERK" &&
     /^(证据书记官宣读证据卷宗|已完成证据装卷)/u.test(text)
   ) {
-    return compactEvidenceBootstrapReport(text);
+    return displayHearingFactReferences(compactEvidenceBootstrapReport(text));
   }
-  return stripTranscriptPreamble(text);
+  return displayHearingFactReferences(stripTranscriptPreamble(text));
 }
 
 // 庭审卡片只展示稳定、去重的证据摘要；完整矩阵与 A2A 报告仍由后端结构化卷宗提供。
@@ -1612,6 +1958,13 @@ function compactReportSection(value) {
   return characters.length > 84 ? `${characters.slice(0, 84).join("")}…` : normalized;
 }
 
+function fullReportSection(value) {
+  return cleanPublicReportText(value)
+    .replace(/^[\-—•·*\d.、\s]+/u, "")
+    .replace(/[；;,\s]+$/u, "")
+    .trim();
+}
+
 function reportTextOverlaps(left, right) {
   const normalize = (value) =>
     compactReportSection(value).replace(/[\s，。；：、,.!！?？…]/gu, "");
@@ -1639,41 +1992,90 @@ function uniqueReportItems(values, existing = []) {
 
 // 业务位置：【前端庭审】formatJuryReviewReport：将 人工审核关注点和陪审团提示 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function formatJuryReviewReport(payload, fallbackText = "") {
-  if (!payload) {
-    return compactReportSection(
+  const source = juryReviewSource(payload);
+  if (!source) {
+    return fullReportSection(
       stripTranscriptPreamble(
         displayRoomMessageText(sanitizeHearingCopy(fallbackText)),
       ),
     );
   }
-  const publicMessage = compactReportSection(
-    displayRoomMessageText(sanitizeHearingCopy(payload.public_message || "")),
+  const publicMessage = fullReportSection(
+    displayRoomMessageText(sanitizeHearingCopy(source.public_message || "")),
   );
-  if (publicMessage) return publicMessage;
-  const summary = compactReportSection(
-    displayRoomMessageText(sanitizeHearingCopy(payload.summary || "")),
+  const findings = Array.isArray(source.findings) ? source.findings : [];
+  const revisions = Array.isArray(source.mandatory_revisions)
+    ? source.mandatory_revisions
+    : [];
+  if (findings.length || revisions.length) {
+    const sections = [];
+    if (publicMessage) sections.push(`评审结论\n${publicMessage}`);
+    if (findings.length) {
+      const findingLines = findings.map((item, index) => {
+        const dimensionCode = String(item?.dimension || "").toUpperCase();
+        const severityCode = String(item?.severity || "").toUpperCase();
+        const heading = [
+          JURY_DIMENSION_LABELS[dimensionCode] || dimensionCode || `发现 ${index + 1}`,
+          JURY_SEVERITY_LABELS[severityCode] || severityCode,
+        ].filter(Boolean).join(" · ");
+        const assessment = fullReportSection(
+          displayRoomMessageText(sanitizeHearingCopy(item?.assessment || "")),
+        );
+        const basis = Array.isArray(item?.basis)
+          ? item.basis
+              .map((value) => fullReportSection(
+                displayRoomMessageText(sanitizeHearingCopy(value)),
+              ))
+              .filter(Boolean)
+          : [];
+        const details = [`${index + 1}. 【${heading}】${assessment}`];
+        if (basis.length) details.push(`依据：${basis.join("；")}`);
+        if (item?.requires_revision === true) details.push("结论：需要修订");
+        return details.join("\n");
+      });
+      sections.push(`逐项评审（${findings.length} 项）\n${findingLines.join("\n\n")}`);
+    }
+    if (revisions.length) {
+      const revisionLines = revisions
+        .map((item, index) => {
+          const text = fullReportSection(
+            displayRoomMessageText(sanitizeHearingCopy(item)),
+          );
+          return text ? `${index + 1}. ${text}` : "";
+        })
+        .filter(Boolean);
+      if (revisionLines.length) {
+        sections.push(`强制修订（${revisionLines.length} 项）\n${revisionLines.join("\n")}`);
+      }
+    }
+    return sections.join("\n\n");
+  }
+
+  const summary = fullReportSection(
+    displayRoomMessageText(sanitizeHearingCopy(source.summary || publicMessage || "")),
   );
-  const recommendations = Array.isArray(payload.recommendations)
-    ? payload.recommendations
-    : payload.recommendation
-      ? [payload.recommendation]
+  const recommendations = Array.isArray(source.recommendations)
+    ? source.recommendations
+    : source.recommendation
+      ? [source.recommendation]
       : [];
-  const conciseRecommendations = uniqueReportItems(
-    recommendations.map((item) =>
+  const conciseRecommendations = recommendations
+    .map((item) => fullReportSection(
       displayRoomMessageText(sanitizeHearingCopy(item)),
-    ),
-    [summary],
-  ).slice(0, 3);
-  const reviewNotes = uniqueReportItems(
-    [displayRoomMessageText(sanitizeHearingCopy(payload.review_notes || ""))],
-    [summary, ...conciseRecommendations],
-  )[0];
+    ))
+    .filter((item, index, values) => item && values.indexOf(item) === index)
+    .slice(0, 3);
+  const reviewNotes = fullReportSection(
+    displayRoomMessageText(sanitizeHearingCopy(source.review_notes || "")),
+  );
   const parts = [summary];
   if (conciseRecommendations.length) {
     parts.push(`复核建议：${conciseRecommendations.join("；")}`);
   }
-  if (reviewNotes) parts.push(`补充说明：${reviewNotes}`);
-  return parts.filter(Boolean).join(" ") || "AI 评审员已完成复核，报告已交由法官参考。";
+  if (reviewNotes && !reportTextOverlaps(summary, reviewNotes)) {
+    parts.push(`补充说明：${reviewNotes}`);
+  }
+  return parts.filter(Boolean).join("\n\n") || "AI 评审员已完成复核，报告已交由法官参考。";
 }
 
 // 业务位置：【前端庭审】stripTranscriptPreamble：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -2215,7 +2617,10 @@ function ledgerItemForMessage(message) {
       id: message.id || `jury-${message.sequence_no || ""}`,
       title: "评审复核报告",
       status: "已交法官",
-      text: formatJuryReviewReport(messagePayload(message), rawMessageText(message)),
+      text: formatJuryReviewReport(
+        juryReviewPayloadForMessage(message),
+        rawMessageText(message),
+      ),
       statusCode: "JURY_REVIEW_REPORT",
       sequenceNo: message.sequence_no || message.sequenceNo || 0,
       tone: "jury",
@@ -2446,6 +2851,15 @@ async function resumeActiveHearingRuns() {
   await Promise.all((activeRuns || []).map((descriptor) =>
     consumeHearingAgentRun(descriptor, hearingAgentPresentation(descriptor)),
   ));
+}
+
+function canConsumeHearingRunEvent(payload) {
+  const descriptor = extractAgentRunDescriptor(payload);
+  return Boolean(
+    descriptor &&
+      descriptor.streamAccess === "ACTOR_VISIBLE" &&
+      descriptor.streamUrl,
+  );
 }
 
 // 业务位置：【前端庭审】hearingAgentPresentation：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -2832,10 +3246,12 @@ function startEventStream() {
         const payload = caseEventPayload(event);
         const operation = String(payload.operation || "").toUpperCase();
         if (HEARING_FLOW_AGENT_OPERATIONS.has(operation)) {
-          void consumeHearingAgentRun(
-            payload,
-            hearingAgentPresentation(payload),
-          ).catch(() => {});
+          if (canConsumeHearingRunEvent(payload)) {
+            void consumeHearingAgentRun(
+              payload,
+              hearingAgentPresentation(payload),
+            ).catch(() => {});
+          }
           void resumeActiveHearingRuns().catch(() => {});
         }
       }
@@ -2951,6 +3367,11 @@ watch(hearingStreamingRuns, () => {
   void scrollTranscriptToLatest();
 }, { deep: true });
 
+watch(
+  () => preludeAgentItems.value.map((item) => item.id).join("|"),
+  () => startPreludeReplay(),
+);
+
 watch(historyMode, (historical) => {
   if (!historical) {
     draftStatusSyncEnabled = true;
@@ -2963,6 +3384,7 @@ watch(historyMode, (historical) => {
     }
     return;
   }
+  finishPreludeReplay();
   draftStatusSyncEnabled = false;
   cancelDraftStatusRetry();
   eventAbortController.abort();
@@ -2981,7 +3403,8 @@ watch(historyMode, (historical) => {
 onMounted(async () => {
   window.addEventListener("keydown", handleCourtroomKeydown);
   startEvidenceDrawerBreakpointObserver();
-  await load();
+  const loaded = await load();
+  if (loaded) startPreludeReplay();
   if (!historyMode.value && (
     props.eventStreamer ||
     props.initialHearing === null ||
@@ -3004,6 +3427,7 @@ onBeforeUnmount(() => {
   eventAbortController.abort();
   clearAgentStreams({ caseId: caseId.value, roomType: "HEARING" });
   clearInterval(stageClockTimer);
+  clearPreludeReplayTimer();
 });
 </script>
 
@@ -3205,7 +3629,11 @@ onBeforeUnmount(() => {
 
       <section
         class="courtroom-center courtroom-center--compact-stage"
-        :class="{ 'courtroom-center--without-input': !isCaseParty }"
+        :class="{
+          'courtroom-center--without-input': !isCaseParty,
+          'courtroom-center--answer-workbench':
+            isCaseParty && flowStageCode === 'PARTY_ANSWERS_OPEN' && !currentActorSubmitted,
+        }"
         :data-has-input-dock="isCaseParty"
       >
         <section
@@ -3259,18 +3687,26 @@ onBeforeUnmount(() => {
 
         </section>
 
-        <section class="court-transcript" data-court-transcript>
+        <section
+          class="court-transcript"
+          data-court-transcript
+          :data-prelude-replay="preludeReplay.active ? 'active' : preludeReplay.complete ? 'complete' : 'idle'"
+        >
           <div
             ref="courtTranscriptRail"
             class="court-transcript__messages"
             data-transcript-scroll-rail="true"
           >
-            <template v-for="item in courtTranscriptItems" :key="item.id">
+            <template v-for="item in presentedCourtTranscriptItems" :key="item.id">
               <div
                 v-if="item.type === 'system'"
                 class="court-system-notice"
+                :class="{
+                  'court-system-notice--prelude-reveal': item.presentationPrelude,
+                }"
                 data-court-system-notice
                 :data-court-message-id="item.id"
+                :data-prelude-state="item.preludeState || undefined"
                 role="status"
               >
                 <time>{{ item.time }}</time>
@@ -3290,18 +3726,20 @@ onBeforeUnmount(() => {
                 ['user', 'merchant'].includes(item.type) ? 'court-message--party-statement-card' : '',
                 ['user', 'merchant'].includes(item.type) ? 'court-message--soft-party-card' : '',
                 ['judge', 'jury', 'intake', 'clerk', 'user', 'merchant'].includes(item.type) ? 'court-message--flexible-height-card' : '',
+                item.presentationPrelude || item.presentationStreaming ? 'court-message--prelude-reveal' : '',
                 ]"
                 :data-court-message="item.type"
                 :data-court-message-id="item.id"
                 :data-long-transcript="isLongTranscript(item)"
-                :data-streaming="item.isStreaming ? 'true' : undefined"
+                :data-streaming="item.isStreaming || item.presentationStreaming ? 'true' : undefined"
+                :data-prelude-state="item.preludeState || undefined"
                 :data-agent-run-id="item.runId || undefined"
                 :data-run-message-count="item.messageCount > 1 ? item.messageCount : undefined"
                 :data-agent-stream-card="item.isStreaming ? item.streamCardKey : undefined"
                 :data-agent-stream-status="item.isStreaming ? item.streamStatus : undefined"
                 :data-agent-streaming-message="item.isStreaming ? 'true' : undefined"
-                :aria-live="item.isStreaming ? 'polite' : undefined"
-                :aria-busy="item.isStreaming ? item.streamActive : undefined"
+                :aria-live="item.isStreaming || item.presentationStreaming ? 'polite' : undefined"
+                :aria-busy="item.isStreaming ? item.streamActive : item.presentationStreaming || undefined"
               >
               <header>
                 <strong>
@@ -3313,22 +3751,36 @@ onBeforeUnmount(() => {
                   />
                   <template v-else>{{ item.speaker }}</template>
                   <small v-if="transcriptBadgeForItem(item)">{{ transcriptBadgeForItem(item) }}</small>
-                  <span v-if="item.type === 'jury'" class="court-message__jury-tags" aria-label="评审辅助指标">
-                    <span>风险等级</span>
-                    <em>{{ item.riskLevel }}</em>
-                    <span>可信分</span>
-                    <em>{{ item.confidenceScore }}</em>
+                  <span
+                    v-if="item.type === 'jury' && (item.isStreaming || item.riskLevel || item.confidenceScore || item.juryHighestSeverity || item.juryFindingCount || item.juryRevisionCount)"
+                    class="court-message__jury-tags"
+                    aria-label="评审辅助指标"
+                  >
+                    <template v-if="item.isStreaming">
+                      <span>评审报告</span>
+                      <em>生成中</em>
+                    </template>
+                    <template v-else>
+                      <span v-if="item.juryHighestSeverity">最高问题等级</span>
+                      <em v-if="item.juryHighestSeverity">{{ item.juryHighestSeverity }}</em>
+                      <span v-if="item.juryFindingCount">{{ item.juryFindingCount }} 项发现</span>
+                      <span v-if="item.juryRevisionCount">{{ item.juryRevisionCount }} 项必改</span>
+                      <span v-if="item.riskLevel">风险等级</span>
+                      <em v-if="item.riskLevel">{{ item.riskLevel }}</em>
+                      <span v-if="item.confidenceScore">可信分</span>
+                      <em v-if="item.confidenceScore">{{ item.confidenceScore }}</em>
+                    </template>
                   </span>
                 </strong>
-                <span :class="{ 'court-message__stream-status': item.isStreaming }">
-                  {{ item.time }}
+                <span :class="{ 'court-message__stream-status': item.isStreaming || item.presentationStreaming }">
+                  {{ item.presentationStreaming ? "正在宣读" : item.time }}
                 </span>
               </header>
               <p>
                 <span v-if="item.text">{{ visibleTranscriptText(item) }}</span>
                 <span v-else class="court-message__stream-waiting">正在组织内容</span>
                 <i
-                  v-if="item.streamActive"
+                  v-if="item.streamActive || item.presentationStreaming"
                   class="court-message__stream-cursor"
                   aria-hidden="true"
                 ></i>
@@ -3375,13 +3827,24 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <section v-if="isCaseParty" class="stage-input-bar stage-input-bar--fixed-dock" data-stage-input-bar>
+        <section
+          v-if="isCaseParty"
+          class="stage-input-bar stage-input-bar--fixed-dock"
+          :class="{
+            'stage-input-bar--answer-workbench':
+              flowStageCode === 'PARTY_ANSWERS_OPEN' && !currentActorSubmitted,
+          }"
+          data-stage-input-bar
+        >
           <div
             class="stage-input-bar__body"
-            :class="{ 'stage-input-bar__body--with-header': isPartyInputStage(flowStageCode) }"
+            :class="{
+              'stage-input-bar__body--with-header':
+                isPartyInputStage(flowStageCode) && flowStageCode !== 'PARTY_ANSWERS_OPEN',
+            }"
           >
             <header
-              v-if="isPartyInputStage(flowStageCode)"
+              v-if="isPartyInputStage(flowStageCode) && flowStageCode !== 'PARTY_ANSWERS_OPEN'"
               class="stage-input-bar__header"
               data-stage-input-header
             >
@@ -3432,35 +3895,72 @@ onBeforeUnmount(() => {
               :data-current-party-role="role"
               @submit.prevent="submitPartyStatement"
             >
-              <div class="hearing-statement-workspace">
-                <section class="hearing-issue-guidance" data-hearing-issue-guidance>
+              <div
+                v-if="activeAnswerIssue"
+                class="hearing-answer-workbench"
+                data-hearing-answer-workbench
+              >
+                <section
+                  class="hearing-answer-question-card"
+                  data-hearing-issue-guidance
+                  data-hearing-issue
+                >
                   <header>
-                    <strong>{{ role === "MERCHANT" ? "商家回答" : "用户回答" }}</strong>
-                    <small>{{ issueGuidanceItems.length }} 个争议焦点</small>
+                    <span>争议焦点</span>
+                    <strong>{{ activeAnswerIssueIndex + 1 }} / {{ issueGuidanceItems.length }}</strong>
                   </header>
-                  <div class="hearing-issue-guidance__list">
-                    <article
-                      v-for="(issue, index) in issueGuidanceItems"
-                      :key="issue.id"
-                      data-hearing-issue
-                    >
-                      <span>焦点 {{ index + 1 }}</span>
-                      <strong>{{ issue.statement }}</strong>
-                      <p v-if="issue.prompt" data-hearing-party-prompt>{{ issue.prompt }}</p>
-                       <label class="hearing-party-statement-composer">
-                         <span>针对焦点 {{ index + 1 }} 的回答</span>
-                         <textarea
-                           v-model="answerTexts[issue.questionId]"
-                           :disabled="submittingAnswers"
-                           rows="3"
-                           maxlength="2000"
-                          :aria-label="`焦点 ${index + 1} 的本方回答`"
-                          :data-hearing-answer-question-id="issue.questionId"
-                          data-hearing-answer
-                          placeholder="请直接回答本争议点；如立场未变，也请明确写明沿用原立场及理由。"
-                        ></textarea>
-                      </label>
-                     </article>
+                  <div class="hearing-answer-question-card__scroll" data-hearing-question-scroll>
+                    <h3>{{ activeAnswerIssue.statement }}</h3>
+                    <p v-if="activeAnswerIssue.prompt" data-hearing-party-prompt>
+                      {{ activeAnswerIssue.prompt }}
+                    </p>
+                  </div>
+                </section>
+
+                <section class="hearing-answer-editor">
+                  <header>
+                    <div>
+                      <strong>{{ role === "MERCHANT" ? "商家回答" : "用户回答" }}</strong>
+                      <small>{{ completedAnswerCount }} / {{ issueGuidanceItems.length }} 已完成</small>
+                    </div>
+                    <nav class="hearing-answer-switcher" aria-label="切换争议焦点">
+                      <button
+                        type="button"
+                        :disabled="!hasPreviousAnswerIssue"
+                        aria-label="切换到上一个争议焦点"
+                        data-hearing-previous-issue
+                        @click="showPreviousAnswerIssue"
+                      >
+                        <span aria-hidden="true">&larr;</span>
+                      </button>
+                      <span>{{ activeAnswerIssueIndex + 1 }} / {{ issueGuidanceItems.length }}</span>
+                      <button
+                        type="button"
+                        :disabled="!hasNextAnswerIssue"
+                        aria-label="切换到下一个争议焦点"
+                        data-hearing-next-issue
+                        @click="showNextAnswerIssue"
+                      >
+                        <span aria-hidden="true">&rarr;</span>
+                      </button>
+                    </nav>
+                  </header>
+
+                  <label class="hearing-answer-editor__field">
+                    <textarea
+                      ref="activeAnswerTextarea"
+                      v-model="answerTexts[issueAnswerKey(activeAnswerIssue)]"
+                      :disabled="submittingAnswers"
+                      rows="4"
+                      maxlength="2000"
+                      :aria-label="`焦点 ${activeAnswerIssueIndex + 1} 的本方回答`"
+                      :data-hearing-answer-question-id="activeAnswerIssue.questionId"
+                      data-hearing-answer
+                      placeholder="请直接回答本争议点；如立场未变，也请明确写明沿用原立场及理由。"
+                    ></textarea>
+                  </label>
+
+                  <footer>
                     <p
                       v-if="issueGuidanceItems.length && !canSubmitAnswers"
                       class="hearing-issue-guidance__sync-note"
@@ -3468,28 +3968,28 @@ onBeforeUnmount(() => {
                     >
                       问题集正在完成正式绑定；可先填写，绑定完成后即可一次提交。
                     </p>
-                    <p
-                      v-if="!issueGuidanceItems.length"
-                      class="hearing-issue-guidance__empty"
-                      data-hearing-party-prompt-empty
+                    <p v-else>提交后本方输入关闭，待另一方提交后统一公开。</p>
+                    <button
+                      type="button"
+                      class="stage-input-bar__submit"
+                      data-submit-answer-bundle
+                      data-submit-party-statement
+                      :disabled="submittingAnswers || !statementComplete || !canSubmitAnswers"
+                      @click="submitPartyStatement()"
                     >
-                      当前没有本方定向提示
-                    </p>
-                  </div>
+                      {{ submittingAnswers ? "正在提交…" : "提交本方回答" }}
+                    </button>
+                  </footer>
                 </section>
               </div>
-              <div class="stage-input-bar__submit-column">
-                <p>提交后本方输入关闭；待另一方提交后，双方陈述统一公开。</p>
-                <button
-                  type="button"
-                  class="stage-input-bar__submit"
-                  data-submit-answer-bundle
-                  data-submit-party-statement
-                  :disabled="submittingAnswers || !statementComplete || !canSubmitAnswers"
-                  @click="submitPartyStatement()"
-                >
-                  {{ submittingAnswers ? "正在提交…" : "提交本方回答" }}
-                </button>
+
+              <div
+                v-else
+                class="hearing-answer-workbench__empty"
+                data-hearing-party-prompt-empty
+              >
+                <strong>当前没有本方定向问题</strong>
+                <small>问题集完成绑定后，这里会显示可回答的争议焦点。</small>
               </div>
             </form>
             <div
@@ -4518,6 +5018,9 @@ onBeforeUnmount(() => {
 .courtroom-center--compact-stage {
   align-content: stretch;
 }
+.courtroom-center--answer-workbench {
+  grid-template-rows: 128px minmax(0, 1fr) 180px;
+}
 .hearing-stage-dock {
   --stage-accent: #4f98bd;
   box-sizing: border-box;
@@ -5024,9 +5527,55 @@ onBeforeUnmount(() => {
   border-radius: 1px;
   animation: court-message-stream-cursor .8s steps(1, end) infinite;
 }
+.court-message--intake .court-message__stream-cursor {
+  background: #4e9178;
+}
+.court-message--clerk .court-message__stream-cursor {
+  background: #4e83c4;
+}
+.court-message--judge .court-message__stream-cursor {
+  background: #5a527f;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .court-message--prelude-reveal {
+    animation: court-prelude-card-in .42s cubic-bezier(.16, 1, .3, 1) both;
+  }
+  .court-system-notice--prelude-reveal {
+    animation: court-prelude-notice-in .28s ease-out both;
+  }
+}
+@keyframes court-prelude-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes court-prelude-notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
 @keyframes court-message-stream-cursor {
   0%, 45% { opacity: 1; }
   46%, 100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .court-message--prelude-reveal,
+  .court-system-notice--prelude-reveal {
+    animation: none;
+  }
+  .court-message__stream-cursor {
+    animation: none;
+  }
 }
 .court-message__expand {
   align-self: flex-start;
@@ -5346,6 +5895,12 @@ onBeforeUnmount(() => {
   max-height: 154px;
   overflow: hidden;
 }
+.stage-input-bar--fixed-dock.stage-input-bar--answer-workbench {
+  height: 180px;
+  min-height: 180px;
+  max-height: 180px;
+  padding: 7px 16px 8px;
+}
 .stage-input-bar__body {
   min-width: 0;
 }
@@ -5420,6 +5975,13 @@ onBeforeUnmount(() => {
   height: 100px;
   min-height: 0;
   margin-top: 8px;
+}
+.stage-input-bar--fixed-dock.stage-input-bar--answer-workbench .stage-input-bar__composer {
+  grid-template-columns: minmax(0, 1fr);
+  height: 164px;
+  min-height: 164px;
+  max-height: 164px;
+  margin-top: 0;
 }
 .stage-input-bar__sealed-status,
 .stage-input-bar__final-status {
@@ -5810,6 +6372,225 @@ onBeforeUnmount(() => {
   background: #fff;
   border-color: #cfddeb;
   border-radius: 9px;
+}
+.hearing-answer-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, .82fr) minmax(0, 1.18fr);
+  gap: 0;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+.hearing-answer-question-card,
+.hearing-answer-editor {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+.hearing-answer-question-card {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 4px;
+  padding: 2px 2px 2px;
+  border-right: 1px solid #dce7ef;
+}
+.hearing-answer-question-card > header {
+  padding-right: 10px;
+}
+.hearing-answer-question-card > header,
+.hearing-answer-editor > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+.hearing-answer-question-card > header span {
+  color: #2f638a;
+  font-size: 10px;
+  font-weight: 900;
+}
+.hearing-answer-question-card > header strong {
+  color: #5b7189;
+  font-size: 10px;
+  font-weight: 900;
+}
+.hearing-answer-question-card__scroll {
+  min-height: 0;
+  padding-right: 9px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #9bafc2 transparent;
+  scrollbar-width: thin;
+}
+.hearing-answer-question-card__scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.hearing-answer-question-card__scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.hearing-answer-question-card__scroll::-webkit-scrollbar-thumb {
+  background: #9bafc2;
+  border-radius: 999px;
+}
+.hearing-answer-question-card__scroll::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+.hearing-answer-question-card__scroll h3 {
+  margin: 0;
+  color: #263c58;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.45;
+}
+.hearing-answer-question-card__scroll p {
+  padding: 3px 0 0 8px;
+  margin: 6px 0 0;
+  color: #536b84;
+  background: transparent;
+  border-left: 2px solid #7fb4d5;
+  border-radius: 0;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.hearing-answer-editor {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 5px;
+  padding: 2px 2px 2px 14px;
+}
+.hearing-answer-editor > header > div:first-child {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+}
+.hearing-answer-editor > header strong {
+  color: #2c435e;
+  font-size: 12px;
+  font-weight: 900;
+}
+.hearing-answer-editor > header small {
+  color: #687f97;
+  font-size: 10px;
+  font-weight: 800;
+}
+.hearing-answer-switcher {
+  display: grid;
+  grid-template-columns: 26px auto 26px;
+  gap: 4px;
+  align-items: center;
+}
+.hearing-answer-switcher > span {
+  min-width: 34px;
+  color: #536b84;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 900;
+}
+.hearing-answer-switcher button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  place-items: center;
+  color: #245f88;
+  background: #edf6fc;
+  border: 1px solid #c8deed;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1;
+  transition: transform .16s ease, background-color .16s ease, border-color .16s ease;
+}
+.hearing-answer-switcher button:hover:not(:disabled) {
+  background: #e2f1fb;
+  border-color: #9fc7df;
+}
+.hearing-answer-switcher button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.hearing-answer-switcher button:focus-visible {
+  outline: 3px solid #8ec5e36b;
+  outline-offset: 2px;
+}
+.hearing-answer-switcher button:disabled {
+  color: #9caabc;
+  cursor: not-allowed;
+  opacity: .55;
+}
+.hearing-answer-editor__field {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+  min-width: 0;
+  min-height: 0;
+}
+.stage-input-bar--fixed-dock.stage-input-bar--answer-workbench .hearing-answer-editor textarea {
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  padding: 8px 10px;
+  overflow: auto;
+  color: #263a54;
+  background: #f8fbfe;
+  border: 1px solid #c8d9e8;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.45;
+  resize: none;
+}
+.stage-input-bar--fixed-dock.stage-input-bar--answer-workbench .hearing-answer-editor textarea:focus {
+  background: #fff;
+  border-color: #6ba9cf;
+  outline: 3px solid #83bddc38;
+}
+.hearing-answer-editor > footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 138px;
+  gap: 8px;
+  align-items: center;
+}
+.hearing-answer-editor > footer p {
+  overflow: hidden;
+  margin: 0;
+  color: #677d94;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+.hearing-answer-editor > footer .hearing-issue-guidance__sync-note {
+  padding: 4px 7px;
+  color: #765e36;
+  background: #fff9ea;
+  border: 1px solid #eedcae;
+  border-radius: 7px;
+}
+.hearing-answer-editor > footer .stage-input-bar__submit {
+  min-height: 34px;
+  padding: 7px 10px;
+  border-radius: 11px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.hearing-answer-workbench__empty {
+  display: grid;
+  gap: 4px;
+  height: 100%;
+  place-content: center;
+  color: #526981;
+  text-align: center;
+}
+.hearing-answer-workbench__empty small {
+  color: #71849a;
 }
 .hearing-evidence-request-panel {
   display: grid;
@@ -6237,15 +7018,31 @@ onBeforeUnmount(() => {
     grid-template-columns: minmax(0, 1fr) 104px;
     gap: 8px;
   }
-  .hearing-statement-workspace {
-    grid-template-columns: minmax(120px, .75fr) minmax(0, 1.25fr);
-    gap: 7px;
+  .courtroom-center--answer-workbench {
+    grid-template-rows: 128px minmax(0, 1fr) 360px;
   }
-  .hearing-issue-guidance {
-    padding-right: 7px;
+  .stage-input-bar--fixed-dock.stage-input-bar--answer-workbench {
+    height: 360px;
+    min-height: 360px;
+    max-height: 360px;
   }
-  .stage-input-bar--fixed-dock .stage-input-bar__composer textarea {
-    padding: 11px 12px;
+  .stage-input-bar--fixed-dock.stage-input-bar--answer-workbench .stage-input-bar__composer {
+    height: 344px;
+    min-height: 344px;
+    max-height: 344px;
+  }
+  .hearing-answer-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, .82fr) minmax(0, 1.18fr);
+    gap: 0;
+  }
+  .hearing-answer-question-card {
+    padding: 3px 2px 10px;
+    border-right: 0;
+    border-bottom: 1px solid #dce7ef;
+  }
+  .hearing-answer-editor {
+    padding: 10px 2px 2px;
   }
   .hearing-ledger ol {
     grid-template-columns: 1fr;

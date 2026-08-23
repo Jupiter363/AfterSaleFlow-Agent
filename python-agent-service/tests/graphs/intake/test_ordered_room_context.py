@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -19,6 +20,7 @@ from app.agents.dispute_intake_officer.schemas import (
 )
 from app.agents.dispute_intake_officer.skills.dossier import dossier_skill
 from app.agents.dispute_intake_officer.workflow import (
+    build_intake_turn_context_pack,
     project_intake_case_detail_output,
 )
 from app.harness.context_pack import build_context_pack
@@ -92,10 +94,7 @@ def _initiator_v3_payload() -> dict[str, object]:
                 "sequence": 3,
                 "kind": "PARTY_POSITIONS",
                 "value": {
-                    "user_claim": "用户称尚未收到订单。",
-                    "merchant_claim": "商家尚未直接回应。",
                     "initiator_position": "用户要求退款。",
-                    "respondent_position": "商家尚未直接回应。",
                     "platform_observation": "目前仅有用户单方陈述。",
                 },
             },
@@ -110,14 +109,7 @@ def _initiator_v3_payload() -> dict[str, object]:
                         "requested_items": None,
                         "request_reason": "订单未在承诺时间内送达。",
                         "normalized_statement": "用户要求对未按时送达的订单退款。",
-                    },
-                    "respondent_attitude": {
-                        "respondent_role": "MERCHANT",
-                        "source_attribution": "NO_DIRECT_POSITION",
-                        "attitude": "NOT_RESPONDED",
-                        "position": "商家尚未在接待室表达态度。",
-                        "alternative_proposal": None,
-                    },
+                    }
                 },
             },
             {
@@ -194,10 +186,62 @@ def _initiator_v3_payload() -> dict[str, object]:
     }
 
 
+def _respondent_v3_payload() -> dict[str, object]:
+    payload = _initiator_v3_payload()
+    payload["ordered_sections"][2]["value"] = {
+        "respondent_position": "商家仅补充本方直接回应。",
+        "platform_observation": "平台仅整理当前被发起方的直接陈述。",
+    }
+    payload["ordered_sections"][3]["value"] = {
+        "respondent_attitude": {
+            "respondent_role": "MERCHANT",
+            "source_attribution": "NO_DIRECT_POSITION",
+            "attitude": "NOT_RESPONDED",
+            "position": "本轮未表达处理态度。",
+            "alternative_proposal": None,
+        }
+    }
+    return payload
+
+
+def test_ordered_room_matrix_rebinds_only_unique_case_drifted_summary_keys() -> None:
+    payload = _initiator_v3_payload()
+    matrix = payload["ordered_sections"][0]["value"]
+    matrix["fact_rows"][0]["fact_key"] = "FACT_ORDER_REF"
+    matrix["summary_source_fact_keys"] = ["FACt_ORDER_REF"]
+
+    normalized = IntakeInitiatorRoomLlmOutputV3.model_validate(payload)
+
+    assert normalized.ordered_sections[0].value.summary_source_fact_keys == [
+        "FACT_ORDER_REF"
+    ]
+
+    ambiguous = copy.deepcopy(payload)
+    ambiguous_matrix = ambiguous["ordered_sections"][0]["value"]
+    second_row = copy.deepcopy(ambiguous_matrix["fact_rows"][0])
+    second_row["fact_key"] = "FACT_order_ref"
+    second_row["fact_target"] = "订单引用是否与另一个大小写不同的事实键相同"
+    ambiguous_matrix["fact_rows"].append(second_row)
+    ambiguous_matrix["summary_source_fact_keys"] = ["FaCt_ORDER_REF"]
+
+    with pytest.raises(
+        ValidationError,
+        match="summary_source_fact_keys must reference at least one delta fact",
+    ):
+        IntakeInitiatorRoomLlmOutputV3.model_validate(ambiguous)
+
+
 def test_intake_room_v3_contract_places_reply_first_and_evaluation_last() -> None:
     schema = IntakeInitiatorRoomLlmOutputV3.model_json_schema()
+    serialized_schema = json.dumps(schema, sort_keys=True)
 
     assert list(schema["properties"]) == ["room_utterance", "ordered_sections"]
+    assert "respondent_attitude" not in serialized_schema
+    assert "respondent_claim" not in serialized_schema
+    assert "respondent_position" not in serialized_schema
+    assert "user_claim" not in serialized_schema
+    assert "merchant_claim" not in serialized_schema
+    assert "INITIATOR_REPORTED" not in serialized_schema
     assert INTAKE_ROOM_SECTION_KINDS == (
         "CASE_MATRIX",
         "CASE_STORY",
@@ -220,6 +264,29 @@ def test_intake_room_v3_contract_places_reply_first_and_evaluation_last() -> Non
         all("$ref" in branch["prefixItems"][index] for index in (0, 7, 8, 9))
         for branch in section_schema["anyOf"]
     )
+
+    injected_counterparty_claim = _initiator_v3_payload()
+    injected_counterparty_claim["ordered_sections"][0]["value"][
+        "respondent_claim"
+    ] = {
+        "attitude": "AGREE",
+        "position_summary": "用户转述商家同意退款。",
+    }
+    with pytest.raises(ValidationError):
+        IntakeInitiatorRoomLlmOutputV3.model_validate(injected_counterparty_claim)
+
+
+def test_initiator_provider_schema_keeps_reported_and_direct_opponent_positions_distinct() -> None:
+    schema = IntakeInitiatorRoomLlmOutputV3.model_json_schema()
+
+    utterance_description = schema["properties"]["room_utterance"]["description"]
+    sections_description = schema["properties"]["ordered_sections"]["description"]
+
+    assert "voluntarily reports what the merchant/opponent previously said" in utterance_description
+    assert "never treat it as the opponent's direct position" in utterance_description
+    assert "not a completeness gap" in utterance_description
+    assert "An attributed counterparty report remains part of the initiator's narrative" in sections_description
+    assert "direct opponent positions are collected only in the respondent turn" in sections_description
 
 
 def test_intake_room_v3_provider_schema_binds_readiness_before_streaming() -> None:
@@ -346,6 +413,142 @@ def test_intake_context_retention_is_separate_from_physical_prompt_order() -> No
     ]
 
 
+def test_initiator_context_exposes_only_the_initiator_persisted_position() -> None:
+    case_id = "CASE_INITIATOR_CONTEXT_ISOLATION"
+    initial_request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "EXTERNAL_IMPORT",
+            "initial_case_facts": {
+                "form_source": "EXTERNAL_IMPORT",
+                "form_description": "用户称订单未发货并要求取消。",
+                "order_reference": "ORDER_CONTEXT_ISOLATION",
+                "initiator_role": "USER",
+                "respondent_attitude_seed": {
+                    "respondent_role": "MERCHANT",
+                    "attitude": "AGREE",
+                    "position": "用户转述商家已经同意取消。",
+                    "source": "发起方单方陈述（主观）",
+                    "confidence": 0.8,
+                },
+            },
+            "agent_context": _agent_context(case_id=case_id, role="USER"),
+        }
+    )
+    initial_sections = {
+        section.name: json.loads(section.content)
+        for section in build_intake_turn_context_pack(
+            initial_request
+        ).prompt_sections()
+    }
+    assert "respondent_attitude_seed" not in initial_sections["initial_case_facts"]
+
+    previous_request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_INITIATOR_CONTEXT_ISOLATION",
+                "sequence_no": 3,
+                "role": "USER",
+                "source": "ROOM_MESSAGE",
+                "text": "我要求取消订单并退款。",
+            },
+            "previous_case_detail": {
+                "schema_version": "intake_case_detail.v1",
+                "party_positions": {
+                    "user_claim": "用户要求取消订单并退款。",
+                    "merchant_claim": "用户转述商家已经同意取消。",
+                    "initiator_position": "用户要求取消订单并退款。",
+                    "respondent_position": "用户转述商家已经同意取消。",
+                    "platform_observation": "平台仅整理当前方陈述。",
+                },
+                "respondent_attitude": {
+                    "respondent_role": "MERCHANT",
+                    "attitude": "AGREE",
+                    "position": "用户转述商家已经同意取消。",
+                    "source": "发起方单方陈述（主观）",
+                    "confidence": 0.8,
+                },
+            },
+            "agent_context": _agent_context(case_id=case_id, role="USER"),
+        }
+    )
+
+    sections = {
+        section.name: json.loads(section.content)
+        for section in build_intake_turn_context_pack(
+            previous_request
+        ).prompt_sections()
+    }
+
+    previous = sections["previous_dispute_outline"]
+    assert "respondent_attitude" not in previous
+    assert previous["party_positions"] == {
+        "user_claim": "用户要求取消订单并退款。",
+        "initiator_position": "用户要求取消订单并退款。",
+        "platform_observation": "平台仅整理当前方陈述。",
+    }
+
+
+def test_respondent_context_uses_frozen_initiator_position_not_reported_opponent_claim() -> None:
+    case_id = "CASE_RESPONDENT_CONTEXT_ISOLATION"
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_RESPONDENT_CONTEXT_ISOLATION",
+                "sequence_no": 2,
+                "role": "MERCHANT",
+                "source": "ROOM_MESSAGE",
+                "text": "我方确认订单尚未发货并同意取消。",
+            },
+            "previous_case_detail": {
+                "schema_version": "intake_case_detail.v1",
+                "case_fact_matrix": {
+                    "schema_version": "case_fact_matrix.v2",
+                    "matrix_id": "MATRIX_CONTEXT_ISOLATION",
+                    "matrix_version": 1,
+                    "matrix_kind": "WORKING",
+                    "party_map": {
+                        "initiator_role": "USER",
+                        "respondent_role": "MERCHANT",
+                    },
+                    "claims": {
+                        "initiator_claim": {
+                            "initiator_role": "USER",
+                            "requested_resolution": "CANCEL_ORDER",
+                            "reason_summary": "用户称订单尚未发货。",
+                            "position_summary": "用户要求取消订单。",
+                        },
+                        "respondent_reported_by_initiator": {
+                            "respondent_role": "MERCHANT",
+                            "attitude": "AGREE",
+                            "position_summary": "用户转述商家同意取消。",
+                            "source_type": "INITIATOR_REPORTED",
+                        },
+                    },
+                    "fact_rows": [],
+                },
+            },
+            "agent_context": _agent_context(case_id=case_id, role="MERCHANT"),
+        }
+    )
+
+    sections = {
+        section.name: json.loads(section.content)
+        for section in build_intake_turn_context_pack(request).prompt_sections()
+    }
+    claims = sections["frozen_case_matrix"]["claims"]
+
+    assert claims["initiator_claim"]["position_summary"] == "用户要求取消订单。"
+    assert "respondent_reported_by_initiator" not in claims
+
+
 def test_v3_projection_preserves_model_evaluation_without_legacy_recalculation() -> None:
     case_id = "CASE_ORDERED_ROOM_SCORE"
     request = IntakeTurnRequest.model_validate(
@@ -382,6 +585,21 @@ def test_v3_projection_preserves_model_evaluation_without_legacy_recalculation()
     assert quality["score_breakdown"] == output.ordered_sections[-1].value.score_breakdown.model_dump()
     assert quality["improvement_reason"] == "仍需补充异常发现时间。"
     assert projected["missing_fields"] == ["异常发现时间"]
+    assert projected["scroll_snapshot"]["party_positions"] == {
+        "user_claim": "用户要求退款。",
+        "merchant_claim": "尚未直接陈述",
+        "raw_statement": "",
+        "platform_observation": "目前仅有用户单方陈述。",
+        "initiator_position": "用户要求退款。",
+        "respondent_position": "尚未直接陈述",
+    }
+    assert projected["scroll_snapshot"]["respondent_attitude"] == {
+        "respondent_role": "MERCHANT",
+        "attitude": "NOT_RESPONDED",
+        "position": "尚未直接陈述",
+        "source": "尚未回应",
+        "confidence": 0.5,
+    }
 
 
 def test_v3_direct_binding_uses_typed_model_authority_without_regex(
@@ -481,20 +699,35 @@ def test_v3_direct_binding_uses_typed_model_authority_without_regex(
     }
 
     wrong_binding = {**binding, "source_quote": "当前消息中不存在的引文"}
-    with pytest.raises(AgentOutputSchemaError) as failure:
-        negative_detail = copy.deepcopy(model_detail)
-        dossier_skill._bind_model_trusted_respondent_attitude(
-            negative_detail,
-            request,
-            copy.deepcopy(request.previous_case_detail or {}),
-            copy.deepcopy(model_detail),
-            matrix,
-            wrong_binding,
-        )
-    assert failure.value.safe_code == "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    rebound_detail = copy.deepcopy(model_detail)
+    dossier_skill._bind_model_trusted_respondent_attitude(
+        rebound_detail,
+        request,
+        copy.deepcopy(request.previous_case_detail or {}),
+        copy.deepcopy(model_detail),
+        matrix,
+        wrong_binding,
+    )
+    assert rebound_detail["respondent_attitude"] == detail["respondent_attitude"]
+
+    no_binding_detail = copy.deepcopy(model_detail)
+    dossier_skill._bind_model_trusted_respondent_attitude(
+        no_binding_detail,
+        request,
+        copy.deepcopy(request.previous_case_detail or {}),
+        copy.deepcopy(model_detail),
+        matrix,
+        None,
+    )
+    assert no_binding_detail["respondent_attitude"] == detail["respondent_attitude"]
+
+    invalid_matrix = matrix.model_dump(mode="json")
+    invalid_matrix["respondent_claim"]["attitude"] = "UNRECOGNIZED"
+    with pytest.raises(ValueError):
+        CaseFactMatrixDeltaV2.model_validate(invalid_matrix)
 
 
-def test_v3_direct_binding_ignores_known_historical_extras_but_requires_current_authority() -> None:
+def test_v3_direct_binding_ignores_model_source_binding_and_uses_current_message() -> None:
     case_id = "CASE_ORDERED_ROOM_LINK_SUBSET"
     current_text = (
         "现阶段不同意直接退货退款，但同意核验宣传参数依据和检测方法。"
@@ -622,38 +855,32 @@ def test_v3_direct_binding_ignores_known_historical_extras_but_requires_current_
 
     unknown_binding = copy.deepcopy(binding)
     unknown_binding["linked_fact_keys"][-1] = "FACT_UNKNOWN"
-    with pytest.raises(AgentOutputSchemaError) as unknown_failure:
-        dossier_skill._bind_model_trusted_respondent_attitude(
-            copy.deepcopy(model_detail),
-            request,
-            copy.deepcopy(request.previous_case_detail or {}),
-            copy.deepcopy(model_detail),
-            matrix,
-            unknown_binding,
-        )
-    assert (
-        unknown_failure.value.safe_code
-        == "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    unknown_detail = copy.deepcopy(model_detail)
+    dossier_skill._bind_model_trusted_respondent_attitude(
+        unknown_detail,
+        request,
+        copy.deepcopy(request.previous_case_detail or {}),
+        copy.deepcopy(model_detail),
+        matrix,
+        unknown_binding,
     )
+    assert unknown_detail["respondent_attitude"] == first["respondent_attitude"]
 
     historical_only_binding = copy.deepcopy(binding)
     historical_only_binding["linked_fact_keys"] = ["FACT_PREVIOUS_REFUND"]
-    with pytest.raises(AgentOutputSchemaError) as historical_failure:
-        dossier_skill._bind_model_trusted_respondent_attitude(
-            copy.deepcopy(model_detail),
-            request,
-            copy.deepcopy(request.previous_case_detail or {}),
-            copy.deepcopy(model_detail),
-            matrix,
-            historical_only_binding,
-        )
-    assert (
-        historical_failure.value.safe_code
-        == "INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED"
+    historical_detail = copy.deepcopy(model_detail)
+    dossier_skill._bind_model_trusted_respondent_attitude(
+        historical_detail,
+        request,
+        copy.deepcopy(request.previous_case_detail or {}),
+        copy.deepcopy(model_detail),
+        matrix,
+        historical_only_binding,
     )
+    assert historical_detail["respondent_attitude"] == first["respondent_attitude"]
 
 
-def test_respondent_turn_projects_frozen_claim_and_keeps_reported_attitude_attribution() -> None:
+def test_respondent_turn_generates_only_own_view_and_server_copies_frozen_claim() -> None:
     case_id = "CASE_ORDERED_ROOM_CROSS_PARTY_AUTHORITY"
     frozen_claim = {
         "initiator_role": "USER",
@@ -666,6 +893,10 @@ def test_respondent_turn_projects_frozen_claim_and_keeps_reported_attitude_attri
     previous = {
         "schema_version": "intake_case_detail.v1",
         "claim_resolution": copy.deepcopy(frozen_claim),
+        "party_positions": {
+            "initiator_position": "用户主张商品实际性能与宣传不符并要求退货退款。",
+            "user_claim": "用户主张商品实际性能与宣传不符并要求退货退款。",
+        },
         "case_fact_matrix": {
             "schema_version": "case_fact_matrix.v2",
             "party_map": {
@@ -698,8 +929,18 @@ def test_respondent_turn_projects_frozen_claim_and_keeps_reported_attitude_attri
             "request_reason": "核心性能未达到宣传标准",
         }
     }
-    provider_payload = _initiator_v3_payload()
+    provider_payload = _respondent_v3_payload()
+    provider_payload["ordered_sections"][2]["value"]["respondent_position"] = (
+        "商家同意标准复检，复检不达标时同意退货退款。"
+    )
     matrix = provider_payload["ordered_sections"][0]["value"]
+    matrix["fact_rows"][0].update(
+        {
+            "fact_target": "商家是否提出标准复检方案",
+            "position_summary": "商家同意标准复检，复检不达标时同意退货退款。",
+            "asserted_value": "标准复检",
+        }
+    )
     matrix["respondent_claim"] = {
         "attitude": "ALTERNATIVE_PROPOSED",
         "position_summary": "商家同意标准复检，复检不达标时同意退货退款。",
@@ -713,9 +954,6 @@ def test_respondent_turn_projects_frozen_claim_and_keeps_reported_attitude_attri
         },
     }
     claim_and_response = provider_payload["ordered_sections"][3]["value"]
-    claim_and_response["claim_resolution"] = copy.deepcopy(
-        provider_detail["claim_resolution"]
-    )
     claim_and_response["respondent_attitude"] = {
         "respondent_role": "MERCHANT",
         "source_attribution": "RESPONDENT_DIRECT",
@@ -727,13 +965,29 @@ def test_respondent_turn_projects_frozen_claim_and_keeps_reported_attitude_attri
     respondent_schema = respondent_output_type.model_json_schema()
     Draft202012Validator.check_schema(respondent_schema)
     assert len(respondent_schema["properties"]["ordered_sections"]["anyOf"]) == 4
+    assert "claim_resolution" not in json.dumps(respondent_schema, sort_keys=True)
+    assert "initiator_position" not in json.dumps(respondent_schema, sort_keys=True)
+    assert "INITIATOR_REPORTED" not in json.dumps(respondent_schema, sort_keys=True)
 
-    with pytest.raises(ValidationError):
-        respondent_output_type.model_validate(provider_payload)
-    provider_payload["ordered_sections"][3]["value"]["claim_resolution"] = (
+    injected_opponent_view = copy.deepcopy(provider_payload)
+    injected_opponent_view["ordered_sections"][3]["value"]["claim_resolution"] = (
         copy.deepcopy(frozen_claim)
     )
-    assert respondent_output_type.model_validate(provider_payload)
+    with pytest.raises(ValidationError):
+        respondent_output_type.model_validate(injected_opponent_view)
+    validated_provider_output = respondent_output_type.model_validate(provider_payload)
+    materialized_provider_output = materialize_intake_case_detail_output(
+        respondent_request,
+        validated_provider_output,
+    )
+    assert materialized_provider_output.case_detail["claim_resolution"] == frozen_claim
+    assert materialized_provider_output.case_detail["party_positions"] == {
+        "user_claim": "用户主张商品实际性能与宣传不符并要求退货退款。",
+        "merchant_claim": "商家同意标准复检，复检不达标时同意退货退款。",
+        "initiator_position": "用户主张商品实际性能与宣传不符并要求退货退款。",
+        "respondent_position": "商家同意标准复检，复检不达标时同意退货退款。",
+        "platform_observation": "平台仅整理当前被发起方的直接陈述。",
+    }
 
     first = copy.deepcopy(provider_detail)
     dossier_skill._bind_model_trusted_claim_authority(
@@ -796,7 +1050,7 @@ def test_respondent_turn_projects_frozen_claim_and_keeps_reported_attitude_attri
     assert no_direct_response["respondent_attitude"] == {
         "respondent_role": "MERCHANT",
         "attitude": "NOT_RESPONDED",
-        "position": "商家尚未在接待室表达态度。",
+        "position": "尚未直接陈述",
         "source": "尚未回应",
         "confidence": 0.5,
     }
@@ -822,6 +1076,10 @@ def test_v3_fact_key_normalization_rebinds_private_respondent_source() -> None:
                 "claim_resolution": {
                     "initiator_role": "USER",
                     "requested_resolution": "REFUND",
+                    "requested_amount": None,
+                    "requested_items": None,
+                    "request_reason": "订单未按时送达。",
+                    "normalized_statement": "用户要求退款。",
                 },
                 "case_fact_matrix": {
                     "schema_version": "case_fact_matrix.v2",
@@ -834,7 +1092,7 @@ def test_v3_fact_key_normalization_rebinds_private_respondent_source() -> None:
             "agent_context": _agent_context(case_id=case_id, role="MERCHANT"),
         }
     )
-    provider_payload = _initiator_v3_payload()
+    provider_payload = _respondent_v3_payload()
     matrix = provider_payload["ordered_sections"][0]["value"]
     matrix["fact_rows"] = [
         {

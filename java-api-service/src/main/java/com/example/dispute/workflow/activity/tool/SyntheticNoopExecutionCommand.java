@@ -53,8 +53,8 @@ public record SyntheticNoopExecutionCommand(
         requireSyntheticRef(packetRef, "packetRef");
         requirePattern(packetHash, HASH, "packetHash");
         requirePattern(requestHash, HASH, "requestHash");
-        if (epoch < 1) {
-            throw new IllegalArgumentException("epoch must be positive");
+        if (epoch < 0) {
+            throw new IllegalArgumentException("epoch must not be negative");
         }
         if (revision < 0) {
             throw new IllegalArgumentException("revision must not be negative");

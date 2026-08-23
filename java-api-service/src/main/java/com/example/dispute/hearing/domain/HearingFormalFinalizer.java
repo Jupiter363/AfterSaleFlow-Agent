@@ -89,7 +89,8 @@ public interface HearingFormalFinalizer {
                     : source == HearingFlowStage.PARTY_EVIDENCE_OPEN
                             ? HearingFlowActionType.EVIDENCE_BATCH : null;
             if (expected != actionType || !transition.actorId().equals(actorId)
-                    || !HearingFormalPayload.hashCanonical(payloadJson).equals(contentHash)) {
+                    || (actionType == HearingFlowActionType.ANSWER_BUNDLE
+                            && submissionStatus != HearingFlowSubmissionStatus.SUBMITTED)) {
                 throw new IllegalArgumentException("party adoption does not match its Hearing wait stage");
             }
             if (!actionType.acceptsSchemaVersion(schemaVersion)) {
@@ -143,7 +144,7 @@ public interface HearingFormalFinalizer {
 
     enum MatrixKind {
         INTAKE(HearingFlowStage.INTAKE_SYNTHESIZING, HearingFlowStage.EVIDENCE_REQUESTS_GENERATING,
-                "hearing_intake_synthesis.v1", "case_fact_matrix"),
+                "hearing_intake_synthesis.v5", "case_fact_matrix"),
         EVIDENCE(HearingFlowStage.EVIDENCE_SYNTHESIZING, HearingFlowStage.DOSSIER_FREEZING,
                 "hearing_evidence_synthesis.v1", "fact_evidence_matrix");
 
@@ -165,7 +166,7 @@ public interface HearingFormalFinalizer {
         public String schemaVersion() { return schemaVersion; }
         public String matrixField() { return matrixField; }
         public String matrixSchemaVersion() {
-            return this == INTAKE ? "case_fact_matrix.v2" : "fact_evidence_matrix.v2";
+            return this == INTAKE ? "case_fact_matrix.v2" : "fact_evidence_matrix.v3";
         }
     }
 
@@ -308,7 +309,7 @@ public interface HearingFormalFinalizer {
                     authorityCommit,
                     HearingAuthorityCommit.OperationType.FINALIZE,
                     authorityPrefix(authorityCommit) + authorityCommit.authority().stageSequence()
-                            + ":trial_dossier.v1:" + authorityCommit.requestHash());
+                            + ":trial_dossier.v2:" + authorityCommit.requestHash());
             HearingFormalPayload.requireDossier(
                     payloadJson,
                     dossierId,
@@ -490,7 +491,13 @@ public interface HearingFormalFinalizer {
             requireOperation(
                     authorityCommit,
                     HearingAuthorityCommit.OperationType.HANDOFF,
-                    authorityPrefix(authorityCommit) + judgeV2Id + ':' + judgeV2Hash);
+                    HearingFormalRequestHash.handoffOperationKey(
+                            authorityCommit.authority().tenantSurrogate(),
+                            authorityCommit.authority().caseId(),
+                            authorityCommit.authority().epochId(),
+                            authorityCommit.authority().roomEpoch(),
+                            judgeV2Id,
+                            judgeV2Hash));
             HearingFormalRequestHash.require(
                     authorityCommit,
                     "HANDOFF",

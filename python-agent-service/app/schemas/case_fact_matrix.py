@@ -102,7 +102,10 @@ class DirectRespondentPositionV2(StrictModel):
     attitude: ClaimAttitude
     position_summary: LongText
     alternative_proposal: LongText | None = None
-    source_type: Literal["RESPONDENT_DIRECT_INTAKE"] = "RESPONDENT_DIRECT_INTAKE"
+    source_type: Literal[
+        "RESPONDENT_DIRECT_INTAKE",
+        "RESPONDENT_DIRECT_HEARING",
+    ] = "RESPONDENT_DIRECT_INTAKE"
     source_refs: Annotated[list[Identifier], Field(min_length=1, max_length=50)]
 
 
@@ -294,12 +297,20 @@ class CaseFactMatrixDeltaV2(StrictModel):
                 raise ValueError("case fact delta keys must be unique")
 
         effective_keys = set(row_payloads)
+        keys_by_casefold: dict[str, list[str]] = {}
+        for fact_key in effective_keys:
+            keys_by_casefold.setdefault(fact_key.casefold(), []).append(fact_key)
         effective_summary_keys: list[str] = []
         seen_summary_keys: set[str] = set()
         for key in self.summary_source_fact_keys:
-            if key in effective_keys and key not in seen_summary_keys:
-                seen_summary_keys.add(key)
-                effective_summary_keys.append(key)
+            canonical_key: str | None = key if key in effective_keys else None
+            if canonical_key is None:
+                casefold_matches = keys_by_casefold.get(key.casefold(), [])
+                if len(casefold_matches) == 1:
+                    canonical_key = casefold_matches[0]
+            if canonical_key is not None and canonical_key not in seen_summary_keys:
+                seen_summary_keys.add(canonical_key)
+                effective_summary_keys.append(canonical_key)
         if not effective_summary_keys:
             raise ValueError(
                 "summary_source_fact_keys must reference at least one delta fact"

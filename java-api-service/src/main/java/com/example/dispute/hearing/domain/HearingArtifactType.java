@@ -1,10 +1,10 @@
 package com.example.dispute.hearing.domain;
 
-/** Immutable adjudication artifacts produced after trial_dossier.v1 is frozen. */
+/** Immutable adjudication artifacts produced after trial_dossier.v2 is frozen. */
 public enum HearingArtifactType {
-    JUDGE_PROPOSAL("judge_proposal.v1"),
+    JUDGE_PROPOSAL("judge_proposal.v2"),
     JURY_REVIEW_REPORT("jury_review_report.v1"),
-    ADJUDICATION_DRAFT("adjudication_draft.v2");
+    ADJUDICATION_DRAFT("adjudication_draft.v3");
 
     private final String schemaVersion;
 

@@ -560,46 +560,101 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             String traceId) {
         Set<String> allowed = visibleEvidenceIds(caseId, accessSession);
         allowed.retainAll(Set.copyOf(attachmentRefs));
-        Map<String, TargetEvidenceTurnResultV2.Frame> assessmentFrames =
-                result.frames().stream()
-                        .filter(frame -> "EVIDENCE_ASSESSMENT".equals(frame.frameType()))
-                        .collect(Collectors.toMap(
-                                frame -> frame.header().path("evidence_id").asText(""),
-                                frame -> frame,
-                                (left, right) -> { throw new IllegalStateException(
-                                        "duplicate v2 Evidence assessment frame"); },
-                                java.util.LinkedHashMap::new));
-        Set<String> supplied = new LinkedHashSet<>();
-        for (TargetEvidenceTurnResultV2.Frame frame : assessmentFrames.values()) {
-            supplied.add(frame.header().path("evidence_id").asText(""));
-        }
-        if (!supplied.equals(allowed)) {
+        if (!allowed.equals(Set.copyOf(attachmentRefs))) {
             throw new IllegalStateException(
-                    "v2 Evidence assessments must cover current attachments exactly once");
+                    "v3 Evidence attachments are outside current actor visibility");
         }
-        Set<String> reviewEvidenceIds = result.humanReviewTasks().stream()
-                .map(node -> node.path("evidence_id").asText(""))
-                .filter(value -> !value.isBlank())
-                .collect(Collectors.toSet());
-        for (TargetEvidenceTurnResultV2.Frame frame : assessmentFrames.values()) {
+        Map<String, JsonNode> observationsBySlot = new java.util.LinkedHashMap<>();
+        for (JsonNode observation : result.observationGraph()) {
+            observationsBySlot.put(
+                    observation.path("observation_slot").asText(""), observation);
+        }
+        for (TargetEvidenceTurnResultV2.Frame frame : result.frames()) {
+            if (!"EVIDENCE_ASSESSMENT".equals(frame.frameType())) {
+                continue;
+            }
             JsonNode header = frame.header();
             String evidenceId = header.path("evidence_id").asText("");
-            String authenticity = header.path("authenticity_status").asText("UNAVAILABLE");
-            EvidenceVerificationStatus status = switch (authenticity) {
-                case "PROVISIONALLY_CONSISTENT" -> EvidenceVerificationStatus.PLAUSIBLE;
-                case "ANOMALY_DETECTED" -> EvidenceVerificationStatus.SUSPICIOUS;
-                case "REQUIRES_HUMAN_REVIEW" -> EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW;
-                default -> EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW;
-            };
-            boolean requiresReview = status == EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW
-                    || reviewEvidenceIds.contains(evidenceId);
+            if (evidenceId.isBlank()) {
+                // Optional model fields bind as empty; there is no assessment
+                // row to persist, but the rest of the turn remains valid.
+                continue;
+            }
+            if (!allowed.contains(evidenceId)) {
+                throw new IllegalStateException(
+                        "v3 Evidence assessment is outside current actor attachment authority");
+            }
+            double authenticity = header.path("authenticity_score").doubleValue();
+            double relevance = header.path("relevance_score").doubleValue();
+            double completeness = header.path("completeness_score").doubleValue();
+            double confidence = header.path("assessment_confidence").doubleValue();
+            String riskLevel = header.path("risk_level").textValue();
+            var reasonDetails = objectMapper.createArrayNode();
+            appendReviewReason(
+                    reasonDetails,
+                    authenticity < 0.50,
+                    "LOW_AUTHENTICITY_SUSPECTED_FORGERY",
+                    "疑似造假：真实性评分低于 50%",
+                    header.path("authenticity_score_explanation").asText(""));
+            appendReviewReason(
+                    reasonDetails,
+                    relevance < 0.50,
+                    "LOW_RELEVANCE_SCORE",
+                    "关联度低：材料与待证事实的关联性评分低于 50%",
+                    header.path("relevance_score_explanation").asText(""));
+            appendReviewReason(
+                    reasonDetails,
+                    completeness < 0.50,
+                    "LOW_COMPLETENESS_SCORE",
+                    "完成度低：材料完整性评分偏低",
+                    header.path("completeness_score_explanation").asText(""));
+            appendReviewReason(
+                    reasonDetails,
+                    confidence < 0.50,
+                    "LOW_ASSESSMENT_CONFIDENCE",
+                    "置信度低：模型对本次核验的把握不足",
+                    header.path("assessment_confidence_explanation").asText(""));
+            appendReviewReason(
+                    reasonDetails,
+                    "HIGH".equals(riskLevel),
+                    "HIGH_RISK_FLAG",
+                    "模型综合判断该材料为高风险",
+                    header.path("risk_explanation").asText(""));
+            boolean requiresReview = !reasonDetails.isEmpty();
+            EvidenceVerificationStatus status = requiresReview
+                    ? EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW
+                    : "MEDIUM".equals(riskLevel)
+                            ? EvidenceVerificationStatus.SUSPICIOUS
+                            : EvidenceVerificationStatus.PLAUSIBLE;
+
+            var factLinks = objectMapper.createArrayNode();
+            for (JsonNode slotNode : header.path("observation_slots")) {
+                JsonNode observation = observationsBySlot.get(slotNode.asText(""));
+                if (observation == null) {
+                    continue;
+                }
+                for (JsonNode binding : observation.path("fact_bindings")) {
+                    ObjectNode link = binding.deepCopy();
+                    link.put("source_unit_id", observation.path("source_unit_id").asText(""));
+                    link.put("observation_slot", observation.path("observation_slot").asText(""));
+                    factLinks.add(link);
+                }
+            }
             ObjectNode findings = header.deepCopy();
-            findings.put("schema_version", "evidence-turn-result.v2");
+            findings.put("schema_version", "evidence-turn-result.v3");
+            findings.put("agent_run_id", runId);
+            findings.put("frame_id", frame.frameId());
+            findings.put("assessment_public_text", frame.publicText());
+            findings.put("verification_feedback", frame.publicText());
             findings.put("public_text_sha256", frame.publicTextSha256());
+            findings.put("requires_human_review", requiresReview);
+            findings.set("reason_details", reasonDetails.deepCopy());
+            findings.set("fact_links", factLinks);
             ObjectNode reasons = objectMapper.createObjectNode();
-            reasons.put("authenticity_status", authenticity);
-            reasons.put("source_chain_status", header.path("source_chain_status").asText());
-            reasons.put("formation_time_status", header.path("formation_time_status").asText());
+            reasons.put("schema_version", "evidence-review-reasons.v1");
+            reasons.put("summary", frame.publicText());
+            reasons.put("requires_human_review", requiresReview);
+            reasons.set("reason_details", reasonDetails.deepCopy());
             verificationRepository.save(
                     EvidenceVerificationEntity.create(
                             "VERIFICATION_" + compactUuid(),
@@ -607,7 +662,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                             evidenceId,
                             nextVerificationVersion(evidenceId),
                             status,
-                            json(Map.of("protocol", "evidence-turn-result.v2",
+                            json(Map.of("protocol", "evidence-turn-result.v3",
                                     "frame_id", frame.frameId(),
                                     "frame_sequence", frame.frameSequence())),
                             json(findings),
@@ -617,6 +672,21 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                             AGENT_SENDER_ID,
                             traceId));
         }
+    }
+
+    private void appendReviewReason(
+            com.fasterxml.jackson.databind.node.ArrayNode reasonDetails,
+            boolean triggered,
+            String code,
+            String label,
+            String explanation) {
+        if (!triggered) {
+            return;
+        }
+        ObjectNode detail = reasonDetails.addObject();
+        detail.put("code", code);
+        detail.put("label", label);
+        detail.put("explanation", explanation);
     }
 
     private RoomMessageView finalizeResult(

@@ -50,7 +50,6 @@ from app.graph_runtime.persistence_models import (
     GraphPersistenceConfigurationError,
     GraphPoolConfig,
     GraphReadinessConfig,
-    GraphReadinessReport,
 )
 from app.graph_runtime.postgres_bulkhead import (
     PostgresBulkheadConfig,
@@ -257,48 +256,6 @@ class _PersistenceReadinessProbe(Protocol):
     async def check(self) -> Any: ...
 
 
-class _CompositeGraphPersistenceReadinessProbe:
-    """Require both isolated pools before exposing one persistence readiness result."""
-
-    def __init__(
-        self,
-        *,
-        checkpoint_probe: _PersistenceReadinessProbe,
-        control_probe: _PersistenceReadinessProbe,
-        mode: GraphGatewayMode,
-    ) -> None:
-        self._checkpoint_probe = checkpoint_probe
-        self._control_probe = control_probe
-        self._mode = mode
-
-    async def check(self) -> Any:
-        if self._checkpoint_probe is self._control_probe:
-            return await self._checkpoint_probe.check()
-        checkpoint, control = await asyncio.gather(
-            self._checkpoint_probe.check(),
-            self._control_probe.check(),
-            return_exceptions=True,
-        )
-        for report in (checkpoint, control):
-            if isinstance(report, asyncio.CancelledError):
-                raise report
-        if isinstance(checkpoint, BaseException) or isinstance(control, BaseException):
-            return GraphReadinessReport(
-                ready=False,
-                mode=self._mode,
-                code="GRAPH_PERSISTENCE_CHECK_FAILED",
-                checks={
-                    "checkpoint_pool_ready": not isinstance(checkpoint, BaseException),
-                    "control_pool_ready": not isinstance(control, BaseException),
-                },
-            )
-        if not checkpoint.ready:
-            return checkpoint
-        if not control.ready:
-            return control
-        return checkpoint
-
-
 class GraphApplicationRuntime:
     """One process-lifetime pool, saver, gateway, key runtime, and admission gate."""
 
@@ -390,20 +347,19 @@ class GraphApplicationRuntime:
             settings.graph_database_dsn.get_secret_value(),
             pool_config,
         )
-        checkpoint_probe = GraphPersistenceReadinessProbe(
-            readiness_config,
+        readiness_pool = getattr(
+            checkpoint_runtime,
+            "readiness_pool",
             checkpoint_runtime.pool,
         )
-        control_pool = getattr(checkpoint_runtime, "control_pool", checkpoint_runtime.pool)
-        control_probe = (
-            checkpoint_probe
-            if control_pool is checkpoint_runtime.pool
-            else GraphPersistenceReadinessProbe(readiness_config, control_pool)
+        control_pool = getattr(
+            checkpoint_runtime,
+            "control_pool",
+            checkpoint_runtime.pool,
         )
-        probe = _CompositeGraphPersistenceReadinessProbe(
-            checkpoint_probe=checkpoint_probe,
-            control_probe=control_probe,
-            mode=mode,
+        probe = GraphPersistenceReadinessProbe(
+            readiness_config,
+            readiness_pool,
         )
         security_runtime: GraphSecurityRuntime | None = None
         durable_bulkhead: PostgresGraphFanoutBulkhead | None = None

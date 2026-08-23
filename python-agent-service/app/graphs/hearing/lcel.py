@@ -19,10 +19,22 @@ from app.graphs.hearing.contracts import (
     HEARING_MODEL_NODE_PROMPTS,
 )
 from app.graphs.hearing.errors import HearingLcelContractError
+from app.harness.context_pack import build_context_pack
+from app.harness.hearing_intake_context_v4 import (
+    HEARING_INTAKE_CONTEXT_V4_MAX_ESTIMATED_TOKENS,
+    HEARING_INTAKE_CONTEXT_V4_NODES,
+    assemble_hearing_intake_context_v4,
+)
+from app.harness.hearing_room_context_v3 import (
+    HEARING_ROOM_CONTEXT_V3_NODES,
+    assemble_hearing_room_context_v3,
+)
+from app.harness.invocation_context import AgentInvocationContext
 
 
 TOutput = TypeVar("TOutput", bound=BaseModel)
 _PROMPT_ROOT = Path(__file__).resolve().parents[2] / "agents" / "prompts"
+_ORDERED_CONTEXT_TAIL_NODES = frozenset({"hearing_judge_v1", "hearing_judge_v2"})
 
 
 class GovernedHearingModelAdapter(Runnable[PromptValue, AIMessage], Generic[TOutput]):
@@ -40,6 +52,7 @@ class GovernedHearingModelAdapter(Runnable[PromptValue, AIMessage], Generic[TOut
         node_name: str,
         output_type: type[TOutput],
         semantic_validator: Callable[[TOutput], TOutput] | None = None,
+        agent_context: AgentInvocationContext | None = None,
         tool_policy: tuple[()] = EMPTY_HEARING_TOOL_POLICY,
     ) -> None:
         if model_runner is None or not callable(getattr(model_runner, "invoke_structured", None)):
@@ -54,6 +67,7 @@ class GovernedHearingModelAdapter(Runnable[PromptValue, AIMessage], Generic[TOut
         self.node_name = node_name
         self.output_type = output_type
         self.semantic_validator = semantic_validator
+        self.agent_context = agent_context
         self.tool_policy = tool_policy
 
     def invoke(
@@ -103,11 +117,48 @@ class GovernedHearingModelAdapter(Runnable[PromptValue, AIMessage], Generic[TOut
         if not isinstance(case_data, dict):
             raise HearingLcelContractError("HEARING_PROMPT_PAYLOAD_INVALID")
 
+        invocation_case_data = case_data
+        context_pack = None
+        if self.node_name in HEARING_INTAKE_CONTEXT_V4_NODES:
+            assembled_v4 = assemble_hearing_intake_context_v4(self.node_name, case_data)
+            invocation_case_data = {
+                "context_contract": "hearing_intake_context.v4",
+                "agent_role": "INTAKE_OFFICER",
+                "stage_mode": assembled_v4.stage_mode,
+                "source_authority_hash": assembled_v4.source_authority_hash,
+            }
+            context_pack = build_context_pack(
+                self.node_name,
+                {"hearing_intake_context_v4": assembled_v4.payload},
+                required_section_names=frozenset({"hearing_intake_context_v4"}),
+            )
+        elif self.node_name in HEARING_ROOM_CONTEXT_V3_NODES:
+            assembled = assemble_hearing_room_context_v3(self.node_name, case_data)
+            invocation_case_data = {
+                "context_contract": "hearing_room_context.v3",
+                "agent_role": assembled.agent_role,
+                "stage_mode": assembled.stage_mode,
+                "source_authority_hash": assembled.source_authority_hash,
+            }
+            context_pack = build_context_pack(
+                self.node_name,
+                {"hearing_room_context_v3": assembled.payload},
+                required_section_names=frozenset({"hearing_room_context_v3"}),
+            )
+
         invocation: dict[str, Any] = {
             "node_name": self.node_name,
-            "case_data": case_data,
+            "case_data": invocation_case_data,
             "output_type": self.output_type,
         }
+        if context_pack is not None:
+            invocation["context_pack"] = context_pack
+        if self.node_name in HEARING_INTAKE_CONTEXT_V4_NODES:
+            invocation["max_input_tokens"] = (
+                HEARING_INTAKE_CONTEXT_V4_MAX_ESTIMATED_TOKENS
+            )
+        if self.agent_context is not None:
+            invocation["agent_context"] = self.agent_context
         if self.semantic_validator is not None:
             invocation["semantic_validator"] = self.semantic_validator
         return invocation
@@ -127,6 +178,7 @@ def build_hearing_lcel(
     node_name: str,
     output_type: type[TOutput],
     semantic_validator: Callable[[TOutput], TOutput] | None = None,
+    agent_context: AgentInvocationContext | None = None,
 ) -> HearingLcelFlow[TOutput]:
     relative_prompt = HEARING_MODEL_NODE_PROMPTS.get(node_name)
     if relative_prompt is None:
@@ -146,6 +198,7 @@ def build_hearing_lcel(
         node_name=node_name,
         output_type=output_type,
         semantic_validator=semantic_validator,
+        agent_context=agent_context,
     )
     parser = PydanticOutputParser(pydantic_object=output_type)
     runnable = cast(RunnableSequence, prompt | model | parser)
@@ -173,17 +226,19 @@ def invoke_hearing_lcel(
     case_data: dict[str, Any],
     output_type: type[TOutput],
     semantic_validator: Callable[[TOutput], TOutput] | None = None,
+    agent_context: AgentInvocationContext | None = None,
 ) -> TOutput:
     flow = build_hearing_lcel(
         model_runner=model_runner,
         node_name=node_name,
         output_type=output_type,
         semantic_validator=semantic_validator,
+        agent_context=agent_context,
     )
     encoded = json.dumps(
         case_data,
         ensure_ascii=False,
-        sort_keys=True,
+        sort_keys=node_name not in _ORDERED_CONTEXT_TAIL_NODES,
         separators=(",", ":"),
     )
     result = flow.runnable.invoke(
@@ -200,17 +255,19 @@ async def ainvoke_hearing_lcel(
     case_data: dict[str, Any],
     output_type: type[TOutput],
     semantic_validator: Callable[[TOutput], TOutput] | None = None,
+    agent_context: AgentInvocationContext | None = None,
 ) -> TOutput:
     flow = build_hearing_lcel(
         model_runner=model_runner,
         node_name=node_name,
         output_type=output_type,
         semantic_validator=semantic_validator,
+        agent_context=agent_context,
     )
     encoded = json.dumps(
         case_data,
         ensure_ascii=False,
-        sort_keys=True,
+        sort_keys=node_name not in _ORDERED_CONTEXT_TAIL_NODES,
         separators=(",", ":"),
     )
     result = await flow.runnable.ainvoke(

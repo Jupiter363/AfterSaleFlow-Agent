@@ -6,12 +6,14 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptSta
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunStreamProjection;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.activity.agent.AgentRunFinalizationFailureRecorder;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.Optional;
 
 /** Transactional port for one logical run and its ordered attempts. */
@@ -87,7 +89,54 @@ public interface AgentRunLedger {
             String logicalInputHash,
             int attemptLimit,
             Instant deadlineAt,
-            Instant createdAt) {}
+            Instant createdAt,
+            AgentRunStreamProjection streamProjection) {
+
+        public CreateLogicalRun(
+                String agentRunId,
+                String tenantSurrogate,
+                String caseId,
+                String roomId,
+                String operation,
+                String logicalIdempotencyKey,
+                AgentRunProtocol protocol,
+                AgentRunExecutorKind executorKind,
+                String roomEpochId,
+                RoomType roomType,
+                long roomEpoch,
+                long processRevision,
+                long fencingToken,
+                String requestHash,
+                String logicalInputHash,
+                int attemptLimit,
+                Instant deadlineAt,
+                Instant createdAt) {
+            this(
+                    agentRunId,
+                    tenantSurrogate,
+                    caseId,
+                    roomId,
+                    operation,
+                    logicalIdempotencyKey,
+                    protocol,
+                    executorKind,
+                    roomEpochId,
+                    roomType,
+                    roomEpoch,
+                    processRevision,
+                    fencingToken,
+                    requestHash,
+                    logicalInputHash,
+                    attemptLimit,
+                    deadlineAt,
+                    createdAt,
+                    AgentRunStreamProjection.BOUND_AUDIENCE);
+        }
+
+        public CreateLogicalRun {
+            Objects.requireNonNull(streamProjection, "streamProjection");
+        }
+    }
 
     record LogicalRun(
             String agentRunId,

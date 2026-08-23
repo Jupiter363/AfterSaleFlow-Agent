@@ -50,6 +50,7 @@ class JdbcTargetHearingPublicTranscriptCommitterTest {
   private static final String REQUEST_HASH = "b".repeat(64);
   private static final String RESULT_HASH = "c".repeat(64);
   private static final String AGENT_RUN_ID = "target-hearing-run:public-1";
+  private static final String AGENT_WORKFLOW_ID = "AGENT_RUN_" + AGENT_RUN_ID;
   private static final Instant COMMITTED_AT = Instant.parse("2030-01-02T03:04:05.123456Z");
   private static final Instant PARTY_COMMITTED_AT = COMMITTED_AT.plusSeconds(1);
 
@@ -96,6 +97,7 @@ class JdbcTargetHearingPublicTranscriptCommitterTest {
             dataSource, JsonMapper.builder().findAndAddModules().build(), notifications::add);
     HearingRoomStart start = start(3);
     assertThat(start.roomId()).isNotEqualTo(start.flowInstanceId());
+    assertThat(AGENT_WORKFLOW_ID).isNotEqualTo(start.roomId());
     HearingStageReceipt receipt = receipt();
     List<HearingPublicTranscriptPolicy.Draft> drafts = drafts();
 
@@ -480,9 +482,10 @@ class JdbcTargetHearingPublicTranscriptCommitterTest {
         CASE_ID,
         ROOM_ID);
     jdbc.update(
-        "insert into agent_run (id, case_id, workflow_id) values (?, ?, ?)",
+        "insert into agent_run (id, case_id, workflow_id, room_id) values (?, ?, ?, ?)",
         AGENT_RUN_ID,
         CASE_ID,
+        AGENT_WORKFLOW_ID,
         ROOM_ID);
     seedReceipt(receipt().committed(), COMMITTED_AT);
   }
@@ -578,7 +581,8 @@ class JdbcTargetHearingPublicTranscriptCommitterTest {
         create table agent_run (
           id varchar(128) primary key,
           case_id varchar(64),
-          workflow_id varchar(128))
+          workflow_id varchar(128),
+          room_id varchar(64))
         """);
     jdbc.execute(
         """

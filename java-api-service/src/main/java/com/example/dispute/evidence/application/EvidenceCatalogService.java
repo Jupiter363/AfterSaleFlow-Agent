@@ -140,8 +140,6 @@ public class EvidenceCatalogService {
                         .map(this::readJson)
                         .orElseGet(objectMapper::createObjectNode);
         JsonNode submissionMetadata = readJson(item.getMetadataJson());
-        Double confidenceScore = confidenceScore(agentFindings);
-        JsonNode humanReview = agentFindings.path("human_review");
         return new RoleScopedEvidenceView.Item(
                 item.getId(),
                 item.getEvidenceType(),
@@ -151,8 +149,6 @@ public class EvidenceCatalogService {
                 contentUrl,
                 !visible,
                 status,
-                confidenceScore,
-                confidenceLevel(agentFindings, confidenceScore),
                 verificationFeedback(agentFindings, reasons),
                 item.getSourceType(),
                 item.getOriginalFilename(),
@@ -161,29 +157,33 @@ public class EvidenceCatalogService {
                 item.getSubmittedAt(),
                 item.getSubmissionBatchId(),
                 score(agentFindings, "authenticity_score"),
+                textOrNull(agentFindings.path("authenticity_score_explanation")),
                 score(agentFindings, "relevance_score"),
+                textOrNull(agentFindings.path("relevance_score_explanation")),
                 score(agentFindings, "completeness_score"),
+                textOrNull(agentFindings.path("completeness_score_explanation")),
                 score(agentFindings, "assessment_confidence"),
-                textList(agentFindings.path("inspected_modalities")),
+                textOrNull(agentFindings.path("assessment_confidence_explanation")),
+                textOrNull(agentFindings.path("risk_level")),
+                textOrNull(agentFindings.path("risk_explanation")),
+                textList(agentFindings.path("source_basis")),
+                textOrNull(agentFindings.path("formation_time_assessment")),
+                assessmentFindings(agentFindings.path("findings")),
                 textList(agentFindings.path("limitations")),
+                textList(agentFindings.path("unsupported_claims")),
                 latestVerification
                         .map(EvidenceVerificationEntity::isRequiresHumanReview)
                         .orElse(false),
-                firstNonEmptyTextList(
-                        humanReview.path("reason_codes"),
-                        reasons.isArray()
-                                ? reasons
-                                : reasons.path("human_review_reason_codes")),
-                firstNonEmptyTextList(
-                        humanReview.path("instructions"),
-                        reasons.path("human_review_instructions")),
+                reviewReasonDetails(reasons.path("reason_details")),
                 textOrNull(submissionMetadata.path("claimed_fact")),
                 submissionMetadata.path("truth_attested").asBoolean(false),
                 textList(submissionMetadata.path("attestation_scope")),
                 textOrNull(submissionMetadata.path("party_capacity")),
                 textOrNull(submissionMetadata.path("attestation_version")),
                 textOrNull(submissionMetadata.path("forgery_consequence_code")),
-                textOrNull(submissionMetadata.path("enforcement_gate")));
+                textOrNull(submissionMetadata.path("enforcement_gate")),
+                textOrNull(agentFindings.path("schema_version")),
+                textOrNull(agentFindings.path("assessment_public_text")));
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCatalogService.readJson(String)」。
@@ -207,21 +207,6 @@ public class EvidenceCatalogService {
     // 上游调用：「EvidenceCatalogService.confidenceScore(JsonNode)」的上游调用点包括 「EvidenceCatalogService.project」。
     // 下游影响：「EvidenceCatalogService.confidenceScore(JsonNode)」向下依次触达 「Math.max」、「Math.min」、「agentFindings.isMissingNode」、「agentFindings.isNull」；计算结果以「Double」交给调用方。
     // 系统意义：「EvidenceCatalogService.confidenceScore(JsonNode)」负责主链路中的“可信度分数”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static Double confidenceScore(JsonNode agentFindings) {
-        if (agentFindings == null || agentFindings.isMissingNode() || agentFindings.isNull()) {
-            return null;
-        }
-        JsonNode value = firstPresent(agentFindings, "confidence_score", "confidence");
-        if (value == null || !value.isNumber()) {
-            return null;
-        }
-        double score = value.asDouble();
-        if (score > 1.0) {
-            return Math.max(0.0, Math.min(1.0, score / 100.0));
-        }
-        return Math.max(0.0, Math.min(1.0, score));
-    }
-
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCatalogService.score(JsonNode,String)」。
     // 具体功能：「EvidenceCatalogService.score(JsonNode,String)」：构建分数；实际协作者为 「Math.max」、「Math.min」、「agentFindings.isMissingNode」、「agentFindings.isNull」，最终返回「Double」。
     // 上游调用：「EvidenceCatalogService.score(JsonNode,String)」的上游调用点包括 「EvidenceCatalogService.project」。
@@ -235,18 +220,7 @@ public class EvidenceCatalogService {
         if (!value.isNumber()) {
             return null;
         }
-        double score = value.asDouble();
-        return Math.max(0.0, Math.min(1.0, score > 1.0 ? score / 100.0 : score));
-    }
-
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCatalogService.firstNonEmptyTextList(JsonNode,JsonNode)」。
-    // 具体功能：「EvidenceCatalogService.firstNonEmptyTextList(JsonNode,JsonNode)」：构建首版非为空文本列表；实际协作者为 「textList」，最终返回「List<String>」。
-    // 上游调用：「EvidenceCatalogService.firstNonEmptyTextList(JsonNode,JsonNode)」的上游调用点包括 「EvidenceCatalogService.project」。
-    // 下游影响：「EvidenceCatalogService.firstNonEmptyTextList(JsonNode,JsonNode)」向下依次触达 「textList」；计算结果以「List<String>」交给调用方。
-    // 系统意义：「EvidenceCatalogService.firstNonEmptyTextList(JsonNode,JsonNode)」负责主链路中的“首版非为空文本列表”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static List<String> firstNonEmptyTextList(JsonNode primary, JsonNode fallback) {
-        List<String> values = textList(primary);
-        return values.isEmpty() ? textList(fallback) : values;
+        return value.asDouble();
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCatalogService.textList(JsonNode)」。
@@ -269,34 +243,43 @@ public class EvidenceCatalogService {
         return List.copyOf(values);
     }
 
+    private static List<RoleScopedEvidenceView.AssessmentFinding> assessmentFindings(
+            JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<RoleScopedEvidenceView.AssessmentFinding> values = new ArrayList<>();
+        node.forEach(
+                item ->
+                        values.add(
+                                new RoleScopedEvidenceView.AssessmentFinding(
+                                        item.path("finding_type").asText(""),
+                                        item.path("description").asText(""))));
+        return List.copyOf(values);
+    }
+
+    private static List<RoleScopedEvidenceView.ReviewReasonDetail> reviewReasonDetails(
+            JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<RoleScopedEvidenceView.ReviewReasonDetail> values = new ArrayList<>();
+        node.forEach(
+                item ->
+                        values.add(
+                                new RoleScopedEvidenceView.ReviewReasonDetail(
+                                        item.path("code").asText(""),
+                                        item.path("label").asText(""),
+                                        item.path("explanation").asText(""))));
+        return List.copyOf(values);
+    }
+
     private static String textOrNull(JsonNode node) {
         if (node == null || node.isMissingNode() || node.isNull()) {
             return null;
         }
         String value = node.asText("").trim();
         return value.isBlank() ? null : value;
-    }
-
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCatalogService.confidenceLevel(JsonNode,Double)」。
-    // 具体功能：「EvidenceCatalogService.confidenceLevel(JsonNode,Double)」：构建可信度级别；实际协作者为 「explicit.isTextual」、「explicit.asText」、「firstPresent」；处理的关键状态/协议值包括 「confidence_level」、「confidenceLevel」、「HIGH」、「MEDIUM」，最终返回「String」。
-    // 上游调用：「EvidenceCatalogService.confidenceLevel(JsonNode,Double)」的上游调用点包括 「EvidenceCatalogService.project」。
-    // 下游影响：「EvidenceCatalogService.confidenceLevel(JsonNode,Double)」向下依次触达 「explicit.isTextual」、「explicit.asText」、「firstPresent」；计算结果以「String」交给调用方。
-    // 系统意义：「EvidenceCatalogService.confidenceLevel(JsonNode,Double)」负责主链路中的“可信度级别”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static String confidenceLevel(JsonNode agentFindings, Double confidenceScore) {
-        JsonNode explicit = firstPresent(agentFindings, "confidence_level", "confidenceLevel");
-        if (explicit != null && explicit.isTextual() && !explicit.asText().isBlank()) {
-            return explicit.asText();
-        }
-        if (confidenceScore == null) {
-            return null;
-        }
-        if (confidenceScore >= 0.8) {
-            return "HIGH";
-        }
-        if (confidenceScore >= 0.5) {
-            return "MEDIUM";
-        }
-        return "LOW";
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCatalogService.verificationFeedback(JsonNode,JsonNode)」。
@@ -310,6 +293,7 @@ public class EvidenceCatalogService {
                         agentFindings,
                         "verification_feedback",
                         "verificationFeedback",
+                        "assessment_public_text",
                         "suggestion",
                         "summary");
         if (feedback != null && feedback.isTextual() && !feedback.asText().isBlank()) {

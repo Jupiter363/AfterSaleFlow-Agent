@@ -157,17 +157,26 @@ public class EvidenceDossierQueryService {
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierQueryService.readMatrix(String)」。
-    // 具体功能：「EvidenceDossierQueryService.readMatrix(String)」：读取矩阵：先把 JSON 文本解析为可逐字段校验的 JsonNode；实际协作者为 「objectMapper.readTree」、「node.isObject」、「objectMapper.convertValue」、「node.path("fact_evidence_matrix").isArray」；不满足前置条件时抛出 「IllegalStateException」；处理的关键状态/协议值包括 「fact_evidence_matrix」，最终返回「List<Map<String, Object>>」。
+    // 具体功能：「EvidenceDossierQueryService.readMatrix(String)」：从 v3 卷宗包装中读取唯一正式 fact_evidence_matrix 对象，不回退到旧数组投影。
     // 上游调用：「EvidenceDossierQueryService.readMatrix(String)」的上游调用点包括 「EvidenceDossierQueryService.view」。
     // 下游影响：「EvidenceDossierQueryService.readMatrix(String)」向下依次触达 「objectMapper.readTree」、「node.isObject」、「objectMapper.convertValue」、「node.path("fact_evidence_matrix").isArray」；计算结果以「List<Map<String, Object>>」交给调用方。
     // 系统意义：「EvidenceDossierQueryService.readMatrix(String)」统一“矩阵”的跨层表示，避免不同入口产生不兼容字段；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private List<Map<String, Object>> readMatrix(String json) {
+    private Map<String, Object> readMatrix(String json) {
         try {
             JsonNode node = objectMapper.readTree(json);
-            JsonNode matrix =
-                    node.isObject() && node.path("fact_evidence_matrix").isArray()
-                            ? node.path("fact_evidence_matrix")
-                            : node;
+            if (!node.isObject()
+                    || !"evidence-dossier-matrix-summary.v3"
+                            .equals(node.path("schema_version").asText())
+                    || !node.path("fact_evidence_matrix").isObject()
+                    || !"fact_evidence_matrix.v3"
+                            .equals(
+                                    node.path("fact_evidence_matrix")
+                                            .path("schema_version")
+                                            .asText())) {
+                throw new IllegalStateException(
+                        "frozen dossier does not contain fact_evidence_matrix.v3");
+            }
+            JsonNode matrix = node.path("fact_evidence_matrix");
             return objectMapper.convertValue(matrix, new TypeReference<>() {});
         } catch (IllegalArgumentException | JsonProcessingException exception) {
             throw new IllegalStateException("invalid dossier projection", exception);

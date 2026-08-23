@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -16,12 +17,17 @@ from app.llm import (
     LiteLlmProxyClient,
 )
 from app.schemas.final_agents import EvidenceTurnLlmOutput
-from app.streaming import AgentStreamObserver, bind_stream_observer
+from app.streaming import AgentStreamObserver, VisibleFieldSpec, bind_stream_observer
 
 
 class SimpleStructuredOutput(BaseModel):
     requires_supplemental_evidence: bool
     gaps: list[dict[str, object]]
+
+
+class RegeneratedStreamOutput(BaseModel):
+    room_utterance: str
+    required_value: int
 
 
 class _ChunkedByteStream(httpx.SyncByteStream):
@@ -53,6 +59,7 @@ def _structured_stream_body(
     *,
     finish_reason: str | None,
     include_done: bool = True,
+    include_usage: bool = False,
 ) -> bytes:
     choice: dict[str, object] = {"delta": {"content": content}}
     if finish_reason is not None:
@@ -65,9 +72,39 @@ def _structured_stream_body(
         )
         + "\n\n"
     ]
+    if include_usage:
+        events.append(
+            "data: "
+            + json.dumps(
+                {
+                    "model": "qwen3.7-plus",
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 5,
+                        "completion_tokens": 3,
+                        "total_tokens": 8,
+                    },
+                }
+            )
+            + "\n\n"
+        )
     if include_done:
         events.append("data: [DONE]\n\n")
     return "".join(events).encode()
+
+
+def _governed_stream_request() -> GovernedProviderRequest:
+    return GovernedProviderRequest(
+        provider="litellm",
+        model="qwen3.7-plus",
+        temperature=0,
+        max_output_tokens=6_144,
+        response_format="STRICT_JSON_SCHEMA",
+        tool_allowlist=(),
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+        provider_attempts_remaining=2,
+        repairs_remaining=0,
+    )
 
 
 def test_stream_line_parser_yields_the_first_complete_upstream_line_immediately() -> None:
@@ -79,14 +116,15 @@ def test_stream_line_parser_yields_the_first_complete_upstream_line_immediately(
 
 
 # 所属模块：LLM 网关测试 > 接待节点单次调用预算与严格 Schema。
-# 具体功能：验证 intake_turn_case_detail 使用固定模型、6144 输出预算、关闭 Thinking，并把本地测试 Schema 以 strict json_schema response_format 发给供应商。
-# 上下游：上游直接调用 LiteLlmProxyClient 请求体构造器；下游断言不会为接待提取任务使用裁判级输出预算，且 Schema 名称与正文正确。
-# 系统意义：防止配置回归导致首个可见 Token 过慢，也确保流开始前供应商已收到字段/枚举约束，降低最终 Pydantic 失败率。
-def test_intake_generation_uses_a_bounded_single_call_budget() -> None:
+# 具体功能：验证开启 Thinking 时，intake_turn_case_detail 使用可覆盖推理用量的受控输出预算，并把本地测试 Schema 以 strict json_schema response_format 发给供应商。
+# 上下游：上游直接调用 LiteLlmProxyClient 请求体构造器；下游断言请求预算与运行时治理配置一致，且 Schema 名称与正文正确。
+# 系统意义：避免供应商把推理 Token 计入 completion_tokens 后，完整且合法的接待结果被后置治理误拒绝。
+def test_intake_generation_uses_a_thinking_compatible_bounded_budget() -> None:
     client = LiteLlmProxyClient(
         "http://litellm:4000",
         "qwen3.7-plus",
         "test-master-key",
+        enable_thinking=True,
     )
 
     body = client._completion_request_body(
@@ -99,14 +137,142 @@ def test_intake_generation_uses_a_bounded_single_call_budget() -> None:
     )
 
     assert body["model"] == "qwen3.7-plus"
-    assert body["max_tokens"] == 6_144
-    assert body["enable_thinking"] is False
+    assert "max_tokens" not in body
+    assert body["enable_thinking"] is True
     assert "thinking_budget" not in body
     assert body["response_format"]["type"] == "json_schema"
     assert body["response_format"]["json_schema"]["strict"] is True
     assert body["response_format"]["json_schema"]["name"] == (
         "intake_turn_case_detail"
     )
+
+
+@pytest.mark.parametrize(
+    "node_name",
+    [*sorted(llm_module._NODE_GENERATION_BUDGETS), "unregistered_business_node"],
+)
+def test_all_business_generation_requests_disable_thinking(node_name: str) -> None:
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-plus",
+        "test-master-key",
+    )
+
+    body = client._completion_request_body(
+        node_name=node_name,
+        output_type=SimpleStructuredOutput,
+        system_prompt="system",
+        user_prompt="user",
+        user_content_parts=None,
+        json_mode=True,
+    )
+
+    assert body["enable_thinking"] is False
+    assert "thinking_budget" not in body
+
+
+def test_business_generation_uses_enabled_thinking_configuration() -> None:
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-max",
+        "test-master-key",
+        enable_thinking=True,
+    )
+
+    body = client._completion_request_body(
+        node_name="intake_turn_case_detail",
+        output_type=SimpleStructuredOutput,
+        system_prompt="system",
+        user_prompt="user",
+        user_content_parts=None,
+        json_mode=True,
+    )
+
+    assert body["enable_thinking"] is True
+    assert "thinking_budget" not in body
+
+
+def test_plain_json_mode_omits_provider_schema_and_keeps_local_validation() -> None:
+    calls: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        assert "response_format" not in body
+        assert body["max_tokens"] == 8_192
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen3.8-max",
+                "choices": [
+                    {
+                        "message": {
+                            "content": "结果如下：\n```json\n"
+                            '{"requires_supplemental_evidence":false,"gaps":[]}'
+                            "\n```"
+                        }
+                    }
+                ],
+            },
+        )
+
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.8-max",
+        "test-master-key",
+        transport=httpx.MockTransport(handler),
+        strict_json_schema_enabled=False,
+    )
+
+    result = client.generate(
+        node_name="evidence_turn",
+        system_prompt="只输出 JSON",
+        user_prompt="测试",
+        output_type=SimpleStructuredOutput,
+    )
+
+    assert len(calls) == 1
+    assert result.value.requires_supplemental_evidence is False
+    assert result.value.gaps == []
+
+
+def test_plain_json_stream_omits_provider_schema() -> None:
+    calls: list[dict[str, object]] = []
+    content = json.dumps(
+        {"requires_supplemental_evidence": False, "gaps": []},
+        ensure_ascii=False,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        assert "response_format" not in body
+        assert body["max_tokens"] == 8_192
+        return httpx.Response(
+            200,
+            content=_structured_stream_body(content, finish_reason="stop"),
+        )
+
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.8-max",
+        "test-master-key",
+        transport=httpx.MockTransport(handler),
+        strict_json_schema_enabled=False,
+    )
+
+    updates = list(
+        client.generate_stream(
+            node_name="evidence_turn",
+            system_prompt="只输出 JSON",
+            user_prompt="测试",
+            output_type=SimpleStructuredOutput,
+        )
+    )
+
+    assert len(calls) == 1
+    assert updates[-1].kind == "completed"
+    assert updates[-1].generation.value.gaps == []
 
 
 def test_model_health_probe_disables_thinking_and_reuses_recent_success() -> None:
@@ -154,7 +320,7 @@ def test_litellm_proxy_contract_and_structured_response_validation() -> None:
         assert request.headers["Authorization"] == "Bearer test-master-key"
         body = json.loads(request.content)
         assert body["model"] == "qwen3.7-plus"
-        assert body["max_tokens"] == 8_192
+        assert "max_tokens" not in body
         assert body["enable_thinking"] is False
         assert "thinking_budget" not in body
         assert body["response_format"]["type"] == "json_schema"
@@ -307,6 +473,7 @@ def test_litellm_proxy_repairs_empty_structured_content_with_plain_json_retry() 
         calls.append(body)
         if len(calls) == 1:
             assert body["response_format"]["type"] == "json_schema"
+            assert "max_tokens" not in body
             return httpx.Response(
                 200,
                 json={
@@ -315,6 +482,7 @@ def test_litellm_proxy_repairs_empty_structured_content_with_plain_json_retry() 
                 },
             )
         assert "response_format" not in body
+        assert body["max_tokens"] == 8_192
         return httpx.Response(
             200,
             json={
@@ -984,7 +1152,7 @@ def test_litellm_proxy_rejects_streamed_output_above_cumulative_byte_limit(
     # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert body["max_tokens"] == 8_192
+        assert "max_tokens" not in body
         assert body["enable_thinking"] is False
         assert "thinking_budget" not in body
         assert request.headers["Accept-Encoding"] == "identity"
@@ -1099,6 +1267,210 @@ def test_async_stream_reuses_one_client_for_consecutive_provider_calls(
     assert client_constructions[0]["transport"] is transport
     assert "trust_env" not in client_constructions[0]
     assert "verify" not in client_constructions[0]
+
+
+def test_async_stream_valid_output_does_not_regenerate() -> None:
+    provider_calls: list[dict[str, object]] = []
+    valid_content = json.dumps(
+        {"room_utterance": "一次通过", "required_value": 1},
+        ensure_ascii=False,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        provider_calls.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_structured_stream_body(
+                valid_content,
+                finish_reason="stop",
+                include_usage=True,
+            ),
+        )
+
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-plus",
+        "test-master-key",
+        async_transport=httpx.MockTransport(handler),
+    )
+
+    async def scenario() -> list[object]:
+        try:
+            return [
+                update
+                async for update in client.agenerate_stream(
+                    node_name="intake_turn_case_detail",
+                    system_prompt="same-system",
+                    user_prompt="same-user",
+                    output_type=RegeneratedStreamOutput,
+                    visible_fields=(
+                        VisibleFieldSpec(
+                            property_name="room_utterance",
+                            field="room_utterance",
+                        ),
+                    ),
+                    governed_request=_governed_stream_request(),
+                )
+            ]
+        finally:
+            await client.aclose()
+
+    updates = asyncio.run(scenario())
+
+    assert len(provider_calls) == 1
+    assert [getattr(update, "kind") for update in updates] == [
+        "visible_delta",
+        "completed",
+    ]
+    assert updates[-1].generation.provider_attempts_used == 1
+
+
+def test_async_stream_schema_failure_regenerates_same_request_once() -> None:
+    provider_calls: list[dict[str, object]] = []
+    responses = iter(
+        (
+            json.dumps({"room_utterance": "第一代"}, ensure_ascii=False),
+            json.dumps(
+                {"room_utterance": "第二代", "required_value": 2},
+                ensure_ascii=False,
+            ),
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        provider_calls.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_structured_stream_body(
+                next(responses),
+                finish_reason="stop",
+                include_usage=True,
+            ),
+        )
+
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-plus",
+        "test-master-key",
+        async_transport=httpx.MockTransport(handler),
+    )
+
+    async def scenario() -> list[object]:
+        try:
+            return [
+                update
+                async for update in client.agenerate_stream(
+                    node_name="intake_turn_case_detail",
+                    system_prompt="same-system",
+                    user_prompt="same-user",
+                    output_type=RegeneratedStreamOutput,
+                    visible_fields=(
+                        VisibleFieldSpec(
+                            property_name="room_utterance",
+                            field="room_utterance",
+                        ),
+                    ),
+                    governed_request=_governed_stream_request(),
+                )
+            ]
+        finally:
+            await client.aclose()
+
+    updates = asyncio.run(scenario())
+
+    assert len(provider_calls) == 2
+    assert provider_calls[0] == provider_calls[1]
+    assert [getattr(update, "kind") for update in updates] == [
+        "visible_delta",
+        "generation_reset",
+        "visible_delta",
+        "completed",
+    ]
+    reset = updates[1]
+    assert reset.generation == 2
+    assert reset.reason_code == "OUTPUT_SCHEMA_INVALID"
+    completed = updates[-1].generation
+    assert completed.provider_attempts_used == 2
+    assert completed.repairs_used == 0
+    assert completed.value.room_utterance == "第二代"
+
+
+def test_async_stream_projection_does_not_starve_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long structured projection must not delay Graph lease heartbeat scheduling."""
+
+    valid_content = json.dumps(
+        {"room_utterance": "保持流式顺序", "required_value": 1},
+        ensure_ascii=False,
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_structured_stream_body(valid_content, finish_reason="stop"),
+        )
+
+    projection_entered = threading.Event()
+    release_projection = threading.Event()
+    original_accept = llm_module._AsyncStructuredStreamState.accept
+
+    def held_projection(
+        state: llm_module._AsyncStructuredStreamState,
+        payload: object,
+    ) -> list[object]:
+        projection_entered.set()
+        if not release_projection.wait(timeout=2.0):
+            raise AssertionError("structured projection was not released")
+        return original_accept(state, payload)
+
+    monkeypatch.setattr(
+        llm_module._AsyncStructuredStreamState,
+        "accept",
+        held_projection,
+    )
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-plus",
+        "test-master-key",
+        async_transport=httpx.MockTransport(handler),
+    )
+
+    async def consume() -> list[object]:
+        return [
+            update
+            async for update in client.agenerate_stream(
+                node_name="intake_turn_case_detail",
+                system_prompt="system",
+                user_prompt="user",
+                output_type=RegeneratedStreamOutput,
+            )
+        ]
+
+    async def scenario() -> list[object]:
+        consume_task = asyncio.create_task(consume())
+        try:
+            for _ in range(100):
+                if projection_entered.is_set():
+                    break
+                await asyncio.sleep(0.001)
+            assert projection_entered.is_set()
+
+            # This scheduling point represents the independent ten-second Graph
+            # heartbeat.  Before projection was offloaded, the event loop could not
+            # reach it until the synchronous projector returned.
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+            assert not release_projection.is_set()
+            release_projection.set()
+            return await asyncio.wait_for(consume_task, timeout=2.0)
+        finally:
+            release_projection.set()
+            await client.aclose()
+
+    updates = asyncio.run(scenario())
+
+    assert updates[-1].kind == "completed"
+    assert updates[-1].generation.value.room_utterance == "保持流式顺序"
 
 
 def test_async_client_close_is_concurrent_idempotent_and_rejects_reuse() -> None:

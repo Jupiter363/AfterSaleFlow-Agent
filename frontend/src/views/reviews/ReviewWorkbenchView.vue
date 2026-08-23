@@ -14,7 +14,7 @@ import {
   ref,
   watch,
 } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { extractAgentRunDescriptor } from "../../api/agentStream";
 import { evidenceApi } from "../../api/evidence";
 import {
@@ -34,6 +34,7 @@ import {
   clearAgentStreams,
   consumeAgentRun,
 } from "../../stores/agentStream";
+import { domainCodeLabel } from "../../utils/displayText";
 
 const props = defineProps({
   initialPacket: { type: Object, default: null },
@@ -43,6 +44,7 @@ const props = defineProps({
 });
 
 const route = useRoute();
+const router = useRouter();
 const normalizedInitialPacket = normalizeReviewPacket(props.initialPacket);
 const packet = ref(normalizedInitialPacket);
 const evidenceCatalog = ref(null);
@@ -67,20 +69,32 @@ const reason = ref("");
 const pendingDecision = ref("");
 const decisionResult = ref(null);
 const error = ref("");
+const decisionSubmitError = ref("");
 const submitting = ref(false);
-const planEditorOpen = ref(false);
-const modifiedPlan = ref("");
+const actionSelectorOpen = ref(false);
+const reviewerOpinionDecision = ref("");
+const selectedDecisionActionCode = ref("");
 const approvedPlanDraft = ref(null);
 const submittedDecision = ref("");
 const confirmButton = ref(null);
 const confirmCancelButton = ref(null);
 const confirmDialog = ref(null);
+const actionSelectorDialog = ref(null);
+const actionSelectorCloseButton = ref(null);
+const reviewOperationScroll = ref(null);
+const reviewOperationScrollTrack = ref(null);
+const reviewOperationScrollVisible = ref(false);
+const reviewOperationScrollOffset = ref(0);
 let decisionTrigger = null;
+let actionSelectorTrigger = null;
+let reviewOperationResizeObserver = null;
+let reviewOperationMutationObserver = null;
 const agentState = ref("LISTENING");
 const copilotQuestion = ref("");
 const copilotMessages = ref([]);
 const copilotSubmitting = ref(false);
 const copilotStreamError = ref("");
+const REVIEW_OPERATION_SCROLL_THUMB_HEIGHT = 72;
 
 const reviewId = computed(() => route.params.reviewId);
 const historyMode = computed(() => route.query.view === "history");
@@ -153,8 +167,9 @@ const digitalHumanState = computed(() =>
 
 const reviewSections = [
   { value: "overview", label: "案件概览" },
-  { value: "evidence", label: "证据与规则" },
-  { value: "draft", label: "草案与执行" },
+  { value: "evidence", label: "证据矩阵" },
+  { value: "draft", label: "裁决草案" },
+  { value: "risk", label: "重点复核" },
   { value: "audit", label: "版本与审计" },
 ];
 const explanationPrompts = [
@@ -165,37 +180,78 @@ const explanationPrompts = [
 const approvalDecisions = [
   {
     value: "APPROVE",
-    label: "批准并交执行",
-    description: "采用冻结方案并交执行助手",
+    label: "批准 AI 建议",
+    description: "沿用 AI 建议的执行动作",
     icon: "✓",
   },
   {
     value: "MODIFY_AND_APPROVE",
-    label: "修改后交执行",
-    description: "编辑方案副本后交执行助手",
+    label: "修改执行动作",
+    description: "从候选决定中另选执行动作",
     icon: "✎",
   },
 ];
 const exceptionDecisions = [
-  {
-    value: "REQUEST_MORE_EVIDENCE",
-    label: "退回补证",
-    description: "关键事实仍需举证",
-    icon: "↺",
-  },
   {
     value: "ESCALATE_MANUAL",
     label: "升级人工接管",
     description: "终止自动链路并转人工处理",
     icon: "↗",
   },
-  {
-    value: "REJECT",
-    label: "驳回草案",
-    description: "不采纳当前草案",
-    icon: "×",
-  },
 ];
+const decisionActionCatalog = Object.freeze([
+  {
+    code: "CANCEL_ORDER",
+    label: "取消订单",
+    meaning: "取消当前订单；是否产生退款由后续订单结算处理",
+  },
+  {
+    code: "RETURN_AND_REFUND",
+    label: "退货退款",
+    meaning: "用户退回商品后，由商家退还相应款项",
+  },
+  {
+    code: "REFUND_ONLY",
+    label: "仅退款",
+    meaning: "用户无需退货，直接获得全额或部分退款",
+  },
+  {
+    code: "RESHIP",
+    label: "补发商品",
+    meaning: "针对未送达、漏发或缺失商品，由商家补发",
+  },
+  {
+    code: "REPLACE",
+    label: "更换商品",
+    meaning: "针对已收到但存在问题的商品，由商家换货",
+  },
+  {
+    code: "REPAIR",
+    label: "维修商品",
+    meaning: "由商家对争议商品提供维修处理",
+  },
+  {
+    code: "COMPENSATE",
+    label: "补偿",
+    meaning: "在主要交易处理之外或无需退款时，向用户提供补偿",
+  },
+  {
+    code: "CONTINUE_FULFILLMENT",
+    label: "继续履约",
+    meaning: "维持当前订单关系，等待商家继续完成原有履约义务",
+  },
+  {
+    code: "REJECT_CLAIM",
+    label: "驳回诉求",
+    meaning: "不支持本次售后诉求并结束案件",
+  },
+]);
+const decisionActionByCode = new Map(
+  decisionActionCatalog.map((item) => [item.code, item]),
+);
+const decisionActionLabels = Object.fromEntries(
+  decisionActionCatalog.map((item) => [item.code, item.label]),
+);
 
 const roleLabels = {
   user: "用户",
@@ -226,6 +282,8 @@ const taskStatusLabels = {
   ASSIGNED: "已分配",
   IN_REVIEW: "审核中",
   APPROVED: "审核通过",
+  ESCALATED: "已升级人工接管",
+  MANUAL_HANDOFF: "人工接管中",
   REJECTED: "审核未通过",
   CLOSED: "已关闭",
 };
@@ -286,6 +344,151 @@ const riskFlagLabels = {
   SIGNATURE_MISMATCH: "签收信息不一致",
   SAFETY_RISK_HIGH: "人身或财产安全风险",
 };
+const factFindingLabels = {
+  CONFIRMED: "已确认",
+  PARTIALLY_CONFIRMED: "部分确认",
+  NOT_EVALUATED: "尚未认定",
+  NOT_ESTABLISHED: "未能认定",
+  NOT_PROVEN: "未证实",
+  CLAIMED_BY_USER: "用户单方主张",
+  CLAIMED_BY_MERCHANT: "商家单方主张",
+  CLAIMED_BY_BOTH: "双方均有主张",
+  CONTESTED: "仍有争议",
+  INCONCLUSIVE: "无法确认",
+};
+const evidenceCoverageLabels = {
+  PENDING_EVIDENCE_REVIEW: "待证据审查",
+  COVERED_BY_SUBMITTED_EVIDENCE: "已有提交证据覆盖",
+  COVERED_BY_FROZEN_DOSSIER: "已有冻结证据覆盖",
+  PARTIALLY_COVERED_BY_FROZEN_DOSSIER: "部分证据覆盖",
+  NOT_COVERED_BY_FROZEN_DOSSIER: "冻结证据未覆盖",
+  REQUIRES_HUMAN_REVIEW: "需要人工复核",
+};
+const evidenceRelationLabels = {
+  CONTENT_SUPPORTS: "支持该事实",
+  CONTENT_CONTRADICTS: "反驳该事实",
+  CONTEXT_ONLY: "仅作背景参考",
+  INCONCLUSIVE: "关联性不确定",
+  SUPPORTS: "支持该事实",
+  OPPOSES: "反驳该事实",
+};
+const alignmentLabels = {
+  NOT_COMPUTED: "尚未比对",
+  AGREED: "双方一致",
+  PARTIALLY_AGREED: "部分一致",
+  CONTESTED: "双方有争议",
+  ONE_SIDED: "仅一方陈述",
+  UNRESOLVED: "尚未解决",
+};
+const stanceLabels = {
+  CONFIRM: "确认",
+  AGREE: "同意",
+  ACCEPT: "认可",
+  DENY: "否认",
+  DISAGREE: "不同意",
+  REJECT: "不认可",
+  PARTIAL: "部分认可",
+  PARTIALLY_AGREE: "部分认可",
+  NOT_ADDRESSED: "未回应",
+};
+const materialityLabels = {
+  CORE: "核心事实",
+  SUPPORTING: "辅助事实",
+  CONTEXT: "背景事实",
+};
+const factCategoryLabels = {
+  ORDER: "订单",
+  PRODUCT_PAGE: "商品信息",
+  PRODUCT_STATE: "商品状态",
+  AFTER_SALES: "售后诉求",
+  LOGISTICS: "物流",
+  PAYMENT: "支付",
+  TIME: "时间",
+  PARTY: "当事人",
+  OTHER: "其他",
+};
+const ruleCodeLabels = {
+  MERCHANT_APPROVED_REFUND: "商家同意退款规则",
+  UNSHIPPED_CANCEL: "未发货订单取消规则",
+};
+const policyReferenceLabels = {
+  POLICY_MERCHANT_REFUND_V1: "商家同意退款规则",
+  POLICY_UNSHIPPED_CANCEL_V1: "未发货订单取消规则",
+  POLICY_DELIVERY_PROOF_V1: "交付证明规则",
+};
+const ruleNameLabels = {
+  "merchant-approved refund policy": "商家同意退款规则",
+  "unshipped order cancellation policy": "未发货订单取消规则",
+};
+const ruleApplicationTokenLabels = {
+  requires_evidence: "证据充分性",
+  evidence_sufficiency: "证据充分性",
+  merchant_approval: "商家退款同意",
+  shipment_status: "订单发货状态",
+  delivery_status: "商品交付状态",
+  order_status: "订单状态",
+  payment_status: "支付状态",
+  refund_eligibility: "退款资格",
+  cancellation_eligibility: "订单取消资格",
+  product_quality_issue: "商品质量问题",
+  party_agreement: "双方意见一致",
+  requested_resolution: "请求处理方式",
+  user_request: "用户诉求",
+};
+const ruleApplicationTokenPattern = new RegExp(
+  `\\b(${Object.keys(ruleApplicationTokenLabels).join("|")})\\b`,
+  "g",
+);
+const remedyTypeLabels = {
+  FURTHER_VERIFICATION: "进一步人工核验",
+  ...decisionActionLabels,
+};
+const reviewSourceLabels = {
+  V1_REVIEW_FOCUS: "法官 V1 复核重点",
+  JURY_FINDING: "陪审意见",
+  MANDATORY_REVISION: "陪审强制修订项",
+};
+const reviewDispositionLabels = {
+  ACCEPTED: "已采纳",
+  PARTIALLY_ACCEPTED: "部分采纳",
+  REJECTED: "未采纳",
+};
+const reviewTopicLabels = {
+  FACT_COMPLETENESS: "事实完整性",
+  EVIDENCE_CONSISTENCY: "证据一致性",
+  RULE_APPLICABILITY: "规则适用性",
+  PROCEDURAL_FAIRNESS: "程序公平性",
+  REMEDY_FEASIBILITY: "执行可行性",
+  RISK_AND_OMISSIONS: "风险与遗漏",
+  SINGLE_ACTION: "执行动作收束",
+};
+const affectedFieldLabels = {
+  decision_action: "最终执行决定",
+  recommended_decision: "总体建议",
+  remedy_orders: "处理事项",
+  fact_findings: "事实认定",
+  rule_applications: "规则适用",
+  decision_reasoning: "裁决理由",
+  reviewer_attention: "人工关注事项",
+};
+const reviewTextFieldLabels = {
+  ...affectedFieldLabels,
+  truth_status: "事实认定状态",
+  evidence_coverage_status: "证据覆盖状态",
+  evidence_relation: "证据关联性",
+  evidence_ids: "证据引用",
+  fact_id: "事实编号",
+  fact_ids: "关联事实编号",
+  review_item_ref: "复审事项编号",
+  review_source: "复审来源",
+  requires_human_review: "需人工复核",
+};
+const reviewTextFieldTokenPattern = new RegExp(
+  `\\b(${Object.keys(reviewTextFieldLabels)
+    .sort((left, right) => right.length - left.length)
+    .join("|")})\\b`,
+  "g",
+);
 const evidenceStatusLabels = {
   UNVERIFIED: { label: "待核验", tone: "neutral" },
   PENDING: { label: "待核验", tone: "neutral" },
@@ -353,9 +556,24 @@ const commonValueLabels = {
   ...outcomeLabels,
   ...actionLabels,
   ...riskFlagLabels,
+  ...factFindingLabels,
+  ...evidenceCoverageLabels,
+  ...evidenceRelationLabels,
+  ...alignmentLabels,
+  ...stanceLabels,
+  ...materialityLabels,
+  ...factCategoryLabels,
+  ...ruleCodeLabels,
+  ...policyReferenceLabels,
+  ...remedyTypeLabels,
+  ...reviewSourceLabels,
+  ...reviewTopicLabels,
+  ...reviewDispositionLabels,
+  ...affectedFieldLabels,
   ...preconditionLabels,
   ...notificationLabels,
   ...decisionLabels,
+  ...decisionActionLabels,
   ...Object.fromEntries(
     Object.entries(evidenceStatusLabels).map(([code, presentation]) => [
       code,
@@ -386,6 +604,9 @@ const commonValueLabels = {
   WAITING_HUMAN_REVIEW: "等待人工复核",
   RULE_DELIVERY_PROOF: "交付证明规则",
   RULE_REFUND_ELIGIBILITY: "退款资格规则",
+  BASED_ON_PARTY_AGREEMENT: "基于双方一致陈述确认",
+  MANDATORY: "强制修订",
+  JURY: "陪审意见",
 };
 
 const enumWordLabels = {
@@ -432,21 +653,40 @@ const enumWordLabels = {
 function fallbackEnumLabel(value) {
   const text = String(value || "").trim();
   if (!/^[A-Z][A-Z0-9_]*$/.test(text)) return text;
-  if (/^V\d+$/.test(text)) return text;
+  if (/^(?:V|E)\d+$/.test(text)) return text;
   if (/^ISSUE_\d+$/.test(text)) return `争点 ${text.slice(6)}`;
   if (/^ACTION_\d+$/.test(text)) return `执行动作 ${text.slice(7)}`;
 
   const words = text.split("_");
   const localized = words.map((word) => enumWordLabels[word] || "");
   if (localized.every(Boolean)) return localized.join("");
-  return "待人工确认";
+  return text.includes("_") ? "待人工确认" : text;
 }
 
 function mapReviewTokens(value) {
-  return String(value || "").replace(
-    /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*\b/g,
-    (token) => commonValueLabels[token] || fallbackEnumLabel(token),
-  );
+  return String(value || "")
+    .replace(/\bDirect Probative Value\b/gi, "直接证明力")
+    .replace(
+      reviewTextFieldTokenPattern,
+      (token) => reviewTextFieldLabels[token] || token,
+    )
+    .replace(
+      ruleApplicationTokenPattern,
+      (token) => ruleApplicationTokenLabels[token] || token,
+    )
+    .replace(
+      /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g,
+      (token) => domainCodeLabel(token, token),
+    )
+    .replace(
+      /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*\b/g,
+      (token, offset, source) => {
+        if (source[offset - 1] === "-" || source[offset + token.length] === "-") {
+          return token;
+        }
+        return commonValueLabels[token] || domainCodeLabel(token, "") || fallbackEnumLabel(token);
+      },
+    );
 }
 
 function fieldLabel(value) {
@@ -536,6 +776,13 @@ function evidenceReferenceLabel(value) {
     : name;
 }
 
+function numberedEvidenceReferenceLabel(value, index) {
+  const label = evidenceReferenceLabel(value);
+  return label === "证据材料"
+    ? `证据材料 ${String(index + 1).padStart(2, "0")}`
+    : label;
+}
+
 function evidenceReferenceTitle(value) {
   const id = evidenceReferenceId(value);
   const name = evidenceReferenceName(value);
@@ -550,8 +797,15 @@ function replaceEvidenceReferences(value) {
   );
 }
 
+function replaceFactReferences(value) {
+  return String(value || "").replace(
+    /FACT_[A-Za-z0-9_:-]+/g,
+    (reference) => factReferenceLabel(reference),
+  );
+}
+
 function evidenceTextSegments(value) {
-  return replaceEvidenceReferences(value)
+  return replaceFactReferences(replaceEvidenceReferences(value))
     .split(evidenceStatusPattern)
     .filter(Boolean)
     .map((text) => {
@@ -643,6 +897,11 @@ function reviewRiskEntry(value) {
     code ||= prefixedLabel[1];
     label = prefixedLabel[2].trim();
   }
+  const reviewSource = label.match(/^\[(MANDATORY|JURY)\]\s*([\s\S]+)$/u);
+  if (reviewSource) {
+    code ||= label;
+    label = `${enumLabel(reviewSource[1])}：${reviewSource[2].trim()}`;
+  }
   code ||= label;
   const codeOnly = /^[A-Za-z][A-Za-z0-9_-]*$/u.test(label);
   if (!label) {
@@ -655,7 +914,10 @@ function reviewRiskEntry(value) {
   }
   return {
     code,
-    label: replaceEvidenceReferences(label) || "待人工确认",
+    label:
+      mapReviewTokens(
+        replaceFactReferences(replaceEvidenceReferences(label)),
+      ) || "未提供风险说明",
   };
 }
 
@@ -669,6 +931,31 @@ function packetStatusLabel(status) {
 
 function claimEntries(claims) {
   if (!claims) return [];
+  const canonicalClaims = claims?.claims;
+  if (canonicalClaims && typeof canonicalClaims === "object") {
+    const entries = [];
+    const initiator = canonicalClaims.initiator_claim;
+    if (initiator?.position_summary) {
+      entries.push({
+        label: enumLabel(initiator.initiator_role, roleLabels) || "发起方",
+        text: cleanText(initiator.position_summary),
+        detail: cleanText(initiator.reason_summary),
+        attitude: "提出售后诉求",
+      });
+    }
+    const respondent =
+      canonicalClaims.respondent_direct ||
+      canonicalClaims.respondent_reported_by_initiator;
+    if (respondent?.position_summary) {
+      entries.push({
+        label: enumLabel(respondent.respondent_role, roleLabels) || "响应方",
+        text: cleanText(respondent.position_summary),
+        detail: cleanText(respondent.alternative_proposal),
+        attitude: enumLabel(respondent.attitude, stanceLabels),
+      });
+    }
+    if (entries.length) return entries;
+  }
   if (Array.isArray(claims)) {
     return claims.map((item, index) => ({
       label:
@@ -734,6 +1021,47 @@ function referenceEntries(claims) {
 }
 
 function issueEntries(sourcePacket) {
+  const factRows = listEntries(sourcePacket?.claims?.fact_rows);
+  if (factRows.length) {
+    const findingsByFactId = new Map(
+      listEntries(adjudicationBody(sourcePacket?.draft)?.fact_findings)
+        .filter((item) => item?.fact_id)
+        .map((item) => [item.fact_id, item]),
+    );
+    return factRows
+      .filter((fact) => fact?.fact_id && fact?.fact_target)
+      .map((fact) => {
+        const finding = findingsByFactId.get(fact.fact_id);
+        const positions = ["USER", "MERCHANT"]
+          .map((role) => {
+            const position = fact?.positions?.[role];
+            if (!position?.position_summary) return null;
+            return {
+              role,
+              roleLabel: enumLabel(role, roleLabels),
+              stance: enumLabel(position.stance, stanceLabels),
+              text:
+                position.stance === "NOT_ADDRESSED"
+                  ? "该方未就此事实直接陈述。"
+                  : cleanText(position.position_summary),
+            };
+          })
+          .filter(Boolean);
+        return {
+          id: fact.fact_id,
+          code: fact.fact_id,
+          text: cleanText(fact.fact_target),
+          category: enumLabel(fact.category, factCategoryLabels),
+          materiality: enumLabel(fact.materiality, materialityLabels),
+          alignment: enumLabel(fact?.party_alignment?.status, alignmentLabels),
+          positions,
+          finding: finding?.finding
+            ? enumLabel(finding.finding, factFindingLabels)
+            : "",
+          confidence: displayPercent(finding?.confidence),
+        };
+      });
+  }
   const directIssues = listEntries(sourcePacket?.issues);
   const fallbackIssues = listEntries(
     sourcePacket?.claims?.dispute_core_state?.disputed_facts ||
@@ -742,20 +1070,82 @@ function issueEntries(sourcePacket) {
   );
   return (directIssues.length ? directIssues : fallbackIssues).map(
     (issue, index) => ({
-      id: issue?.id || issue?.issue_id || `issue-${index}`,
-      code: issue?.issue_id || issue?.id || "",
+      id: issue?.id || issue?.issue_id || issue?.fact_id || `issue-${index}`,
+      code: issue?.issue_id || issue?.id || issue?.fact_id || "",
       text: cleanText(
         issue?.issue ||
           issue?.title ||
           issue?.question ||
           issue?.description ||
+          issue?.finding ||
           displayValue(issue),
       ),
+      category: "",
+      materiality: "",
+      alignment: "",
+      positions: [],
+      finding: issue?.finding
+        ? enumLabel(issue.finding, factFindingLabels)
+        : "",
+      confidence: displayPercent(issue?.confidence),
     }),
   );
 }
 
 function evidenceEntries(matrix, issues) {
+  if (matrix && !Array.isArray(matrix) && Array.isArray(matrix.fact_coverage)) {
+    const issuesByFactId = new Map(
+      issues.filter((issue) => issue?.code).map((issue) => [issue.code, issue]),
+    );
+    const links = listEntries(matrix.links);
+    return matrix.fact_coverage
+      .filter((coverage) => coverage?.fact_id)
+      .map((coverage) => {
+        const linkedIssue = issuesByFactId.get(coverage.fact_id);
+        const relatedLinks = Array.from(
+          new Map(
+            links
+              .filter((link) => link?.fact_id === coverage.fact_id)
+              .map((link) => [
+                [link.evidence_id, link.relation, link.reason].join(":"),
+                {
+                  evidenceId: link.evidence_id,
+                  relation: link.relation,
+                  relationLabel: enumLabel(
+                    link.relation,
+                    evidenceRelationLabels,
+                  ),
+                  reason: cleanText(link.reason),
+                },
+              ]),
+          ).values(),
+        );
+        const status = String(coverage.coverage_status || "").trim();
+        return {
+          id: coverage.fact_id,
+          code: coverage.fact_id,
+          issue: linkedIssue?.text || "",
+          matrixKind: "FACT_LEVEL",
+          coverageStatus: status,
+          coverageLabel: enumLabel(status, evidenceCoverageLabels),
+          links: relatedLinks,
+          supporting: relatedLinks
+            .filter((link) => link.relation === "CONTENT_SUPPORTS")
+            .map((link) => link.evidenceId),
+          contradicting: relatedLinks
+            .filter((link) => link.relation === "CONTENT_CONTRADICTS")
+            .map((link) => link.evidenceId),
+          missing: [
+            "PARTIALLY_COVERED_BY_FROZEN_DOSSIER",
+            "NOT_COVERED_BY_FROZEN_DOSSIER",
+            "REQUIRES_HUMAN_REVIEW",
+          ].includes(status),
+          confidence: "",
+          confidenceValue: Number.NaN,
+          analysis: cleanText(coverage.note),
+        };
+      });
+  }
   return listEntries(matrix).map((row, index) => {
     const linkedIssue = issues[index];
     const evidenceId = row?.evidence_id || row?.evidenceId;
@@ -778,9 +1168,12 @@ function evidenceEntries(matrix, issues) {
         row?.issue ||
           row?.title ||
           (factIds.length ? `关联事实：${factIds.join("、")}` : "") ||
-          linkedIssue?.text ||
-          `证据组 ${index + 1}`,
+          linkedIssue?.text,
       ),
+      matrixKind: "LEGACY",
+      coverageStatus: "",
+      coverageLabel: "",
+      links: [],
       supporting,
       contradicting,
       missing:
@@ -798,101 +1191,236 @@ function evidenceEntries(matrix, issues) {
   });
 }
 
+function adjudicationBody(draft) {
+  if (draft?.draft && typeof draft.draft === "object" && !Array.isArray(draft.draft)) {
+    return draft.draft;
+  }
+  return draft && typeof draft === "object" ? draft : {};
+}
+
 function policyEntries(draft) {
-  const policy = draft?.policy_application;
+  const body = adjudicationBody(draft);
+  const policy = body.rule_applications || body.policy_application;
   if (!policy) return [];
   if (!Array.isArray(policy) && typeof policy === "object") {
     return Object.entries(policy).map(([title, detail], index) => ({
       id: `policy-${index}`,
       title: cleanText(title),
       detail: cleanText(displayValue(detail)),
+      code: "",
+      version: "",
+      applicable: null,
+      factIds: [],
+      conditionsMet: [],
+      conditionsUnmet: [],
+      resultingEffect: "",
     }));
   }
-  return listEntries(policy).map((item, index) => ({
-    id: item?.id || item?.rule_id || item?.rule_code || `policy-${index}`,
-    title: cleanText(
-      item?.rule_name ||
-        item?.rule ||
-        item?.title ||
-        item?.rule_code ||
-        item?.clause ||
-        `适用规则 ${index + 1}`,
-    ),
-    detail: cleanText(
-      item?.rationale ||
-        item?.application ||
-        item?.reason ||
-        item?.conclusion ||
-        (typeof item === "string" ? item : displayValue(item)),
-    ),
-  }));
+  return listEntries(policy)
+    .map((item, index) => {
+      const code = firstText(item?.rule_code, item?.rule_id, item?.id);
+      const ruleName = firstText(
+        item?.rule_name,
+        item?.rule,
+        item?.title,
+        item?.clause,
+      );
+      const mappedCode = enumLabel(code, ruleCodeLabels);
+      const cleanedRuleName = cleanText(ruleName);
+      const explicitChineseRuleName = /[\u3400-\u9fff]/u.test(cleanedRuleName)
+        ? cleanedRuleName
+        : "";
+      const localizedRuleName =
+        ruleNameLabels[cleanedRuleName.toLowerCase()] || "";
+      const title =
+        localizedRuleName ||
+        explicitChineseRuleName ||
+        (mappedCode && mappedCode !== code ? mappedCode : "") ||
+        mapReviewTokens(cleanedRuleName) ||
+        (code ? enumLabel(code, ruleCodeLabels) : "");
+      return {
+        id: code || `policy-${index}`,
+        code,
+        version: item?.rule_version ?? item?.version ?? "",
+        title,
+        applicable:
+          typeof item?.applicable === "boolean" ? item.applicable : null,
+        detail: cleanText(
+          item?.rationale ||
+            item?.application ||
+            item?.reason ||
+            item?.conclusion ||
+            (typeof item === "string" ? item : ""),
+        ),
+        factIds: listEntries(item?.fact_ids),
+        conditionsMet: listEntries(item?.conditions_met).map(cleanText),
+        conditionsUnmet: listEntries(item?.conditions_unmet).map(cleanText),
+        resultingEffect: cleanText(item?.resulting_effect),
+      };
+    })
+    .filter((item) => item.title || item.detail);
 }
 
 function normalizeReviewPacket(value) {
-  const normalized = normalizeReviewApiPacket(value);
-  if (!normalized) return normalized;
-  const artifact = normalized.draft;
-  if (
-    artifact?.schema_version === "adjudication_draft.v2" &&
-    artifact.draft &&
-    typeof artifact.draft === "object"
-  ) {
-    return {
-      ...normalized,
-      draft: {
-        ...artifact.draft,
-        artifact_id: artifact.draft_id,
-        artifact_hash: artifact.content_hash,
-        trial_dossier_id: artifact.trial_dossier_id,
-        trial_dossier_hash: artifact.trial_dossier_hash,
-      },
-    };
-  }
-  return normalized;
+  return normalizeReviewApiPacket(value);
 }
 
 function draftAttention(draft) {
-  return listEntries(draft?.reviewer_attention).map(cleanText).filter(Boolean);
+  return listEntries(adjudicationBody(draft).reviewer_attention)
+    .map((item) => {
+      const text = String(item || "").trim();
+      const source = text.match(/^\[(MANDATORY|JURY)\]\s*([\s\S]+)$/u);
+      return source
+        ? `${enumLabel(source[1])}：${cleanText(source[2])}`
+        : cleanText(text);
+    })
+    .filter(Boolean);
 }
 
 function draftDecisionCode(draft) {
+  const body = adjudicationBody(draft);
   return (
-    draft?.recommended_decision ||
-    draft?.recommendedDecision ||
-    draft?.recommended_outcome ||
-    draft?.recommendedOutcome ||
-    draft?.conclusion ||
-    draft?.decision ||
+    body?.decision_action ||
+    body?.recommended_decision ||
+    body?.recommendedDecision ||
+    body?.recommended_outcome ||
+    body?.recommendedOutcome ||
+    body?.conclusion ||
+    body?.decision ||
     ""
   );
 }
 
 function draftDecision(draft) {
   const code = draftDecisionCode(draft);
-  return code ? enumLabel(code, outcomeLabels) : "等待草案";
+  return code
+    ? enumLabel(code, { ...decisionActionLabels, ...outcomeLabels })
+    : "草案未提供执行建议";
+}
+
+function draftDecisionMeaning(draft) {
+  const code = String(draftDecisionCode(draft) || "").trim().toUpperCase();
+  return decisionActionByCode.get(code)?.meaning || "";
 }
 
 function draftReasoning(draft) {
+  const body = adjudicationBody(draft);
   return cleanText(
-    draft?.draft_text ||
-      draft?.draftText ||
-      draft?.reasoning_summary ||
-      draft?.reasoningSummary ||
-      draft?.reasoning ||
-      draft?.reason,
+    body?.decision_reasoning ||
+      body?.draft_text ||
+      body?.draftText ||
+      body?.reasoning_summary ||
+      body?.reasoningSummary ||
+      body?.reasoning ||
+      body?.reason,
   );
 }
 
-function findingEntries(draft) {
-  return listEntries(draft?.fact_findings).map((finding, index) => ({
-    id: finding?.id || finding?.fact_id || finding?.issue_id || `finding-${index}`,
-    text: cleanText(
-      finding?.finding ||
-        finding?.conclusion ||
-        finding?.text ||
-        displayValue(finding),
-    ),
-  }));
+function findingEntries(draft, issues = []) {
+  const issuesByFactId = new Map(
+    issues.filter((issue) => issue?.code).map((issue) => [issue.code, issue]),
+  );
+  return listEntries(adjudicationBody(draft).fact_findings)
+    .map((finding, index) => {
+      const factId = firstText(finding?.fact_id, finding?.issue_id, finding?.id);
+      const rawFinding = firstText(
+        finding?.finding,
+        finding?.conclusion,
+        finding?.text,
+      );
+      return {
+        id: factId || `finding-${index}`,
+        factId,
+        title:
+          issuesByFactId.get(factId)?.text ||
+          (factId ? enumLabel(factId) : `事实认定 ${index + 1}`),
+        finding: rawFinding
+          ? enumLabel(rawFinding, factFindingLabels)
+          : "",
+        confidence: displayPercent(finding?.confidence),
+        evidenceIds: listEntries(finding?.evidence_ids),
+        evidenceGap: cleanText(finding?.evidence_gap),
+      };
+    })
+    .filter((finding) => finding.finding || finding.evidenceGap);
+}
+
+function remedyOrderEntries(draft, issues = []) {
+  const issuesByFactId = new Map(
+    issues.filter((issue) => issue?.code).map((issue) => [issue.code, issue.text]),
+  );
+  return listEntries(adjudicationBody(draft).remedy_orders)
+    .map((order, index) => ({
+      id: order?.id || `${order?.remedy_type || "remedy"}-${index}`,
+      type: firstText(order?.remedy_type, order?.type),
+      title: enumLabel(
+        firstText(order?.remedy_type, order?.type),
+        remedyTypeLabels,
+      ),
+      text: cleanText(order?.order_text || order?.text || order?.description),
+      facts: listEntries(order?.fact_ids).map((factId) => ({
+        id: factId,
+        label: issuesByFactId.get(factId) || enumLabel(factId),
+      })),
+      conditions: listEntries(order?.conditions).map(cleanText).filter(Boolean),
+    }))
+    .filter((order) => order.title || order.text);
+}
+
+function reviewResponseTopic(reference, source) {
+  if (source === "JURY_FINDING") {
+    const dimension = String(reference || "").replace(/^JURY_FINDING_/u, "");
+    return reviewTopicLabels[dimension] || "陪审意见";
+  }
+  const sequence = String(reference || "").match(/(\d+)$/u)?.[1];
+  if (source === "MANDATORY_REVISION") {
+    return sequence ? `强制修订 ${Number(sequence)}` : "陪审强制修订";
+  }
+  return sequence ? `复核重点 ${Number(sequence)}` : "法官 V1 复核重点";
+}
+
+function reviewResponseEntries(draft, reviewSourceItems = []) {
+  const sourceItemsByReference = new Map(
+    listEntries(reviewSourceItems)
+      .filter((item) => item?.review_item_ref)
+      .map((item) => [String(item.review_item_ref), item]),
+  );
+  const sourcePriority = {
+    JURY_FINDING: 0,
+    MANDATORY_REVISION: 1,
+    V1_REVIEW_FOCUS: 2,
+  };
+  return listEntries(draft?.review_responses)
+    .map((response, index) => {
+      const id = response?.review_item_ref || `review-response-${index}`;
+      const reviewSource = String(response?.review_source || "").trim().toUpperCase();
+      const sourceItem = sourceItemsByReference.get(String(id));
+      const isJury = reviewSource === "JURY_FINDING" || reviewSource === "MANDATORY_REVISION";
+      return {
+        id,
+        originalIndex: index,
+        sortPriority: sourcePriority[reviewSource] ?? 3,
+        reviewSource,
+        source: enumLabel(reviewSource, reviewSourceLabels),
+        topic: reviewResponseTopic(id, reviewSource),
+        opinionLabel: isJury ? "陪审意见" : "法官 V1 复核重点",
+        sourceKind: reviewSource === "MANDATORY_REVISION" ? "强制修订" : "",
+        reviewItemText: cleanText(sourceItem?.review_item_text),
+        disposition: enumLabel(
+          response?.disposition,
+          reviewDispositionLabels,
+        ),
+        response: cleanText(response?.response),
+        affectedFields: listEntries(response?.affected_fields)
+          .map((field) => enumLabel(field, affectedFieldLabels))
+          .filter(Boolean),
+      };
+    })
+    .filter((response) => response.response)
+    .sort(
+      (left, right) =>
+        left.sortPriority - right.sortPriority || left.originalIndex - right.originalIndex,
+    );
 }
 
 function parameterEntries(parameters) {
@@ -955,12 +1483,14 @@ const caseTitle = computed(() =>
   mapReviewTokens(
     packet.value?.case_summary?.title ||
       packet.value?.claims?.case_story?.title ||
-      "案件终审摘要",
+      packet.value?.case_id ||
+      "",
   ),
 );
 const caseDescription = computed(() =>
   firstText(
     packet.value?.case_summary?.description,
+    packet.value?.claims?.case_overview?.neutral_summary,
     packet.value?.claims?.case_story?.one_sentence_summary,
     packet.value?.claims?.claim_resolution?.request_reason,
   ),
@@ -973,35 +1503,55 @@ const references = computed(() => referenceEntries(packet.value?.claims));
 const resolution = computed(() => {
   const claimResolution = packet.value?.claims?.claim_resolution || {};
   const requestedResolution = packet.value?.claims?.requested_resolution || {};
+  const canonicalClaim = packet.value?.claims?.claims?.initiator_claim || {};
   const code =
-    claimResolution.requested_resolution || requestedResolution.requested_outcome;
+    canonicalClaim.requested_resolution ||
+    claimResolution.requested_resolution ||
+    requestedResolution.requested_outcome;
   return {
     code,
     label: enumLabel(code, outcomeLabels),
     text: firstText(
+      canonicalClaim.position_summary,
+      canonicalClaim.reason_summary,
       claimResolution.normalized_statement,
       requestedResolution.expected_resolution_text,
       claimResolution.request_reason,
     ),
-    amount: displayAmount(claimResolution.requested_amount),
-    items: cleanText(claimResolution.requested_items),
+    amount: displayAmount(
+      canonicalClaim.requested_amount ?? claimResolution.requested_amount,
+    ),
+    items: cleanText(
+      canonicalClaim.requested_items || claimResolution.requested_items,
+    ),
   };
 });
 const coreConflict = computed(() =>
   firstText(
+    packet.value?.claims?.case_overview?.core_conflict,
     packet.value?.claims?.dispute_core_state?.core_conflict,
     packet.value?.claims?.dispute_focus?.core_issue,
   ),
 );
 const factsToVerify = computed(() =>
-  listEntries(
-    packet.value?.claims?.dispute_core_state?.next_verification_focus ||
-      packet.value?.claims?.dispute_focus?.facts_to_verify,
-  )
+  (Array.isArray(packet.value?.claims?.fact_rows)
+    ? packet.value.claims.fact_rows
+        .filter((fact) => fact?.requires_resolution && fact?.fact_target)
+        .map((fact) => fact.fact_target)
+    : listEntries(
+        packet.value?.claims?.dispute_core_state?.next_verification_focus ||
+          packet.value?.claims?.dispute_focus?.facts_to_verify,
+      ))
     .map((value) => mapReviewTokens(cleanText(value)))
     .filter(Boolean),
 );
 const issues = computed(() => issueEntries(packet.value));
+function factReferenceLabel(factId) {
+  return (
+    issues.value.find((issue) => issue.code === factId)?.text ||
+    enumLabel(factId)
+  );
+}
 const evidenceCatalogItems = computed(() =>
   listEntries(
     evidenceCatalog.value?.items ||
@@ -1022,7 +1572,33 @@ const evidence = computed(() =>
   evidenceEntries(packet.value?.evidence_matrix, issues.value),
 );
 const policies = computed(() => policyEntries(packet.value?.draft));
-const findings = computed(() => findingEntries(packet.value?.draft));
+const findings = computed(() => findingEntries(packet.value?.draft, issues.value));
+const remedyOrders = computed(() =>
+  remedyOrderEntries(packet.value?.draft, issues.value),
+);
+const reviewResponses = computed(() =>
+  reviewResponseEntries(packet.value?.draft, packet.value?.review_source_items),
+);
+const adjudicationReasoning = computed(() => draftReasoning(packet.value?.draft));
+const adjudicationPublicText = computed(() => {
+  const body = adjudicationBody(packet.value?.draft);
+  if (
+    Array.isArray(body.fact_findings) &&
+    Array.isArray(body.rule_applications) &&
+    body.decision_reasoning
+  ) {
+    return "";
+  }
+  const text = firstText(
+    packet.value?.draft?.public_text,
+    packet.value?.draft?.public_message,
+  );
+  return text && text !== adjudicationReasoning.value ? cleanText(text) : "";
+});
+const adjudicationAttention = computed(() => draftAttention(packet.value?.draft));
+const adjudicationDecisionMeaning = computed(() =>
+  draftDecisionMeaning(packet.value?.draft),
+);
 const actions = computed(() => remedyActions(packet.value?.remedy));
 const notifications = computed(() => notificationEntries(packet.value?.remedy));
 const reviewRisks = computed(() => {
@@ -1046,45 +1622,106 @@ const reviewMetrics = computed(() => ({
   issues: issues.value.length,
   evidence: evidence.value.length,
   missingEvidence: evidence.value.filter((row) => row.missing).length,
+  coveredEvidence: evidence.value.filter((row) => !row.missing).length,
+  boundEvidence: evidence.value.filter(
+    (row) =>
+      row.links?.length || row.supporting?.length || row.contradicting?.length,
+  ).length,
   actions: actions.value.length,
+  findings: findings.value.length,
+  rules: policies.value.length,
+  responses: reviewResponses.value.length,
 }));
-const auditVersionGroups = computed(() => [
-  {
-    label: "案件材料",
-    entries: [
-      ["审核包", `v${packet.value?.packet_version ?? "-"}`],
-      ["案件快照", `v${packet.value?.case_version ?? "-"}`],
-      ["证据卷", `v${packet.value?.dossier_version ?? "-"}`],
-      ["争点", `v${packet.value?.issue_version ?? "-"}`],
-    ],
-  },
-  {
-    label: "裁决链路",
-    entries: [
-      ["裁决草案", `v${packet.value?.adjudication_draft_version ?? "-"}`],
-      ["评议报告", `v${packet.value?.deliberation_report_version ?? "-"}`],
-      ["执行方案", `v${packet.value?.remedy_plan_version ?? "-"}`],
-    ],
-  },
-  {
-    label: "运行基线",
-    entries: [
-      ["规则集", packet.value?.ruleset_version || "-"],
-      ["提示词", packet.value?.prompt_version || "-"],
-      ["技能", packet.value?.skill_version || "-"],
-      ["角色配置", packet.value?.profile_version || "-"],
-    ],
-  },
-]);
+function versionEntry(label, value) {
+  return value === null || value === undefined || value === ""
+    ? null
+    : [label, `v${value}`];
+}
+
+function textEntry(label, value) {
+  return String(value || "").trim() ? [label, value] : null;
+}
+
+const auditVersionGroups = computed(() =>
+  [
+    {
+      label: "案件材料",
+      entries: [
+        versionEntry("审核包", packet.value?.packet_version),
+        versionEntry("案件快照", packet.value?.case_version),
+        versionEntry("证据卷", packet.value?.dossier_version),
+        versionEntry("争点", packet.value?.issue_version),
+      ].filter(Boolean),
+    },
+    {
+      label: "裁决链路",
+      entries: [
+        versionEntry("裁决草案", packet.value?.adjudication_draft_version),
+        versionEntry("评议报告", packet.value?.deliberation_report_version),
+        versionEntry("执行方案", packet.value?.remedy_plan_version),
+      ].filter(Boolean),
+    },
+    {
+      label: "运行基线",
+      entries: [
+        textEntry("规则集", packet.value?.ruleset_version),
+        textEntry("提示词", packet.value?.prompt_version),
+        textEntry("技能", packet.value?.skill_version),
+        textEntry("角色配置", packet.value?.profile_version),
+      ].filter(Boolean),
+    },
+  ].filter((group) => group.entries.length),
+);
 const auditEntryCount = computed(() =>
   auditVersionGroups.value.reduce((total, group) => total + group.entries.length, 0),
 );
 const pendingDecisionLabel = computed(
   () => decisionLabels[pendingDecision.value] || pendingDecision.value,
 );
+const frozenDecisionActionCode = computed(() =>
+  String(
+    packet.value?.remedy?.decision_action ||
+      packet.value?.draft?.decision_action ||
+      packet.value?.draft?.draft?.decision_action ||
+      "",
+  )
+    .trim()
+    .toUpperCase(),
+);
+const selectedDecisionAction = computed(
+  () => decisionActionByCode.get(selectedDecisionActionCode.value) || null,
+);
+const reviewerOpinionTitle = computed(() => {
+  if (reviewerOpinionDecision.value === "APPROVE") return "批准 AI 建议";
+  if (reviewerOpinionDecision.value === "MODIFY_AND_APPROVE") {
+    return selectedDecisionAction.value?.label || "待选择修改决定";
+  }
+  return decisionLabels[reviewerOpinionDecision.value] || "尚未形成";
+});
+const reviewerOpinionDescription = computed(() => {
+  if (reviewerOpinionDecision.value === "APPROVE") {
+    return "采纳当前 AI 建议及其冻结方案，待确认后提交执行。";
+  }
+  if (reviewerOpinionDecision.value === "MODIFY_AND_APPROVE") {
+    return selectedDecisionAction.value?.meaning || "请先选择一个最终决定候选。";
+  }
+  const option = exceptionDecisions.find(
+    (item) => item.value === reviewerOpinionDecision.value,
+  );
+  return option?.description || "批准或修改后，审核员意见会显示在这里。";
+});
+const reviewerOpinionState = computed(() => {
+  if (decisionResult.value) return "submitted";
+  return reviewerOpinionDecision.value ? "ready" : "empty";
+});
+const reviewerOpinionReady = computed(() => {
+  if (!reviewerOpinionDecision.value) return false;
+  if (reviewerOpinionDecision.value !== "MODIFY_AND_APPROVE") return true;
+  return Boolean(selectedDecisionAction.value && approvedPlanDraft.value);
+});
 const decisionReadonlyMessage = computed(() => {
   if (historyMode.value) {
-    return "这是已封存的历史终审记录，所有批准、修改和驳回操作均已锁定。";
+    return "这是已封存的历史终审记录，所有批准、修改和人工接管操作均已锁定。";
   }
   if (packetExpired.value) {
     return "冻结审核包已超过有效期，决定与解释官已锁定，请返回队列重新确认任务。";
@@ -1108,12 +1745,6 @@ const decisionReadonlyMessage = computed(() => {
 });
 const decisionResultMessage = computed(() => {
   const decision = decisionResult.value?.decision || submittedDecision.value;
-  if (decision === "REQUEST_MORE_EVIDENCE") {
-    return "案件已退回证据室，等待补充关键材料。";
-  }
-  if (decision === "REJECT") {
-    return "当前裁决草案已驳回，案件进入人工接管。";
-  }
   if (decision === "ESCALATE_MANUAL") {
     return "自动处理链路已停止，案件进入人工接管。";
   }
@@ -1127,9 +1758,27 @@ const caseBriefingMessage = computed(() => {
     );
   }
   parts.push(`冻结包整理出 ${reviewMetrics.value.issues} 个核心争点。`);
-  parts.push(`当前草案建议为“${draftDecision(packet.value?.draft)}”。`);
+  if (draftDecisionCode(packet.value?.draft)) {
+    parts.push(`当前草案建议为“${draftDecision(packet.value?.draft)}”。`);
+  }
   if (reviewRisks.value.length) {
-    parts.push(`终审需要重点复核：${reviewRisks.value.map((risk) => risk.label).join("、")}。`);
+    const conciseRisks = Array.from(
+      new Set(
+        reviewRisks.value
+          .map((risk) =>
+            cleanText(risk.label)
+              .replace(
+                /^(?:需重点审查|需要重点审查|需重点复核|需要重点复核|需核实|需要核实|需确认|需要确认|需审查|需要审查|需评估|需要评估)\s*/u,
+                "",
+              )
+              .replace(/[。；、]+$/u, ""),
+          )
+          .filter(Boolean),
+      ),
+    );
+    parts.push(
+      `终审重点：\n${conciseRisks.map((risk, index) => `${index + 1}. ${risk}`).join("\n")}`,
+    );
   }
   parts.push("你可以继续问我事实、证据、规则或执行方案，我只解释冻结材料，不代替你作出终审决定。");
   return parts.join("");
@@ -1313,79 +1962,65 @@ async function submitCopilotQuestion(command = null) {
 function requestDecision(decision) {
   if (!canDecide.value) return;
   error.value = "";
+  decisionSubmitError.value = "";
+  pendingDecision.value = "";
   if (decision === "MODIFY_AND_APPROVE") {
-    modifiedPlan.value = JSON.stringify(packet.value.remedy, null, 2);
-    approvedPlanDraft.value = null;
-    planEditorOpen.value = true;
+    actionSelectorOpen.value = true;
     return;
   }
-  if (!reason.value.trim()) {
-    error.value = "请先填写审核理由";
-    return;
-  }
-  pendingDecision.value = decision;
+  reviewerOpinionDecision.value = decision;
+  selectedDecisionActionCode.value = "";
+  approvedPlanDraft.value = null;
 }
 
-function confirmModifiedPlan() {
+function closeDecisionActionSelector() {
+  actionSelectorOpen.value = false;
+}
+
+function selectDecisionAction(actionCode) {
   error.value = "";
+  const catalogItem = decisionActionByCode.get(actionCode);
+  const frozenPlan = normalizedJson(packet.value?.remedy || {});
+  if (!catalogItem) return;
+  if (!String(frozenPlan.id || "").trim() || !Array.isArray(frozenPlan.actions)) {
+    error.value = "当前冻结执行方案缺少方案 ID 或 actions，无法提交修改。";
+    return;
+  }
+  if (frozenDecisionActionCode.value === catalogItem.code) {
+    error.value = "所选决定与当前 AI 建议一致，如无其他修改请直接选择批准 AI 建议。";
+    return;
+  }
+  approvedPlanDraft.value = {
+    ...frozenPlan,
+    decision_action: catalogItem.code,
+  };
+  selectedDecisionActionCode.value = catalogItem.code;
+  reviewerOpinionDecision.value = "MODIFY_AND_APPROVE";
+  pendingDecision.value = "";
+  closeDecisionActionSelector();
+}
+
+function selectManualEscalation() {
+  requestDecision("ESCALATE_MANUAL");
+  closeDecisionActionSelector();
+}
+
+function prepareReviewerOpinionSubmission() {
+  if (!canDecide.value || !reviewerOpinionDecision.value) return;
+  error.value = "";
+  decisionSubmitError.value = "";
   if (!reason.value.trim()) {
     error.value = "请先填写审核理由";
-    return;
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(modifiedPlan.value);
-  } catch {
-    error.value = "修改后的执行方案不是有效 JSON";
-    return;
-  }
-  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-    error.value = "修改后的执行方案必须是对象";
-    return;
-  }
-  if (!String(parsed.id || "").trim() || !Array.isArray(parsed.actions)) {
-    error.value = "修改后的执行方案必须保留方案 ID 和 actions 数组";
-    return;
-  }
-  if (parsed.id !== packet.value.remedy?.id || parsed.id !== packet.value.plan_id) {
-    error.value = "修改方案必须保留当前冻结方案 ID";
     return;
   }
   if (
-    parsed.actions.length === 0 ||
-    parsed.actions.some(
-      (action) =>
-        !action ||
-        typeof action !== "object" ||
-        !String(action.action_type || action.actionType || action.type || "").trim(),
-    )
+    reviewerOpinionDecision.value === "MODIFY_AND_APPROVE" &&
+    (!selectedDecisionAction.value || !approvedPlanDraft.value)
   ) {
-    error.value = "修改方案必须保留至少一个有效执行动作";
+    actionSelectorOpen.value = true;
     return;
   }
-  const originalPlan = packet.value.remedy || {};
-  const immutableKeys = Object.keys(originalPlan).filter((key) => key !== "actions");
-  const hasUnexpectedTopLevelKey = Object.keys(parsed).some(
-    (key) => !Object.prototype.hasOwnProperty.call(originalPlan, key),
-  );
-  const changedImmutableField = immutableKeys.some(
-    (key) =>
-      JSON.stringify(normalizedJson(parsed[key])) !==
-      JSON.stringify(normalizedJson(originalPlan[key])),
-  );
-  if (hasUnexpectedTopLevelKey || changedImmutableField) {
-    error.value = "只能修改 actions；方案 ID、版本、前置条件和通知必须保持冻结一致";
-    return;
-  }
-  const original = JSON.stringify(normalizedJson(packet.value.remedy));
-  const modified = JSON.stringify(normalizedJson(parsed));
-  if (original === modified) {
-    error.value = "执行方案尚未修改；如采用原方案，请选择批准执行";
-    return;
-  }
-  approvedPlanDraft.value = parsed;
-  planEditorOpen.value = false;
-  pendingDecision.value = "MODIFY_AND_APPROVE";
+  pendingDecision.value = reviewerOpinionDecision.value;
 }
 
 async function submitDecision() {
@@ -1397,8 +2032,17 @@ async function submitDecision() {
   ) {
     return;
   }
+  if (
+    pendingDecision.value === "MODIFY_AND_APPROVE" &&
+    !approvedPlanDraft.value
+  ) {
+    pendingDecision.value = "";
+    error.value = "请先选择一个修改后的最终决定";
+    return;
+  }
   submitting.value = true;
   error.value = "";
+  decisionSubmitError.value = "";
   agentState.value = "THINKING";
   const command = {
     decision: pendingDecision.value,
@@ -1411,14 +2055,33 @@ async function submitDecision() {
   };
   submittedDecision.value = pendingDecision.value;
   try {
-    decisionResult.value = props.decideAction
+    const result = props.decideAction
       ? await props.decideAction(command)
       : await reviewApi.decide(actor, reviewId.value, command);
+    decisionResult.value = result;
     pendingDecision.value = "";
     agentState.value = "HANDOFF";
+    const outcomeCaseId = String(
+      result?.case_id || result?.caseId || packet.value?.case_id || "",
+    ).trim();
+    if (!outcomeCaseId) {
+      decisionSubmitError.value =
+        "终审决定已提交，但返回结果缺少案件编号，暂时无法打开执行结果页。";
+      return;
+    }
+    await router.push({
+      name: "dispute-outcome",
+      params: { caseId: outcomeCaseId },
+    });
   } catch (failure) {
-    error.value = failure?.message || "终审决定提交失败，请稍后重试。";
-    agentState.value = "ERROR";
+    if (decisionResult.value) {
+      decisionSubmitError.value =
+        failure?.message || "终审决定已提交，但执行结果页跳转失败，请从案件列表重新进入。";
+    } else {
+      decisionSubmitError.value =
+        failure?.message || "终审决定提交失败，请稍后重试。";
+      agentState.value = "ERROR";
+    }
   } finally {
     submitting.value = false;
   }
@@ -1427,7 +2090,10 @@ async function submitDecision() {
 watch(historyMode, (historical) => {
   if (!historical) return;
   pendingDecision.value = "";
-  planEditorOpen.value = false;
+  actionSelectorOpen.value = false;
+  reviewerOpinionDecision.value = "";
+  selectedDecisionActionCode.value = "";
+  approvedPlanDraft.value = null;
   copilotQuestion.value = "";
   copilotSubmitting.value = false;
   clearAgentStreams(copilotContext.value);
@@ -1449,6 +2115,18 @@ watch(pendingDecision, async (decision, previousDecision) => {
     decisionTrigger.focus();
   }
 });
+watch(actionSelectorOpen, async (open, wasOpen) => {
+  if (open) {
+    actionSelectorTrigger = document.activeElement;
+    await nextTick();
+    actionSelectorCloseButton.value?.focus();
+    return;
+  }
+  if (wasOpen && actionSelectorTrigger instanceof HTMLElement) {
+    await nextTick();
+    actionSelectorTrigger.focus({ preventScroll: true });
+  }
+});
 
 function trapDecisionFocus(event) {
   const focusable = [confirmCancelButton.value, confirmButton.value].filter(
@@ -1466,10 +2144,88 @@ function trapDecisionFocus(event) {
   }
 }
 
-onMounted(load);
+function trapActionSelectorFocus(event) {
+  const focusable = Array.from(
+    actionSelectorDialog.value?.querySelectorAll("button:not(:disabled)") || [],
+  );
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function syncReviewOperationScrollIndicator() {
+  const scroller = reviewOperationScroll.value;
+  const track = reviewOperationScrollTrack.value;
+  if (!scroller || !track) {
+    reviewOperationScrollVisible.value = false;
+    reviewOperationScrollOffset.value = 0;
+    return;
+  }
+  const maximumScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  reviewOperationScrollVisible.value = maximumScroll > 1;
+  const travel = Math.max(
+    0,
+    track.clientHeight - REVIEW_OPERATION_SCROLL_THUMB_HEIGHT,
+  );
+  reviewOperationScrollOffset.value = maximumScroll
+    ? (scroller.scrollTop / maximumScroll) * travel
+    : 0;
+}
+
+function bindReviewOperationScrollIndicator() {
+  reviewOperationResizeObserver?.disconnect();
+  reviewOperationMutationObserver?.disconnect();
+  reviewOperationResizeObserver = null;
+  reviewOperationMutationObserver = null;
+  nextTick(() => {
+    const scroller = reviewOperationScroll.value;
+    if (typeof ResizeObserver !== "undefined" && scroller) {
+      reviewOperationResizeObserver = new ResizeObserver(
+        syncReviewOperationScrollIndicator,
+      );
+      reviewOperationResizeObserver.observe(scroller);
+      if (scroller.firstElementChild) {
+        reviewOperationResizeObserver.observe(scroller.firstElementChild);
+      }
+    }
+    if (typeof MutationObserver !== "undefined" && scroller) {
+      reviewOperationMutationObserver = new MutationObserver(
+        syncReviewOperationScrollIndicator,
+      );
+      reviewOperationMutationObserver.observe(scroller, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    }
+    syncReviewOperationScrollIndicator();
+  });
+}
+
+watch(
+  [packet, reviewerOpinionDecision, selectedDecisionActionCode, decisionResult],
+  bindReviewOperationScrollIndicator,
+  { flush: "post" },
+);
+
+onMounted(() => {
+  load();
+  window.addEventListener("resize", syncReviewOperationScrollIndicator);
+  bindReviewOperationScrollIndicator();
+});
 onBeforeUnmount(() => {
   clearInterval(clockTimer);
   clearAgentStreams(copilotContext.value);
+  window.removeEventListener("resize", syncReviewOperationScrollIndicator);
+  reviewOperationResizeObserver?.disconnect();
+  reviewOperationMutationObserver?.disconnect();
 });
 </script>
 
@@ -1479,7 +2235,7 @@ onBeforeUnmount(() => {
     eyebrow="平台人工终审"
     title="平台终审室"
     subtitle="平台最终确认"
-    subtitle-description="审核员可以核对、修改或驳回裁决草案，并决定最终执行方案。"
+    subtitle-description="审核员可以批准 AI 建议、修改最终决定或升级人工接管。"
     :case-id="packet?.case_id || String(reviewId || 'REVIEW')"
     :show-case-id="false"
     :show-connection="false"
@@ -1493,7 +2249,12 @@ onBeforeUnmount(() => {
         <div class="review-workbench__packet-version">
           <span>冻结审核包</span>
           <strong>冻结审核包 v{{ packet.packet_version }}</strong>
-          <time data-frozen-time :datetime="packet.frozen_at" :title="packet.frozen_at">
+          <time
+            v-if="packet.frozen_at"
+            data-frozen-time
+            :datetime="packet.frozen_at"
+            :title="packet.frozen_at"
+          >
             {{ displayDateTime(packet.frozen_at) }}
           </time>
         </div>
@@ -1513,7 +2274,7 @@ onBeforeUnmount(() => {
         :state="digitalHumanState"
         name="小译"
         role="审核解释官"
-        message="我只依据当前冻结审核包转述事实、证据、规则和草案。批准、修改或驳回必须由你亲自确认。"
+        message="我只依据当前冻结审核包转述事实、证据、规则和草案。批准、修改或升级人工接管必须由你亲自确认。"
       />
     </template>
 
@@ -1550,22 +2311,11 @@ onBeforeUnmount(() => {
             </small>
           </header>
 
-          <div class="review-explain-room__prompts" aria-label="快捷提问">
-            <button
-              v-for="prompt in explanationPrompts"
-              :key="prompt"
-              type="button"
-              :disabled="!canUseCopilot || copilotBusy"
-              @click="submitCopilotQuestion({ text: prompt })"
-            >
-              {{ prompt }}
-            </button>
-          </div>
-
           <div class="review-explain-room__conversation">
             <ConversationStream
               :messages="copilotConversationMessages"
               :streaming-runs="copilotRuns"
+              :quick-prompts="explanationPrompts"
               :disabled="!canUseCopilot || copilotBusy"
               :composer-visible="!historyMode"
               :disabled-reason="decisionReadonlyMessage"
@@ -1584,86 +2334,76 @@ onBeforeUnmount(() => {
           data-review-operation-column
           aria-label="终审表单与操作"
         >
-          <header class="review-operation-room__header">
+          <header class="review-operation-room__decision-heading" data-review-decision-heading>
             <div>
-              <span>终审工作台</span>
-              <h2>冻结审核与最终决定</h2>
-              <p>核对当前冻结版本，记录终审依据并提交平台最终决定。</p>
+              <span>人工决定</span>
+              <h2>审核员判决</h2>
             </div>
-            <small>仅审核员</small>
+            <i>仅审核员</i>
           </header>
 
-          <div class="review-operation-room__scroll">
-            <section
-              class="review-case-strip"
-              data-review-case-strip
-              aria-label="当前终审案件"
+          <section
+            class="review-case-strip"
+            data-review-case-strip
+            aria-label="当前终审案件"
+          >
+            <div class="review-case-strip__identity" data-review-case-identity>
+              <span>当前终审案件</span>
+              <strong data-review-case-title>{{ caseTitle }}</strong>
+            </div>
+            <div class="review-case-strip__statuses" data-review-case-statuses>
+              <div class="review-workbench__badges">
+                <span class="status-badge" data-packet-status>
+                  {{ packetStatusLabel(packet.status) }}
+                </span>
+                <span v-if="taskStatus" class="task-badge">
+                  {{ enumLabel(taskStatus, taskStatusLabels) }}
+                </span>
+                <span class="risk-badge" :data-risk="packet.case_summary?.risk_level">
+                  {{ riskLabel(packet.case_summary?.risk_level) }}
+                </span>
+                <span v-if="caseRoute" class="route-badge">{{ caseRoute }}</span>
+              </div>
+            </div>
+          </section>
+
+          <div class="review-operation-room__scroll-shell">
+            <div
+              ref="reviewOperationScroll"
+              class="review-operation-room__scroll"
+              @scroll="syncReviewOperationScrollIndicator"
             >
-              <div class="review-case-strip__identity" data-review-case-identity>
-                <span>当前终审案件</span>
-                <strong data-review-case-title>{{ caseTitle }}</strong>
-                <div class="review-workbench__badges">
-                  <span class="status-badge" data-packet-status>
-                    {{ packetStatusLabel(packet.status) }}
-                  </span>
-                  <span v-if="taskStatus" class="task-badge">
-                    {{ enumLabel(taskStatus, taskStatusLabels) }}
-                  </span>
-                  <span class="risk-badge" :data-risk="packet.case_summary?.risk_level">
-                    {{ riskLabel(packet.case_summary?.risk_level) }}
-                  </span>
-                  <span v-if="caseRoute" class="route-badge">{{ caseRoute }}</span>
-                </div>
-              </div>
-              <div class="review-case-strip__version" data-review-case-baseline>
-                <div>
-                  <span>当前核验基线</span>
-                  <strong>冻结审核包 v{{ packet.packet_version }}</strong>
-                </div>
-                <small>所有决定仅作用于本冻结版本</small>
-              </div>
-            </section>
+              <section class="decision-panel">
+            <div class="decision-panel__positions">
+              <section class="decision-position decision-position--ai" data-ai-opinion>
+                <header>
+                  <span>AI 建议</span>
+                </header>
+                <strong>{{ draftDecision(packet.draft) }}</strong>
+                <p v-if="adjudicationDecisionMeaning">
+                  {{ adjudicationDecisionMeaning }}
+                </p>
+              </section>
 
-            <section
-              v-if="reviewRisks.length"
-              class="review-risk-strip"
-              data-review-risk-panel
-              aria-labelledby="review-risk-title"
-            >
-              <header class="review-risk-strip__header">
-                <div>
-                  <strong id="review-risk-title">重点复核</strong>
-                  <small>提交最终决定前逐项确认</small>
-                </div>
-                <span data-review-risk-count>{{ reviewRisks.length }} 项待核验</span>
-              </header>
-              <ol class="review-risk-strip__list">
-                <li
-                  v-for="(risk, index) in reviewRisks"
-                  :key="risk.code"
-                  :data-risk-code="risk.code"
-                  data-review-risk-item
-                >
-                  <span class="review-risk-strip__index" aria-hidden="true">
-                    {{ String(index + 1).padStart(2, "0") }}
-                  </span>
-                  <p>{{ risk.label }}</p>
-                </li>
-              </ol>
-            </section>
-
-            <section class="decision-panel">
-            <header>
-              <div>
-                <span>人工决定</span>
-                <h2>人类最终决定</h2>
-              </div>
-              <i>仅审核员</i>
-            </header>
-
-            <div class="decision-panel__draft">
-              <span>AI 建议</span>
-              <strong>{{ draftDecision(packet.draft) }}</strong>
+              <section
+                class="decision-position decision-position--reviewer"
+                :data-state="reviewerOpinionState"
+                data-reviewer-opinion
+              >
+                <header>
+                  <span>审核员意见</span>
+                  <button
+                    v-if="canDecide && reviewerOpinionDecision === 'MODIFY_AND_APPROVE' && !pendingDecision"
+                    type="button"
+                    data-reviewer-opinion-change
+                    @click="actionSelectorOpen = true"
+                  >
+                    更改选择
+                  </button>
+                </header>
+                <strong>{{ reviewerOpinionTitle }}</strong>
+                <p>{{ reviewerOpinionDescription }}</p>
+              </section>
             </div>
 
             <section v-if="canDecide" class="decision-dock" data-review-decisions>
@@ -1684,8 +2424,12 @@ onBeforeUnmount(() => {
                   v-for="decision in approvalDecisions"
                   :key="decision.value"
                   type="button"
-                  :class="{ 'decision-action--primary': decision.value === 'APPROVE' }"
+                  :class="{
+                    'decision-action--primary': decision.value === 'APPROVE',
+                    'is-selected': reviewerOpinionDecision === decision.value,
+                  }"
                   :data-decision="decision.value"
+                  :aria-pressed="reviewerOpinionDecision === decision.value"
                   @click="requestDecision(decision.value)"
                 >
                   <span aria-hidden="true">{{ decision.icon }}</span>
@@ -1696,47 +2440,18 @@ onBeforeUnmount(() => {
                 </button>
               </div>
 
-              <div v-if="planEditorOpen" class="plan-editor" data-plan-editor>
-                <header>
-                  <strong>修改执行方案</strong>
-                  <button
-                    type="button"
-                    aria-label="关闭方案编辑"
-                    title="关闭方案编辑"
-                    @click="planEditorOpen = false"
-                  >
-                    ×
-                  </button>
-                </header>
-                <textarea
-                  v-model="modifiedPlan"
-                  rows="12"
-                  spellcheck="false"
-                  aria-label="修改后的执行方案"
-                  data-modified-plan
-                />
-                <button type="button" data-modified-plan-confirm @click="confirmModifiedPlan">
-                  校验并继续
-                </button>
-              </div>
-
-              <div class="decision-actions decision-actions--exception">
-                <span>其他处理</span>
-                <button
-                  v-for="decision in exceptionDecisions"
-                  :key="decision.value"
-                  type="button"
-                  :class="{ 'decision-action--danger': decision.value === 'REJECT' }"
-                  :data-decision="decision.value"
-                  @click="requestDecision(decision.value)"
-                >
-                  <span aria-hidden="true">{{ decision.icon }}</span>
-                  <span>
-                    <strong>{{ decision.label }}</strong>
-                    <small>{{ decision.description }}</small>
-                  </span>
-                </button>
-              </div>
+              <button
+                type="button"
+                class="decision-submit"
+                data-reviewer-opinion-submit
+                :disabled="!reviewerOpinionReady || submitting"
+                @click="prepareReviewerOpinionSubmission"
+              >
+                <strong>{{ submitting ? "正在提交" : "提交终审决定" }}</strong>
+                <small>
+                  {{ reviewerOpinionReady ? "提交当前审核意见并进入最终确认" : "请先选择批准、修改或升级人工接管" }}
+                </small>
+              </button>
             </section>
 
             <div v-else-if="decisionResult" class="decision-success" role="status">
@@ -1747,8 +2462,19 @@ onBeforeUnmount(() => {
               {{ decisionReadonlyMessage }}
             </div>
 
-            <p v-if="error" class="decision-error" role="alert">{{ error }}</p>
-            </section>
+              <p v-if="error" class="decision-error" role="alert">{{ error }}</p>
+              </section>
+            </div>
+            <span
+              v-show="reviewOperationScrollVisible"
+              ref="reviewOperationScrollTrack"
+              class="review-operation-room__scroll-indicator"
+              aria-hidden="true"
+            >
+              <i
+                :style="{ transform: `translateY(${reviewOperationScrollOffset}px)` }"
+              />
+            </span>
           </div>
         </aside>
       </div>
@@ -1786,12 +2512,11 @@ onBeforeUnmount(() => {
             role="tabpanel"
             aria-labelledby="review-tab-overview"
           >
-            <header class="review-panel__header">
+            <header class="review-panel__header review-panel__header--compact">
               <div>
                 <span>01</span>
                 <div>
                   <h2>案件事实与诉求</h2>
-                  <p>核对当事人陈述、核心冲突和待核事实。</p>
                 </div>
               </div>
               <dl class="review-panel__metrics">
@@ -1806,35 +2531,38 @@ onBeforeUnmount(() => {
                 <h3>案件摘要</h3>
                 <span>冻结快照</span>
               </header>
-              <p v-if="caseDescription" class="case-narrative">
-                <EvidenceMappedText :text="caseDescription" />
-              </p>
+              <div class="case-summary-card">
+                <dl class="case-key-facts">
+                  <div v-if="resolution.label">
+                    <dt>申请结果</dt>
+                    <dd>
+                      <strong>{{ resolution.label }}</strong>
+                    </dd>
+                  </div>
+                  <div v-if="resolution.amount">
+                    <dt>争议金额</dt>
+                    <dd><strong>{{ resolution.amount }}</strong></dd>
+                  </div>
+                  <div v-if="resolution.items">
+                    <dt>争议商品</dt>
+                    <dd><EvidenceMappedText :text="resolution.items" /></dd>
+                  </div>
+                  <div v-if="coreConflict">
+                    <dt>核心冲突</dt>
+                    <dd><EvidenceMappedText :text="coreConflict" /></dd>
+                  </div>
+                </dl>
 
-              <dl class="case-key-facts">
-                <div v-if="resolution.label">
-                  <dt>申请结果</dt>
-                  <dd>
-                    <strong>{{ resolution.label }}</strong>
-                  </dd>
+                <div v-if="caseDescription" class="case-narrative">
+                  <h4>案情摘要</h4>
+                  <p><EvidenceMappedText :text="caseDescription" /></p>
                 </div>
-                <div v-if="resolution.amount">
-                  <dt>争议金额</dt>
-                  <dd><strong>{{ resolution.amount }}</strong></dd>
-                </div>
-                <div v-if="resolution.items">
-                  <dt>争议商品</dt>
-                  <dd><EvidenceMappedText :text="resolution.items" /></dd>
-                </div>
-                <div v-if="coreConflict">
-                  <dt>核心冲突</dt>
-                  <dd><EvidenceMappedText :text="coreConflict" /></dd>
-                </div>
-              </dl>
 
-              <div v-if="references.length" class="case-references" aria-label="业务单据">
-                <span v-for="reference in references" :key="reference.label">
-                  {{ reference.label }} <code>{{ reference.value }}</code>
-                </span>
+                <div v-if="references.length" class="case-references" aria-label="业务单据">
+                  <span v-for="reference in references" :key="reference.label">
+                    {{ reference.label }} <code>{{ reference.value }}</code>
+                  </span>
+                </div>
               </div>
             </section>
 
@@ -1845,8 +2573,14 @@ onBeforeUnmount(() => {
               </header>
               <div v-if="claims.length" class="claim-list">
                 <article v-for="claim in claims" :key="claim.label" class="claim-item">
-                  <strong>{{ claim.label }}</strong>
+                  <header>
+                    <strong>{{ claim.label }}</strong>
+                    <span v-if="claim.attitude">{{ claim.attitude }}</span>
+                  </header>
                   <p><EvidenceMappedText :text="claim.text" /></p>
+                  <small v-if="claim.detail">
+                    <EvidenceMappedText :text="claim.detail" />
+                  </small>
                 </article>
               </div>
               <p v-else class="empty-state">冻结包未提供结构化双方主张。</p>
@@ -1861,7 +2595,40 @@ onBeforeUnmount(() => {
                 <li v-for="(issue, index) in issues" :key="issue.id">
                   <span>{{ String(index + 1).padStart(2, "0") }}</span>
                   <div>
-                    <strong><EvidenceMappedText :text="issue.text" /></strong>
+                    <header class="issue-item__heading" data-issue-heading>
+                      <strong><EvidenceMappedText :text="issue.text" /></strong>
+                    </header>
+                    <div
+                      v-if="issue.finding || issue.confidence"
+                      class="issue-finding"
+                      :title="'法官认定：' + (issue.finding || '认定结果待明确') + (issue.confidence ? '，可信度 ' + issue.confidence : '')"
+                      role="note"
+                      aria-label="法官认定"
+                      data-judge-finding-tag
+                    >
+                      <div class="issue-finding__meta">
+                        <span>法官认定</span>
+                        <small v-if="issue.confidence">可信度 {{ issue.confidence }}</small>
+                      </div>
+                      <p class="issue-finding__text">
+                        <EvidenceMappedText :text="issue.finding || '认定结果待明确'" />
+                      </p>
+                    </div>
+                    <details
+                      v-if="issue.positions?.length"
+                      class="issue-position-disclosure"
+                    >
+                      <summary>
+                        查看双方陈述
+                        <span>{{ issue.positions.length }} 方</span>
+                      </summary>
+                      <dl class="issue-positions">
+                        <div v-for="position in issue.positions" :key="position.role">
+                          <dt>{{ position.roleLabel }} · {{ position.stance }}</dt>
+                          <dd><EvidenceMappedText :text="position.text" /></dd>
+                        </div>
+                      </dl>
+                    </details>
                   </div>
                 </li>
               </ol>
@@ -1888,25 +2655,24 @@ onBeforeUnmount(() => {
             role="tabpanel"
             aria-labelledby="review-tab-evidence"
           >
-            <header class="review-panel__header">
+            <header class="review-panel__header review-panel__header--compact">
               <div>
                 <span>02</span>
                 <div>
-                  <h2>证据与规则核验</h2>
-                  <p>按争点检查支持证据、反驳证据、缺口和规则依据。</p>
+                  <h2>事实级证据矩阵</h2>
                 </div>
               </div>
               <dl class="review-panel__metrics">
-                <div><dt>证据组</dt><dd>{{ reviewMetrics.evidence }}</dd></div>
-                <div><dt>缺口</dt><dd>{{ reviewMetrics.missingEvidence }}</dd></div>
-                <div><dt>规则</dt><dd>{{ policies.length }}</dd></div>
+                <div><dt>事实</dt><dd>{{ reviewMetrics.evidence }}</dd></div>
+                <div><dt>已绑定证据</dt><dd>{{ reviewMetrics.boundEvidence }}</dd></div>
+                <div><dt>需复核</dt><dd>{{ reviewMetrics.missingEvidence }}</dd></div>
               </dl>
             </header>
 
             <section class="review-subsection" data-evidence-matrix>
               <header>
-                <h3>争点证据矩阵</h3>
-                <span>{{ evidence.length }} 组</span>
+                <h3>证据覆盖</h3>
+                <span>{{ evidence.length }} 项事实</span>
               </header>
               <div v-if="evidence.length" class="evidence-matrix">
                 <article
@@ -1919,8 +2685,9 @@ onBeforeUnmount(() => {
                     <div>
                       <strong><EvidenceMappedText :text="row.issue" /></strong>
                     </div>
-                    <span v-if="row.missing">存在证据缺口</span>
-                    <span v-else>材料已归集</span>
+                    <span v-if="row.coverageLabel">{{ row.coverageLabel }}</span>
+                    <span v-else-if="row.missing">存在证据缺口</span>
+                    <span v-else>已有证据材料</span>
                   </header>
 
                   <div v-if="row.confidence" class="evidence-confidence">
@@ -1937,34 +2704,72 @@ onBeforeUnmount(() => {
                     <strong>{{ row.confidence }}</strong>
                   </div>
 
-                  <dl class="evidence-links">
+                  <ul
+                    v-if="row.matrixKind === 'FACT_LEVEL' && row.links.length"
+                    class="evidence-binding-list"
+                    aria-label="证据材料"
+                  >
+                    <li
+                      v-for="(link, linkIndex) in row.links"
+                      :key="`${link.evidenceId}-${link.relation}-${link.reason}`"
+                      :data-relation="link.relation"
+                    >
+                      <code
+                        class="evidence-material-reference"
+                        :title="evidenceReferenceTitle(link.evidenceId)"
+                        data-evidence-reference
+                        data-evidence-material-reference
+                      >
+                        {{ numberedEvidenceReferenceLabel(link.evidenceId, linkIndex) }}
+                      </code>
+                      <p v-if="link.reason">
+                        <EvidenceMappedText :text="link.reason" />
+                      </p>
+                      <span class="evidence-binding-list__relation">
+                        {{ link.relationLabel }}
+                      </span>
+                    </li>
+                  </ul>
+                  <p
+                    v-else-if="row.matrixKind === 'FACT_LEVEL'"
+                    class="evidence-no-binding"
+                  >
+                    该事实没有冻结证据绑定。
+                  </p>
+
+                  <dl
+                    v-else-if="row.supporting.length || row.contradicting.length"
+                    class="evidence-links"
+                  >
                     <div>
                       <dt>支持证据</dt>
-                      <dd v-if="row.supporting.length">
+                      <dd>
                         <code
-                          v-for="item in row.supporting"
+                          v-for="(item, itemIndex) in row.supporting"
                           :key="evidenceReferenceId(item) || displayValue(item)"
+                          class="evidence-material-reference"
                           :title="evidenceReferenceTitle(item)"
                           data-evidence-reference
+                          data-evidence-material-reference
                         >
-                          {{ evidenceReferenceLabel(item) }}
+                          {{ numberedEvidenceReferenceLabel(item, itemIndex) }}
                         </code>
                       </dd>
-                      <dd v-else>暂无有效支持证据</dd>
                     </div>
-                    <div>
+                    <div v-if="row.contradicting.length">
                       <dt>反驳证据</dt>
-                      <dd v-if="row.contradicting.length">
+                      <dd>
                         <code
-                          v-for="item in row.contradicting"
+                          v-for="(item, itemIndex) in row.contradicting"
                           :key="evidenceReferenceId(item) || displayValue(item)"
+                          class="evidence-material-reference"
                           :title="evidenceReferenceTitle(item)"
                           data-evidence-reference
+                          data-evidence-material-reference
                         >
-                          {{ evidenceReferenceLabel(item) }}
+                          {{ numberedEvidenceReferenceLabel(item, itemIndex) }}
                         </code>
                       </dd>
-                      <dd v-else>暂无反驳证据</dd>
                     </div>
                   </dl>
                   <p v-if="row.analysis" class="evidence-analysis">
@@ -1974,142 +2779,329 @@ onBeforeUnmount(() => {
               </div>
               <p v-else class="empty-state">冻结包未提供证据矩阵。</p>
             </section>
-
-            <section class="review-subsection">
-              <header>
-                <h3>规则适用</h3>
-                <span>{{ packet.ruleset_version }}</span>
-              </header>
-              <div v-if="policies.length" class="policy-list">
-                <article v-for="policy in policies" :key="policy.id">
-                  <strong><EvidenceMappedText :text="policy.title" /></strong>
-                  <p><EvidenceMappedText :text="policy.detail" /></p>
-                </article>
-              </div>
-              <p v-else class="empty-state">
-                当前草案未附结构化规则条款，请结合冻结规则集复核。
-              </p>
-            </section>
-
-            <section v-if="findings.length" class="review-subsection">
-              <header>
-                <h3>事实认定</h3>
-                <span>{{ findings.length }} 项</span>
-              </header>
-              <ul class="focus-list">
-                <li v-for="finding in findings" :key="finding.id">
-                  <EvidenceMappedText :text="finding.text" />
-                </li>
-              </ul>
-            </section>
           </section>
 
           <section
             v-show="activeSection === 'draft'"
             id="review-panel-draft"
-            class="review-panel"
+            class="review-panel review-panel--draft"
+            data-review-draft-panel
             role="tabpanel"
             aria-labelledby="review-tab-draft"
           >
-            <header class="review-panel__header">
+            <header class="review-panel__header review-panel__header--compact">
               <div>
                 <span>03</span>
                 <div>
-                  <h2>裁决草案与执行方案</h2>
-                  <p>比较非最终建议、人工关注点和待批准执行动作。</p>
+                  <h2>法官 V2 裁决草案</h2>
                 </div>
               </div>
               <dl class="review-panel__metrics">
-                <div><dt>关注项</dt><dd>{{ draftAttention(packet.draft).length }}</dd></div>
-                <div><dt>执行动作</dt><dd>{{ reviewMetrics.actions }}</dd></div>
+                <div><dt>事实认定</dt><dd>{{ reviewMetrics.findings }}</dd></div>
+                <div><dt>规则适用</dt><dd>{{ reviewMetrics.rules }}</dd></div>
+                <div><dt>复审回应</dt><dd>{{ reviewMetrics.responses }}</dd></div>
               </dl>
             </header>
 
-            <section class="review-subsection packet-cards__draft">
+            <section class="review-subsection adjudication-decision" data-adjudication-decision>
               <header>
-                <h3>AI 裁决草案（非最终）</h3>
-                <span v-if="packet.draft?.confidence">
-                  置信度 {{ displayPercent(packet.draft.confidence) }}
-                </span>
+                <h3>最终执行建议</h3>
+                <span>AI 建议，等待人工终审</span>
               </header>
-              <div class="draft-decision">
-                <div>
-                  <span>建议方向</span>
-                  <strong>{{ draftDecision(packet.draft) }}</strong>
-                </div>
-                <p v-if="draftReasoning(packet.draft)">
-                  <EvidenceMappedText :text="draftReasoning(packet.draft)" />
+              <div class="adjudication-decision__summary">
+                <strong>{{ draftDecision(packet.draft) }}</strong>
+                <p v-if="adjudicationDecisionMeaning">
+                  {{ adjudicationDecisionMeaning }}
                 </p>
-              </div>
-              <div v-if="draftAttention(packet.draft).length" class="review-attention">
-                <strong>人工关注点</strong>
-                <ul>
-                  <li v-for="item in draftAttention(packet.draft)" :key="item">
-                    <EvidenceMappedText :text="item" />
-                  </li>
-                </ul>
               </div>
             </section>
 
-            <section class="review-subsection" data-remedy-card>
+            <section
+              v-if="adjudicationPublicText"
+              class="review-subsection adjudication-public-text"
+              data-adjudication-public-text
+            >
               <header>
-                <h3>待批准执行方案</h3>
-                <span>v{{ packet.remedy_plan_version }}</span>
+                <h3>法官结论说明</h3>
+                <span>草案公开文本</span>
               </header>
-              <div v-if="actions.length" class="remedy-actions">
-                <article v-for="(action, index) in actions" :key="action.id" class="remedy-action">
+              <p><EvidenceMappedText :text="adjudicationPublicText" /></p>
+            </section>
+
+            <section
+              v-if="adjudicationReasoning"
+              class="review-subsection adjudication-reasoning"
+              data-adjudication-reasoning
+            >
+              <header>
+                <h3>完整裁决理由</h3>
+                <span>事实、证据与规则推导</span>
+              </header>
+              <p><EvidenceMappedText :text="adjudicationReasoning" /></p>
+            </section>
+
+            <section
+              v-if="remedyOrders.length"
+              class="review-subsection"
+              data-adjudication-remedies
+            >
+              <header>
+                <h3>处理事项</h3>
+                <span>{{ remedyOrders.length }} 项</span>
+              </header>
+              <div class="adjudication-remedy-list">
+                <article v-for="order in remedyOrders" :key="order.id">
                   <header>
-                    <span>{{ String(index + 1).padStart(2, "0") }}</span>
-                    <div>
-                      <strong>{{ action.title }}</strong>
-                    </div>
-                    <i :data-risk="action.risk">
-                      {{ riskLabel(action.risk) }} · {{ action.requiresApproval ? "需终审" : "无需终审" }}
-                    </i>
+                    <strong>{{ order.title }}</strong>
                   </header>
-                  <dl v-if="action.amount || action.target || action.deadline" class="remedy-action__facts">
-                    <div v-if="action.amount"><dt>金额</dt><dd>{{ action.amount }}</dd></div>
-                    <div v-if="action.target">
-                      <dt>目标方</dt><dd><EvidenceMappedText :text="action.target" /></dd>
+                  <p v-if="order.text"><EvidenceMappedText :text="order.text" /></p>
+                  <div v-if="order.facts.length" class="adjudication-fact-refs">
+                    <span>依据事实</span>
+                    <ul>
+                      <li v-for="fact in order.facts" :key="fact.id">{{ fact.label }}</li>
+                    </ul>
+                  </div>
+                  <div v-if="order.conditions.length" class="adjudication-conditions">
+                    <span>执行条件</span>
+                    <ul>
+                      <li v-for="condition in order.conditions" :key="condition">
+                        <EvidenceMappedText :text="condition" />
+                      </li>
+                    </ul>
+                  </div>
+                </article>
+              </div>
+            </section>
+
+            <section
+              v-if="findings.length"
+              class="review-subsection"
+              data-adjudication-findings
+            >
+              <header>
+                <h3>逐事实认定</h3>
+                <span>{{ findings.length }} 项</span>
+              </header>
+              <div class="adjudication-finding-list">
+                <article v-for="finding in findings" :key="finding.id">
+                  <header data-adjudication-finding-heading>
+                    <strong>{{ finding.title }}</strong>
+                  </header>
+                  <div
+                    v-if="finding.finding || finding.confidence"
+                    class="adjudication-finding__result"
+                    role="note"
+                    aria-label="认定结论"
+                    data-adjudication-finding-result
+                  >
+                    <div class="adjudication-finding__meta">
+                      <span>认定结论</span>
+                      <small v-if="finding.confidence">可信度 {{ finding.confidence }}</small>
                     </div>
-                    <div v-if="action.deadline">
-                      <dt>截止时间</dt><dd>{{ displayDateTime(action.deadline) }}</dd>
-                    </div>
-                  </dl>
-                  <div v-if="action.preconditions.length" class="remedy-action__conditions">
-                    <span>执行前置条件</span>
-                    <p>
-                      <code v-for="condition in action.preconditions" :key="condition">
-                        {{ enumLabel(condition, preconditionLabels) }}
-                      </code>
+                    <p v-if="finding.finding">
+                      <EvidenceMappedText :text="finding.finding" />
                     </p>
                   </div>
-                  <dl v-if="action.parameters.length" class="remedy-action__parameters">
-                    <div v-for="parameter in action.parameters" :key="parameter.key">
-                      <dt>{{ parameter.label }}</dt>
-                      <dd><EvidenceMappedText :text="parameter.value" /></dd>
-                    </div>
-                  </dl>
-                  <p v-if="action.note" class="remedy-action__note">
-                    <EvidenceMappedText :text="action.note" />
+                  <div v-if="finding.evidenceIds.length" class="adjudication-evidence-refs">
+                    <span>引用证据</span>
+                    <code
+                      v-for="(evidenceId, evidenceIndex) in finding.evidenceIds"
+                      :key="evidenceId"
+                      class="evidence-material-reference"
+                      :title="evidenceReferenceTitle(evidenceId)"
+                      data-evidence-reference
+                      data-evidence-material-reference
+                    >
+                      {{ numberedEvidenceReferenceLabel(evidenceId, evidenceIndex) }}
+                    </code>
+                  </div>
+                  <p v-if="finding.evidenceGap" class="adjudication-gap">
+                    <strong>证据缺口</strong>
+                    <EvidenceMappedText :text="finding.evidenceGap" />
                   </p>
                 </article>
               </div>
-              <p v-else class="empty-state">冻结包未提供可执行动作。</p>
             </section>
 
-            <section v-if="notifications.length" class="review-subsection">
+            <section
+              v-if="policies.length"
+              class="review-subsection"
+              data-adjudication-rules
+            >
               <header>
-                <h3>执行后通知</h3>
-                <span>{{ notifications.length }} 项</span>
+                <h3>逐规则适用</h3>
+                <span>{{ policies.length }} 条</span>
               </header>
-              <ul class="notification-list">
-                <li v-for="notification in notifications" :key="notification.code">
-                  <span aria-hidden="true">✓</span>
-                  <strong>{{ notification.label }}</strong>
-                </li>
-              </ul>
+              <div class="adjudication-rule-list">
+                <article v-for="policy in policies" :key="policy.id">
+                  <header>
+                    <strong><EvidenceMappedText :text="policy.title" /></strong>
+                    <div class="adjudication-rule__meta" data-adjudication-rule-meta>
+                      <span v-if="policy.applicable !== null" :data-applicable="policy.applicable">
+                        {{ policy.applicable ? "适用" : "不适用" }}
+                      </span>
+                      <small v-if="policy.version !== ''">版本 {{ policy.version }}</small>
+                    </div>
+                  </header>
+                  <p v-if="policy.detail"><EvidenceMappedText :text="policy.detail" /></p>
+                  <div v-if="policy.factIds.length" class="adjudication-fact-refs">
+                    <span>关联事实</span>
+                    <ul>
+                      <li v-for="factId in policy.factIds" :key="factId">
+                        {{ factReferenceLabel(factId) }}
+                      </li>
+                    </ul>
+                  </div>
+                  <dl v-if="policy.conditionsMet.length || policy.conditionsUnmet.length" class="adjudication-rule-conditions">
+                    <div v-if="policy.conditionsMet.length">
+                      <dt>已满足条件</dt>
+                      <dd>
+                        <template v-for="(condition, conditionIndex) in policy.conditionsMet" :key="condition">
+                          <EvidenceMappedText :text="condition" /><template v-if="conditionIndex < policy.conditionsMet.length - 1">；</template>
+                        </template>
+                      </dd>
+                    </div>
+                    <div v-if="policy.conditionsUnmet.length">
+                      <dt>未满足条件</dt>
+                      <dd>
+                        <template v-for="(condition, conditionIndex) in policy.conditionsUnmet" :key="condition">
+                          <EvidenceMappedText :text="condition" /><template v-if="conditionIndex < policy.conditionsUnmet.length - 1">；</template>
+                        </template>
+                      </dd>
+                    </div>
+                  </dl>
+                  <p v-if="policy.resultingEffect" class="adjudication-rule-effect">
+                    <strong>适用结果</strong>
+                    <EvidenceMappedText :text="policy.resultingEffect" />
+                  </p>
+                </article>
+              </div>
             </section>
+
+            <details
+              v-if="reviewResponses.length"
+              class="review-subsection adjudication-disclosure"
+              data-adjudication-review-responses
+            >
+              <summary>
+                <span>
+                  <strong>V2 复审回应</strong>
+                  <small>先看原意见，再核对法官回复</small>
+                </span>
+                <i>{{ reviewResponses.length }} 条</i>
+              </summary>
+              <ol class="adjudication-response-list">
+                <li
+                  v-for="(response, index) in reviewResponses"
+                  :key="response.id"
+                  :data-review-source="response.reviewSource"
+                >
+                  <span>{{ String(index + 1).padStart(2, "0") }}</span>
+                  <div class="adjudication-response-list__content">
+                    <header>
+                      <strong>{{ response.topic }}</strong>
+                      <div>
+                        <small v-if="response.sourceKind">{{ response.sourceKind }}</small>
+                        <i>{{ response.disposition }}</i>
+                      </div>
+                    </header>
+                    <div class="adjudication-response-pair">
+                      <section
+                        :class="{ 'is-unavailable': !response.reviewItemText }"
+                        data-review-source-opinion
+                      >
+                        <span>{{ response.opinionLabel }}</span>
+                        <p>
+                          <EvidenceMappedText
+                            v-if="response.reviewItemText"
+                            :text="response.reviewItemText"
+                          />
+                          <template v-else>该条原始意见未随当前冻结审核包展开。</template>
+                        </p>
+                      </section>
+                      <section data-judge-review-response>
+                        <span>法官回复</span>
+                        <p><EvidenceMappedText :text="response.response" /></p>
+                      </section>
+                    </div>
+                    <ul v-if="response.affectedFields.length">
+                      <li v-for="field in response.affectedFields" :key="field">{{ field }}</li>
+                    </ul>
+                  </div>
+                </li>
+              </ol>
+            </details>
+          </section>
+
+          <section
+            v-show="activeSection === 'risk'"
+            id="review-panel-risk"
+            class="review-panel review-panel--risk"
+            data-review-risk-panel
+            role="tabpanel"
+            aria-labelledby="review-tab-risk"
+          >
+            <header class="review-panel__header review-panel__header--compact">
+              <div>
+                <span>04</span>
+                <div>
+                  <h2>重点复核</h2>
+                </div>
+              </div>
+              <dl class="review-panel__metrics">
+                <div><dt>待核验</dt><dd>{{ reviewRisks.length }}</dd></div>
+                <div><dt>证据缺口</dt><dd>{{ reviewMetrics.missingEvidence }}</dd></div>
+                <div><dt>人工关注</dt><dd>{{ adjudicationAttention.length }}</dd></div>
+              </dl>
+            </header>
+
+            <section
+              v-if="reviewRisks.length"
+              class="review-risk-strip review-risk-strip--document"
+              aria-labelledby="review-risk-list-title"
+            >
+              <header class="review-risk-strip__header">
+                <div>
+                  <strong id="review-risk-list-title">终审核验清单</strong>
+                  <small>确认每一项均已在终审理由中得到回应</small>
+                </div>
+                <span data-review-risk-count>{{ reviewRisks.length }} 项待核验</span>
+              </header>
+              <ol class="review-risk-strip__list">
+                <li
+                  v-for="(risk, index) in reviewRisks"
+                  :key="risk.code"
+                  :data-risk-code="risk.code"
+                  data-review-risk-item
+                >
+                  <span class="review-risk-strip__index" aria-hidden="true">
+                    {{ String(index + 1).padStart(2, "0") }}
+                  </span>
+                  <p>{{ risk.label }}</p>
+                </li>
+              </ol>
+            </section>
+            <p v-else class="empty-state">当前冻结审核包没有需要重点复核的风险项。</p>
+
+            <details
+              v-if="adjudicationAttention.length"
+              class="review-subsection adjudication-attention adjudication-disclosure"
+              data-adjudication-attention
+            >
+              <summary>
+                <span>
+                  <strong>法官保留的人工关注事项</strong>
+                  <small>展开查看草案仍未消除的不确定性</small>
+                </span>
+                <i>{{ adjudicationAttention.length }} 项</i>
+              </summary>
+              <ol>
+                <li v-for="(attention, index) in adjudicationAttention" :key="attention">
+                  <span>{{ String(index + 1).padStart(2, "0") }}</span>
+                  <p><EvidenceMappedText :text="attention" /></p>
+                </li>
+              </ol>
+            </details>
           </section>
 
           <section
@@ -2120,12 +3112,11 @@ onBeforeUnmount(() => {
             role="tabpanel"
             aria-labelledby="review-tab-audit"
           >
-            <header class="review-panel__header">
+            <header class="review-panel__header review-panel__header--compact">
               <div>
-                <span>04</span>
+                <span>05</span>
                 <div>
                   <h2>冻结版本与审计信息</h2>
-                  <p>核对冻结材料版本链和不可变执行标识。</p>
                 </div>
               </div>
             </header>
@@ -2210,6 +3201,80 @@ onBeforeUnmount(() => {
     </div>
 
     <div
+      v-if="actionSelectorOpen && !historyMode"
+      class="decision-action-selector-backdrop"
+      role="presentation"
+      @click.self="closeDecisionActionSelector"
+      @keydown.esc="closeDecisionActionSelector"
+    >
+      <section
+        ref="actionSelectorDialog"
+        class="decision-action-selector"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="decision-action-selector-title"
+        data-decision-action-selector
+        @keydown.tab="trapActionSelectorFocus"
+      >
+        <header class="decision-action-selector__header">
+          <div>
+            <span>修改最终决定</span>
+            <h2 id="decision-action-selector-title">选择一个执行候选</h2>
+            <p>选择后会先回填到审核员意见，确认无误后再提交执行。</p>
+          </div>
+          <button
+            ref="actionSelectorCloseButton"
+            type="button"
+            @click="closeDecisionActionSelector"
+          >
+            取消
+          </button>
+        </header>
+
+        <div class="decision-action-selector__grid" aria-label="最终决定候选">
+          <button
+            v-for="item in decisionActionCatalog"
+            :key="item.code"
+            type="button"
+            :class="{
+              'is-selected': selectedDecisionActionCode === item.code,
+              'is-current': frozenDecisionActionCode === item.code,
+            }"
+            :disabled="frozenDecisionActionCode === item.code"
+            :aria-pressed="selectedDecisionActionCode === item.code"
+            :data-decision-action-choice="item.code"
+            @click="selectDecisionAction(item.code)"
+          >
+            <span class="decision-action-selector__choice-heading">
+              <strong>{{ item.label }}</strong>
+              <code>平台执行动作</code>
+            </span>
+            <small>{{ item.meaning }}</small>
+            <i v-if="frozenDecisionActionCode === item.code">当前 AI 建议</i>
+          </button>
+          <button
+            type="button"
+            class="decision-action-selector__manual-choice"
+            :class="{ 'is-selected': reviewerOpinionDecision === 'ESCALATE_MANUAL' }"
+            :aria-pressed="reviewerOpinionDecision === 'ESCALATE_MANUAL'"
+            data-manual-escalation-choice
+            @click="selectManualEscalation"
+          >
+            <span class="decision-action-selector__choice-heading">
+              <strong>{{ exceptionDecisions[0].label }}</strong>
+              <code>人工审核状态</code>
+            </span>
+            <small>{{ exceptionDecisions[0].description }}</small>
+          </button>
+        </div>
+
+        <footer>
+          共 {{ decisionActionCatalog.length + 1 }} 个最终候选。选择不会立即提交，可在审核员意见中再次确认。
+        </footer>
+      </section>
+    </div>
+
+    <div
       v-if="pendingDecision && !historyMode"
       class="decision-confirm-backdrop"
       role="presentation"
@@ -2221,18 +3286,54 @@ onBeforeUnmount(() => {
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="decision-confirm-title"
+        aria-describedby="decision-confirm-description decision-confirm-record-note"
         @keydown.tab="trapDecisionFocus"
       >
-        <span class="decision-confirm__icon" aria-hidden="true">!</span>
-        <div>
-          <span>最终确认</span>
-          <h2 id="decision-confirm-title">确认{{ pendingDecisionLabel }}？</h2>
-          <p>该决定会写入不可变审核记录，并驱动后续执行链路。</p>
-          <dl>
-            <div><dt>案件</dt><dd><EvidenceMappedText :text="caseTitle" /></dd></div>
-            <div><dt>审核包</dt><dd>v{{ packet.packet_version }}</dd></div>
-            <div><dt>决定</dt><dd>{{ pendingDecisionLabel }}</dd></div>
+        <header class="decision-confirm__header">
+          <span class="decision-confirm__icon" aria-hidden="true">!</span>
+          <div>
+            <span class="decision-confirm__eyebrow">最终确认</span>
+            <h2 id="decision-confirm-title">确认提交审核决定？</h2>
+            <p id="decision-confirm-description">
+              提交后不可撤回，请再次核对执行结果与冻结审核包。
+            </p>
+          </div>
+        </header>
+
+        <div class="decision-confirm__body">
+          <section
+            class="decision-confirm__outcome"
+            aria-label="本次提交结果"
+          >
+            <div>
+              <span>本次提交结果</span>
+              <strong>
+                {{
+                  selectedDecisionAction
+                    ? selectedDecisionAction.label
+                    : pendingDecisionLabel
+                }}
+              </strong>
+            </div>
+            <span class="decision-confirm__type">
+              {{ pendingDecisionLabel }}
+            </span>
+          </section>
+
+          <dl class="decision-confirm__meta">
+            <div class="decision-confirm__case">
+              <dt>案件</dt>
+              <dd><EvidenceMappedText :text="caseTitle" /></dd>
+            </div>
+            <div>
+              <dt>冻结审核包</dt>
+              <dd>v{{ packet.packet_version }}</dd>
+            </div>
           </dl>
+        </div>
+
+        <footer class="decision-confirm__footer">
+          <p id="decision-confirm-record-note">确认后将写入不可变审核记录</p>
           <div class="decision-confirm__actions">
             <button
               ref="confirmCancelButton"
@@ -2251,7 +3352,7 @@ onBeforeUnmount(() => {
               {{ submitting ? "正在提交" : "确认提交" }}
             </button>
           </div>
-        </div>
+        </footer>
       </section>
     </div>
 
@@ -2259,6 +3360,11 @@ onBeforeUnmount(() => {
       :message="copilotStreamError"
       title="审核解释官生成失败"
       @dismiss="copilotStreamError = ''"
+    />
+    <AgentStreamErrorDialog
+      :message="decisionSubmitError"
+      title="终审决定提交失败"
+      @dismiss="decisionSubmitError = ''"
     />
   </RoomShell>
 </template>
@@ -2334,43 +3440,47 @@ onBeforeUnmount(() => {
 }
 
 .review-workbench__badges > span {
-  padding: 5px 9px;
+  min-height: 24px;
+  padding: 5px 10px;
   border: 1px solid var(--review-border);
   border-radius: 999px;
-  font-size: 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .86),
+    0 2px 6px rgba(59, 78, 102, .08);
+  font-size: 11px;
   font-weight: 800;
   line-height: 1;
 }
 
 .status-badge {
   color: #246149;
-  background: #edf8f1;
-  border-color: #cfe7d8 !important;
+  background: linear-gradient(180deg, #f1fcf6, #e5f6ec);
+  border-color: #bfe0cd !important;
 }
 
 .task-badge {
   color: #5e5682;
-  background: #f1edff;
-  border-color: #ded5f4 !important;
+  background: linear-gradient(180deg, #f7f4ff, #eee9ff);
+  border-color: #d5c9f0 !important;
 }
 
 .risk-badge {
   color: var(--review-amber);
-  background: var(--review-amber-soft);
-  border-color: #ead7af !important;
+  background: linear-gradient(180deg, #fffaf0, #fff0cf);
+  border-color: #e8cb8e !important;
 }
 
 .risk-badge[data-risk="HIGH"],
 .risk-badge[data-risk="CRITICAL"] {
   color: var(--review-danger);
-  background: var(--review-danger-soft);
-  border-color: #ebcbc7 !important;
+  background: linear-gradient(180deg, #fff7f8, #ffe9ed);
+  border-color: #e7bdc5 !important;
 }
 
 .route-badge {
   color: #586b8c;
-  background: #f1f5ff;
-  border-color: #dce5f5 !important;
+  background: linear-gradient(180deg, #f8faff, #eaf0ff);
+  border-color: #cfdcf2 !important;
 }
 
 .review-workbench__timing {
@@ -2433,11 +3543,12 @@ onBeforeUnmount(() => {
 }
 
 .review-triple-layout {
+  --review-column-height: clamp(760px, calc(100dvh - 190px), 840px);
   display: grid;
   grid-template-columns:
-    minmax(320px, .92fr)
-    minmax(420px, 1.05fr)
-    minmax(320px, .83fr);
+    minmax(310px, .88fr)
+    minmax(430px, 1.05fr)
+    minmax(350px, .87fr);
   grid-template-areas:
     "chat materials operation";
   align-items: start;
@@ -2452,7 +3563,7 @@ onBeforeUnmount(() => {
 .review-explain-room,
 .review-operation-room {
   box-sizing: border-box;
-  height: 740px;
+  height: var(--review-column-height);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -2465,13 +3576,12 @@ onBeforeUnmount(() => {
 .review-explain-room {
   grid-area: chat;
   display: grid;
-  grid-template-rows: 92px auto minmax(0, 1fr);
+  grid-template-rows: 92px minmax(0, 1fr);
   gap: 12px;
   padding: 18px;
 }
 
-.review-explain-room__header,
-.review-operation-room__header {
+.review-explain-room__header {
   box-sizing: border-box;
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr) auto;
@@ -2500,30 +3610,26 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.review-explain-room__header > div,
-.review-operation-room__header > div {
+.review-explain-room__header > div {
   display: grid;
   gap: 3px;
 }
 
-.review-explain-room__header > div > span,
-.review-operation-room__header > div > span {
+.review-explain-room__header > div > span {
   color: #7186aa;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 900;
   letter-spacing: .16em;
 }
 
-.review-explain-room__header h2,
-.review-operation-room__header h2 {
+.review-explain-room__header h2 {
   margin: 3px 0 2px;
   color: #34435c;
   font-size: 17px;
   line-height: 1.22;
 }
 
-.review-explain-room__header p,
-.review-operation-room__header p {
+.review-explain-room__header p {
   display: -webkit-box;
   margin: 0;
   overflow: hidden;
@@ -2538,58 +3644,35 @@ onBeforeUnmount(() => {
   -webkit-line-clamp: 1;
 }
 
-.review-explain-room__header small,
-.review-operation-room__header small {
+.review-explain-room__header small {
   justify-self: end;
+  min-height: 24px;
   padding: 4px 9px;
   color: #34755a;
-  background: rgba(229, 250, 240, .82);
-  border: 1px solid rgba(106, 211, 169, .48);
+  background: linear-gradient(180deg, rgba(241, 255, 248, .96), rgba(225, 249, 237, .9));
+  border: 1px solid rgba(93, 194, 151, .56);
   border-radius: 999px;
-  font-size: 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 6px rgba(52, 117, 90, .09);
+  font-size: 11px;
   font-weight: 800;
   white-space: nowrap;
 }
 
 .review-explain-room__header small[data-agent-state="working"] {
   color: #875c20;
-  background: #fff3d9;
-}
-
-.review-explain-room__prompts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.review-explain-room__prompts button {
-  min-height: 38px;
-  padding: 7px 11px;
-  color: #586d91;
-  background: #f8fbff;
-  border: 1px solid #d9e4f2;
-  border-radius: 13px;
-  cursor: pointer;
-  font-size: 11px;
-}
-
-.review-explain-room__prompts button:hover:not(:disabled) {
-  color: #385a83;
-  background: #edf5ff;
-  border-color: #bcd4eb;
-}
-
-.review-explain-room__prompts button:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
+  background: linear-gradient(180deg, #fffaf0, #ffefcf);
+  border-color: #e9cb8d;
 }
 
 .review-explain-room__conversation {
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .review-explain-room__conversation :deep(.conversation-stream) {
+  --conversation-quick-prompts-left: -18px;
   height: 100%;
   min-height: 0;
 }
@@ -2597,84 +3680,104 @@ onBeforeUnmount(() => {
 .review-operation-room {
   grid-area: operation;
   display: grid;
-  grid-template-rows: 112px minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: var(--review-column-height);
+  min-height: 0;
+  align-content: stretch;
   gap: 14px;
-  padding: 18px;
+  overflow: hidden;
+  padding: 18px 18px 10px;
 }
 
-.review-operation-room__header {
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas:
-    "eyebrow eyebrow"
-    "title badge"
-    "description description";
-  align-content: start;
-  align-items: start;
-  column-gap: 12px;
-  row-gap: 3px;
-  height: 112px;
-  min-height: 112px;
+.review-operation-room__decision-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 10px;
+  border-bottom: 1px solid #e2eaf4;
 }
 
-.review-operation-room__header > div {
-  display: contents;
+.review-operation-room__decision-heading span {
+  color: #7186aa;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: .14em;
 }
 
-.review-operation-room__header > div > span {
-  grid-area: eyebrow;
+.review-operation-room__decision-heading h2 {
+  margin: 3px 0 0;
+  color: #34435c;
+  font-size: 20px;
+  font-weight: 850;
+  line-height: 1.3;
 }
 
-.review-operation-room__header h2 {
-  grid-area: title;
-  margin: 0;
+.review-operation-room__decision-heading i {
+  min-height: 24px;
+  padding: 5px 9px;
+  color: #526bc0;
+  background: linear-gradient(180deg, #f8fbff, #eaf1ff);
+  border: 1px solid #c9d8ef;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 6px rgba(73, 101, 179, .08);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
 }
 
-.review-operation-room__header p {
-  grid-area: description;
-}
-
-.review-operation-room__header small {
-  grid-area: badge;
-  align-self: center;
+.review-operation-room__scroll-shell {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .review-operation-room__scroll {
   display: grid;
   grid-auto-rows: max-content;
   align-content: start;
-  gap: 12px;
+  height: 100%;
+  gap: 14px;
   min-height: 0;
-  padding: 2px 6px 8px 2px;
+  padding: 2px 12px 0 2px;
   overflow-x: hidden;
   overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-  scrollbar-color: #cbd8e8 transparent;
-  scrollbar-width: thin;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none;
 }
 
 .review-operation-room__scroll::-webkit-scrollbar {
-  width: 8px;
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
-.review-operation-room__scroll::-webkit-scrollbar-thumb {
-  background: #cbd8e8;
+.review-operation-room__scroll-indicator {
+  position: absolute;
+  top: 4px;
+  right: 1px;
+  bottom: 4px;
+  width: 5px;
+  pointer-events: none;
+  background: #edf3f9;
   border-radius: 999px;
+}
+
+.review-operation-room__scroll-indicator i {
+  display: block;
+  width: 5px;
+  height: 72px;
+  background: #bfd0e3;
+  border-radius: 999px;
+  box-shadow: inset 0 1px 0 #ffffffb8;
+  transition: transform 80ms linear;
 }
 
 .review-operation-room .decision-actions--approval {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.review-operation-room .decision-actions--exception {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.review-operation-room .decision-actions--exception > button {
-  grid-template-columns: 26px minmax(0, 1fr);
-  min-height: 48px;
-  align-content: center;
-  min-width: 0;
+  column-gap: 12px;
 }
 
 .review-risk-strip {
@@ -2769,6 +3872,67 @@ onBeforeUnmount(() => {
   word-break: normal;
 }
 
+.review-risk-strip--document {
+  margin-top: 18px;
+  color: #40536a;
+  background: linear-gradient(135deg, #f8faff, #f3f7fc);
+  border-color: #dce6f1;
+  border-left: 3px solid #7f92d6;
+  border-radius: 16px;
+}
+
+.review-risk-strip--document .review-risk-strip__header {
+  padding: 16px 18px 15px;
+  border-bottom-color: #e1e8f0;
+}
+
+.review-risk-strip--document .review-risk-strip__header strong {
+  color: #40536a;
+  font-size: 14px;
+}
+
+.review-risk-strip--document .review-risk-strip__header small {
+  color: #718092;
+  font-size: 11px;
+}
+
+.review-risk-strip--document .review-risk-strip__header > span {
+  color: #536e9d;
+  background: #eef3fb;
+  border: 1px solid #dce6f4;
+  font-size: 11px;
+}
+
+.review-risk-strip--document .review-risk-strip__list {
+  padding-right: 18px;
+  padding-left: 18px;
+}
+
+.review-risk-strip--document .review-risk-strip__list > li {
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px 0;
+}
+
+.review-risk-strip--document .review-risk-strip__list > li + li {
+  border-top-color: #e4ebf2;
+}
+
+.review-risk-strip--document .review-risk-strip__index {
+  width: 28px;
+  height: 28px;
+  color: #536e9d;
+  background: #edf3fb;
+  border-color: #d7e2f0;
+  font-size: 11px;
+}
+
+.review-risk-strip--document .review-risk-strip__list p {
+  color: #536374;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
 .review-case-strip {
   display: grid;
   gap: 12px;
@@ -2794,11 +3958,9 @@ onBeforeUnmount(() => {
   word-break: normal;
 }
 
-.review-case-strip__identity > span,
-.review-case-strip__version span,
-.review-case-strip__version > small {
+.review-case-strip__identity > span {
   color: #7a8799;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .review-case-strip__identity > span {
@@ -2807,34 +3969,8 @@ onBeforeUnmount(() => {
   letter-spacing: .08em;
 }
 
-.review-case-strip__identity .review-workbench__badges {
-  margin-top: 2px;
-}
-
-.review-case-strip__version {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 8px 16px;
-  padding-top: 10px;
-  border-top: 1px solid #dce4e9;
-  text-align: left;
-}
-
-.review-case-strip__version > div {
-  display: grid;
-  gap: 2px;
-}
-
-.review-case-strip__version strong {
-  color: #4f6078;
-  font-size: 12px;
-}
-
-.review-case-strip__version > small {
-  max-width: 148px;
-  line-height: 1.45;
-  text-align: right;
+.review-case-strip__statuses .review-workbench__badges {
+  margin: 0;
 }
 
 .review-loading,
@@ -3059,7 +4195,7 @@ onBeforeUnmount(() => {
   grid-area: materials;
   display: grid;
   grid-template-rows: 58px minmax(0, 1fr);
-  height: 740px;
+  height: var(--review-column-height);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -3071,7 +4207,7 @@ onBeforeUnmount(() => {
 
 .review-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(78px, 1fr));
+  grid-template-columns: repeat(5, minmax(86px, 1fr));
   min-height: 58px;
   gap: 6px;
   padding: 8px 12px;
@@ -3137,6 +4273,11 @@ onBeforeUnmount(() => {
   gap: 10px;
 }
 
+.review-panel__header--compact,
+.review-panel__header--compact > div:first-child {
+  align-items: center;
+}
+
 .review-panel__header > div:first-child > span {
   display: grid;
   width: 28px;
@@ -3147,7 +4288,7 @@ onBeforeUnmount(() => {
   background: linear-gradient(135deg, #7f91e6, #69bea7);
   border-radius: 11px;
   box-shadow: 0 8px 18px #657ab42b;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 900;
 }
 
@@ -3169,6 +4310,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex: 0 0 auto;
   gap: 10px;
+  margin: 0;
 }
 
 .review-panel__metrics > div {
@@ -3180,7 +4322,7 @@ onBeforeUnmount(() => {
 
 .review-panel__metrics dt {
   color: #89939e;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .review-panel__metrics dd {
@@ -3202,23 +4344,31 @@ onBeforeUnmount(() => {
   border-top: 0;
 }
 
-.review-case-summary > header + .case-narrative,
-.review-case-summary > header + .case-key-facts {
-  margin-top: 0;
-}
-
-.review-case-summary .case-narrative + .case-key-facts {
-  margin-top: 10px;
+.case-summary-card {
+  overflow: hidden;
+  background: linear-gradient(135deg, #fbfcff, #f6f9fd);
+  border: 1px solid #dfe8f4;
+  border-left: 3px solid #8197e4;
+  border-radius: 16px;
 }
 
 .case-narrative {
-  padding: 12px 14px;
-  margin: 18px 0 0;
+  padding: 15px 16px;
+  margin: 0;
+  border-top: 1px solid #e1e8f0;
+}
+
+.case-narrative h4 {
+  margin: 0;
+  color: #657386;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
+.case-narrative p {
+  margin: 6px 0 0;
   color: #41505e;
-  background: linear-gradient(135deg, #f8fbff, #f5f8ff);
-  border: 1px solid #e1eaf5;
-  border-left: 3px solid #8197e4;
-  border-radius: 15px;
   font-size: 13px;
   line-height: 1.7;
 }
@@ -3226,17 +4376,25 @@ onBeforeUnmount(() => {
 .case-key-facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin: 18px 0 0;
+  margin: 0;
 }
 
 .case-key-facts > div {
   display: grid;
   gap: 5px;
-  padding: 12px;
-  background: #f9fbff;
-  border: 1px solid #e1e9f3;
-  border-radius: 14px;
+  padding: 13px 15px;
+}
+
+.case-key-facts > div:nth-child(even) {
+  border-left: 1px solid #e1e8f0;
+}
+
+.case-key-facts > div:nth-child(n + 3) {
+  border-top: 1px solid #e1e8f0;
+}
+
+.case-summary-card .case-key-facts dt {
+  font-size: 11px;
 }
 
 .case-key-facts dt,
@@ -3255,9 +4413,16 @@ onBeforeUnmount(() => {
   line-height: 1.55;
 }
 
+.case-summary-card .case-key-facts dd {
+  color: #2f3f4e;
+  font-size: 13px;
+  font-weight: 750;
+}
+
 .case-key-facts dd strong {
-  color: #273744;
-  font-size: 14px;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
 }
 
 .case-key-facts code,
@@ -3276,17 +4441,21 @@ onBeforeUnmount(() => {
 .case-references {
   display: flex;
   flex-wrap: wrap;
-  gap: 7px;
-  margin-top: 10px;
+  gap: 10px;
+  padding: 11px 15px;
+  margin: 0;
+  border-top: 1px solid #e1e8f0;
 }
 
 .case-references span {
-  padding: 5px 7px;
+  padding: 0;
   color: #6a7581;
-  background: #f7faff;
-  border: 1px solid #dfe7f2;
-  border-radius: 10px;
-  font-size: 9px;
+  font-size: 11px;
+}
+
+.case-references span + span {
+  padding-left: 10px;
+  border-left: 1px solid #dfe7f2;
 }
 
 .case-references code {
@@ -3316,7 +4485,7 @@ onBeforeUnmount(() => {
 
 .review-subsection > header span {
   color: #7f8a96;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .claim-list {
@@ -3338,12 +4507,39 @@ onBeforeUnmount(() => {
 
 .claim-item strong {
   display: inline-block;
-  padding: 3px 6px;
-  color: #536bc0;
-  background: #eef3ff;
-  border: 1px solid #dbe4fb;
+  min-height: 24px;
+  padding: 3px 9px;
+  color: #4965b3;
+  background: linear-gradient(180deg, #f8faff, #eaf0ff);
+  border: 1px solid #cad8ef;
   border-radius: 999px;
-  font-size: 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 6px rgba(73, 101, 179, .08);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.claim-item > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.claim-item > header > span {
+  min-height: 24px;
+  padding: 3px 9px;
+  color: #748292;
+  background: linear-gradient(180deg, #f8fafc, #edf2f7);
+  border: 1px solid #d3dee9;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 6px rgba(59, 78, 102, .07);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.45;
 }
 
 .claim-item p {
@@ -3353,21 +4549,32 @@ onBeforeUnmount(() => {
   line-height: 1.65;
 }
 
+.claim-item > small {
+  display: block;
+  padding-top: 8px;
+  margin-top: 8px;
+  color: #74808c;
+  border-top: 1px solid #e6ecf3;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
 .issue-list,
 .focus-list,
 .notification-list {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   padding: 0;
   margin: 0;
   list-style: none;
 }
 
 .issue-list li {
-  display: flex;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 12px;
   align-items: flex-start;
-  padding: 10px 0;
+  padding: 14px 0;
   border-bottom: 1px solid #e6eaee;
 }
 
@@ -3377,37 +4584,174 @@ onBeforeUnmount(() => {
 
 .issue-list li > span {
   display: grid;
-  width: 25px;
-  height: 25px;
-  flex: 0 0 25px;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
   place-items: center;
   color: #fff;
   background: linear-gradient(135deg, #8294e5, #72bba9);
   border-radius: 10px;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 800;
 }
 
 .issue-list strong {
+  display: block;
+  min-width: 0;
   color: #3c4a57;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.issue-list li > div {
+  min-width: 0;
+}
+
+.issue-item__heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: flex-start;
+}
+
+.issue-finding {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  margin-top: 9px;
+  padding: 9px 12px 10px 13px;
+  overflow: hidden;
+  color: #355d5e;
+  background: linear-gradient(110deg, #f3faf9 0%, #f8fbff 100%);
+  border-radius: 10px;
+}
+
+.issue-finding::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: #6eb7ab;
+  content: "";
+}
+
+.issue-finding__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.issue-finding__meta span {
+  color: #28766f;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: .02em;
+}
+
+.issue-finding__meta small {
+  flex: 0 0 auto;
+  color: #6e8490;
+  font-size: 10px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.issue-finding__text {
+  margin: 0;
+  color: #3e585b;
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.issue-positions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin: 12px 0 0;
+}
+
+.issue-position-disclosure {
+  margin-top: 9px;
+}
+
+.issue-position-disclosure > summary {
+  display: flex;
+  align-items: center;
+  width: fit-content;
+  gap: 8px;
+  color: #60728a;
+  cursor: pointer;
   font-size: 12px;
-  line-height: 1.6;
+  font-weight: 750;
+  list-style: none;
+}
+
+.issue-position-disclosure > summary::-webkit-details-marker,
+.adjudication-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.issue-position-disclosure > summary::before {
+  content: "+";
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  color: #5870aa;
+  background: #eef3fb;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.issue-position-disclosure[open] > summary::before {
+  content: "−";
+}
+
+.issue-position-disclosure > summary span {
+  color: #8a96a2;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.issue-positions > div {
+  padding: 11px 12px;
+  background: #f8faff;
+  border: 1px solid #e4eaf2;
+  border-radius: 11px;
+}
+
+.issue-positions dt {
+  color: #687994;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.issue-positions dd {
+  margin: 5px 0 0;
+  color: #566474;
+  font-size: 12px;
+  line-height: 1.65;
 }
 
 .focus-list li {
   position: relative;
-  padding-left: 16px;
+  padding-left: 18px;
   color: #4d5c69;
-  font-size: 12px;
-  line-height: 1.65;
+  font-size: 14px;
+  line-height: 1.7;
 }
 
 .focus-list li::before {
   position: absolute;
   top: 0.7em;
   left: 1px;
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   background: #6f86d8;
   border-radius: 50%;
   content: "";
@@ -3428,11 +4772,19 @@ onBeforeUnmount(() => {
 .policy-list,
 .remedy-actions {
   display: grid;
-  gap: 10px;
+  gap: 12px;
+}
+
+.evidence-row {
+  padding: 16px 17px;
+  background: linear-gradient(135deg, #fcfdff, #f5f9ff);
+  border-color: #d5e2f2;
+  box-shadow: none;
 }
 
 .evidence-row[data-missing="true"] {
-  border-left: 3px solid #daa74a;
+  background: linear-gradient(135deg, #fbfdff, #f1f6fd);
+  border-left: 3px solid #6f94c9;
 }
 
 .evidence-row > header,
@@ -3461,17 +4813,24 @@ onBeforeUnmount(() => {
 
 .evidence-row > header > span {
   flex: 0 0 auto;
-  padding: 3px 6px;
-  color: #36775f;
-  background: #eaf8f1;
-  border: 1px solid #cfeadb;
+  min-height: 24px;
+  padding: 3px 9px;
+  color: #426a9b;
+  background: linear-gradient(180deg, #f4f8ff, #e6effb);
+  border: 1px solid #c2d4e9;
   border-radius: 999px;
-  font-size: 9px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 6px rgba(66, 106, 155, .08);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.45;
 }
 
 .evidence-row[data-missing="true"] > header > span {
-  color: #8d521a;
-  background: #fff1dc;
+  color: #3e6595;
+  background: linear-gradient(180deg, #f2f7ff, #dfebf9);
+  border-color: #b8cde5;
 }
 
 .evidence-confidence {
@@ -3481,7 +4840,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   margin-top: 10px;
   color: #7b8691;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .evidence-confidence > div {
@@ -3500,26 +4859,25 @@ onBeforeUnmount(() => {
 
 .evidence-confidence strong {
   color: #495763;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .evidence-links {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
-  margin-top: 12px;
+  padding-top: 0;
+  margin-top: 11px;
 }
 
 .evidence-links > div {
-  padding: 9px;
-  background: #f7faff;
-  border: 1px solid #e3eaf4;
-  border-radius: 13px;
+  padding: 0;
 }
 
 .evidence-links dt {
   color: #7a8590;
-  font-size: 9px;
+  font-size: 11px;
+  font-weight: 750;
 }
 
 .evidence-links dd {
@@ -3528,16 +4886,100 @@ onBeforeUnmount(() => {
   gap: 5px;
   margin: 6px 0 0;
   color: #78838f;
-  font-size: 10px;
+  font-size: 11px;
 }
 
-.evidence-links code {
-  padding: 3px 5px;
-  color: #3e5b68;
-  background: #fff;
-  border: 1px solid #dce6f1;
-  border-radius: 8px;
-  font-size: 9px;
+.evidence-binding-list {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  margin: 11px 0 0;
+  list-style: none;
+}
+
+.evidence-binding-list li {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+}
+
+.evidence-binding-list li + li {
+  margin-top: 1px;
+}
+
+.evidence-material-reference {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 24px;
+  gap: 0;
+  padding: 3px 9px;
+  overflow: hidden;
+  color: #49689a;
+  background: linear-gradient(180deg, #f8fbff 0%, #eaf1ff 100%);
+  border: 1px solid #c9d8ef;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .94),
+    0 2px 6px rgba(70, 92, 119, .08);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-material-reference::before {
+  display: none;
+}
+
+.evidence-binding-list__relation {
+  justify-self: end;
+  padding-left: 9px;
+  color: #4f7769;
+  border-left: 2px solid #8bbca8;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.evidence-binding-list li[data-relation="CONTENT_CONTRADICTS"]
+  .evidence-binding-list__relation {
+  color: #975361;
+  border-left-color: #d99aa6;
+}
+
+.evidence-binding-list li[data-relation="INCONCLUSIVE"]
+  .evidence-binding-list__relation {
+  color: #91671f;
+  border-left-color: #d9ad4b;
+}
+
+.evidence-binding-list li[data-relation="CONTEXT_ONLY"]
+  .evidence-binding-list__relation {
+  color: #667587;
+  border-left-color: #b9c5d3;
+}
+
+.evidence-binding-list li > p,
+.evidence-no-binding {
+  margin: 0;
+  color: #637180;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.evidence-no-binding {
+  margin-top: 10px;
+  color: #687a90;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
 
 .evidence-analysis,
@@ -3551,9 +4993,9 @@ onBeforeUnmount(() => {
 }
 
 .evidence-analysis {
-  padding-top: 10px;
+  padding-top: 0;
   margin: 10px 0 0;
-  border-top: 1px solid #e4e8ec;
+  font-size: 12px;
 }
 
 .evidence-mapped-text {
@@ -3568,7 +5010,10 @@ onBeforeUnmount(() => {
   margin: 0 2px;
   border: 1px solid #dce3eb;
   border-radius: 999px;
-  font-size: 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .88),
+    0 2px 5px rgba(59, 78, 102, .07);
+  font-size: 11px;
   font-weight: 750;
   line-height: 1.3;
   vertical-align: 1px;
@@ -3577,37 +5022,37 @@ onBeforeUnmount(() => {
 
 .evidence-mapped-text :deep(.evidence-inline-status[data-tone="neutral"]) {
   color: #667587;
-  background: #f1f4f8;
+  background: linear-gradient(180deg, #f8fafc, #edf1f6);
 }
 
 .evidence-mapped-text :deep(.evidence-inline-status[data-tone="verified"]) {
   color: #2f735b;
-  background: #eaf8f1;
-  border-color: #cfeadb;
+  background: linear-gradient(180deg, #f3fcf7, #e3f6eb);
+  border-color: #bee0cc;
 }
 
 .evidence-mapped-text :deep(.evidence-inline-status[data-tone="partial"]) {
   color: #486985;
-  background: #edf5fb;
-  border-color: #d2e4f1;
+  background: linear-gradient(180deg, #f6fbff, #e7f2fb);
+  border-color: #c7ddec;
 }
 
 .evidence-mapped-text :deep(.evidence-inline-status[data-tone="warning"]) {
   color: #8d5a1e;
-  background: #fff3df;
-  border-color: #efd9b3;
+  background: linear-gradient(180deg, #fffaf0, #ffedcf);
+  border-color: #e8ca92;
 }
 
 .evidence-mapped-text :deep(.evidence-inline-status[data-tone="review"]) {
   color: #6e5799;
-  background: #f2edff;
-  border-color: #ddd2f5;
+  background: linear-gradient(180deg, #faf8ff, #eee9ff);
+  border-color: #d5c9ed;
 }
 
 .evidence-mapped-text :deep(.evidence-inline-status[data-tone="danger"]) {
   color: #944a52;
-  background: #fff0f2;
-  border-color: #efd3d8;
+  background: linear-gradient(180deg, #fff8f9, #ffe9ed);
+  border-color: #e6bdc5;
 }
 
 .policy-list article {
@@ -3621,6 +5066,544 @@ onBeforeUnmount(() => {
 
 .policy-list p {
   margin: 6px 0 0;
+}
+
+.review-panel--draft {
+  background: linear-gradient(180deg, #ffffff 0, #fbfcff 100%);
+}
+
+.adjudication-decision {
+  position: relative;
+  overflow: hidden;
+  padding: 22px;
+  background:
+    radial-gradient(circle at 92% 8%, rgba(37, 177, 143, .22), transparent 34%),
+    linear-gradient(135deg, #e8efff 0%, #edf9f5 68%, #e5f6f1 100%);
+  border: 1px solid #b9cceb;
+  border-radius: 20px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .84),
+    0 10px 26px rgba(64, 91, 140, .12);
+}
+
+.review-panel__header + .review-subsection.adjudication-decision {
+  padding-top: 22px;
+}
+
+.adjudication-decision::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: linear-gradient(180deg, #5677df, #2eaf88);
+  content: "";
+}
+
+.adjudication-decision > header {
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.adjudication-decision > header h3 {
+  color: #263f68;
+  font-size: 14px;
+}
+
+.adjudication-decision > header > span {
+  min-height: 24px;
+  padding: 3px 9px;
+  color: #436b7b;
+  background: linear-gradient(180deg, rgba(255, 255, 255, .85), rgba(226, 244, 242, .86));
+  border: 1px solid #b9d7d4;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 6px rgba(50, 101, 102, .08);
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.adjudication-decision__summary {
+  display: grid;
+  gap: 7px;
+}
+
+.adjudication-decision__summary strong {
+  color: #315fc1;
+  font-size: 22px;
+  font-weight: 850;
+  line-height: 1.35;
+  letter-spacing: -.01em;
+}
+
+.adjudication-decision__summary p,
+.adjudication-public-text > p,
+.adjudication-reasoning > p {
+  margin: 0;
+  color: #536374;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.adjudication-public-text > p,
+.adjudication-reasoning > p {
+  padding: 13px 14px;
+  background: #f8faff;
+  border: 1px solid #e2e9f2;
+  border-radius: 14px;
+}
+
+.adjudication-remedy-list,
+.adjudication-finding-list,
+.adjudication-rule-list {
+  display: grid;
+  gap: 11px;
+}
+
+.adjudication-remedy-list > article,
+.adjudication-finding-list > article,
+.adjudication-rule-list > article {
+  padding: 14px 15px;
+  background: #fff;
+  border: 1px solid #dfe7f0;
+  border-radius: 16px;
+  box-shadow: 0 7px 18px #61738b0a;
+}
+
+.adjudication-remedy-list article > header,
+.adjudication-finding-list article > header,
+.adjudication-rule-list article > header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.adjudication-remedy-list article > header,
+.adjudication-finding-list article > header {
+  justify-content: space-between;
+}
+
+.adjudication-remedy-list article > header strong,
+.adjudication-finding-list article > header strong,
+.adjudication-rule-list article > header strong {
+  display: block;
+  min-width: 0;
+  color: #34475a;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.adjudication-finding__result {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  margin-top: 9px;
+  padding: 9px 12px 10px 13px;
+  overflow: hidden;
+  color: #415b77;
+  background: linear-gradient(110deg, #f4f7fc 0%, #f7fbfb 100%);
+  border-radius: 10px;
+}
+
+.adjudication-finding__result::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: #7898c7;
+  content: "";
+}
+
+.adjudication-finding__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.adjudication-finding__meta span {
+  color: #466b9d;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: .02em;
+}
+
+.adjudication-finding__meta small {
+  flex: 0 0 auto;
+  color: #718397;
+  font-size: 10px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.adjudication-finding__result > p {
+  margin: 0;
+  color: #435a70;
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.adjudication-remedy-list article > p,
+.adjudication-rule-list article > p {
+  margin: 7px 0 0;
+  color: #576677;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.adjudication-fact-refs,
+.adjudication-conditions,
+.adjudication-evidence-refs {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-top: 8px;
+  margin-top: 8px;
+  border-top: 1px solid #e8edf3;
+}
+
+.adjudication-fact-refs > span,
+.adjudication-conditions > span,
+.adjudication-evidence-refs > span {
+  flex: 0 0 auto;
+  color: #7a8796;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.adjudication-fact-refs ul,
+.adjudication-conditions ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.adjudication-fact-refs li,
+.adjudication-conditions li {
+  min-height: 24px;
+  padding: 3px 9px;
+  color: #596b80;
+  background: linear-gradient(180deg, #f9fbfd, #edf2f8);
+  border: 1px solid #d2deea;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 5px rgba(59, 78, 102, .07);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.5;
+}
+
+.adjudication-evidence-refs {
+  flex-wrap: wrap;
+}
+
+.adjudication-gap {
+  padding: 8px 0 0;
+  margin: 8px 0 0;
+  color: #61748c;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.adjudication-gap > strong {
+  margin-right: 6px;
+  color: #426b9b;
+}
+
+.adjudication-rule-effect {
+  padding: 9px 10px;
+  margin: 8px 0 0;
+  color: #74562c;
+  background: #fff9ef;
+  border: 1px solid #efdfc2;
+  border-radius: 11px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.adjudication-rule-effect > strong {
+  margin-right: 6px;
+  color: #825b20;
+}
+
+.adjudication-rule-list article > header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 12px;
+}
+
+.adjudication-rule-list article > header strong {
+  min-width: 0;
+}
+
+.adjudication-rule__meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  justify-self: end;
+}
+
+.adjudication-rule__meta > span {
+  min-height: 24px;
+  padding: 3px 9px;
+  color: #7f5632;
+  background: linear-gradient(180deg, #fffaf2, #ffefd8);
+  border: 1px solid #e7c991;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 6px rgba(105, 81, 45, .08);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.adjudication-rule__meta > span[data-applicable="true"] {
+  color: #36745b;
+  background: linear-gradient(180deg, #f3fcf7, #e4f6ec);
+  border-color: #bee0cc;
+}
+
+.adjudication-rule__meta > small {
+  color: #7e8a97;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.adjudication-rule-conditions {
+  display: grid;
+  gap: 6px;
+  margin: 9px 0 0;
+}
+
+.adjudication-rule-conditions > div {
+  display: grid;
+  gap: 3px;
+  padding: 10px 11px;
+  background: #f7f9fc;
+  border-radius: 10px;
+}
+
+.adjudication-rule-conditions dt {
+  color: #778596;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.adjudication-rule-conditions dd {
+  margin: 0;
+  color: #596879;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.adjudication-response-list,
+.adjudication-attention > ol {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.adjudication-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  color: #40536a;
+  background: #f7f9fd;
+  border: 1px solid #dfe7f0;
+  border-radius: 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.adjudication-disclosure > summary > span {
+  display: grid;
+  gap: 2px;
+}
+
+.adjudication-disclosure > summary strong {
+  font-size: 12px;
+}
+
+.adjudication-disclosure > summary small {
+  color: #7a8796;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.adjudication-disclosure > summary > i {
+  flex: 0 0 auto;
+  color: #60738e;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 750;
+}
+
+.adjudication-disclosure > summary > i::after {
+  content: "  展开";
+}
+
+.adjudication-disclosure[open] > summary > i::after {
+  content: "  收起";
+}
+
+.adjudication-disclosure[open] > summary {
+  margin-bottom: 10px;
+  background: #f2f6fc;
+}
+
+.adjudication-response-list > li,
+.adjudication-attention > ol > li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  padding: 11px 12px;
+  background: #fff;
+  border: 1px solid #e0e7ef;
+  border-radius: 14px;
+}
+
+.adjudication-response-list > li > span,
+.adjudication-attention > ol > li > span {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  color: #fff;
+  background: #748bd3;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.adjudication-response-list header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.adjudication-response-list__content {
+  min-width: 0;
+}
+
+.adjudication-response-list header > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.adjudication-response-list header small {
+  color: #6b63a0;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.adjudication-response-list header strong {
+  color: #40536a;
+  font-size: 12px;
+}
+
+.adjudication-response-list header i {
+  min-height: 24px;
+  padding: 3px 9px;
+  color: #4d725f;
+  background: linear-gradient(180deg, #f3fcf7, #e4f6ec);
+  border: 1px solid #bee0cc;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 6px rgba(54, 119, 95, .08);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.adjudication-response-list p,
+.adjudication-attention p {
+  margin: 5px 0 0;
+  color: #596879;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.adjudication-response-pair {
+  margin-top: 10px;
+  border-top: 1px solid #e3e9f1;
+  border-bottom: 1px solid #e3e9f1;
+}
+
+.adjudication-response-pair > section {
+  padding: 10px 0;
+}
+
+.adjudication-response-pair > section + section {
+  border-top: 1px solid #e8edf3;
+}
+
+.adjudication-response-pair > section > span {
+  color: #6279ba;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: .06em;
+}
+
+.adjudication-response-pair > section[data-judge-review-response] > span {
+  color: #3e806d;
+}
+
+.adjudication-response-pair > section > p {
+  margin-top: 4px;
+  color: #53647a;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.adjudication-response-pair > section.is-unavailable > p {
+  color: #8894a4;
+}
+
+.adjudication-response-list ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 7px 0 0;
+  margin: 7px 0 0;
+  border-top: 1px solid #e8edf3;
+  list-style: none;
+}
+
+.adjudication-response-list ul li {
+  min-height: 24px;
+  padding: 3px 9px;
+  color: #60728a;
+  background: linear-gradient(180deg, #f9fbfd, #edf2f8);
+  border: 1px solid #d2deea;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 5px rgba(59, 78, 102, .07);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.5;
 }
 
 .packet-cards__draft {
@@ -3707,18 +5690,26 @@ onBeforeUnmount(() => {
 
 .remedy-action > header i {
   flex: 0 0 auto;
-  padding: 3px 6px;
+  min-height: 24px;
+  padding: 3px 9px;
   color: #496654;
-  background: #edf5ef;
+  background: linear-gradient(180deg, #f3fcf7, #e4f6ec);
+  border: 1px solid #bee0cc;
   border-radius: 999px;
-  font-size: 9px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 6px rgba(54, 119, 95, .08);
+  font-size: 11px;
   font-style: normal;
+  font-weight: 800;
+  line-height: 1.45;
 }
 
 .remedy-action > header i[data-risk="HIGH"],
 .remedy-action > header i[data-risk="CRITICAL"] {
   color: var(--review-danger);
-  background: var(--review-danger-soft);
+  background: linear-gradient(180deg, #fff8f9, #ffe9ed);
+  border-color: #e6bdc5;
 }
 
 .remedy-action__facts,
@@ -3804,66 +5795,130 @@ onBeforeUnmount(() => {
 }
 
 .decision-panel {
-  padding: 4px 2px 8px;
+  padding: 4px 2px 0;
 }
 
-.decision-panel > header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 2px 2px 12px;
-  border-bottom: 1px solid #e2eaf4;
-}
-
-.decision-panel > header span {
-  color: #7186aa;
-  font-size: 9px;
-  font-weight: 900;
-  letter-spacing: .14em;
-}
-
-.decision-panel > header h2 {
-  margin: 3px 0 0;
-  color: #34435c;
-  font-size: 17px;
-}
-
-.decision-panel > header i {
-  padding: 5px 9px;
-  color: #526bc0;
-  background: #eef3ff;
-  border: 1px solid #dbe4fb;
-  border-radius: 999px;
-  font-size: 10px;
-  font-style: normal;
-}
-
-.decision-panel__draft {
+.decision-panel__positions {
   display: grid;
-  gap: 3px;
-  padding: 12px 14px;
-  margin-top: 12px;
-  background: linear-gradient(135deg, #f4f7ff, #f2fbf7);
+  overflow: hidden;
+  margin-top: 2px;
   border: 1px solid #dce7f2;
-  border-left: 3px solid #8197e4;
-  border-radius: 14px;
+  border-radius: 16px;
 }
 
-.decision-panel__draft > span {
+.decision-position {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 14px 15px;
+}
+
+.decision-position + .decision-position {
+  border-top: 1px solid #dfe7ef;
+}
+
+.decision-position--ai {
+  background: linear-gradient(135deg, #f4f7ff, #f2fbf7);
+}
+
+.decision-position--reviewer {
+  background: #fbfcfe;
+}
+
+.decision-position--reviewer[data-state="ready"] {
+  background: linear-gradient(135deg, #fffaf0, #f7fbff);
+}
+
+.decision-position--reviewer[data-state="submitted"] {
+  background: linear-gradient(135deg, #eef9f2, #f5fbff);
+}
+
+.decision-position > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.decision-position > header span {
   color: #77848f;
-  font-size: 9px;
+  font-size: 11px;
+  font-weight: 750;
 }
 
-.decision-panel__draft > strong {
-  color: #4f68bd;
+.decision-position > header i {
+  min-height: 24px;
+  padding: 3px 9px;
+  color: #788596;
+  background: linear-gradient(180deg, rgba(255, 255, 255, .95), rgba(237, 242, 248, .9));
+  border: 1px solid #d2deea;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .9),
+    0 2px 5px rgba(59, 78, 102, .07);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.decision-position > strong {
+  color: #4a596c;
   font-size: 14px;
+  line-height: 1.45;
+}
+
+.decision-position--ai > strong {
+  color: #4f68bd;
+}
+
+.decision-position--reviewer[data-state="ready"] > strong {
+  color: #7c5b25;
+}
+
+.decision-position--reviewer[data-state="submitted"] > strong {
+  color: #2d7356;
+}
+
+.decision-position > p {
+  margin: 0;
+  color: #738091;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.decision-position > header button {
+  min-height: 26px;
+  padding: 0 9px;
+  color: #596878;
+  background: #fff;
+  border: 1px solid #d3dee9;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.decision-position--reviewer > header button {
+  color: #fff;
+  background: #597ec4;
+  border-color: #597ec4;
+}
+
+.decision-position > header button:hover {
+  border-color: #9eb1d4;
+}
+
+.decision-position > header button:active,
+.decision-actions > button:active,
+.decision-action-selector__grid > button:active {
+  transform: translateY(1px);
 }
 
 .decision-dock {
   display: grid;
-  gap: 12px;
-  margin-top: 12px;
+  gap: 15px;
+  margin-top: 14px;
 }
 
 .decision-reason {
@@ -3874,18 +5929,17 @@ onBeforeUnmount(() => {
 
 .decision-reason > span {
   color: #53647d;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 750;
 }
 
 .decision-reason b {
   margin-left: 4px;
   color: var(--review-danger);
-  font-size: 9px;
+  font-size: 11px;
 }
 
-.decision-reason textarea,
-.plan-editor textarea {
+.decision-reason textarea {
   width: 100%;
   padding: 10px;
   color: #34435c;
@@ -3894,12 +5948,11 @@ onBeforeUnmount(() => {
   border-radius: 14px;
   outline: none;
   resize: vertical;
-  font-size: 11px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
-.decision-reason textarea:focus,
-.plan-editor textarea:focus {
+.decision-reason textarea:focus {
   border-color: #91a6e8;
   box-shadow: 0 0 0 3px #748be326;
 }
@@ -3911,7 +5964,7 @@ onBeforeUnmount(() => {
   padding-left: 5px;
   color: #9099a3;
   background: #fff;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .decision-actions {
@@ -3922,7 +5975,7 @@ onBeforeUnmount(() => {
 .decision-actions > button {
   display: grid;
   grid-template-columns: 26px minmax(0, 1fr);
-  min-height: 46px;
+  min-height: 52px;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -3937,6 +5990,12 @@ onBeforeUnmount(() => {
 .decision-actions > button:hover {
   border-color: #b7c6e8;
   background: #f1f5ff;
+}
+
+.decision-actions > button.is-selected {
+  border-color: #6684d0;
+  outline: 3px solid rgba(102, 132, 208, .16);
+  outline-offset: 1px;
 }
 
 .decision-actions > button > span:first-child {
@@ -3957,24 +6016,25 @@ onBeforeUnmount(() => {
 }
 
 .decision-actions > button strong {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .decision-actions > button small {
   color: #818b95;
-  font-size: 10px;
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .decision-actions > .decision-action--primary {
   color: #fff;
-  background: linear-gradient(135deg, #5b91d7, #62b99b);
-  border-color: #69a9b3;
-  box-shadow: 0 10px 24px #4d83b52b;
+  background: linear-gradient(135deg, #536bc1, #6b59b3);
+  border-color: #625fb5;
+  box-shadow: none;
 }
 
 .decision-actions > .decision-action--primary:hover {
-  background: linear-gradient(135deg, #4e83cb, #53aa8d);
-  border-color: #579aa8;
+  background: linear-gradient(135deg, #465db4, #5e4da6);
+  border-color: #5651a7;
 }
 
 .decision-actions > .decision-action--primary > span:first-child {
@@ -3983,112 +6043,72 @@ onBeforeUnmount(() => {
 }
 
 .decision-actions > .decision-action--primary small {
-  color: #e8f6f3;
+  color: #f0edff;
 }
 
 .decision-actions--approval > button:not(.decision-action--primary) {
-  color: #735b2f;
-  background: #fffaf0;
-  border-color: #eddfbd;
+  color: #fff;
+  background: linear-gradient(135deg, #b47738, #a05d42);
+  border-color: #ad7047;
 }
 
 .decision-actions--approval > button:not(.decision-action--primary) > span:first-child {
-  color: #9a6a18;
-  background: #fff1cf;
-}
-
-.decision-actions--exception {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  padding-top: 11px;
-  border-top: 1px solid #e2eaf4;
-}
-
-.decision-actions--exception > span {
-  grid-column: 1 / -1;
-  color: #7d8792;
-  font-size: 9px;
-}
-
-.decision-actions--exception > button {
-  grid-template-columns: 1fr;
-  min-height: 70px;
-  align-content: start;
-  gap: 5px;
-  padding: 8px;
-}
-
-.decision-actions--exception > button > span:first-child {
-  width: 22px;
-  height: 22px;
-}
-
-.decision-actions--exception > button small {
-  line-height: 1.35;
-}
-
-.decision-actions--exception > .decision-action--danger {
-  color: var(--review-danger);
-  background: #fff5f7;
-  border-color: #efd4dc;
-}
-
-.decision-actions--exception > button[data-decision="REQUEST_MORE_EVIDENCE"] {
-  color: #526bc0;
-  background: #f4f7ff;
-  border-color: #dbe4fb;
-}
-
-.decision-actions--exception > button[data-decision="ESCALATE_MANUAL"] {
-  color: #69568f;
-  background: #f8f4ff;
-  border-color: #e3d8f5;
-}
-
-.plan-editor {
-  display: grid;
-  gap: 8px;
-  padding: 10px;
-  background: #f7f9ff;
-  border: 1px solid #dce6f3;
-  border-radius: 16px;
-}
-
-.plan-editor > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.plan-editor > header strong {
-  font-size: 11px;
-}
-
-.plan-editor > header button {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  color: #69747f;
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  font-size: 16px;
-}
-
-.plan-editor textarea {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
-}
-
-.plan-editor > button {
-  min-height: 44px;
   color: #fff;
-  background: linear-gradient(135deg, #7188d8, #5fae95);
-  border: 0;
-  border-radius: 11px;
+  background: #ffffff1f;
+}
+
+.decision-actions--approval > button:not(.decision-action--primary) small {
+  color: #fff2e6;
+}
+
+.decision-actions--approval > button:not(.decision-action--primary):hover {
+  color: #fff;
+  background: linear-gradient(135deg, #a66a30, #934f38);
+  border-color: #9f613b;
+}
+
+.decision-submit {
+  display: grid;
+  width: 100%;
+  min-height: 58px;
+  place-content: center;
+  gap: 3px;
+  padding: 10px 14px;
+  color: #fff;
+  background: linear-gradient(135deg, #527fd2, #3fa58c);
+  border: 1px solid #548fa9;
+  border-radius: 14px;
+  box-shadow: none;
   cursor: pointer;
-  font-size: 10px;
-  font-weight: 750;
+  text-align: center;
+}
+
+.decision-submit strong {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.decision-submit small {
+  color: rgba(240, 252, 249, .9);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.decision-submit:hover:not(:disabled) {
+  background: linear-gradient(135deg, #4773c7, #359a80);
+  border-color: #47899f;
+}
+
+.decision-submit:disabled {
+  color: #8b96a5;
+  background: #edf2f7;
+  border-color: #d8e1eb;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.decision-submit:disabled small {
+  color: #98a2af;
 }
 
 .decision-error {
@@ -4099,7 +6119,7 @@ onBeforeUnmount(() => {
   border: 1px solid #efd5dc;
   border-left: 3px solid #d36b7d;
   border-radius: 12px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.5;
 }
 
@@ -4130,9 +6150,10 @@ onBeforeUnmount(() => {
 
 .decision-success p {
   margin: 3px 0 0;
-  font-size: 10px;
+  font-size: 12px;
 }
 
+.decision-action-selector-backdrop,
 .decision-confirm-backdrop {
   position: fixed;
   inset: 0;
@@ -4140,104 +6161,373 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   padding: 20px;
+  overflow-y: auto;
+  scrollbar-color: #cbd8e8 transparent;
+  scrollbar-width: thin;
   background: #1d2935a8;
   backdrop-filter: blur(3px);
 }
 
-.decision-confirm {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
-  width: min(460px, 100%);
-  gap: 13px;
+.decision-action-selector {
+  width: min(760px, 100%);
+  max-height: none;
+  overflow: visible;
+  margin: auto 0;
   padding: 18px;
-  background: #fff;
-  border: 1px solid #d6dce1;
+  color: #33445a;
+  background: #fbfcfe;
+  border: 1px solid #d6e0eb;
   border-radius: 24px;
   box-shadow: 0 28px 80px #1d29353d;
-  box-shadow: 0 24px 70px #16202a4d;
+}
+
+.decision-action-selector__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid #e0e7ef;
+}
+
+.decision-action-selector__header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.decision-action-selector__header span {
+  color: #6d7d91;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.decision-action-selector__header h2 {
+  margin: 0;
+  color: #2f4056;
+  font-size: 20px;
+}
+
+.decision-action-selector__header p {
+  margin: 0;
+  color: #718093;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.decision-action-selector__header > button {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 12px;
+  color: #617083;
+  background: #fff;
+  border: 1px solid #d4dee8;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.decision-action-selector__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding: 12px 0;
+}
+
+.decision-action-selector__grid > button {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-height: 62px;
+  padding: 9px 11px;
+  color: #43546a;
+  background: #fff;
+  border: 1px solid #dce5ee;
+  border-radius: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.decision-action-selector__grid > button:hover {
+  background: #f5f8fd;
+  border-color: #afc0dd;
+}
+
+.decision-action-selector__grid > button.is-selected {
+  background: #f1f6ff;
+  border-color: #7597d1;
+  box-shadow: inset 0 0 0 1px #7597d1;
+}
+
+.decision-action-selector__grid > button.is-current {
+  cursor: not-allowed;
+  opacity: .58;
+}
+
+.decision-action-selector__choice-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.decision-action-selector__choice-heading strong {
+  color: #344b65;
+  font-size: 13px;
+}
+
+.decision-action-selector__choice-heading code {
+  color: #8793a1;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.decision-action-selector__grid small {
+  color: #718092;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.decision-action-selector__grid i {
+  color: #5877af;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 750;
+}
+
+.decision-action-selector__grid > .decision-action-selector__manual-choice {
+  color: #fff;
+  background: linear-gradient(135deg, #d96776, #b9435b);
+  border: 1px solid #c65368;
+}
+
+.decision-action-selector__grid > .decision-action-selector__manual-choice:hover {
+  background: linear-gradient(135deg, #cb596a, #aa354e);
+  border-color: #b7465d;
+}
+
+.decision-action-selector__grid > .decision-action-selector__manual-choice.is-selected {
+  border-color: #9e2d45;
+  outline: 3px solid rgba(190, 67, 89, .2);
+  outline-offset: 1px;
+}
+
+.decision-action-selector__manual-choice .decision-action-selector__choice-heading strong,
+.decision-action-selector__manual-choice .decision-action-selector__choice-heading code,
+.decision-action-selector__manual-choice small {
+  color: #fff;
+}
+
+.decision-action-selector__manual-choice .decision-action-selector__choice-heading code {
+  opacity: .78;
+}
+
+.decision-action-selector__manual-choice small {
+  opacity: .9;
+}
+
+.decision-action-selector > footer {
+  padding-top: 12px;
+  color: #7a8797;
+  border-top: 1px solid #e0e7ef;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.decision-confirm {
+  width: min(540px, 100%);
+  overflow: hidden;
+  margin: auto 0;
+  color: #263648;
+  background: #fbfcfe;
+  border: 1px solid #d5e0eb;
+  border-radius: 22px;
+  box-shadow: 0 28px 80px #1324384a;
+}
+
+.decision-confirm__header {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 14px;
+  padding: 22px 24px 19px;
+  background:
+    radial-gradient(circle at 7% 14%, #fff1d5 0, #fff1d500 26%),
+    linear-gradient(125deg, #fffdf8 0%, #f5f9ff 58%, #eef8f6 100%);
+  border-bottom: 1px solid #dce5ee;
 }
 
 .decision-confirm__icon {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 42px;
+  height: 42px;
   place-items: center;
-  color: #8a561d;
-  background: #fff1d9;
+  color: #a45d0b;
+  background: #fff0d0;
+  border: 1px solid #f2d194;
   border-radius: 50%;
-  font-size: 16px;
+  box-shadow: inset 0 1px 0 #ffffffcc;
+  font-size: 18px;
   font-weight: 900;
 }
 
-.decision-confirm > div > span {
-  color: #8a743f;
-  font-size: 8px;
+.decision-confirm__eyebrow {
+  display: block;
+  color: #8b6e32;
+  font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.12em;
 }
 
 .decision-confirm h2 {
-  margin: 4px 0 0;
-  color: #273440;
-  font-size: 18px;
+  margin: 5px 0 0;
+  color: #223246;
+  font-size: 21px;
+  line-height: 1.3;
 }
 
-.decision-confirm p {
-  margin: 7px 0 0;
+.decision-confirm__header p {
+  margin: 8px 0 0;
   color: #687480;
-  font-size: 11px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
-.decision-confirm dl {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 13px 0 0;
-  border-top: 1px solid #e1e5e9;
-  border-left: 1px solid #e1e5e9;
+.decision-confirm__body {
+  padding: 18px 24px 20px;
 }
 
-.decision-confirm dl > div {
-  padding: 8px;
-  border-right: 1px solid #e1e5e9;
-  border-bottom: 1px solid #e1e5e9;
+.decision-confirm__outcome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 16px;
+  background: linear-gradient(120deg, #f2f6ff 0%, #f1f8f6 100%);
+  border: 1px solid #d7e3ef;
+  border-radius: 14px;
+  box-shadow: inset 3px 0 #5878bb;
 }
 
+.decision-confirm__outcome > div {
+  min-width: 0;
+}
+
+.decision-confirm__outcome > div > span,
 .decision-confirm dt {
-  color: #89939d;
-  font-size: 8px;
+  display: block;
+  color: #74849a;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.decision-confirm__outcome strong {
+  display: block;
+  margin-top: 4px;
+  color: #213c62;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.decision-confirm__type {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  color: #4c669d;
+  background: #fff;
+  border: 1px solid #cfdced;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.decision-confirm__meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 26px;
+  margin: 17px 0 0;
+  padding: 16px 2px 0;
+  border-top: 1px solid #e1e7ee;
+}
+
+.decision-confirm__meta > div {
+  min-width: 0;
+}
+
+.decision-confirm__meta > div:last-child {
+  min-width: 82px;
 }
 
 .decision-confirm dd {
-  margin: 3px 0 0;
-  color: #3f4d59;
-  font-size: 10px;
+  margin: 5px 0 0;
+  color: #34475c;
+  font-size: 13px;
   font-weight: 700;
+  line-height: 1.45;
+}
+
+.decision-confirm__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 15px 24px 18px;
+  background: #f5f8fb;
+  border-top: 1px solid #dce5ee;
+}
+
+.decision-confirm__footer > p {
+  margin: 0;
+  color: #7b8795;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .decision-confirm__actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 14px;
 }
 
 .decision-confirm__actions button {
   min-height: 44px;
-  padding: 0 13px;
-  color: #53606d;
+  padding: 0 16px;
+  color: #485b70;
   background: #fff;
-  border: 1px solid #ccd3d9;
-  border-radius: 12px;
+  border: 1px solid #c8d4df;
+  border-radius: 11px;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
+}
+
+.decision-confirm__actions button:hover {
+  background: #f0f4f8;
+  border-color: #abbccc;
+}
+
+.decision-confirm__actions button:focus-visible {
+  outline: 3px solid #8ea8dc80;
+  outline-offset: 2px;
 }
 
 .decision-confirm__actions button:last-child {
   color: #fff;
-  background: linear-gradient(135deg, #7188d8, #5fae95);
-  border-color: #6d9eb3;
+  background: #4e6eae;
+  border-color: #4e6eae;
+  box-shadow: 0 7px 16px #4e6eae2e;
+}
+
+.decision-confirm__actions button:last-child:hover {
+  background: #405f9d;
+  border-color: #405f9d;
+}
+
+.decision-confirm__actions button:active {
+  transform: translateY(1px);
 }
 
 .decision-confirm__actions button:disabled {
@@ -4251,20 +6541,18 @@ onBeforeUnmount(() => {
 
 @container room-workspace (max-width: 1099px) {
   .review-triple-layout {
+    --review-column-height: clamp(700px, calc(100dvh - 190px), 800px);
     grid-template-columns: repeat(2, minmax(0, 1fr));
     grid-template-areas:
       "chat operation"
       "materials materials";
   }
 
-  .review-explain-room,
-  .review-operation-room {
-    height: 700px;
-  }
 }
 
 @media (max-width: 760px) {
   .review-triple-layout {
+    --review-column-height: 660px;
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "chat"
@@ -4284,25 +6572,36 @@ onBeforeUnmount(() => {
   }
 
   .review-explain-room {
-    height: 660px;
-    grid-template-rows: auto auto minmax(0, 1fr);
-    padding: 12px;
-    border-radius: 24px;
-  }
-
-  .review-operation-room {
-    height: 660px;
+    height: var(--review-column-height);
+    min-height: 0;
     grid-template-rows: auto minmax(0, 1fr);
     padding: 12px;
     border-radius: 24px;
   }
 
-  .review-document {
-    height: 660px;
+  .review-operation-room {
+    height: var(--review-column-height);
+    min-height: 0;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    padding: 12px 12px 8px;
+    border-radius: 24px;
   }
 
-  .review-explain-room__header,
-  .review-operation-room__header {
+  .evidence-binding-list li {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .evidence-binding-list li > p {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .review-document {
+    height: var(--review-column-height);
+    min-height: 0;
+  }
+
+  .review-explain-room__header {
     height: auto;
     min-height: 112px;
   }
@@ -4316,17 +6615,8 @@ onBeforeUnmount(() => {
     justify-self: start;
   }
 
-  .review-operation-room__header {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas:
-      "eyebrow"
-      "title"
-      "description"
-      "badge";
-  }
-
-  .review-operation-room__header small {
-    justify-self: start;
+  .review-explain-room__conversation :deep(.conversation-stream) {
+    --conversation-quick-prompts-left: -12px;
   }
 
   .review-panel {
@@ -4343,6 +6633,7 @@ onBeforeUnmount(() => {
 
   .case-key-facts,
   .claim-list,
+  .issue-positions,
   .evidence-links,
   .draft-decision,
   .remedy-action__facts,
@@ -4351,10 +6642,22 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
+  .case-key-facts > div:nth-child(even) {
+    border-left: 0;
+  }
+
+  .case-key-facts > div + div {
+    border-top: 1px solid #e1e8f0;
+  }
+
   .draft-decision > div {
     padding: 0 0 10px;
     border-right: 0;
     border-bottom: 1px solid #d4e0de;
+  }
+
+  .decision-action-selector__grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
 }
@@ -4362,13 +6665,12 @@ onBeforeUnmount(() => {
 @media (max-width: 480px) {
   .review-workbench__timing,
   .review-operation-room .decision-actions--approval,
-  .decision-actions--exception,
-  .decision-confirm dl {
+  .decision-confirm__meta {
     grid-template-columns: 1fr;
   }
 
   .review-tabs {
-    grid-template-columns: repeat(4, minmax(74px, 1fr));
+    grid-template-columns: repeat(5, minmax(74px, 1fr));
     padding: 6px;
   }
 
@@ -4381,28 +6683,70 @@ onBeforeUnmount(() => {
     left: 10px;
   }
 
-  .decision-actions--exception > button {
-    grid-template-columns: 26px minmax(0, 1fr);
-    min-height: 46px;
+  .decision-confirm__header {
+    grid-template-columns: 40px minmax(0, 1fr);
+    gap: 12px;
+    padding: 19px 18px 16px;
   }
 
-  .decision-confirm {
-    grid-template-columns: 1fr;
+  .decision-confirm__icon {
+    width: 38px;
+    height: 38px;
+  }
+
+  .decision-confirm__body {
+    padding: 15px 18px 17px;
+  }
+
+  .decision-confirm__outcome {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .decision-confirm__meta {
+    gap: 14px;
+  }
+
+  .decision-confirm__footer {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+    padding: 13px 18px 17px;
+  }
+
+  .decision-confirm__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .decision-confirm__actions button {
+    padding: 0 10px;
+  }
+
+  .decision-action-selector {
+    padding: 16px;
+    border-radius: 20px;
+  }
+
+  .decision-action-selector__header {
+    gap: 12px;
+  }
+
+  .decision-action-selector__choice-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .decision-action-selector__choice-heading code {
+    text-align: left;
   }
 
   .review-risk-strip__header,
   .review-risk-strip__list {
     padding-right: 12px;
     padding-left: 12px;
-  }
-
-  .review-case-strip__version {
-    grid-template-columns: 1fr;
-  }
-
-  .review-case-strip__version > small {
-    max-width: none;
-    text-align: left;
   }
 
   .review-audit__versions {

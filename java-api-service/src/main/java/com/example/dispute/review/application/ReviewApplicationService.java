@@ -61,9 +61,11 @@ import com.example.dispute.review.domain.ApprovalPolicyInput;
 import com.example.dispute.review.domain.ActionSnapshotHasher;
 import com.example.dispute.review.domain.ReviewPacketVersions;
 import com.example.dispute.review.domain.ReviewPacketContentHasher;
+import com.example.dispute.review.domain.ReviewDecisionPlanPolicy;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -99,7 +101,7 @@ public class ReviewApplicationService {
     static final String TARGET_DECISION_AUTHORITY = "TARGET_REVIEW";
     private static final String TARGET_HEARING_PROMPT_VERSION = "hearing-flow.v2";
     private static final String TARGET_HEARING_PROFILE_VERSION = "hearing-judge-v2";
-    private static final String TARGET_HEARING_DRAFT_SCHEMA = "adjudication_draft.v2";
+    private static final String TARGET_HEARING_DRAFT_SCHEMA = "adjudication_draft.v3";
     private static final AuthenticatedActor SYSTEM =
             new AuthenticatedActor("temporal-worker", ActorRole.SYSTEM);
     private final FulfillmentCaseRepository caseRepository;
@@ -403,6 +405,7 @@ public class ReviewApplicationService {
         ReviewTaskEntity task=taskRepository.findById(taskId).orElseThrow(()->notFound("review task",taskId));
         ReviewPacketEntity p=packetRepository.findById(task.getPacketId()).orElseThrow(()->notFound("review packet",task.getPacketId()));
         String contentHash = packetContentHash(p);
+        JsonNode frozenDraft = read(p.getDraftJson());
         return new ReviewPacketView(p.getId(),p.getCaseId(),p.getPlanId(),p.getPacketVersion(),
                 p.getCaseVersion(),p.getDossierVersion(),p.getIssueVersion(),
                 p.getAdjudicationDraftVersion(),p.getDeliberationReportVersion(),
@@ -411,7 +414,7 @@ public class ReviewApplicationService {
                 read(p.getAgentRunRefsJson()),
                 p.getFrozenAt(),p.getExpiresAt(),
                 read(p.getCaseSummaryJson()),read(p.getClaimsJson()),read(p.getIssuesJson()),
-                read(p.getEvidenceMatrixJson()),read(p.getDraftJson()),read(p.getRemedyJson()),
+                read(p.getEvidenceMatrixJson()),frozenDraft,reviewSourceItems(p,frozenDraft),read(p.getRemedyJson()),
                 read(p.getRiskFlagsJson()),p.getPacketStatus(),task.getTaskStatus().name(),
                 task.getAssignedReviewerId(),reviewDeadline(task,p));
     }
@@ -438,14 +441,17 @@ public class ReviewApplicationService {
             throw new BusinessException(ErrorCode.CASE_STATUS_INVALID,"review packet authorization has expired",Map.of("task_id",taskId));
         String policyVersion=pinnedPolicyDecision(task,targetEpoch(task.getCaseId())==null)
                 .getPolicyVersion();
-        Map<String,String> refs=Map.of(
-                "case_summary",packet.getId()+":case-summary",
-                "claims",packet.getId()+":claims",
-                "issues",packet.getId()+":issues",
-                "evidence_matrix",packet.getId()+":evidence-matrix",
-                "adjudication_draft",packet.getId()+":draft",
-                "remedy_plan",packet.getId()+":remedy",
-                "risk_flags",packet.getId()+":risk-flags");
+        Map<String,String> refs=new TreeMap<>();
+        refs.put("case_summary",packet.getId()+":case-summary");
+        refs.put("claims",packet.getId()+":claims");
+        refs.put("issues",packet.getId()+":issues");
+        refs.put("evidence_matrix",packet.getId()+":evidence-matrix");
+        refs.put("adjudication_draft",packet.getId()+":draft");
+        refs.put("remedy_plan",packet.getId()+":remedy");
+        refs.put("risk_flags",packet.getId()+":risk-flags");
+        if(isBoundedDecisionActionReview(packet)) {
+            refs.put("decision_contract","hearing-decision-action.v1");
+        }
         return new ReviewPacketAuthorizationView(
                 "review-packet-authorization.v1",task.getCaseId(),task.getId(),
                 sha256("reviewer-authority:v1:"+actor.actorId()),packet.getId(),packet.getPacketVersion(),
@@ -464,7 +470,8 @@ public class ReviewApplicationService {
         String durableAuthority=durableDecisionAuthority(task.getDecisionJson());
         if(TARGET_DECISION_AUTHORITY.equals(durableAuthority)) {
             return transactions.execute(ignored->persistDecision(
-                    taskId,command,actor,null,TARGET_DECISION_AUTHORITY));
+                    taskId,command,actor,null,TARGET_DECISION_AUTHORITY,
+                    targetRoute(task.getCaseId())));
         }
         if(TRUSTED_DECISION_AUTHORITY.equals(durableAuthority)) {
             throw new IdempotencyConflictException(
@@ -482,7 +489,7 @@ public class ReviewApplicationService {
         // 审批事实先在事务内完成版本、哈希和幂等校验并提交。
         // 工具执行与结案属于事务后编排，不能在持有 ReviewTask 行锁时调用外部系统。
         ReviewDecisionView result=transactions.execute(ignored->persistDecision(
-                taskId,command,actor,null,LEGACY_DECISION_AUTHORITY));
+                taskId,command,actor,null,LEGACY_DECISION_AUTHORITY,null));
         if (result.executionAllowed()) {
             postReviewOrchestration.orchestrate(
                     result.approvalRecordId(), actor, command.idempotencyKey());
@@ -543,7 +550,7 @@ public class ReviewApplicationService {
                 .orElseThrow(() -> notFound("review task", taskId));
         TargetReviewRoute target = targetRoute(initialTask.getCaseId());
         ReviewDecisionView decision = persistDecision(
-                taskId, command, actor, null, TARGET_DECISION_AUTHORITY);
+                taskId, command, actor, null, TARGET_DECISION_AUTHORITY, target);
         ReviewTaskEntity task = taskRepository.findByIdForUpdate(taskId)
                 .orElseThrow(() -> notFound("review task", taskId));
         ReviewPacketEntity packet = packetRepository.findById(task.getPacketId())
@@ -652,6 +659,10 @@ public class ReviewApplicationService {
         value.put("case_id", task.getCaseId());
         value.put("command_id", commandId);
         value.put("decision", record.getDecisionType().name());
+        if(record.getAiDecisionAction()!=null&&record.getReviewerDecisionAction()!=null) {
+            value.put("ai_decision_action", record.getAiDecisionAction());
+            value.put("reviewer_decision_action", record.getReviewerDecisionAction());
+        }
         value.put("decision_reason", record.getDecisionReason());
         value.put("fencing_token", target.epoch().getFencingToken());
         value.put("packet_content_hash", packetContentHash(packet));
@@ -694,12 +705,20 @@ public class ReviewApplicationService {
                 ? sha256("target-review-operation:" + task.getCaseId() + ":" + record.getId()
                         + ":" + record.getActionSnapshotHash())
                 : null;
+        String approvedActionSnapshotRef = approved
+                ? ReviewApprovedActionSnapshotRef.resolve(
+                        record.getDecisionType(),
+                        record.getId(),
+                        execution.actionSnapshotRef(),
+                        execution.actionSnapshotHash(),
+                        record.getActionSnapshotHash())
+                : null;
         var outcome = new com.example.dispute.workflow.contract.outcome.v1.OutcomeReviewDecisionReceipt(
                 com.example.dispute.workflow.contract.outcome.v1.OutcomeReviewDecisionReceipt.SCHEMA_VERSION,
                 target.epoch().getRoomTemporalWorkflowId(), task.getCaseId(), record.getId(), decisionRecordHash,
                 task.getId(), "reviewer-authority:" + sha256("reviewer-authority:v1:" + record.getReviewerId()),
                 packet.getId(), packetContentHash(packet), execution.actionSnapshotRef(),
-                execution.actionSnapshotHash(), approved ? "approval:" + record.getId() + ":action" : null,
+                execution.actionSnapshotHash(), approvedActionSnapshotRef,
                 approved ? record.getActionSnapshotHash() : null, record.getId(), decisionRecordHash,
                 "review-decision:" + record.getId() + ":reason", sha256(record.getDecisionReason()), operationKeyHash,
                 execution.requiredOperationSetRef(), execution.requiredOperationSetHash(),
@@ -746,7 +765,7 @@ public class ReviewApplicationService {
         Objects.requireNonNull(outcomeContext,"outcomeContext");
         return transactions.execute(
                 ignored->persistDecision(
-                        taskId,command,actor,outcomeContext,TRUSTED_DECISION_AUTHORITY));
+                        taskId,command,actor,outcomeContext,TRUSTED_DECISION_AUTHORITY,null));
     }
 
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.persistDecision(String,ReviewDecisionCommand,AuthenticatedActor)」。
@@ -760,7 +779,8 @@ public class ReviewApplicationService {
             ReviewDecisionCommand command,
             AuthenticatedActor actor,
             ReviewOutcomeReceiptContext outcomeContext,
-            String expectedAuthoritySource){
+            String expectedAuthoritySource,
+            TargetReviewRoute targetRoute){
         ReviewTaskEntity task=taskRepository.findByIdForUpdate(taskId).orElseThrow(()->notFound("review task",taskId));
         ReviewPacketEntity packet =
                 packetRepository
@@ -793,12 +813,23 @@ public class ReviewApplicationService {
         String submittedTaskStatus=storedDecision.path("submitted_task_status").asText(task.getTaskStatus().name());
         ReviewPacketAuthorizationView trustedAuthorization=
                 outcomeContext==null?null:outcomeContext.authorization();
+        CaseRoomEpochEntity targetEpoch=targetRoute==null?null:targetRoute.epoch();
+        if(targetEpoch!=null&&!TARGET_DECISION_AUTHORITY.equals(expectedAuthoritySource))
+            throw new IllegalStateException("target Review epoch authority is bound to a non-target decision");
         long outcomeEpoch=storedDecision.has("outcome_epoch")?storedDecision.path("outcome_epoch").asLong()
-                :trustedAuthorization==null?0:trustedAuthorization.roomEpoch();
+                :trustedAuthorization!=null?trustedAuthorization.roomEpoch()
+                :targetEpoch==null?0:targetEpoch.getRoomEpoch();
         long fencingToken=storedDecision.has("fencing_token")?storedDecision.path("fencing_token").asLong()
-                :trustedAuthorization==null?0:trustedAuthorization.fencingToken();
+                :trustedAuthorization!=null?trustedAuthorization.fencingToken()
+                :targetEpoch==null?0:targetEpoch.getFencingToken();
         long processRevision=storedDecision.has("process_revision")?storedDecision.path("process_revision").asLong()
-                :trustedAuthorization==null?0:trustedAuthorization.processRevision();
+                :trustedAuthorization!=null?trustedAuthorization.processRevision()
+                :targetEpoch==null?0:targetEpoch.getProcessRevision();
+        if(targetEpoch!=null&&(outcomeEpoch!=targetEpoch.getRoomEpoch()
+                ||fencingToken!=targetEpoch.getFencingToken()
+                ||processRevision!=targetEpoch.getProcessRevision()))
+            throw new IdempotencyConflictException(
+                    "durable target Review decision epoch authority is stale");
         String requestHash=decisionRequestHash(task,packet,packetContentHash,effectivePolicyVersion,
                 submittedTaskStatus,actor,command,outcomeEpoch,fencingToken,processRevision,
                 outcomeContext);
@@ -822,28 +853,46 @@ public class ReviewApplicationService {
 
         JsonNode original=read(packet.getRemedyJson());
         JsonNode approved=command.approvedPlan();
-        // APPROVE 必须精确采用冻结原方案；MODIFY_AND_APPROVE 可改批准快照，
-        // 但仍要保留 plan id 和结构化 actions，不能提交自由文本工具命令。
-        if(command.decision()==ApprovalDecisionType.MODIFY_AND_APPROVE && (approved==null||approved.isNull()||approved.isEmpty()))
-            throw new IllegalArgumentException("approved_plan is required for modification");
-        if(command.decision()==ApprovalDecisionType.APPROVE) approved=original;
-        if(approved==null) approved=objectMapper.createObjectNode();
-        if (command.decision() == ApprovalDecisionType.MODIFY_AND_APPROVE
-                && (approved.path("id").asText().isBlank()
-                        || !approved.path("actions").isArray())) {
-            throw new IllegalArgumentException(
-                    "modified approved_plan must retain plan id and actions");
-        }
-        if (command.decision() == ApprovalDecisionType.MODIFY_AND_APPROVE
-                && (!Objects.equals(original.path("id").asText(), approved.path("id").asText())
-                        || original.path("version").asInt(-1)
-                                != approved.path("version").asInt(-2))) {
-            throw new IllegalArgumentException(
-                    "modified approved_plan cannot change frozen plan identity or version");
+        String aiDecisionAction=null;
+        String reviewerDecisionAction=null;
+        boolean boundedDecisionActionReview=isBoundedDecisionActionReview(packet);
+        if(boundedDecisionActionReview){
+            var resolution=ReviewDecisionPlanPolicy.resolve(
+                    objectMapper,command.decision(),original,read(packet.getDraftJson()),approved);
+            original=resolution.originalPlan();
+            approved=resolution.approvedPlan();
+            aiDecisionAction=resolution.aiDecisionAction();
+            reviewerDecisionAction=resolution.reviewerDecisionAction();
+        }else{
+            // Legacy packets retain their historical full-plan modification contract.
+            if(command.decision()==ApprovalDecisionType.MODIFY_AND_APPROVE && (approved==null||approved.isNull()||approved.isEmpty()))
+                throw new IllegalArgumentException("approved_plan is required for modification");
+            if(command.decision()==ApprovalDecisionType.APPROVE) approved=original;
+            if(approved==null) approved=objectMapper.createObjectNode();
+            if (command.decision() == ApprovalDecisionType.MODIFY_AND_APPROVE
+                    && (approved.path("id").asText().isBlank()
+                            || !approved.path("actions").isArray())) {
+                throw new IllegalArgumentException(
+                        "modified approved_plan must retain plan id and actions");
+            }
+            if (command.decision() == ApprovalDecisionType.MODIFY_AND_APPROVE
+                    && (!Objects.equals(original.path("id").asText(), approved.path("id").asText())
+                            || original.path("version").asInt(-1)
+                                    != approved.path("version").asInt(-2))) {
+                throw new IllegalArgumentException(
+                        "modified approved_plan cannot change frozen plan identity or version");
+            }
         }
         String actionSnapshotHash =
                 isExecutable(command.decision()) ? actionHash(approved) : packet.getActionHash();
-        if (command.decision() == ApprovalDecisionType.MODIFY_AND_APPROVE
+        if (boundedDecisionActionReview
+                && isExecutable(command.decision())
+                && !packet.getActionHash().equals(actionSnapshotHash)) {
+            throw new IllegalArgumentException(
+                    "review decision_action selection cannot change frozen execution actions");
+        }
+        if (!boundedDecisionActionReview
+                && command.decision() == ApprovalDecisionType.MODIFY_AND_APPROVE
                 && (original.equals(approved)
                         || packet.getActionHash().equals(actionSnapshotHash))) {
             throw new IllegalArgumentException(
@@ -855,6 +904,10 @@ public class ReviewApplicationService {
         decisionFact.put("authority_source",expectedAuthoritySource);
         decisionFact.put("confirmed",true);
         decisionFact.put("decision",command.decision().name());
+        if(aiDecisionAction!=null) {
+            decisionFact.put("ai_decision_action",aiDecisionAction);
+            decisionFact.put("reviewer_decision_action",reviewerDecisionAction);
+        }
         decisionFact.put("fencing_token",fencingToken);
         decisionFact.put("original_plan",original);
         decisionFact.put("outcome_epoch",outcomeEpoch);
@@ -877,11 +930,15 @@ public class ReviewApplicationService {
                     "frozen review packet action hash does not match approved plan",
                     Map.of("packet_id", packet.getId()));
         }
-        ApprovalRecordEntity record=approvalRepository.save(ApprovalRecordEntity.recordFrozen(
+        ApprovalRecordEntity record=ApprovalRecordEntity.recordFrozen(
                 "APPROVAL_"+id(),task.getCaseId(),taskId,task.getPlanId(),actor.actorId(),actor.role().name(),
                 command.decision(),original.toString(),approved.toString(),command.reason(),hash,
                 packet.getId(),packet.getPacketVersion(),policyDecision.getPolicyVersion(),
-                actionSnapshotHash,packet.getExpiresAt(),committedAt));
+                actionSnapshotHash,packet.getExpiresAt(),committedAt);
+        if(boundedDecisionActionReview) {
+            record.bindDecisionActions(aiDecisionAction,reviewerDecisionAction);
+        }
+        record=approvalRepository.save(record);
         auditRecorder.record(actor,"REVIEW_DECIDED","REVIEW_TASK",taskId,task.getCaseId(),
                 Map.of("task_status",submittedTaskStatus,"plan",original),Map.of("task_status",task.getTaskStatus().name(),"approved_plan",approved));
         switch (command.decision()) {
@@ -976,7 +1033,10 @@ public class ReviewApplicationService {
                         frozenActionHash,allowed?record.getActionSnapshotHash():null,
                         outcomeEpoch,fencingToken,processRevision,allowed,false,record.getCreatedAt())
                 :null;
-        return new ReviewDecisionView(record.getId(),task.getId(),task.getCaseId(),record.getDecisionType().name(),task.getTaskStatus().name(),status,allowed,receipt);
+        return new ReviewDecisionView(
+                record.getId(),task.getId(),task.getCaseId(),record.getDecisionType().name(),
+                task.getTaskStatus().name(),status,allowed,record.getAiDecisionAction(),
+                record.getReviewerDecisionAction(),receipt);
     }
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.assertSameIdempotentRequest(ApprovalRecordEntity,ReviewDecisionCommand,AuthenticatedActor)」。
     // 具体功能：「ReviewApplicationService.assertSameIdempotentRequest(ApprovalRecordEntity,ReviewDecisionCommand,AuthenticatedActor)」：复核相同审批幂等键的决定类型、理由、审核员和批准动作快照完全一致；任何差异都抛幂等冲突，最终返回「void」。
@@ -1103,6 +1163,11 @@ public class ReviewApplicationService {
                 || decision==ApprovalDecisionType.MODIFY_AND_APPROVE;
     }
 
+    private static boolean isBoundedDecisionActionReview(ReviewPacketEntity packet) {
+        return TARGET_HEARING_PROMPT_VERSION.equals(packet.getPromptVersion())
+                && TARGET_HEARING_PROFILE_VERSION.equals(packet.getProfileVersion());
+    }
+
     private String packetContentHash(ReviewPacketEntity packet) {
         Map<String,Object> content=new TreeMap<>();
         content.put("action_hash",packet.getActionHash());
@@ -1146,6 +1211,125 @@ public class ReviewApplicationService {
     // 系统意义：「ReviewApplicationService.actionTypes(String)」负责主链路中的“动作Types”；最终决定权属于具备平台审核角色的人；过期、改版或哈希不一致的审批必须失效
     // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private List<String> actionTypes(String json){List<String> values=new ArrayList<>();read(json).forEach(node->values.add(node.path("action_type").asText()));return values;}
+
+    private JsonNode reviewSourceItems(ReviewPacketEntity packet, JsonNode frozenDraft) {
+        ArrayNode items = objectMapper.createArrayNode();
+        if (frozenDraft == null || !frozenDraft.isObject() || hearingArtifactRepository == null) {
+            return items;
+        }
+        HearingFlowArtifactEntity proposal = boundReviewArtifact(
+                packet,
+                frozenDraft,
+                HearingArtifactType.JUDGE_PROPOSAL,
+                "proposal_id",
+                "proposal_content_hash");
+        if (proposal != null) {
+            JsonNode source = artifactSource(proposal);
+            JsonNode reviewFocus = source.path("review_focus");
+            if (reviewFocus.isArray()) {
+                for (int index = 0; index < reviewFocus.size(); index++) {
+                    addReviewSourceItem(
+                            items,
+                            "V1_FOCUS_%02d".formatted(index + 1),
+                            "V1_REVIEW_FOCUS",
+                            reviewFocus.get(index),
+                            proposal);
+                }
+            }
+        }
+
+        HearingFlowArtifactEntity report = boundReviewArtifact(
+                packet,
+                frozenDraft,
+                HearingArtifactType.JURY_REVIEW_REPORT,
+                "report_id",
+                "report_content_hash");
+        if (report != null) {
+            JsonNode source = artifactSource(report);
+            JsonNode findings = source.path("findings");
+            if (findings.isArray()) {
+                for (JsonNode finding : findings) {
+                    String dimension = finding.path("dimension").asText().trim();
+                    if (!dimension.isBlank()) {
+                        addReviewSourceItem(
+                                items,
+                                "JURY_FINDING_" + dimension,
+                                "JURY_FINDING",
+                                finding.path("assessment"),
+                                report);
+                    }
+                }
+            }
+            JsonNode mandatoryRevisions = source.path("mandatory_revisions");
+            if (mandatoryRevisions.isArray()) {
+                for (int index = 0; index < mandatoryRevisions.size(); index++) {
+                    addReviewSourceItem(
+                            items,
+                            "JURY_MANDATORY_%02d".formatted(index + 1),
+                            "MANDATORY_REVISION",
+                            mandatoryRevisions.get(index),
+                            report);
+                }
+            }
+        }
+        return items;
+    }
+
+    private HearingFlowArtifactEntity boundReviewArtifact(
+            ReviewPacketEntity packet,
+            JsonNode frozenDraft,
+            HearingArtifactType expectedType,
+            String idField,
+            String hashField) {
+        String artifactId = frozenDraft.path(idField).asText().trim();
+        String artifactHash = frozenDraft.path(hashField).asText().trim();
+        if (artifactId.isBlank() || artifactHash.isBlank()) return null;
+        HearingFlowArtifactEntity artifact = hearingArtifactRepository.findById(artifactId).orElse(null);
+        if (artifact == null
+                || artifact.getArtifactType() != expectedType
+                || !Objects.equals(packet.getCaseId(), artifact.getCaseId())
+                || !Objects.equals(artifactHash, artifact.getContentHash())) {
+            return null;
+        }
+        String dossierId = frozenDraft.path("trial_dossier_id").asText().trim();
+        String dossierHash = frozenDraft.path("trial_dossier_hash").asText().trim();
+        if ((!dossierId.isBlank() && !Objects.equals(dossierId, artifact.getTrialDossierId()))
+                || (!dossierHash.isBlank()
+                        && !Objects.equals(dossierHash, artifact.getTrialDossierHash()))) {
+            return null;
+        }
+        if (expectedType == HearingArtifactType.JURY_REVIEW_REPORT
+                && (!Objects.equals(
+                                frozenDraft.path("proposal_id").asText(),
+                                artifact.getProposalId())
+                        || !Objects.equals(
+                                frozenDraft.path("proposal_content_hash").asText(),
+                                artifact.getProposalContentHash()))) {
+            return null;
+        }
+        return artifact;
+    }
+
+    private JsonNode artifactSource(HearingFlowArtifactEntity artifact) {
+        JsonNode payload = read(artifact.getPayloadJson());
+        JsonNode proposal = payload.path("proposal");
+        return proposal.isObject() ? proposal : payload;
+    }
+
+    private void addReviewSourceItem(
+            ArrayNode items,
+            String reference,
+            String source,
+            JsonNode text,
+            HearingFlowArtifactEntity artifact) {
+        if (text == null || !text.isTextual() || text.asText().isBlank()) return;
+        items.addObject()
+                .put("review_item_ref", reference)
+                .put("review_source", source)
+                .put("review_item_text", text.asText().trim())
+                .put("source_artifact_id", artifact.getId())
+                .put("source_content_hash", artifact.getContentHash());
+    }
 
     private HearingFlowArtifactEntity requireV2Artifact(
             String caseId, HearingArtifactType artifactType) {

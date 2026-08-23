@@ -106,29 +106,34 @@ The judge and jury receive only this immutable object, never live tables.
 
 ### Decision chain
 
-- `judge_proposal.v1`: `proposal_id`, `trial_dossier_id`, `trial_dossier_hash`,
+- `judge_proposal.v2`: `proposal_id`, `trial_dossier_id`, `trial_dossier_hash`,
   structured findings, rule applications, remedy, public text and `content_hash`.
 - `jury_review_report.v1`: `report_id`, exact `proposal_id` and
   `proposal_content_hash`, findings, mandatory revisions, public text and
   `content_hash`.
-- `adjudication_draft.v2`: `draft_id`, exact proposal/report ids and hashes,
+- `adjudication_draft.v3`: `draft_id`, exact proposal/report ids and hashes,
   structured findings, rule applications, remedy, reviewer attention, public
   text and `content_hash`.
 
 The nested V2 `draft` is the only adjudication content projected to the draft
 page:
 
-- `recommended_decision`, `confidence`, `draft_text`
+- `decision_action`: exactly one of `CANCEL_ORDER`, `RETURN_AND_REFUND`,
+  `REFUND_ONLY`, `RESHIP`, `REPLACE`, `REPAIR`, `COMPENSATE`,
+  `CONTINUE_FULFILLMENT`, or `REJECT_CLAIM`
+- `remedy_orders`: explanatory handling items bound to supporting `fact_ids`;
+  they cannot introduce a second decision outcome
 - `fact_findings`: stable `fact_id`, finding text, linked `evidence_ids`, an
   optional `evidence_gap`, and confidence
-- `evidence_assessment`: either an `EVIDENCE` assessment bound to one frozen
-  `evidence_id` and its linked `fact_ids`, or an `EVIDENCE_GAP` assessment with
-  a null evidence id and `weight = NONE`; both include assessment text,
-  confidence and limitations
-- `policy_application`: exact frozen `rule_code` and `rule_version`, rule name,
-  linked `fact_ids`, applicability, rationale and limitations
-- `reviewer_attention`, `draft_status`, `requires_human_review`, and
-  `is_final_decision`
+- `rule_applications`: exact frozen `rule_code` and `rule_version`, rule name,
+  linked `fact_ids`, applicability, satisfied and unsatisfied conditions,
+  rationale, and resulting effect
+- `decision_reasoning` and `reviewer_attention`
+
+Both Judge V1 and Judge V2 receive the same closed decision catalog as the
+last model-visible context block. The catalog explains each code, while the
+strict output schema makes `decision_action` required and rejects free text,
+unknown codes, and manual-takeover pseudo-decisions.
 
 The draft page also reads `draft_version`, `review_task_id`, and
 `review_task_status` from the Java outcome projection. Artifact hashes, parent

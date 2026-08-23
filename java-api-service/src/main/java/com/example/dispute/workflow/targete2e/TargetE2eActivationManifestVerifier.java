@@ -52,7 +52,7 @@ public final class TargetE2eActivationManifestVerifier {
   private static final int MAXIMUM_HEADER_BYTES = 2 * 1024;
   private static final int MAXIMUM_PAYLOAD_BYTES = 32 * 1024;
   private static final long MAXIMUM_SAFE_JSON_INTEGER = 9_007_199_254_740_991L;
-  private static final Duration MAXIMUM_LIFETIME = Duration.ofHours(2);
+  private static final Duration MAXIMUM_LIFETIME = Duration.ofDays(30);
   private static final Pattern BASE64_URL = Pattern.compile("[A-Za-z0-9_-]+");
   private static final Base64.Decoder BASE64_URL_DECODER = Base64.getUrlDecoder();
   private static final Base64.Encoder BASE64_URL_ENCODER = Base64.getUrlEncoder().withoutPadding();
@@ -578,7 +578,7 @@ public final class TargetE2eActivationManifestVerifier {
     } catch (RuntimeException failure) {
       throw rejected(Reason.MALFORMED_MANIFEST);
     }
-    if (lifetime.isZero() || lifetime.isNegative() || lifetime.compareTo(MAXIMUM_LIFETIME) > 0) {
+    if (!isPermittedLifetime(lifetime)) {
       throw rejected(Reason.WRONG_CONTRACT);
     }
     Instant now = clock.instant();
@@ -586,6 +586,13 @@ public final class TargetE2eActivationManifestVerifier {
       throw rejected(Reason.NOT_YET_VALID);
     }
     return !now.isBefore(expiresAt);
+  }
+
+  static boolean isPermittedLifetime(Duration lifetime) {
+    return lifetime != null
+        && !lifetime.isZero()
+        && !lifetime.isNegative()
+        && lifetime.compareTo(MAXIMUM_LIFETIME) <= 0;
   }
 
   private static void requireRuntime(

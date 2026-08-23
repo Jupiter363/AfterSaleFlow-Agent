@@ -38,7 +38,7 @@ public record ReviewPacketAuthorizationView(
         if(deadline==null) throw new IllegalArgumentException("deadline is required");
         if(!reviewOpenedAt.isBefore(deadline))
             throw new IllegalArgumentException("reviewOpenedAt must be before deadline");
-        if(roomEpoch<1||processRevision<0||fencingToken<1)
+        if(roomEpoch<0||processRevision<0||fencingToken<1)
             throw new IllegalArgumentException("epoch, revision, and fence are invalid");
         authorizedArtifactRefs=authorizedArtifactRefs==null?Map.of():Map.copyOf(authorizedArtifactRefs);
         authorizedArtifactRefs.forEach((category,ref)->{

@@ -16,6 +16,7 @@ from app.llm import (
     StructuredLlmClient,
     StructuredStreamCompleted,
     StructuredStreamDelta,
+    StructuredStreamReset,
 )
 from app.streaming import VisibleFieldSpec
 
@@ -74,11 +75,21 @@ class ModelTransportVisibleDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelTransportGenerationReset:
+    generation: int
+    reason_code: str
+
+
+@dataclass(frozen=True, slots=True)
 class ModelTransportCompleted:
     result: ModelTransportResult
 
 
-ModelTransportStreamUpdate = ModelTransportVisibleDelta | ModelTransportCompleted
+ModelTransportStreamUpdate = (
+    ModelTransportVisibleDelta
+    | ModelTransportGenerationReset
+    | ModelTransportCompleted
+)
 
 
 class ModelTransport(Protocol):
@@ -117,7 +128,9 @@ class NativeAsyncStructuredLlmClient(Protocol):
         visible_fields: tuple[VisibleFieldSpec, ...] = (),
         user_content_parts: list[dict[str, Any]] | None = None,
         governed_request: GovernedProviderRequest | None = None,
-    ) -> AsyncIterator[StructuredStreamDelta | StructuredStreamCompleted]: ...
+    ) -> AsyncIterator[
+        StructuredStreamDelta | StructuredStreamReset | StructuredStreamCompleted
+    ]: ...
 
 
 class StructuredClientTransport:
@@ -210,6 +223,12 @@ class StructuredClientTransport:
                 if isinstance(update, StructuredStreamDelta):
                     yield ModelTransportVisibleDelta(field=update.field, delta=update.delta)
                     continue
+                if isinstance(update, StructuredStreamReset):
+                    yield ModelTransportGenerationReset(
+                        generation=update.generation,
+                        reason_code=update.reason_code,
+                    )
+                    continue
                 if not isinstance(update, StructuredStreamCompleted):
                     raise ModelTransportOutputError("stream emitted an unknown update")
                 completed = True
@@ -260,6 +279,12 @@ class StructuredClientTransport:
                     raise ModelTransportOutputError("stream emitted data after completion")
                 if isinstance(update, StructuredStreamDelta):
                     yield ModelTransportVisibleDelta(field=update.field, delta=update.delta)
+                    continue
+                if isinstance(update, StructuredStreamReset):
+                    yield ModelTransportGenerationReset(
+                        generation=update.generation,
+                        reason_code=update.reason_code,
+                    )
                     continue
                 if not isinstance(update, StructuredStreamCompleted):
                     raise ModelTransportOutputError("stream emitted an unknown update")

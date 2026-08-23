@@ -135,6 +135,8 @@ def _normalize_section_value(
 
     if name in {
         "evidence_room_context_v2",
+        "hearing_intake_context_v4",
+        "hearing_room_context_v3",
         "case_identity",
         "initial_case_facts",
         "frozen_case_matrix",

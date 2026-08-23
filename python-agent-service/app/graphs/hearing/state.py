@@ -13,6 +13,7 @@ from typing_extensions import NotRequired, TypedDict
 from app.graphs.hearing.contracts import HearingGraphIdentity, HearingOperation
 from app.graphs.hearing.errors import HearingGraphContractError
 from app.graphs.hearing.reducers import merge_keyed_hearing_results
+from app.harness.invocation_context import AgentInvocationContext
 
 
 MAX_HEARING_PROPOSAL_BYTES = 2_000_000
@@ -51,7 +52,7 @@ class HearingScopeBindingV1(TypedDict):
 
 
 class HearingGraphStateV1(TypedDict):
-    schema_version: Literal["hearing.graph-state.v1"]
+    schema_version: str
     graph_identity: str
     version_pins: "HearingGraphVersionPins"
     operation: str
@@ -95,6 +96,7 @@ class HearingGraphInvocation:
 
     request: BaseModel
     execute: Callable[[BaseModel], BaseModel | Awaitable[BaseModel]]
+    agent_context: AgentInvocationContext | None = None
     plan_work_items: Callable[[BaseModel], Sequence[str]] | None = None
     execute_work_item: (
         Callable[[BaseModel, str], BaseModel | Awaitable[BaseModel]] | None
@@ -146,7 +148,7 @@ def new_hearing_graph_state(
     ):
         raise HearingGraphContractError("HEARING_REQUEST_BINDING_INVALID")
     state: HearingGraphStateV1 = {
-        "schema_version": "hearing.graph-state.v1",
+        "schema_version": identity.state_schema_version,
         "graph_identity": identity.identity,
         "version_pins": version_pins(identity),
         "operation": operation.value,

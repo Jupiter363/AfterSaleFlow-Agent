@@ -90,6 +90,10 @@ public final class JdbcTargetReviewNonExecutionActivities
          and approval.action_snapshot_hash =
              decision_event.event_json ->> 'approved_action_snapshot_hash'
          and approval.decision_type::text = decision_event.event_json ->> 'decision'
+         and approval.ai_decision_action =
+             decision_event.event_json ->> 'ai_decision_action'
+         and approval.reviewer_decision_action =
+             decision_event.event_json ->> 'reviewer_decision_action'
         join target_e2e_activation activation
           on activation.activation_id = admission.activation_id
          and activation.manifest_hash = admission.activation_manifest_hash
@@ -126,7 +130,8 @@ public final class JdbcTargetReviewNonExecutionActivities
          and admission.execution_lane = 'TARGET_E2E_CANDIDATE'
          and approval.id = ?
          and approval.decision_type = ?
-         and approval.decision_type in ('REJECT', 'REQUEST_MORE_EVIDENCE', 'ESCALATE_MANUAL')
+         and approval.decision_type = 'ESCALATE_MANUAL'
+         and approval.reviewer_decision_action = 'ESCALATE_MANUAL'
          and activation.execution_lane = 'TARGET_E2E_CANDIDATE'
          and activation.lifecycle_status in (
              'ACTIVE', 'DRAIN_ONLY', 'DRAINED', 'REVOKED_TERMINAL')
@@ -155,10 +160,8 @@ public final class JdbcTargetReviewNonExecutionActivities
              command.room_epoch::text
          and material.material_canonical_json::jsonb #>> '{request,command,event_ref,uri}' =
              command.payload_uri
-         and material.material_canonical_json::jsonb #>> '{request,command,event_ref,sha256}' =
-             command.payload_sha256
-         and material.material_canonical_json::jsonb #>> '{request,command,request_hash}' =
-             command.request_hash
+          and material.material_canonical_json::jsonb #>> '{request,command,event_ref,sha256}' =
+              command.payload_sha256
        for update of command, activation, epoch
       """;
 
@@ -368,9 +371,7 @@ public final class JdbcTargetReviewNonExecutionActivities
   }
 
   private static boolean isNonExecutable(ReviewDecision decision) {
-    return decision == ReviewDecision.REJECT
-        || decision == ReviewDecision.REQUEST_MORE_EVIDENCE
-        || decision == ReviewDecision.ESCALATE_MANUAL;
+    return decision == ReviewDecision.ESCALATE_MANUAL;
   }
 
   private static void requireCaseWorkflow(

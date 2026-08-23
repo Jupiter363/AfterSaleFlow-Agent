@@ -301,6 +301,30 @@ class CaseProcessLedgerActivitiesIntegrationTest {
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void temporalRoutingCannotPrecedeTheDurableCommandAcceptanceBoundary() {
+        insertRoutingFixture("TEMPORAL", 7);
+        insertCommand(1);
+        RecordCaseCommandRouted request =
+                routingRequest(
+                        1,
+                        TENANT,
+                        7,
+                        workflowId(TENANT),
+                        NOW.minusMillis(14));
+
+        assertThat(activities.recordCaseCommandRouted(request).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        CommandLifecycleSnapshot accepted = commandLifecycleSnapshot(1);
+        assertThat(accepted.orchestratedAt()).isEqualTo(accepted.acceptedAt());
+        assertThat(accepted.updatedAt()).isEqualTo(accepted.acceptedAt());
+
+        assertThat(activities.recordCaseCommandRouted(request).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        assertThat(commandLifecycleSnapshot(1)).isEqualTo(accepted);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void legacyEpochRejectsBothRoutingLifecycleActivitiesWithoutMutation() {
         insertRoutingFixture("LEGACY", 7);
         insertCommand(1);

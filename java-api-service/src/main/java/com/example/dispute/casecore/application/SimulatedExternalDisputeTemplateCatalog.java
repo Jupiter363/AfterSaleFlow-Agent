@@ -24,6 +24,8 @@ import org.springframework.stereotype.Component;
 public class SimulatedExternalDisputeTemplateCatalog {
 
     public static final String SOURCE_SYSTEM = "TEMPLATE_SIMULATED_OMS";
+    public static final String CANONICAL_FULL_CHAIN_FIXTURE_ID =
+            "air-purifier-specification-mismatch-v1";
 
     private static final List<SimulatedExternalDisputeTemplate> TEMPLATES =
             List.of(
@@ -46,7 +48,7 @@ public class SimulatedExternalDisputeTemplateCatalog {
                     template(17, "虚拟权益未到账", "兑换码购买成功且订单已完成，但账户中未到账对应权益，重新登录和绑定均无效。", "我购买的会员兑换码显示订单完成，但账户权益一直没到账，重新登录也没用，请重新发放。客服说需要核对兑换账户、兑换码状态和绑定记录。", "DIGITAL_DELIVERY_FAILURE", MEDIUM, "RESHIP", null, "视频平台季度会员 1 份", "已支付但未获得数字权益，要求重新发放有效权益。", "NEED_MORE_INFO", "对方需要核对兑换账户、兑换码状态和绑定记录。"),
                     template(18, "保价商品运输丢失赔付不足", "高价值包裹购买了保价服务，物流确认运输丢失，但提出的赔付金额低于申报价值。", "我的保价包裹已经确认丢失，但赔付低于申报价值，我要求按 3200 元申报价值赔偿。商家承认丢件责任，但对商品价值证明和赔付上限有异议。", "INSURED_LOGISTICS_LOSS", HIGH, "COMPENSATION", "3200.00", "收藏模型 1 件", "包裹已确认丢失且购买保价，要求按申报价值赔付。", "PARTIALLY_AGREE", "对方认可丢件责任，但对商品价值证明和赔付上限有异议。"),
                     template(19, "订单取消后仍然发货", "发起方在订单出库前提交取消并收到受理提示，随后系统仍发货并产生退回运费争议。", "我在出库前提交取消并收到受理提示，订单后来还是发货了，请关闭订单并免除退回运费。商家说我提交取消时仓库已经完成出库。", "CANCELLATION_FAILURE", MEDIUM, "CANCEL_ORDER", "35.00", "家居收纳箱 2 个", "取消申请已被受理，要求关闭订单并免除退回运费。", "DISAGREE", "对方认为取消申请提交时仓库已经完成出库。"),
-                    template(20, "商品参数宣传与检测结果不符", "页面宣称达到指定性能参数，第三方检测和实际使用结果均明显低于宣传值，双方对检测方法存在争议。", "我购买的净化器实测性能明显低于页面宣传参数，希望退货退款，并核验宣传参数依据。商家不认可现有检测条件，认为结果不能代表标准工况。", "SPECIFICATION_MISMATCH", HIGH, "RETURN_REFUND", "1899.00", "空气净化器 1 台", "核心性能未达到宣传标准，要求退货退款并核验参数依据。", "DISAGREE", "对方不认可现有检测条件，认为结果不能代表标准工况。"));
+                    template(20, "商品参数宣传与检测结果不符", "页面宣称达到指定性能参数，第三方检测和实际使用结果均明显低于宣传值，双方对检测方法存在争议。", "我购买的空气净化器实测性能明显低于页面宣传参数，希望退货退款，并核验宣传参数依据。商家不认可现有检测条件，认为结果不能代表标准工况。", "SPECIFICATION_MISMATCH", HIGH, "RETURN_REFUND", "1899.00", "空气净化器 1 台", "核心性能未达到宣传标准，要求退货退款并核验宣传参数依据。", "DISAGREE", "据发起方转述，商家不认可现有检测条件，认为结果不能代表标准工况。"));
 
     // 所属模块：【案件核心与导入 / 应用编排层】「SimulatedExternalDisputeTemplateCatalog.all()」。
     // 具体功能：「SimulatedExternalDisputeTemplateCatalog.all()」：列出列表，最终返回「List<SimulatedExternalDisputeTemplate>」。
@@ -76,6 +78,13 @@ public class SimulatedExternalDisputeTemplateCatalog {
             throw new IllegalArgumentException("templateNo must be between 1 and " + TEMPLATES.size());
         }
         return TEMPLATES.get(templateNo - 1);
+    }
+
+    public SimulatedExternalDisputeTemplate getFixture(String fixtureId) {
+        if (CANONICAL_FULL_CHAIN_FIXTURE_ID.equals(fixtureId)) {
+            return get(20);
+        }
+        throw new IllegalArgumentException("unknown simulated import fixture_id");
     }
 
     // 所属模块：【案件核心与导入 / 应用编排层】「SimulatedExternalDisputeTemplateCatalog.template(int,String,String,String,String,RiskLevel,String,String,String,String,String,String)」。

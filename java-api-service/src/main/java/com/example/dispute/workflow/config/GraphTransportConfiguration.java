@@ -101,7 +101,7 @@ public class GraphTransportConfiguration {
                 client,
                 tls,
                 new GraphContinuousReadinessProperties(
-                        Duration.ofSeconds(15), Duration.ofSeconds(5)),
+                        Duration.ofSeconds(20), Duration.ofSeconds(15)),
                 environment);
     }
 
@@ -119,8 +119,8 @@ public class GraphTransportConfiguration {
 
 @ConfigurationProperties(prefix = "app.agent-run-v2.graph-client.readiness")
 record GraphContinuousReadinessProperties(
-        @DefaultValue("PT15S") Duration interval,
-        @DefaultValue("PT5S") Duration timeout) {
+        @DefaultValue("PT20S") Duration interval,
+        @DefaultValue("PT15S") Duration timeout) {
 
     private static final Duration MINIMUM_TIMEOUT = Duration.ofMillis(100);
 
@@ -133,10 +133,10 @@ record GraphContinuousReadinessProperties(
         }
         if (timeout == null
                 || timeout.compareTo(MINIMUM_TIMEOUT) < 0
-                || timeout.compareTo(Duration.ofSeconds(5)) > 0
+                || timeout.compareTo(Duration.ofSeconds(15)) > 0
                 || timeout.compareTo(interval) >= 0) {
             throw new IllegalArgumentException(
-                    "Graph readiness timeout must be between 100ms and 5s and less than interval");
+                    "Graph readiness timeout must be between 100ms and 15s and less than interval");
         }
     }
 

@@ -12,6 +12,11 @@ import {
   digitalHumanAvatarOptions,
   promptSafetyRules,
 } from "./agentConsoleFixtures";
+import { domainCodeLabel } from "../../utils/displayText";
+
+function agentRunStatusLabel(status) {
+  return domainCodeLabel(status, "状态待确认");
+}
 
 const agents = ref(createAgentConsoleAgents());
 const activeAgentId = ref(agents.value[0].id);
@@ -654,7 +659,7 @@ function createRollbackDraft(version) {
                   <strong role="cell">{{ run.id }}</strong>
                   <time role="cell">{{ run.time }}</time>
                   <span role="cell">{{ run.issue }}</span>
-                  <em role="cell">{{ run.status }}</em>
+                  <em role="cell">{{ agentRunStatusLabel(run.status) }}</em>
                 </div>
               </div>
             </section>
@@ -1193,7 +1198,7 @@ function createRollbackDraft(version) {
                 <strong role="cell">{{ run.id }}</strong>
                 <time role="cell">{{ run.time }}</time>
                 <span role="cell">{{ run.issue }}</span>
-                <em role="cell">{{ run.status }}</em>
+                <em role="cell">{{ agentRunStatusLabel(run.status) }}</em>
               </div>
             </div>
 

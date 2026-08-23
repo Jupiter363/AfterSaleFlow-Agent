@@ -14,11 +14,15 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.application.EvidenceCatalogService;
+import com.example.dispute.evidence.application.RoleScopedEvidenceView;
+import com.example.dispute.evidence.domain.EvidenceVerificationStatus;
+import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceVerificationEntity;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceVerificationRepository;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -134,6 +138,94 @@ class EvidenceCatalogServiceTest {
                         new AuthenticatedActor("merchant-local", ActorRole.MERCHANT));
 
         assertThat(catalog.items()).isEmpty();
+    }
+
+    @Test
+    void catalogProjectsEvidenceV3AssessmentScoresRiskAndReviewReasons() {
+        FulfillmentCaseEntity dispute = dispute(CaseStatus.EVIDENCE_OPEN, "EVIDENCE");
+        EvidenceItemEntity userEvidence = submittedEvidence("PARTIES");
+        EvidenceVerificationEntity verification = EvidenceVerificationEntity.create(
+                "VERIFICATION_V2_CATALOG",
+                dispute.getId(),
+                userEvidence.getId(),
+                1,
+                EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW,
+                "{}",
+                """
+                {"schema_version":"evidence-turn-result.v3",
+                 "assessment_public_text":"材料文本可读，但缺少签收人身份和交付照片。",
+                 "authenticity_score":0.76,
+                 "authenticity_score_explanation":"可读取物流页面，但缺少原始平台导出来源。",
+                 "relevance_score":0.91,
+                 "relevance_score_explanation":"签收时间直接对应冻结矩阵中的物流事实。",
+                 "completeness_score":0.42,
+                 "completeness_score_explanation":"缺少签收人身份和交付照片。",
+                 "assessment_confidence":0.83,
+                 "assessment_confidence_explanation":"文本清晰，可判断当前材料覆盖范围。",
+                 "risk_level":"MEDIUM",
+                 "risk_explanation":"来源链不完整但尚无明显伪造迹象。",
+                 "source_basis":["物流页面中的签收时间"],
+                 "formation_time_assessment":"页面时间与物流节点部分对应",
+                 "findings":[{"finding_type":"LOGISTICS_RECORD","description":"可见签收时间"}],
+                 "limitations":["缺少签收人身份"],
+                 "unsupported_claims":["不能仅凭该页面确认实际签收人"]}
+                """,
+                """
+                {"requires_human_review":true,
+                 "reason_details":[{"code":"LOW_COMPLETENESS_SCORE",
+                 "label":"完成度低：材料完整性评分偏低",
+                 "explanation":"缺少签收人身份和交付照片。"}]}
+                """,
+                true,
+                Instant.parse("2026-08-20T02:00:00Z"),
+                "evidence-clerk-agent",
+                "TRACE_V2_CATALOG");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(evidenceRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of(userEvidence));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        userEvidence.getId()))
+                .thenReturn(Optional.of(verification));
+
+        var item = service.catalog(
+                        dispute.getId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER))
+                .items()
+                .getFirst();
+
+        assertThat(item.assessmentProtocol()).isEqualTo("evidence-turn-result.v3");
+        assertThat(item.assessmentText())
+                .isEqualTo("材料文本可读，但缺少签收人身份和交付照片。");
+        assertThat(item.verificationFeedback()).isEqualTo(item.assessmentText());
+        assertThat(item.authenticityScore()).isEqualTo(0.76);
+        assertThat(item.authenticityScoreExplanation())
+                .isEqualTo("可读取物流页面，但缺少原始平台导出来源。");
+        assertThat(item.relevanceScore()).isEqualTo(0.91);
+        assertThat(item.relevanceScoreExplanation())
+                .isEqualTo("签收时间直接对应冻结矩阵中的物流事实。");
+        assertThat(item.completenessScore()).isEqualTo(0.42);
+        assertThat(item.completenessScoreExplanation())
+                .isEqualTo("缺少签收人身份和交付照片。");
+        assertThat(item.assessmentConfidence()).isEqualTo(0.83);
+        assertThat(item.assessmentConfidenceExplanation())
+                .isEqualTo("文本清晰，可判断当前材料覆盖范围。");
+        assertThat(item.riskLevel()).isEqualTo("MEDIUM");
+        assertThat(item.riskExplanation()).isEqualTo("来源链不完整但尚无明显伪造迹象。");
+        assertThat(item.sourceBasis()).containsExactly("物流页面中的签收时间");
+        assertThat(item.formationTimeAssessment()).isEqualTo("页面时间与物流节点部分对应");
+        assertThat(item.findings())
+                .containsExactly(new RoleScopedEvidenceView.AssessmentFinding(
+                        "LOGISTICS_RECORD", "可见签收时间"));
+        assertThat(item.limitations()).containsExactly("缺少签收人身份");
+        assertThat(item.unsupportedClaims()).containsExactly("不能仅凭该页面确认实际签收人");
+        assertThat(item.requiresHumanReview()).isTrue();
+        assertThat(item.reasonDetails())
+                .containsExactly(new RoleScopedEvidenceView.ReviewReasonDetail(
+                        "LOW_COMPLETENESS_SCORE",
+                        "完成度低：材料完整性评分偏低",
+                        "缺少签收人身份和交付照片。"));
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCatalogServiceTest.submittedEvidence(String)」。

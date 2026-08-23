@@ -39,10 +39,14 @@ public class HearingProjectionAdapter {
                         snapshot.reviewGateReady(),
                         snapshot.latestDraftId());
         return new HearingFlowView(
+                HearingProjectionContract.PROJECTION_SCHEMA_VERSION,
                 status,
                 snapshot.questionSet(),
                 snapshot.evidenceRequestSet(),
+                snapshot.caseFactMatrix(),
+                snapshot.issueStateSet(),
                 snapshot.trialDossier(),
+                snapshot.juryReviewReport(),
                 snapshot.decisionChain());
     }
 }

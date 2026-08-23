@@ -88,22 +88,26 @@ public final class JdbcTargetHearingFormalAuthorityLoader {
 
   private MatrixAuthority matrixAuthority(HearingAuthorityExpectation authority) {
     return switch (authority.stage()) {
-      case INTAKE_QUESTIONS_GENERATING -> oneMatrix(jdbc.query("""
-          select (d.dossier_json -> 'case_fact_matrix' ->> 'matrix_version')::integer,
+      case INTAKE_QUESTIONS_GENERATING, INTAKE_SYNTHESIZING -> oneMatrix(jdbc.query("""
+          select d.dossier_json -> 'case_fact_matrix' ->> 'matrix_id',
+                 (d.dossier_json -> 'case_fact_matrix' ->> 'matrix_version')::integer,
                  d.dossier_json -> 'case_fact_matrix' ->> 'content_hash'
             from case_intake_dossier d
            where d.case_id = ? and d.room_type = 'INTAKE'
            for update
-          """, (row, ignored) -> new MatrixAuthority(row.getInt(1), row.getString(2)),
+          """, (row, ignored) -> new MatrixAuthority(
+              row.getString(1), row.getInt(2), row.getString(3)),
           authority.caseId()), "question source matrix");
       case EVIDENCE_REQUESTS_GENERATING -> oneMatrix(jdbc.query("""
-          select (s.output_json -> 'case_fact_matrix' ->> 'matrix_version')::integer,
+          select s.output_json -> 'case_fact_matrix' ->> 'matrix_id',
+                 (s.output_json -> 'case_fact_matrix' ->> 'matrix_version')::integer,
                  s.output_json -> 'case_fact_matrix' ->> 'content_hash'
             from hearing_flow_stage s
            where s.case_id = ? and s.flow_instance_id = ?
              and s.stage_code = 'INTAKE_SYNTHESIZING' and s.stage_status = 'COMPLETED'
            for update
-          """, (row, ignored) -> new MatrixAuthority(row.getInt(1), row.getString(2)),
+          """, (row, ignored) -> new MatrixAuthority(
+              row.getString(1), row.getInt(2), row.getString(3)),
           authority.caseId(), authority.flowInstanceId()), "request successor matrix");
       default -> null;
     };
@@ -194,8 +198,8 @@ public final class JdbcTargetHearingFormalAuthorityLoader {
     int expectedSequence;
     String expectedRole;
     if ("JUDGE_PROPOSAL".equals(type)) {
-      wrapperSchema = "judge_proposal.v1"; wrapperIdField = "proposal_id";
-      sourceSchema = "hearing_judge_v1.v1"; sourceIdField = "proposal_id";
+      wrapperSchema = "judge_proposal.v2"; wrapperIdField = "proposal_id";
+      sourceSchema = "hearing_judge_v1.v2"; sourceIdField = "proposal_id";
       sourceHashField = "proposal_hash"; expectedStage = "JUDGE_V1_GENERATING";
       expectedSequence = HearingFlowStage.JUDGE_V1_GENERATING.ordinal() + 1;
       expectedRole = "PRESIDING_JUDGE";
@@ -320,6 +324,7 @@ public final class JdbcTargetHearingFormalAuthorityLoader {
         throw new IllegalArgumentException("target Hearing authority transition is invalid");
       }
       boolean actionRequiresMatrix = authority.stage() == HearingFlowStage.INTAKE_QUESTIONS_GENERATING
+          || authority.stage() == HearingFlowStage.INTAKE_SYNTHESIZING
           || authority.stage() == HearingFlowStage.EVIDENCE_REQUESTS_GENERATING;
       if (actionRequiresMatrix != (matrixAuthority != null)) {
         throw new IllegalArgumentException("target Hearing action matrix authority is invalid");
@@ -369,11 +374,17 @@ public final class JdbcTargetHearingFormalAuthorityLoader {
     }
   }
 
-  public record MatrixAuthority(int version, String hash) {
+  public record MatrixAuthority(String id, int version, String hash) {
     public MatrixAuthority {
+      id = HearingAuthorityExpectation.identifier(id, "matrixAuthorityId");
       if (version < 1 || hash == null || !hash.matches("[0-9a-f]{64}")) {
         throw new IllegalArgumentException("target Hearing matrix authority is invalid");
       }
+    }
+
+    /** Historical unit-fixture constructor; V4 runtime loaders always supply the exact matrix ID. */
+    public MatrixAuthority(int version, String hash) {
+      this("legacy-matrix-authority", version, hash);
     }
   }
   public record Parents(

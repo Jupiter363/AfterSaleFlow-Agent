@@ -1078,7 +1078,37 @@ def _committed_baseline_context(
     context.pop("unilateral_case_matrix", None)
     if selected is not None:
         context["case_fact_matrix"] = selected
+    _require_committed_handoff_partition_adjacent(
+        context,
+        selected_matrix=selected,
+    )
     return context
+
+
+def _require_committed_handoff_partition_adjacent(
+    context: dict[str, Any],
+    *,
+    selected_matrix: Mapping[str, Any] | None,
+) -> None:
+    """Require the handoff partition to bind the latest committed revision."""
+
+    partition = context.get("handoff_remark_partition")
+    if partition is None:
+        return
+    if selected_matrix is None:
+        raise IntakeGraphContractError(
+            "INTAKE_BASELINE_CONTEXT_COMMITTED_PARTITION_INVALID"
+        )
+    validated = _validate_handoff_remark_partition(
+        partition,
+        formal_matrix=selected_matrix,
+        require_formal_matrix=True,
+        error_code="INTAKE_BASELINE_CONTEXT_COMMITTED_PARTITION_INVALID",
+    )
+    if validated is None:
+        raise IntakeGraphContractError(
+            "INTAKE_BASELINE_CONTEXT_COMMITTED_PARTITION_INVALID"
+        )
 
 
 def _selected_committed_baseline_matrix(
@@ -1145,20 +1175,20 @@ def _selected_committed_baseline_matrix(
                 )
             readiness = result.get("readiness")
             missing_fields = result.get("missing_fields")
-            if opening:
-                selected = formal_matrix
-            elif readiness == "READY_TO_CONFIRM":
-                if not isinstance(missing_fields, list) or missing_fields:
-                    raise IntakeGraphContractError(
-                        "INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID"
-                    )
-                selected = formal_matrix
-            elif readiness in {"INCOMPLETE", "NEEDS_REVIEW"}:
-                selected = authority_input
-            else:
+            if readiness not in {"INCOMPLETE", "NEEDS_REVIEW", "READY_TO_CONFIRM"}:
                 raise IntakeGraphContractError(
                     "INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID"
                 )
+            if readiness == "READY_TO_CONFIRM" and (
+                not isinstance(missing_fields, list) or missing_fields
+            ):
+                raise IntakeGraphContractError(
+                    "INTAKE_BASELINE_CONTEXT_COMMITTED_MATRIX_INVALID"
+                )
+            # Every successfully finalized substantive turn installs the
+            # deterministic successor.  Readiness controls confirmation only;
+            # it never selects the previous working matrix as the next baseline.
+            selected = formal_matrix
 
     if selected is None:
         return None
