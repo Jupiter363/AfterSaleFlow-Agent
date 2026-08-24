@@ -308,6 +308,19 @@ class CaseFactMatrixDeltaV2(StrictModel):
                 casefold_matches = keys_by_casefold.get(key.casefold(), [])
                 if len(casefold_matches) == 1:
                     canonical_key = casefold_matches[0]
+            if canonical_key is None and not key.upper().startswith(
+                ("FACT_", "NEW_")
+            ):
+                namespace_matches = {
+                    candidate
+                    for prefix in ("FACT_", "NEW_")
+                    for candidate in keys_by_casefold.get(
+                        f"{prefix}{key}".casefold(),
+                        [],
+                    )
+                }
+                if len(namespace_matches) == 1:
+                    canonical_key = namespace_matches.pop()
             if canonical_key is not None and canonical_key not in seen_summary_keys:
                 seen_summary_keys.add(canonical_key)
                 effective_summary_keys.append(canonical_key)

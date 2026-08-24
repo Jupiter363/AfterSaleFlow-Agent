@@ -231,6 +231,50 @@ def test_ordered_room_matrix_rebinds_only_unique_case_drifted_summary_keys() -> 
         IntakeInitiatorRoomLlmOutputV3.model_validate(ambiguous)
 
 
+def test_ordered_room_matrix_rebinds_only_unique_missing_namespace_prefixes() -> None:
+    payload = _initiator_v3_payload()
+    matrix = payload["ordered_sections"][0]["value"]
+    existing_row = matrix["fact_rows"][0]
+    existing_row["fact_key"] = "FACT_E6720A1DE3A7194BF9B5000D"
+    new_row = copy.deepcopy(existing_row)
+    new_row.update(
+        fact_key="NEW_MERCHANT_RETEST_COORDINATION_PREFERENCE",
+        fact_target="复测机构选定方式",
+        source_scope="CURRENT_SOURCE",
+    )
+    matrix["fact_rows"].append(new_row)
+    matrix["summary_source_fact_keys"] = [
+        "E6720A1DE3A7194BF9B5000D",
+        "MERCHANT_RETEST_COORDINATION_PREFERENCE",
+    ]
+
+    normalized = IntakeInitiatorRoomLlmOutputV3.model_validate(payload)
+
+    assert normalized.ordered_sections[0].value.summary_source_fact_keys == [
+        "FACT_E6720A1DE3A7194BF9B5000D",
+        "NEW_MERCHANT_RETEST_COORDINATION_PREFERENCE",
+    ]
+
+    ambiguous = copy.deepcopy(payload)
+    ambiguous_matrix = ambiguous["ordered_sections"][0]["value"]
+    ambiguous_row = copy.deepcopy(new_row)
+    ambiguous_row.update(
+        fact_key="FACT_MERCHANT_RETEST_COORDINATION_PREFERENCE",
+        fact_target="另一条同主体键事实",
+        source_scope="CURRENT_SOURCE",
+    )
+    ambiguous_matrix["fact_rows"].append(ambiguous_row)
+    ambiguous_matrix["summary_source_fact_keys"] = [
+        "MERCHANT_RETEST_COORDINATION_PREFERENCE"
+    ]
+
+    with pytest.raises(
+        ValidationError,
+        match="summary_source_fact_keys must reference at least one delta fact",
+    ):
+        IntakeInitiatorRoomLlmOutputV3.model_validate(ambiguous)
+
+
 def test_intake_room_v3_contract_places_reply_first_and_evaluation_last() -> None:
     schema = IntakeInitiatorRoomLlmOutputV3.model_json_schema()
     serialized_schema = json.dumps(schema, sort_keys=True)
