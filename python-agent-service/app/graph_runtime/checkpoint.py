@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import math
+import re
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -59,6 +60,9 @@ from app.graph_runtime.transaction_boundary import run_postgres_transaction
 
 FENCE_CONTEXT_KEY: Final[str] = "__trusted_graph_fence_context__"
 TERMINAL_RESULT_CONTEXT_KEY: Final[str] = "__trusted_graph_terminal_result__"
+TECHNICAL_CHILD_CHECKPOINT_CONTEXT_KEY: Final[str] = (
+    "__trusted_technical_child_checkpoint_context__"
+)
 ROOM_GRAPH_RESULT_SCHEMA_VERSION: Final[str] = "room-graph-result.v1"
 PENDING_WRITE_OWNER_PREFIX: Final[str] = "grt.pending-write.v1."
 FENCED_LEASE_HORIZON_SECONDS: Final[float] = float(LEASE_DURATION_SECONDS)
@@ -355,6 +359,101 @@ def bind_fence_context(config: RunnableConfig, fence: GraphFenceContext) -> Runn
     return bound
 
 
+@dataclass(frozen=True, slots=True)
+class TechnicalChildCheckpointBinding:
+    """Runtime-only authority for one non-terminal child Graph checkpoint namespace.
+
+    These checkpoints are durable recovery material for an already admitted command.  They must
+    remain lease fenced, but they must never claim the command's single formal checkpoint pointer
+    or advance the thread cognitive revision.
+    """
+
+    frame_set_id: str
+    run_id: str
+    attempt_id: str
+    frame_type: str
+    generation: int
+    frame_id: str
+    checkpoint_ns: str
+    authority_sha256: str
+    cognitive_revision: int
+
+    def __post_init__(self) -> None:
+        identifier = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+        for field_name in ("frame_set_id", "run_id", "attempt_id", "frame_id"):
+            if identifier.fullmatch(getattr(self, field_name)) is None:
+                raise GraphBindingError(
+                    f"technical child checkpoint {field_name} is invalid"
+                )
+        if self.frame_type not in {
+            "DIALOGUE_FRAME",
+            "DOSSIER_FRAME",
+            "QUALITY_FRAME",
+        }:
+            raise GraphBindingError("technical child checkpoint frame_type is invalid")
+        if (
+            not isinstance(self.generation, int)
+            or isinstance(self.generation, bool)
+            or self.generation < 1
+        ):
+            raise GraphBindingError("technical child checkpoint generation is invalid")
+        if (
+            not self.checkpoint_ns.startswith("intake.parallel.")
+            or len(self.checkpoint_ns) > 128
+            or "\x00" in self.checkpoint_ns
+        ):
+            raise GraphBindingError("technical child checkpoint namespace is invalid")
+        if re.fullmatch(r"^[0-9a-f]{64}$", self.authority_sha256) is None:
+            raise GraphBindingError("technical child checkpoint authority hash is invalid")
+        if (
+            not isinstance(self.cognitive_revision, int)
+            or isinstance(self.cognitive_revision, bool)
+            or self.cognitive_revision < 1
+        ):
+            raise GraphBindingError(
+                "technical child checkpoint cognitive revision is invalid"
+            )
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "graph_checkpoint_kind": "INTAKE_PARALLEL_FRAME_CHILD",
+            "parallel_frame_set_id": self.frame_set_id,
+            "parallel_run_id": self.run_id,
+            "parallel_attempt_id": self.attempt_id,
+            "parallel_frame_type": self.frame_type,
+            "parallel_generation": self.generation,
+            "parallel_frame_id": self.frame_id,
+            "parallel_checkpoint_ns": self.checkpoint_ns,
+            "parallel_authority_sha256": self.authority_sha256,
+        }
+
+
+def bind_technical_child_checkpoint(
+    config: RunnableConfig,
+    binding: TechnicalChildCheckpointBinding,
+) -> RunnableConfig:
+    """Attach a typed technical-child capability without changing the Graph fence."""
+
+    if not isinstance(binding, TechnicalChildCheckpointBinding):
+        raise GraphBindingError("technical child checkpoint capability is invalid")
+    configurable = dict(config.get("configurable") or {})
+    existing = configurable.get(TECHNICAL_CHILD_CHECKPOINT_CONTEXT_KEY)
+    if existing is not None and existing != binding:
+        raise GraphBindingError(
+            "RunnableConfig already carries another technical child checkpoint"
+        )
+    checkpoint_ns = configurable.get("checkpoint_ns")
+    if checkpoint_ns not in {None, ""}:
+        raise GraphBindingError(
+            "technical child storage namespace must remain hidden from LangGraph"
+        )
+    configurable["checkpoint_ns"] = ""
+    configurable[TECHNICAL_CHILD_CHECKPOINT_CONTEXT_KEY] = binding
+    bound = dict(config)
+    bound["configurable"] = configurable
+    return bound
+
+
 def bind_terminal_result_context(
     config: RunnableConfig,
     materializer: TerminalResultMaterializer,
@@ -564,6 +663,15 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         fence = self._require_fence(config)
+        technical = self._technical_child_binding(config)
+        if technical is not None:
+            found = await self._reader.aget_tuple(
+                self._technical_storage_config(config, technical)
+            )
+            if found is None:
+                return None
+            self._validate_technical_child_tuple(found, fence, technical)
+            return self._bind_technical_child_tuple(found, fence, technical)
         selection = await self._checkpoint_restore_selection(config, fence)
         if selection is None:
             return None
@@ -589,10 +697,31 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         if config is None:
             raise GraphBindingError("runtime checkpoint listing requires a trusted thread fence")
         fence = self._require_fence(config)
+        technical = self._technical_child_binding(config)
         if before is not None:
             before_fence = self._require_fence(before)
             if before_fence != fence:
                 raise GraphBindingError("checkpoint list cursor belongs to another fence")
+            if self._technical_child_binding(before) != technical:
+                raise GraphBindingError(
+                    "checkpoint list cursor belongs to another technical child"
+                )
+        if technical is not None:
+            storage_config = self._technical_storage_config(config, technical)
+            storage_before = (
+                None
+                if before is None
+                else self._technical_storage_config(before, technical)
+            )
+            async for item in self._reader.alist(
+                storage_config,
+                filter=filter,
+                before=storage_before,
+                limit=limit,
+            ):
+                self._validate_technical_child_tuple(item, fence, technical)
+                yield self._bind_technical_child_tuple(item, fence, technical)
+            return
         selection = await self._checkpoint_restore_selection(config, fence)
         if selection is None:
             return
@@ -614,6 +743,16 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         fence = self._require_fence(config)
+        technical = self._technical_child_binding(config)
+        if technical is not None:
+            return await self._put_technical_child_checkpoint(
+                config,
+                checkpoint,
+                metadata,
+                new_versions,
+                fence=fence,
+                binding=technical,
+            )
         materializer = self._terminal_materializer(config)
         cognitive_revision = self._checkpoint_revision(checkpoint)
         terminal_result: ResultRecord | None = None
@@ -746,6 +885,84 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             effective_fence,
         )
 
+    async def _put_technical_child_checkpoint(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+        *,
+        fence: GraphFenceContext,
+        binding: TechnicalChildCheckpointBinding,
+    ) -> RunnableConfig:
+        if self._terminal_materializer(config) is not None:
+            raise GraphBindingError(
+                "technical child checkpoint cannot carry terminal result authority"
+            )
+        bound_metadata = self._bind_technical_child_metadata(
+            metadata,
+            fence,
+            binding,
+        )
+        storage_config = self._technical_storage_config(config, binding)
+        async with self._serialized_thread_write(fence.thread_id):
+            prepared = (
+                await asyncio.to_thread(
+                    self._prepare_checkpoint_write,
+                    storage_config,
+                    checkpoint,
+                    bound_metadata,
+                    new_versions,
+                )
+                if self._uses_native_direct_writes
+                else None
+            )
+
+            async def write_transaction(connection: Any) -> RunnableConfig:
+                if prepared is None:
+                    saver = self._direct_saver_factory(connection, self.serde)
+                    saved = await saver.aput(
+                        storage_config,
+                        checkpoint,
+                        bound_metadata,
+                        new_versions,
+                    )
+                else:
+                    await self._write_prepared_checkpoint(connection, prepared)
+                    saved = prepared.saved_config
+                configurable = saved.get("configurable") or {}
+                checkpoint_id = configurable.get("checkpoint_id")
+                if (
+                    configurable.get("thread_id") != fence.thread_id
+                    or configurable.get("checkpoint_ns") != binding.checkpoint_ns
+                    or not isinstance(checkpoint_id, str)
+                    or not checkpoint_id
+                    or len(checkpoint_id) > 128
+                ):
+                    raise GraphBindingError(
+                        "PostgresSaver returned another technical child checkpoint identity"
+                    )
+                # Technical child checkpoints retain the exact command lease and Java room fence,
+                # but deliberately do not bind agent_graph_command.committed_checkpoint_* and do
+                # not advance graph_thread_registry.cognitive_revision.
+                async with self._bounded_fenced_lease_suffix(connection):
+                    await self._lock_fence(connection, fence)
+                    await self._refresh_locked_fence_lease(connection, fence)
+                return saved
+
+            saved = await run_postgres_transaction(
+                self._pool,
+                timeout=self._acquire_timeout_seconds,
+                operation=write_transaction,
+                operation_name="technical child checkpoint put",
+            )
+        return self._technical_graph_config(
+            config,
+            saved,
+            fence,
+            binding,
+        )
+
     async def aput_writes(
         self,
         config: RunnableConfig,
@@ -754,12 +971,18 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         task_path: str = "",
     ) -> None:
         fence = self._require_fence(config)
+        technical = self._technical_child_binding(config)
+        storage_config = (
+            config
+            if technical is None
+            else self._technical_storage_config(config, technical)
+        )
         owned_task_id = self._encode_pending_write_task_id(task_id, fence)
         async with self._serialized_thread_write(fence.thread_id):
             prepared = (
                 await asyncio.to_thread(
                     self._prepare_pending_writes,
-                    config,
+                    storage_config,
                     writes,
                     owned_task_id,
                     task_path,
@@ -770,7 +993,12 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             async def write_transaction(connection: Any) -> None:
                 if prepared is None:
                     saver = self._direct_saver_factory(connection, self.serde)
-                    await saver.aput_writes(config, writes, owned_task_id, task_path)
+                    await saver.aput_writes(
+                        storage_config,
+                        writes,
+                        owned_task_id,
+                        task_path,
+                    )
                 else:
                     await self._write_prepared_pending_writes(connection, prepared)
                 # Pending writes are speculative until checkpoint ownership and the
@@ -778,7 +1006,15 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                 # existing checkpoint before the lease so every checkpoint writer
                 # uses one cross-process checkpoint -> lease order.  A missing
                 # checkpoint remains the fenced orphan-write case LangGraph needs.
-                await self._validate_pending_write_target(connection, config, fence)
+                if technical is None:
+                    await self._validate_pending_write_target(connection, config, fence)
+                else:
+                    await self._validate_technical_pending_write_target(
+                        connection,
+                        storage_config,
+                        fence,
+                        technical,
+                    )
                 async with self._bounded_fenced_lease_suffix(connection):
                     await self._lock_fence(connection, fence)
                     await self._refresh_locked_fence_lease(connection, fence)
@@ -1569,6 +1805,38 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             checkpoint_id=checkpoint_id,
         )
 
+    async def _validate_technical_pending_write_target(
+        self,
+        connection: Any,
+        config: RunnableConfig,
+        fence: GraphFenceContext,
+        binding: TechnicalChildCheckpointBinding,
+    ) -> None:
+        configurable = config.get("configurable") or {}
+        checkpoint_ns = configurable.get("checkpoint_ns")
+        checkpoint_id = configurable.get("checkpoint_id")
+        if (
+            checkpoint_ns != binding.checkpoint_ns
+            or not isinstance(checkpoint_id, str)
+            or not checkpoint_id
+            or len(checkpoint_id) > 128
+        ):
+            raise GraphBindingError(
+                "technical child pending writes require an exact checkpoint identity"
+            )
+        row = await (
+            await connection.execute(
+                CHECKPOINT_METADATA_SQL,
+                (fence.thread_id, checkpoint_ns, checkpoint_id),
+            )
+        ).fetchone()
+        if row is None:
+            # LangGraph may emit task writes before the corresponding checkpoint.  They
+            # remain unread orphans unless the later technical-child aput succeeds under
+            # the same lease and exact metadata binding.
+            return
+        self._validate_technical_child_metadata(row["metadata"], fence, binding)
+
     async def _lock_external_terminal_checkpoint(
         self,
         connection: Any,
@@ -1698,6 +1966,150 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         if configurable.get("thread_id") != fence.thread_id:
             raise GraphBindingError("RunnableConfig thread_id conflicts with Graph fence")
         return fence
+
+    @staticmethod
+    def _technical_child_binding(
+        config: RunnableConfig,
+    ) -> TechnicalChildCheckpointBinding | None:
+        configurable = config.get("configurable") or {}
+        value = configurable.get(TECHNICAL_CHILD_CHECKPOINT_CONTEXT_KEY)
+        if value is None:
+            return None
+        if not isinstance(value, TechnicalChildCheckpointBinding):
+            raise GraphBindingError(
+                "RunnableConfig has a forged technical child checkpoint capability"
+            )
+        if configurable.get("checkpoint_ns") not in {None, ""}:
+            raise GraphBindingError(
+                "technical child storage namespace leaked into LangGraph config"
+            )
+        return value
+
+    @staticmethod
+    def _technical_storage_config(
+        config: RunnableConfig,
+        binding: TechnicalChildCheckpointBinding,
+    ) -> RunnableConfig:
+        """Project a graph-facing child config onto its private storage namespace."""
+
+        configurable = dict(config.get("configurable") or {})
+        if configurable.get("checkpoint_ns") not in {None, ""}:
+            raise GraphBindingError(
+                "technical child storage namespace leaked into LangGraph config"
+            )
+        configurable["checkpoint_ns"] = binding.checkpoint_ns
+        projected = dict(config)
+        projected["configurable"] = configurable
+        return projected
+
+    @classmethod
+    def _technical_graph_config(
+        cls,
+        original: RunnableConfig,
+        saved: RunnableConfig,
+        fence: GraphFenceContext,
+        binding: TechnicalChildCheckpointBinding,
+    ) -> RunnableConfig:
+        """Return a LangGraph-safe config while retaining the durable checkpoint id."""
+
+        saved_configurable = saved.get("configurable") or {}
+        checkpoint_id = saved_configurable.get("checkpoint_id")
+        if (
+            saved_configurable.get("thread_id") != fence.thread_id
+            or saved_configurable.get("checkpoint_ns") != binding.checkpoint_ns
+            or not isinstance(checkpoint_id, str)
+            or not checkpoint_id
+            or len(checkpoint_id) > 128
+        ):
+            raise GraphBindingError(
+                "PostgresSaver returned another technical child checkpoint identity"
+            )
+        configurable = dict(original.get("configurable") or {})
+        configurable["thread_id"] = fence.thread_id
+        configurable["checkpoint_ns"] = ""
+        configurable["checkpoint_id"] = checkpoint_id
+        graph_config = dict(original)
+        graph_config["configurable"] = configurable
+        return bind_technical_child_checkpoint(
+            bind_fence_context(graph_config, fence),
+            binding,
+        )
+
+    @classmethod
+    def _bind_technical_child_metadata(
+        cls,
+        metadata: CheckpointMetadata,
+        fence: GraphFenceContext,
+        binding: TechnicalChildCheckpointBinding,
+    ) -> CheckpointMetadata:
+        bound = dict(
+            cls._bind_metadata(metadata, fence, binding.cognitive_revision)
+        )
+        for key, value in binding.metadata().items():
+            if key in bound and bound[key] != value:
+                raise GraphBindingError(f"checkpoint metadata conflicts at {key}")
+            bound[key] = value
+        return bound  # type: ignore[return-value]
+
+    @classmethod
+    def _validate_technical_child_metadata(
+        cls,
+        metadata: Any,
+        fence: GraphFenceContext,
+        binding: TechnicalChildCheckpointBinding,
+    ) -> None:
+        cls._validate_exact_checkpoint_metadata(
+            metadata,
+            fence,
+            cognitive_revision=binding.cognitive_revision,
+        )
+        if any(metadata.get(key) != value for key, value in binding.metadata().items()):
+            raise GraphBindingError(
+                "checkpoint metadata differs from technical child authority"
+            )
+
+    @classmethod
+    def _validate_technical_child_tuple(
+        cls,
+        item: CheckpointTuple,
+        fence: GraphFenceContext,
+        binding: TechnicalChildCheckpointBinding,
+    ) -> None:
+        configurable = item.config.get("configurable") or {}
+        if (
+            configurable.get("thread_id") != fence.thread_id
+            or configurable.get("checkpoint_ns") != binding.checkpoint_ns
+        ):
+            raise GraphBindingError(
+                "checkpoint tuple belongs to another technical child"
+            )
+        cls._require_checkpoint_tuple_identity(item)
+        cls._validate_technical_child_metadata(item.metadata, fence, binding)
+
+    def _bind_technical_child_tuple(
+        self,
+        item: CheckpointTuple,
+        fence: GraphFenceContext,
+        binding: TechnicalChildCheckpointBinding,
+    ) -> CheckpointTuple:
+        bound = self._bind_tuple(item, fence)
+        config = self._technical_graph_config(
+            {"configurable": {"thread_id": fence.thread_id, "checkpoint_ns": ""}},
+            bound.config,
+            fence,
+            binding,
+        )
+        parent = (
+            None
+            if bound.parent_config is None
+            else self._technical_graph_config(
+                {"configurable": {"thread_id": fence.thread_id, "checkpoint_ns": ""}},
+                bound.parent_config,
+                fence,
+                binding,
+            )
+        )
+        return bound._replace(config=config, parent_config=parent)
 
     @staticmethod
     def _bind_metadata(

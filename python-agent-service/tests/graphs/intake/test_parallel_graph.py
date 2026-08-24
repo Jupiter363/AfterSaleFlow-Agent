@@ -33,6 +33,10 @@ from app.graphs.intake.parallel_graph import (
     build_parallel_frame_graph,
     compile_parallel_frame_graphs,
 )
+from app.graph_runtime.checkpoint import (
+    TechnicalChildCheckpointBinding,
+    bind_technical_child_checkpoint,
+)
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.model_runner import (
     HarnessGeneration,
@@ -171,6 +175,92 @@ async def test_three_physical_graphs_stream_independently_before_fan_in() -> Non
     assert all("checkpoint_id" not in request.model_input.model_dump_json()
                for request in requests)
     assert len([event for event in sink.events if isinstance(event, FrameSealed)]) == 3
+
+
+@pytest.mark.asyncio
+async def test_external_checkpoint_configs_keep_three_children_in_distinct_namespaces() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(
+            checkpointer={frame_type: InMemorySaver() for frame_type in FRAME_TYPES}
+        )
+    )
+    requests, contexts = _requests_and_contexts()
+    checkpoint_configs = {
+        frame_type: bind_technical_child_checkpoint(
+            {
+                "configurable": {
+                    "thread_id": "grt.v1." + "1" * 32,
+                }
+            },
+            TechnicalChildCheckpointBinding(
+                frame_set_id=request.frame_set_id,
+                run_id=request.run_id,
+                attempt_id=request.attempt_id,
+                frame_type=frame_type,
+                generation=request.generation,
+                frame_id=request.frame_id,
+                checkpoint_ns=f"intake.parallel.{frame_type.lower()}",
+                authority_sha256="9" * 64,
+                cognitive_revision=1,
+            ),
+        )
+        for frame_type, request in (
+            (request.frame_type, request) for request in requests
+        )
+    }
+
+    result = await orchestrator.execute(
+        requests,
+        agent_contexts=contexts,
+        model_runner=_StreamingRunner(_outputs()),
+        event_sink=_CollectingSink(),
+        checkpoint_configs=checkpoint_configs,
+    )
+
+    assert result.all_succeeded
+    refs = {
+        frame_type: item.child_checkpoint_ref
+        for frame_type, item in result.completed.items()
+    }
+    assert len(set(refs.values())) == 3
+    for frame_type, ref in refs.items():
+        assert f"intake.parallel.{frame_type.lower()}" in ref
+
+
+@pytest.mark.asyncio
+async def test_parallel_children_reject_shared_checkpoint_namespace() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    shared = {
+        frame_type: bind_technical_child_checkpoint(
+            {"configurable": {"thread_id": "grt.v1." + "1" * 32}},
+            TechnicalChildCheckpointBinding(
+                frame_set_id=request.frame_set_id,
+                run_id=request.run_id,
+                attempt_id=request.attempt_id,
+                frame_type=frame_type,
+                generation=request.generation,
+                frame_id=request.frame_id,
+                checkpoint_ns="intake.parallel.shared",
+                authority_sha256="9" * 64,
+                cognitive_revision=1,
+            ),
+        )
+        for frame_type, request in (
+            (request.frame_type, request) for request in requests
+        )
+    }
+
+    with pytest.raises(ValueError, match="cannot share"):
+        await orchestrator.execute(
+            requests,
+            agent_contexts=contexts,
+            model_runner=_StreamingRunner(_outputs()),
+            event_sink=_CollectingSink(),
+            checkpoint_configs=shared,
+        )
 
 
 @pytest.mark.asyncio

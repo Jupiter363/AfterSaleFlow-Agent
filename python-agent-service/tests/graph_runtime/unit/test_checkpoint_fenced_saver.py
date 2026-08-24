@@ -16,10 +16,13 @@ from app.graph_runtime.checkpoint import (
     BIND_EXTERNAL_TERMINAL_METADATA_SQL,
     ExternalTerminalCommit,
     FENCE_CONTEXT_KEY,
+    TECHNICAL_CHILD_CHECKPOINT_CONTEXT_KEY,
     TERMINAL_RESULT_CONTEXT_KEY,
     FencedPostgresSaver,
+    TechnicalChildCheckpointBinding,
     TerminalResultMaterializer,
     bind_fence_context,
+    bind_technical_child_checkpoint,
     bind_terminal_result_context,
 )
 from app.graph_runtime.errors import GraphTerminalBindingError
@@ -492,6 +495,7 @@ class _DirectSaver:
     def __init__(self, connection: _Connection) -> None:
         self.connection = connection
         self.put_calls: list[dict[str, Any]] = []
+        self.put_configs: list[dict[str, Any]] = []
         self.checkpoints: list[dict[str, Any]] = []
         self.write_calls: list[tuple[Any, ...]] = []
 
@@ -504,11 +508,13 @@ class _DirectSaver:
     ) -> dict[str, Any]:
         self.connection.events.append("saver:put")
         self.put_calls.append(metadata)
+        self.put_configs.append(config)
         self.checkpoints.append(checkpoint)
+        configurable = config.get("configurable") or {}
         return {
             "configurable": {
                 "thread_id": _fence().thread_id,
-                "checkpoint_ns": "hearing",
+                "checkpoint_ns": configurable.get("checkpoint_ns", "hearing"),
                 "checkpoint_id": "cp-1",
             }
         }
@@ -686,6 +692,52 @@ async def test_checkpoint_write_uses_one_connection_and_fences_after_bulk_write(
     assert direct_savers[0].connection is connection
     assert direct_savers[0].put_calls == [_metadata()]
     assert saved["configurable"][FENCE_CONTEXT_KEY] == _fence()
+
+
+@pytest.mark.asyncio
+async def test_technical_child_checkpoint_is_fenced_without_claiming_formal_pointer() -> None:
+    connection = _Connection()
+    saver, direct_savers = _saver(connection)
+    binding = TechnicalChildCheckpointBinding(
+        frame_set_id="frame-set-1",
+        run_id="run-1",
+        attempt_id="attempt-1",
+        frame_type="DIALOGUE_FRAME",
+        generation=1,
+        frame_id="frame-1",
+        checkpoint_ns="intake.parallel.dialogue.abc123",
+        authority_sha256=SHA_B,
+        cognitive_revision=3,
+    )
+    config = bind_technical_child_checkpoint(_config(), binding)
+    checkpoint = {
+        "id": "cp-1",
+        "channel_values": {"status": "COMPLETE"},
+        "channel_versions": {},
+    }
+
+    saved = await saver.aput(config, checkpoint, {}, {})  # type: ignore[arg-type]
+
+    assert connection.events == [
+        "transaction:enter",
+        "saver:put",
+        "sql:fence",
+        "sql:refresh-lease",
+        "transaction:commit",
+    ]
+    metadata = direct_savers[0].put_calls[0]
+    assert metadata["graph_cognitive_revision"] == 3
+    assert metadata["graph_checkpoint_kind"] == "INTAKE_PARALLEL_FRAME_CHILD"
+    assert metadata["parallel_authority_sha256"] == SHA_B
+    assert saved["configurable"][FENCE_CONTEXT_KEY] == _fence()
+    assert (
+        saved["configurable"][TECHNICAL_CHILD_CHECKPOINT_CONTEXT_KEY]
+        == binding
+    )
+    assert direct_savers[0].put_configs[0]["configurable"]["checkpoint_ns"] == (
+        binding.checkpoint_ns
+    )
+    assert saved["configurable"]["checkpoint_ns"] == ""
 
 
 @pytest.mark.asyncio

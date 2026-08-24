@@ -6,12 +6,17 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol, TypedDict, cast
+from urllib.parse import quote
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
+from app.graph_runtime.checkpoint import (
+    TECHNICAL_CHILD_CHECKPOINT_CONTEXT_KEY,
+    TechnicalChildCheckpointBinding,
+)
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.parallel_contracts import (
     FRAME_OUTPUT_SCHEMA,
@@ -367,9 +372,16 @@ def build_parallel_frame_graph(frame_type: ParallelFrameType) -> StateGraph:
 def compile_parallel_frame_graphs(*, checkpointer: Any) -> Mapping[ParallelFrameType, Any]:
     if checkpointer is None:
         raise ValueError("parallel Frame graphs require a checkpointer")
+    selected = (
+        {frame_type: checkpointer[frame_type] for frame_type in FRAME_TYPES}
+        if isinstance(checkpointer, Mapping)
+        else {frame_type: checkpointer for frame_type in FRAME_TYPES}
+    )
+    if any(value is None for value in selected.values()):
+        raise ValueError("every parallel Frame graph requires a checkpointer")
     return {
         frame_type: build_parallel_frame_graph(frame_type).compile(
-            checkpointer=checkpointer
+            checkpointer=selected[frame_type]
         )
         for frame_type in FRAME_TYPES
     }
@@ -388,6 +400,7 @@ class ParallelIntakeFrameOrchestrator:
         agent_contexts: Mapping[ParallelFrameType, AgentInvocationContext],
         model_runner: ParallelFrameModelRunner,
         event_sink: ParallelFrameTechnicalEventSink,
+        checkpoint_configs: Mapping[ParallelFrameType, Mapping[str, Any]] | None = None,
     ) -> ParallelFrameBatchResult:
         if not requests:
             raise ValueError("at least one Frame request is required")
@@ -398,6 +411,8 @@ class ParallelIntakeFrameOrchestrator:
             raise ValueError("a Frame batch contains an unknown Frame type")
         if set(by_type) - set(agent_contexts):
             raise ValueError("every requested Frame requires an agent context")
+        if checkpoint_configs is not None and set(by_type) - set(checkpoint_configs):
+            raise ValueError("every requested Frame requires a checkpoint config")
         frame_set_ids = {request.frame_set_id for request in requests}
         run_ids = {request.run_id for request in requests}
         attempt_ids = {request.attempt_id for request in requests}
@@ -418,6 +433,22 @@ class ParallelIntakeFrameOrchestrator:
         ):
             raise ValueError("requested Frames do not share one immutable turn context")
 
+        resolved_checkpoint_configs = {
+            frame_type: _validated_graph_config(
+                request,
+                None
+                if checkpoint_configs is None
+                else checkpoint_configs[frame_type],
+            )
+            for frame_type, request in by_type.items()
+        }
+        checkpoint_locations = {
+            _checkpoint_location(config)
+            for config in resolved_checkpoint_configs.values()
+        }
+        if len(checkpoint_locations) != len(resolved_checkpoint_configs):
+            raise ValueError("parallel Frames cannot share one checkpoint namespace")
+
         tasks = {
             frame_type: asyncio.create_task(
                 self.execute_frame(
@@ -425,6 +456,7 @@ class ParallelIntakeFrameOrchestrator:
                     agent_context=agent_contexts[frame_type],
                     model_runner=model_runner,
                     event_sink=event_sink,
+                    checkpoint_config=resolved_checkpoint_configs[frame_type],
                 ),
                 name=f"intake-parallel-{frame_type.lower()}",
             )
@@ -453,9 +485,10 @@ class ParallelIntakeFrameOrchestrator:
         agent_context: AgentInvocationContext,
         model_runner: ParallelFrameModelRunner,
         event_sink: ParallelFrameTechnicalEventSink,
+        checkpoint_config: Mapping[str, Any] | None = None,
     ) -> ParallelFrameExecutionResult:
         graph = self._graphs[request.frame_type]
-        config = _graph_config(request)
+        config = _validated_graph_config(request, checkpoint_config)
         snapshot = await graph.aget_state(config)
         existing = cast(Mapping[str, Any], snapshot.values or {})
         if existing:
@@ -488,7 +521,11 @@ class ParallelIntakeFrameOrchestrator:
         _require_status(state, "COMPLETE")
         _require_complete_state(state, request.frame_type)
         terminal_snapshot = await graph.aget_state(config)
-        checkpoint_ref = _checkpoint_ref(terminal_snapshot.config, request)
+        checkpoint_ref = _checkpoint_ref(
+            terminal_snapshot.config,
+            request,
+            expected_config=config,
+        )
         checkpoint_sha256 = canonical_sha256(
             {
                 "checkpoint_ref": checkpoint_ref,
@@ -932,9 +969,59 @@ def _graph_config(request: ParallelFrameExecutionRequest) -> dict[str, Any]:
     }
 
 
+def _validated_graph_config(
+    request: ParallelFrameExecutionRequest,
+    config: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    selected = _graph_config(request) if config is None else dict(config)
+    configurable = dict(selected.get("configurable") or {})
+    thread_id = configurable.get("thread_id")
+    checkpoint_ns = configurable.get("checkpoint_ns", "")
+    checkpoint_id = configurable.get("checkpoint_id")
+    if (
+        not isinstance(thread_id, str)
+        or not thread_id
+        or len(thread_id) > 128
+        or checkpoint_ns not in {None, ""}
+        or (
+            checkpoint_id is not None
+            and (
+                not isinstance(checkpoint_id, str)
+                or not checkpoint_id
+                or len(checkpoint_id) > 128
+            )
+        )
+    ):
+        raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_CHECKPOINT_CONFIG_INVALID")
+    selected["configurable"] = configurable
+    return selected
+
+
+def _checkpoint_location(config: Mapping[str, Any]) -> tuple[str, str]:
+    configurable = dict(config.get("configurable") or {})
+    return (
+        str(configurable.get("thread_id") or ""),
+        _logical_checkpoint_namespace(config),
+    )
+
+
+def _logical_checkpoint_namespace(config: Mapping[str, Any]) -> str:
+    configurable = dict(config.get("configurable") or {})
+    binding = configurable.get(TECHNICAL_CHILD_CHECKPOINT_CONTEXT_KEY)
+    if binding is None:
+        return str(configurable.get("checkpoint_ns") or "")
+    if not isinstance(binding, TechnicalChildCheckpointBinding):
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_CHECKPOINT_CONFIG_INVALID"
+        )
+    return binding.checkpoint_ns
+
+
 def _checkpoint_ref(
     config: Mapping[str, Any] | None,
     request: ParallelFrameExecutionRequest,
+    *,
+    expected_config: Mapping[str, Any],
 ) -> str:
     configurable = dict((config or {}).get("configurable", {}))
     checkpoint_id = configurable.get("checkpoint_id")
@@ -948,11 +1035,19 @@ def _checkpoint_ref(
         )
     ) or checkpoint_ns not in {None, ""}:
         raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_CHECKPOINT_PROOF_MISSING")
-    expected = _graph_config(request)["configurable"]
-    if thread_id != expected["thread_id"]:
+    expected = _validated_graph_config(request, expected_config)["configurable"]
+    if (
+        thread_id != expected["thread_id"]
+        or (checkpoint_ns or "") != (expected.get("checkpoint_ns") or "")
+    ):
         raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_CHECKPOINT_PROOF_DRIFT")
-    logical_namespace = f"intake.parallel.{request.frame_type.lower()}"
-    return f"langgraph://{logical_namespace}/{thread_id}/{checkpoint_id}"
+    logical_namespace = _logical_checkpoint_namespace(expected_config)
+    if not logical_namespace:
+        logical_namespace = f"intake.parallel.{request.frame_type.lower()}"
+    return (
+        f"langgraph://{logical_namespace}/{quote(thread_id, safe='')}"
+        f"/{quote(checkpoint_ns, safe='')}/{quote(checkpoint_id, safe='')}"
+    )
 
 
 def _require_checkpoint_authority(
