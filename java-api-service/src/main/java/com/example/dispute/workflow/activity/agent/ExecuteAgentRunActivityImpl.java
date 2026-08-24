@@ -616,10 +616,15 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                 allowedAttempts < 1
                         || context.temporalAttempt() > allowedAttempts
                         || !deadlineOpen;
+        boolean resumableParallelAttempt =
+                ExecuteAgentRunRequest.isParallelIntakeCommand(request.command())
+                        && "agent-stream.v4".equals(request.streamProtocol())
+                        && attempt.status() == AgentRunAttemptStatus.RUNNING;
         boolean existingVisibleAttempt =
                 attempt.status() == AgentRunAttemptStatus.RESULT_READY
-                        || attempt.publicOutputEmitted()
-                        || attempt.finalFrameObserved();
+                        || (!resumableParallelAttempt
+                                && (attempt.publicOutputEmitted()
+                                        || attempt.finalFrameObserved()));
         ExecutionMode mode = executionWindowClosed || existingVisibleAttempt
                 ? ExecutionMode.RECONCILE_ONLY
                 : ExecutionMode.EXECUTE_OR_RECONCILE;

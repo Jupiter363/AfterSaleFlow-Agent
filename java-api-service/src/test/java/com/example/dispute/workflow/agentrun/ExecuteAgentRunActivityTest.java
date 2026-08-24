@@ -190,7 +190,7 @@ class ExecuteAgentRunActivityTest {
                 .thenReturn(parallelRunningAttempt(request, 4, true));
         when(gateway.execute(
                         eq(request),
-                        eq(ExecutionMode.RECONCILE_ONLY),
+                        eq(ExecutionMode.EXECUTE_OR_RECONCILE),
                         any(),
                         any()))
                 .thenReturn(new AgentRunExecutionGateway.Completion(
@@ -206,7 +206,7 @@ class ExecuteAgentRunActivityTest {
         verify(ledger, never()).recordResultReady(any());
         verify(gateway).execute(
                 eq(request),
-                eq(ExecutionMode.RECONCILE_ONLY),
+                eq(ExecutionMode.EXECUTE_OR_RECONCILE),
                 any(),
                 any());
     }
