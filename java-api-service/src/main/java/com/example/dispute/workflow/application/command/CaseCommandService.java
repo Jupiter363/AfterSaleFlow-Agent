@@ -39,6 +39,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -136,7 +137,15 @@ public class CaseCommandService {
                 existing.get(), requestHash, actor, caseId, traceId, requestId);
         }
 
-        validateAndReserveRevision(tenantSurrogate, caseId, command);
+        try {
+            validateAndReserveRevision(tenantSurrogate, caseId, command);
+        } catch (OptimisticLockingFailureException exception) {
+            throw invalidState(
+                "expected process revision is already reserved by an active command",
+                Map.of(
+                    "case_id", caseId,
+                    "expected_process_revision", command.expectedProcessRevision()));
+        }
         OffsetDateTime acceptedAt =
             OffsetDateTime.ofInstant(
                 clock.instant().truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC);

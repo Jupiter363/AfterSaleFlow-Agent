@@ -9,6 +9,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
@@ -48,6 +50,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.OptimisticLockingFailureException;
 
 @ExtendWith(MockitoExtension.class)
 class CaseCommandServiceTest {
@@ -197,6 +200,41 @@ class CaseCommandServiceTest {
 
         verifyNoInteractions(commandRepository, outboxRepository, auditLogRepository);
         verify(projectionRepository, never()).findById(any());
+    }
+
+    @Test
+    void mapsConcurrentRevisionReservationToRetryableCaseStatusConflict() {
+        when(disputeCase.getId()).thenReturn(CASE_ID);
+        when(caseRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(disputeCase));
+        when(roomEpochRepository.findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
+                        CASE_ID, RoomType.EVIDENCE, 0))
+                .thenThrow(new OptimisticLockingFailureException("concurrent room epoch update"));
+
+        assertThatThrownBy(
+                        () ->
+                                service.accept(
+                                        CASE_ID,
+                                        "command.concurrent-revision",
+                                        command("a".repeat(64)),
+                                        user(),
+                                        "TRACE_concurrent_revision",
+                                        "REQ_concurrent_revision",
+                                        null))
+                .isInstanceOfSatisfying(
+                        BusinessException.class,
+                        exception -> {
+                            assertThat(exception.errorCode())
+                                    .isEqualTo(ErrorCode.CASE_STATUS_INVALID);
+                            assertThat(exception.getMessage())
+                                    .isEqualTo(
+                                            "expected process revision is already reserved by an active command");
+                            assertThat(exception.details())
+                                    .containsEntry("case_id", CASE_ID)
+                                    .containsEntry("expected_process_revision", 0L);
+                        });
+
+        verify(commandRepository, never()).save(any());
+        verify(outboxRepository, never()).save(any());
     }
 
     @Test
