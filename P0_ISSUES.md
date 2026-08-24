@@ -1293,3 +1293,23 @@
 - Root cause and evidence: `.local-dev/resume-case-to-outcome.py:112-126` returns only for `COMPLETED` and raises only for `FAILED`; every other status is treated as in progress. The public AgentRun contract also uses terminal `ABORTED`, so a genuine model or finalization failure is misreported as an indefinitely slow run.
 - Impact: Full-chain UAT can hang for its full global deadline after an already-final error, hiding the real failure reason and preventing safe checkpoint diagnosis.
 - Identifying metadata: observed 2026-08-24; case `CASE_P9_6A8BF9E2_7`; actor `merchant-local/MERCHANT`; run `target-intake-run:6a578b37f8fd376cafbc5f3de6e8418e`; terminal diagnostic `AGENT_OUTPUT_SCHEMA_INVALID`.
+
+## P1-20260824-DEV-LOCAL-RESTART-TARGET-TOPOLOGY-CONFLICT
+
+- Severity: P1
+- Status: ENVIRONMENT_REPAIRED / UAT_PENDING
+- Component: Local all-service restart orchestration
+- Confirmed fact: Running `scripts/dev-local.ps1` from the candidate checkout stopped the prior TARGET source topology's Docker application services, recreated shared dependencies from the candidate-local `.env`, and then terminated with exit code 1 at line 373 while creating `.local-dev/java-control-worker.out.log`; Windows reported that another TARGET Control Worker still used the file. A subsequent authoritative `.local-dev/launch-source.ps1` activation reached Java API startup but failed `target Intake payload readiness` because MinIO returned `InvalidAccessKeyId`.
+- Root cause and evidence: `scripts/dev-local.ps1` owns the ordinary 8080 local topology rather than the 8081 TARGET activation topology, so it neither reconciles TARGET ownership nor binds TARGET activation/JWKS/mTLS/build IDs. It also loaded the candidate-local `.env`; the recreated MinIO container's `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` exactly match that file and both differ from the root `.env` consumed by `.local-dev/launch-source.ps1`. The retained TARGET worker held the ordinary launcher's log path, while the split MinIO credential authority made the newly signed TARGET API fail closed before readiness.
+- Impact: The local service set is left partially stopped, the new TARGET activation cannot initialize its immutable Intake payload bucket, no fresh full-chain UAT can begin, and a second blind ordinary-local invocation risks duplicate Temporal pollers plus repeated credential drift.
+- Identifying metadata: observed 2026-08-24 at 19:19-19:31 CST; ordinary script `scripts/dev-local.ps1`; authoritative script `.local-dev/launch-source.ps1`; failing log `.local-dev/java-control-worker.out.log`; Java API PID `46848`; MinIO container `order-fulfillment-dispute-system-minio-1`; new activation `p9act.v1.4df66dd074abcf6b7decbeee91e93ff6`.
+
+## P1-20260824-AGENT-RUN-RECOVERY-EXISTING-GLOBAL-TERMINAL
+
+- Severity: P1
+- Status: CONFIRMED / QUEUED
+- Component: AgentRun V2 post-commit recovery scheduler
+- Confirmed fact: After the fresh TARGET activation became healthy, the API recovery side effect repeatedly selected historical Hearing run `target-hearing-run:24afa4da7d3732b4ad7d2bfa8f116016` with persisted status `RUNNING`, then failed with `recovery candidate already has a global terminal event`; the exception was logged by both `PostCommitSideEffectExecutor` and the scheduled task while the API remained available.
+- Root cause and evidence: The recovery candidate selection admits a run whose global terminal stream event already exists, while `JpaAgentRunLedger.requireRecoveryTerminalPosition` rejects that same state before `terminalizeV2RecoveryCandidate`. The selector and terminalization boundary therefore disagree on whether an existing global terminal event is recoverable.
+- Impact: Historical stale-run reconciliation emits repeated scheduled-task errors and cannot converge that candidate; fresh requests remain serviceable, but any new run entering the same split state could lose automatic recovery progress.
+- Identifying metadata: observed 2026-08-24 at 19:37 CST; API PID `75264`; activation `p9act.v1.c039c93da0c89267127b15c357ed4630`; run `target-hearing-run:24afa4da7d3732b4ad7d2bfa8f116016`; rejecting method `JpaAgentRunLedger.requireRecoveryTerminalPosition`.
