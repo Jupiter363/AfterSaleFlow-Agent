@@ -74,14 +74,15 @@ class JdbcIntakeParallelAssemblyStoreContractTest {
     }
 
     @Test
-    void terminalReaderJoinsTheCallerTransactionAndLocksCurrentV080Authority()
+    void terminalReaderJoinsTheCallerTransactionAndLocksExactThreeWithCurrentV080Authority()
             throws Exception {
         String source = normalizedSource();
 
         assertThat(source)
                 .contains("public readyauthority lockreadyforterminal")
                 .contains("@transactional(propagation = propagation.mandatory)")
-                .contains("for update of frame_set, authority")
+                .contains("for update of frame_set, slot, generation, authority")
+                .contains("requireexactthree(rows, \"intake_parallel_ready_authority_incomplete\")")
                 .contains("current_binding_generation")
                 .contains("current_authority_version")
                 .contains("intake_parallel_ready_authority_stale");

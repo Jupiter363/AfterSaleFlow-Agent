@@ -177,9 +177,9 @@ public final class JdbcIntakeParallelAssemblyStore implements IntakeParallelAsse
                    graph.command_envelope_sha256,
                    graph.canonical_proposal_source_bytes,
                    graph.target_proposal_sha256,
-                   graph.canonical_result_envelope_bytes,
-                   graph.result_envelope_sha256, graph.checkpoint_ns,
-                   graph.registry_binding_sha256, graph.tool_policy_version
+                    graph.canonical_result_envelope_bytes,
+                    graph.result_envelope_sha256, graph.checkpoint_ns,
+                    graph.registry_binding_sha256, graph.tool_policy_version
               from intake_parallel_frame_set frame_set
               join intake_parallel_proposal_artifact proposal
                 on proposal.artifact_id = frame_set.proposal_artifact_id
@@ -218,9 +218,13 @@ public final class JdbcIntakeParallelAssemblyStore implements IntakeParallelAsse
                    graph.command_envelope_sha256,
                    graph.canonical_proposal_source_bytes,
                    graph.target_proposal_sha256,
-                   graph.canonical_result_envelope_bytes,
-                   graph.result_envelope_sha256, graph.checkpoint_ns,
-                   graph.registry_binding_sha256, graph.tool_policy_version
+                    graph.canonical_result_envelope_bytes,
+                    graph.result_envelope_sha256, graph.checkpoint_ns,
+                    graph.registry_binding_sha256, graph.tool_policy_version,
+                    slot.frame_type, slot.current_generation,
+                    slot.current_frame_id, slot.slot_state, slot.current_result_id,
+                    generation.staging_state, generation.result_id as generation_result_id,
+                    result.result_id, result.frame_id as result_frame_id
               from intake_parallel_frame_set frame_set
               join intake_parallel_proposal_artifact proposal
                 on proposal.artifact_id = frame_set.proposal_artifact_id
@@ -232,6 +236,17 @@ public final class JdbcIntakeParallelAssemblyStore implements IntakeParallelAsse
                and graph.frame_set_id = frame_set.frame_set_id
                and graph.input_set_sha256 = frame_set.input_set_sha256
                and graph.graph_result_sha256 = frame_set.graph_result_sha256
+              join intake_parallel_frame_slot slot
+                on slot.frame_set_id = frame_set.frame_set_id
+              join intake_parallel_frame_generation generation
+                on generation.frame_set_id = slot.frame_set_id
+               and generation.frame_type = slot.frame_type
+               and generation.frame_generation = slot.current_generation
+              join intake_parallel_frame_result result
+                on result.result_id = slot.current_result_id
+               and result.frame_set_id = slot.frame_set_id
+               and result.frame_type = slot.frame_type
+               and result.frame_generation = slot.current_generation
               join case_intake_event_slot_authority authority
                 on authority.thread_registration_id = frame_set.thread_registration_id
                and authority.logical_sequence = frame_set.logical_sequence
@@ -240,8 +255,9 @@ public final class JdbcIntakeParallelAssemblyStore implements IntakeParallelAsse
                and frame_set.command_id = :commandId
                and frame_set.command_request_sha256 = :commandRequestSha256
                and frame_set.assembly_state in ('READY', 'COMMITTED')
-             for update of frame_set, authority
-            """;
+             order by %s
+             for update of frame_set, slot, generation, authority
+            """.formatted(FRAME_ORDER);
 
     private final NamedParameterJdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
@@ -358,13 +374,7 @@ public final class JdbcIntakeParallelAssemblyStore implements IntakeParallelAsse
         Objects.requireNonNull(lookup, "lookup");
         List<Map<String, Object>> rows = jdbc.queryForList(
                 LOCK_READY_FOR_TERMINAL, readyParameters(lookup));
-        if (rows.size() != 1) {
-            throw conflict(
-                    rows.isEmpty()
-                            ? "INTAKE_PARALLEL_READY_AUTHORITY_MISSING"
-                            : "INTAKE_PARALLEL_READY_AUTHORITY_AMBIGUOUS",
-                    "terminalization requires exactly one immutable READY authority");
-        }
+        requireExactThree(rows, "INTAKE_PARALLEL_READY_AUTHORITY_INCOMPLETE");
         Map<String, Object> row = rows.getFirst();
         if (!text(row, "event_binding_id").equals(text(row, "current_binding_id"))
                 || number(row, "binding_generation")
