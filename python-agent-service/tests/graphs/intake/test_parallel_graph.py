@@ -61,6 +61,9 @@ from app.graph_runtime.intake_parallel_runtime import (
 from app.graph_runtime.intake_parallel_context import (
     build_parallel_turn_model_material,
 )
+from app.graph_runtime.intake_parallel_bundle import (
+    build_parallel_intake_production_bundle,
+)
 from app.graph_runtime.lease import LeaseRecord
 from app.graph_runtime.ledger import AttemptRecord, AttemptStatus
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
@@ -72,6 +75,7 @@ from app.harness.model_runner import (
     HarnessStreamDelta,
     HarnessStreamReset,
 )
+from app.harness.prompt_composer import PromptRepository
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -385,6 +389,47 @@ def test_frozen_parallel_ingress_projects_one_shared_model_context_for_three_fra
         )
 
 
+def test_production_bundle_deterministically_binds_three_prompts_ids_and_budgets() -> None:
+    requests, _ = _requests_and_contexts()
+    execution = _parallel_execution(requests)
+    snapshot, event, execution = _parallel_ingress(execution)
+    prompts = PromptRepository()
+
+    bundle = build_parallel_intake_production_bundle(
+        execution,
+        snapshot_context=IntakeTurnContext("SNAPSHOT", snapshot),
+        event_context=IntakeTurnContext("EVENT", event),
+        prompts=prompts,
+    )
+    replay = build_parallel_intake_production_bundle(
+        execution,
+        snapshot_context=IntakeTurnContext("SNAPSHOT", snapshot),
+        event_context=IntakeTurnContext("EVENT", event),
+        prompts=prompts,
+    )
+
+    assert bundle == replay
+    assert tuple(request.frame_type for request in bundle.requests) == FRAME_TYPES
+    assert len({request.frame_id for request in bundle.requests}) == 3
+    assert {request.generation for request in bundle.requests} == {1}
+    assert {
+        request.context_envelope_sha256 for request in bundle.requests
+    } == {bundle.material.context_envelope.context_envelope_sha256}
+    assert sum(
+        context.retry_budget.provider_attempts_remaining
+        for context in bundle.agent_contexts.values()
+        if context.retry_budget is not None
+    ) == 6
+    assert {
+        frame_type: context.prompt_profile_id
+        for frame_type, context in bundle.agent_contexts.items()
+    } == dict(FRAME_PROMPT_PROFILE)
+    assert {
+        frame_type: context.output_schema_version
+        for frame_type, context in bundle.agent_contexts.items()
+    } == dict(FRAME_OUTPUT_SCHEMA)
+
+
 @pytest.mark.asyncio
 async def test_one_lane_reset_does_not_change_sibling_generation() -> None:
     orchestrator = ParallelIntakeFrameOrchestrator(
@@ -577,6 +622,7 @@ async def test_failed_lane_isolated_while_siblings_checkpoint_and_seal() -> None
     ]
     assert len(interruptions) == 1
     assert interruptions[0].frame_type == "DOSSIER_FRAME"
+    assert not interruptions[0].retryable
     assert "private provider failure" not in interruptions[0].model_dump_json()
     assert {
         event.frame_type for event in sink.events if isinstance(event, FrameSealed)

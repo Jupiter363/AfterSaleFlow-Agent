@@ -43,6 +43,7 @@ from app.harness.model_runner import (
     HarnessStreamDelta,
     HarnessStreamReset,
 )
+from app.model_runtime.governed_chat_model import ModelStreamInterrupted
 from app.streaming import VisibleFieldSpec
 
 
@@ -810,7 +811,7 @@ async def _invoke_frame_model(
                         generation=generation,
                         frame_id=frame_id,
                         error_code=_public_error_code(error),
-                        retryable=True,
+                        retryable=_is_retryable_frame_failure(error),
                     )
                 )
             except BaseException:
@@ -1245,7 +1246,29 @@ def _require_status(state: Mapping[str, Any], expected: str) -> None:
 def _public_error_code(error: BaseException) -> str:
     if isinstance(error, IntakeGraphContractError):
         return error.code
+    if (
+        type(error) is ModelStreamInterrupted
+        and error.retryable is True
+        and error.safe_code == "MODEL_PROVIDER_STREAM_INTERRUPTED"
+    ):
+        return "GRAPH_PROVIDER_STREAM_INTERRUPTED"
     return "INTAKE_PARALLEL_FRAME_EXECUTION_FAILED"
+
+
+def _is_retryable_frame_failure(error: BaseException) -> bool:
+    """Grant out-of-band lane retry only to the reviewed transient provider failure.
+
+    Schema repair is already represented inside one invocation as the explicit
+    interrupted -> generation-reset -> replacement-start sequence.  Every other
+    exception escaping the Frame graph is deterministic or unclassified and must
+    fail closed instead of authorizing Java to replay provider work.
+    """
+
+    return (
+        type(error) is ModelStreamInterrupted
+        and error.retryable is True
+        and error.safe_code == "MODEL_PROVIDER_STREAM_INTERRUPTED"
+    )
 
 
 __all__ = [

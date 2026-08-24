@@ -62,6 +62,12 @@ def test_parallel_intake_frame_prompts_share_authority_but_isolate_frame_rules(
     ) == (
         Path(f"app/agents/prompts/dispute_intake_officer/{node_name}.md"),
     )
+    common_authority, frame_prompt = repository.parallel_frame_instruction_sources(
+        node_name
+    )
+    assert shared_rule in common_authority
+    assert own_rule in frame_prompt
+    assert all(foreign_rule not in frame_prompt for foreign_rule in foreign_rules)
 
 
 def test_parallel_intake_frame_prompt_profile_cannot_authorize_another_frame() -> None:

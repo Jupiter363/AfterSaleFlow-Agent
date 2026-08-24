@@ -397,6 +397,31 @@ class PromptComposer:
             resolved.append(path.relative_to(self._app_root.parent))
         return tuple(resolved)
 
+    def parallel_frame_instruction_sources(self, node_name: str) -> tuple[str, str]:
+        """Return the exact shared-authority and lane prompt texts for one Frame.
+
+        The returned strings are used only to seal the instruction-pack hashes.
+        Model invocation still goes through ``render_system_prompt`` so common
+        safety fragments remain system-message authority rather than case data.
+        """
+
+        bundle_nodes = self.VERSIONED_PROMPT_BUNDLES.get(node_name)
+        shared = self.NODE_SHARED_TEMPLATE_FILES.get(node_name, ())
+        if bundle_nodes != frozenset({node_name}) or len(shared) != 1:
+            raise PromptResourceError(
+                f"parallel Frame prompt bundle is not exact: {node_name}"
+            )
+        shared_ref = shared[0]
+        common_authority = self._read_required(
+            self._agent_prompt_root / shared_ref.agent_key / shared_ref.filename
+        )
+        frame_prompt = self._read_required(self._base_template_path(node_name))
+        if not common_authority or not frame_prompt:
+            raise PromptResourceError(
+                f"parallel Frame prompt bundle is empty: {node_name}"
+            )
+        return common_authority, frame_prompt
+
     # 所属模块：Agent Harness > Prompt 仓库 > 节点/Profile 模板解析。
     # 具体功能：`_absolute_template_path` 先由 NODE_TEMPLATES 白名单定位基础模板；有 profile 时只接受约定命名的覆盖文件，并按显式参数决定缺失时回退还是报错。
     # 上下游：上游是 system_prompt 渲染和路径查询；下游是 `_profile_template_path` 与 `_read_required`。
