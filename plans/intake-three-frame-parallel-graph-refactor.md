@@ -4,7 +4,7 @@
 
 ```text
 plan_status: RISK_REVIEWED_FINAL_DESIGN
-implementation_status: R0_ACCEPTED_R1_CONTRACTS_IN_PROGRESS
+implementation_status: R1A_STREAM_ACCEPTED_R1B_CONTEXT_IN_PROGRESS
 runtime_change: NONE
 database_change: PLANNED_EXECUTION_FRAME_STAGING_AND_PROGRESS_ONLY
 uat_status: NOT_STARTED
@@ -277,7 +277,8 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
 - `current_user_message` 是本轮 current-source delta 的唯一来源。
 - `frozen_case_matrix` 为只读引用集合；任何 fact id 必须从其 exact key 或本轮合法 `NEW_` namespace 中选择。
 - 三个模型请求必须携带完全相同的 `model_context_view_sha256`；三个 Frame manifest 还必须由服务端绑定同一 `context_envelope_sha256`。任一路不一致时 fan-in fail closed。
-- System Prompt 只附加本 Frame 的职责和 Schema，不复制整套其他 Frame 说明。
+- 三路共享的是同一份不可变业务事实视图和 `model_context_view_sha256`，不是同一份完整指令上文。Prompt Composer 必须把公共事实与规则分层：公共层只提供来源/只读边界；Frame 专属层只提供本路职责、字段、Schema 和预算。
+- 任一 Frame 的 System/Human 指令不得携带其他 Frame 的评分细则、展示措辞、字段清单或输出示例；这种跨路规则污染属于契约错误，而不是模型自由裁量。
 - actor business role 与诉讼容量分离；USER/MERCHANT 不自动等价于 initiator/respondent。
 
 ## 7. 三个小 Frame 的严格 Schema
@@ -452,10 +453,14 @@ authority_binding_sha256
 Parent coordinator graph
 ------------------------
 START -> authorize_and_load -> import_snapshot_once_or_apply_event
-      -> route_turn -> freeze_parallel_context
-      -> reserve_three_provider_permits_as_one_group
-      -> java_batch_admit_parallel_frame_set
-      -> dispatch_three_frame_children
+      -> route_turn (authoritative source_type discriminator)
+           | INITIAL_FORM      -> fresh_form_opening_node
+           | RESPONDENT_OPENING-> respondent_opening_node
+           | FORMAL_EVENT      -> deterministic_transition_node
+           | ROOM_MESSAGE      -> freeze_parallel_context
+      -> [ROOM_MESSAGE only] reserve_three_provider_permits_as_one_group
+      -> [ROOM_MESSAGE only] java_batch_admit_parallel_frame_set
+      -> [ROOM_MESSAGE only] dispatch_three_frame_children
       -> wait_and_consume_frame_completion
             | retryable one-frame failure -> dispatch_that_frame(generation + 1)
             | fatal/exhausted/deadline    -> send_frame_failure_to_java -> fail
@@ -492,6 +497,8 @@ frame sealed -> persist immutable Frame result + CAS current Frame slot
                        -> existing Target outer finalizer
                        -> one formal domain transaction + terminal receipt
 ```
+
+`fresh_form_opening_node` 与 `respondent_opening_node` 各自使用既有开场语义对应的专属 Prompt/Schema，只负责首次进入房间的说明和首组提问；它们不进入 Dossier/Quality 三路，也不得写本轮并行评分增量。`ROOM_MESSAGE` 才是“接收参与方回答后整理回复”的三路并行路径。`FORMAL_EVENT` 只执行服务端确定性阶段转换。路由值只能来自可信 `IntakeTurnEvent.source_type`，不得让模型自行判断当前属于开场还是整理回复。
 
 这里不是 LangGraph 普通并行 superstep 的 barrier 模式。三个 Frame 必须作为可独立调度、独立完成、独立持久化的 child graph 运行；任一路完成后无需等待另外两路即可写自己的 terminal checkpoint。父协调图只消费完成通知和 checkpoint 引用，不承载三个 Provider 调用的共同 barrier。
 
@@ -677,15 +684,13 @@ Quality 不依赖 Dossier 输出，因此三路可以真正并行。它看到的
 
 ### 10.1 公共 Authority Header
 
-三个 Prompt 共享一段短、位置固定的 Authority Header：
+三个 Prompt 只共享一段短、位置固定、且不含任何 Frame 业务规则的 Authority Header：
 
 ```text
-1. previous_persisted_state 是只读历史权威，决定本轮可见动作。
-2. current_user_message 是本轮 current-source delta 的唯一来源。
-3. frozen_case_matrix 只读；只能复制已授权 key 或使用给定 NEW namespace。
-4. 本轮评分和增量只形成 next state，不得改变 current action。
-5. 只输出本 Frame Schema 中的字段，不转述或补全其他 Frame。
-6. 所有面向人的文本使用简体中文；机器枚举严格使用 Schema 值。
+1. common_model_context 是本次 command 唯一、不可变的业务事实视图。
+2. current_user_message 是本轮 current-source delta 的唯一来源；frozen_case_matrix 只读。
+3. 只执行当前 Prompt profile 和当前 Frame Schema；不得推断、转述或补全其他 Frame。
+4. 所有面向人的文本使用简体中文；机器枚举严格使用 Schema 值。
 ```
 
 ### 10.2 Frame 专属 Prompt
@@ -696,17 +701,23 @@ Quality 不依赖 Dossier 输出，因此三路可以真正并行。它看到的
 - `intake_turn_dossier_frame.md`
 - `intake_turn_quality_frame.md`
 
-USER/MERCHANT overlay 只说明当前业务角色和可写 source partition，不再重复阶段、评分或整份输出规则。initiator/respondent 容量从 authority header 注入，禁止 overlay 自行推断。
+三份专属上文的字段所有权必须物理隔离：
+
+- Dialogue 只接收 `current_action_binding`、授权问题槽、近期对话和当前消息；不得出现六项评分、blocking-gap 判定或卷宗卡片输出规则。
+- Dossier 只接收 source capacity、previous dossier、frozen matrix、current message 与合法 fact-key namespace；不得出现对话措辞、当前 action 或评分/handoff 输出规则。
+- Quality 只接收标准化 dossier/claim facts、previous persisted phase、六项评分和合法 blocker 规则；不得出现 room utterance 写作规则或要求重复生成卷宗 prose。
+
+USER/MERCHANT overlay 只说明当前业务角色和可写 source partition，不再重复阶段、评分或整份输出规则。initiator/respondent 容量由服务端信封投影，禁止 overlay 自行推断。Prompt Composer 必须为三路分别构造消息数组，不允许先拼成单体上文再用末尾附注覆盖。
 
 ### 10.3 上下文完整性与独立优化边界
 
-本次重构只拆输出，不缩减任何 authority 输入。上下文裁剪不属于并行 Frame 交付范围；只有完整方案通过后，才能作为独立项目基于真实 token/延迟数据逐项证明并删除不相关上下文，例如：
+本次重构不删除任何 authority 事实，但从第一版开始就隔离规则上文。业务事实先冻结为一个 common view，再按固定字段白名单投影三个只读 Frame lens；三者都绑定同一 `model_context_view_sha256`，lens hash 另行进入 Frame manifest。任何事实字段缩减仍需基于真实 token/延迟数据和 parity 测试，例如：
 
 - Dialogue 可不携带完整历史展示卡，只保留上轮阶段、授权问题、近期对话和当前消息。
 - Quality 可使用标准化 dossier snapshot 而不是全部公开 prose。
 - Dossier 保留 frozen matrix、previous dossier 和 current message。
 
-任何缩减必须先做 context parity 测试，不能靠主观判断删除 authority 字段。
+任何事实缩减必须先做 context parity 测试，不能靠主观判断删除 authority 字段；规则隔离则是本次重构的强制交付，不得延后。
 
 ## 11. Java 后端校验和正式写入
 
@@ -1080,12 +1091,12 @@ error
 
 工作：
 
-- 定义 `IntakeParallelContextEnvelopeV1`、`IntakeModelContextViewV1`、三个 Provider proposal/accepted canonical Frame Schema、typed prefix validator/reconciliation、Frame ingress/receipt，以及 Java 到当前 `IntakeTurnProposal` 的确定性映射。
+- 定义 `IntakeParallelContextEnvelopeV1`、`IntakeModelContextViewV1`、三个白名单 Frame lens/独立 instruction pack、三个 Provider proposal/accepted canonical Frame Schema、typed prefix validator/reconciliation、Frame ingress/receipt，以及 Java 到当前 `IntakeTurnProposal` 的确定性映射。
 - 定义 server-only Envelope、Provider-visible Model View、authorized question/action binding。
 - 定义 Java execution-scoped Frame result/current-slot/assembly staging；通过新 migration 增加，且不修改 V080。
 - 定义 execution profile pin、exact-three batch admission/group provider lease、multiplex session handshake、connection-scoped transport sequence、durable cursor/per-Frame index、`agent-stream.v4` version matrix和 private/public 字段白名单。
 - 冻结 projection registry、三类 item count/bytes、每 Frame queue/snapshot/ledger write budget、排他 `next_local_index`，以及 `frame_preview_observed/frame_staging_observed` 与 legacy output/final flags 的状态转换。
-- 编写 deterministic context hash / batch admission / byte-equal item/index fixture / Java assembly input-set / total score / V3 strict compatibility focused tests。
+- 编写 deterministic common-context/lens/instruction-pack hash、跨 Frame 规则字段拒绝、batch admission、byte-equal item/index fixture、Java assembly input-set、total score 和 V3 strict compatibility focused tests。
 
 出口：Java/Python/frontend 对同一 V4 contract fixture、canonical item bytes、exclusive index、public/private whitelist 和 V3 reject fixture 达成 byte-equal；不启动 Provider 即可完成纯契约验证。
 
@@ -1107,7 +1118,7 @@ error
 工作：
 
 - 加入 context freeze、command-level exact-three permit reservation、Java durable batch/retry admission、三个独立 child、完整数组 item projector、三类 request-bound prefix validator/reconciliation、局部 retry、独立 checkpoint、bounded fair merge queue 和一条 attempt-scoped multiplex Java ingress。
-- 新建三个小 Prompt，复用同一上下文；三类 `public_projection_items` 都是物理首字段，strict Schema 分别调用 Qwen 3.7，固定 thinking off。
+- 新建三个小 Prompt，复用同一 immutable common context 但使用独立白名单 lens 和 instruction pack；三类 `public_projection_items` 都是物理首字段，strict Schema 分别调用 Qwen 3.7，固定 thinking off。
 - 删除新路径上单体十段重复输出要求、跨 Frame Reducer、Proposal materializer 和第二次 final submit；保留 legacy profile 文件供旧 epoch 回放，但同 epoch 不混用。
 
 出口：fake/fragmented Provider focused Graph 测试覆盖 admission ack 前零调用、三路并发、完整 item 早于 Provider completion、公平性/backpressure cancellation、乱序完成、单 Frame retry、sealed Frame 幂等重交、hash drift、缺 Frame和父图等待 Java terminal receipt；固定上下文的三类输出都通过 Schema/authority/reconciliation，字段所有权无越界。
