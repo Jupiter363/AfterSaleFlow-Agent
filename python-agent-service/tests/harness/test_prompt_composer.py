@@ -130,13 +130,11 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     assert "不得索要截图、照片、视频" in system_prompt
     assert "只进行一次模型调用" in system_prompt
     assert "不输出增量补丁" in system_prompt
-    assert "纯业务文本叶子" in system_prompt
-    assert "每个数组元素必须是一条完整、可独立阅读的简体中文" in system_prompt
-    assert "数组元素内部不得写入或续写输出协议结构" in system_prompt
-    assert "禁止直接输出或加上“核验”后照抄" in system_prompt
-    assert "必须先理解其业务含义，再改写成完整的中文自然语言" in system_prompt
-    assert "没有实际业务内容时直接输出空数组" in system_prompt
-    assert "total_score >= 85" in system_prompt
+    assert "只返回符合响应 Schema 的 JSON" in system_prompt
+    assert "不写裸材料名、疑问句或证据索要" in system_prompt
+    assert "所有用户可见文本只用简体中文" in system_prompt
+    assert "不输出独立总分" in system_prompt
+    assert "六项 score_breakdown 分数合计大于等于 85" in system_prompt
     assert system_prompt.index("room_utterance") < system_prompt.index(
         "ordered_sections"
     )

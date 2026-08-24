@@ -125,9 +125,9 @@ Provider SSE bytes
 | `risk_and_conflicts` | 15 | 核心冲突、争议事实和风险点是否明确中立 |
 | `next_action_clarity` | 15 | 缺口、问题或交接动作是否明确且不索要证据 |
 
-六项用于解释评分依据；`total_score` 是模型按六项标准综合给出的唯一最终完善度，后端不再用机械求和二次改写或否决它。阈值固定为 85：
+模型只输出六项 `score_breakdown`，不输出独立总分；服务端以六项之和生成唯一最终完善度。阈值固定为 85：
 
-- `total_score >= 85` 且无阻塞缺口：`ready_for_next_step=true`；
+- 六项分数之和 `>= 85` 且无阻塞缺口：`ready_for_next_step=true`；
 - 否则保持 `ASK_SUBSTANTIVE / NOT_READY`；
 - 后端不重新评分，也不把缺口或完整度改写成固定话术；
 - 服务端状态机仍要求“首次达标轮必须来自认证参与方消息”，并负责正式备注分区和交接来源。

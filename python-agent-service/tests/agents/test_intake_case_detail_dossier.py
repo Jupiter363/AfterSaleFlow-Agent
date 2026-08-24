@@ -2313,7 +2313,6 @@ def test_intake_case_detail_preserves_model_human_missing_fields_without_rewriti
                     "risk_and_conflicts": 0,
                     "next_action_clarity": 0,
                 },
-                "total_score": 70,
                 "threshold": 85,
                 "ready_for_next_step": False,
                 "improvement_reason": (

@@ -291,7 +291,6 @@ class IntakeRoomScoreBreakdown(StrictIntakeRoomModel):
 
 class IntakeRoomTurnEvaluationValue(StrictIntakeRoomModel):
     score_breakdown: IntakeRoomScoreBreakdown
-    total_score: int = Field(ge=0, le=100)
     threshold: Literal[85]
     ready_for_next_step: bool
     improvement_reason: str = Field(max_length=20_000)
@@ -300,6 +299,16 @@ class IntakeRoomTurnEvaluationValue(StrictIntakeRoomModel):
     confidence: float = Field(ge=0, le=1)
     conversation_action: IntakeConversationAction
     knowledge_answer_mode: KnowledgeAnswerMode
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_total_score(cls, value: Any) -> Any:
+        """Accept old replays without preserving a second score authority."""
+
+        if isinstance(value, Mapping) and "total_score" in value:
+            value = dict(value)
+            value.pop("total_score", None)
+        return value
 
 
 class IntakeRoomCaseMatrixSection(StrictIntakeRoomModel):
@@ -430,15 +439,14 @@ class IntakeRoomIncompleteTurnEvaluationValue(IntakeRoomTurnEvaluationValue):
 class IntakeRoomBelowThresholdEvaluationValue(
     IntakeRoomIncompleteTurnEvaluationValue
 ):
-    total_score: int = Field(ge=0, le=84)
+    pass
 
 
 class IntakeRoomBlockedEvaluationValue(IntakeRoomIncompleteTurnEvaluationValue):
-    total_score: int = Field(ge=85, le=100)
+    pass
 
 
 class IntakeRoomReadyTurnEvaluationValue(IntakeRoomTurnEvaluationValue):
-    total_score: int = Field(ge=85, le=100)
     ready_for_next_step: Literal[True]
     admission_recommendation: Literal["ACCEPTED"]
 
@@ -564,8 +572,11 @@ def _validate_ordered_room_outcome(
     missing = sections[7].value
     handoff = sections[8].value
     evaluation = sections[9].value
+    score_total = sum(
+        evaluation.score_breakdown.model_dump(mode="python").values()
+    )
     derived_ready = (
-        evaluation.total_score >= evaluation.threshold
+        score_total >= evaluation.threshold
         and not missing.blocking_gaps
     )
     if evaluation.ready_for_next_step != derived_ready:
@@ -1116,6 +1127,9 @@ def _materialize_ordered_intake_room_output(
     missing_information = sections[7].value.model_dump(mode="json")
     handoff_summary = sections[8].value.model_dump(mode="json")
     evaluation = sections[9].value
+    score_total = sum(
+        evaluation.score_breakdown.model_dump(mode="python").values()
+    )
 
     dispute_core_state = dispute.dispute_core_state.model_dump(mode="json")
     dispute_core_state["next_verification_focus"] = list(verification_focus.items)
@@ -1150,7 +1164,7 @@ def _materialize_ordered_intake_room_output(
         "risk_assessment": risk_assessment,
         "missing_information": missing_information,
         "intake_quality": {
-            "score": evaluation.total_score,
+            "score": score_total,
             "threshold": evaluation.threshold,
             "ready_for_next_step": evaluation.ready_for_next_step,
             "score_breakdown": evaluation.score_breakdown.model_dump(mode="json"),

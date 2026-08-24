@@ -111,10 +111,7 @@ def intake_initiator_v3_payload(
                 "sequence": 3,
                 "kind": "PARTY_POSITIONS",
                 "value": {
-                    "user_claim": "用户称物流显示签收但本人未收到商品，并希望退款。",
-                    "merchant_claim": "商家要求等待物流核查，暂未提供签收底单。",
                     "initiator_position": "用户要求退款。",
-                    "respondent_position": "商家尚未在接待室直接回应。",
                     "platform_observation": "目前需要核对物流签收状态与收货陈述。",
                 },
             },
@@ -129,13 +126,6 @@ def intake_initiator_v3_payload(
                         "requested_items": None,
                         "request_reason": "用户称物流显示签收但未收到商品。",
                         "normalized_statement": "用户请求对未收到的商品退款。",
-                    },
-                    "respondent_attitude": {
-                        "respondent_role": "MERCHANT",
-                        "source_attribution": "NO_DIRECT_POSITION",
-                        "attitude": "NOT_RESPONDED",
-                        "position": "商家尚未在接待室表达态度。",
-                        "alternative_proposal": None,
                     },
                 },
             },
@@ -195,7 +185,6 @@ def intake_initiator_v3_payload(
                 "kind": "TURN_EVALUATION",
                 "value": {
                     "score_breakdown": _score_breakdown(total_score),
-                    "total_score": total_score,
                     "threshold": 85,
                     "ready_for_next_step": ready,
                     "improvement_reason": resolved_improvement,

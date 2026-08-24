@@ -641,9 +641,8 @@ class CaseDetailDossierSkill:
                 if isinstance(field, str)
             ]
             score_breakdown = _quality_mapping(quality.get("score_breakdown"))
-            # The six bounded components are the only score authority.  Provider
-            # ``total_score`` remains an input-shape field, but it is deliberately
-            # discarded here so a model arithmetic slip cannot become durable state.
+            # The six bounded components are the only provider and durable score
+            # authority; the provider contract intentionally has no separate total.
             score = sum(score_breakdown.values())
             quality["score"] = score
         else:

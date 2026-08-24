@@ -171,7 +171,6 @@ def _initiator_v3_payload() -> dict[str, object]:
                         "risk_and_conflicts": 7,
                         "next_action_clarity": 7,
                     },
-                    "total_score": 50,
                     "threshold": 85,
                     "ready_for_next_step": False,
                     "improvement_reason": "仍需补充异常发现时间。",
@@ -333,7 +332,7 @@ def test_initiator_provider_schema_keeps_reported_and_direct_opponent_positions_
     assert "direct opponent positions are collected only in the respondent turn" in sections_description
 
 
-def test_intake_room_v3_provider_schema_binds_readiness_before_streaming() -> None:
+def test_intake_room_v3_runtime_binds_readiness_from_component_sum() -> None:
     payload = _initiator_v3_payload()
     missing = payload["ordered_sections"][7]["value"]
     missing.update(
@@ -360,7 +359,6 @@ def test_intake_room_v3_provider_schema_binds_readiness_before_streaming() -> No
                 "risk_and_conflicts": 12,
                 "next_action_clarity": 12,
             },
-            "total_score": 94,
             "threshold": 85,
             "ready_for_next_step": False,
             "improvement_reason": "仍有两项补充信息可进一步明确履约事实。",
@@ -374,7 +372,7 @@ def test_intake_room_v3_provider_schema_binds_readiness_before_streaming() -> No
     Draft202012Validator.check_schema(schema)
     provider_validator = Draft202012Validator(schema)
 
-    assert list(provider_validator.iter_errors(payload))
+    assert provider_validator.is_valid(payload)
     with pytest.raises(ValidationError):
         IntakeInitiatorRoomLlmOutputV3.model_validate(payload)
 
@@ -412,20 +410,30 @@ def test_intake_room_v3_provider_schema_binds_readiness_before_streaming() -> No
     )
 
 
-def test_intake_room_v3_total_score_is_the_single_model_score_authority() -> None:
+def test_intake_room_v3_exposes_only_component_score_authority() -> None:
     payload = _initiator_v3_payload()
     evaluation = payload["ordered_sections"][9]["value"]
     evaluation["score_breakdown"]["references"] = 11
 
     schema = IntakeInitiatorRoomLlmOutputV3.model_json_schema()
     assert Draft202012Validator(schema).is_valid(payload)
+    assert '"total_score"' not in json.dumps(schema, sort_keys=True)
+    assert '"total_score"' not in json.dumps(
+        IntakeRespondentRoomLlmOutputV3.model_json_schema(),
+        sort_keys=True,
+    )
 
     first = IntakeInitiatorRoomLlmOutputV3.model_validate(payload)
     replay = IntakeInitiatorRoomLlmOutputV3.model_validate(copy.deepcopy(payload))
 
     assert first.model_dump(mode="python") == replay.model_dump(mode="python")
-    assert first.ordered_sections[9].value.total_score == 50
     assert first.ordered_sections[9].value.score_breakdown.references == 11
+    assert "total_score" not in first.ordered_sections[9].value.model_dump()
+
+    legacy = copy.deepcopy(payload)
+    legacy["ordered_sections"][9]["value"]["total_score"] = 1
+    accepted_legacy = IntakeInitiatorRoomLlmOutputV3.model_validate(legacy)
+    assert "total_score" not in accepted_legacy.ordered_sections[9].value.model_dump()
 
 
 def test_intake_context_retention_is_separate_from_physical_prompt_order() -> None:
@@ -593,7 +601,7 @@ def test_respondent_context_uses_frozen_initiator_position_not_reported_opponent
     assert "respondent_reported_by_initiator" not in claims
 
 
-def test_v3_projection_preserves_model_evaluation_without_legacy_recalculation() -> None:
+def test_v3_projection_derives_total_from_the_six_components() -> None:
     case_id = "CASE_ORDERED_ROOM_SCORE"
     request = IntakeTurnRequest.model_validate(
         {
@@ -611,9 +619,8 @@ def test_v3_projection_preserves_model_evaluation_without_legacy_recalculation()
         }
     )
     payload = _initiator_v3_payload()
-    # The typed total is the model's sole score authority; component values are
-    # retained as explanatory detail and are not recomputed or cross-summed by
-    # the legacy dossier reducer.
+    # The provider owns only the six components.  The public and durable total
+    # is their deterministic sum.
     payload["ordered_sections"][9]["value"]["score_breakdown"]["references"] = 11
     output = IntakeInitiatorRoomLlmOutputV3.model_validate(payload)
     materialized = materialize_intake_case_detail_output(request, output)
@@ -625,7 +632,7 @@ def test_v3_projection_preserves_model_evaluation_without_legacy_recalculation()
     )
 
     quality = projected["scroll_snapshot"]["intake_quality"]
-    assert quality["score"] == 50
+    assert quality["score"] == 51
     assert quality["score_breakdown"] == output.ordered_sections[-1].value.score_breakdown.model_dump()
     assert quality["improvement_reason"] == "仍需补充异常发现时间。"
     assert projected["missing_fields"] == ["异常发现时间"]

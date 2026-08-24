@@ -847,7 +847,6 @@ def test_visible_turn_evaluation_uses_the_six_component_total() -> None:
                     "risk_and_conflicts": 10,
                     "next_action_clarity": 10,
                 },
-                "total_score": 9,
                 "threshold": 85,
                 "ready_for_next_step": False,
             },
