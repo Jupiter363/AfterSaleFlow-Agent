@@ -39,6 +39,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalization
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationEvidenceProvider;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider;
 import com.example.dispute.workflow.targete2e.finalization.JdbcTargetE2eFinalizationReceiptLedger;
+import com.example.dispute.workflow.targete2e.finalization.JdbcIntakeParallelProposalStore;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptLedger;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eCommandCompletionWriter;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeRoomFinalizationStrategy;
@@ -48,6 +49,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeFinali
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeFinalizationStateReader;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeProposalReader;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeProposalStore;
+import com.example.dispute.workflow.targete2e.finalization.RoutingTargetE2eIntakeProposalStore;
 import com.example.dispute.workflow.targete2e.finalization.TemporalTargetE2eFinalizationRuntimeContextProvider;
 import com.example.dispute.workflow.targete2e.graph.Es256TargetE2EGraphEnvelopeSigner;
 import com.example.dispute.workflow.targete2e.graph.JdbcTargetE2EAgentSessionResolver;
@@ -341,8 +343,8 @@ public class TargetE2eArtifactConfiguration {
 
     @Bean
     TargetE2eIntakeProposalStore targetE2eIntakeProposalStore(
-            MinioClient minioClient, Environment environment) {
-        return new MinioTargetE2eIntakeProposalStore(
+            MinioClient minioClient, DataSource dataSource, Environment environment) {
+        var minio = new MinioTargetE2eIntakeProposalStore(
                 minioClient,
                 environment.getProperty(
                         "app.target-e2e.finalization.intake-proposal-bucket",
@@ -350,6 +352,9 @@ public class TargetE2eArtifactConfiguration {
                 environment.getProperty(
                         "app.target-e2e.finalization.intake-proposal-prefix",
                         "graph-proposals"));
+        var parallel = new JdbcIntakeParallelProposalStore(
+                new NamedParameterJdbcTemplate(dataSource));
+        return new RoutingTargetE2eIntakeProposalStore(minio, parallel);
     }
 
     @Bean
