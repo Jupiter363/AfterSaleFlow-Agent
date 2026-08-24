@@ -32,6 +32,7 @@ from app.graphs.intake.parallel_graph import (
     FrameInterrupted,
     FrameProjectionItem,
     FrameSealed,
+    FrameStarted,
     ParallelFrameExecutionRequest,
     ParallelIntakeFrameOrchestrator,
     build_parallel_frame_graph,
@@ -401,6 +402,26 @@ async def test_one_lane_reset_does_not_change_sibling_generation() -> None:
     assert len(resets) == 1
     assert resets[0].frame_type == "DIALOGUE_FRAME"
     assert resets[0].new_generation == 2
+    interruption_index = next(
+        index
+        for index, event in enumerate(sink.events)
+        if isinstance(event, FrameInterrupted)
+        and event.frame_type == "DIALOGUE_FRAME"
+    )
+    reset_index = sink.events.index(resets[0])
+    replacement_start_index = next(
+        index
+        for index, event in enumerate(sink.events)
+        if isinstance(event, FrameStarted)
+        and event.frame_type == "DIALOGUE_FRAME"
+        and event.generation == 2
+    )
+    interruption = sink.events[interruption_index]
+    assert isinstance(interruption, FrameInterrupted)
+    assert interruption.generation == 1
+    assert interruption.error_code == "OUTPUT_SCHEMA_INVALID"
+    assert interruption.retryable
+    assert interruption_index < reset_index < replacement_start_index
     dialogue_items = [
         event
         for event in sink.events

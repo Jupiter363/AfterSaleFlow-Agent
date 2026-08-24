@@ -679,6 +679,22 @@ async def _invoke_frame_model(
                     )
                 old_generation = generation
                 old_frame_id = frame_id
+                # Java owns replacement-generation admission.  Its slot CAS accepts a
+                # retry only after the current generation has durably entered FAILED or
+                # AMBIGUOUS, so make the superseded provider generation explicit before
+                # announcing the reset and replacement Frame identity.
+                await runtime.event_sink.emit(
+                    FrameInterrupted(
+                        frame_set_id=request.frame_set_id,
+                        run_id=request.run_id,
+                        attempt_id=request.attempt_id,
+                        frame_type=frame_type,
+                        generation=old_generation,
+                        frame_id=old_frame_id,
+                        error_code=update.reason_code,
+                        retryable=True,
+                    )
+                )
                 generation += 1
                 frame_id = _replacement_frame_id(
                     request,
