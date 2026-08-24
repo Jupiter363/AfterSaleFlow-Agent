@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.agentrun;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -12,6 +13,11 @@ import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ExecutionMode;
 import com.example.dispute.workflow.activity.agent.ProfileSelectingAgentRunExecutionGateway;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 class ProfileSelectingAgentRunExecutionGatewayTest {
@@ -56,5 +62,48 @@ class ProfileSelectingAgentRunExecutionGatewayTest {
         assertThat(actual).isSameAs(expected);
         verify(legacy).execute(any(), any(), any(), any());
         verify(parallel, never()).execute(any(), any(), any(), any());
+    }
+
+    @Test
+    void rejectsReservedParallelMarkersWhenTheRemainingAuthorityIsMissing() {
+        AgentRunExecutionGateway legacy = mock(AgentRunExecutionGateway.class);
+        AgentRunExecutionGateway parallel = mock(AgentRunExecutionGateway.class);
+        ExecuteAgentRunRequest mixed = mixedParallelMarkerRequest();
+
+        assertThatThrownBy(() -> new ProfileSelectingAgentRunExecutionGateway(legacy, parallel)
+                        .execute(
+                                mixed,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("mixed parallel Intake authority");
+
+        verify(legacy, never()).execute(any(), any(), any(), any());
+        verify(parallel, never()).execute(any(), any(), any(), any());
+    }
+
+    private static ExecuteAgentRunRequest mixedParallelMarkerRequest() {
+        ExecuteAgentRunRequest source = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        var mapper = JsonMapper.builder().findAndAddModules().build();
+        ObjectNode commandJson = mapper.valueToTree(source.command());
+        commandJson.remove("event_ref");
+        commandJson.remove("request_hash");
+        commandJson.put("request_hash", ContractJson.sha256Hex(commandJson));
+        try {
+            RoomGraphCommand command = mapper.treeToValue(commandJson, RoomGraphCommand.class);
+            return new ExecuteAgentRunRequest(
+                    ExecuteAgentRunRequest.SCHEMA_VERSION,
+                    source.agentRunId(),
+                    source.attemptNo(),
+                    "agent-stream.v3",
+                    source.logicalInputHash(),
+                    source.previousAttemptId(),
+                    source.resetRequired(),
+                    source.publicSequenceOffset(),
+                    command);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+            throw new IllegalStateException("test command encoding failed", failure);
+        }
     }
 }

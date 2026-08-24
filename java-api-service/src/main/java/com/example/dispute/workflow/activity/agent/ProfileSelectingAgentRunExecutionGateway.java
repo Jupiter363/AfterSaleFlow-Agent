@@ -36,6 +36,16 @@ public final class ProfileSelectingAgentRunExecutionGateway implements AgentRunE
         Objects.requireNonNull(progressListener, "progressListener");
         Objects.requireNonNull(cancellationToken, "cancellationToken");
         boolean parallel = ExecuteAgentRunRequest.isParallelIntakeCommand(request.command());
+        var invocation = request.command().invocationContext();
+        boolean reservedParallelMarker = invocation != null
+                && (ExecuteAgentRunRequest.PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(
+                                invocation.agentProfileId())
+                        || ExecuteAgentRunRequest.PARALLEL_INTAKE_OUTPUT_SCHEMA.equals(
+                                invocation.outputSchemaVersion()));
+        if (!parallel && reservedParallelMarker) {
+            throw new IllegalArgumentException(
+                    "incomplete or mixed parallel Intake authority cannot use the legacy lane");
+        }
         String expectedProtocol = parallel ? "agent-stream.v4" : "agent-stream.v3";
         if (!expectedProtocol.equals(request.streamProtocol())) {
             throw new IllegalArgumentException(

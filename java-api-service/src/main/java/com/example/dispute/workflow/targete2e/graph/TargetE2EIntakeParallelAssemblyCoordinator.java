@@ -23,6 +23,7 @@ import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -152,6 +153,68 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
                 artifact));
         return new AssemblyResult(
                 receipt.inserted(), receipt.artifact(), output.graphResult());
+    }
+
+    /** Rebuilds the exact result envelope from immutable READY bytes without contacting Python. */
+    public GraphReconcileResponse reconcileReady(
+            ExecuteAgentRunRequest request,
+            AgentRunCancellationToken cancellationToken) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(cancellationToken, "cancellationToken")
+                .throwIfCancellationRequested();
+        RoomGraphCommand command = requireParallelRequest(request);
+        long roomFencingToken = Objects.requireNonNull(
+                        identityResolver.resolve(request),
+                        "durable AgentRun identity resolver returned no identity")
+                .requireExact(request);
+        GraphRegistryBindingPolicy.ExpectedBinding registryBinding =
+                GraphRegistryBindingPolicy.requireExpected(
+                        registryBindingPolicy, GraphStreamVisibilityPolicy.Binding.from(command));
+        ReadyArtifact artifact = assemblyStore
+                .loadReady(new ReadyLookup(
+                        request.agentRunId(),
+                        request.attemptId(),
+                        command.commandId(),
+                        command.requestHash()))
+                .orElseThrow(() -> new AssemblyConflictException(
+                        "INTAKE_PARALLEL_READY_MISSING",
+                        "parallel Intake READY artifact was not found"));
+        AssemblyResult replay = replayResult(
+                request, roomFencingToken, registryBinding, artifact);
+        return reconciliation(request, replay);
+    }
+
+    /** Converts a fully revalidated READY artifact into the standard result contract. */
+    private GraphReconcileResponse reconciliation(
+            ExecuteAgentRunRequest request, AssemblyResult assembly) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(assembly, "assembly");
+        RoomGraphCommand command = requireParallelRequest(request);
+        ReadyArtifact artifact = assembly.artifact();
+        RoomGraphResult result = assembly.graphResult();
+        if (!artifact.graphResultSha256().equals(result.outputHash())) {
+            throw new AssemblyConflictException(
+                    "INTAKE_PARALLEL_READY_RESULT_CONFLICT",
+                    "READY artifact hash differs from its graph result");
+        }
+        return new GraphReconcileResponse(
+                "graph-reconcile-response.v1",
+                GraphReconcileResponse.Disposition.RETURN_CACHED,
+                command.threadId(),
+                command.commandId(),
+                command.requestHash(),
+                request.logicalRunId(),
+                request.attemptId(),
+                command.graphKey(),
+                command.graphVersion(),
+                command.checkpointSchemaVersion(),
+                artifact.checkpointNs(),
+                result.checkpointId(),
+                artifact.resultRef(),
+                artifact.graphResultSha256(),
+                artifact.registryBindingSha256(),
+                artifact.toolPolicyVersion(),
+                result);
     }
 
     private AssemblyResult replayResult(

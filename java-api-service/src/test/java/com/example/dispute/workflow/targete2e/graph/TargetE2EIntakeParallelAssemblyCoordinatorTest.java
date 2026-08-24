@@ -79,6 +79,8 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 request, FRAME_SET_ID, new AgentRunCancellationToken());
         var replay = coordinator.assembleReady(
                 request, FRAME_SET_ID, new AgentRunCancellationToken());
+        var reconciliation = coordinator.reconcileReady(
+                request, new AgentRunCancellationToken());
 
         assertThat(first.newlyPublished()).isTrue();
         assertThat(replay.newlyPublished()).isFalse();
@@ -89,6 +91,14 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
         assertThat(replay.artifact().canonicalResultEnvelopeBytes())
                 .isEqualTo(first.artifact().canonicalResultEnvelopeBytes());
         assertThat(replay.graphResult()).isEqualTo(first.graphResult());
+        assertThat(reconciliation.result()).isEqualTo(first.graphResult());
+        assertThat(reconciliation.resultRef()).isEqualTo(first.artifact().resultRef());
+        assertThat(reconciliation.resultHash())
+                .isEqualTo(first.artifact().graphResultSha256());
+        assertThat(reconciliation.disposition())
+                .isEqualTo(
+                        com.example.dispute.workflow.contract.v1.GraphReconcileResponse
+                                .Disposition.RETURN_CACHED);
         assertThat(first.artifact().proposalArtifactId())
                 .startsWith("intake.proposal.");
         assertThat(first.artifact().resultArtifactId())
