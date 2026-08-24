@@ -23,6 +23,8 @@ import com.example.dispute.workflow.infrastructure.security.MountedPemGraphEnvel
 import com.example.dispute.workflow.application.intake.IntakeAgentRunDomainResultCommitter;
 import com.example.dispute.workflow.application.intake.IntakeGraphResultFinalizer;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposalLoader;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore;
+import com.example.dispute.workflow.infrastructure.persistence.intake.parallel.JdbcTargetE2eIntakeParallelAssemblyFinalizationPort;
 import com.example.dispute.workflow.targete2e.artifact.finalization.JdbcTargetE2eFinalizationAuthority;
 import com.example.dispute.workflow.targete2e.artifact.finalization.JdbcTargetE2eIntakeCommandCompletionWriter;
 import com.example.dispute.workflow.targete2e.artifact.finalization.ReconciledTargetE2eFinalizationEvidenceProvider;
@@ -47,6 +49,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eRoomFinaliza
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eRoomFinalizationStrategyRegistry;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeFinalizationRequestResolver;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeFinalizationStateReader;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeParallelAssemblyFinalizationPort;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeProposalReader;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeProposalStore;
 import com.example.dispute.workflow.targete2e.finalization.RoutingTargetE2eIntakeProposalStore;
@@ -427,10 +430,20 @@ public class TargetE2eArtifactConfiguration {
     }
 
     @Bean
+    TargetE2eIntakeParallelAssemblyFinalizationPort
+            targetE2eIntakeParallelAssemblyFinalizationPort(
+                    IntakeParallelAssemblyStore assemblyStore, DataSource dataSource) {
+        return new JdbcTargetE2eIntakeParallelAssemblyFinalizationPort(
+                assemblyStore, new NamedParameterJdbcTemplate(dataSource));
+    }
+
+    @Bean
     TargetE2eRoomFinalizationStrategy targetE2eIntakeRoomFinalizationStrategy(
             TargetE2eAuthorizedIntakeFinalizationSource source,
-            TargetE2eAgentRunV2FinalizationFactsProvider factsProvider) {
-        return new TargetE2eIntakeRoomFinalizationStrategy(source, factsProvider);
+            TargetE2eAgentRunV2FinalizationFactsProvider factsProvider,
+            TargetE2eIntakeParallelAssemblyFinalizationPort parallelFinalization) {
+        return new TargetE2eIntakeRoomFinalizationStrategy(
+                source, factsProvider, parallelFinalization);
     }
 
     @Bean

@@ -11,12 +11,16 @@ public final class TargetE2eIntakeRoomFinalizationStrategy
 
     private final TargetE2eAuthorizedIntakeFinalizationSource source;
     private final TargetE2eAgentRunV2FinalizationFactsProvider factsProvider;
+    private final TargetE2eIntakeParallelAssemblyFinalizationPort parallelFinalization;
 
     public TargetE2eIntakeRoomFinalizationStrategy(
             TargetE2eAuthorizedIntakeFinalizationSource source,
-            TargetE2eAgentRunV2FinalizationFactsProvider factsProvider) {
+            TargetE2eAgentRunV2FinalizationFactsProvider factsProvider,
+            TargetE2eIntakeParallelAssemblyFinalizationPort parallelFinalization) {
         this.source = Objects.requireNonNull(source, "source");
         this.factsProvider = Objects.requireNonNull(factsProvider, "factsProvider");
+        this.parallelFinalization = Objects.requireNonNull(
+                parallelFinalization, "parallelFinalization");
     }
 
     @Override
@@ -69,5 +73,38 @@ public final class TargetE2eIntakeRoomFinalizationStrategy
                         evidence.isolatedDomainDbBindingHash(),
                         state.attempt().completedAt()),
                 facts);
+    }
+
+    @Override
+    public TechnicalAuthority lockTechnicalAuthority(
+            ExecuteAgentRunRequest request,
+            ExecuteAgentRunResult result,
+            PreparedFinalization prepared) {
+        if (!ExecuteAgentRunRequest.isParallelIntakeCommand(request.command())) {
+            return NoTechnicalAuthority.INSTANCE;
+        }
+        return parallelFinalization.lockAndRevalidate(
+                request, result, prepared.receiptBindings());
+    }
+
+    @Override
+    public void commitTechnicalAuthority(
+            ExecuteAgentRunRequest request,
+            ExecuteAgentRunResult result,
+            PreparedFinalization prepared,
+            TechnicalAuthority authority,
+            TargetE2eFinalizationReceiptLedger.StoredReceipt storedReceipt) {
+        if (!ExecuteAgentRunRequest.isParallelIntakeCommand(request.command())) {
+            TargetE2eRoomFinalizationStrategy.super.commitTechnicalAuthority(
+                    request, result, prepared, authority, storedReceipt);
+            return;
+        }
+        if (!(authority
+                instanceof TargetE2eIntakeParallelAssemblyFinalizationPort.LockedAssembly locked)) {
+            throw new TargetE2eFinalizationRejectedException(
+                    "INTAKE_PARALLEL_FORMAL_AUTHORITY_MISSING",
+                    "parallel Intake finalization lost its locked assembly authority");
+        }
+        parallelFinalization.markCommitted(locked, storedReceipt);
     }
 }

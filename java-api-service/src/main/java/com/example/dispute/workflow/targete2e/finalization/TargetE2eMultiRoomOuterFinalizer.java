@@ -80,28 +80,31 @@ public final class TargetE2eMultiRoomOuterFinalizer {
                 manifestCommit.manifest(), manifestCommit.manifestHash());
         AgentRunFinalizationReceipt domainReceipt = formalCommitter.commit(
                 new FormalResultCommit(request, result, manifestCommit));
+        var technicalAuthority =
+                strategy.lockTechnicalAuthority(request, result, prepared);
         TargetE2eFinalizationReceipt targetReceipt = receipt(
                 prepared.receiptBindings(), request, result,
                 manifestCommit.manifest().manifestId(), manifestCommit.manifestHash(), domainReceipt);
         AppendCommand append = new AppendCommand(prepared.activationManifestHash(), targetReceipt);
+        StoredReceipt stored;
         if (domainReceipt.commitStatus() == CommitStatus.COMMITTED) {
-            StoredReceipt stored = receiptLedger.append(append);
-            completionWriter.complete(request, stored.receipt());
-            return new FinalizationOutcome(stored, domainReceipt);
-        }
-        if (domainReceipt.commitStatus() == CommitStatus.ALREADY_COMMITTED) {
-            StoredReceipt original = receiptLedger
+            stored = receiptLedger.append(append);
+        } else if (domainReceipt.commitStatus() == CommitStatus.ALREADY_COMMITTED) {
+            stored = receiptLedger
                     .find(targetReceipt.activationId(), targetReceipt.logicalRunId())
                     .orElseThrow(() -> rejected(
                             "TARGET_E2E_ORIGINAL_RECEIPT_MISSING",
                             "committed AgentRun has no atomically persisted target receipt"));
-            TargetE2eFinalizationReceiptLedger.requireExact(original, append);
-            completionWriter.complete(request, original.receipt());
-            return new FinalizationOutcome(original, domainReceipt);
+            TargetE2eFinalizationReceiptLedger.requireExact(stored, append);
+        } else {
+            throw rejected(
+                    "TARGET_E2E_DOMAIN_COMMIT_STATUS_INVALID",
+                    "Java formal commit did not return a terminal commit status");
         }
-        throw rejected(
-                "TARGET_E2E_DOMAIN_COMMIT_STATUS_INVALID",
-                "Java formal commit did not return a terminal commit status");
+        strategy.commitTechnicalAuthority(
+                request, result, prepared, technicalAuthority, stored);
+        completionWriter.complete(request, stored.receipt());
+        return new FinalizationOutcome(stored, domainReceipt);
     }
 
     private static void validatePrepared(

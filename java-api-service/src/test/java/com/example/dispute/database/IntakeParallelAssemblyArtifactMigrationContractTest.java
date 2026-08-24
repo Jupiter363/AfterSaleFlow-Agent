@@ -16,6 +16,13 @@ class IntakeParallelAssemblyArtifactMigrationContractTest {
             "db",
             "migration",
             "V082__intake_parallel_assembly_artifacts.sql");
+    private static final Path TERMINAL_RECEIPT_MIGRATION = Path.of(
+            "src",
+            "main",
+            "resources",
+            "db",
+            "migration",
+            "V084__intake_parallel_terminal_receipt_authority.sql");
 
     @Test
     void freezesCanonicalProposalBytesAtTheExistingSixtyFourKibBoundary() throws Exception {
@@ -69,6 +76,20 @@ class IntakeParallelAssemblyArtifactMigrationContractTest {
                 .doesNotContain("update agent_run set finalization_status")
                 .doesNotContain("update case_command")
                 .doesNotContain("insert into target_e2e_agent_run_finalization_receipt");
+    }
+
+    @Test
+    void committedAssemblyReferencesTheImmutableTargetReceipt() throws Exception {
+        String sql = Files.readString(TERMINAL_RECEIPT_MIGRATION)
+                .replace("\r\n", "\n")
+                .replaceAll("\\s+", " ")
+                .trim()
+                .toLowerCase(Locale.ROOT);
+
+        assertThat(sql)
+                .contains("foreign key (terminal_receipt_id)")
+                .contains("references target_e2e_finalization_receipt(receipt_id)")
+                .contains("deferrable initially deferred");
     }
 
     private static String normalizedSql() throws Exception {

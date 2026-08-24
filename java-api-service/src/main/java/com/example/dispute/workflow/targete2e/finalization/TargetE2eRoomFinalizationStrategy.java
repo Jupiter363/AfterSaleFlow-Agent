@@ -27,6 +27,32 @@ public interface TargetE2eRoomFinalizationStrategy {
      */
     PreparedFinalization prepare(ExecuteAgentRunRequest request, ExecuteAgentRunResult result);
 
+    /** Locks any room-specific technical authority after the domain writer has joined the tx. */
+    default TechnicalAuthority lockTechnicalAuthority(
+            ExecuteAgentRunRequest request,
+            ExecuteAgentRunResult result,
+            PreparedFinalization prepared) {
+        return NoTechnicalAuthority.INSTANCE;
+    }
+
+    /** Binds technical authority to the real target receipt before command completion. */
+    default void commitTechnicalAuthority(
+            ExecuteAgentRunRequest request,
+            ExecuteAgentRunResult result,
+            PreparedFinalization prepared,
+            TechnicalAuthority authority,
+            TargetE2eFinalizationReceiptLedger.StoredReceipt storedReceipt) {
+        if (authority != NoTechnicalAuthority.INSTANCE) {
+            throw new IllegalArgumentException("room strategy received foreign technical authority");
+        }
+    }
+
+    interface TechnicalAuthority {}
+
+    enum NoTechnicalAuthority implements TechnicalAuthority {
+        INSTANCE
+    }
+
     record PreparedFinalization(
             String activationManifestHash,
             ReceiptBindings receiptBindings,
