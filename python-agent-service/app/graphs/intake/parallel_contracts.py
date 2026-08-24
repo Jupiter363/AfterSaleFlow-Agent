@@ -315,10 +315,10 @@ class IntakeFrozenMatrixViewV1(StrictParallelModel):
 
 
 class IntakeDialogueMessageViewV1(StrictParallelModel):
-    sequence: int = Field(ge=1)
+    sequence: int = Field(ge=0)
     speaker_role: PartyRole
     speaker_capacity: LitigationCapacity
-    text: Annotated[str, StringConstraints(min_length=1, max_length=4000)]
+    text: Annotated[str, StringConstraints(min_length=1, max_length=8192)]
     source_sha256: Sha256
 
     @model_validator(mode="after")
@@ -332,7 +332,7 @@ class IntakeCurrentMessageViewV1(StrictParallelModel):
     source_sequence: int = Field(ge=1)
     source_role: PartyRole
     source_capacity: LitigationCapacity
-    text: Annotated[str, StringConstraints(min_length=1, max_length=8000)]
+    text: Annotated[str, StringConstraints(min_length=1, max_length=8192)]
     text_sha256: Sha256
 
     @model_validator(mode="after")

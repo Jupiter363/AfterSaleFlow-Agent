@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,9 +56,13 @@ from app.graph_runtime.intake_parallel_runtime import (
     PARALLEL_INTAKE_OUTPUT_SCHEMA,
     build_parallel_checkpoint_configs,
 )
+from app.graph_runtime.intake_parallel_context import (
+    build_parallel_turn_model_material,
+)
 from app.graph_runtime.lease import LeaseRecord
 from app.graph_runtime.ledger import AttemptRecord, AttemptStatus
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
+from app.graphs.intake.state import IntakeTurnContext
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.model_runner import (
     HarnessGeneration,
@@ -317,6 +322,56 @@ def test_checkpoint_config_issuer_binds_exact_execution_and_three_private_namesp
     )
     with pytest.raises(GraphContractError, match="cross turn authority"):
         build_parallel_checkpoint_configs(execution, tuple(drifted))
+
+
+def test_frozen_parallel_ingress_projects_one_shared_model_context_for_three_frames() -> None:
+    requests, _ = _requests_and_contexts()
+    execution = _parallel_execution(requests)
+    snapshot, event, execution = _parallel_ingress(execution)
+
+    material = build_parallel_turn_model_material(
+        execution,
+        room_id="ROOM_PARALLEL_1",
+        snapshot_context=IntakeTurnContext("SNAPSHOT", snapshot),
+        event_context=IntakeTurnContext("EVENT", event),
+        instruction_packs=_instruction_packs(),
+    )
+    replay = build_parallel_turn_model_material(
+        execution,
+        room_id="ROOM_PARALLEL_1",
+        snapshot_context=IntakeTurnContext("SNAPSHOT", snapshot),
+        event_context=IntakeTurnContext("EVENT", event),
+        instruction_packs=_instruction_packs(),
+    )
+
+    assert material == replay
+    assert len(material.frame_inputs) == 3
+    assert {
+        item.common_model_context.model_context_view_sha256
+        for item in material.frame_inputs
+    } == {material.model_context.model_context_view_sha256}
+    assert material.model_context.source_capacity.litigation_capacity == "INITIATOR"
+    assert material.model_context.current_action_binding.action == "ASK_SUBSTANTIVE"
+    assert material.model_context.current_user_message.text == "商品于昨日签收。"
+    assert len(material.model_context.authorized_question_slots) == 1
+    assert material.model_context.authorized_question_slots[0].canonical_text == (
+        "请说明签收时间。"
+    )
+    assert [message.sequence for message in material.model_context.recent_dialogue_messages] == [0]
+    matrix = material.model_context.frozen_case_matrix.payload
+    assert "case_id" not in matrix
+    assert "message_id" not in json.dumps(matrix, ensure_ascii=False)
+
+    drifted = dict(snapshot)
+    drifted["snapshot_hash"] = "f" * 64
+    with pytest.raises(GraphContractError, match="differs from command authority"):
+        build_parallel_turn_model_material(
+            execution,
+            room_id="ROOM_PARALLEL_1",
+            snapshot_context=IntakeTurnContext("SNAPSHOT", drifted),
+            event_context=IntakeTurnContext("EVENT", event),
+            instruction_packs=_instruction_packs(),
+        )
 
 
 @pytest.mark.asyncio
@@ -657,6 +712,161 @@ def _parallel_execution(
         lease=lease,
         fence=fence,
         thread_record=record,
+    )
+
+
+def _parallel_ingress(
+    execution: GatewayExecution,
+) -> tuple[dict[str, Any], dict[str, Any], GatewayExecution]:
+    command = execution.admission.command
+    identity = execution.admission.thread
+    actor_hash = identity.actor_scope_hash
+    party_entry = {
+        "intake_quality": {
+            "score": 0,
+            "threshold": 85,
+            "ready_for_next_step": False,
+            "score_breakdown": {
+                "references": 0,
+                "event_story": 0,
+                "party_positions": 0,
+                "requested_resolution": 0,
+                "risk_and_conflicts": 0,
+                "next_action_clarity": 0,
+            },
+            "improvement_reason": "等待补充。",
+        },
+        "missing_information": {
+            "blocking_gaps": [],
+            "nice_to_have_gaps": [],
+            "next_questions": ["请说明签收时间。"],
+        },
+        "handoff_notes": {
+            "remark_status": "NOT_READY",
+            "phase_source_message_id": "",
+            "latest_remark": "",
+            "remarks": [],
+            "instruction": "请继续补充。",
+        },
+        "admission": {
+            "recommendation": "NEED_MORE_INFO",
+            "reasoning": "",
+            "confidence": 0,
+        },
+    }
+    matrix = {
+        "schema_version": "case_fact_matrix.v2",
+        "case_id": command.case_id,
+        "matrix_id": "MATRIX_PARALLEL_1",
+        "matrix_version": 3,
+        "matrix_kind": "BILATERAL_FROZEN",
+        "party_map": {"initiator_role": "USER", "respondent_role": "MERCHANT"},
+        "case_overview": {"neutral_summary": "商品参数存在争议。"},
+        "claims": {},
+        "fact_rows": [
+            {
+                "fact_id": "FACT_01",
+                "fact_target": "商品是否达到宣传参数。",
+                "message_id": "MESSAGE_PRIVATE_1",
+            }
+        ],
+        "fact_relationships": [],
+        "fact_indexes": {"core_fact_ids": ["FACT_01"]},
+    }
+    snapshot = {
+        "schema_version": "intake-domain-snapshot.v2",
+        "snapshot_id": "SNAPSHOT_PARALLEL_1",
+        "tenant_surrogate": command.tenant_surrogate,
+        "case_id": command.case_id,
+        "room_type": "INTAKE",
+        "room_epoch": command.room_epoch,
+        "thread_id": command.thread_id,
+        "actor_scope_hash": actor_hash,
+        "agent_session_id": identity.agent_session_id,
+        "domain_revision": 8,
+        "room_revision": 8,
+        "projection_revision": 8,
+        "visibility": "PRIVATE",
+        "source_refs": ["MESSAGE_OLD_1", "MESSAGE_AI_1"],
+        "initial_case_facts": {},
+        "shareable_projection": {
+            "initiator_role": "USER",
+            "respondent_role": "MERCHANT",
+        },
+        "own_messages": [
+            {
+                "message_id": "MESSAGE_OLD_1",
+                "role": "HUMAN",
+                "audience": "USER",
+                "sequence": 0,
+                "text": "商品参数不符。",
+                "source_hash": "1" * 64,
+            },
+            {
+                "message_id": "MESSAGE_AI_1",
+                "role": "AI",
+                "audience": "USER",
+                "sequence": 1,
+                "text": "请说明签收时间。",
+                "source_hash": "2" * 64,
+            },
+        ],
+        "current_dossier": {
+            "schema_version": "intake-dossier.v2",
+            "case_story": {
+                "summary": "商品参数存在争议。",
+                "message_id": "MESSAGE_PRIVATE_1",
+            },
+            "case_fact_matrix": matrix,
+            "party_intake_state": {
+                "schema_version": "party-intake-state.v1",
+                "USER": party_entry,
+                "MERCHANT": party_entry,
+            },
+        },
+        "created_at": "2026-08-25T10:00:00Z",
+        "snapshot_hash": "a" * 64,
+    }
+    event = {
+        "schema_version": "intake-turn-event.v2",
+        "event_id": "EVENT_PARALLEL_1",
+        "message_id": "MESSAGE_PARALLEL_1",
+        "tenant_surrogate": command.tenant_surrogate,
+        "case_id": command.case_id,
+        "room_type": "INTAKE",
+        "room_epoch": command.room_epoch,
+        "thread_id": command.thread_id,
+        "actor_scope_hash": actor_hash,
+        "agent_session_id": identity.agent_session_id,
+        "sequence_no": 9,
+        "domain_revision": 9,
+        "audience": "USER",
+        "source_type": "ROOM_MESSAGE",
+        "text": "商品于昨日签收。",
+        "source_refs": ["MESSAGE_PARALLEL_1"],
+        "occurred_at": "2026-08-25T10:00:01Z",
+        "event_hash": "b" * 64,
+    }
+    snapshot_ref = command.domain_snapshot_ref.model_copy(
+        update={
+            "schema_version": "intake-domain-snapshot.v2",
+            "sha256": snapshot["snapshot_hash"],
+        }
+    )
+    event_ref = command.event_ref.model_copy(
+        update={
+            "schema_version": "intake-turn-event.v2",
+            "sha256": event["event_hash"],
+        }
+    )
+    updated_command = command.model_copy(
+        update={"domain_snapshot_ref": snapshot_ref, "event_ref": event_ref}
+    )
+    updated_admission = SimpleNamespace(command=updated_command, thread=identity)
+    return (
+        snapshot,
+        event,
+        replace(execution, admission=updated_admission),  # type: ignore[arg-type]
     )
 
 

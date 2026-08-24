@@ -41,7 +41,7 @@ def build_parallel_checkpoint_configs(
     namespace while retaining the command lease and Java room fence.
     """
 
-    _require_parallel_execution(execution)
+    require_parallel_intake_execution(execution)
     if not requests:
         raise GraphContractError("parallel Intake checkpoint requests are empty")
     by_type: dict[ParallelFrameType, ParallelFrameExecutionRequest] = {}
@@ -131,7 +131,7 @@ def build_parallel_checkpoint_configs(
     return configs
 
 
-def _require_parallel_execution(execution: GatewayExecution) -> None:
+def require_parallel_intake_execution(execution: GatewayExecution) -> None:
     if not isinstance(execution, GatewayExecution):
         raise GraphContractError("parallel Intake runtime requires GatewayExecution")
     command = execution.admission.command
@@ -142,6 +142,9 @@ def _require_parallel_execution(execution: GatewayExecution) -> None:
     actor_scope = command.actor_scope
     if (
         fence.execution_lane is not GraphGatewayMode.TARGET_E2E_CANDIDATE
+        or isinstance(fence.room_fencing_token, bool)
+        or not isinstance(fence.room_fencing_token, int)
+        or fence.room_fencing_token < 1
         or command.room_type != "INTAKE"
         or command.event_ref is None
         or invocation.agent_profile_id != PARALLEL_INTAKE_AGENT_PROFILE_ID
@@ -217,4 +220,5 @@ __all__ = [
     "PARALLEL_INTAKE_AGENT_PROFILE_ID",
     "PARALLEL_INTAKE_OUTPUT_SCHEMA",
     "build_parallel_checkpoint_configs",
+    "require_parallel_intake_execution",
 ]
