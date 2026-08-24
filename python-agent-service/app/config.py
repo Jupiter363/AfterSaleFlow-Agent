@@ -336,7 +336,7 @@ class Settings(BaseSettings):
     例如 litellm_base_url 可由 LITELLM_BASE_URL 覆盖。
     """
 
-    QWEN_MODEL: ClassVar[str] = "qwen3.7-max-2026-06-08"
+    QWEN_MODEL: ClassVar[str] = "qwen3.8-max"
 
     model_config = SettingsConfigDict(
         # .env 是本地开发配置文件；生产环境通常由容器环境变量注入。
