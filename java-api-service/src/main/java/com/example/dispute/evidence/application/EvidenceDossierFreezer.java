@@ -7,6 +7,7 @@
 package com.example.dispute.evidence.application;
 
 import com.example.dispute.domain.model.ParseStatus;
+import com.example.dispute.evidence.domain.FactEvidenceRelationCanonicalizer;
 import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
 import com.example.dispute.evidence.domain.EvidenceVerificationStatus;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceDossierItemEntity;
@@ -652,11 +653,12 @@ public class EvidenceDossierFreezer {
         List<FactLinkSnapshot> links = new ArrayList<>();
         for (JsonNode rawLink : rawLinks) {
             String factId = rawLink.path("fact_id").asText("").trim();
-            String relation = rawLink.path("relation").asText("").trim();
+            String relation =
+                    FactEvidenceRelationCanonicalizer.canonicalize(
+                            rawLink.path("relation").asText(""));
             String sourceUnitId = rawLink.path("source_unit_id").asText("").trim();
             String observationSlot = rawLink.path("observation_slot").asText("").trim();
             if (factId.isBlank()
-                    || relation.isBlank()
                     || sourceUnitId.isBlank()
                     || observationSlot.isBlank()) {
                 throw new IllegalStateException(

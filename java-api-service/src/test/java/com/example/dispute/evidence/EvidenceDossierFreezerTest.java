@@ -301,7 +301,7 @@ class EvidenceDossierFreezerTest {
                   ],
                   "fact_links":[{
                     "fact_id":"FACT_DELIVERY",
-                    "relation":"CONTENT_SUPPORTS",
+                    "relation":"SUPPORTS_CLAIM",
                     "reason":"模型直接绑定到物流签收事实。",
                     "source_unit_id":"SOURCE_UNIT_01",
                     "observation_slot":"OBS_01"

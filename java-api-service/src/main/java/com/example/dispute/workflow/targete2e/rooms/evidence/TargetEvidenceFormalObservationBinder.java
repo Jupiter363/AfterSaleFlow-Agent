@@ -1,11 +1,11 @@
 package com.example.dispute.workflow.targete2e.rooms.evidence;
 
+import com.example.dispute.evidence.domain.FactEvidenceRelationCanonicalizer;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 
 /**
@@ -40,13 +40,6 @@ final class TargetEvidenceFormalObservationBinder {
   }
 
   static String canonicalRelation(String relation) {
-    String normalized = relation == null ? "" : relation.strip().toUpperCase(Locale.ROOT);
-    return switch (normalized) {
-      case "CONTENT_SUPPORTS", "SUPPORTS" -> "CONTENT_SUPPORTS";
-      case "CONTENT_CONTRADICTS", "CONTRADICTS", "OPPOSES" -> "CONTENT_CONTRADICTS";
-      case "CONTEXT_ONLY", "CONTEXTUALIZES" -> "CONTEXT_ONLY";
-      case "INCONCLUSIVE" -> "INCONCLUSIVE";
-      default -> "INCONCLUSIVE";
-    };
+    return FactEvidenceRelationCanonicalizer.canonicalize(relation);
   }
 }

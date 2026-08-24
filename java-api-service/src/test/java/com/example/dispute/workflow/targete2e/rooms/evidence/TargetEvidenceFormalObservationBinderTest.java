@@ -19,7 +19,8 @@ class TargetEvidenceFormalObservationBinderTest {
           "fact_bindings":[
             {"fact_id":"FACT_1","relation":"SUPPORTS","reason":"direct"},
             {"fact_id":"FACT_2","relation":"CONTEXTUALIZES","reason":"context"},
-            {"fact_id":"FACT_3","relation":"OPPOSES","reason":"conflict"}
+            {"fact_id":"FACT_3","relation":"OPPOSES","reason":"conflict"},
+            {"fact_id":"FACT_4","relation":"SUPPORTS_CLAIM","reason":"claim"}
           ]
         }
         """);
@@ -32,6 +33,8 @@ class TargetEvidenceFormalObservationBinderTest {
         .isEqualTo("CONTEXT_ONLY");
     assertThat(bound.getFirst().path("fact_bindings").get(2).path("relation").asText())
         .isEqualTo("CONTENT_CONTRADICTS");
+    assertThat(bound.getFirst().path("fact_bindings").get(3).path("relation").asText())
+        .isEqualTo("CONTENT_SUPPORTS");
     assertThat(observation.path("fact_bindings").get(0).path("relation").asText())
         .isEqualTo("SUPPORTS");
   }

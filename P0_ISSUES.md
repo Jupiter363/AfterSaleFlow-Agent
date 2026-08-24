@@ -1148,3 +1148,14 @@
 - Impact: The first party's visible Hearing answer is not durably recorded, the second party cannot submit at all, and the full-chain UAT cannot advance to evidence review or adjudication.
 - Verification evidence: The Hearing operation-key participant now comes from the authenticated command actor after exact bilateral-membership validation, the formal start loader reconstructs the real initiator/respondent ordering, and timeout roles resolve from the persisted case participant. The merchant-initiated positive/negative participant-binding regression plus the adjacent Hearing formalization and bootstrap suites passed: 24 tests, zero failures.
 - Identifying metadata: observed 2026-08-24; case `CASE_P9_6A8AC2C9_12`; actor commands `MERCHANT` then `USER`; expected process revision `18`; command sequence `14`; flow stage `PARTY_ANSWERS_OPEN`.
+
+## P1-20260824-HEARING-E1-EVIDENCE-REQUESTS-CONTRACT-REJECTED
+
+- Severity: P1
+- Status: FIXED_FOCUSED_VERIFIED / UAT_PENDING
+- Component: Hearing E1 targeted evidence-request generation
+- Confirmed fact: Fresh browser-UAT case `CASE_P9_6A8AC2C9_16` committed both parties' four M2 answers and committed `HEARING_INTAKE_SYNTHESIS`, then the immediately following `HEARING_EVIDENCE_REQUESTS` run terminated `FAILED / UNCOMMITTED` with diagnostic `GRAPH_CONTRACT_REJECTED`; the courtroom remained at `定向补证` and created no E1 answer form.
+- Root cause and evidence: The frozen Evidence dossier copied model-authored fact-link relation `SUPPORTS_CLAIM` into `fact_evidence_matrix.v3.links[0].relation`. `HearingEvidenceRequestsRequest` accepts only `CONTENT_SUPPORTS`, `CONTENT_CONTRADICTS`, `CONTEXT_ONLY`, or `INCONCLUSIVE`, so the governed invocation decoder rejected the immutable E1 input before any provider call. Replaying the exact 32,056-byte MinIO invocation through the production Pydantic request type produces one validation error at `evidence_dossier.fact_evidence_matrix.links.0.relation`; the failed attempt records zero provider/model/token fields and 390 ms latency. The earlier formal Evidence projection binder canonicalized only the database edge, while `EvidenceDossierFreezer.factLinks` independently copied the unbound relation from `agent_findings_json`, leaving the downstream dossier vocabulary inconsistent.
+- Impact: The full-chain UAT cannot advance from the committed M2 matrix to evidence verification, dossier freezing, adjudication, review, or Outcome.
+- Verification evidence: The formal Evidence projection and frozen dossier now share one canonical relation binder; the observed `SUPPORTS_CLAIM` value freezes as `CONTENT_SUPPORTS`. Focused freezer and formal-observation regression tests passed: 5 tests, zero failures.
+- Identifying metadata: observed 2026-08-24; case `CASE_P9_6A8AC2C9_16`; stage `定向补证`; operation `HEARING_EVIDENCE_REQUESTS`; diagnostic `GRAPH_CONTRACT_REJECTED`.
