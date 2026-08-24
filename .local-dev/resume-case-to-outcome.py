@@ -455,7 +455,7 @@ def hearing_stage(user_evidence_id: str, merchant_evidence_id: str) -> dict[str,
 def wait_for_review_task() -> dict[str, Any]:
     reviewer = context("reviewer-local", "PLATFORM_REVIEWER")
     while True:
-        for review_status in ("PENDING", "IN_REVIEW"):
+        for review_status in ("PENDING", "IN_REVIEW", "APPROVED"):
             items = request_data(
                 reviewer,
                 f"review_list_{review_status.lower()}",
@@ -469,6 +469,31 @@ def wait_for_review_task() -> dict[str, Any]:
         reviewer.deadline.pause("review_list", 0.5)
 
 
+def wait_for_outcome() -> dict[str, Any]:
+    while True:
+        status, envelope = base.uat.request_json(
+            USER,
+            "outcome",
+            "GET",
+            f"/api/disputes/{base.uat.quote_path(CASE_ID)}/outcome",
+        )
+        if status == 200:
+            outcome = base.uat.required_object(
+                base.uat.envelope_data(envelope, "outcome"), "outcome", "outcome"
+            )
+            actions = v(outcome, "actions")
+            if (
+                v(outcome, "case_status", "caseStatus") == "CLOSED"
+                and isinstance(actions, list)
+                and len(actions) == 1
+                and v(actions[0], "execution_status", "executionStatus") == "SUCCEEDED"
+            ):
+                return outcome
+        else:
+            base.require(status in (404, 409), "outcome", "status")
+        USER.deadline.pause("outcome", 0.25)
+
+
 def review_and_execute() -> dict[str, Any]:
     reviewer = context("reviewer-local", "PLATFORM_REVIEWER")
     task = wait_for_review_task()
@@ -479,31 +504,25 @@ def review_and_execute() -> dict[str, Any]:
     task_status = base.uat.required_text(v(task, "status"), "review_task", "status")
     if task_status == "PENDING":
         request_data(reviewer, "review_start", "POST", f"/api/reviews/{task_id}/start")
-    elif task_status != "IN_REVIEW":
+        task_status = "IN_REVIEW"
+    if task_status == "IN_REVIEW":
+        request_data(
+            reviewer,
+            "review_decision",
+            "POST",
+            f"/api/reviews/{task_id}/decision",
+            payload={
+                "decision": "APPROVE",
+                "reason": "后端全链路 UAT 已核对冻结卷宗、证据及裁决链。",
+            },
+            idempotency_key=f"resume-{CASE_ID}-review-approve",
+        )
+    elif task_status != "APPROVED":
         raise RuntimeError(f"review task is not actionable: status={task_status}")
-    request_data(
-        reviewer,
-        "review_decision",
-        "POST",
-        f"/api/reviews/{task_id}/decision",
-        payload={
-            "decision": "APPROVE",
-            "reason": "后端全链路 UAT 已核对冻结卷宗、证据及裁决链。",
-        },
-        idempotency_key=f"resume-{CASE_ID}-review-approve",
-    )
-    admin = context("admin-local", "ADMIN")
-    executed = request_data(
-        admin,
-        "execution",
-        "POST",
-        f"/api/disputes/{CASE_ID}/execution/execute",
-        idempotency_key=f"resume-{CASE_ID}-execute",
-    )
-    outcome = request_data(USER, "outcome", "GET", f"/api/disputes/{CASE_ID}/outcome")
+    outcome = wait_for_outcome()
     return {
         "task_id": task_id,
-        "execution": executed,
+        "execution": v(outcome, "actions"),
         "outcome": outcome,
     }
 
