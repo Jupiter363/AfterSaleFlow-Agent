@@ -54,6 +54,24 @@ public final class TargetE2EGraphStreamVisibility {
   private static final Map<String, Set<String>> EVIDENCE_VISIBLE_FIELDS =
       Map.of("evidence_turn", Set.of("room_utterance"));
 
+  private static final Set<String> HEARING_PUBLIC_MESSAGE = Set.of("public_message");
+
+  /**
+   * Public text emitted by the non-frame Hearing operations.
+   *
+   * <p>Hearing intake questions and synthesis use the v3 public-frame protocol and therefore do
+   * not appear here. The remaining model nodes project only their validated terminal
+   * {@code public_message} as legacy-compatible deltas; no reasoning or structured proposal field
+   * is public.
+   */
+  private static final Map<String, Set<String>> HEARING_VISIBLE_FIELDS =
+      Map.of(
+          "hearing_evidence_requests", HEARING_PUBLIC_MESSAGE,
+          "hearing_evidence_synthesis", HEARING_PUBLIC_MESSAGE,
+          "hearing_judge_v1", HEARING_PUBLIC_MESSAGE,
+          "hearing_jury_review", HEARING_PUBLIC_MESSAGE,
+          "hearing_judge_v2", HEARING_PUBLIC_MESSAGE);
+
   private static final Map<String, Set<String>> NO_VISIBLE_FIELDS = Map.of();
 
   private TargetE2EGraphStreamVisibility() {}
@@ -91,7 +109,8 @@ public final class TargetE2EGraphStreamVisibility {
     return switch (Objects.requireNonNull(roomType, "roomType")) {
       case INTAKE -> INTAKE_VISIBLE_FIELDS;
       case EVIDENCE -> EVIDENCE_VISIBLE_FIELDS;
-      case HEARING, REVIEW -> NO_VISIBLE_FIELDS;
+      case HEARING -> HEARING_VISIBLE_FIELDS;
+      case REVIEW -> NO_VISIBLE_FIELDS;
     };
   }
 }

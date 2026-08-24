@@ -226,14 +226,44 @@ class TargetE2EGraphStreamVisibilityTest {
   }
 
   @Test
-  void hearingAndReviewRoomsExposeNoVisibleFields() {
-    assertThat(TargetE2EGraphStreamVisibility.frozenPolicy(RoomType.HEARING)).isEmpty();
+  void hearingExposesOnlyValidatedPublicMessagesAndReviewRemainsPrivate() {
+    assertThat(TargetE2EGraphStreamVisibility.frozenPolicy(RoomType.HEARING))
+        .containsExactlyInAnyOrderEntriesOf(
+            Map.of(
+                "hearing_evidence_requests", Set.of("public_message"),
+                "hearing_evidence_synthesis", Set.of("public_message"),
+                "hearing_judge_v1", Set.of("public_message"),
+                "hearing_jury_review", Set.of("public_message"),
+                "hearing_judge_v2", Set.of("public_message")));
     assertThat(TargetE2EGraphStreamVisibility.frozenPolicy(RoomType.REVIEW)).isEmpty();
 
-    for (RoomType roomType : Set.of(RoomType.HEARING, RoomType.REVIEW)) {
-      assertRoomFieldRejected(roomType, "evidence_turn", "room_utterance");
-      assertRoomFieldRejected(roomType, "intake_turn_case_detail", "room_utterance");
+    for (String node :
+        Set.of(
+            "hearing_evidence_requests",
+            "hearing_evidence_synthesis",
+            "hearing_judge_v1",
+            "hearing_jury_review",
+            "hearing_judge_v2")) {
+      var allowed = state(RoomType.HEARING);
+      parseV3(allowed, eventV3(0, "attempt_started", "{\"node\":\"hearing_target_e2e\"}"));
+      assertThat(
+              parseV3(
+                      allowed,
+                      eventV3(
+                          1,
+                          "visible_delta",
+                          "{\"node\":\""
+                              + node
+                              + "\",\"field\":\"public_message\",\"delta\":\"公开文本\"}"))
+                  .eventType())
+          .isEqualTo(StreamEventType.VISIBLE_DELTA);
     }
+
+    assertRoomFieldRejected(RoomType.HEARING, "hearing_evidence_requests", "reasoning_content");
+    assertRoomFieldRejected(RoomType.HEARING, "hearing_evidence_file_assessment", "public_message");
+    assertRoomFieldRejected(RoomType.HEARING, "evidence_turn", "room_utterance");
+    assertRoomFieldRejected(RoomType.HEARING, "intake_turn_case_detail", "room_utterance");
+    assertRoomFieldRejected(RoomType.REVIEW, "hearing_judge_v2", "public_message");
   }
 
   private static void assertEvidenceFieldRejected(String node, String field) {
@@ -276,6 +306,11 @@ class TargetE2EGraphStreamVisibilityTest {
     return AgentNdjsonStreamClient.parseV2Line(MAPPER, line, state);
   }
 
+  private static com.example.dispute.workflow.contract.v1.AgentStreamEvent parseV3(
+      AgentNdjsonStreamClient.V2ProtocolState state, String line) {
+    return AgentNdjsonStreamClient.parseV3Line(MAPPER, line, state);
+  }
+
   private static String event(long sequence, String eventType, String payload) {
     return "{\"schema_version\":\"agent-stream.v2\",\"run_id\":\"run-1\","
         + "\"attempt_id\":\"attempt-1\",\"sequence_no\":"
@@ -286,5 +321,10 @@ class TargetE2EGraphStreamVisibilityTest {
         + "\"payload\":"
         + payload
         + "}";
+  }
+
+  private static String eventV3(long sequence, String eventType, String payload) {
+    return event(sequence, eventType, payload)
+        .replace("\"agent-stream.v2\"", "\"agent-stream.v3\"");
   }
 }

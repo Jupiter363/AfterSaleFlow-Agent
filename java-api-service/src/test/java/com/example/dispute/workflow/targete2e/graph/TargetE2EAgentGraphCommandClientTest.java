@@ -90,7 +90,13 @@ class TargetE2EAgentGraphCommandClientTest {
     assertThat(capturedVisibleFields(RoomType.EVIDENCE, registryTemplate))
         .isSameAs(TargetE2EGraphStreamVisibility.frozenPolicy(RoomType.EVIDENCE))
         .containsExactly(Map.entry("evidence_turn", Set.of("room_utterance")));
-    assertThat(capturedVisibleFields(RoomType.HEARING, registryTemplate)).isEmpty();
+    assertThat(capturedVisibleFields(RoomType.HEARING, registryTemplate))
+        .isSameAs(TargetE2EGraphStreamVisibility.frozenPolicy(RoomType.HEARING))
+        .containsEntry("hearing_evidence_requests", Set.of("public_message"))
+        .containsEntry("hearing_evidence_synthesis", Set.of("public_message"))
+        .containsEntry("hearing_judge_v1", Set.of("public_message"))
+        .containsEntry("hearing_jury_review", Set.of("public_message"))
+        .containsEntry("hearing_judge_v2", Set.of("public_message"));
     assertThat(capturedVisibleFields(RoomType.REVIEW, registryTemplate)).isEmpty();
   }
 
