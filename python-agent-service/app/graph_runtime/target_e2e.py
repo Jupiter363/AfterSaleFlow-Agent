@@ -232,6 +232,26 @@ class TargetE2EInvocationClaims(InvocationClaims):
     command_hash: str = Field(pattern=_SHA256.pattern)
     command_envelope_hash: str = Field(pattern=_SHA256.pattern)
     agent_session_id: str | None = Field(default=None, pattern=_IDENTIFIER.pattern)
+    parallel_phase: Literal["PREPARE", "EXECUTE"] | None = None
+    parallel_admission_receipt_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256.pattern,
+    )
+
+    @model_validator(mode="after")
+    def validate_parallel_delivery_binding(self) -> TargetE2EInvocationClaims:
+        if (
+            self.parallel_phase == "PREPARE"
+            and self.parallel_admission_receipt_sha256 is not None
+        ) or (
+            self.parallel_phase == "EXECUTE"
+            and self.parallel_admission_receipt_sha256 is None
+        ) or (
+            self.parallel_phase is None
+            and self.parallel_admission_receipt_sha256 is not None
+        ):
+            raise ValueError("target-E2E parallel delivery binding is invalid")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +380,36 @@ class TargetE2EInvocationVerifier(InvocationEnvelopeVerifier):
             envelope=envelope,
             transport_identity=transport_identity,
             allow_expired=False,
+            parallel_phase=None,
+            admission_receipt_sha256=None,
+        )
+
+    def verify_parallel_envelope(
+        self,
+        *,
+        token: str,
+        envelope: TargetE2EGraphCommandEnvelope,
+        transport_identity: TransportIdentity,
+        phase: Literal["PREPARE", "EXECUTE"],
+        admission_receipt_sha256: str | None,
+    ) -> VerifiedTargetE2EInvocation:
+        if not envelope.command.is_parallel_intake_command:
+            raise InvocationEnvelopeError("TARGET_E2E_PARALLEL_COMMAND_REQUIRED")
+        if (phase == "PREPARE" and admission_receipt_sha256 is not None) or (
+            phase == "EXECUTE"
+            and (
+                admission_receipt_sha256 is None
+                or _SHA256.fullmatch(admission_receipt_sha256) is None
+            )
+        ):
+            raise InvocationEnvelopeError("TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED")
+        return self._verify_envelope(
+            token=token,
+            envelope=envelope,
+            transport_identity=transport_identity,
+            allow_expired=False,
+            parallel_phase=phase,
+            admission_receipt_sha256=admission_receipt_sha256,
         )
 
     def verify_envelope_for_reconciliation(
@@ -376,6 +426,8 @@ class TargetE2EInvocationVerifier(InvocationEnvelopeVerifier):
             envelope=envelope,
             transport_identity=transport_identity,
             allow_expired=True,
+            parallel_phase=None,
+            admission_receipt_sha256=None,
         )
 
     def _verify_envelope(
@@ -385,6 +437,8 @@ class TargetE2EInvocationVerifier(InvocationEnvelopeVerifier):
         envelope: TargetE2EGraphCommandEnvelope,
         transport_identity: TransportIdentity,
         allow_expired: bool,
+        parallel_phase: Literal["PREPARE", "EXECUTE"] | None,
+        admission_receipt_sha256: str | None,
     ) -> VerifiedTargetE2EInvocation:
         self._authority.authorize(envelope)
         verified = (
@@ -405,6 +459,12 @@ class TargetE2EInvocationVerifier(InvocationEnvelopeVerifier):
             raise InvocationEnvelopeError("TARGET_E2E_COMMAND_KEY_REJECTED")
         if not isinstance(claims, TargetE2EInvocationClaims):
             raise InvocationEnvelopeError("TARGET_E2E_COMMAND_CLAIMS_REJECTED")
+        if (
+            claims.parallel_phase != parallel_phase
+            or claims.parallel_admission_receipt_sha256
+            != admission_receipt_sha256
+        ):
+            raise InvocationEnvelopeError("TARGET_E2E_PARALLEL_DELIVERY_BINDING_MISMATCH")
         expected = (
             envelope.execution_lane,
             envelope.activation_id,

@@ -103,15 +103,22 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                         "append:USAGE:DOSSIER_FRAME",
                         "seal:DOSSIER_FRAME",
                         "find");
-        assertThat(transport.requests)
-                .singleElement()
-                .satisfies(sent -> {
-                    assertThat(sent.maximumLineBytes())
-                            .isEqualTo(GraphCommandHttpTransport.MAXIMUM_PARALLEL_LINE_BYTES);
-                    assertThat(sent.headers())
-                            .containsEntry("Accept", "application/x-ndjson")
-                            .containsEntry("X-Agent-Run-Id", request.agentRunId());
-                });
+        assertThat(transport.requests).hasSize(2);
+        assertThat(transport.requests.get(0).headers())
+                .containsEntry(HttpTargetE2EIntakeParallelFrameExecutionClient.PHASE_HEADER, "PREPARE")
+                .doesNotContainKey(HttpTargetE2EIntakeParallelFrameExecutionClient.ADMISSION_HEADER);
+        assertThat(transport.requests.get(1).maximumLineBytes())
+                .isEqualTo(GraphCommandHttpTransport.MAXIMUM_PARALLEL_LINE_BYTES);
+        assertThat(transport.requests.get(1).headers())
+                .containsEntry("Accept", "application/x-ndjson")
+                .containsEntry("X-Agent-Run-Id", request.agentRunId())
+                .containsEntry(HttpTargetE2EIntakeParallelFrameExecutionClient.PHASE_HEADER, "EXECUTE")
+                .containsKey(HttpTargetE2EIntakeParallelFrameExecutionClient.ADMISSION_HEADER);
+        assertThat(staging.deliveryBindings)
+                .extracting(TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding::phase)
+                .containsExactly("PREPARE", "EXECUTE");
+        assertThat(staging.deliveryBindings.get(1).admissionReceiptSha256())
+                .isEqualTo(receiptHash(transport.requests.get(1)));
         assertThat(staging.admission.manifests())
                 .extracting(IntakeParallelFrameStagingPort.FrameManifest::frameType)
                 .containsExactly(FrameType.values());
@@ -174,7 +181,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                 bundle(transport, proof),
                 exact -> TargetE2EAgentRunIdentityResolver.DurableIdentity.from(exact, 7L),
                 TargetE2EGraphTestFixtures.codec(),
-                (envelope, binding) -> credential(request),
+                signer(request, staging),
                 policy,
                 ignored -> new IntakeParallelFrameAdmissionAuthorityResolver.AdmissionAuthority(
                         7L,
@@ -221,6 +228,39 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                 "parallel-command-jti-001",
                 issuedAt,
                 issuedAt.plusSeconds(45));
+    }
+
+    private static TargetE2EGraphEnvelopeSigner signer(
+            ExecuteAgentRunRequest request, RecordingStaging staging) {
+        return new TargetE2EGraphEnvelopeSigner() {
+            @Override
+            public SignedEnvelope sign(
+                    TargetE2EGraphCommandEnvelope envelope,
+                    GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding) {
+                return credential(request);
+            }
+
+            @Override
+            public SignedEnvelope signParallel(
+                    TargetE2EGraphCommandEnvelope envelope,
+                    GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding,
+                    ParallelDeliveryBinding deliveryBinding) {
+                staging.deliveryBindings.add(deliveryBinding);
+                return credential(request);
+            }
+        };
+    }
+
+    private static String receiptHash(GraphCommandHttpTransport.Request request) {
+        try {
+            String encoded = request.headers().get(
+                    HttpTargetE2EIntakeParallelFrameExecutionClient.ADMISSION_HEADER);
+            JsonNode receipt = TargetE2EGraphTestFixtures.MAPPER.readTree(
+                    Base64.getUrlDecoder().decode(encoded));
+            return receipt.path("receipt_sha256").asText();
+        } catch (Exception exception) {
+            throw new IllegalStateException("parallel admission receipt could not be decoded", exception);
+        }
     }
 
     private static GraphTransportSecurityProof mutualTlsProof() {
@@ -289,11 +329,15 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
             requests.add(request);
             TargetE2EGraphCommandEnvelope envelope =
                     TargetE2EGraphTestFixtures.codec().decodeCommand(request.body());
+            boolean prepare = "PREPARE".equals(request.headers().get(
+                    HttpTargetE2EIntakeParallelFrameExecutionClient.PHASE_HEADER));
             listener.onResponse(new ResponseHead(
                     200,
                     request.uri(),
                     Map.of(
-                            "Content-Type", List.of("application/x-ndjson; charset=utf-8"),
+                            "Content-Type", List.of(prepare
+                                    ? "application/json; charset=utf-8"
+                                    : "application/x-ndjson; charset=utf-8"),
                             "Cache-Control", List.of("no-store, no-transform"),
                             "X-Agent-Run-Id", List.of(envelope.command().logicalRunId()),
                             "X-Agent-Stream-Protocol", List.of("agent-stream.v4"),
@@ -302,7 +346,11 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                             "X-Intake-Frame-Set-Id", List.of(fixture.frameSetId()),
                             "X-Intake-Parallel-Authority",
                                     List.of(fixture.authorityHeader()))));
-            fixture.lines().forEach(listener::onLine);
+            if (prepare) {
+                listener.onLine("{\"schema_version\":\"intake.parallel-prepared.v1\"}");
+            } else {
+                fixture.lines().forEach(listener::onLine);
+            }
         }
     }
 
@@ -312,6 +360,8 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         private final StreamFixture fixture;
         private final EventAuthority eventAuthority;
         private final List<String> actions = new ArrayList<>();
+        private final List<TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding>
+                deliveryBindings = new ArrayList<>();
         private final EnumMap<FrameType, FrameSlotView> slots = new EnumMap<>(FrameType.class);
         private FrameSetAdmission admission;
         private long nextSequence;

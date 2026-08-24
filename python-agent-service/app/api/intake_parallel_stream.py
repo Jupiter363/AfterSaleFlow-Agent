@@ -6,7 +6,8 @@ import base64
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 import json
-from typing import Protocol
+import re
+from typing import Literal, Protocol, cast
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.contracts.v1.models import (
@@ -31,6 +32,10 @@ from app.contracts.v1.models import RoomGraphCommand
 
 class ParallelFrameStreamProtocolError(RuntimeError):
     pass
+
+
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,18 +96,80 @@ class ParallelFrameStreamAuthority:
 
 
 @dataclass(frozen=True, slots=True)
+class ParallelFrameAdmissionLane:
+    frame_type: ParallelFrameType
+    generation: int
+    frame_id: str
+    action: Literal["RUN"]
+    next_local_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelFrameAdmissionReceipt:
+    request_hash: str
+    frame_set_id: str
+    run_id: str
+    attempt_id: str
+    java_receipt_id: str
+    authority_sha256: str
+    lanes: tuple[
+        ParallelFrameAdmissionLane,
+        ParallelFrameAdmissionLane,
+        ParallelFrameAdmissionLane,
+    ]
+    receipt_sha256: str
+
+    def require_authority(
+        self,
+        *,
+        command: RoomGraphCommand,
+        authority: ParallelFrameStreamAuthority,
+    ) -> None:
+        expected_frames = tuple(
+            (frame.frame_type, frame.generation, frame.frame_id)
+            for frame in authority.frames
+        )
+        actual_frames = tuple(
+            (lane.frame_type, lane.generation, lane.frame_id) for lane in self.lanes
+        )
+        if (
+            self.request_hash != command.request_hash
+            or self.frame_set_id != authority.frame_set_id
+            or self.run_id != authority.run_id
+            or self.attempt_id != authority.attempt_id
+            or self.run_id != command.logical_run_id
+            or self.attempt_id != command.attempt_id
+            or self.authority_sha256 != parallel_frame_authority_sha256(authority)
+            or actual_frames != expected_frames
+            or any(lane.action != "RUN" or lane.next_local_index != 0 for lane in self.lanes)
+        ):
+            raise ParallelFrameStreamProtocolError(
+                "parallel admission receipt differs from prepared authority"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class OpenedParallelFrameStream:
     authority: ParallelFrameStreamAuthority
     events: AsyncIterator[ParallelFrameTechnicalEvent]
 
 
 class ParallelIntakeFrameStreamService(Protocol):
+    async def prepare(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> ParallelFrameStreamAuthority: ...
+
     async def open_stream(
         self,
         *,
         command: RoomGraphCommand,
         verified_invocation: VerifiedTargetE2EInvocation,
         expected_thread: ThreadIdentity,
+        admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> OpenedParallelFrameStream: ...
 
 
@@ -316,7 +383,20 @@ def encode_parallel_frame_authority_header(
 ) -> str:
     """Encode the exact-three pre-provider authority into one bounded response header."""
 
-    document: dict[str, object] = {
+    document = _parallel_frame_authority_document(authority)
+    document["authority_sha256"] = canonical_sha256(document)
+    encoded = base64.urlsafe_b64encode(canonicalize(document)).decode("ascii")
+    return encoded.rstrip("=")
+
+
+def parallel_frame_authority_sha256(authority: ParallelFrameStreamAuthority) -> str:
+    return canonical_sha256(_parallel_frame_authority_document(authority))
+
+
+def _parallel_frame_authority_document(
+    authority: ParallelFrameStreamAuthority,
+) -> dict[str, object]:
+    return {
         "schema_version": "intake.parallel-frame-stream-authority.v1",
         "frame_set_id": authority.frame_set_id,
         "run_id": authority.run_id,
@@ -334,9 +414,128 @@ def encode_parallel_frame_authority_header(
             for frame in authority.frames
         ],
     }
-    document["authority_sha256"] = canonical_sha256(document)
-    encoded = base64.urlsafe_b64encode(canonicalize(document)).decode("ascii")
-    return encoded.rstrip("=")
+
+
+def decode_parallel_admission_receipt_header(
+    encoded: str | None,
+) -> ParallelFrameAdmissionReceipt:
+    if encoded is None or not encoded or len(encoded) > 24 * 1024:
+        raise ParallelFrameStreamProtocolError(
+            "parallel admission receipt header is absent or oversized"
+        )
+    try:
+        padding = (4 - len(encoded) % 4) % 4
+        raw = base64.urlsafe_b64decode(encoded + "=" * padding)
+        if not raw or len(raw) > 12 * 1024:
+            raise ValueError("receipt bytes are oversized")
+        document = json.loads(raw, object_pairs_hook=_unique_json_object)
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        raise ParallelFrameStreamProtocolError(
+            "parallel admission receipt header is invalid"
+        ) from error
+    expected_fields = {
+        "schema_version",
+        "request_hash",
+        "frame_set_id",
+        "run_id",
+        "attempt_id",
+        "java_receipt_id",
+        "authority_sha256",
+        "lanes",
+        "receipt_sha256",
+    }
+    if not isinstance(document, dict) or set(document) != expected_fields:
+        raise ParallelFrameStreamProtocolError(
+            "parallel admission receipt fields differ"
+        )
+    receipt_hash = document.get("receipt_sha256")
+    unsigned = dict(document)
+    unsigned.pop("receipt_sha256", None)
+    if (
+        document.get("schema_version") != "intake.parallel-admission-receipt.v1"
+        or not isinstance(receipt_hash, str)
+        or _SHA256.fullmatch(receipt_hash) is None
+        or canonical_sha256(unsigned) != receipt_hash
+    ):
+        raise ParallelFrameStreamProtocolError(
+            "parallel admission receipt self-hash drifted"
+        )
+    raw_lanes = document.get("lanes")
+    if not isinstance(raw_lanes, list) or len(raw_lanes) != len(FRAME_TYPES):
+        raise ParallelFrameStreamProtocolError(
+            "parallel admission receipt is not exact-three"
+        )
+    lanes: list[ParallelFrameAdmissionLane] = []
+    for index, value in enumerate(raw_lanes):
+        if not isinstance(value, dict) or set(value) != {
+            "frame_type",
+            "generation",
+            "frame_id",
+            "action",
+            "next_local_index",
+        }:
+            raise ParallelFrameStreamProtocolError(
+                "parallel admission lane fields differ"
+            )
+        raw_frame_type = value["frame_type"]
+        if not isinstance(raw_frame_type, str) or raw_frame_type not in FRAME_TYPES:
+            raise ParallelFrameStreamProtocolError(
+                "parallel admission lane type is invalid"
+            )
+        frame_type = cast(ParallelFrameType, raw_frame_type)
+        generation = value["generation"]
+        next_local_index = value["next_local_index"]
+        frame_id = value["frame_id"]
+        if (
+            frame_type != FRAME_TYPES[index]
+            or type(generation) is not int
+            or generation < 1
+            or not isinstance(frame_id, str)
+            or _IDENTIFIER.fullmatch(frame_id) is None
+            or value["action"] != "RUN"
+            or type(next_local_index) is not int
+            or next_local_index != 0
+        ):
+            raise ParallelFrameStreamProtocolError(
+                "parallel admission lane authority is invalid"
+            )
+        lanes.append(
+            ParallelFrameAdmissionLane(
+                frame_type=frame_type,
+                generation=generation,
+                frame_id=frame_id,
+                action="RUN",
+                next_local_index=next_local_index,
+            )
+        )
+    text_fields = (
+        "frame_set_id",
+        "run_id",
+        "attempt_id",
+        "java_receipt_id",
+    )
+    if any(
+        not isinstance(document[field], str)
+        or _IDENTIFIER.fullmatch(document[field]) is None
+        for field in text_fields
+    ) or any(
+        not isinstance(document[field], str)
+        or _SHA256.fullmatch(document[field]) is None
+        for field in ("request_hash", "authority_sha256")
+    ):
+        raise ParallelFrameStreamProtocolError(
+            "parallel admission receipt binding is invalid"
+        )
+    return ParallelFrameAdmissionReceipt(
+        request_hash=document["request_hash"],
+        frame_set_id=document["frame_set_id"],
+        run_id=document["run_id"],
+        attempt_id=document["attempt_id"],
+        java_receipt_id=document["java_receipt_id"],
+        authority_sha256=document["authority_sha256"],
+        lanes=tuple(lanes),  # type: ignore[arg-type]
+        receipt_sha256=receipt_hash,
+    )
 
 
 async def stream_parallel_frame_ndjson(
@@ -365,11 +564,15 @@ __all__ = [
     "OpenedParallelFrameStream",
     "PARALLEL_INTAKE_AGENT_PROFILE_ID",
     "PARALLEL_INTAKE_OUTPUT_SCHEMA",
+    "ParallelFrameAdmissionLane",
+    "ParallelFrameAdmissionReceipt",
     "ParallelFrameStreamAuthority",
     "ParallelFrameStreamProtocolError",
     "ParallelFrameStreamProtocolValidator",
     "ParallelIntakeFrameStreamService",
+    "decode_parallel_admission_receipt_header",
     "encode_parallel_frame_authority_header",
     "encode_parallel_frame_event",
+    "parallel_frame_authority_sha256",
     "stream_parallel_frame_ndjson",
 ]

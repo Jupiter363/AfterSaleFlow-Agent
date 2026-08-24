@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
 from app.api.intake_parallel_stream import (
+    decode_parallel_admission_receipt_header,
     ExpectedParallelFrame,
+    parallel_frame_authority_sha256,
     ParallelFrameStreamAuthority,
     ParallelFrameStreamProtocolError,
     ParallelFrameStreamProtocolValidator,
@@ -30,6 +33,50 @@ RUN_ID = "run.test"
 ATTEMPT_ID = "attempt.test"
 CONTEXT_HASH = "a" * 64
 MODEL_CONTEXT_HASH = "b" * 64
+
+
+def test_admission_receipt_decodes_exact_three_literal_frame_types() -> None:
+    document = _admission_receipt_document()
+
+    receipt = decode_parallel_admission_receipt_header(_encode_receipt(document))
+
+    assert receipt.frame_set_id == FRAME_SET_ID
+    assert tuple(lane.frame_type for lane in receipt.lanes) == FRAME_TYPES
+    assert receipt.receipt_sha256 == document["receipt_sha256"]
+
+
+@pytest.mark.parametrize("mutation", ["unknown", "reordered", "tampered_hash"])
+def test_admission_receipt_rejects_noncanonical_authority(mutation: str) -> None:
+    document = _admission_receipt_document()
+    if mutation == "unknown":
+        document["unexpected"] = True
+        document["receipt_sha256"] = canonical_sha256(
+            {key: value for key, value in document.items() if key != "receipt_sha256"}
+        )
+    elif mutation == "reordered":
+        document["lanes"] = list(reversed(document["lanes"]))
+        document["receipt_sha256"] = canonical_sha256(
+            {key: value for key, value in document.items() if key != "receipt_sha256"}
+        )
+    else:
+        document["request_hash"] = "0" * 64
+
+    with pytest.raises(ParallelFrameStreamProtocolError):
+        decode_parallel_admission_receipt_header(_encode_receipt(document))
+
+
+def test_admission_receipt_rejects_duplicate_json_members() -> None:
+    canonical = canonicalize(_admission_receipt_document()).decode("utf-8")
+    duplicated = canonical.replace(
+        '"receipt_sha256":',
+        '"receipt_sha256":"' + ("0" * 64) + '","receipt_sha256":',
+        1,
+    ).encode("utf-8")
+
+    with pytest.raises(ParallelFrameStreamProtocolError, match="header is invalid"):
+        decode_parallel_admission_receipt_header(
+            base64.urlsafe_b64encode(duplicated).decode("ascii").rstrip("=")
+        )
 
 
 def test_interleaved_exact_three_lanes_seal_against_their_public_results() -> None:
@@ -207,6 +254,35 @@ def test_lane_cannot_emit_after_it_is_sealed() -> None:
 
     with pytest.raises(ParallelFrameStreamProtocolError, match="after seal"):
         validator.accept(events[0])
+
+
+def _admission_receipt_document() -> dict[str, Any]:
+    authority = _authority()
+    document: dict[str, Any] = {
+        "schema_version": "intake.parallel-admission-receipt.v1",
+        "request_hash": "f" * 64,
+        "frame_set_id": authority.frame_set_id,
+        "run_id": authority.run_id,
+        "attempt_id": authority.attempt_id,
+        "java_receipt_id": "FRAME_SET_RECEIPT_V4_1",
+        "authority_sha256": parallel_frame_authority_sha256(authority),
+        "lanes": [
+            {
+                "frame_type": frame.frame_type,
+                "generation": frame.generation,
+                "frame_id": frame.frame_id,
+                "action": "RUN",
+                "next_local_index": 0,
+            }
+            for frame in authority.frames
+        ],
+    }
+    document["receipt_sha256"] = canonical_sha256(document)
+    return document
+
+
+def _encode_receipt(document: dict[str, Any]) -> str:
+    return base64.urlsafe_b64encode(canonicalize(document)).decode("ascii").rstrip("=")
 
 
 def _authority() -> ParallelFrameStreamAuthority:

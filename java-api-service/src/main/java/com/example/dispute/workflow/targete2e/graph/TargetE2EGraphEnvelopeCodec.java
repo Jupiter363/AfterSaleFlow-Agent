@@ -120,6 +120,29 @@ public final class TargetE2EGraphEnvelopeCodec {
     return new TargetE2ESealedGraphCommand(envelope, body, credential);
   }
 
+  public TargetE2ESealedGraphCommand sealParallelCommand(
+      String activationId,
+      long roomFencingToken,
+      RoomGraphCommand command,
+      GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding,
+      TargetE2EGraphEnvelopeSigner signer,
+      TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding deliveryBinding) {
+    TargetE2EGraphCommandEnvelope envelope = wrapCommand(activationId, roomFencingToken, command);
+    byte[] body = encodeCommand(envelope);
+    TargetE2EGraphEnvelopeSigner.SignedEnvelope credential =
+        Objects.requireNonNull(signer, "signer")
+            .signParallel(
+                envelope,
+                expectedRegistryBinding,
+                Objects.requireNonNull(deliveryBinding, "deliveryBinding"));
+    if (!constantTimeEquals(credential.keyId(), command.invocationContext().envelopeKeyId())
+        || constantTimeEquals(credential.jti(), command.invocationContext().envelopeNonce())) {
+      throw new IllegalArgumentException(
+          "target Graph parallel credential conflicts with its immutable command");
+    }
+    return new TargetE2ESealedGraphCommand(envelope, body, credential);
+  }
+
   public byte[] encodeCommand(TargetE2EGraphCommandEnvelope envelope) {
     requireValidCommandEnvelope(Objects.requireNonNull(envelope, "envelope"));
     return ContractJson.canonicalize(mapper.valueToTree(envelope));

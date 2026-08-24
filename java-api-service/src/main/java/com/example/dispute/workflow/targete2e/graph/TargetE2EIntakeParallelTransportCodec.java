@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
@@ -110,6 +111,47 @@ final class TargetE2EIntakeParallelTransportCodec {
                 identifier(root, "attempt_id"),
                 List.copyOf(frames),
                 authorityHash);
+    }
+
+    EncodedAdmissionReceipt encodeAdmissionReceipt(
+            String requestHash,
+            String javaReceiptId,
+            StreamAuthority authority) {
+        if (!SHA256.matcher(Objects.requireNonNull(requestHash, "requestHash")).matches()
+                || !IDENTIFIER.matcher(Objects.requireNonNull(javaReceiptId, "javaReceiptId")).matches()
+                || authority == null
+                || authority.frames().size() != FrameType.values().length) {
+            throw invalid("parallel admission receipt input is invalid");
+        }
+        ObjectNode document = mapper.createObjectNode();
+        document.put("schema_version", "intake.parallel-admission-receipt.v1");
+        document.put("request_hash", requestHash);
+        document.put("frame_set_id", authority.frameSetId());
+        document.put("run_id", authority.runId());
+        document.put("attempt_id", authority.attemptId());
+        document.put("java_receipt_id", javaReceiptId);
+        document.put("authority_sha256", authority.authoritySha256());
+        ArrayNode lanes = document.putArray("lanes");
+        for (int index = 0; index < authority.frames().size(); index++) {
+            FrameAuthority frame = authority.frames().get(index);
+            if (frame.frameType() != FrameType.values()[index]) {
+                throw invalid("parallel admission receipt lane order drifted");
+            }
+            ObjectNode lane = lanes.addObject();
+            lane.put("frame_type", frame.frameType().name());
+            lane.put("generation", frame.generation());
+            lane.put("frame_id", frame.frameId());
+            lane.put("action", "RUN");
+            lane.put("next_local_index", 0);
+        }
+        String receiptHash = ContractJson.sha256Hex(document);
+        document.put("receipt_sha256", receiptHash);
+        byte[] canonical = ContractJson.canonicalize(document);
+        if (canonical.length > 12 * 1024) {
+            throw invalid("parallel admission receipt document is oversized");
+        }
+        String encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(canonical);
+        return new EncodedAdmissionReceipt(encoded, receiptHash);
     }
 
     TechnicalEvent decodeEvent(String line) {
@@ -404,6 +446,13 @@ final class TargetE2EIntakeParallelTransportCodec {
             String framePromptSha256,
             String contextEnvelopeSha256,
             String modelContextViewSha256) {}
+
+    record EncodedAdmissionReceipt(String headerValue, String receiptSha256) {
+        EncodedAdmissionReceipt {
+            Objects.requireNonNull(headerValue, "headerValue");
+            Objects.requireNonNull(receiptSha256, "receiptSha256");
+        }
+    }
 
     sealed interface TechnicalEvent
             permits Started, ProjectionItem, GenerationReset, Interrupted, Sealed {

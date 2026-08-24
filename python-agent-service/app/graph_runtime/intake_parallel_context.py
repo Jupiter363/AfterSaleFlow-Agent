@@ -7,8 +7,10 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence, cast
 
 from app.contracts.v1.codec import canonical_sha256
+from app.contracts.v1.models import RoomGraphCommand
 from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.gateway import GatewayExecution
+from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.intake_parallel_runtime import require_parallel_intake_execution
 from app.graphs.intake.contracts import IntakeDomainSnapshot, IntakeTurnEvent, PartyIntakeState
 from app.graphs.intake.parallel_contracts import (
@@ -116,6 +118,23 @@ def build_parallel_turn_model_material(
     """Build one self-hashed common view from exact decoded snapshot/event authority."""
 
     require_parallel_intake_execution(execution)
+    return build_parallel_turn_model_material_from_command(
+        execution.admission.command,
+        thread=execution.admission.thread,
+        snapshot_context=snapshot_context,
+        event_context=event_context,
+        instruction_packs=instruction_packs,
+    )
+
+
+def build_parallel_turn_model_material_from_command(
+    command: RoomGraphCommand,
+    *,
+    thread: ThreadIdentity,
+    snapshot_context: IntakeTurnContext,
+    event_context: IntakeTurnContext,
+    instruction_packs: Sequence[IntakeFrameInstructionPackV1],
+) -> ParallelTurnModelMaterial:
     if snapshot_context.ingress_kind != "SNAPSHOT" or event_context.ingress_kind != "EVENT":
         raise GraphContractError("parallel Intake requires exact snapshot and event ingress")
     try:
@@ -124,11 +143,10 @@ def build_parallel_turn_model_material(
     except ValueError as error:
         raise GraphContractError("parallel Intake ingress schema is invalid") from error
 
-    command = execution.admission.command
     room_id = command.room_id
     if room_id is None:
         raise GraphContractError("parallel Intake room authority is absent")
-    identity = execution.admission.thread
+    identity = thread
     snapshot_ref = command.domain_snapshot_ref
     event_ref = command.event_ref
     if event_ref is None:

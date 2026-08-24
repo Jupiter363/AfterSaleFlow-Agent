@@ -26,6 +26,7 @@ import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTranspo
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandTransportException;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTransportCodec.FrameAuthority;
+import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTransportCodec.EncodedAdmissionReceipt;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTransportCodec.GenerationReset;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTransportCodec.Interrupted;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTransportCodec.ProjectionItem;
@@ -42,6 +43,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.EnumMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -56,6 +58,8 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
 
     public static final String PATH = "internal/graphs/target-e2e/commands/stream";
     static final String AUTHORITY_HEADER = "X-Intake-Parallel-Authority";
+    static final String ADMISSION_HEADER = "X-Intake-Parallel-Admission";
+    static final String PHASE_HEADER = "X-Intake-Parallel-Phase";
     private static final String FRAME_SET_HEADER = "X-Intake-Frame-Set-Id";
     private static final String PROJECTION_REGISTRY_VERSION = "intake-projection-registry.v1";
     private static final Set<String> REMOTE_ERROR_FIELDS = Set.of("code", "retryable");
@@ -130,13 +134,29 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
         GraphRegistryBindingPolicy.ExpectedBinding registryBinding =
                 GraphRegistryBindingPolicy.requireExpected(
                         registryBindingPolicy, GraphStreamVisibilityPolicy.Binding.from(command));
-        TargetE2ESealedGraphCommand sealed = envelopeCodec.sealCommand(
-                activationId, roomFencingToken, command, registryBinding, signer);
+        PreparedAdmission prepared = prepare(
+                request,
+                roomFencingToken,
+                registryBinding,
+                cancellationToken);
+        TargetE2ESealedGraphCommand sealed = envelopeCodec.sealParallelCommand(
+                activationId,
+                roomFencingToken,
+                command,
+                registryBinding,
+                signer,
+                TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.execute(
+                        prepared.encodedReceipt().receiptSha256()));
         StreamSession session = new StreamSession(
-                request, sealed.envelope(), progressListener, cancellationToken);
+                request,
+                sealed.envelope(),
+                progressListener,
+                cancellationToken,
+                prepared.authority(),
+                prepared.frameSetReceipt());
         GraphCommandHttpTransport.Request transportRequest = new GraphCommandHttpTransport.Request(
                 endpoint,
-                requestHeaders(sealed),
+                requestHeaders(sealed, "EXECUTE", prepared.encodedReceipt().headerValue()),
                 sealed.body(),
                 timeout,
                 GraphCommandHttpTransport.MAXIMUM_PARALLEL_LINE_BYTES,
@@ -164,16 +184,190 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
         }
     }
 
-    private Map<String, String> requestHeaders(TargetE2ESealedGraphCommand sealed) {
-        return Map.of(
-                "Authorization", "Bearer " + sealed.credential().compactJws(),
-                "Accept", "application/x-ndjson",
-                "Content-Type", "application/json; charset=utf-8",
-                "Content-Encoding", "identity",
-                "Cache-Control", "no-store",
-                "X-Agent-Run-Id", sealed.envelope().command().logicalRunId(),
-                "traceparent", sealed.envelope().command().traceparent());
+    private Map<String, String> requestHeaders(
+            TargetE2ESealedGraphCommand sealed,
+            String phase,
+            String admissionReceipt) {
+        LinkedHashMap<String, String> headers = new LinkedHashMap<>();
+        headers.put("Authorization", "Bearer " + sealed.credential().compactJws());
+        headers.put("Accept", "PREPARE".equals(phase) ? "application/json" : "application/x-ndjson");
+        headers.put("Content-Type", "application/json; charset=utf-8");
+        headers.put("Content-Encoding", "identity");
+        headers.put("Cache-Control", "no-store");
+        headers.put("X-Agent-Run-Id", sealed.envelope().command().logicalRunId());
+        headers.put("traceparent", sealed.envelope().command().traceparent());
+        headers.put(PHASE_HEADER, phase);
+        if (admissionReceipt != null) {
+            headers.put(ADMISSION_HEADER, admissionReceipt);
+        }
+        return Map.copyOf(headers);
     }
+
+    private PreparedAdmission prepare(
+            ExecuteAgentRunRequest request,
+            long roomFencingToken,
+            GraphRegistryBindingPolicy.ExpectedBinding registryBinding,
+            AgentRunCancellationToken cancellationToken) {
+        TargetE2ESealedGraphCommand sealed = envelopeCodec.sealParallelCommand(
+                activationId,
+                roomFencingToken,
+                request.command(),
+                registryBinding,
+                signer,
+                TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.prepare());
+        PreparationSession preparation = new PreparationSession(request, sealed.envelope());
+        GraphCommandHttpTransport.Request transportRequest = new GraphCommandHttpTransport.Request(
+                endpoint,
+                requestHeaders(sealed, "PREPARE", null),
+                sealed.body(),
+                timeout,
+                GraphCommandHttpTransport.MAXIMUM_LINE_BYTES,
+                GraphCommandHttpTransport.MAXIMUM_RESPONSE_BYTES);
+        try {
+            transport.stream(transportRequest, cancellationToken, preparation);
+            cancellationToken.throwIfCancellationRequested();
+            StreamAuthority authority = preparation.finish();
+            requireStreamAuthority(request, authority);
+            IntakeParallelFrameStagingPort.FrameSetReceipt frameSetReceipt =
+                    admitPreparedAuthority(request, authority);
+            EncodedAdmissionReceipt encodedReceipt = technicalCodec.encodeAdmissionReceipt(
+                    request.command().requestHash(), frameSetReceipt.receiptId(), authority);
+            return new PreparedAdmission(authority, frameSetReceipt, encodedReceipt);
+        } catch (TargetE2EGraphClientException failure) {
+            throw failure;
+        } catch (GraphCommandTransportException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            if (failure.protocolViolation()) {
+                throw TargetE2EGraphClientException.protocol(
+                        "parallel target Graph preparation violated the protocol", failure);
+            }
+            throw TargetE2EGraphClientException.transport(
+                    "parallel target Graph preparation failed", failure);
+        } catch (IllegalArgumentException failure) {
+            throw TargetE2EGraphClientException.protocol(
+                    "parallel target Graph preparation is invalid", failure);
+        }
+    }
+
+    private IntakeParallelFrameStagingPort.FrameSetReceipt admitPreparedAuthority(
+            ExecuteAgentRunRequest request, StreamAuthority authority) {
+        IntakeParallelFrameAdmissionAuthorityResolver.AdmissionAuthority durableAuthority =
+                admissionAuthorityResolver.resolve(request);
+        List<FrameManifest> manifests = authority.frames().stream()
+                .map(frame -> new FrameManifest(
+                        frame.frameType(),
+                        frame.generation(),
+                        frame.frameId(),
+                        frame.frameType().promptProfileId(),
+                        frame.frameType().outputSchemaId(),
+                        request.command().invocationContext().modelProfileId(),
+                        frame.frameModelInputSha256(),
+                        frame.framePromptSha256()))
+                .toList();
+        FrameAuthority first = authority.frames().getFirst();
+        return staging.admit(new FrameSetAdmission(
+                authority.frameSetId(),
+                request.agentRunId(),
+                request.attemptId(),
+                request.command().commandId(),
+                request.command().tenantSurrogate(),
+                request.command().caseId(),
+                Objects.requireNonNull(request.command().roomId(), "parallel roomId"),
+                request.command().roomEpoch(),
+                durableAuthority.fencingToken(),
+                request.command().threadId(),
+                durableAuthority.actorScopeSha256(),
+                durableAuthority.agentSessionId(),
+                durableAuthority.eventAuthority(),
+                first.contextEnvelopeSha256(),
+                first.modelContextViewSha256(),
+                "PARALLEL_FRAMES_V1",
+                PROJECTION_REGISTRY_VERSION,
+                request.command().invocationContext().modelProfileId(),
+                request.command().deadlineAt(),
+                manifests));
+    }
+
+    private final class PreparationSession implements GraphCommandHttpTransport.Listener {
+
+        private final ExecuteAgentRunRequest request;
+        private final TargetE2EGraphCommandEnvelope envelope;
+        private boolean responseReceived;
+        private int statusCode;
+        private StreamAuthority authority;
+        private String responseLine;
+
+        private PreparationSession(
+                ExecuteAgentRunRequest request, TargetE2EGraphCommandEnvelope envelope) {
+            this.request = request;
+            this.envelope = envelope;
+        }
+
+        @Override
+        public void onResponse(GraphCommandHttpTransport.ResponseHead response) {
+            if (responseReceived) {
+                throw protocol("parallel preparation returned duplicate response metadata", null);
+            }
+            responseReceived = true;
+            statusCode = response.statusCode();
+            if (statusCode != 200) {
+                return;
+            }
+            if (!sharedResponseMetadataIsValid(response, false)
+                    || !endpoint.equals(response.uri())
+                    || !"application/json".equalsIgnoreCase(
+                            mediaType(singleHeader(response.headers(), "Content-Type")))
+                    || !request.agentRunId().equals(
+                            singleHeader(response.headers(), "X-Agent-Run-Id"))
+                    || !"agent-stream.v4".equals(
+                            singleHeader(response.headers(), "X-Agent-Stream-Protocol"))
+                    || !envelope.executionLane().equals(
+                            singleHeader(response.headers(), "X-Graph-Execution-Lane"))
+                    || !activationId.equals(
+                            singleHeader(response.headers(), "X-Graph-Activation-Id"))) {
+                throw protocol("parallel preparation response metadata drifted", null);
+            }
+            authority = technicalCodec.decodeAuthority(
+                    singleHeader(response.headers(), AUTHORITY_HEADER));
+            if (!authority.frameSetId().equals(
+                    singleHeader(response.headers(), FRAME_SET_HEADER))) {
+                throw protocol("parallel preparation frame-set header drifted", null);
+            }
+        }
+
+        @Override
+        public void onLine(String line) {
+            if (responseLine != null) {
+                throw protocol("parallel preparation returned multiple response lines", null);
+            }
+            responseLine = line;
+        }
+
+        private StreamAuthority finish() {
+            if (!responseReceived || statusCode != 200 || authority == null || responseLine == null) {
+                throw protocol("parallel preparation did not return durable authority", null);
+            }
+            try {
+                JsonNode body = mapper.readTree(responseLine);
+                Set<String> fields = new HashSet<>();
+                body.fieldNames().forEachRemaining(fields::add);
+                if (!body.isObject()
+                        || !fields.equals(Set.of("schema_version"))
+                        || !"intake.parallel-prepared.v1"
+                                .equals(body.required("schema_version").asText())) {
+                    throw new IllegalArgumentException("parallel preparation body is invalid");
+                }
+            } catch (RuntimeException | com.fasterxml.jackson.core.JsonProcessingException failure) {
+                throw protocol("parallel preparation body is invalid", failure);
+            }
+            return authority;
+        }
+    }
+
+    private record PreparedAdmission(
+            StreamAuthority authority,
+            IntakeParallelFrameStagingPort.FrameSetReceipt frameSetReceipt,
+            EncodedAdmissionReceipt encodedReceipt) {}
 
     private final class StreamSession implements GraphCommandHttpTransport.Listener {
 
@@ -198,11 +392,19 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                 ExecuteAgentRunRequest request,
                 TargetE2EGraphCommandEnvelope envelope,
                 ProgressListener progressListener,
-                AgentRunCancellationToken cancellationToken) {
+                AgentRunCancellationToken cancellationToken,
+                StreamAuthority authority,
+                IntakeParallelFrameStagingPort.FrameSetReceipt frameSetReceipt) {
             this.request = request;
             this.envelope = envelope;
             this.progressListener = progressListener;
             this.cancellationToken = cancellationToken;
+            this.authority = Objects.requireNonNull(authority, "authority");
+            this.frameSetReceipt = Objects.requireNonNull(frameSetReceipt, "frameSetReceipt");
+            this.streamSessionId = "IPSS_" + ContractJson.sha256Hex(authorityNode(authority))
+                    .substring(0, 32);
+            authority.frames().forEach(frame -> frames.put(
+                    frame.frameType(), new FrameState(authority.frameSetId(), frame)));
         }
 
         @Override
@@ -220,52 +422,16 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                 return;
             }
             requireSuccessMetadata(response);
-            authority = technicalCodec.decodeAuthority(
+            StreamAuthority responseAuthority = technicalCodec.decodeAuthority(
                     singleHeader(response.headers(), AUTHORITY_HEADER));
-            if (!authority.frameSetId()
+            if (!responseAuthority.frameSetId()
                     .equals(singleHeader(response.headers(), FRAME_SET_HEADER))) {
                 throw protocol("parallel target Graph frame-set header drifted", null);
             }
-            requireStreamAuthority(request, authority);
-            IntakeParallelFrameAdmissionAuthorityResolver.AdmissionAuthority durableAuthority =
-                    admissionAuthorityResolver.resolve(request);
-            List<FrameManifest> manifests = authority.frames().stream()
-                    .map(frame -> new FrameManifest(
-                            frame.frameType(),
-                            frame.generation(),
-                            frame.frameId(),
-                            frame.frameType().promptProfileId(),
-                            frame.frameType().outputSchemaId(),
-                            request.command().invocationContext().modelProfileId(),
-                            frame.frameModelInputSha256(),
-                            frame.framePromptSha256()))
-                    .toList();
-            FrameAuthority first = authority.frames().getFirst();
-            frameSetReceipt = staging.admit(new FrameSetAdmission(
-                    authority.frameSetId(),
-                    request.agentRunId(),
-                    request.attemptId(),
-                    request.command().commandId(),
-                    request.command().tenantSurrogate(),
-                    request.command().caseId(),
-                    Objects.requireNonNull(request.command().roomId(), "parallel roomId"),
-                    request.command().roomEpoch(),
-                    durableAuthority.fencingToken(),
-                    request.command().threadId(),
-                    durableAuthority.actorScopeSha256(),
-                    durableAuthority.agentSessionId(),
-                    durableAuthority.eventAuthority(),
-                    first.contextEnvelopeSha256(),
-                    first.modelContextViewSha256(),
-                    "PARALLEL_FRAMES_V1",
-                    PROJECTION_REGISTRY_VERSION,
-                    request.command().invocationContext().modelProfileId(),
-                    request.command().deadlineAt(),
-                    manifests));
-            streamSessionId = "IPSS_" + ContractJson.sha256Hex(authorityNode(authority))
-                    .substring(0, 32);
-            authority.frames().forEach(frame -> frames.put(
-                    frame.frameType(), new FrameState(authority.frameSetId(), frame)));
+            requireStreamAuthority(request, responseAuthority);
+            if (!authority.equals(responseAuthority)) {
+                throw protocol("parallel execution authority differs from preparation", null);
+            }
         }
 
         @Override

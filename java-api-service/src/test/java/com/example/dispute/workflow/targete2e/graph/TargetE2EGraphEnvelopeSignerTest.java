@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -148,6 +149,41 @@ class TargetE2EGraphEnvelopeSignerTest {
     verifier.initVerify(keyPair.getPublic());
     verifier.update((segments[0] + "." + segments[1]).getBytes(StandardCharsets.US_ASCII));
     assertThat(verifier.verify(Base64.getUrlDecoder().decode(segments[2]))).isTrue();
+  }
+
+  @Test
+  void signsFreshPrepareAndReceiptBoundExecuteCredentialsWithoutWideningGenericClaims()
+      throws Exception {
+    var codec = TargetE2EGraphTestFixtures.codec();
+    var command = codec.wrapCommand(ACTIVATION_ID, 7L, TargetE2EGraphTestFixtures.command());
+    AtomicInteger nonce = new AtomicInteger();
+    var signer =
+        new Es256TargetE2EGraphEnvelopeSigner(
+            signingKey(KEY_ID),
+            MAPPER,
+            Clock.fixed(NOW, ZoneOffset.UTC),
+            Duration.ofSeconds(45),
+            () -> "target-command-jti-00" + nonce.incrementAndGet());
+    String receiptHash = "9".repeat(64);
+
+    var prepared = signer.signParallel(
+        command,
+        REGISTRY_BINDING,
+        TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.prepare());
+    var executed = signer.signParallel(
+        command,
+        REGISTRY_BINDING,
+        TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.execute(receiptHash));
+    ObjectNode prepareClaims = decode(prepared.compactJws().split("\\.", -1)[1]);
+    ObjectNode executeClaims = decode(executed.compactJws().split("\\.", -1)[1]);
+
+    assertThat(prepareClaims.path("parallel_phase").asText()).isEqualTo("PREPARE");
+    assertThat(prepareClaims.has("parallel_admission_receipt_sha256")).isFalse();
+    assertThat(executeClaims.path("parallel_phase").asText()).isEqualTo("EXECUTE");
+    assertThat(executeClaims.path("parallel_admission_receipt_sha256").asText())
+        .isEqualTo(receiptHash);
+    assertThat(prepareClaims.path("jti").asText())
+        .isNotEqualTo(executeClaims.path("jti").asText());
   }
 
   private static Es256TargetE2EGraphEnvelopeSigner signer(String keyId) {

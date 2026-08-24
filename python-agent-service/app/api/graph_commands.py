@@ -19,9 +19,11 @@ from app.api.graph_stream_service import (
 )
 from app.api.intake_parallel_stream import (
     OpenedParallelFrameStream,
+    ParallelFrameAdmissionReceipt,
     ParallelFrameStreamProtocolError,
     ParallelFrameStreamProtocolValidator,
     ParallelIntakeFrameStreamService,
+    decode_parallel_admission_receipt_header,
     encode_parallel_frame_authority_header,
     encode_parallel_frame_event,
     stream_parallel_frame_ndjson,
@@ -87,6 +89,8 @@ GRAPH_STREAM_PATH = "/internal/graphs/commands/stream"
 GRAPH_RECONCILE_PATH = "/internal/graphs/commands/reconcile"
 TARGET_E2E_RECONCILE_PATH = "/internal/graphs/target-e2e/commands/reconcile"
 TARGET_E2E_PROPOSAL_SOURCE_PATH = "/internal/graphs/target-e2e/commands/proposal-source"
+_PARALLEL_PHASE_HEADER = "x-intake-parallel-phase"
+_PARALLEL_ADMISSION_HEADER = "x-intake-parallel-admission"
 _TERMINAL_EVENTS = frozenset({"attempt_aborted", "final", "error"})
 _STABLE_INTAKE_ERROR_CODE_PATTERN = re.compile(r"^INTAKE_[A-Z0-9_]{1,120}$")
 _SAFE_ERROR_SITE_MODULE_PATTERN = re.compile(
@@ -179,6 +183,16 @@ class TargetE2EInvocationEnvelopeVerifierPort(Protocol):
         token: str,
         envelope: TargetE2EGraphCommandEnvelope,
         transport_identity: TransportIdentity,
+    ) -> VerifiedTargetE2EInvocation: ...
+
+    def verify_parallel_envelope(
+        self,
+        *,
+        token: str,
+        envelope: TargetE2EGraphCommandEnvelope,
+        transport_identity: TransportIdentity,
+        phase: str,
+        admission_receipt_sha256: str | None,
     ) -> VerifiedTargetE2EInvocation: ...
 
 
@@ -465,16 +479,63 @@ def create_graph_commands_router(
             _log_safe_failure("target-E2E command envelope decoding", error)
             return _error_response(500, "GRAPH_STREAM_INTERNAL_ERROR", False)
 
+        parallel_phase: str | None = None
+        parallel_receipt: ParallelFrameAdmissionReceipt | None = None
         try:
-            verified = verifier.verify_envelope(
-                token=token,
-                envelope=envelope,
-                transport_identity=transport_identity,
-            )
+            if envelope.command.is_parallel_intake_command:
+                phase_values = request.headers.getlist(_PARALLEL_PHASE_HEADER)
+                admission_values = request.headers.getlist(_PARALLEL_ADMISSION_HEADER)
+                if len(phase_values) != 1 or phase_values[0] not in {"PREPARE", "EXECUTE"}:
+                    raise InvocationEnvelopeError(
+                        "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                    )
+                parallel_phase = phase_values[0]
+                if parallel_phase == "PREPARE":
+                    if admission_values:
+                        raise InvocationEnvelopeError(
+                            "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                        )
+                else:
+                    if len(admission_values) != 1:
+                        raise InvocationEnvelopeError(
+                            "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                        )
+                    parallel_receipt = decode_parallel_admission_receipt_header(
+                        admission_values[0]
+                    )
+                verified = verifier.verify_parallel_envelope(
+                    token=token,
+                    envelope=envelope,
+                    transport_identity=transport_identity,
+                    phase=parallel_phase,
+                    admission_receipt_sha256=(
+                        parallel_receipt.receipt_sha256
+                        if parallel_receipt is not None
+                        else None
+                    ),
+                )
+            else:
+                if request.headers.getlist(_PARALLEL_PHASE_HEADER) or request.headers.getlist(
+                    _PARALLEL_ADMISSION_HEADER
+                ):
+                    raise InvocationEnvelopeError(
+                        "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                    )
+                verified = verifier.verify_envelope(
+                    token=token,
+                    envelope=envelope,
+                    transport_identity=transport_identity,
+                )
             if not isinstance(verified, VerifiedTargetE2EInvocation):
                 raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
         except InvocationEnvelopeError as error:
             return _error_response(401, error.code, False)
+        except ParallelFrameStreamProtocolError:
+            return _error_response(
+                401,
+                "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED",
+                False,
+            )
         except Exception as error:
             _log_safe_failure("target-E2E invocation envelope verification", error)
             return _error_response(500, "GRAPH_STREAM_INTERNAL_ERROR", False)
@@ -501,10 +562,36 @@ def create_graph_commands_router(
                         "INTAKE_PARALLEL_RUNTIME_UNAVAILABLE",
                         False,
                     )
+                if parallel_phase == "PREPARE":
+                    authority = await parallel_service.prepare(
+                        command=command,
+                        verified_invocation=verified,
+                        expected_thread=expected_thread,
+                    )
+                    return JSONResponse(
+                        status_code=200,
+                        content={"schema_version": "intake.parallel-prepared.v1"},
+                        headers={
+                            **_NO_STORE_HEADERS,
+                            "X-Agent-Run-Id": command.logical_run_id,
+                            "X-Agent-Stream-Protocol": "agent-stream.v4",
+                            "X-Intake-Frame-Set-Id": authority.frame_set_id,
+                            "X-Intake-Parallel-Authority": (
+                                encode_parallel_frame_authority_header(authority)
+                            ),
+                            "X-Graph-Execution-Lane": envelope.execution_lane,
+                            "X-Graph-Activation-Id": envelope.activation_id,
+                        },
+                    )
+                if parallel_receipt is None:
+                    raise ParallelFrameStreamProtocolError(
+                        "parallel execution admission receipt is absent"
+                    )
                 parallel_opened = await parallel_service.open_stream(
                     command=command,
                     verified_invocation=verified,
                     expected_thread=expected_thread,
+                    admission_receipt=parallel_receipt,
                 )
                 authority = parallel_opened.authority
                 if (

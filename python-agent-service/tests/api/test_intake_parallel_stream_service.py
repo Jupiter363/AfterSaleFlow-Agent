@@ -11,7 +11,10 @@ import pytest
 from app.api.graph_stream_service import GraphStreamAdmissionGate
 from app.api.intake_parallel_stream import (
     ExpectedParallelFrame,
+    ParallelFrameAdmissionLane,
+    ParallelFrameAdmissionReceipt,
     ParallelFrameStreamAuthority,
+    parallel_frame_authority_sha256,
 )
 from app.api.intake_parallel_stream_service import (
     GatewayBackedParallelIntakeFrameStreamService,
@@ -216,6 +219,7 @@ async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for
         command=gateway.execution.admission.command,
         verified_invocation=object(),
         expected_thread=object(),
+        admission_receipt=_admission_receipt(gateway.execution.admission.command),
     )
     iterator = opened.events
 
@@ -292,6 +296,7 @@ async def test_cached_technical_completion_replays_without_acquire_or_model(
         command=gateway.execution.admission.command,
         verified_invocation=object(),
         expected_thread=object(),
+        admission_receipt=_admission_receipt(gateway.execution.admission.command),
     )
 
     assert [event async for event in opened.events] == list(cached_events)
@@ -305,6 +310,7 @@ def _execution() -> Any:
     command = SimpleNamespace(
         logical_run_id=RUN_ID,
         attempt_id=ATTEMPT_ID,
+        request_hash="f" * 64,
     )
     return SimpleNamespace(
         admission=SimpleNamespace(command=command),
@@ -347,6 +353,29 @@ def _authority() -> ParallelFrameStreamAuthority:
             )
             for request in _requests()
         ),
+    )
+
+
+def _admission_receipt(command: Any) -> ParallelFrameAdmissionReceipt:
+    authority = _authority()
+    return ParallelFrameAdmissionReceipt(
+        request_hash=command.request_hash,
+        frame_set_id=authority.frame_set_id,
+        run_id=authority.run_id,
+        attempt_id=authority.attempt_id,
+        java_receipt_id="FRAME_SET_RECEIPT_V4_1",
+        authority_sha256=parallel_frame_authority_sha256(authority),
+        lanes=tuple(
+            ParallelFrameAdmissionLane(
+                frame_type=frame.frame_type,
+                generation=frame.generation,
+                frame_id=frame.frame_id,
+                action="RUN",
+                next_local_index=0,
+            )
+            for frame in authority.frames
+        ),  # type: ignore[arg-type]
+        receipt_sha256="e" * 64,
     )
 
 

@@ -17,7 +17,13 @@ from app.config import (
     GraphTargetE2ERuntimeContextSettings,
 )
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
-from app.contracts.v1.models import ExecutionMetadata, RoomGraphCommand, Usage
+from app.contracts.v1.models import (
+    ExecutionMetadata,
+    PARALLEL_INTAKE_AGENT_PROFILE_ID,
+    PARALLEL_INTAKE_OUTPUT_SCHEMA,
+    RoomGraphCommand,
+    Usage,
+)
 from app.graph_runtime.checkpoint import TerminalResultMaterializer
 from app.graph_runtime.errors import GraphContractError, GraphThreadBindingError
 from app.graph_runtime.gateway import GraphCommandGateway
@@ -79,12 +85,12 @@ def _command() -> RoomGraphCommand:
     values = {**vector["input"]}
     values.update(
         {
-        "graph_key": "all-rooms.target-e2e.v1",
-            "graph_version": "target-e2e-graph.2026-07-27.1",
-            "checkpoint_schema_version": "target-e2e-checkpoint.v1",
+            "graph_key": "all-rooms.target-e2e.v2",
+            "graph_version": "target-e2e-graph.2026-08-18.1",
+            "checkpoint_schema_version": "target-e2e-checkpoint.v2",
             "invocation_context": {
                 **values["invocation_context"],
-                "output_schema_version": "target-e2e-room-proposal-source.v1",
+                "output_schema_version": "target-e2e-room-proposal-source.v2",
             },
         }
     )
@@ -197,6 +203,31 @@ def _command_envelope(command: RoomGraphCommand) -> TargetE2EGraphCommandEnvelop
     )
 
 
+def _parallel_command() -> RoomGraphCommand:
+    value = _command().model_dump(mode="json", exclude_none=True)
+    value.update(
+        {
+            "room_id": "ROOM_PARALLEL_SECURITY_1",
+            "event_ref": {
+                "artifact_id": "intake.event.parallel-security-1",
+                "schema_version": "intake-turn-event.v2",
+                "uri": "urn:intake:event:parallel-security-1",
+                "sha256": "e" * 64,
+                "size_bytes": 128,
+            },
+        }
+    )
+    value["invocation_context"].update(
+        {
+            "agent_profile_id": PARALLEL_INTAKE_AGENT_PROFILE_ID,
+            "output_schema_version": PARALLEL_INTAKE_OUTPUT_SCHEMA,
+        }
+    )
+    value["retry_budget"]["provider_attempts_remaining"] = 6
+    value["request_hash"] = canonical_sha256_omitting(value, "request_hash")
+    return RoomGraphCommand.model_validate(value)
+
+
 def _command_token(
     key: ec.EllipticCurvePrivateKey,
     command: RoomGraphCommand,
@@ -252,6 +283,102 @@ def test_runtime_projection_and_command_credential_are_distinct() -> None:
 
     assert verified.authority.activation_id == ACTIVATION_ID
     assert verified.room_fencing_token == 11
+
+
+def test_parallel_prepare_and_execute_claims_are_strictly_discriminated() -> None:
+    key = ec.generate_private_key(ec.SECP256R1())
+    command = _parallel_command()
+    envelope = _command_envelope(command)
+    verifier = TargetE2EInvocationVerifier(
+        key_resolver=_Resolver(key.public_key()),
+        authority=_authority(),
+        now=lambda: NOW,
+    )
+    transport = TransportIdentity("java-api-service", True, "e" * 64)
+    receipt_hash = "9" * 64
+
+    prepared = verifier.verify_parallel_envelope(
+        token=_command_token(key, command, parallel_phase="PREPARE"),
+        envelope=envelope,
+        transport_identity=transport,
+        phase="PREPARE",
+        admission_receipt_sha256=None,
+    )
+    executed = verifier.verify_parallel_envelope(
+        token=_command_token(
+            key,
+            command,
+            jti="candidate-command-jti-2",
+            parallel_phase="EXECUTE",
+            parallel_admission_receipt_sha256=receipt_hash,
+        ),
+        envelope=envelope,
+        transport_identity=transport,
+        phase="EXECUTE",
+        admission_receipt_sha256=receipt_hash,
+    )
+
+    assert prepared.claims.parallel_phase == "PREPARE"
+    assert executed.claims.parallel_admission_receipt_sha256 == receipt_hash
+    with pytest.raises(InvocationEnvelopeError, match="DELIVERY_BINDING_MISMATCH"):
+        verifier.verify_envelope(
+            token=_command_token(key, command, parallel_phase="PREPARE"),
+            envelope=envelope,
+            transport_identity=transport,
+        )
+    with pytest.raises(InvocationEnvelopeError, match="DELIVERY_BINDING_MISMATCH"):
+        verifier.verify_parallel_envelope(
+            token=_command_token(
+                key,
+                command,
+                jti="candidate-command-jti-3",
+                parallel_phase="EXECUTE",
+                parallel_admission_receipt_sha256=receipt_hash,
+            ),
+            envelope=envelope,
+            transport_identity=transport,
+            phase="EXECUTE",
+            admission_receipt_sha256="8" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    ("claims", "phase", "request_receipt_hash"),
+    [
+        (
+            {
+                "parallel_phase": "PREPARE",
+                "parallel_admission_receipt_sha256": "9" * 64,
+            },
+            "PREPARE",
+            None,
+        ),
+        ({"parallel_phase": "EXECUTE"}, "EXECUTE", "9" * 64),
+    ],
+)
+def test_parallel_phase_and_receipt_hash_must_form_an_exact_pair(
+    claims: dict[str, Any],
+    phase: str,
+    request_receipt_hash: str | None,
+) -> None:
+    key = ec.generate_private_key(ec.SECP256R1())
+    command = _parallel_command()
+    verifier = TargetE2EInvocationVerifier(
+        key_resolver=_Resolver(key.public_key()),
+        authority=_authority(),
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(InvocationEnvelopeError, match="CLAIMS_REJECTED"):
+        verifier.verify_parallel_envelope(
+            token=_command_token(key, command, **claims),
+            envelope=_command_envelope(command),
+            transport_identity=TransportIdentity(
+                "java-api-service", True, "e" * 64
+            ),
+            phase=phase,  # type: ignore[arg-type]
+            admission_receipt_sha256=request_receipt_hash,
+        )
     with pytest.raises(InvocationEnvelopeError, match="HEADER_REJECTED"):
         InvocationEnvelopeVerifier(
             key_resolver=_Resolver(key.public_key()),
@@ -495,7 +622,7 @@ def test_candidate_terminal_materializer_atomically_binds_proposal_and_result_en
         code_build_id="candidate-build-1",
     )
     source = TargetE2ERoomProposalSource(
-        schema_version="target-e2e-room-proposal-source.v1",
+        schema_version="target-e2e-room-proposal-source.v2",
         room_type="INTAKE",
         proposal=TargetE2ERoomProposal(
             schema_version="target-e2e-intake-proposal.v1",

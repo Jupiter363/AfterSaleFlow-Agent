@@ -102,6 +102,24 @@ public final class Es256TargetE2EGraphEnvelopeSigner implements TargetE2EGraphEn
   public SignedEnvelope sign(
       TargetE2EGraphCommandEnvelope envelope,
       GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding) {
+    return signInternal(envelope, expectedRegistryBinding, null);
+  }
+
+  @Override
+  public SignedEnvelope signParallel(
+      TargetE2EGraphCommandEnvelope envelope,
+      GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding,
+      ParallelDeliveryBinding deliveryBinding) {
+    return signInternal(
+        envelope,
+        expectedRegistryBinding,
+        Objects.requireNonNull(deliveryBinding, "deliveryBinding"));
+  }
+
+  private SignedEnvelope signInternal(
+      TargetE2EGraphCommandEnvelope envelope,
+      GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding,
+      ParallelDeliveryBinding deliveryBinding) {
     Objects.requireNonNull(envelope, "envelope");
     Objects.requireNonNull(expectedRegistryBinding, "expectedRegistryBinding");
     codec.encodeCommand(envelope);
@@ -128,7 +146,14 @@ public final class Es256TargetE2EGraphEnvelopeSigner implements TargetE2EGraphEn
     header.put("alg", "ES256");
     header.put("kid", keyId);
     header.put("typ", PROTECTED_HEADER_TYPE);
-    ObjectNode claims = claims(envelope, expectedRegistryBinding, jti, issuedAt, expiresAt);
+    ObjectNode claims =
+        claims(
+            envelope,
+            expectedRegistryBinding,
+            jti,
+            issuedAt,
+            expiresAt,
+            deliveryBinding);
     String encodedHeader = encodeJson(header);
     String encodedClaims = encodeJson(claims);
     byte[] signingInput = (encodedHeader + "." + encodedClaims).getBytes(StandardCharsets.US_ASCII);
@@ -151,7 +176,8 @@ public final class Es256TargetE2EGraphEnvelopeSigner implements TargetE2EGraphEn
       GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding,
       String jti,
       Instant issuedAt,
-      Instant expiresAt) {
+      Instant expiresAt,
+      ParallelDeliveryBinding deliveryBinding) {
     RoomGraphCommand command = envelope.command();
     ObjectNode commandJson = mapper.valueToTree(command);
     ObjectNode actorScope = requiredObject(commandJson, "actor_scope");
@@ -199,6 +225,14 @@ public final class Es256TargetE2EGraphEnvelopeSigner implements TargetE2EGraphEn
     String agentSessionId = agentSessions.resolve(command);
     if (agentSessionId != null) {
       claims.put("agent_session_id", identifier(agentSessionId, "agentSessionId"));
+    }
+    if (deliveryBinding != null) {
+      claims.put("parallel_phase", deliveryBinding.phase());
+      if (deliveryBinding.admissionReceiptSha256() != null) {
+        claims.put(
+            "parallel_admission_receipt_sha256",
+            deliveryBinding.admissionReceiptSha256());
+      }
     }
     return claims;
   }

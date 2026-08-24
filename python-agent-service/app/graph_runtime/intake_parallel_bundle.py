@@ -6,13 +6,15 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from app.contracts.v1.codec import canonical_sha256
+from app.contracts.v1.models import RoomGraphCommand
 from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.gateway import GatewayExecution
 from app.graph_runtime.intake_parallel_context import (
     ParallelTurnModelMaterial,
-    build_parallel_turn_model_material,
+    build_parallel_turn_model_material_from_command,
 )
 from app.graph_runtime.intake_parallel_runtime import require_parallel_intake_execution
+from app.graph_runtime.identity import ThreadIdentity
 from app.graphs.intake.parallel_contracts import (
     FRAME_OUTPUT_SCHEMA,
     FRAME_PROMPT_PROFILE,
@@ -61,6 +63,56 @@ def build_parallel_intake_production_bundle(
     require_parallel_intake_execution(execution)
     if not isinstance(prompts, PromptRepository):
         raise GraphContractError("parallel Intake prompt repository is not production-owned")
+    return _build_parallel_intake_bundle(
+        command=execution.admission.command,
+        thread=execution.admission.thread,
+        snapshot_context=snapshot_context,
+        event_context=event_context,
+        prompts=prompts,
+    )
+
+
+def build_parallel_intake_prepared_bundle(
+    command: RoomGraphCommand,
+    *,
+    thread: ThreadIdentity,
+    snapshot_context: IntakeTurnContext,
+    event_context: IntakeTurnContext,
+    prompts: PromptRepository,
+) -> ParallelIntakeProductionBundle:
+    """Build the exact pre-provider authority without acquiring a Python execution lease."""
+
+    if (
+        not command.is_parallel_intake_command
+        or command.thread_id != thread.thread_id
+        or command.tenant_surrogate != thread.tenant_surrogate
+        or command.case_id != thread.case_id
+        or command.room_epoch != thread.room_epoch
+        or command.graph_key != thread.graph_key
+        or command.graph_version != thread.graph_version
+        or command.checkpoint_schema_version != thread.checkpoint_schema_version
+        or command.actor_scope.model_dump(mode="json") != thread.actor_scope.to_json()
+    ):
+        raise GraphContractError("parallel Intake prepared authority differs from its thread")
+    return _build_parallel_intake_bundle(
+        command=command,
+        thread=thread,
+        snapshot_context=snapshot_context,
+        event_context=event_context,
+        prompts=prompts,
+    )
+
+
+def _build_parallel_intake_bundle(
+    *,
+    command: RoomGraphCommand,
+    thread: ThreadIdentity,
+    snapshot_context: IntakeTurnContext,
+    event_context: IntakeTurnContext,
+    prompts: PromptRepository,
+) -> ParallelIntakeProductionBundle:
+    if not isinstance(prompts, PromptRepository):
+        raise GraphContractError("parallel Intake prompt repository is not production-owned")
     instruction_packs = []
     for frame_type in FRAME_TYPES:
         node_name = FRAME_NODE_NAMES[frame_type]
@@ -74,13 +126,13 @@ def build_parallel_intake_production_bundle(
                 frame_prompt=frame_prompt,
             )
         )
-    material = build_parallel_turn_model_material(
-        execution,
+    material = build_parallel_turn_model_material_from_command(
+        command,
+        thread=thread,
         snapshot_context=snapshot_context,
         event_context=event_context,
         instruction_packs=tuple(instruction_packs),
     )
-    command = execution.admission.command
     actor = command.actor_scope
     context_hash = material.context_envelope.context_envelope_sha256
     frame_set_id = "IFS_" + canonical_sha256(
@@ -123,7 +175,8 @@ def build_parallel_intake_production_bundle(
     )
     contexts = {
         frame_type: _agent_context(
-            execution,
+            command,
+            thread,
             frame_type=frame_type,
             provider_attempts=provider_budgets[frame_type],
         )
@@ -168,19 +221,16 @@ def _frame_id(
 
 
 def _agent_context(
-    execution: GatewayExecution,
+    command: RoomGraphCommand,
+    thread: ThreadIdentity,
     *,
     frame_type: ParallelFrameType,
     provider_attempts: int,
 ) -> AgentInvocationContext:
-    command = execution.admission.command
-    record = execution.thread_record
-    if record is None or record.identity != execution.admission.thread:
-        raise GraphContractError("parallel Intake thread record is absent")
     actor = command.actor_scope
     invocation = command.invocation_context
     permission_level = "PARTY_USER" if actor.actor_role == "USER" else "PARTY_MERCHANT"
-    access_session_id = f"ACCESS_{record.identity.actor_scope_hash[:32]}"
+    access_session_id = f"ACCESS_{thread.actor_scope_hash[:32]}"
     invocation_id = "IFV_" + canonical_sha256(
         {
             "attempt_id": command.attempt_id,
@@ -211,7 +261,7 @@ def _agent_context(
             "permission_scopes": sorted(actor.capabilities),
             "agent_key": invocation.agent_profile_id,
             "agent_invocation_id": invocation_id,
-            "agent_session_id": record.identity.agent_session_id,
+            "agent_session_id": thread.agent_session_id,
             "conversation_scope": conversation_scope,
             "scope_type": "INTAKE_PARTY_PRIVATE",
             "allowed_actor_ids": [actor.actor_id],
@@ -236,5 +286,6 @@ def _agent_context(
 
 __all__ = [
     "ParallelIntakeProductionBundle",
+    "build_parallel_intake_prepared_bundle",
     "build_parallel_intake_production_bundle",
 ]

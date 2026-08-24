@@ -17,7 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.contracts.v1.codec import canonical_sha256_omitting, canonicalize
 from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.gateway import GatewayExecution
-from app.graph_runtime.identity import ThreadRecord
+from app.contracts.v1.models import RoomGraphCommand
+from app.graph_runtime.identity import ThreadIdentity, ThreadRecord
 from app.graph_runtime.intake_binding import (
     CanonicalIntakeProposal,
     INTAKE_EVENT_SCHEMA,
@@ -282,8 +283,42 @@ class JavaIntakeExchangeClient:
             or (reference != command.event_ref and reference != command.domain_snapshot_ref)
         ):
             raise GraphContractError("Intake loader received an object outside the exact command binding")
-        request = IntakePayloadLoadRequest(
+        return await self._load_bound(
+            command=command,
             authority=_authority(execution),
+            reference=reference,
+        )
+
+    async def load_bound(
+        self,
+        command: RoomGraphCommand,
+        *,
+        thread: ThreadIdentity,
+        object_ref: Any | None = None,
+    ) -> LoadedIntakePayload:
+        reference = object_ref or command.event_ref or command.domain_snapshot_ref
+        if (
+            reference is None
+            or (reference != command.event_ref and reference != command.domain_snapshot_ref)
+        ):
+            raise GraphContractError(
+                "Intake loader received an object outside the exact command binding"
+            )
+        return await self._load_bound(
+            command=command,
+            authority=_authority_from_thread(command, thread),
+            reference=reference,
+        )
+
+    async def _load_bound(
+        self,
+        *,
+        command: RoomGraphCommand,
+        authority: IntakeExchangeAuthority,
+        reference: Any,
+    ) -> LoadedIntakePayload:
+        request = IntakePayloadLoadRequest(
+            authority=authority,
             object_ref=IntakeExchangeObjectReference.model_validate(
                 reference.model_dump(mode="json")
             ),
@@ -470,7 +505,24 @@ def _authority(execution: GatewayExecution) -> IntakeExchangeAuthority:
     record = execution.thread_record
     if not isinstance(record, ThreadRecord) or record.identity != execution.admission.thread:
         raise GraphContractError("Intake exchange has no authoritative thread record")
-    identity = record.identity
+    return _authority_from_thread(command, record.identity)
+
+
+def _authority_from_thread(
+    command: RoomGraphCommand,
+    identity: ThreadIdentity,
+) -> IntakeExchangeAuthority:
+    if (
+        identity.thread_id != command.thread_id
+        or identity.tenant_surrogate != command.tenant_surrogate
+        or identity.case_id != command.case_id
+        or identity.room_type.value != command.room_type
+        or identity.room_epoch != command.room_epoch
+        or identity.graph_key != command.graph_key
+        or identity.graph_version != command.graph_version
+        or identity.checkpoint_schema_version != command.checkpoint_schema_version
+    ):
+        raise GraphContractError("Intake exchange thread authority differs from the command")
     scope = command.actor_scope
     if identity.actor_scope.to_json() != scope.model_dump(mode="json"):
         raise GraphContractError("Intake exchange actor authority differs from the thread")

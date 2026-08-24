@@ -14,6 +14,7 @@ from app.api.graph_stream_service import GraphStreamAdmissionGate
 from app.api.intake_parallel_stream import (
     ExpectedParallelFrame,
     OpenedParallelFrameStream,
+    ParallelFrameAdmissionReceipt,
     ParallelFrameStreamAuthority,
     ParallelFrameStreamProtocolError,
     ParallelFrameStreamProtocolValidator,
@@ -34,6 +35,7 @@ from app.graph_runtime.intake_binding import decode_authorized_intake_ingress
 from app.graph_runtime.intake_exchange import LoadedIntakePayload
 from app.graph_runtime.intake_parallel_bundle import (
     ParallelIntakeProductionBundle,
+    build_parallel_intake_prepared_bundle,
     build_parallel_intake_production_bundle,
 )
 from app.graph_runtime.intake_parallel_runtime import (
@@ -123,6 +125,14 @@ class _ParallelInputLoader(Protocol):
         object_ref: Any | None = None,
     ) -> LoadedIntakePayload: ...
 
+    async def load_bound(
+        self,
+        command: RoomGraphCommand,
+        *,
+        thread: ThreadIdentity,
+        object_ref: Any | None = None,
+    ) -> LoadedIntakePayload: ...
+
 
 class _StreamingTechnicalEventSink:
     """Validate and expose each lane independently while retaining its replay log."""
@@ -209,6 +219,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
         command: RoomGraphCommand,
         verified_invocation: VerifiedTargetE2EInvocation,
         expected_thread: ThreadIdentity,
+        admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> OpenedParallelFrameStream:
         token = await self._gate.enter()
         try:
@@ -235,6 +246,10 @@ class GatewayBackedParallelIntakeFrameStreamService:
                     bundle=bundle,
                     authority=authority,
                 )
+            admission_receipt.require_authority(
+                command=command,
+                authority=authority,
+            )
         except BaseException:
             await self._gate.leave(token)
             raise
@@ -242,6 +257,22 @@ class GatewayBackedParallelIntakeFrameStreamService:
             authority=authority,
             events=self._guarded(stream, token),
         )
+
+    async def prepare(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> ParallelFrameStreamAuthority:
+        if verified_invocation.request_hash != command.request_hash:
+            raise GraphContractError("parallel Intake preparation crossed invocation authority")
+        token = await self._gate.enter()
+        try:
+            bundle = await self._load_prepared_bundle(command, expected_thread)
+            return _authority_from_command_bundle(command, bundle)
+        finally:
+            await self._gate.leave(token)
 
     async def _acquire_new_execution(
         self,
@@ -310,6 +341,56 @@ class GatewayBackedParallelIntakeFrameStreamService:
         )
         return build_parallel_intake_production_bundle(
             execution,
+            snapshot_context=snapshot_context,
+            event_context=event_context,
+            prompts=self._prompts,
+        )
+
+    async def _load_prepared_bundle(
+        self,
+        command: RoomGraphCommand,
+        expected_thread: ThreadIdentity,
+    ) -> ParallelIntakeProductionBundle:
+        if command.domain_snapshot_ref is None or command.event_ref is None:
+            raise GraphContractError("parallel Intake command has no exact input pair")
+        snapshot_task = asyncio.create_task(
+            self._input_loader.load_bound(
+                command,
+                thread=expected_thread,
+                object_ref=command.domain_snapshot_ref,
+            ),
+            name="intake-parallel-prepare-snapshot",
+        )
+        event_task = asyncio.create_task(
+            self._input_loader.load_bound(
+                command,
+                thread=expected_thread,
+                object_ref=command.event_ref,
+            ),
+            name="intake-parallel-prepare-event",
+        )
+        snapshot_result, event_result = await asyncio.gather(
+            snapshot_task,
+            event_task,
+            return_exceptions=True,
+        )
+        if isinstance(snapshot_result, BaseException):
+            raise snapshot_result
+        if isinstance(event_result, BaseException):
+            raise event_result
+        snapshot_context = decode_authorized_intake_ingress(
+            command=command,
+            loaded=snapshot_result,
+            object_ref=command.domain_snapshot_ref,
+        )
+        event_context = decode_authorized_intake_ingress(
+            command=command,
+            loaded=event_result,
+            object_ref=command.event_ref,
+        )
+        return build_parallel_intake_prepared_bundle(
+            command,
+            thread=expected_thread,
             snapshot_context=snapshot_context,
             event_context=event_context,
             prompts=self._prompts,
@@ -525,7 +606,13 @@ def _authority_from_bundle(
     execution: GatewayExecution,
     bundle: ParallelIntakeProductionBundle,
 ) -> ParallelFrameStreamAuthority:
-    command = execution.admission.command
+    return _authority_from_command_bundle(execution.admission.command, bundle)
+
+
+def _authority_from_command_bundle(
+    command: RoomGraphCommand,
+    bundle: ParallelIntakeProductionBundle,
+) -> ParallelFrameStreamAuthority:
     frames = tuple(
         ExpectedParallelFrame(
             frame_type=request.frame_type,

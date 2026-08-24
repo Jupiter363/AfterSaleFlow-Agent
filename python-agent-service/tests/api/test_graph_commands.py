@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
@@ -29,12 +30,15 @@ from app.api.graph_commands import (
 from app.api.intake_parallel_stream import (
     ExpectedParallelFrame,
     OpenedParallelFrameStream,
+    ParallelFrameAdmissionReceipt,
     ParallelFrameStreamAuthority,
+    parallel_frame_authority_sha256,
 )
 from app.contracts.v1.codec import (
     ContractCodec,
     canonical_sha256,
     canonical_sha256_omitting,
+    canonicalize,
 )
 from app.contracts.v1.models import (
     AgentStreamEvent,
@@ -134,6 +138,9 @@ class FakeStreamService:
 
 class FakeParallelStreamService:
     def __init__(self, command: RoomGraphCommand) -> None:
+        self.prepare_calls: list[
+            tuple[RoomGraphCommand, VerifiedTargetE2EInvocation, ThreadIdentity]
+        ] = []
         self.calls: list[tuple[RoomGraphCommand, VerifiedInvocation, ThreadIdentity]] = []
         self.closed = False
         frames = tuple(
@@ -155,13 +162,25 @@ class FakeParallelStreamService:
             frames=frames,  # type: ignore[arg-type]
         )
 
+    async def prepare(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> ParallelFrameStreamAuthority:
+        self.prepare_calls.append((command, verified_invocation, expected_thread))
+        return self.authority
+
     async def open_stream(
         self,
         *,
         command: RoomGraphCommand,
         verified_invocation: VerifiedTargetE2EInvocation,
         expected_thread: ThreadIdentity,
+        admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> OpenedParallelFrameStream:
+        admission_receipt.require_authority(command=command, authority=self.authority)
         self.calls.append((command, verified_invocation, expected_thread))
 
         async def emit():
@@ -256,6 +275,16 @@ class TargetVerifier:
 
     def verify_envelope(self, **kwargs: Any) -> VerifiedTargetE2EInvocation:
         assert kwargs["envelope"] == self.envelope
+        return self.verified
+
+    def verify_parallel_envelope(self, **kwargs: Any) -> VerifiedTargetE2EInvocation:
+        assert kwargs["envelope"] == self.envelope
+        if kwargs["phase"] == "PREPARE":
+            assert kwargs["admission_receipt_sha256"] is None
+        else:
+            assert kwargs["phase"] == "EXECUTE"
+            assert isinstance(kwargs["admission_receipt_sha256"], str)
+            assert len(kwargs["admission_receipt_sha256"]) == 64
         return self.verified
 
 
@@ -737,6 +766,33 @@ def _parallel_command() -> RoomGraphCommand:
     return RoomGraphCommand.model_validate(value)
 
 
+def _parallel_admission_header(
+    command: RoomGraphCommand,
+    authority: ParallelFrameStreamAuthority,
+) -> str:
+    document: dict[str, Any] = {
+        "schema_version": "intake.parallel-admission-receipt.v1",
+        "request_hash": command.request_hash,
+        "frame_set_id": authority.frame_set_id,
+        "run_id": authority.run_id,
+        "attempt_id": authority.attempt_id,
+        "java_receipt_id": "FRAME_SET_RECEIPT_V4_1",
+        "authority_sha256": parallel_frame_authority_sha256(authority),
+        "lanes": [
+            {
+                "frame_type": frame.frame_type,
+                "generation": frame.generation,
+                "frame_id": frame.frame_id,
+                "action": "RUN",
+                "next_local_index": 0,
+            }
+            for frame in authority.frames
+        ],
+    }
+    document["receipt_sha256"] = canonical_sha256(document)
+    return base64.urlsafe_b64encode(canonicalize(document)).decode("ascii").rstrip("=")
+
+
 def test_target_exact_parallel_command_uses_only_parallel_technical_stream() -> None:
     command = _parallel_command()
     envelope = _target_envelope(command)
@@ -748,10 +804,33 @@ def test_target_exact_parallel_command_uses_only_parallel_technical_stream() -> 
         parallel_service=parallel,
     )
 
+    prepared = client.post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+            "X-Intake-Parallel-Phase": "PREPARE",
+        },
+    )
+
+    assert prepared.status_code == 200
+    assert prepared.json() == {"schema_version": "intake.parallel-prepared.v1"}
+    assert prepared.headers["x-intake-frame-set-id"] == parallel.authority.frame_set_id
+    assert len(parallel.prepare_calls) == 1
+    assert parallel.calls == []
+
     response = client.post(
         "/internal/graphs/target-e2e/commands/stream",
         content=envelope.model_dump_json(),
-        headers={"Authorization": "Bearer a.b.c", "Content-Type": "application/json"},
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+            "X-Intake-Parallel-Phase": "EXECUTE",
+            "X-Intake-Parallel-Admission": _parallel_admission_header(
+                command, parallel.authority
+            ),
+        },
     )
 
     assert response.status_code == 200
@@ -778,7 +857,11 @@ def test_target_exact_parallel_command_fails_closed_without_parallel_runtime() -
     response = _target_client(envelope=envelope, service=legacy).post(
         "/internal/graphs/target-e2e/commands/stream",
         content=envelope.model_dump_json(),
-        headers={"Authorization": "Bearer a.b.c", "Content-Type": "application/json"},
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+            "X-Intake-Parallel-Phase": "PREPARE",
+        },
     )
 
     assert response.status_code == 503
