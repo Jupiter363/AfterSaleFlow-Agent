@@ -78,7 +78,9 @@ class IntakeParallelFrameStagingPortTest {
                 "FRAME_RECEIPT_QUALITY_1",
                 true,
                 true,
-                AssemblyState.COLLECTING);
+                AssemblyState.COLLECTING,
+                8,
+                8);
 
         assertThat(receipt.exactThreeSealed()).isTrue();
         assertThat(receipt.assemblyState()).isEqualTo(AssemblyState.COLLECTING);
@@ -90,7 +92,9 @@ class IntakeParallelFrameStagingPortTest {
                         "FRAME_RECEIPT_QUALITY_1",
                         true,
                         true,
-                        AssemblyState.READY))
+                        AssemblyState.READY,
+                        8,
+                        8))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("does not itself grant READY");
     }

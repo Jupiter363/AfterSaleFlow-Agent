@@ -22,6 +22,7 @@ from app.api.intake_parallel_stream import (
     ParallelFrameStreamProtocolError,
     ParallelFrameStreamProtocolValidator,
     ParallelIntakeFrameStreamService,
+    encode_parallel_frame_authority_header,
     encode_parallel_frame_event,
     stream_parallel_frame_ndjson,
 )
@@ -595,6 +596,9 @@ def create_graph_commands_router(
                     "X-Agent-Run-Id": command.logical_run_id,
                     "X-Agent-Stream-Protocol": "agent-stream.v4",
                     "X-Intake-Frame-Set-Id": parallel_opened.authority.frame_set_id,
+                    "X-Intake-Parallel-Authority": (
+                        encode_parallel_frame_authority_header(parallel_opened.authority)
+                    ),
                     "X-Graph-Execution-Lane": envelope.execution_lane,
                     "X-Graph-Activation-Id": envelope.activation_id,
                 },

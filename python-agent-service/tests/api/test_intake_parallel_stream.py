@@ -225,6 +225,7 @@ def _expected(frame_type: ParallelFrameType) -> ExpectedParallelFrame:
         generation=1,
         frame_id=f"frame.{frame_type.lower()}",
         frame_model_input_sha256=str(suffix) * 64,
+        frame_prompt_sha256=str(suffix + 3) * 64,
         context_envelope_sha256=CONTEXT_HASH,
         model_context_view_sha256=MODEL_CONTEXT_HASH,
     )
@@ -244,6 +245,9 @@ def _started(
         generation=expected.generation if generation is None else generation,
         frame_id=expected.frame_id if frame_id is None else frame_id,
         frame_model_input_sha256=expected.frame_model_input_sha256,
+        frame_prompt_sha256=expected.frame_prompt_sha256,
+        context_envelope_sha256=expected.context_envelope_sha256,
+        model_context_view_sha256=expected.model_context_view_sha256,
     )
 
 

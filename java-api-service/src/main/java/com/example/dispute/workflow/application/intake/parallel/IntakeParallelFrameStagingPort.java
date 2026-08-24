@@ -421,7 +421,9 @@ public interface IntakeParallelFrameStagingPort {
             String frameReceiptId,
             boolean inserted,
             boolean exactThreeSealed,
-            AssemblyState assemblyState) {
+            AssemblyState assemblyState,
+            long globalSequence,
+            long durableHighWatermark) {
 
         public FrameSealReceipt {
             frameSetId = identifier(frameSetId, "frameSetId");
@@ -430,6 +432,12 @@ public interface IntakeParallelFrameStagingPort {
             resultId = identifier(resultId, "resultId");
             frameReceiptId = identifier(frameReceiptId, "frameReceiptId");
             assemblyState = Objects.requireNonNull(assemblyState, "assemblyState");
+            nonNegative(globalSequence, "globalSequence");
+            nonNegative(durableHighWatermark, "durableHighWatermark");
+            if (durableHighWatermark < globalSequence) {
+                throw new IllegalArgumentException(
+                        "durableHighWatermark cannot precede the sealed event");
+            }
             if (exactThreeSealed && assemblyState != AssemblyState.COLLECTING) {
                 throw new IllegalArgumentException(
                         "sealing three Frames does not itself grant READY authority");

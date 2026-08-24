@@ -233,7 +233,7 @@ class JdkGraphCommandHttpTransportTest {
                 .hasMessageContaining("positive");
         assertThatThrownBy(() -> request(
                         URI.create("http://localhost/stream"),
-                        GraphCommandHttpTransport.MAXIMUM_LINE_BYTES + 1,
+                        GraphCommandHttpTransport.MAXIMUM_PARALLEL_LINE_BYTES + 1,
                         GraphCommandHttpTransport.MAXIMUM_RESPONSE_BYTES))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("maximumLineBytes");

@@ -813,7 +813,9 @@ public final class JdbcIntakeParallelFrameStagingStore
                 frameReceiptId,
                 true,
                 exactThreeSealed,
-                AssemblyState.COLLECTING);
+                AssemblyState.COLLECTING,
+                globalSequence,
+                eventReceipt.durableHighWatermark());
     }
 
     private Map<String, Object> lockFrame(String frameSetId, FrameType frameType) {
@@ -1357,7 +1359,9 @@ public final class JdbcIntakeParallelFrameStagingStore
                 frameReceiptId,
                 false,
                 exactThreeSealed(command.frameSetId()),
-                AssemblyState.COLLECTING));
+                AssemblyState.COLLECTING,
+                number(ingress, "global_sequence"),
+                durableHighWatermark(command.runId(), command.attemptId())));
     }
 
     private String projectionSha256(

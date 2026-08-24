@@ -142,6 +142,7 @@ class FakeParallelStreamService:
                 generation=1,
                 frame_id=f"IFR_{index}",
                 frame_model_input_sha256=str(index) * 64,
+                frame_prompt_sha256=str(index + 3) * 64,
                 context_envelope_sha256="a" * 64,
                 model_context_view_sha256="b" * 64,
             )
@@ -174,6 +175,9 @@ class FakeParallelStreamService:
                         generation=frame.generation,
                         frame_id=frame.frame_id,
                         frame_model_input_sha256=frame.frame_model_input_sha256,
+                        frame_prompt_sha256=frame.frame_prompt_sha256,
+                        context_envelope_sha256=frame.context_envelope_sha256,
+                        model_context_view_sha256=frame.model_context_view_sha256,
                     )
                 for frame in self.authority.frames:
                     yield FrameInterrupted(

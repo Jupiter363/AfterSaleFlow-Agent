@@ -127,6 +127,132 @@ public record AgentStreamEventV4(
             String finalResultHash,
             String errorCode) {
 
+        public static Payload frameStartPayload(
+                String frameId,
+                FrameType frameType,
+                int generation,
+                String frameSetReceiptId,
+                String projectionRegistryVersion) {
+            return new Payload(
+                    frameId, frameType, generation, frameSetReceiptId,
+                    projectionRegistryVersion, DeliveryClass.DURABLE_CONTROL,
+                    null, null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null, null,
+                    null, null, null, null);
+        }
+
+        public static Payload projectionItemPayload(
+                String frameId,
+                FrameType frameType,
+                int generation,
+                int localIndex,
+                int nextLocalIndex,
+                String canonicalItemId,
+                String projectionKind,
+                String projectionPathId,
+                ValueKind valueKind,
+                String canonicalValueJson,
+                String publicText,
+                String itemSha256) {
+            return new Payload(
+                    frameId, frameType, generation, null, null,
+                    DeliveryClass.DURABLE_PREVIEW, localIndex, nextLocalIndex,
+                    canonicalItemId, projectionKind, projectionPathId, valueKind,
+                    canonicalValueJson, publicText, itemSha256, null, null, null,
+                    null, null, null, null, null, null, null, null, null, null,
+                    null, null);
+        }
+
+        public static Payload generationResetPayload(
+                String oldFrameId,
+                String newFrameId,
+                FrameType frameType,
+                int oldGeneration,
+                int newGeneration,
+                String reasonCode) {
+            return new Payload(
+                    null, // frameId
+                    frameType,
+                    null, // generation
+                    null, // frameSetReceiptId
+                    null, // projectionRegistryVersion
+                    DeliveryClass.DURABLE_CONTROL,
+                    null, // localIndex
+                    null, // nextLocalIndex
+                    null, // canonicalItemId
+                    null, // projectionKind
+                    null, // projectionPathId
+                    null, // valueKind
+                    null, // canonicalValueJson
+                    null, // publicText
+                    null, // itemSha256
+                    null, // frameRevision
+                    null, // projectionSha256
+                    oldFrameId,
+                    newFrameId,
+                    oldGeneration,
+                    newGeneration,
+                    reasonCode,
+                    null, // frameReceiptId
+                    null, // resultSha256
+                    null, // publicProjectionSha256
+                    null, // retryable
+                    null, // usage
+                    null, // finalReceiptId
+                    null, // finalResultHash
+                    null); // errorCode
+        }
+
+        public static Payload interruptedPayload(
+                String frameId,
+                FrameType frameType,
+                int generation,
+                int nextLocalIndex,
+                String reasonCode,
+                boolean retryable) {
+            return new Payload(
+                    frameId,
+                    frameType,
+                    generation,
+                    null, // frameSetReceiptId
+                    null, // projectionRegistryVersion
+                    DeliveryClass.DURABLE_CONTROL,
+                    null, // localIndex
+                    nextLocalIndex,
+                    null, // canonicalItemId
+                    null, // projectionKind
+                    null, // projectionPathId
+                    null, // valueKind
+                    null, // canonicalValueJson
+                    null, // publicText
+                    null, // itemSha256
+                    null, // frameRevision
+                    null, // projectionSha256
+                    null, // oldFrameId
+                    null, // newFrameId
+                    null, // oldGeneration
+                    null, // newGeneration
+                    reasonCode,
+                    null, // frameReceiptId
+                    null, // resultSha256
+                    null, // publicProjectionSha256
+                    retryable,
+                    null, // usage
+                    null, // finalReceiptId
+                    null, // finalResultHash
+                    null); // errorCode
+        }
+
+        public static Payload usagePayload(
+                FrameType frameType, int generation, Usage usage) {
+            return new Payload(
+                    null, frameType, generation, null, null,
+                    DeliveryClass.DURABLE_STAGING, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, required(usage, "usage"), null,
+                    null, null);
+        }
+
         public static Payload finalPayload(String receiptId, String resultHash) {
             return new Payload(
                     null, // frameId

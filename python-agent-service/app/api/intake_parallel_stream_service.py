@@ -365,6 +365,13 @@ class GatewayBackedParallelIntakeFrameStreamService:
                     generation=request.generation,
                     frame_id=request.frame_id,
                     frame_model_input_sha256=request.model_input.frame_model_input_sha256,
+                    frame_prompt_sha256=(
+                        request.model_input.instruction_pack.frame_prompt_sha256
+                    ),
+                    context_envelope_sha256=request.context_envelope_sha256,
+                    model_context_view_sha256=(
+                        request.model_input.common_model_context.model_context_view_sha256
+                    ),
                 )
                 validator.accept(started)
                 event_log.append(started)
@@ -525,6 +532,9 @@ def _authority_from_bundle(
             generation=request.generation,
             frame_id=request.frame_id,
             frame_model_input_sha256=request.model_input.frame_model_input_sha256,
+            frame_prompt_sha256=(
+                request.model_input.instruction_pack.frame_prompt_sha256
+            ),
             context_envelope_sha256=request.context_envelope_sha256,
             model_context_view_sha256=(
                 request.model_input.common_model_context.model_context_view_sha256
@@ -579,6 +589,7 @@ def _decode_cached_completion(
                     generation=starts[frame_type].generation,
                     frame_id=starts[frame_type].frame_id,
                     frame_model_input_sha256=(starts[frame_type].frame_model_input_sha256),
+                    frame_prompt_sha256=starts[frame_type].frame_prompt_sha256,
                     context_envelope_sha256=(seals[frame_type].context_envelope_sha256),
                     model_context_view_sha256=(seals[frame_type].model_context_view_sha256),
                 )

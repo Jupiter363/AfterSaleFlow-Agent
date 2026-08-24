@@ -41,9 +41,15 @@ class _FakeModelContext:
 
 
 @dataclass(frozen=True)
+class _FakeInstructionPack:
+    frame_prompt_sha256: str = "c" * 64
+
+
+@dataclass(frozen=True)
 class _FakeModelInput:
     frame_model_input_sha256: str
     common_model_context: _FakeModelContext = _FakeModelContext()
+    instruction_pack: _FakeInstructionPack = _FakeInstructionPack()
 
 
 @dataclass(frozen=True)
@@ -255,6 +261,9 @@ async def test_cached_technical_completion_replays_without_acquire_or_model(
             generation=1,
             frame_id=expected.frame_id,
             frame_model_input_sha256=expected.frame_model_input_sha256,
+            frame_prompt_sha256=expected.frame_prompt_sha256,
+            context_envelope_sha256=expected.context_envelope_sha256,
+            model_context_view_sha256=expected.model_context_view_sha256,
         )
         for expected in authority.frames
     )
@@ -332,6 +341,7 @@ def _authority() -> ParallelFrameStreamAuthority:
                 generation=request.generation,
                 frame_id=request.frame_id,
                 frame_model_input_sha256=request.model_input.frame_model_input_sha256,
+                frame_prompt_sha256=request.model_input.instruction_pack.frame_prompt_sha256,
                 context_envelope_sha256=CONTEXT_HASH,
                 model_context_view_sha256=MODEL_CONTEXT_HASH,
             )

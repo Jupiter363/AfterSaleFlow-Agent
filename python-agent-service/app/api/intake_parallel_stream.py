@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 import json
@@ -38,6 +39,7 @@ class ExpectedParallelFrame:
     generation: int
     frame_id: str
     frame_model_input_sha256: str
+    frame_prompt_sha256: str
     context_envelope_sha256: str
     model_context_view_sha256: str
 
@@ -53,6 +55,7 @@ class ExpectedParallelFrame:
                 or any(character not in "0123456789abcdef" for character in value)
                 for value in (
                     self.frame_model_input_sha256,
+                    self.frame_prompt_sha256,
                     self.context_envelope_sha256,
                     self.model_context_view_sha256,
                 )
@@ -188,6 +191,10 @@ class ParallelFrameStreamProtocolValidator:
             or event.generation != state.generation
             or event.frame_id != state.frame_id
             or event.frame_model_input_sha256 != state.expected.frame_model_input_sha256
+            or event.frame_prompt_sha256 != state.expected.frame_prompt_sha256
+            or event.context_envelope_sha256 != state.expected.context_envelope_sha256
+            or event.model_context_view_sha256
+            != state.expected.model_context_view_sha256
         ):
             raise ParallelFrameStreamProtocolError("parallel Frame start is invalid")
         state.started = True
@@ -304,6 +311,34 @@ def encode_parallel_frame_event(
     return canonicalize(event.model_dump(mode="json", exclude_none=True)) + b"\n"
 
 
+def encode_parallel_frame_authority_header(
+    authority: ParallelFrameStreamAuthority,
+) -> str:
+    """Encode the exact-three pre-provider authority into one bounded response header."""
+
+    document: dict[str, object] = {
+        "schema_version": "intake.parallel-frame-stream-authority.v1",
+        "frame_set_id": authority.frame_set_id,
+        "run_id": authority.run_id,
+        "attempt_id": authority.attempt_id,
+        "frames": [
+            {
+                "frame_type": frame.frame_type,
+                "generation": frame.generation,
+                "frame_id": frame.frame_id,
+                "frame_model_input_sha256": frame.frame_model_input_sha256,
+                "frame_prompt_sha256": frame.frame_prompt_sha256,
+                "context_envelope_sha256": frame.context_envelope_sha256,
+                "model_context_view_sha256": frame.model_context_view_sha256,
+            }
+            for frame in authority.frames
+        ],
+    }
+    document["authority_sha256"] = canonical_sha256(document)
+    encoded = base64.urlsafe_b64encode(canonicalize(document)).decode("ascii")
+    return encoded.rstrip("=")
+
+
 async def stream_parallel_frame_ndjson(
     *,
     iterator: AsyncIterator[ParallelFrameTechnicalEvent],
@@ -334,6 +369,7 @@ __all__ = [
     "ParallelFrameStreamProtocolError",
     "ParallelFrameStreamProtocolValidator",
     "ParallelIntakeFrameStreamService",
+    "encode_parallel_frame_authority_header",
     "encode_parallel_frame_event",
     "stream_parallel_frame_ndjson",
 ]

@@ -13,6 +13,7 @@ public interface GraphCommandHttpTransport {
 
     int MAXIMUM_REQUEST_BODY_BYTES = 65_536;
     int MAXIMUM_LINE_BYTES = 32 * 1024;
+    int MAXIMUM_PARALLEL_LINE_BYTES = 1024 * 1024;
     int MAXIMUM_RESPONSE_BYTES = 4 * 1024 * 1024;
 
     /** Factory provenance. Arbitrary implementations receive only the unverified proof. */
@@ -66,7 +67,7 @@ public interface GraphCommandHttpTransport {
             if (timeout.isZero() || timeout.isNegative()) {
                 throw new IllegalArgumentException("graph command timeout must be positive");
             }
-            if (maximumLineBytes < 1 || maximumLineBytes > MAXIMUM_LINE_BYTES) {
+            if (maximumLineBytes < 1 || maximumLineBytes > MAXIMUM_PARALLEL_LINE_BYTES) {
                 throw new IllegalArgumentException("maximumLineBytes is invalid");
             }
             if (maximumResponseBytes < maximumLineBytes

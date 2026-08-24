@@ -210,6 +210,7 @@ class _FrameEvent(StrictParallelRuntimeModel):
     run_id: Identifier
     attempt_id: Identifier
     frame_type: ParallelFrameType
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class FrameStarted(_FrameEvent):
@@ -217,6 +218,9 @@ class FrameStarted(_FrameEvent):
     generation: int = Field(ge=1)
     frame_id: Identifier
     frame_model_input_sha256: Sha256
+    frame_prompt_sha256: Sha256
+    context_envelope_sha256: Sha256
+    model_context_view_sha256: Sha256
 
 
 class FrameProjectionItem(_FrameEvent):
@@ -891,6 +895,11 @@ def _frame_started(
         generation=generation,
         frame_id=frame_id,
         frame_model_input_sha256=request.model_input.frame_model_input_sha256,
+        frame_prompt_sha256=request.model_input.instruction_pack.frame_prompt_sha256,
+        context_envelope_sha256=request.context_envelope_sha256,
+        model_context_view_sha256=(
+            request.model_input.common_model_context.model_context_view_sha256
+        ),
     )
 
 
@@ -923,6 +932,7 @@ def _sealed_event(
     checkpoint_ref: str,
     checkpoint_sha256: str,
 ) -> FrameSealed:
+    completed_at = datetime.fromisoformat(str(state["completed_at"]))
     return FrameSealed(
         frame_set_id=request.frame_set_id,
         run_id=request.run_id,
@@ -941,7 +951,8 @@ def _sealed_event(
         public_projection_sha256=str(state["public_projection_sha256"]),
         next_local_index=len(state["canonical_projection_items"]),
         usage=FrameProviderUsage.model_validate(state["usage"]),
-        completed_at=datetime.fromisoformat(str(state["completed_at"])),
+        completed_at=completed_at,
+        occurred_at=completed_at,
     )
 
 
