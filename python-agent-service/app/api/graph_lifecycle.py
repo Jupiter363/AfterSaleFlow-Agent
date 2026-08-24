@@ -38,6 +38,7 @@ from app.api.graph_stream_service import (
     GraphRetainedCleanupError,
     GraphStreamAdmissionGate,
 )
+from app.api.intake_parallel_stream import ParallelIntakeFrameStreamService
 from app.config import Settings
 from app.contracts.v1.codec import ContractCodec
 from app.contracts.v1.models import AgentStreamEvent, GraphReconcileResponse, RoomGraphCommand
@@ -79,6 +80,7 @@ from app.graph_runtime.target_e2e_lifecycle import (
     VerifiedTargetE2ELifecycleReceipt,
 )
 from app.harness.prompt_composer import (
+    INTAKE_PARALLEL_FRAME_PROMPT_BUNDLES,
     PromptRepository,
     TARGET_E2E_PROMPT_BUNDLE_NODES,
 )
@@ -166,6 +168,11 @@ def _require_target_e2e_prompt_resources(
             configured.prompt_version,
             required_node_names=TARGET_E2E_PROMPT_BUNDLE_NODES,
         )
+    for prompt_profile_id, required_nodes in INTAKE_PARALLEL_FRAME_PROMPT_BUNDLES.items():
+        prompt_repository.require_prompt_bundle(
+            prompt_profile_id,
+            required_node_names=tuple(sorted(required_nodes)),
+        )
     if not observed:
         raise ValueError("target-E2E Prompt readiness requires an exact binding")
 
@@ -189,6 +196,19 @@ class ExecutorRegistryFactory(Protocol):
     ) -> ExactShadowExecutorRegistry: ...
 
 
+class ParallelIntakeStreamServiceFactory(Protocol):
+    """Build the V4 ROOM_MESSAGE runtime from the same process-owned kernel."""
+
+    def __call__(
+        self,
+        kernel: GraphExecutorKernel,
+        /,
+        *,
+        owner_id: str,
+        admission_gate: GraphStreamAdmissionGate,
+    ) -> ParallelIntakeFrameStreamService: ...
+
+
 @dataclass(frozen=True, slots=True)
 class GraphRuntimeBindings:
     """Trusted process-local dependencies that cannot be selected by a command body."""
@@ -196,6 +216,7 @@ class GraphRuntimeBindings:
     thread_identity_resolver: TrustedThreadIdentityResolver
     input_authorizer: ImmutableInputAuthorizer
     executor_registry_factory: ExecutorRegistryFactory
+    parallel_intake_stream_service_factory: ParallelIntakeStreamServiceFactory | None = None
     resource_opener: Callable[[], Awaitable[None]] | None = None
     resource_closer: Callable[[], Awaitable[None]] | None = None
     intake_infrastructure_preparer: Callable[[], Awaitable[None]] | None = None
@@ -227,6 +248,7 @@ class GraphRuntimeInstance(Protocol):
     execution_verifier: InvocationEnvelopeVerifier
     reconciliation_verifier: ReconciliationEnvelopeVerifier
     stream_service: GraphCommandStreamService
+    parallel_intake_stream_service: ParallelIntakeFrameStreamService | None
     reconciliation_service: GraphReconciliationService
     target_e2e_verifier: TargetE2EInvocationEnvelopeVerifierPort | None
 
@@ -272,6 +294,7 @@ class GraphApplicationRuntime:
         admission_gate: GraphStreamAdmissionGate,
         execution_verifier: InvocationEnvelopeVerifier,
         reconciliation_verifier: ReconciliationEnvelopeVerifier,
+        parallel_intake_stream_service: ParallelIntakeFrameStreamService | None = None,
         target_e2e_verifier: TargetE2EInvocationVerifier | None = None,
         mode: GraphGatewayMode = GraphGatewayMode.SHADOW,
         resource_closer: Callable[[], Awaitable[None]] | None = None,
@@ -283,6 +306,7 @@ class GraphApplicationRuntime:
         self._security_runtime = security_runtime
         self._gateway = gateway
         self.stream_service = stream_service
+        self.parallel_intake_stream_service = parallel_intake_stream_service
         self.reconciliation_service = reconciliation_service
         self._admission_gate = admission_gate
         self.execution_verifier = execution_verifier
@@ -486,13 +510,12 @@ class GraphApplicationRuntime:
                 raise RuntimeError("active Graph runtime bindings were not assembled")
             if bindings.resource_opener is not None:
                 await bindings.resource_opener()
-            executors = bindings.executor_registry_factory(
-                GraphExecutorKernel(
-                    saver=checkpoint_runtime.saver,
-                    gateway=gateway,
-                    durable_bulkhead=durable_bulkhead,
-                )
+            kernel = GraphExecutorKernel(
+                saver=checkpoint_runtime.saver,
+                gateway=gateway,
+                durable_bulkhead=durable_bulkhead,
             )
+            executors = bindings.executor_registry_factory(kernel)
             if type(executors) is not ExactShadowExecutorRegistry:
                 raise TypeError(
                     "SHADOW Graph executor factory must return an exact executor registry"
@@ -507,6 +530,15 @@ class GraphApplicationRuntime:
                 owner_id=owner_id,
                 admission_gate=gate,
             )
+            parallel_intake_stream_service = (
+                bindings.parallel_intake_stream_service_factory(
+                    kernel,
+                    owner_id=owner_id,
+                    admission_gate=gate,
+                )
+                if bindings.parallel_intake_stream_service_factory is not None
+                else None
+            )
             reconciliation_service = GatewayBackedGraphReconciliationService(
                 gateway=gateway,
                 owner_id=owner_id,
@@ -519,6 +551,7 @@ class GraphApplicationRuntime:
                 security_runtime=security_runtime,
                 gateway=gateway,
                 stream_service=stream_service,
+                parallel_intake_stream_service=parallel_intake_stream_service,
                 reconciliation_service=reconciliation_service,
                 admission_gate=gate,
                 execution_verifier=InvocationEnvelopeVerifier(
@@ -771,6 +804,7 @@ class GraphRuntimeHandle:
         self._target_e2e_verifier = _RuntimeTargetE2EVerifier(self)
         self._reconciliation_verifier = _RuntimeReconciliationVerifier(self)
         self._stream_service = _RuntimeStreamService(self)
+        self._parallel_intake_stream_service = _RuntimeParallelIntakeStreamService(self)
         self._reconciliation_service = _RuntimeReconciliationService(self)
         self._target_e2e_lifecycle_binding = (
             _build_target_e2e_lifecycle_binding(settings)
@@ -808,6 +842,11 @@ class GraphRuntimeHandle:
             stream_service=self._stream_service,
             ready=lambda: self.ready,
             target_e2e_envelope_verifier=self._target_e2e_verifier,
+            parallel_intake_stream_service=(
+                self._parallel_intake_stream_service
+                if self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE
+                else None
+            ),
         )
 
     def reconciliation_endpoint_dependencies(
@@ -1062,6 +1101,27 @@ class _RuntimeStreamService:
         expected_thread: ThreadIdentity,
     ) -> AsyncIterator[AgentStreamEvent]:
         return await self._handle.require_runtime().stream_service.open_stream(
+            command=command,
+            verified_invocation=verified_invocation,
+            expected_thread=expected_thread,
+        )
+
+
+class _RuntimeParallelIntakeStreamService:
+    def __init__(self, handle: GraphRuntimeHandle) -> None:
+        self._handle = handle
+
+    async def open_stream(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> Any:
+        service = self._handle.require_runtime().parallel_intake_stream_service
+        if service is None:
+            raise GraphGatewayDisabledError("INTAKE_PARALLEL_RUNTIME_UNAVAILABLE")
+        return await service.open_stream(
             command=command,
             verified_invocation=verified_invocation,
             expected_thread=expected_thread,

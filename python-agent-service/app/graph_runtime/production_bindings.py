@@ -13,8 +13,12 @@ from app.api.graph_lifecycle import (
 )
 from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
+    GraphStreamAdmissionGate,
     ProviderRuntimeBinding,
     ShadowExecutorRegistration,
+)
+from app.api.intake_parallel_stream_service import (
+    GatewayBackedParallelIntakeFrameStreamService,
 )
 from app.agents.evidence_clerk.workflow import EVIDENCE_TURN_MODEL_NODE_NAME
 from app.agents.evidence_clerk.v2_workflow import EvidenceTurnWorkflowV2
@@ -54,6 +58,10 @@ from app.graph_runtime.intake_binding import require_exact_intake_binding
 from app.graph_runtime.intake_exchange import JavaIntakeExchangeClient
 from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
 from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
+from app.graphs.intake.parallel_graph import (
+    ParallelIntakeFrameOrchestrator,
+    compile_parallel_frame_graphs,
+)
 from app.graphs.hearing.contracts import HEARING_MODEL_NODE_PROMPTS
 from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.registry import VersionBinding
@@ -263,6 +271,8 @@ def build_graph_runtime_bindings(
     intake_exchange: JavaIntakeExchangeClient | None = None
     evidence_workflow: EvidenceTurnWorkflowV2 | None = None
     hearing_workflow: HearingFlowWorkflows | None = None
+    parallel_intake_prompts: PromptRepository | None = None
+    parallel_intake_model_runner: HarnessModelRunner | None = None
     target_uses_default_providers = (
         settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE"
         and target_e2e_provider_factory is None
@@ -284,6 +294,11 @@ def build_graph_runtime_bindings(
             java_service_secret=settings.java_service_secret,
         )
         if target_uses_default_providers:
+            parallel_intake_prompts = PromptRepository()
+            parallel_intake_model_runner = HarnessModelRunner(
+                llm=structured_client,
+                prompts=parallel_intake_prompts,
+            )
             evidence_workflow = _build_target_e2e_evidence_workflow(
                 settings=settings,
                 structured_client=structured_client,
@@ -397,10 +412,41 @@ def build_graph_runtime_bindings(
         ]
         return ExactShadowExecutorRegistry(registrations)
 
+    def parallel_intake_stream_service_factory(
+        kernel: GraphExecutorKernel,
+        *,
+        owner_id: str,
+        admission_gate: GraphStreamAdmissionGate,
+    ) -> GatewayBackedParallelIntakeFrameStreamService:
+        if (
+            not target_uses_default_providers
+            or intake_exchange is None
+            or structured_client is None
+            or parallel_intake_prompts is None
+            or parallel_intake_model_runner is None
+        ):
+            raise GraphContractError("parallel Intake production dependencies are incomplete")
+        return GatewayBackedParallelIntakeFrameStreamService(
+            gateway=kernel.gateway,
+            input_loader=intake_exchange,
+            prompts=parallel_intake_prompts,
+            orchestrator=ParallelIntakeFrameOrchestrator(
+                compile_parallel_frame_graphs(checkpointer=kernel.saver)
+            ),
+            model_runner=parallel_intake_model_runner,
+            provider=structured_client.governed_provider,
+            model=structured_client.governed_model,
+            owner_id=owner_id,
+            admission_gate=admission_gate,
+        )
+
     return GraphRuntimeBindings(
         thread_identity_resolver=resolver,
         input_authorizer=authorizer,
         executor_registry_factory=executor_registry_factory,
+        parallel_intake_stream_service_factory=(
+            parallel_intake_stream_service_factory if target_uses_default_providers else None
+        ),
         resource_opener=(
             open_http_resources
             if (

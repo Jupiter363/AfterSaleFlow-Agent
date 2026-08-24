@@ -129,6 +129,7 @@ def _empty_executor_registry_factory(
 def _bindings(
     *,
     executor_registry_factory: Any = _empty_executor_registry_factory,
+    parallel_intake_stream_service_factory: Any = None,
     resource_opener: Any = None,
     resource_closer: Any = None,
 ) -> GraphRuntimeBindings:
@@ -136,6 +137,7 @@ def _bindings(
         thread_identity_resolver=cast(Any, _ThreadResolver()),
         input_authorizer=cast(Any, _InputAuthorizer()),
         executor_registry_factory=executor_registry_factory,
+        parallel_intake_stream_service_factory=parallel_intake_stream_service_factory,
         resource_opener=resource_opener,
         resource_closer=resource_closer,
     )
@@ -764,6 +766,35 @@ async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
         assert kernel.durable_bulkhead is durable_bulkheads[0]
         return _registered_executors()
 
+    parallel_service = SimpleNamespace()
+
+    def parallel_service_factory(
+        kernel: GraphExecutorKernel,
+        *,
+        owner_id: str,
+        admission_gate: Any,
+    ) -> Any:
+        events.append("parallel_service_factory")
+        assert kernel.saver is saver
+        assert kernel.gateway is gateways[0]
+        assert kernel.durable_bulkhead is durable_bulkheads[0]
+        assert owner_id == "graph-replica:test-owner"
+        assert admission_gate is runtime_gate[0]
+        parallel_service._gate = admission_gate
+        parallel_service._owner_id = owner_id
+        return parallel_service
+
+    runtime_gate: list[Any] = []
+
+    original_gate = graph_lifecycle.GraphStreamAdmissionGate
+
+    def gate_factory() -> Any:
+        gate = original_gate()
+        runtime_gate.append(gate)
+        return gate
+
+    monkeypatch.setattr(graph_lifecycle, "GraphStreamAdmissionGate", gate_factory)
+
     async def open_http_resources() -> None:
         events.append("http_resources_open")
 
@@ -774,6 +805,7 @@ async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
         _shadow_settings(),
         _bindings(
             executor_registry_factory=executor_factory,
+            parallel_intake_stream_service_factory=parallel_service_factory,
             resource_opener=open_http_resources,
             resource_closer=close_http_resources,
         ),
@@ -785,6 +817,9 @@ async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
     assert runtime.reconciliation_service._owner_id == "graph-replica:test-owner"
     assert runtime.stream_service._gate is runtime.reconciliation_service._gate
     assert runtime.stream_service._gate is runtime._admission_gate
+    assert runtime.parallel_intake_stream_service is parallel_service
+    assert parallel_service._gate is runtime._admission_gate
+    assert parallel_service._owner_id == "graph-replica:test-owner"
     assert await runtime.close() is True
     assert events == [
         "checkpoint_open",
@@ -794,6 +829,7 @@ async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
         "security_open",
         "http_resources_open",
         "executor_factory",
+        "parallel_service_factory",
         "gate_start",
         "drain",
         "bulkhead_drain",
