@@ -73,6 +73,20 @@ class JdbcIntakeParallelAssemblyStoreContractTest {
                 .doesNotContain("update case_command");
     }
 
+    @Test
+    void terminalReaderJoinsTheCallerTransactionAndLocksCurrentV080Authority()
+            throws Exception {
+        String source = normalizedSource();
+
+        assertThat(source)
+                .contains("public readyauthority lockreadyforterminal")
+                .contains("@transactional(propagation = propagation.mandatory)")
+                .contains("for update of frame_set, authority")
+                .contains("current_binding_generation")
+                .contains("current_authority_version")
+                .contains("intake_parallel_ready_authority_stale");
+    }
+
     private static String normalizedSource() throws Exception {
         return Files.readString(SOURCE)
                 .replace("\r\n", "\n")

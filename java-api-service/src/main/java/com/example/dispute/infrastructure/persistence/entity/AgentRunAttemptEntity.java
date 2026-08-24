@@ -398,6 +398,50 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         updatedAt = completedAt;
     }
 
+    /**
+     * Binds the exact V4 FINAL sequence to RESULT_READY without inheriting V3's permissive
+     * high-watermark merge.
+     */
+    public void recordV4ResultReady(
+            ExecuteAgentRunResult result,
+            String serializedResult,
+            long expectedPreviousSequenceNo) {
+        requireIdentity(result.agentRunId(), result.attemptId(), result.attemptNo());
+        if (attemptNo != 1 || previousAttemptId != null || resetRequired || publicSequenceOffset != 0) {
+            throw new IllegalStateException(
+                    "agent-stream.v4 result-ready requires the single outer attempt");
+        }
+        if (!result.publicOutputEmitted()) {
+            throw new IllegalStateException(
+                    "agent-stream.v4 FINAL must be publicly durable before RESULT_READY");
+        }
+        long terminalSequence = Math.addExact(expectedPreviousSequenceNo, 1L);
+        requireEqual(result.lastSequenceNo(), terminalSequence, "lastSequenceNo");
+        if (attemptStatus == AgentRunAttemptStatus.RESULT_READY
+                || attemptStatus == AgentRunAttemptStatus.COMPLETED) {
+            requireEqual(lastSequenceNo, terminalSequence, "lastSequenceNo");
+            requireEqual(publicOutputEmitted, true, "publicOutputEmitted");
+            requireEqual(finalFrameObserved, true, "finalFrameObserved");
+            requireEqual(resultHash, result.resultHash(), "resultHash");
+            requireEqual(resultJson, serializedResult, "serializedResult");
+            requireEqual(
+                    completedAt == null ? null : completedAt.toInstant(),
+                    result.completedAt(),
+                    "completedAt");
+            return;
+        }
+        if (attemptStatus != AgentRunAttemptStatus.RUNNING) {
+            throw new IllegalStateException(
+                    "attempt cannot become V4 result-ready from " + attemptStatus);
+        }
+        requireEqual(lastSequenceNo, expectedPreviousSequenceNo, "lastSequenceNo");
+        requireEqual(finalFrameObserved, false, "finalFrameObserved");
+        recordResultReady(result, serializedResult);
+        requireEqual(lastSequenceNo, terminalSequence, "lastSequenceNo");
+        requireEqual(publicOutputEmitted, true, "publicOutputEmitted");
+        requireEqual(finalFrameObserved, true, "finalFrameObserved");
+    }
+
     public void recordFailure(
             AgentRunAttemptStatus status,
             String errorCode,

@@ -13,6 +13,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures;
 import com.example.dispute.workflow.activity.agent.AgentRunActivityContext;
 import com.example.dispute.workflow.activity.agent.AgentRunActivityContextProvider;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
@@ -172,6 +173,37 @@ class ExecuteAgentRunActivityTest {
 
         assertThat(result.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.COMPLETED);
         assertThat(result.recoveryAction()).isNull();
+        verify(gateway).execute(
+                eq(request),
+                eq(ExecutionMode.RECONCILE_ONLY),
+                any(),
+                any());
+    }
+
+    @Test
+    void parallelDurableResultReturnsWithoutASecondLedgerCommit() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        ExecuteAgentRunResult durable = AgentRunPersistenceFixtures.parallelIntakeResult(5);
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.requireAllocatedAttempt(request))
+                .thenReturn(parallelRunningAttempt(request, 4, true));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.RECONCILE_ONLY),
+                        any(),
+                        any()))
+                .thenReturn(new AgentRunExecutionGateway.Completion(
+                        durable.graphResult(),
+                        durable.lastSequenceNo(),
+                        durable.publicOutputEmitted(),
+                        durable));
+
+        ExecuteAgentRunResult result =
+                activity(ledger, gateway, () -> context(1)).execute(request);
+
+        assertThat(result).isSameAs(durable);
+        verify(ledger, never()).recordResultReady(any());
         verify(gateway).execute(
                 eq(request),
                 eq(ExecutionMode.RECONCILE_ONLY),
@@ -766,6 +798,33 @@ class ExecuteAgentRunActivityTest {
                 lastSequenceNo,
                 publicOutputEmitted,
                 true);
+    }
+
+    private static AgentRunLedger.Attempt parallelRunningAttempt(
+            ExecuteAgentRunRequest request,
+            long lastSequenceNo,
+            boolean publicOutputEmitted) {
+        return new AgentRunLedger.Attempt(
+                request.attemptId(),
+                request.agentRunId(),
+                request.attemptNo(),
+                AgentRunAttemptStatus.RUNNING,
+                publicOutputEmitted,
+                false,
+                lastSequenceNo,
+                null,
+                AgentRunPersistenceFixtures.STARTED_AT,
+                null,
+                0,
+                "agent-run-attempt-lineage.v1",
+                request.command().commandId(),
+                request.command().requestHash(),
+                request.logicalInputHash(),
+                "{}",
+                null,
+                false,
+                0,
+                null);
     }
 
     private static AgentRunLedger.Attempt durableFailureAttempt(

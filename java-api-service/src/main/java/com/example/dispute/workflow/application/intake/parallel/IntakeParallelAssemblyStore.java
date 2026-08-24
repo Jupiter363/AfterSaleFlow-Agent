@@ -26,6 +26,14 @@ public interface IntakeParallelAssemblyStore {
 
     Optional<ReadyArtifact> loadReady(ReadyLookup lookup);
 
+    /**
+     * Locks and reloads the immutable READY authority inside the caller transaction.
+     *
+     * <p>The caller must already own the AgentRun and attempt row locks. This method does not
+     * append a FINAL event, advance RESULT_READY, or write formal Intake business state.
+     */
+    ReadyAuthority lockReadyForTerminal(ReadyLookup lookup);
+
     record AssemblyLookup(
             String frameSetId,
             String runId,
@@ -289,6 +297,26 @@ public interface IntakeParallelAssemblyStore {
             attemptId = identifier(attemptId, "attemptId");
             commandId = identifier(commandId, "commandId");
             commandRequestSha256 = sha256(commandRequestSha256, "commandRequestSha256");
+        }
+    }
+
+    record ReadyAuthority(
+            String frameSetId,
+            AssemblyState state,
+            long frameSetVersion,
+            Instant readyAt,
+            ReadyArtifact artifact) {
+
+        public ReadyAuthority {
+            frameSetId = identifier(frameSetId, "frameSetId");
+            state = Objects.requireNonNull(state, "state");
+            if (state != AssemblyState.READY && state != AssemblyState.COMMITTED) {
+                throw new IllegalArgumentException(
+                        "terminal authority requires READY or COMMITTED");
+            }
+            nonNegative(frameSetVersion, "frameSetVersion");
+            readyAt = Objects.requireNonNull(readyAt, "readyAt");
+            artifact = Objects.requireNonNull(artifact, "artifact");
         }
     }
 

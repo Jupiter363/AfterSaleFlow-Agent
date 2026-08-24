@@ -115,6 +115,21 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                         completion.lastSequenceNo(), completion.publicOutputEmitted(), true));
             }
 
+            ExecuteAgentRunResult durableResult = completion.durableResult();
+            if (durableResult != null) {
+                if (!ExecuteAgentRunRequest.isParallelIntakeCommand(request.command())
+                        || !"agent-stream.v4".equals(request.streamProtocol())) {
+                    throw AgentRunExecutionException.failLogicalRun(
+                            "AGENT_RUN_DURABLE_RESULT_PROFILE_INVALID",
+                            "only the explicit parallel Intake lane may return a durable result",
+                            completion.lastSequenceNo(),
+                            completion.publicOutputEmitted(),
+                            null);
+                }
+                heartbeat.close();
+                return durableResult;
+            }
+
             RoomGraphResult graphResult = completion.graphResult();
             ExecuteAgentRunResult result = new ExecuteAgentRunResult(
                     ExecuteAgentRunResult.SCHEMA_VERSION,
@@ -560,6 +575,25 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RESULT_IDENTITY_MISMATCH",
                     "graph result identity does not match the command",
+                    completion.lastSequenceNo(),
+                    completion.publicOutputEmitted(),
+                    null);
+        }
+        ExecuteAgentRunResult durableResult = completion.durableResult();
+        if (durableResult != null
+                && (!request.agentRunId().equals(durableResult.agentRunId())
+                        || !request.logicalRunId().equals(durableResult.logicalRunId())
+                        || !request.attemptId().equals(durableResult.attemptId())
+                        || request.attemptNo() != durableResult.attemptNo()
+                        || durableResult.outcome() != ExecuteAgentRunResult.Outcome.COMPLETED
+                        || !result.equals(durableResult.graphResult())
+                        || !result.outputHash().equals(durableResult.resultHash())
+                        || completion.lastSequenceNo() != durableResult.lastSequenceNo()
+                        || completion.publicOutputEmitted()
+                                != durableResult.publicOutputEmitted())) {
+            throw AgentRunExecutionException.failLogicalRun(
+                    "AGENT_RUN_DURABLE_RESULT_MISMATCH",
+                    "durable result differs from the execution request or completion",
                     completion.lastSequenceNo(),
                     completion.publicOutputEmitted(),
                     null);

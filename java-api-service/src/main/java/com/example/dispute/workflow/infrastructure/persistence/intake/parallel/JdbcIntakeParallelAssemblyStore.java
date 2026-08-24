@@ -8,6 +8,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAs
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.FrameSetAuthority;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.PublishReady;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.ReadyArtifact;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.ReadyAuthority;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.ReadyLookup;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.ReadyReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.SealedFrameRecord;
@@ -197,6 +198,51 @@ public final class JdbcIntakeParallelAssemblyStore implements IntakeParallelAsse
                and frame_set.assembly_state in ('READY', 'COMMITTED')
             """;
 
+    private static final String LOCK_READY_FOR_TERMINAL =
+            """
+            select frame_set.frame_set_id, frame_set.assembly_state,
+                   frame_set.version as frame_set_version, frame_set.ready_at,
+                   frame_set.event_binding_id, frame_set.binding_generation,
+                   frame_set.authority_version,
+                   authority.current_binding_id,
+                   authority.current_generation as current_binding_generation,
+                   authority.authority_version as current_authority_version,
+                   frame_set.input_set_sha256,
+                   proposal.artifact_id as proposal_artifact_id,
+                   proposal.artifact_uri as proposal_uri,
+                   proposal.proposal_sha256, proposal.canonical_proposal_bytes,
+                   proposal.profile_manifest_id,
+                   graph.result_artifact_id, graph.result_ref,
+                   graph.graph_result_sha256, graph.canonical_graph_result_bytes,
+                   graph.canonical_command_envelope_bytes,
+                   graph.command_envelope_sha256,
+                   graph.canonical_proposal_source_bytes,
+                   graph.target_proposal_sha256,
+                   graph.canonical_result_envelope_bytes,
+                   graph.result_envelope_sha256, graph.checkpoint_ns,
+                   graph.registry_binding_sha256, graph.tool_policy_version
+              from intake_parallel_frame_set frame_set
+              join intake_parallel_proposal_artifact proposal
+                on proposal.artifact_id = frame_set.proposal_artifact_id
+               and proposal.frame_set_id = frame_set.frame_set_id
+               and proposal.input_set_sha256 = frame_set.input_set_sha256
+               and proposal.proposal_sha256 = frame_set.proposal_sha256
+              join intake_parallel_graph_result_artifact graph
+                on graph.result_artifact_id = frame_set.graph_result_artifact_id
+               and graph.frame_set_id = frame_set.frame_set_id
+               and graph.input_set_sha256 = frame_set.input_set_sha256
+               and graph.graph_result_sha256 = frame_set.graph_result_sha256
+              join case_intake_event_slot_authority authority
+                on authority.thread_registration_id = frame_set.thread_registration_id
+               and authority.logical_sequence = frame_set.logical_sequence
+             where frame_set.agent_run_id = :runId
+               and frame_set.agent_run_attempt_id = :attemptId
+               and frame_set.command_id = :commandId
+               and frame_set.command_request_sha256 = :commandRequestSha256
+               and frame_set.assembly_state in ('READY', 'COMMITTED')
+             for update of frame_set, authority
+            """;
+
     private final NamedParameterJdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final AgentPlatformContractCodec contractCodec;
@@ -304,6 +350,39 @@ public final class JdbcIntakeParallelAssemblyStore implements IntakeParallelAsse
         ReadyArtifact artifact = artifact(rows.getFirst());
         validateArtifact(artifact);
         return Optional.of(artifact);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public ReadyAuthority lockReadyForTerminal(ReadyLookup lookup) {
+        Objects.requireNonNull(lookup, "lookup");
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                LOCK_READY_FOR_TERMINAL, readyParameters(lookup));
+        if (rows.size() != 1) {
+            throw conflict(
+                    rows.isEmpty()
+                            ? "INTAKE_PARALLEL_READY_AUTHORITY_MISSING"
+                            : "INTAKE_PARALLEL_READY_AUTHORITY_AMBIGUOUS",
+                    "terminalization requires exactly one immutable READY authority");
+        }
+        Map<String, Object> row = rows.getFirst();
+        if (!text(row, "event_binding_id").equals(text(row, "current_binding_id"))
+                || number(row, "binding_generation")
+                        != number(row, "current_binding_generation")
+                || number(row, "authority_version")
+                        != number(row, "current_authority_version")) {
+            throw conflict(
+                    "INTAKE_PARALLEL_READY_AUTHORITY_STALE",
+                    "READY Frame set is not bound to the current Intake event slot");
+        }
+        ReadyArtifact artifact = artifact(row);
+        validateArtifact(artifact);
+        return new ReadyAuthority(
+                text(row, "frame_set_id"),
+                AssemblyState.valueOf(text(row, "assembly_state")),
+                number(row, "frame_set_version"),
+                instant(row, "ready_at"),
+                artifact);
     }
 
     private ExactThreeInputs inputs(List<Map<String, Object>> rows) {

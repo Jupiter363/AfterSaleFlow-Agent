@@ -13,6 +13,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAs
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.FrameSetAuthority;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.PublishReady;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.ReadyArtifact;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.ReadyAuthority;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.ReadyLookup;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.ReadyReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.SealedFrameRecord;
@@ -470,6 +471,19 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
         public Optional<ReadyArtifact> loadReady(ReadyLookup lookup) {
             readCalls++;
             return Optional.ofNullable(ready);
+        }
+
+        @Override
+        public ReadyAuthority lockReadyForTerminal(ReadyLookup lookup) {
+            if (ready == null) {
+                throw new IllegalStateException("READY artifact is missing");
+            }
+            return new ReadyAuthority(
+                    inputs.authority().frameSetId(),
+                    AssemblyState.READY,
+                    1,
+                    Instant.parse("2026-08-19T00:00:00Z"),
+                    ready);
         }
     }
 }

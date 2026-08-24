@@ -37,6 +37,38 @@ class AgentRunAttemptEntityTest {
     }
 
     @Test
+    void v4ResultReadyConsumesOnlyTheExactNextFinalSequence() {
+        AgentRunAttemptEntity attempt = AgentRunAttemptEntity.startV4(
+                RUN_ID,
+                AgentRunPersistenceFixtures.parallelIntakeAllocation(),
+                STARTED_AT);
+        attempt.recordHeartbeat(new AgentRunAttemptHeartbeat(
+                AgentRunAttemptHeartbeat.SCHEMA_VERSION,
+                RUN_ID,
+                "ATTEMPT_V4_1",
+                1,
+                4,
+                true,
+                false,
+                STARTED_AT.plusSeconds(2)));
+        ExecuteAgentRunResult result = AgentRunPersistenceFixtures.parallelIntakeResult(5);
+
+        attempt.recordV4ResultReady(result, "{\"terminal\":true}", 4);
+        attempt.recordV4ResultReady(result, "{\"terminal\":true}", 4);
+
+        assertThat(attempt.getAttemptStatus()).isEqualTo(AgentRunAttemptStatus.RESULT_READY);
+        assertThat(attempt.getLastSequenceNo()).isEqualTo(5);
+        assertThat(attempt.isPublicOutputEmitted()).isTrue();
+        assertThat(attempt.isFinalFrameObserved()).isTrue();
+        assertThatThrownBy(() -> attempt.recordV4ResultReady(
+                        AgentRunPersistenceFixtures.parallelIntakeResult(6),
+                        "{\"terminal\":true}",
+                        4))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lastSequenceNo");
+    }
+
+    @Test
     void initializesProgressAtTheJavaOwnedPreludeHighWatermark() {
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(

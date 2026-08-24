@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.activity.agent;
 
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 
 /**
@@ -53,7 +54,15 @@ public interface AgentRunExecutionGateway {
     record Completion(
             RoomGraphResult graphResult,
             long lastSequenceNo,
-            boolean publicOutputEmitted) {
+            boolean publicOutputEmitted,
+            ExecuteAgentRunResult durableResult) {
+
+        public Completion(
+                RoomGraphResult graphResult,
+                long lastSequenceNo,
+                boolean publicOutputEmitted) {
+            this(graphResult, lastSequenceNo, publicOutputEmitted, null);
+        }
 
         public Completion {
             if (graphResult == null) {
@@ -61,6 +70,15 @@ public interface AgentRunExecutionGateway {
             }
             if (lastSequenceNo < 0) {
                 throw new IllegalArgumentException("lastSequenceNo must not be negative");
+            }
+            if (durableResult != null
+                    && (durableResult.outcome() != ExecuteAgentRunResult.Outcome.COMPLETED
+                            || !graphResult.equals(durableResult.graphResult())
+                            || !graphResult.outputHash().equals(durableResult.resultHash())
+                            || lastSequenceNo != durableResult.lastSequenceNo()
+                            || publicOutputEmitted != durableResult.publicOutputEmitted())) {
+                throw new IllegalArgumentException(
+                        "durableResult must match the terminal completion");
             }
         }
     }

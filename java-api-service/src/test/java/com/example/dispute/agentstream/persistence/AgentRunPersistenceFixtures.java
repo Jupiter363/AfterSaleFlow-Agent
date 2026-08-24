@@ -198,6 +198,22 @@ public final class AgentRunPersistenceFixtures {
                 command);
     }
 
+    public static ExecuteAgentRunRequest parallelIntakeRequest() {
+        RoomGraphCommand command = parallelIntakeCommand();
+        Binding binding = BINDING_FACTORY.bind(PARALLEL_INTAKE_BINDING_CONTEXT, command);
+        return new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                RUN_ID,
+                1,
+                1,
+                AgentRunProtocol.V4.wireValue(),
+                binding.logicalInputHash(),
+                null,
+                false,
+                0,
+                command);
+    }
+
     public static AttemptAllocation allocation(long attemptNo, String attemptId) {
         RoomGraphCommand command = command(attemptNo, attemptId);
         return new AttemptAllocation(attemptNo, command, binding(command));
@@ -438,6 +454,52 @@ public final class AgentRunPersistenceFixtures {
                 graphResult,
                 RESULT_HASH,
                 3,
+                true,
+                null,
+                false,
+                null,
+                COMPLETED_AT);
+    }
+
+    public static RoomGraphResult parallelIntakeGraphResult() {
+        RoomGraphCommand command = parallelIntakeCommand();
+        return new RoomGraphResult(
+                "room-graph-result.v1",
+                command.commandId(),
+                RUN_ID,
+                command.attemptId(),
+                command.graphKey(),
+                command.graphVersion(),
+                "checkpoint-parallel-intake",
+                8,
+                GraphStatus.COMPLETED,
+                List.of(),
+                List.of(),
+                null,
+                null,
+                null,
+                RESULT_HASH,
+                new Usage(60, 15, 75),
+                new RoomGraphResult.ExecutionMetadata(
+                        command.invocationContext().promptProfileId(),
+                        command.invocationContext().modelProfileId(),
+                        command.invocationContext().outputSchemaVersion(),
+                        command.invocationContext().policyVersion(),
+                        command.invocationContext().guardrailVersion()));
+    }
+
+    public static ExecuteAgentRunResult parallelIntakeResult(long lastSequenceNo) {
+        RoomGraphResult graphResult = parallelIntakeGraphResult();
+        return new ExecuteAgentRunResult(
+                ExecuteAgentRunResult.SCHEMA_VERSION,
+                RUN_ID,
+                RUN_ID,
+                "ATTEMPT_V4_1",
+                1,
+                ExecuteAgentRunResult.Outcome.COMPLETED,
+                graphResult,
+                graphResult.outputHash(),
+                lastSequenceNo,
                 true,
                 null,
                 false,

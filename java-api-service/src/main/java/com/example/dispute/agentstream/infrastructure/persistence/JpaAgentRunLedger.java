@@ -401,17 +401,17 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 attemptRepository
                         .findByIdForUpdate(result.attemptId())
                         .orElseThrow(() -> new IllegalStateException("AgentRun attempt was not found"));
+        if (AgentRunProtocol.V4.wireValue().equals(run.getProtocol())) {
+            throw new IllegalStateException(
+                    "agent-stream.v4 RESULT_READY is owned by the atomic parallel terminal store");
+        }
         attempt.recordResultReady(result, json(result));
         if ("COMMITTED".equals(run.getFinalizationStatus())) {
             requireEqual(run.getCommittedAttemptId(), result.attemptId(), "committedAttemptId");
             requireEqual(run.getFinalResultHash(), result.resultHash(), "finalResultHash");
             return;
         }
-        if (AgentRunProtocol.V4.wireValue().equals(run.getProtocol())) {
-            run.markV4ResultReady(result.attemptId(), result.resultHash(), result.completedAt());
-        } else {
-            run.markV3ResultReady(result.attemptId(), result.resultHash(), result.completedAt());
-        }
+        run.markV3ResultReady(result.attemptId(), result.resultHash(), result.completedAt());
     }
 
     @Override
