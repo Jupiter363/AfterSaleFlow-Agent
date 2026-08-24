@@ -39,6 +39,8 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eAuthorizedIn
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eExecutionLaneVerifier;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationBindingVerifier;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationEvidenceProvider;
+import com.example.dispute.workflow.targete2e.finalization.ReadyAssemblyTargetE2eFinalizationEvidenceProvider;
+import com.example.dispute.workflow.targete2e.finalization.RoutingTargetE2eFinalizationEvidenceProvider;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider;
 import com.example.dispute.workflow.targete2e.finalization.JdbcTargetE2eFinalizationReceiptLedger;
 import com.example.dispute.workflow.targete2e.finalization.JdbcIntakeParallelProposalStore;
@@ -310,8 +312,10 @@ public class TargetE2eArtifactConfiguration {
             HttpTargetE2EGraphReconciliationClient reconciliation,
             HttpTargetE2EGraphProposalSourceClient proposalSource,
             GraphRegistryBindingPolicy registryBindings,
+            IntakeParallelAssemblyStore assemblyStore,
             ObjectMapper objectMapper) {
-        return new ReconciledTargetE2eFinalizationEvidenceProvider(
+        TargetE2eFinalizationEvidenceProvider legacy =
+                new ReconciledTargetE2eFinalizationEvidenceProvider(
                 authority,
                 codec,
                 signer,
@@ -319,6 +323,10 @@ public class TargetE2eArtifactConfiguration {
                 proposalSource,
                 registryBindings,
                 objectMapper);
+        TargetE2eFinalizationEvidenceProvider parallel =
+                new ReadyAssemblyTargetE2eFinalizationEvidenceProvider(
+                        assemblyStore, authority, objectMapper);
+        return new RoutingTargetE2eFinalizationEvidenceProvider(legacy, parallel);
     }
 
     @Bean

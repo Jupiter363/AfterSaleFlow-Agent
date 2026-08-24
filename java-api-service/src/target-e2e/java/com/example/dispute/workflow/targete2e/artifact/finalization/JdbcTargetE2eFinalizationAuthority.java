@@ -2,6 +2,8 @@ package com.example.dispute.workflow.targete2e.artifact.finalization;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationEnvironmentSource;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationEnvironmentSource.EnvironmentEvidence;
 import java.sql.Array;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -17,7 +19,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 /** Reads the control-registered activation and immutable command admission evidence. */
 public final class JdbcTargetE2eFinalizationAuthority
-        implements TargetE2eFinalizationActivationPort {
+        implements TargetE2eFinalizationActivationPort, TargetE2eFinalizationEnvironmentSource {
 
     private static final String AUTHORIZATION_SQL = """
             select activation.activation_id, activation.manifest_hash,
@@ -169,10 +171,11 @@ public final class JdbcTargetE2eFinalizationAuthority
                 row.revokedAt()));
     }
 
-    public EvidenceBindings evidenceBindings() {
+    @Override
+    public EnvironmentEvidence loadEnvironmentEvidence() {
         var rows = jdbc.query(
                 EVIDENCE_SQL,
-                (result, ignored) -> new EvidenceBindings(
+                (result, ignored) -> new EnvironmentEvidence(
                         result.getString("activation_id"),
                         result.getString("manifest_hash"),
                         result.getString("environment_id"),
@@ -239,16 +242,6 @@ public final class JdbcTargetE2eFinalizationAuthority
         OffsetDateTime value = result.getObject(column, OffsetDateTime.class);
         return value == null ? null : value.toInstant();
     }
-
-    public record EvidenceBindings(
-            String activationId,
-            String manifestHash,
-            String environmentId,
-            long environmentGeneration,
-            String domainClusterIdentity,
-            String domainDatabaseIdentity,
-            String domainRuntimePrincipalIdentity,
-            String domainDbBindingHash) {}
 
     private record AuthorizationRow(
             String activationId,
