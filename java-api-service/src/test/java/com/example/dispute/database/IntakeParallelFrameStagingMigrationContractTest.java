@@ -104,6 +104,10 @@ class IntakeParallelFrameStagingMigrationContractTest {
                 .contains("trg_intake_parallel_projection_no_update")
                 .contains("trg_intake_parallel_result_no_update")
                 .contains("trg_intake_parallel_proposal_no_update")
+                .contains("trg_intake_parallel_frame_generation_transition")
+                .contains("trg_intake_parallel_frame_generation_no_delete")
+                .contains("trg_intake_parallel_frame_slot_no_delete")
+                .contains("terminal intake parallel frame generation is immutable")
                 .contains("sealed intake parallel frame slot is immutable")
                 .contains("terminal intake parallel frame-set is immutable");
     }

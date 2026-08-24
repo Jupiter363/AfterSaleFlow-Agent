@@ -216,6 +216,7 @@ create table intake_parallel_frame_generation (
     provider_call_count integer not null default 0,
     result_id varchar(128),
     failure_code varchar(128),
+    failure_retryable boolean,
     created_at timestamptz not null default clock_timestamp(),
     updated_at timestamptz not null default clock_timestamp(),
     started_at timestamptz,
@@ -263,13 +264,16 @@ create table intake_parallel_frame_generation (
     constraint ck_intake_parallel_frame_generation_state_fields
         check (
             (staging_state in ('ADMITTED', 'STARTED')
-                and result_id is null and failure_code is null and terminal_at is null)
+                and result_id is null and failure_code is null
+                and failure_retryable is null and terminal_at is null)
             or
             (staging_state = 'SEALED'
-                and result_id is not null and failure_code is null and terminal_at is not null)
+                and result_id is not null and failure_code is null
+                and failure_retryable is null and terminal_at is not null)
             or
             (staging_state in ('FAILED', 'AMBIGUOUS')
-                and result_id is null and failure_code is not null and terminal_at is not null)
+                and result_id is null and failure_code is not null
+                and failure_retryable is not null and terminal_at is not null)
         ),
     constraint ck_intake_parallel_frame_generation_time
         check (
@@ -553,6 +557,83 @@ create trigger trg_intake_parallel_proposal_no_truncate
     before truncate on intake_parallel_proposal_artifact
     for each statement execute function reject_append_only_mutation();
 
+create function enforce_intake_parallel_frame_generation_transition()
+returns trigger
+language plpgsql
+as $$
+begin
+    if new.frame_set_id is distinct from old.frame_set_id
+        or new.frame_type is distinct from old.frame_type
+        or new.frame_generation is distinct from old.frame_generation
+        or new.frame_id is distinct from old.frame_id
+        or new.prompt_profile_id is distinct from old.prompt_profile_id
+        or new.output_schema_id is distinct from old.output_schema_id
+        or new.model_profile_id is distinct from old.model_profile_id
+        or new.frame_model_input_sha256 is distinct from old.frame_model_input_sha256
+        or new.frame_prompt_sha256 is distinct from old.frame_prompt_sha256
+        or new.created_at is distinct from old.created_at
+        or new.updated_at < old.updated_at
+        or new.provider_call_count < old.provider_call_count
+        or new.next_local_index < old.next_local_index
+        or (old.preview_state = 'OBSERVED' and new.preview_state <> 'OBSERVED')
+        or (
+            old.first_preview_next_local_index is not null
+            and new.first_preview_next_local_index is distinct from old.first_preview_next_local_index
+        )
+    then
+        raise exception using errcode = '23514',
+            message = 'Intake parallel Frame generation authority/progress drifted';
+    end if;
+    if old.provider_call_lease_state = 'ADMITTED'
+        and new.provider_call_lease_state not in ('STARTED', 'AMBIGUOUS')
+    then
+        raise exception using errcode = '23514',
+            message = 'Intake parallel Frame provider lease left ADMITTED illegally';
+    end if;
+    if old.provider_call_lease_state = 'STARTED'
+        and new.provider_call_lease_state not in ('STARTED', 'TERMINAL', 'AMBIGUOUS')
+    then
+        raise exception using errcode = '23514',
+            message = 'Intake parallel Frame provider lease left STARTED illegally';
+    end if;
+    if old.provider_call_lease_state in ('TERMINAL', 'AMBIGUOUS')
+        and new.provider_call_lease_state is distinct from old.provider_call_lease_state
+    then
+        raise exception using errcode = '23514',
+            message = 'terminal Intake parallel Frame provider lease is immutable';
+    end if;
+    if old.staging_state = 'ADMITTED'
+        and new.staging_state not in ('STARTED', 'FAILED', 'AMBIGUOUS')
+    then
+        raise exception using errcode = '23514',
+            message = 'Intake parallel Frame generation left ADMITTED illegally';
+    end if;
+    if old.staging_state = 'STARTED'
+        and new.staging_state not in ('STARTED', 'SEALED', 'FAILED', 'AMBIGUOUS')
+    then
+        raise exception using errcode = '23514',
+            message = 'Intake parallel Frame generation left STARTED illegally';
+    end if;
+    if old.staging_state in ('SEALED', 'FAILED', 'AMBIGUOUS') then
+        raise exception using errcode = '23514',
+            message = 'terminal Intake parallel Frame generation is immutable';
+    end if;
+    return new;
+end
+$$;
+
+create trigger trg_intake_parallel_frame_generation_transition
+    before update on intake_parallel_frame_generation
+    for each row execute function enforce_intake_parallel_frame_generation_transition();
+
+create trigger trg_intake_parallel_frame_generation_no_delete
+    before delete on intake_parallel_frame_generation
+    for each row execute function reject_append_only_mutation();
+
+create trigger trg_intake_parallel_frame_generation_no_truncate
+    before truncate on intake_parallel_frame_generation
+    for each statement execute function reject_append_only_mutation();
+
 create function enforce_intake_parallel_frame_set_transition()
 returns trigger
 language plpgsql
@@ -650,6 +731,14 @@ $$;
 create trigger trg_intake_parallel_frame_slot_transition
     before update on intake_parallel_frame_slot
     for each row execute function enforce_intake_parallel_frame_slot_transition();
+
+create trigger trg_intake_parallel_frame_slot_no_delete
+    before delete on intake_parallel_frame_slot
+    for each row execute function reject_append_only_mutation();
+
+create trigger trg_intake_parallel_frame_slot_no_truncate
+    before truncate on intake_parallel_frame_slot
+    for each statement execute function reject_append_only_mutation();
 
 create trigger trg_intake_parallel_frame_set_no_delete
     before delete on intake_parallel_frame_set

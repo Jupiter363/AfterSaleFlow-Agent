@@ -312,6 +312,10 @@ public interface IntakeParallelFrameStagingPort {
                             || publicPayload.localIndex().longValue() != localIndex)) {
                 throw new IllegalArgumentException("public payload localIndex drifted");
             }
+            if (ingressKind == IngressKind.PUBLIC_FRAME_SEALED) {
+                throw new IllegalArgumentException(
+                        "public Frame sealed must use the atomic seal boundary");
+            }
         }
     }
 
@@ -358,6 +362,12 @@ public interface IntakeParallelFrameStagingPort {
 
     record FrameSealCommand(
             String frameSetId,
+            String runId,
+            String attemptId,
+            String streamSessionId,
+            long transportSequence,
+            String ingressIdentity,
+            Audience audience,
             FrameType frameType,
             long generation,
             String frameId,
@@ -374,6 +384,12 @@ public interface IntakeParallelFrameStagingPort {
 
         public FrameSealCommand {
             frameSetId = identifier(frameSetId, "frameSetId");
+            runId = identifier(runId, "runId");
+            attemptId = identifier(attemptId, "attemptId");
+            streamSessionId = identifier(streamSessionId, "streamSessionId");
+            nonNegative(transportSequence, "transportSequence");
+            ingressIdentity = bounded(ingressIdentity, "ingressIdentity", 256);
+            audience = Objects.requireNonNull(audience, "audience");
             frameType = Objects.requireNonNull(frameType, "frameType");
             positive(generation, "generation");
             frameId = identifier(frameId, "frameId");
