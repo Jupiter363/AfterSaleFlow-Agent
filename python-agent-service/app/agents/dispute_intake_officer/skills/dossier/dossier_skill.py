@@ -541,7 +541,11 @@ class CaseDetailDossierSkill:
                 "INTAKE_HANDOFF_REMARK_AUTHORITY_CONFLICT",
                 "persisted handoff partition and party Intake state disagree",
             )
-        actor_substantive_frozen = previous_partition_status != "NOT_READY"
+        actor_substantive_frozen = previous_partition_status in {
+            "WAITING_FOR_REMARK",
+            "HAS_REMARKS",
+            "NO_EXTRA_REMARKS",
+        }
         if actor_substantive_frozen:
             return _render_frozen_handoff_remark_turn(
                 request=request,
@@ -573,16 +577,34 @@ class CaseDetailDossierSkill:
                     "INTAKE_PARTY_STATE_MODEL_AUTHORITY_FORBIDDEN",
                     "model output cannot create or advance party-scoped Intake authority",
                 )
-        if conversation_action == "ACK_REMARK":
+        if conversation_action in _INTAKE_REMARK_ACK_ACTIONS:
             raise _party_intake_state_error(
                 "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
-                "an actual remark requires previously frozen substantive authority",
+                "remark acknowledgement requires previously invited remark authority",
             )
-        combined_no_remark = conversation_action == "ACK_NO_REMARK"
-        if combined_no_remark and effective_matrix_delta is None:
+        expected_substantive_action = (
+            "INVITE_OPTIONAL_REMARK"
+            if previous_remark_status == "READY_PENDING_REMARK_INVITE"
+            else "ASK_SUBSTANTIVE"
+        )
+        if conversation_action != expected_substantive_action:
             raise _party_intake_state_error(
                 "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
-                "a same-turn no-remark acknowledgement requires a substantive matrix delta",
+                "the visible Intake action must be selected from the previous persisted phase",
+            )
+        if previous_remark_status == "READY_PENDING_REMARK_INVITE" and (
+            not current_message_id
+            or current_message_id
+            == str(
+                previous_actor_entry["handoff_notes"].get(
+                    "phase_source_message_id"
+                )
+                or ""
+            )
+        ):
+            raise _party_intake_state_error(
+                "INTAKE_HANDOFF_REMARK_SOURCE_REQUIRED",
+                "the pending remark invitation requires one new substantive answer",
             )
         previous_phase_source_message_id = str(
             previous_actor_entry["handoff_notes"].get("phase_source_message_id") or ""
@@ -756,71 +778,102 @@ class CaseDetailDossierSkill:
                     str(quality.get("improvement_reason") or "")
                 )
 
-        actor_remark_status = "NOT_READY"
-        if quality["ready_for_next_step"]:
-            if conversation_action not in {
-                "INVITE_OPTIONAL_REMARK",
-                "ACK_NO_REMARK",
-            }:
-                raise _party_intake_state_error(
-                    "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
-                    "the first ready turn must invite the optional remark or acknowledge an explicit same-turn no-remark decision",
+        if previous_remark_status == "READY_PENDING_REMARK_INVITE":
+            previous_quality = copy.deepcopy(previous_actor_entry["intake_quality"])
+            quality.clear()
+            quality.update(previous_quality)
+            score_breakdown = _quality_mapping(quality.get("score_breakdown"))
+            score = sum(score_breakdown.values())
+            quality["score"] = score
+            quality["threshold"] = self.readiness_threshold
+            quality["ready_for_next_step"] = True
+            missing = []
+            missing_info["blocking_gaps"] = []
+            missing_info["next_questions"] = []
+        else:
+            quality["threshold"] = self.readiness_threshold
+            next_turn_ready = (
+                score >= self.readiness_threshold
+                and not missing
+                and bool(has_current_actor_answer)
+            )
+            quality["ready_for_next_step"] = next_turn_ready
+            if next_turn_ready:
+                missing = []
+                missing_info["blocking_gaps"] = []
+                quality["improvement_reason"] = "信息完整度已达到提交阈值。"
+            elif missing and not model_semantics_authoritative:
+                quality["improvement_reason"] = "仍缺少可信的" + "、".join(
+                    _human_missing_fields(missing)
                 )
+
+        actor_remark_status = "NOT_READY"
+        if previous_remark_status == "READY_PENDING_REMARK_INVITE":
             if not current_message_id:
                 raise _party_intake_state_error(
                     "INTAKE_HANDOFF_REMARK_SOURCE_REQUIRED",
-                    "the first ready turn requires an authenticated participant message",
+                    "the remark invitation turn requires an authenticated participant message",
                 )
-            if not model_semantics_authoritative:
-                missing_info["next_questions"] = []
-            actor_remark_status = (
-                "NO_EXTRA_REMARKS"
-                if combined_no_remark
-                else "WAITING_FOR_REMARK"
-            )
+            actor_remark_status = "WAITING_FOR_REMARK"
             notes = _ensure_handoff_notes(
                 detail,
                 remark_status=actor_remark_status,
                 phase_source_message_id=current_message_id,
             )
-            notes["latest_remark"] = (
-                "无额外备注。" if combined_no_remark else ""
-            )
+            notes["latest_remark"] = ""
             notes["remarks"] = []
         else:
-            if conversation_action != "ASK_SUBSTANTIVE":
-                raise _party_intake_state_error(
-                    "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT",
-                    "an incomplete Intake turn must ask substantive questions",
-                )
-            phase_source_message_id = previous_phase_source_message_id
-            if previous_remark_status != "NOT_READY" and current_message_id:
-                phase_source_message_id = current_message_id
+            actor_remark_status = (
+                "READY_PENDING_REMARK_INVITE"
+                if quality["ready_for_next_step"]
+                else "NOT_READY"
+            )
+            phase_source_message_id = (
+                current_message_id
+                if actor_remark_status == "READY_PENDING_REMARK_INVITE"
+                else previous_phase_source_message_id
+            )
             notes = _ensure_handoff_notes(
                 detail,
-                remark_status="NOT_READY",
+                remark_status=actor_remark_status,
                 phase_source_message_id=phase_source_message_id,
             )
             notes["latest_remark"] = ""
             notes["remarks"] = []
-            if (
-                not model_semantics_authoritative
-                and not missing_info.get("next_questions")
-            ):
+            substantive_questions = [
+                question
+                for question in _list_values(missing_info.get("next_questions"))
+                if _is_substantive_case_question(question)
+            ]
+            if actor_remark_status == "READY_PENDING_REMARK_INVITE":
+                missing_info["next_questions"] = (
+                    substantive_questions[:1]
+                    or [_question_for_quality_gap(score_breakdown)]
+                )
+            elif not substantive_questions:
                 question = _question_for_missing(missing) or _question_for_quality_gap(
                     score_breakdown
                 )
                 missing_info["next_questions"] = [question]
+            else:
+                missing_info["next_questions"] = substantive_questions[:2]
         if model_semantics_authoritative and model_handoff_instruction:
             notes["instruction"] = model_handoff_instruction
         admission = _ensure_dict(detail, "admission")
-        if not model_semantics_authoritative:
-            if quality["ready_for_next_step"]:
-                admission["recommendation"] = "ACCEPTED"
-            elif llm_admission_recommendation == "NOT_ADMISSIBLE":
+        if quality["ready_for_next_step"]:
+            admission["recommendation"] = "ACCEPTED"
+        elif model_semantics_authoritative:
+            admission["recommendation"] = (
+                "NOT_ADMISSIBLE"
+                if llm_admission_recommendation == "NOT_ADMISSIBLE"
+                else "NEED_MORE_INFO"
+            )
+        elif not model_semantics_authoritative:
+            if llm_admission_recommendation == "NOT_ADMISSIBLE":
                 admission["recommendation"] = "NOT_ADMISSIBLE"
             else:
                 admission["recommendation"] = "NEED_MORE_INFO"
+        if not model_semantics_authoritative:
             admission["confidence"] = _clamp_confidence(
                 admission.get("confidence", llm_confidence)
             )
@@ -1656,6 +1709,10 @@ def _proven_initiator_role(
     previous: dict[str, Any],
 ) -> str | None:
     candidates: list[str] = []
+
+    server_role = str(request.server_initiator_role_authority or "").upper()
+    if server_role in _PARTY_INTAKE_ROLES:
+        candidates.append(server_role)
 
     initial_role = str(
         getattr(request.initial_case_facts, "initiator_role", None) or ""

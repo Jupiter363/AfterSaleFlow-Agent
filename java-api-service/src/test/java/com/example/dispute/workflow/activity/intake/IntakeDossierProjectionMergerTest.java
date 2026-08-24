@@ -424,20 +424,26 @@ class IntakeDossierProjectionMergerTest {
 
         ObjectNode substantiveDrift = acknowledgedPatch.deepCopy();
         substantiveDrift.putObject("case_story").put("post_threshold", "forbidden");
-        assertRejected(
-                "INTAKE_HANDOFF_REMARK_SUBSTANTIVE_DRIFT",
-                () -> merger.merge(
-                        threshold.dossier(),
-                        proposal(
-                                substantiveDrift,
-                                null,
-                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
-                                List.of()),
-                        remarkAuthority));
+        MergeResult projectedRemark = merger.merge(
+                threshold.dossier(),
+                proposal(
+                        substantiveDrift,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                remarkAuthority);
+        assertThat(projectedRemark.dossier().path("case_story"))
+                .isEqualTo(threshold.dossier().path("case_story"));
+        assertThat(projectedRemark.dossier().at("/handoff_remark_partition/parties/USER/remark_status")
+                        .asText())
+                .isEqualTo("HAS_REMARKS");
+        assertThat(projectedRemark.dossier().at("/party_intake_state/USER/handoff_notes/latest_remark")
+                        .asText())
+                .isEqualTo(remark);
     }
 
     @Test
-    void acceptsFirstReadyNoRemarkAsOneActorBoundSuccessorTransition() throws Exception {
+    void enforcesAdjacentRemarkLifecycleBeforeAcceptingNoRemark() throws Exception {
         ObjectNode current = dossierWithInitiatorMatrix();
         ObjectNode notReadyPartition =
                 handoffRemarkPartition(current, "USER", "NOT_READY", null);
@@ -449,44 +455,115 @@ class IntakeDossierProjectionMergerTest {
                 proposal(notReadyPatch, null),
                 matrixAuthority(ActorRole.USER));
 
-        String factId = before.dossier().at("/case_fact_matrix/fact_rows/0/fact_id").asText();
-        ObjectNode noRemarkPartition = handoffRemarkPartition(
+        ObjectNode directNoRemarkPartition = handoffRemarkPartition(
                 before.dossier(), "USER", "NO_EXTRA_REMARKS", null);
-        ObjectNode noRemarkState =
+        ObjectNode directNoRemarkState =
                 ((ObjectNode) before.dossier().path("party_intake_state")).deepCopy();
-        ObjectNode noRemarkUser = readyPartyIntakeEntry(
+        ObjectNode directNoRemarkUser = readyPartyIntakeEntry(
                 "NO_EXTRA_REMARKS", "MESSAGE_HANDOFF_THRESHOLD_USER");
+        directNoRemarkState.set("USER", directNoRemarkUser);
+        ObjectNode directNoRemarkPatch = JSON.createObjectNode();
+        directNoRemarkPatch.set("party_intake_state", directNoRemarkState);
+        copyPartyMirror(directNoRemarkPatch, directNoRemarkUser);
+        directNoRemarkPatch.set("handoff_remark_partition", directNoRemarkPartition);
+        MatrixAuthority thresholdAuthority = matrixAuthority(
+                ActorRole.USER,
+                "MESSAGE_HANDOFF_THRESHOLD_USER",
+                SourceType.ROOM_MESSAGE);
+
+        assertRejected(
+                "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+                () -> merger.merge(
+                        before.dossier(),
+                        proposal(
+                                directNoRemarkPatch,
+                                null,
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of()),
+                        thresholdAuthority));
+
+        ObjectNode pendingPartition = handoffRemarkPartition(
+                before.dossier(), "USER", "READY_PENDING_REMARK_INVITE", null);
+        ObjectNode pendingState =
+                ((ObjectNode) before.dossier().path("party_intake_state")).deepCopy();
+        ObjectNode pendingUser = readyPartyIntakeEntry(
+                "READY_PENDING_REMARK_INVITE", "MESSAGE_HANDOFF_THRESHOLD_USER");
+        pendingState.set("USER", pendingUser);
+        ObjectNode pendingPatch = JSON.createObjectNode();
+        pendingPatch.set("party_intake_state", pendingState);
+        copyPartyMirror(pendingPatch, pendingUser);
+        pendingPatch.set("handoff_remark_partition", pendingPartition);
+        MergeResult pending = merger.merge(
+                before.dossier(),
+                proposal(
+                        pendingPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                thresholdAuthority);
+
+        String inviteMessageId = "MESSAGE_HANDOFF_INVITE_USER";
+        ObjectNode waitingPartition = handoffRemarkPartition(
+                pending.dossier(), "USER", "WAITING_FOR_REMARK", null);
+        waitingPartition
+                .withObject("parties")
+                .withObject("USER")
+                .withObject("source")
+                .put("message_id", inviteMessageId);
+        ObjectNode waitingState =
+                ((ObjectNode) pending.dossier().path("party_intake_state")).deepCopy();
+        ObjectNode waitingUser = readyPartyIntakeEntry("WAITING_FOR_REMARK", inviteMessageId);
+        waitingState.set("USER", waitingUser);
+        ObjectNode waitingPatch = JSON.createObjectNode();
+        waitingPatch.set("party_intake_state", waitingState);
+        copyPartyMirror(waitingPatch, waitingUser);
+        waitingPatch.set("handoff_remark_partition", waitingPartition);
+        waitingPatch
+                .putObject("case_story")
+                .put("title", "已吸收阈值轮保留问题的最后一次实质回答");
+        MergeResult waiting = merger.merge(
+                pending.dossier(),
+                proposal(
+                        waitingPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                matrixAuthority(ActorRole.USER, inviteMessageId, SourceType.ROOM_MESSAGE));
+        assertThat(waiting.dossier().at("/case_story/title").asText())
+                .isEqualTo("已吸收阈值轮保留问题的最后一次实质回答");
+
+        String noRemarkMessageId = "MESSAGE_HANDOFF_NO_REMARK_USER";
+        ObjectNode noRemarkPartition = handoffRemarkPartition(
+                waiting.dossier(), "USER", "NO_EXTRA_REMARKS", null);
+        noRemarkPartition
+                .withObject("parties")
+                .withObject("USER")
+                .withObject("source")
+                .put("message_id", noRemarkMessageId);
+        ObjectNode noRemarkState =
+                ((ObjectNode) waiting.dossier().path("party_intake_state")).deepCopy();
+        ObjectNode noRemarkUser = readyPartyIntakeEntry(
+                "NO_EXTRA_REMARKS", noRemarkMessageId);
         noRemarkUser.withObject("handoff_notes").put("latest_remark", "无额外备注。");
         noRemarkState.set("USER", noRemarkUser);
         ObjectNode noRemarkPatch = JSON.createObjectNode();
         noRemarkPatch.set("party_intake_state", noRemarkState);
         copyPartyMirror(noRemarkPatch, noRemarkUser);
         noRemarkPatch.set("handoff_remark_partition", noRemarkPartition);
-        MatrixAuthority sameMessageAuthority = matrixAuthority(
-                ActorRole.USER,
-                "MESSAGE_HANDOFF_THRESHOLD_USER",
-                SourceType.ROOM_MESSAGE);
-
         MergeResult terminal = merger.merge(
-                before.dossier(),
+                waiting.dossier(),
                 proposal(
                         noRemarkPatch,
-                        carryForwardDraft(factId),
+                        null,
                         IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
                         List.of()),
-                sameMessageAuthority);
+                matrixAuthority(ActorRole.USER, noRemarkMessageId, SourceType.ROOM_MESSAGE));
 
-        JsonNode successor = terminal.dossier().path("case_fact_matrix");
         JsonNode partition = terminal.dossier().path("handoff_remark_partition");
-        assertThat(successor.path("matrix_version").asLong())
-                .isEqualTo(before.dossier().at("/case_fact_matrix/matrix_version").asLong() + 1);
         assertThat(partition.at("/parties/USER/remark_status").asText())
                 .isEqualTo("NO_EXTRA_REMARKS");
-        assertThat(partition.path("case_fact_matrix_id")).isEqualTo(successor.path("matrix_id"));
-        assertThat(partition.path("case_fact_matrix_version"))
-                .isEqualTo(successor.path("matrix_version"));
-        assertThat(partition.path("case_fact_matrix_hash"))
-                .isEqualTo(successor.path("content_hash"));
+        assertThat(terminal.dossier().path("case_fact_matrix"))
+                .isEqualTo(before.dossier().path("case_fact_matrix"));
         assertThat(terminal.dossier().at("/party_intake_state/USER/handoff_notes/latest_remark")
                         .asText())
                 .isEqualTo("无额外备注。");

@@ -286,11 +286,22 @@ def build_intake_baseline_request(
         }
     else:
         transcript = _ensure_current_statement(transcript, current)
+        # Import lazily because validators owns the snapshot-bound authority
+        # checks and imports this adapter during module initialization.  The
+        # returned role is carried as a server-only excluded request field; it
+        # is never rendered into the provider context.
+        from app.graphs.intake.validators import (
+            validated_intake_initiator_role_authority,
+        )
+
         request = {
             "case_id": agent_context.case_id,
             "room_type": "INTAKE",
             "turn_source": "ROOM_MESSAGE",
             "initial_case_facts": None,
+            "server_initiator_role_authority": (
+                validated_intake_initiator_role_authority(state)
+            ),
             "current_user_message": _baseline_message(current, source="ROOM_MESSAGE"),
             "recent_dialogue_messages": [
                 _baseline_message(

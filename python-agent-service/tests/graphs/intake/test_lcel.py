@@ -29,6 +29,7 @@ from app.agents.dispute_intake_officer.case_fact_matrix import (
 from app.agents.dispute_intake_officer.schemas import (
     IntakeCaseDetailLlmOutput,
     IntakeFreshFormOpeningLlmOutput,
+    IntakeInitiatorRoomLlmOutputV3,
     IntakeRemarkAcknowledgementLlmOutput,
     IntakeRespondentOpeningLlmOutput,
     IntakeRespondentRoomLlmOutputV3,
@@ -660,8 +661,9 @@ def test_respondent_router_binds_dynamic_frozen_claim_schema_to_model_and_parser
     provider_payload = intake_initiator_v3_payload(
         room_utterance="已记录商家的检测、换货和维修方案，可以确认提交。",
         total_score=100,
-        conversation_action="ACK_NO_REMARK",
+        conversation_action="ASK_SUBSTANTIVE",
         nice_to_have_gaps=(),
+        next_questions=("请补充最后一项可核验事实。",),
     )
     matrix = provider_payload["ordered_sections"][0]["value"]
     matrix["fact_rows"] = [
@@ -690,7 +692,11 @@ def test_respondent_router_binds_dynamic_frozen_claim_schema_to_model_and_parser
         },
     }
     claim_and_response = provider_payload["ordered_sections"][3]["value"]
-    claim_and_response["claim_resolution"] = copy.deepcopy(frozen_claim)
+    party_positions = provider_payload["ordered_sections"][2]["value"]
+    party_positions["respondent_position"] = party_positions.pop(
+        "initiator_position"
+    )
+    claim_and_response.pop("claim_resolution")
     claim_and_response["respondent_attitude"] = {
         "respondent_role": "MERCHANT",
         "source_attribution": "RESPONDENT_DIRECT",
@@ -700,9 +706,9 @@ def test_respondent_router_binds_dynamic_frozen_claim_schema_to_model_and_parser
     }
     dynamic_output_type.model_validate(provider_payload)
     altered_claim_payload = copy.deepcopy(provider_payload)
-    altered_claim_payload["ordered_sections"][3]["value"]["claim_resolution"][
-        "request_reason"
-    ] = "核心性能未达到宣传标准"
+    altered_claim_payload["ordered_sections"][3]["value"][
+        "claim_resolution"
+    ] = copy.deepcopy(frozen_claim)
     with pytest.raises(ValueError):
         dynamic_output_type.model_validate(altered_claim_payload)
 
@@ -762,9 +768,18 @@ def test_respondent_router_binds_dynamic_frozen_claim_schema_to_model_and_parser
     base_authority_state["baseline_previous_case_detail"]["claim_resolution"].pop(
         "normalized_statement"
     )
-    assert node.model_router._select_flow(base_authority_state) is (
-        node.model_router._respondent_substantive_flow
+    base_authority_request = build_intake_baseline_request(
+        base_authority_state,
+        agent_context=merchant_context,
     )
+    base_authority_output_type = intake_case_detail_output_type(
+        base_authority_request
+    )
+    base_authority_model_type, base_authority_parser_type = selected_contracts(
+        node.model_router._select_flow(base_authority_state)
+    )
+    assert base_authority_model_type is base_authority_output_type
+    assert base_authority_parser_type is base_authority_output_type
 
     user_bindings = copy.deepcopy(bindings)
     user_bindings["command"].update(
@@ -797,9 +812,41 @@ def test_respondent_router_binds_dynamic_frozen_claim_schema_to_model_and_parser
         ),
         agent_context=user_context,
     )
-    assert user_node.model_router._select_flow(user_state) is (
-        user_node.model_router._default_flow
+    user_request = build_intake_baseline_request(
+        user_state,
+        agent_context=user_context,
     )
+    user_output_type = intake_case_detail_output_type(user_request)
+    user_model_type, user_parser_type = selected_contracts(
+        user_node.model_router._select_flow(user_state)
+    )
+    assert user_model_type is user_output_type
+    assert user_parser_type is user_output_type
+
+    locked_user_state = copy.deepcopy(user_state)
+    for detail_key in ("dossier_draft", "baseline_previous_case_detail"):
+        locked_user_state[detail_key]["party_intake_state"] = {
+            "USER": {
+                "handoff_notes": {"remark_status": "NOT_READY"},
+            }
+        }
+    locked_user_request = build_intake_baseline_request(
+        locked_user_state,
+        agent_context=user_context,
+    )
+    locked_user_output_type = intake_case_detail_output_type(locked_user_request)
+    assert locked_user_output_type is not IntakeInitiatorRoomLlmOutputV3
+    assert issubclass(locked_user_output_type, IntakeInitiatorRoomLlmOutputV3)
+
+    locked_user_flow = user_node.model_router._select_flow(locked_user_state)
+    locked_user_model_type, locked_user_parser_type = selected_contracts(
+        locked_user_flow
+    )
+    assert locked_user_model_type is locked_user_output_type
+    assert locked_user_parser_type is locked_user_output_type
+    assert user_node.model._output_type is IntakeInitiatorRoomLlmOutputV3
+    assert user_node.parser.pydantic_object is IntakeInitiatorRoomLlmOutputV3
+    assert _is_vetted_intake_model_runnable(user_node.runnable)
 
 
 def test_ai_message_id_is_retry_stable_but_unique_across_source_turns() -> None:

@@ -355,6 +355,14 @@ class IntakeTurnRequest(StrictModel):
         list[IntakeDialogueMessage], Field(max_length=5)
     ] = Field(default_factory=list)
     previous_case_detail: dict[str, object] | None = None
+    # Snapshot-bound server authority used only by deterministic binders.  It is
+    # intentionally excluded from serialization so it never becomes provider
+    # context or part of the compact matrix-derivation request base.
+    server_initiator_role_authority: Literal["USER", "MERCHANT"] | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
     respondent_opening_source_ref: Identifier | None = None
     initiator_statement_transcript: Annotated[
         list[IntakeTurnMessage], Field(max_length=100)

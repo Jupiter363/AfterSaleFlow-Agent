@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import lru_cache
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
 from typing_extensions import NotRequired, Required, TypedDict
 
 from app.schemas.case_fact_matrix import (
@@ -418,8 +419,23 @@ class IntakeRoomReadyMissingInformationValue(IntakeRoomMissingInformationValue):
     ] = Field(max_length=0)
 
 
+class IntakeRoomPendingRemarkMissingInformationValue(
+    IntakeRoomQuestioningMissingInformationValue
+):
+    blocking_gaps: list[
+        Annotated[str, Field(min_length=1, max_length=2_000)]
+    ] = Field(max_length=0)
+    next_questions: list[
+        Annotated[str, Field(min_length=1, max_length=2_000)]
+    ] = Field(min_length=1, max_length=1)
+
+
 class IntakeRoomNotReadyHandoffSummaryValue(IntakeRoomHandoffSummaryValue):
     remark_status: Literal["NOT_READY"]
+
+
+class IntakeRoomPendingRemarkHandoffSummaryValue(IntakeRoomHandoffSummaryValue):
+    remark_status: Literal["READY_PENDING_REMARK_INVITE"]
 
 
 class IntakeRoomWaitingHandoffSummaryValue(IntakeRoomHandoffSummaryValue):
@@ -451,6 +467,10 @@ class IntakeRoomReadyTurnEvaluationValue(IntakeRoomTurnEvaluationValue):
     admission_recommendation: Literal["ACCEPTED"]
 
 
+class IntakeRoomPendingRemarkEvaluationValue(IntakeRoomReadyTurnEvaluationValue):
+    conversation_action: Literal["ASK_SUBSTANTIVE"]
+
+
 class IntakeRoomInviteRemarkEvaluationValue(IntakeRoomReadyTurnEvaluationValue):
     conversation_action: Literal["INVITE_OPTIONAL_REMARK"]
 
@@ -475,8 +495,18 @@ class IntakeRoomReadyMissingInformationSection(IntakeRoomMissingInformationSecti
     value: IntakeRoomReadyMissingInformationValue
 
 
+class IntakeRoomPendingRemarkMissingInformationSection(
+    IntakeRoomMissingInformationSection
+):
+    value: IntakeRoomPendingRemarkMissingInformationValue
+
+
 class IntakeRoomNotReadyHandoffSummarySection(IntakeRoomHandoffSummarySection):
     value: IntakeRoomNotReadyHandoffSummaryValue
+
+
+class IntakeRoomPendingRemarkHandoffSummarySection(IntakeRoomHandoffSummarySection):
+    value: IntakeRoomPendingRemarkHandoffSummaryValue
 
 
 class IntakeRoomWaitingHandoffSummarySection(IntakeRoomHandoffSummarySection):
@@ -495,6 +525,10 @@ class IntakeRoomBlockedEvaluationSection(IntakeRoomTurnEvaluationSection):
     value: IntakeRoomBlockedEvaluationValue
 
 
+class IntakeRoomPendingRemarkEvaluationSection(IntakeRoomTurnEvaluationSection):
+    value: IntakeRoomPendingRemarkEvaluationValue
+
+
 class IntakeRoomInviteRemarkEvaluationSection(IntakeRoomTurnEvaluationSection):
     value: IntakeRoomInviteRemarkEvaluationValue
 
@@ -507,6 +541,12 @@ def _ordered_room_sections_type(
     matrix_section_type: type[BaseModel],
     party_positions_section_type: type[BaseModel],
     claim_section_type: type[BaseModel],
+    *,
+    branch_profile: Literal[
+        "ALL",
+        "ASK_SUBSTANTIVE",
+        "INVITE_OPTIONAL_REMARK",
+    ] = "ALL",
 ) -> Any:
     common_prefix = (
         matrix_section_type,
@@ -530,28 +570,42 @@ def _ordered_room_sections_type(
             evaluation_section_type,
         ]
 
-    return (
+    ask_branches = (
         branch(
             IntakeRoomQuestioningMissingInformationSection,
             IntakeRoomNotReadyHandoffSummarySection,
             IntakeRoomBelowThresholdEvaluationSection,
-        )
-        | branch(
+        ),
+        branch(
             IntakeRoomBlockedMissingInformationSection,
             IntakeRoomNotReadyHandoffSummarySection,
             IntakeRoomBlockedEvaluationSection,
-        )
-        | branch(
-            IntakeRoomReadyMissingInformationSection,
-            IntakeRoomWaitingHandoffSummarySection,
-            IntakeRoomInviteRemarkEvaluationSection,
-        )
-        | branch(
-            IntakeRoomReadyMissingInformationSection,
-            IntakeRoomNoRemarksHandoffSummarySection,
-            IntakeRoomNoRemarkEvaluationSection,
-        )
+        ),
+        branch(
+            IntakeRoomPendingRemarkMissingInformationSection,
+            IntakeRoomPendingRemarkHandoffSummarySection,
+            IntakeRoomPendingRemarkEvaluationSection,
+        ),
     )
+    invite_branch = branch(
+        IntakeRoomReadyMissingInformationSection,
+        IntakeRoomWaitingHandoffSummarySection,
+        IntakeRoomInviteRemarkEvaluationSection,
+    )
+    no_remark_branch = branch(
+        IntakeRoomReadyMissingInformationSection,
+        IntakeRoomNoRemarksHandoffSummarySection,
+        IntakeRoomNoRemarkEvaluationSection,
+    )
+    selected_branches = {
+        "ALL": (*ask_branches, invite_branch, no_remark_branch),
+        "ASK_SUBSTANTIVE": ask_branches,
+        "INVITE_OPTIONAL_REMARK": (invite_branch,),
+    }[branch_profile]
+    selected_type = selected_branches[0]
+    for branch_type in selected_branches[1:]:
+        selected_type = selected_type | branch_type
+    return selected_type
 
 
 IntakeInitiatorRoomSections = _ordered_room_sections_type(
@@ -572,20 +626,19 @@ def _validate_ordered_room_outcome(
     missing = sections[7].value
     handoff = sections[8].value
     evaluation = sections[9].value
-    score_total = sum(
-        evaluation.score_breakdown.model_dump(mode="python").values()
-    )
-    derived_ready = (
-        score_total >= evaluation.threshold
-        and not missing.blocking_gaps
-    )
-    if evaluation.ready_for_next_step != derived_ready:
-        raise ValueError(
-            "ready_for_next_step must follow the rubric score and blocking gaps"
-        )
     if evaluation.ready_for_next_step:
         if evaluation.admission_recommendation != "ACCEPTED":
             raise ValueError("a ready turn requires ACCEPTED admission")
+        if evaluation.conversation_action == "ASK_SUBSTANTIVE":
+            if (
+                handoff.remark_status != "READY_PENDING_REMARK_INVITE"
+                or missing.blocking_gaps
+                or len(missing.next_questions) != 1
+            ):
+                raise ValueError(
+                    "a threshold-crossing substantive turn must enter the pending remark state"
+                )
+            return
         expected_status = {
             "INVITE_OPTIONAL_REMARK": "WAITING_FOR_REMARK",
             "ACK_NO_REMARK": "NO_EXTRA_REMARKS",
@@ -1033,8 +1086,109 @@ def intake_case_detail_output_type(
     if is_exact_handoff_remark_turn(request):
         return IntakeRemarkAcknowledgementLlmOutput
     if is_exact_respondent_substantive_turn(request):
-        return IntakeRespondentRoomLlmOutputV3
-    return IntakeInitiatorRoomLlmOutputV3
+        base_output_type = IntakeRespondentRoomLlmOutputV3
+    else:
+        base_output_type = IntakeInitiatorRoomLlmOutputV3
+    return _previous_phase_locked_room_output_type(request, base_output_type)
+
+
+def _previous_phase_locked_room_output_type(
+    request: IntakeTurnRequest,
+    base_output_type: type[IntakeInitiatorRoomLlmOutputV3]
+    | type[IntakeRespondentRoomLlmOutputV3],
+) -> type[BaseModel]:
+    """Bind the visible action to the previous persisted actor phase.
+
+    The six scores and gaps in this generation become next-turn state.  They do
+    not select the action that is visible in this generation.  Keeping this
+    request-specific check inside final Pydantic validation lets the governed
+    stream invalidate one provisional generation and retry the exact same
+    request before the dossier reducer is reached.
+    """
+
+    previous = request.previous_case_detail
+    actor_role = request.agent_context.actor_role
+    previous_actor_status: Any = None
+    if isinstance(previous, Mapping) and actor_role in {"USER", "MERCHANT"}:
+        party_state = previous.get("party_intake_state")
+        actor_entry = (
+            party_state.get(actor_role) if isinstance(party_state, Mapping) else None
+        )
+        actor_notes = (
+            actor_entry.get("handoff_notes")
+            if isinstance(actor_entry, Mapping)
+            else None
+        )
+        if isinstance(actor_notes, Mapping):
+            previous_actor_status = actor_notes.get("remark_status")
+    expected_action = (
+        "INVITE_OPTIONAL_REMARK"
+        if previous_actor_status == "READY_PENDING_REMARK_INVITE"
+        else "ASK_SUBSTANTIVE"
+    )
+    return _cached_previous_phase_locked_room_output_type(
+        base_output_type,
+        expected_action,
+    )
+
+
+@lru_cache(maxsize=4)
+def _cached_previous_phase_locked_room_output_type(
+    base_output_type: type[IntakeInitiatorRoomLlmOutputV3]
+    | type[IntakeRespondentRoomLlmOutputV3],
+    expected_action: Literal["ASK_SUBSTANTIVE", "INVITE_OPTIONAL_REMARK"],
+) -> type[BaseModel]:
+    """Reuse one provider-visible contract per role and previous phase.
+
+    The previous implementation added only an after-validator and deliberately
+    kept the base JSON Schema unchanged.  That made the provider generate from
+    every action branch and discover the phase conflict only after completing
+    the entire response.  Override ``ordered_sections`` with the exact
+    role-specific branch union so response_format and the final validator share
+    the same persisted-phase authority.
+    """
+
+    if base_output_type is IntakeRespondentRoomLlmOutputV3:
+        ordered_sections_type = _ordered_room_sections_type(
+            IntakeRespondentRoomCaseMatrixSection,
+            IntakeRespondentRoomPartyPositionsSection,
+            IntakeRespondentRoomResponseSection,
+            branch_profile=expected_action,
+        )
+    else:
+        ordered_sections_type = _ordered_room_sections_type(
+            IntakeRoomCaseMatrixSection,
+            IntakeInitiatorRoomPartyPositionsSection,
+            IntakeInitiatorRoomClaimSection,
+            branch_profile=expected_action,
+        )
+
+    @model_validator(mode="after")
+    def require_previous_phase_action(value: BaseModel) -> BaseModel:
+        sections = getattr(value, "ordered_sections")
+        actual_action = sections[9].value.conversation_action
+        if actual_action != expected_action:
+            raise ValueError(
+                "conversation_action must follow the previous persisted Intake phase"
+            )
+        return value
+
+    constrained = create_model(
+        f"{base_output_type.__name__}{expected_action.title().replace('_', '')}Locked",
+        __base__=base_output_type,
+        __module__=base_output_type.__module__,
+        __doc__=base_output_type.__doc__,
+        ordered_sections=(
+            ordered_sections_type,
+            Field(description=base_output_type.model_fields["ordered_sections"].description),
+        ),
+        __validators__={
+            "_require_previous_phase_action": require_previous_phase_action
+        },
+    )
+    if constrained.model_json_schema() == base_output_type.model_json_schema():
+        raise ValueError("previous-phase lock did not narrow the provider JSON Schema")
+    return constrained
 
 
 def _materialize_ordered_intake_room_output(

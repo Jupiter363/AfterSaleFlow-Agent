@@ -140,7 +140,9 @@ _INTAKE_CONVERSATION_ACTIONS = frozenset(
     }
 )
 INTAKE_ACTION_GATE_ACTION_STATUSES = {
-    "ASK_SUBSTANTIVE": frozenset({"NOT_READY"}),
+    "ASK_SUBSTANTIVE": frozenset(
+        {"NOT_READY", "READY_PENDING_REMARK_INVITE"}
+    ),
     "INVITE_OPTIONAL_REMARK": frozenset({"WAITING_FOR_REMARK"}),
     "ACK_REMARK": frozenset({"HAS_REMARKS"}),
     # A participant may say "no further remarks" after one or more remarks.
@@ -279,6 +281,7 @@ class IntakeRouteModelRunnable(
         ],
         respondent_substantive_prompt: ChatPromptTemplate,
         respondent_substantive_model: GovernedChatModel,
+        default_model: GovernedChatModel,
         default_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]],
         fresh_form_opening_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]],
         remark_acknowledgement_flow: Runnable[
@@ -294,6 +297,7 @@ class IntakeRouteModelRunnable(
         self._respondent_substantive_lens = respondent_substantive_lens
         self._respondent_substantive_prompt = respondent_substantive_prompt
         self._respondent_substantive_model = respondent_substantive_model
+        self._default_model = default_model
         self._default_flow = default_flow
         self._fresh_form_opening_flow = fresh_form_opening_flow
         self._remark_acknowledgement_flow = remark_acknowledgement_flow
@@ -365,8 +369,41 @@ class IntakeRouteModelRunnable(
                 return self._remark_acknowledgement_flow
             if issubclass(output_type, IntakeRespondentRoomLlmOutputV3):
                 return self._respondent_substantive_flow_for(output_type)
-            return self._default_flow
+            if issubclass(output_type, IntakeInitiatorRoomLlmOutputV3):
+                return self._default_flow_for(output_type)
+            raise IntakeGraphContractError("INTAKE_LCEL_OUTPUT_TYPE_INVALID")
         raise IntakeGraphContractError("INTAKE_LCEL_ROUTE_INVALID")
+
+    def _default_flow_for(
+        self,
+        output_type: type[IntakeInitiatorRoomLlmOutputV3],
+    ) -> Runnable[IntakeGraphStateV2, Mapping[str, Any]]:
+        """Bind the initiator flow to this turn's previous-phase action lock."""
+
+        if output_type is IntakeInitiatorRoomLlmOutputV3:
+            return self._default_flow
+        template = self._default_model
+        dynamic_model = GovernedChatModel(
+            transport=template._transport,
+            output_type=output_type,
+            profile=template.profile,
+            policy=template.policy,
+            visible_fields=template._visible_fields,
+            user_content_parts=template._user_content_parts,
+            cancellation_probe=template._cancelled,
+            clock=template._clock,
+        )
+        dynamic_parser = PydanticOutputParser(pydantic_object=output_type)
+        parsed_generation = RunnableParallel(
+            message=RunnablePassthrough(),
+            draft=dynamic_parser,
+        )
+        return (
+            self._respondent_substantive_lens
+            | self._respondent_substantive_prompt
+            | dynamic_model
+            | parsed_generation
+        )
 
     def _respondent_substantive_flow_for(
         self,
@@ -1367,6 +1404,7 @@ class _IntakeComponentSeal:
     ]
     model_router_respondent_substantive_prompt: ChatPromptTemplate
     model_router_respondent_substantive_model: GovernedChatModel
+    model_router_default_model: GovernedChatModel
     model_router_default_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]]
     model_router_fresh_form_opening_flow: Runnable[
         IntakeGraphStateV2, Mapping[str, Any]
@@ -1534,7 +1572,14 @@ def _seal_intake_components(
         (remark_acknowledgement_parser, parser_behavior_methods),
         (respondent_substantive_parser, parser_behavior_methods),
         (respondent_opening_parser, parser_behavior_methods),
-        (model_router, ("_select_flow", "_respondent_substantive_flow_for")),
+        (
+            model_router,
+            (
+                "_select_flow",
+                "_default_flow_for",
+                "_respondent_substantive_flow_for",
+            ),
+        ),
         (model._transport, ("generate", "agenerate", "stream", "astream")),
         (fresh_form_opening_model._transport, ("generate", "agenerate", "stream", "astream")),
         (
@@ -1648,6 +1693,7 @@ def _seal_intake_components(
         model_router_respondent_substantive_model=(
             model_router._respondent_substantive_model
         ),
+        model_router_default_model=model_router._default_model,
         model_router_default_flow=model_router._default_flow,
         model_router_fresh_form_opening_flow=(
             model_router._fresh_form_opening_flow
@@ -1946,6 +1992,7 @@ def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
         is not seal.model_router_respondent_substantive_prompt
         or model_router._respondent_substantive_model
         is not seal.model_router_respondent_substantive_model
+        or model_router._default_model is not seal.model_router_default_model
         or model_router._default_flow is not seal.model_router_default_flow
         or model_router._fresh_form_opening_flow
         is not seal.model_router_fresh_form_opening_flow
@@ -2157,6 +2204,7 @@ def build_intake_model_node(
         respondent_substantive_lens=lens,
         respondent_substantive_prompt=prompt,
         respondent_substantive_model=respondent_substantive_model,
+        default_model=model,
         default_flow=cast(
             Runnable[IntakeGraphStateV2, Mapping[str, Any]],
             default_model_flow,
@@ -3555,7 +3603,19 @@ def _validate_business_output(
 
     questions = _actor_next_questions(state, draft)
     if action == "ASK_SUBSTANTIVE":
-        if readiness != "INCOMPLETE" or not questions:
+        expected_readiness = (
+            "READY_TO_CONFIRM"
+            if reducer_status == "READY_PENDING_REMARK_INVITE"
+            else "INCOMPLETE"
+        )
+        if (
+            readiness != expected_readiness
+            or not questions
+            or (
+                reducer_status == "READY_PENDING_REMARK_INVITE"
+                and len(questions) != 1
+            )
+        ):
             raise IntakeGraphContractError("INTAKE_CONVERSATION_ACTION_TEXT_CONFLICT")
         return
     if readiness != "READY_TO_CONFIRM" or questions:

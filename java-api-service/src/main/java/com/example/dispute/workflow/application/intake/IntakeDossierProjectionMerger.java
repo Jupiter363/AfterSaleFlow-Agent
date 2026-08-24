@@ -230,8 +230,13 @@ public final class IntakeDossierProjectionMerger {
         boolean hasPersistedClaim = current.path("claim_resolution").isObject()
                 || current.path("requested_resolution").isObject();
         ObjectNode merged = (ObjectNode) current.deepCopy();
-        ObjectNode ordinaryPatch = ((ObjectNode) patch).deepCopy();
-        JsonNode proposedRemarkPartition = ordinaryPatch.remove("handoff_remark_partition");
+        boolean frozenRemarkHandoff = matrixAuthority != null
+                && isFrozenRemarkHandoff(current, matrixAuthority.actorRole());
+        JsonNode proposedRemarkPartition = patch.get("handoff_remark_partition");
+        ObjectNode ordinaryPatch = frozenRemarkHandoff
+                ? projectFrozenRemarkOnlyPatch(current, (ObjectNode) patch, matrixAuthority)
+                : ((ObjectNode) patch).deepCopy();
+        ordinaryPatch.remove("handoff_remark_partition");
         deepMerge(merged, ordinaryPatch);
         if (proposedRemarkPartition != null) {
             merged.set("handoff_remark_partition", proposedRemarkPartition.deepCopy());
@@ -768,12 +773,9 @@ public final class IntakeDossierProjectionMerger {
         String from = previousActor.path("remark_status").asText();
         String to = proposedActor.path("remark_status").asText();
         boolean legalStatus = switch (from) {
-            case "NOT_READY" -> Set.of(
-                            "READY_PENDING_REMARK_INVITE",
-                            "WAITING_FOR_REMARK",
-                            "NO_EXTRA_REMARKS")
-                    .contains(to);
-            case "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK" ->
+            case "NOT_READY" -> "READY_PENDING_REMARK_INVITE".equals(to);
+            case "READY_PENDING_REMARK_INVITE" -> "WAITING_FOR_REMARK".equals(to);
+            case "WAITING_FOR_REMARK" ->
                 "HAS_REMARKS".equals(to) || "NO_EXTRA_REMARKS".equals(to);
             case "HAS_REMARKS", "NO_EXTRA_REMARKS" -> "HAS_REMARKS".equals(to);
             default -> false;
@@ -851,10 +853,47 @@ public final class IntakeDossierProjectionMerger {
         return POST_THRESHOLD_HANDOFF_STATUSES.contains(status);
     }
 
+    private static boolean isFrozenRemarkHandoff(JsonNode dossier, ActorRole actorRole) {
+        JsonNode partition = dossier.get("handoff_remark_partition");
+        String status;
+        if (partition != null && partition.isObject()) {
+            status = partition.path("parties")
+                    .path(actorRole.name())
+                    .path("remark_status")
+                    .asText();
+        } else {
+            status = dossier.path("party_intake_state")
+                    .path(actorRole.name())
+                    .path("handoff_notes")
+                    .path("remark_status")
+                    .asText();
+        }
+        return Set.of("WAITING_FOR_REMARK", "HAS_REMARKS", "NO_EXTRA_REMARKS")
+                .contains(status);
+    }
+
+    private static ObjectNode projectFrozenRemarkOnlyPatch(
+            JsonNode current, ObjectNode patch, MatrixAuthority authority) {
+        ObjectNode projected = JsonNodeFactory.instance.objectNode();
+        JsonNode proposedState = patch.get("party_intake_state");
+        if (proposedState == null || !proposedState.isObject()) {
+            return projected;
+        }
+
+        String actorRole = authority.actorRole().name();
+        ObjectNode projectedState = ((ObjectNode) current.path("party_intake_state")).deepCopy();
+        JsonNode proposedHandoff = proposedState.path(actorRole).path("handoff_notes");
+        ((ObjectNode) projectedState.path(actorRole))
+                .set("handoff_notes", proposedHandoff.deepCopy());
+        projected.set("party_intake_state", projectedState);
+        projected.set("handoff_notes", proposedHandoff.deepCopy());
+        return projected;
+    }
+
     private static void requirePostThresholdSubstantiveFreeze(
             JsonNode previous, JsonNode merged, MatrixAuthority authority) {
         if (authority == null
-                || !isPostThresholdHandoff(previous, authority.actorRole())) {
+                || !isFrozenRemarkHandoff(previous, authority.actorRole())) {
             return;
         }
         if (!substantiveProjection(previous).equals(substantiveProjection(merged))) {

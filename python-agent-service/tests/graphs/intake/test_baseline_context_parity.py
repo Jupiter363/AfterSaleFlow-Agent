@@ -21,7 +21,9 @@ from app.graphs.intake.baseline import (
 )
 from app.contracts.v1.codec import canonical_sha256
 from app.graphs.intake.lcel import build_intake_model_node
+from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import IntakeGraphStateV2, new_intake_graph_state
+from app.graphs.intake.validators import MATRIX_AUTHORITY_RECORD_KEY
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.model_runner import (
     PreparedHarnessInvocation,
@@ -326,8 +328,13 @@ def _target_state(
         for message in turn.messages
     }
     state["dossier_draft"] = cast(Any, dict(turn.previous_case_detail))
+    initiator_role = (
+        str((turn.initial_case_facts or {}).get("initiator_role") or "USER").upper()
+    )
+    authorized_initial_case_facts = dict(turn.initial_case_facts or {})
+    authorized_initial_case_facts["initiator_role"] = initiator_role
     state["memory_summary"] = json.dumps(
-        {"authorized_initial_case_facts": turn.initial_case_facts or {}},
+        {"authorized_initial_case_facts": authorized_initial_case_facts},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -335,6 +342,24 @@ def _target_state(
     state["initial_snapshot_ref"] = "SNAPSHOT_BASELINE_PARITY_1"
     state["initial_snapshot_hash"] = _SNAPSHOT_HASH
     state["initial_domain_revision"] = 1
+    private = state["bindings"]["private"]
+    state["node_results"][MATRIX_AUTHORITY_RECORD_KEY] = {
+        "schema_version": "intake-matrix-authority.v1",
+        "kind": "MATRIX_AUTHORITY",
+        "source_snapshot_hash": _SNAPSHOT_HASH,
+        "case_id": private["case_id"],
+        "room_epoch": private["room_epoch"],
+        "thread_id": private["thread_id"],
+        "actor_scope_hash": private["actor_scope_hash"],
+        "actor_role": turn.audience,
+        "initiator_role": initiator_role,
+        "proposal_mode": (
+            "INITIATOR_DELTA"
+            if turn.audience == initiator_role
+            else "RESPONDENT_DELTA"
+        ),
+        "formal_matrix_hash": None,
+    }
     state["last_event_ref"] = cast(Any, None)
     state["last_event_hash"] = cast(Any, None)
     state["last_event_sequence"] = max(
@@ -513,7 +538,7 @@ def test_baseline_request_preserves_every_ordered_participant_answer(
         )
     }
     state["memory_summary"] = build_intake_baseline_memory_summary(
-        {},
+        {"initiator_role": "USER"},
         initiator_statement_transcript=[
             {
                 "message_id": f"INTAKE_TURN_{turn_no}",
@@ -536,6 +561,50 @@ def test_baseline_request_preserves_every_ordered_participant_answer(
     assert [message.role for message in request.initiator_statement_transcript] == [
         "USER"
     ] * 8
+
+
+def test_first_room_message_receives_bound_role_authority_without_provider_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, policy = _capture_target_runtime_controls(monkeypatch, _USER_SECOND)
+    state = _target_state(_USER_SECOND, profile=profile, policy=policy)
+    state["dossier_draft"] = {}
+    state["messages"] = {
+        "MESSAGE_FIRST_ROOM": cast(
+            Any,
+            _message(
+                message_id="MESSAGE_FIRST_ROOM",
+                role="HUMAN",
+                audience="USER",
+                sequence=1,
+                content="I request a refund for the disputed product.",
+            ),
+        )
+    }
+    state["last_event_sequence"] = 1
+
+    request = build_intake_baseline_request(
+        state,
+        agent_context=_agent_context(_USER_SECOND),
+    )
+
+    assert request.initial_case_facts is None
+    assert request.previous_case_detail is None
+    assert request.server_initiator_role_authority == "USER"
+    assert "server_initiator_role_authority" not in request.model_dump(mode="json")
+
+    drifted = cast(Any, json.loads(json.dumps(state)))
+    drifted["node_results"][MATRIX_AUTHORITY_RECORD_KEY]["initiator_role"] = (
+        "MERCHANT"
+    )
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_PARTY_STATE_ROLE_AUTHORITY_INVALID",
+    ):
+        build_intake_baseline_request(
+            drifted,
+            agent_context=_agent_context(_USER_SECOND),
+        )
 
 
 def test_baseline_adapter_projects_display_gap_identifiers_stably_across_event_reflow(

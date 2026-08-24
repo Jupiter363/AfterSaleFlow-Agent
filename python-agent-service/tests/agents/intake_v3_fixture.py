@@ -53,19 +53,26 @@ def intake_initiator_v3_payload(
         next_questions
         if next_questions is not None
         else (
-            ()
-            if total_score >= 85
+            (
+                "请补充商家当时对退款诉求给出的具体答复？",
+            )
+            if action == "ASK_SUBSTANTIVE" and total_score >= 85
             else (
                 "请问该订单的订单号是什么？",
                 "您最早在什么时间发现本人没有收到包裹？",
             )
+            if action == "ASK_SUBSTANTIVE"
+            else ()
         )
     )
     ready = total_score >= 85 and not resolved_blocking_gaps
     remark_status = {
         "INVITE_OPTIONAL_REMARK": "WAITING_FOR_REMARK",
         "ACK_NO_REMARK": "NO_EXTRA_REMARKS",
-    }.get(action, "NOT_READY")
+    }.get(
+        action,
+        "READY_PENDING_REMARK_INVITE" if ready else "NOT_READY",
+    )
     admission = "ACCEPTED" if ready else "NEED_MORE_INFO"
     resolved_improvement = (
         improvement_reason

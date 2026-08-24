@@ -1640,9 +1640,12 @@ def _render_provider_case_detail(
     *,
     request: IntakeTurnRequest,
     case_detail: dict[str, object],
+    conversation_action: str = "ASK_SUBSTANTIVE",
+    model_semantics_authoritative: bool = False,
 ):
     return CaseDetailDossierSkill().render(
         request=request,
+        conversation_action=conversation_action,
         room_utterance="已完成结构化案件梳理。",
         llm_case_detail=case_detail,
         llm_dossier_patch=None,
@@ -1651,6 +1654,7 @@ def _render_provider_case_detail(
         llm_admission_recommendation="NEED_MORE_INFO",
         llm_missing_fields=[],
         llm_confidence=0.0,
+        model_semantics_authoritative=model_semantics_authoritative,
     )
 
 
@@ -1986,6 +1990,50 @@ def test_provider_cannot_replace_trusted_initiator_role(
     assert rendered.scroll_snapshot["respondent_attitude"]["respondent_role"] == (
         "MERCHANT" if trusted_role == "USER" else "USER"
     )
+
+
+def test_server_role_authority_binds_first_room_message_without_previous_dossier() -> None:
+    request = _request(
+        current_user_message={
+            "message_id": "MESSAGE_FIRST_ROOM_WITH_AUTHORITY",
+            "sequence_no": 1,
+            "role": "USER",
+            "source": "ROOM_MESSAGE",
+            "text": "我要求核验商品性能并退款。",
+        },
+        recent_dialogue_messages=[],
+        previous_case_detail=None,
+        server_initiator_role_authority="USER",
+    )
+    case_detail = _sparse_scoring_case_detail(0)
+    case_detail["claim_resolution"] = {
+        "initiator_role": "USER",
+        "requested_resolution": "REFUND",
+        "requested_amount": None,
+        "requested_items": "争议商品",
+        "request_reason": "商品性能与宣传不符。",
+        "normalized_statement": "用户要求核验商品性能并退款。",
+    }
+
+    rendered = _render_provider_case_detail(
+        request=request,
+        case_detail=case_detail,
+        model_semantics_authoritative=True,
+    )
+
+    assert rendered.scroll_snapshot["claim_resolution"]["initiator_role"] == "USER"
+    assert "server_initiator_role_authority" not in request.model_dump(mode="json")
+
+    missing_authority = request.model_copy(
+        update={"server_initiator_role_authority": None}
+    )
+    with pytest.raises(AgentOutputSchemaError) as error:
+        _render_provider_case_detail(
+            request=missing_authority,
+            case_detail=copy.deepcopy(case_detail),
+            model_semantics_authoritative=True,
+        )
+    assert error.value.safe_code == "INTAKE_PARTY_STATE_ROLE_AUTHORITY_INVALID"
 
 
 def test_merchant_initiator_score_is_structural_and_replay_stable() -> None:
@@ -2376,28 +2424,53 @@ def test_not_ready_asks_all_bounded_substantive_questions_without_rewriting_repl
     assert "handoff_remark_partition" not in result.scroll_snapshot
 
 
-def test_first_ready_turn_invites_optional_remark_and_freezes_substantive_state() -> None:
+def test_threshold_crossing_is_persisted_before_the_next_turn_invites_remark() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
-    invite = (
-        "当前信息已达到提交条件。您可以直接提交确认；"
-        "如有备注可选择补充，没有备注也可以直接确认提交。"
-    )
-    result = IntakeTurnWorkflow(
-        model_runner=CaseDetailRunner(
-            room_utterance=invite,
-            conversation_action="INVITE_OPTIONAL_REMARK",
+    class PreviousStateAnchoredRunner(CaseDetailRunner):
+        def invoke_structured(self, *, output_type, **kwargs):
+            if output_type.__name__ != "IntakeInitiatorRoomLlmOutputV3":
+                return super().invoke_structured(output_type=output_type, **kwargs)
+            payload = intake_initiator_v3_payload(
+                room_utterance=self.room_utterance,
+                total_score=self.score,
+                conversation_action="ASK_SUBSTANTIVE",
+            )
+            payload["ordered_sections"][8]["value"].update(
+                {
+                    "remark_status": "NOT_READY",
+                    "instruction": "本轮动作沿用上一轮未达标状态。",
+                }
+            )
+            payload["ordered_sections"][9]["value"].update(
+                {
+                    "ready_for_next_step": False,
+                    "improvement_reason": "本轮动作沿用上一轮未达标状态。",
+                    "admission_recommendation": "NEED_MORE_INFO",
+                    "admission_reasoning": "先完成上一轮已确定的实质追问。",
+                }
+            )
+            return SimpleNamespace(value=output_type.model_validate(payload))
+
+    question = "已记录本轮补充。请补充商家当时对退款诉求给出的具体答复？"
+    first = IntakeTurnWorkflow(
+        model_runner=PreviousStateAnchoredRunner(
+            score=88,
+            room_utterance=question,
+            conversation_action="ASK_SUBSTANTIVE",
         )
     ).run(_request())
 
-    snapshot = result.scroll_snapshot
+    snapshot = first.scroll_snapshot
     partition = snapshot["handoff_remark_partition"]
-    notes = result.scroll_snapshot["handoff_notes"]
-    assert result.room_utterance == invite
+    notes = snapshot["handoff_notes"]
+    assert first.room_utterance == question
     assert snapshot["intake_quality"]["ready_for_next_step"] is True
-    assert result.admission_recommendation == "ACCEPTED"
-    assert snapshot["missing_information"]["next_questions"] == []
-    assert notes["remark_status"] == "WAITING_FOR_REMARK"
+    assert first.admission_recommendation == "ACCEPTED"
+    assert snapshot["missing_information"]["next_questions"] == [
+        "请补充商家当时对退款诉求给出的具体答复？"
+    ]
+    assert notes["remark_status"] == "READY_PENDING_REMARK_INVITE"
     assert partition["schema_version"] == "handoff_remark_partition.v1"
     assert partition["case_fact_matrix_id"] == snapshot["case_fact_matrix"]["matrix_id"]
     assert partition["case_fact_matrix_version"] == snapshot["case_fact_matrix"][
@@ -2406,7 +2479,9 @@ def test_first_ready_turn_invites_optional_remark_and_freezes_substantive_state(
     assert partition["case_fact_matrix_hash"] == snapshot["case_fact_matrix"][
         "content_hash"
     ]
-    assert partition["parties"]["USER"]["remark_status"] == "WAITING_FOR_REMARK"
+    assert partition["parties"]["USER"]["remark_status"] == (
+        "READY_PENDING_REMARK_INVITE"
+    )
     assert partition["parties"]["USER"]["source"]["message_id"] == "MESSAGE_1001"
     assert partition["parties"]["MERCHANT"] == {
         "party_role": "MERCHANT",
@@ -2414,6 +2489,103 @@ def test_first_ready_turn_invites_optional_remark_and_freezes_substantive_state(
         "latest_remark": "",
         "remarks": [],
     }
+
+    from app.graphs.intake.contracts import IntakeCognitionDraft
+    from app.graphs.intake.lcel import _intake_action_gate
+
+    pending_draft = IntakeCognitionDraft.model_validate(
+        {
+            "conversation_action": "ASK_SUBSTANTIVE",
+            "room_utterance": first.room_utterance,
+            "dossier_patch": {
+                "intake_quality": copy.deepcopy(snapshot["intake_quality"]),
+                "missing_information": copy.deepcopy(
+                    snapshot["missing_information"]
+                ),
+                "handoff_notes": copy.deepcopy(snapshot["handoff_notes"]),
+                "admission": copy.deepcopy(snapshot["admission"]),
+                "party_intake_state": copy.deepcopy(
+                    snapshot["party_intake_state"]
+                ),
+                "handoff_remark_partition": copy.deepcopy(partition),
+            },
+            "matrix_patch": None,
+            "readiness": "READY_TO_CONFIRM",
+            "missing_fields": [],
+            "recommendation": "ACCEPTED",
+            "knowledge_answer_mode": "NONE",
+            "confidence": 0.9,
+        }
+    )
+    gate = _intake_action_gate(
+        {
+            "last_event_hash": "a" * 64,
+            "bindings": {"private": {"audience": "USER"}},
+        },
+        pending_draft,
+    )
+    assert gate["conversation_action"] == "ASK_SUBSTANTIVE"
+    assert gate["reducer_status"] == "READY_PENDING_REMARK_INVITE"
+
+    invite = "已记录最后一项回答。当前信息可以提交，请问是否有可选交接备注？"
+    second_message = {
+        "message_id": "MESSAGE_1002",
+        "sequence_no": 4,
+        "role": "USER",
+        "source": "ROOM_MESSAGE",
+        "text": "商家当时表示需要等待物流核查后再决定是否退款。",
+    }
+    second = IntakeTurnWorkflow(
+        model_runner=CaseDetailRunner(
+            score=88,
+            room_utterance=invite,
+            conversation_action="INVITE_OPTIONAL_REMARK",
+        )
+    ).run(
+        _request(
+            current_user_message=second_message,
+            previous_case_detail=snapshot,
+        )
+    )
+
+    assert second.room_utterance == invite
+    assert second.scroll_snapshot["handoff_notes"]["remark_status"] == (
+        "WAITING_FOR_REMARK"
+    )
+    assert second.scroll_snapshot["missing_information"]["next_questions"] == []
+    assert second.scroll_snapshot["intake_quality"] == snapshot["intake_quality"]
+
+    from app.graphs.intake.validators import validate_dossier_transition
+
+    validate_dossier_transition(
+        snapshot,
+        second.scroll_snapshot,
+        actor_role="USER",
+        current_message={
+            "message_id": second_message["message_id"],
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": second_message["text"],
+        },
+        formal_matrix=second.scroll_snapshot["case_fact_matrix"],
+    )
+
+
+def test_not_ready_previous_phase_cannot_invite_remark_in_the_same_turn() -> None:
+    from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
+
+    workflow = IntakeTurnWorkflow(
+        model_runner=CaseDetailRunner(
+            score=88,
+            room_utterance="当前信息可以提交，请问是否有可选交接备注？",
+            conversation_action="INVITE_OPTIONAL_REMARK",
+        )
+    )
+
+    with pytest.raises(AgentOutputSchemaError) as captured:
+        workflow.run(_request())
+
+    assert captured.value.safe_code == "INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT"
 
 
 def test_remark_partition_is_append_only_replay_safe_and_party_isolated(
@@ -2663,10 +2835,7 @@ def test_remark_partition_is_append_only_replay_safe_and_party_isolated(
 def test_pending_ready_stream_matches_model_final_utterance() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
-    raw_invite = (
-        "当前信息已达到提交条件。您可以直接提交确认；"
-        "如有备注可选择补充，没有备注也可以直接确认提交。"
-    )
+    raw_question = "已记录本轮补充。请补充商家当时对退款诉求给出的具体答复？"
 
     class RegistryStreamingRunner(CaseDetailRunner):
         def invoke_structured(self, **kwargs):
@@ -2694,8 +2863,8 @@ def test_pending_ready_stream_matches_model_final_utterance() -> None:
         result = IntakeTurnWorkflow(
             model_runner=RegistryStreamingRunner(
                 score=88,
-                room_utterance=raw_invite,
-                conversation_action="INVITE_OPTIONAL_REMARK",
+                room_utterance=raw_question,
+                conversation_action="ASK_SUBSTANTIVE",
             )
         ).run(request)
 
@@ -2705,5 +2874,8 @@ def test_pending_ready_stream_matches_model_final_utterance() -> None:
         if event.type == "visible_delta" and event.field == "room_utterance"
     )
 
-    assert streamed_utterance == raw_invite
+    assert result.scroll_snapshot["handoff_notes"]["remark_status"] == (
+        "READY_PENDING_REMARK_INVITE"
+    )
+    assert streamed_utterance == raw_question
     assert streamed_utterance == result.room_utterance

@@ -64,6 +64,96 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
             occurred_at, created_at, event_source_type
             """;
 
+    private static final String CURRENT_EVENT_SLOTS_SQL =
+            """
+            select slot.logical_sequence,
+                   slot.current_binding_id,
+                   slot.current_generation,
+                   coalesce(proof.matched_run_count, 0) as matched_run_count,
+                   coalesce(
+                       proof.matched_run_count = 1
+                       and proof.latest_attempt_matches_binding
+                       and proof.run_status in ('FAILED', 'ABORTED')
+                       and proof.finalization_status = 'UNCOMMITTED'
+                       and proof.result_ready_attempt_id is null
+                       and proof.committed_attempt_id is null
+                       and proof.final_result_hash is null
+                       and proof.committed_manifest_id is null
+                       and proof.committed_manifest_hash is null
+                       and proof.finalized_at is null
+                       and proof.attempt_status in ('FAILED', 'ABORTED')
+                       and proof.termination_code = 'FAIL_LOGICAL_RUN'
+                       and proof.error_retryable is false
+                       and proof.completed_at is not null,
+                       false
+                   ) as recovery_eligible
+              from case_intake_event_slot_authority slot
+              join case_intake_snapshot_binding binding
+                on binding.binding_id = slot.current_binding_id
+               and binding.thread_registration_id = slot.thread_registration_id
+               and binding.event_sequence = slot.logical_sequence
+               and binding.binding_generation = slot.current_generation
+               and binding.binding_type = 'EVENT'
+              left join lateral (
+                  select candidate.*,
+                         count(*) over () as matched_run_count
+                    from (
+                        select run.run_status,
+                               run.finalization_status,
+                               run.result_ready_attempt_id,
+                               run.committed_attempt_id,
+                               run.final_result_hash,
+                               run.committed_manifest_id,
+                               run.committed_manifest_hash,
+                               run.finalized_at,
+                               attempt.attempt_status,
+                               attempt.termination_code,
+                               attempt.error_retryable,
+                               attempt.completed_at,
+                               (
+                                   attempt.command_json #>> '{case_id}' = binding.case_id
+                                   and attempt.command_json #>> '{thread_id}' = binding.thread_id
+                                   and attempt.command_json #>> '{room_epoch}' = binding.room_epoch::text
+                                   and attempt.command_json #>> '{actor_scope,audience}' = binding.audience
+                                   and attempt.command_json #>> '{event_ref,artifact_id}' = binding.artifact_id
+                                   and attempt.command_json #>> '{event_ref,schema_version}' = binding.schema_version
+                                   and attempt.command_json #>> '{event_ref,uri}' = binding.object_uri
+                                   and attempt.command_json #>> '{event_ref,sha256}' = binding.content_sha256
+                                   and attempt.command_json #>> '{event_ref,size_bytes}' = binding.size_bytes::text
+                               ) as latest_attempt_matches_binding,
+                               run.id as run_id
+                          from agent_run run
+                          join lateral (
+                              select candidate_attempt.*
+                                from agent_run_attempt candidate_attempt
+                               where candidate_attempt.agent_run_id = run.id
+                               order by candidate_attempt.attempt_no desc
+                               limit 1
+                          ) attempt on true
+                         where run.case_id = binding.case_id
+                           and run.room_type = 'INTAKE'
+                           and exists (
+                               select 1
+                                 from agent_run_attempt bound_attempt
+                                where bound_attempt.agent_run_id = run.id
+                                  and bound_attempt.command_json #>> '{case_id}' = binding.case_id
+                                  and bound_attempt.command_json #>> '{thread_id}' = binding.thread_id
+                                  and bound_attempt.command_json #>> '{room_epoch}' = binding.room_epoch::text
+                                  and bound_attempt.command_json #>> '{actor_scope,audience}' = binding.audience
+                                  and bound_attempt.command_json #>> '{event_ref,artifact_id}' = binding.artifact_id
+                                  and bound_attempt.command_json #>> '{event_ref,schema_version}' = binding.schema_version
+                                  and bound_attempt.command_json #>> '{event_ref,uri}' = binding.object_uri
+                                  and bound_attempt.command_json #>> '{event_ref,sha256}' = binding.content_sha256
+                                  and bound_attempt.command_json #>> '{event_ref,size_bytes}' = binding.size_bytes::text
+                           )
+                    ) candidate
+                   order by candidate.run_id
+                   limit 1
+              ) proof on true
+             where slot.thread_registration_id = :registrationId
+             order by slot.logical_sequence
+            """;
+
     private final NamedParameterJdbcTemplate jdbc;
 
     public JdbcIntakeGraphBindingStore(NamedParameterJdbcTemplate jdbc) {
@@ -117,9 +207,11 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
             return new EventAllocation(event.sequenceNo(), Optional.of(event));
         }
         long initialLastSequence = requireInitialSnapshot(registrationId);
-        long previousSequence = Math.max(initialLastSequence,
-                maximumEventSequence(registrationId).orElse(0L));
-        return new EventAllocation(Math.addExact(previousSequence, 1L), Optional.empty());
+        EventSequenceState sequenceState = eventSequenceState(registrationId, initialLastSequence);
+        long sequence = sequenceState.recoverySlot()
+                .map(EventSlotState::sequenceNo)
+                .orElseGet(() -> Math.addExact(sequenceState.maximumSequence(), 1L));
+        return new EventAllocation(sequence, Optional.empty());
     }
 
     @Override
@@ -205,18 +297,35 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
         IntakeGraphThreadBinding thread = lockThread(reference.threadRegistrationId());
         requireReferenceScope(thread, reference);
         long initialLastSequence = requireInitialSnapshot(reference.threadRegistrationId());
-        Optional<IntakeEventReference> replay = findEvent(reference);
+        Optional<IntakeEventReference> replay = findExactEvent(reference);
         if (replay.isPresent()) {
             if (!replay.get().equals(reference)) {
                 throw conflict("event id or sequence is bound to another hash");
             }
             return WriteReceipt.replayed(replay.get());
         }
-        Optional<Long> maximumSequence = maximumEventSequence(reference.threadRegistrationId());
-        long previousSequence = Math.max(initialLastSequence, maximumSequence.orElse(0L));
-        if (reference.sequenceNo() != Math.addExact(previousSequence, 1L)) {
+        EventSequenceState sequenceState =
+                eventSequenceState(reference.threadRegistrationId(), initialLastSequence);
+        Optional<EventSlotState> recoverySlot = sequenceState.recoverySlot();
+        boolean recovery = recoverySlot
+                .map(slot -> slot.sequenceNo() == reference.sequenceNo())
+                .orElse(false);
+        if (recoverySlot.isPresent() && !recovery) {
+            throw conflict("a terminal uncommitted event sequence must be recovered first");
+        }
+        if (!recovery
+                && reference.sequenceNo()
+                        != Math.addExact(sequenceState.maximumSequence(), 1L)) {
             throw conflict("event sequence is not the next ordered reference");
         }
+        long generation = recovery
+                ? Math.addExact(recoverySlot.orElseThrow().generation(), 1L)
+                : 1L;
+        String supersedesBindingId =
+                recovery ? recoverySlot.orElseThrow().bindingId() : null;
+        MapSqlParameterSource parameters = eventParameters(reference)
+                .addValue("bindingGeneration", generation)
+                .addValue("supersedesBindingId", supersedesBindingId);
         int inserted = jdbc.update(
                 """
                 insert into case_intake_snapshot_binding (
@@ -225,20 +334,27 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                     actor_audience, binding_type, schema_version, artifact_id, object_uri,
                     object_version, content_sha256, size_bytes, visibility, domain_revision,
                     event_id, message_id, event_sequence, audience, occurred_at,
-                    initialization_marker, created_at, event_source_type
+                    initialization_marker, created_at, event_source_type,
+                    binding_generation, supersedes_binding_id
                 ) values (
                     :bindingId, :threadRegistrationId, :tenantSurrogate, :caseId, 'INTAKE',
                     :roomEpoch, :fencingToken, :threadId, :actorScopeHash, :agentSessionId,
                     :audience, 'EVENT', :schemaVersion, :artifactId, :objectUri,
                     :objectVersion, :contentSha256, :sizeBytes, 'PRIVATE', :domainRevision,
                     :eventId, :messageId, :eventSequence, :audience, :occurredAt, false, :createdAt,
-                    :eventSourceType
+                    :eventSourceType, :bindingGeneration, :supersedesBindingId
                 )
                 on conflict do nothing
                 """,
-                eventParameters(reference));
+                parameters);
         if (inserted != 1) {
             throw conflict("event id, sequence, or immutable artifact");
+        }
+        int authorityWritten = recovery
+                ? advanceEventSlotAuthority(reference, generation, supersedesBindingId)
+                : createEventSlotAuthority(reference);
+        if (authorityWritten != 1) {
+            throw conflict("event slot authority compare-and-set failed");
         }
         return WriteReceipt.created(reference);
     }
@@ -361,23 +477,24 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.getFirst());
     }
 
-    private Optional<IntakeEventReference> findEvent(IntakeEventReference candidate) {
+    private Optional<IntakeEventReference> findExactEvent(IntakeEventReference candidate) {
         List<IntakeEventReference> rows = jdbc.query(
                 """
                 select %s
                   from case_intake_snapshot_binding
                  where binding_type = 'EVENT'
                    and (binding_id = :bindingId
-                        or (thread_registration_id = :threadRegistrationId
-                            and event_sequence = :eventSequence)
-                        or (tenant_surrogate = :tenantSurrogate
-                            and (event_id = :eventId
-                                or message_id = :messageId
+                         or (tenant_surrogate = :tenantSurrogate
+                             and (event_id = :eventId
+                                 or message_id = :messageId
                                 or artifact_id = :artifactId)))
                 """.formatted(EVENT_COLUMNS),
                 eventParameters(candidate),
                 JdbcIntakeGraphBindingStore::mapEvent);
-        return rows.size() == 1 ? Optional.of(rows.getFirst()) : Optional.empty();
+        if (rows.size() > 1) {
+            throw conflict("event identity resolves to multiple immutable bindings");
+        }
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.getFirst());
     }
 
     private IntakeGraphThreadBinding lockThread(String registrationId) {
@@ -490,17 +607,97 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
         return rows.getFirst();
     }
 
-    private Optional<Long> maximumEventSequence(String registrationId) {
-        Long maximum = jdbc.queryForObject(
+    private EventSequenceState eventSequenceState(
+            String registrationId, long initialLastSequence) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                CURRENT_EVENT_SLOTS_SQL,
+                Map.of("registrationId", registrationId));
+        long expectedSequence = Math.addExact(initialLastSequence, 1L);
+        java.util.ArrayList<EventSlotState> slots = new java.util.ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            long sequence = number(row, "logical_sequence");
+            if (sequence <= initialLastSequence) {
+                continue;
+            }
+            if (sequence != expectedSequence) {
+                throw conflict("event slot authority is not contiguous with the initial snapshot");
+            }
+            slots.add(new EventSlotState(
+                    sequence,
+                    text(row, "current_binding_id"),
+                    number(row, "current_generation"),
+                    Boolean.TRUE.equals(row.get("recovery_eligible"))));
+            expectedSequence = Math.addExact(expectedSequence, 1L);
+        }
+        long maximumSequence = slots.isEmpty()
+                ? initialLastSequence
+                : slots.getLast().sequenceNo();
+        int recoveryStart = slots.size();
+        while (recoveryStart > 0 && slots.get(recoveryStart - 1).recoveryEligible()) {
+            recoveryStart--;
+        }
+        for (int index = 0; index < recoveryStart; index++) {
+            if (slots.get(index).recoveryEligible()) {
+                throw conflict("a recoverable event is followed by a non-recoverable event");
+            }
+        }
+        Optional<EventSlotState> recoverySlot = recoveryStart < slots.size()
+                ? Optional.of(slots.get(recoveryStart))
+                : Optional.empty();
+        return new EventSequenceState(maximumSequence, recoverySlot);
+    }
+
+    private int createEventSlotAuthority(IntakeEventReference reference) {
+        return jdbc.update(
                 """
-                select max(event_sequence)
-                  from case_intake_snapshot_binding
-                 where thread_registration_id = :registrationId
-                   and binding_type = 'EVENT'
+                insert into case_intake_event_slot_authority (
+                    thread_registration_id, logical_sequence, current_binding_id,
+                    current_generation, authority_version, created_at, updated_at
+                ) values (
+                    :threadRegistrationId, :eventSequence, :bindingId,
+                    1, 0, :createdAt, :createdAt
+                )
+                on conflict do nothing
                 """,
-                Map.of("registrationId", registrationId),
-                Long.class);
-        return Optional.ofNullable(maximum);
+                eventParameters(reference));
+    }
+
+    private int advanceEventSlotAuthority(
+            IntakeEventReference reference,
+            long generation,
+            String supersedesBindingId) {
+        return jdbc.update(
+                """
+                update case_intake_event_slot_authority
+                   set current_binding_id = :bindingId,
+                       current_generation = :bindingGeneration,
+                       authority_version = authority_version + 1,
+                       updated_at = :createdAt
+                 where thread_registration_id = :threadRegistrationId
+                   and logical_sequence = :eventSequence
+                   and current_binding_id = :supersedesBindingId
+                   and current_generation = :previousGeneration
+                """,
+                eventParameters(reference)
+                        .addValue("bindingGeneration", generation)
+                        .addValue("previousGeneration", generation - 1L)
+                        .addValue("supersedesBindingId", supersedesBindingId));
+    }
+
+    private static long number(Map<String, Object> row, String name) {
+        Object value = row.get(name);
+        if (!(value instanceof Number number)) {
+            throw conflict("event slot authority field is not numeric: " + name);
+        }
+        return number.longValue();
+    }
+
+    private static String text(Map<String, Object> row, String name) {
+        Object value = row.get(name);
+        if (!(value instanceof String text) || text.isBlank()) {
+            throw conflict("event slot authority field is not text: " + name);
+        }
+        return text;
     }
 
     private static MapSqlParameterSource registrationParameters(
@@ -728,6 +925,16 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
     private static OffsetDateTime atOffset(java.time.Instant instant) {
         return instant.atOffset(ZoneOffset.UTC);
     }
+
+    private record EventSlotState(
+            long sequenceNo,
+            String bindingId,
+            long generation,
+            boolean recoveryEligible) {}
+
+    private record EventSequenceState(
+            long maximumSequence,
+            Optional<EventSlotState> recoverySlot) {}
 
     private static IntakeGraphBindingConflictException conflict(String detail) {
         return new IntakeGraphBindingConflictException("Intake Graph binding conflict: " + detail);

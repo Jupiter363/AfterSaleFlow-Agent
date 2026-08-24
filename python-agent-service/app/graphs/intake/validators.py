@@ -1350,6 +1350,28 @@ def _validated_ingress_matrix_authority_record(
     return record
 
 
+def validated_intake_initiator_role_authority(
+    state: IntakeGraphStateV2 | Mapping[str, Any],
+) -> str:
+    """Return the request-bound initiator role without exposing provider input.
+
+    The matrix authority record is bound to the ingress snapshot, private case,
+    room epoch, graph thread, actor scope and audience by the validator above.
+    The independently retained initial facts must name the same initiator.  This
+    closes the first-room-message gap where both ``initial_case_facts`` and an
+    empty previous dossier are intentionally absent from the provider request.
+    """
+
+    record = _validated_ingress_matrix_authority_record(state)
+    initiator_role = record.get("initiator_role")
+    if (
+        initiator_role not in {"USER", "MERCHANT"}
+        or initiator_role != _trusted_initiator_role(state)
+    ):
+        raise IntakeGraphContractError("INTAKE_PARTY_STATE_ROLE_AUTHORITY_INVALID")
+    return cast(str, initiator_role)
+
+
 def _ingress_matrix_authority_anchor_hash(
     state: IntakeGraphStateV2 | Mapping[str, Any],
 ) -> str | None:
@@ -2631,8 +2653,7 @@ def _validate_handoff_remark_transition(
     after_status = after["remark_status"]
     allowed = {
         ("NOT_READY", "READY_PENDING_REMARK_INVITE"),
-        ("NOT_READY", "WAITING_FOR_REMARK"),
-        ("NOT_READY", "NO_EXTRA_REMARKS"),
+        ("READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"),
         ("READY_PENDING_REMARK_INVITE", "HAS_REMARKS"),
         ("READY_PENDING_REMARK_INVITE", "NO_EXTRA_REMARKS"),
         ("WAITING_FOR_REMARK", "HAS_REMARKS"),

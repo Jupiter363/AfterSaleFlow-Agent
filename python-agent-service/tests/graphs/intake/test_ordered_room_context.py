@@ -298,7 +298,10 @@ def test_intake_room_v3_contract_places_reply_first_and_evaluation_last() -> Non
         "TURN_EVALUATION",
     )
     section_schema = schema["properties"]["ordered_sections"]
-    assert len(section_schema["anyOf"]) == 4
+    # The provider contract has one explicit branch for the one-turn-lag
+    # threshold crossing: this turn still asks the prior question while the
+    # persisted next-turn state becomes READY_PENDING_REMARK_INVITE.
+    assert len(section_schema["anyOf"]) == 5
     assert all(
         len(branch["prefixItems"]) == len(INTAKE_ROOM_SECTION_KINDS)
         for branch in section_schema["anyOf"]
@@ -332,7 +335,7 @@ def test_initiator_provider_schema_keeps_reported_and_direct_opponent_positions_
     assert "direct opponent positions are collected only in the respondent turn" in sections_description
 
 
-def test_intake_room_v3_runtime_binds_readiness_from_component_sum() -> None:
+def test_intake_room_v3_accepts_prior_state_action_with_new_high_score() -> None:
     payload = _initiator_v3_payload()
     missing = payload["ordered_sections"][7]["value"]
     missing.update(
@@ -373,8 +376,12 @@ def test_intake_room_v3_runtime_binds_readiness_from_component_sum() -> None:
     provider_validator = Draft202012Validator(schema)
 
     assert provider_validator.is_valid(payload)
-    with pytest.raises(ValidationError):
-        IntakeInitiatorRoomLlmOutputV3.model_validate(payload)
+    # The current action is owned by the previously persisted state.  A newly
+    # high six-component sum must therefore remain structurally admissible as
+    # ASK_SUBSTANTIVE; the reducer persists it for the next turn.
+    lagged = IntakeInitiatorRoomLlmOutputV3.model_validate(payload)
+    assert lagged.ordered_sections[9].value.conversation_action == "ASK_SUBSTANTIVE"
+    assert lagged.ordered_sections[9].value.ready_for_next_step is False
 
     ready = copy.deepcopy(payload)
     ready["ordered_sections"][7]["value"]["next_questions"] = []
@@ -408,6 +415,115 @@ def test_intake_room_v3_runtime_binds_readiness_from_component_sum() -> None:
         .value.ready_for_next_step
         is False
     )
+
+
+def test_request_specific_output_contract_locks_action_to_previous_phase() -> None:
+    threshold_crossing = _initiator_v3_payload()
+    threshold_crossing["ordered_sections"][7]["value"].update(
+        {
+            "blocking_gaps": [],
+            "nice_to_have_gaps": [],
+            "next_questions": ["请补充最后一项可核验事实。"],
+        }
+    )
+    threshold_crossing["ordered_sections"][8]["value"].update(
+        {
+            "remark_status": "READY_PENDING_REMARK_INVITE",
+            "instruction": "本轮回答已达标；下一轮先完成当前提问，再邀请备注。",
+        }
+    )
+    threshold_crossing["ordered_sections"][9]["value"].update(
+        {
+            "score_breakdown": {
+                "references": 15,
+                "event_story": 20,
+                "party_positions": 20,
+                "requested_resolution": 15,
+                "risk_and_conflicts": 15,
+                "next_action_clarity": 15,
+            },
+            "ready_for_next_step": True,
+            "admission_recommendation": "ACCEPTED",
+            "admission_reasoning": "六项分数达到阈值且不存在阻塞缺口。",
+            "conversation_action": "ASK_SUBSTANTIVE",
+        }
+    )
+    invitation = copy.deepcopy(threshold_crossing)
+    invitation["ordered_sections"][7]["value"]["next_questions"] = []
+    invitation["ordered_sections"][8]["value"].update(
+        {
+            "remark_status": "WAITING_FOR_REMARK",
+            "instruction": "请确认是否还有可选交接备注。",
+        }
+    )
+    invitation["ordered_sections"][9]["value"][
+        "conversation_action"
+    ] = "INVITE_OPTIONAL_REMARK"
+
+    def request_with_previous_status(status: str) -> IntakeTurnRequest:
+        case_id = f"CASE_PHASE_LOCK_{status}"
+        return IntakeTurnRequest.model_validate(
+            {
+                "case_id": case_id,
+                "room_type": "INTAKE",
+                "turn_source": "ROOM_MESSAGE",
+                "current_user_message": {
+                    "message_id": f"MESSAGE_PHASE_LOCK_{status}",
+                    "sequence_no": 2,
+                    "role": "USER",
+                    "source": "ROOM_MESSAGE",
+                    "text": "补充最后一项事实。",
+                },
+                "previous_case_detail": {
+                    "party_intake_state": {
+                        "USER": {
+                            "handoff_notes": {"remark_status": status},
+                        }
+                    }
+                },
+                "agent_context": _agent_context(case_id=case_id, role="USER"),
+            }
+        )
+
+    not_ready_type = intake_case_detail_output_type(
+        request_with_previous_status("NOT_READY")
+    )
+    not_ready_schema = not_ready_type.model_json_schema()
+    assert not_ready_schema != IntakeInitiatorRoomLlmOutputV3.model_json_schema()
+    Draft202012Validator.check_schema(not_ready_schema)
+    not_ready_provider_validator = Draft202012Validator(not_ready_schema)
+    assert not_ready_provider_validator.is_valid(threshold_crossing)
+    assert not not_ready_provider_validator.is_valid(invitation)
+    assert not_ready_type is intake_case_detail_output_type(
+        request_with_previous_status("NOT_READY")
+    )
+    accepted_crossing = not_ready_type.model_validate(threshold_crossing)
+    assert (
+        accepted_crossing.ordered_sections[9].value.conversation_action
+        == "ASK_SUBSTANTIVE"
+    )
+    with pytest.raises(ValidationError):
+        not_ready_type.model_validate(invitation)
+
+    pending_type = intake_case_detail_output_type(
+        request_with_previous_status("READY_PENDING_REMARK_INVITE")
+    )
+    pending_schema = pending_type.model_json_schema()
+    assert pending_schema != IntakeInitiatorRoomLlmOutputV3.model_json_schema()
+    Draft202012Validator.check_schema(pending_schema)
+    pending_provider_validator = Draft202012Validator(pending_schema)
+    assert pending_provider_validator.is_valid(invitation)
+    assert not pending_provider_validator.is_valid(threshold_crossing)
+    assert pending_type is intake_case_detail_output_type(
+        request_with_previous_status("READY_PENDING_REMARK_INVITE")
+    )
+    accepted_invitation = pending_type.model_validate(invitation)
+    assert (
+        accepted_invitation.ordered_sections[9].value.conversation_action
+        == "INVITE_OPTIONAL_REMARK"
+    )
+    with pytest.raises(ValidationError):
+        pending_type.model_validate(threshold_crossing)
 
 
 def test_intake_room_v3_exposes_only_component_score_authority() -> None:
@@ -1015,7 +1131,7 @@ def test_respondent_turn_generates_only_own_view_and_server_copies_frozen_claim(
     respondent_output_type = intake_case_detail_output_type(respondent_request)
     respondent_schema = respondent_output_type.model_json_schema()
     Draft202012Validator.check_schema(respondent_schema)
-    assert len(respondent_schema["properties"]["ordered_sections"]["anyOf"]) == 4
+    assert len(respondent_schema["properties"]["ordered_sections"]["anyOf"]) == 5
     assert "claim_resolution" not in json.dumps(respondent_schema, sort_keys=True)
     assert "initiator_position" not in json.dumps(respondent_schema, sort_keys=True)
     assert "INITIATOR_REPORTED" not in json.dumps(respondent_schema, sort_keys=True)
