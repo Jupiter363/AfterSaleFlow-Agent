@@ -204,6 +204,8 @@ create table intake_parallel_frame_generation (
     model_profile_id varchar(128) not null,
     frame_model_input_sha256 varchar(64) not null,
     frame_prompt_sha256 varchar(64) not null,
+    repair_code varchar(128),
+    validation_path varchar(1024),
     provider_call_lease_state varchar(16) not null default 'ADMITTED',
     preview_state varchar(16) not null default 'NONE',
     first_preview_next_local_index bigint,
@@ -237,6 +239,14 @@ create table intake_parallel_frame_generation (
             and length(btrim(prompt_profile_id)) between 1 and 128
             and length(btrim(output_schema_id)) between 1 and 128
             and length(btrim(model_profile_id)) between 1 and 128
+            and (
+                (frame_generation = 1 and repair_code is null and validation_path is null)
+                or (
+                    frame_generation > 1
+                    and repair_code ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+                    and length(btrim(validation_path)) between 1 and 1024
+                )
+            )
         ),
     constraint ck_intake_parallel_frame_generation_hashes
         check (
@@ -571,6 +581,8 @@ begin
         or new.model_profile_id is distinct from old.model_profile_id
         or new.frame_model_input_sha256 is distinct from old.frame_model_input_sha256
         or new.frame_prompt_sha256 is distinct from old.frame_prompt_sha256
+        or new.repair_code is distinct from old.repair_code
+        or new.validation_path is distinct from old.validation_path
         or new.created_at is distinct from old.created_at
         or new.updated_at < old.updated_at
         or new.provider_call_count < old.provider_call_count

@@ -1,0 +1,106 @@
+package com.example.dispute.workflow.infrastructure.persistence.intake.parallel;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Locale;
+import org.junit.jupiter.api.Test;
+
+class JdbcIntakeParallelFrameStagingStoreContractTest {
+
+    private static final Path SOURCE = Path.of(
+            "src",
+            "main",
+            "java",
+            "com",
+            "example",
+            "dispute",
+            "workflow",
+            "infrastructure",
+            "persistence",
+            "intake",
+            "parallel",
+            "JdbcIntakeParallelFrameStagingStore.java");
+
+    @Test
+    void keepsFrameIngressAndSealInsideTechnicalTransactionsOnly() throws Exception {
+        String source = normalizedSource();
+
+        assertThat(source)
+                .contains("implements intakeparallelframestagingport")
+                .contains("propagation = propagation.requires_new")
+                .contains("for update of frame_set, attempt, slot, generation, authority")
+                .contains("eventwriter.appendincurrenttransaction")
+                .contains("insert into intake_parallel_frame_ingress")
+                .contains("insert into intake_parallel_frame_result")
+                .contains("update intake_parallel_frame_generation")
+                .contains("update intake_parallel_frame_slot")
+                .doesNotContain("insert into room_message")
+                .doesNotContain("insert into case_dossier")
+                .doesNotContain("update case_process_projection")
+                .doesNotContain("update case_command");
+    }
+
+    @Test
+    void replaysAnExactIngressBeforeRejectingNewWorkAndLetsJavaAllocateSequence()
+            throws Exception {
+        String source = normalizedSource();
+        int replay = source.indexOf("optional<map<string, object>> replay = findingressreplay(identity)");
+        int runningGate = source.indexOf("requirerunningcollecting(authority)", replay);
+        int priorSequence = source.indexOf("long previoussequence = number(authority, \"last_sequence_no\")", runningGate);
+        int javaSequence = source.indexOf("long globalsequence = math.addexact(previoussequence, 1l)", priorSequence);
+
+        assertThat(replay).isGreaterThanOrEqualTo(0);
+        assertThat(runningGate).isGreaterThan(replay);
+        assertThat(priorSequence).isGreaterThan(runningGate);
+        assertThat(javaSequence).isGreaterThan(priorSequence);
+        assertThat(source)
+                .contains("ingress_identity = :ingressidentity")
+                .contains("stream_session_id = :streamsessionid")
+                .contains("transport_sequence = :transportsequence")
+                .contains("canonical_payload_sha256")
+                .contains("highest_contiguous_sequence_no")
+                .contains("stream_protocol = 'agent-stream.v4'");
+    }
+
+    @Test
+    void sealingExactThreeFramesStillDoesNotGrantReadyOrWriteBusinessState()
+            throws Exception {
+        String source = normalizedSource();
+
+        assertThat(source)
+                .contains("boolean exactthreesealed = exactthreesealed(command.framesetid())")
+                .contains("exactthreesealed, assemblystate.collecting")
+                .doesNotContain("assembly_state = 'ready'")
+                .doesNotContain("intaketurnproposal")
+                .doesNotContain("insert into intake_parallel_proposal_artifact");
+    }
+
+    @Test
+    void bindsRetriesAndEveryFrameMutationToCurrentV080Authority() throws Exception {
+        String source = normalizedSource();
+
+        assertThat(source)
+                .contains("authority.current_binding_id")
+                .contains("authority.current_generation as current_binding_generation")
+                .contains("slot.current_generation as current_frame_generation")
+                .doesNotContain("authority.current_generation, authority.authority_version")
+                .contains("authority.authority_version as current_authority_version")
+                .contains("requirecurrenteventauthority(row)")
+                .contains("repair_code")
+                .contains("validation_path")
+                .contains("failure_retryable")
+                .contains("current_generation = :expectedgeneration")
+                .contains("slot_state = :expectedstate")
+                .contains("requireretrypredecessor(admission)");
+    }
+
+    private static String normalizedSource() throws Exception {
+        return Files.readString(SOURCE)
+                .replace("\r\n", "\n")
+                .replaceAll("\\s+", " ")
+                .trim()
+                .toLowerCase(Locale.ROOT);
+    }
+}

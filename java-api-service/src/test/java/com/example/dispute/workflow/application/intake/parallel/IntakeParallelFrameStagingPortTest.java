@@ -8,11 +8,13 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.EventAuthority;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameManifest;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryAdmission;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSlotView;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameType;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.SlotState;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import java.time.Instant;
 import java.util.EnumMap;
 import java.util.List;
@@ -23,13 +25,16 @@ class IntakeParallelFrameStagingPortTest {
 
     @Test
     void admitsExactlyThreeGenerationOneManifestsWithOneFrozenModelView() {
-        FrameSetAdmission admission = admission(manifests(1));
+        FrameSetAdmission admission = admissionWithDeadline(
+                manifests(1), Instant.parse("2026-08-24T01:01:00.123456789Z"));
 
         assertThat(admission.executionProfileId()).isEqualTo("PARALLEL_FRAMES_V1");
         assertThat(admission.manifestsByType()).containsOnlyKeys(FrameType.values());
         assertThat(admission.manifestsByType().values())
                 .extracting(FrameManifest::generation)
                 .containsOnly(1L);
+        assertThat(admission.turnDeadlineAt())
+                .isEqualTo(Instant.parse("2026-08-24T01:01:00.123456Z"));
     }
 
     @Test
@@ -88,6 +93,37 @@ class IntakeParallelFrameStagingPortTest {
                         AssemblyState.READY))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("does not itself grant READY");
+    }
+
+    @Test
+    void v4FrameGenerationAndProjectionWatermarkMustFitThePublicWireContract() {
+        assertThatThrownBy(() -> manifest(FrameType.DIALOGUE_FRAME, (long) Integer.MAX_VALUE + 1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("agent-stream.v4 integer range");
+
+        assertThatThrownBy(() -> new FrameSealCommand(
+                        "FRAME_SET_1",
+                        "RUN_1",
+                        "ATTEMPT_1",
+                        "STREAM_1",
+                        1,
+                        "seal:dialogue:1",
+                        Audience.USER,
+                        FrameType.DIALOGUE_FRAME,
+                        1,
+                        "FRAME_DIALOGUE_1",
+                        "checkpoint://dialogue/1",
+                        hash('a'),
+                        hash('b'),
+                        hash('c'),
+                        "{}",
+                        hash('d'),
+                        hash('e'),
+                        (long) Integer.MAX_VALUE + 1,
+                        new IntakeParallelFrameStagingPort.ProviderUsage(1, 1, 2, 1, 1),
+                        Instant.parse("2026-08-24T01:00:00Z")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("agent-stream.v4 integer range");
     }
 
     @Test
@@ -181,6 +217,11 @@ class IntakeParallelFrameStagingPortTest {
     }
 
     private static FrameSetAdmission admission(List<FrameManifest> manifests) {
+        return admissionWithDeadline(manifests, Instant.parse("2026-08-24T01:01:00Z"));
+    }
+
+    private static FrameSetAdmission admissionWithDeadline(
+            List<FrameManifest> manifests, Instant deadline) {
         return new FrameSetAdmission(
                 "FRAME_SET_1",
                 "RUN_1",
@@ -200,7 +241,7 @@ class IntakeParallelFrameStagingPortTest {
                 "PARALLEL_FRAMES_V1",
                 "intake-projection-registry.v1",
                 "qwen3.7-max-no-thinking-strict",
-                Instant.parse("2026-08-24T01:01:00Z"),
+                deadline,
                 manifests);
     }
 

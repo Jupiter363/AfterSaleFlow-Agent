@@ -113,6 +113,23 @@ class IntakeParallelFrameStagingMigrationContractTest {
     }
 
     @Test
+    void persistsBoundedOneLaneRepairAuthorityWithoutWeakeningTerminalStates()
+            throws Exception {
+        String sql = normalizedSql();
+
+        assertThat(sql)
+                .contains("repair_code varchar(128)")
+                .contains("validation_path varchar(1024)")
+                .contains("frame_generation = 1 and repair_code is null")
+                .contains("frame_generation > 1")
+                .contains("failure_retryable boolean")
+                .contains("staging_state in ('failed', 'ambiguous')")
+                .contains("failure_retryable is not null")
+                .contains("new.repair_code is distinct from old.repair_code")
+                .contains("new.validation_path is distinct from old.validation_path");
+    }
+
+    @Test
     void onlyReadyOrCommittedAssemblyCanReferenceAProposal() throws Exception {
         String sql = normalizedSql();
 

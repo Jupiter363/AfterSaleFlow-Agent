@@ -3,6 +3,7 @@ package com.example.dispute.workflow.application.intake.parallel;
 import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.List;
@@ -128,6 +129,7 @@ public interface IntakeParallelFrameStagingPort {
         public FrameManifest {
             frameType = Objects.requireNonNull(frameType, "frameType");
             positive(generation, "generation");
+            wireInteger(generation, "generation");
             frameId = identifier(frameId, "frameId");
             promptProfileId = identifier(promptProfileId, "promptProfileId");
             outputSchemaId = identifier(outputSchemaId, "outputSchemaId");
@@ -187,7 +189,8 @@ public interface IntakeParallelFrameStagingPort {
             projectionRegistryVersion =
                     identifier(projectionRegistryVersion, "projectionRegistryVersion");
             modelProfileId = identifier(modelProfileId, "modelProfileId");
-            turnDeadlineAt = Objects.requireNonNull(turnDeadlineAt, "turnDeadlineAt");
+            turnDeadlineAt = Objects.requireNonNull(turnDeadlineAt, "turnDeadlineAt")
+                    .truncatedTo(ChronoUnit.MICROS);
             manifests = List.copyOf(Objects.requireNonNull(manifests, "manifests"));
             if (!"PARALLEL_FRAMES_V1".equals(executionProfileId)) {
                 throw new IllegalArgumentException(
@@ -276,6 +279,7 @@ public interface IntakeParallelFrameStagingPort {
             ingressIdentity = bounded(ingressIdentity, "ingressIdentity", 256);
             frameType = Objects.requireNonNull(frameType, "frameType");
             positive(generation, "generation");
+            wireInteger(generation, "generation");
             ingressKind = Objects.requireNonNull(ingressKind, "ingressKind");
             audience = Objects.requireNonNull(audience, "audience");
             publicPayload = Objects.requireNonNull(publicPayload, "publicPayload");
@@ -392,6 +396,7 @@ public interface IntakeParallelFrameStagingPort {
             audience = Objects.requireNonNull(audience, "audience");
             frameType = Objects.requireNonNull(frameType, "frameType");
             positive(generation, "generation");
+            wireInteger(generation, "generation");
             frameId = identifier(frameId, "frameId");
             childCheckpointRef = bounded(childCheckpointRef, "childCheckpointRef", 1024);
             childCheckpointSha256 = sha256(childCheckpointSha256, "childCheckpointSha256");
@@ -402,6 +407,7 @@ public interface IntakeParallelFrameStagingPort {
             publicProjectionSha256 =
                     sha256(publicProjectionSha256, "publicProjectionSha256");
             nonNegative(nextLocalIndex, "nextLocalIndex");
+            wireInteger(nextLocalIndex, "nextLocalIndex");
             usage = Objects.requireNonNull(usage, "usage");
             completedAt = Objects.requireNonNull(completedAt, "completedAt");
         }
@@ -613,6 +619,12 @@ public interface IntakeParallelFrameStagingPort {
     private static void positive(long value, String field) {
         if (value <= 0) {
             throw new IllegalArgumentException(field + " must be positive");
+        }
+    }
+
+    private static void wireInteger(long value, String field) {
+        if (value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(field + " exceeds the agent-stream.v4 integer range");
         }
     }
 }
