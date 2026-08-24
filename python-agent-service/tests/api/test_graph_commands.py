@@ -26,6 +26,11 @@ from app.api.graph_commands import (
     _stream_ndjson,
     create_graph_commands_router,
 )
+from app.api.intake_parallel_stream import (
+    ExpectedParallelFrame,
+    OpenedParallelFrameStream,
+    ParallelFrameStreamAuthority,
+)
 from app.contracts.v1.codec import (
     ContractCodec,
     canonical_sha256,
@@ -34,9 +39,13 @@ from app.contracts.v1.codec import (
 from app.contracts.v1.models import (
     AgentStreamEvent,
     AgentStreamPayload,
+    PARALLEL_INTAKE_AGENT_PROFILE_ID,
+    PARALLEL_INTAKE_OUTPUT_SCHEMA,
     RoomGraphCommand,
     Usage,
 )
+from app.graphs.intake.parallel_contracts import FRAME_TYPES
+from app.graphs.intake.parallel_graph import FrameInterrupted, FrameStarted
 from app.graph_runtime.errors import (
     EvidenceModelInvocationContractError,
     GraphContractError,
@@ -121,6 +130,66 @@ class FakeStreamService:
                 self.closed = True
 
         return emit()
+
+
+class FakeParallelStreamService:
+    def __init__(self, command: RoomGraphCommand) -> None:
+        self.calls: list[tuple[RoomGraphCommand, VerifiedInvocation, ThreadIdentity]] = []
+        self.closed = False
+        frames = tuple(
+            ExpectedParallelFrame(
+                frame_type=frame_type,
+                generation=1,
+                frame_id=f"IFR_{index}",
+                frame_model_input_sha256=str(index) * 64,
+                context_envelope_sha256="a" * 64,
+                model_context_view_sha256="b" * 64,
+            )
+            for index, frame_type in enumerate(FRAME_TYPES, start=1)
+        )
+        self.authority = ParallelFrameStreamAuthority(
+            frame_set_id="IFS_ENDPOINT_1",
+            run_id=command.logical_run_id,
+            attempt_id=command.attempt_id,
+            frames=frames,  # type: ignore[arg-type]
+        )
+
+    async def open_stream(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> OpenedParallelFrameStream:
+        self.calls.append((command, verified_invocation, expected_thread))
+
+        async def emit():
+            try:
+                for frame in self.authority.frames:
+                    yield FrameStarted(
+                        frame_set_id=self.authority.frame_set_id,
+                        run_id=self.authority.run_id,
+                        attempt_id=self.authority.attempt_id,
+                        frame_type=frame.frame_type,
+                        generation=frame.generation,
+                        frame_id=frame.frame_id,
+                        frame_model_input_sha256=frame.frame_model_input_sha256,
+                    )
+                for frame in self.authority.frames:
+                    yield FrameInterrupted(
+                        frame_set_id=self.authority.frame_set_id,
+                        run_id=self.authority.run_id,
+                        attempt_id=self.authority.attempt_id,
+                        frame_type=frame.frame_type,
+                        generation=frame.generation,
+                        frame_id=frame.frame_id,
+                        error_code="TEST_TERMINAL_INTERRUPTION",
+                        retryable=False,
+                    )
+            finally:
+                self.closed = True
+
+        return OpenedParallelFrameStream(self.authority, emit())
 
 
 async def _collect_validated_ndjson(
@@ -592,6 +661,7 @@ def _target_client(
     *,
     envelope: TargetE2EGraphCommandEnvelope,
     service: FakeStreamService,
+    parallel_service: FakeParallelStreamService | None = None,
 ) -> TestClient:
     command = envelope.command
     verified = VerifiedTargetE2EInvocation(
@@ -616,6 +686,7 @@ def _target_client(
                 stream_service=service,
                 ready=lambda: True,
                 target_e2e_envelope_verifier=TargetVerifier(envelope, verified),
+                parallel_intake_stream_service=parallel_service,
             )
         )
     )
@@ -634,6 +705,84 @@ def _target_envelope(command: RoomGraphCommand) -> TargetE2EGraphCommandEnvelope
     return TargetE2EGraphCommandEnvelope.model_validate(
         {**values, "command_envelope_hash": canonical_sha256(values)}
     )
+
+
+def _parallel_command() -> RoomGraphCommand:
+    command, _ = _command()
+    value = command.model_dump(mode="json", exclude_none=True)
+    value.update(
+        {
+            "room_id": "ROOM_PARALLEL_ENDPOINT_1",
+            "event_ref": {
+                "artifact_id": "intake.event.parallel-endpoint-1",
+                "schema_version": "intake-turn-event.v2",
+                "uri": "urn:intake:event:parallel-endpoint-1",
+                "sha256": "e" * 64,
+                "size_bytes": 128,
+            },
+        }
+    )
+    value["invocation_context"].update(
+        {
+            "agent_profile_id": PARALLEL_INTAKE_AGENT_PROFILE_ID,
+            "output_schema_version": PARALLEL_INTAKE_OUTPUT_SCHEMA,
+        }
+    )
+    value["retry_budget"]["provider_attempts_remaining"] = 6
+    value["request_hash"] = canonical_sha256_omitting(value, "request_hash")
+    return RoomGraphCommand.model_validate(value)
+
+
+def test_target_exact_parallel_command_uses_only_parallel_technical_stream() -> None:
+    command = _parallel_command()
+    envelope = _target_envelope(command)
+    legacy = FakeStreamService(())
+    parallel = FakeParallelStreamService(command)
+    client = _target_client(
+        envelope=envelope,
+        service=legacy,
+        parallel_service=parallel,
+    )
+
+    response = client.post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={"Authorization": "Bearer a.b.c", "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-agent-stream-protocol"] == "agent-stream.v4"
+    assert response.headers["x-intake-frame-set-id"] == parallel.authority.frame_set_id
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert [event["event_kind"] for event in events] == [
+        "FRAME_STARTED",
+        "FRAME_STARTED",
+        "FRAME_STARTED",
+        "FRAME_INTERRUPTED",
+        "FRAME_INTERRUPTED",
+        "FRAME_INTERRUPTED",
+    ]
+    assert legacy.calls == []
+    assert len(parallel.calls) == 1
+    assert parallel.closed
+
+
+def test_target_exact_parallel_command_fails_closed_without_parallel_runtime() -> None:
+    command = _parallel_command()
+    envelope = _target_envelope(command)
+    legacy = FakeStreamService(())
+    response = _target_client(envelope=envelope, service=legacy).post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={"Authorization": "Bearer a.b.c", "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "code": "INTAKE_PARALLEL_RUNTIME_UNAVAILABLE",
+        "retryable": False,
+    }
+    assert legacy.calls == []
 
 
 def test_signed_command_streams_only_validated_agent_stream_v2_events() -> None:

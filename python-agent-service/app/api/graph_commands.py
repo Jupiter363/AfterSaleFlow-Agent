@@ -17,6 +17,14 @@ from app.api.graph_stream_service import (
     _model_provider_stream_interruption_code,
     _model_transport_output_error_code,
 )
+from app.api.intake_parallel_stream import (
+    OpenedParallelFrameStream,
+    ParallelFrameStreamProtocolError,
+    ParallelFrameStreamProtocolValidator,
+    ParallelIntakeFrameStreamService,
+    encode_parallel_frame_event,
+    stream_parallel_frame_ndjson,
+)
 from app.api.graph_reconciliation_service import (
     GraphReconciliationService,
     TargetE2EReconciliationArtifacts,
@@ -215,6 +223,7 @@ class GraphCommandEndpointDependencies:
     stream_service: GraphCommandStreamService
     ready: Callable[[], bool]
     target_e2e_envelope_verifier: TargetE2EInvocationEnvelopeVerifierPort | None = None
+    parallel_intake_stream_service: ParallelIntakeFrameStreamService | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,6 +480,9 @@ def create_graph_commands_router(
 
         command = envelope.command
         iterator: AsyncIterator[AgentStreamEvent] | None = None
+        parallel_opened: OpenedParallelFrameStream | None = None
+        parallel_first_line: bytes | None = None
+        parallel_validator: ParallelFrameStreamProtocolValidator | None = None
         try:
             expected_thread = await dependencies.thread_identity_resolver.resolve(
                 command=command,
@@ -480,29 +492,68 @@ def create_graph_commands_router(
                 raise AgentStreamProtocolError(
                     "trusted resolver returned an invalid thread identity"
                 )
-            iterator = await dependencies.stream_service.open_stream(
-                command=command,
-                verified_invocation=verified,
-                expected_thread=expected_thread,
-            )
-            first = await anext(iterator)
-            validator = AgentStreamProtocolValidator(
-                run_id=command.logical_run_id,
-                attempt_id=command.attempt_id,
-                audience=command.actor_scope.audience,
-            )
-            first_line = _encode_event(dependencies.codec, validator, first)
+            if command.is_parallel_intake_command:
+                parallel_service = dependencies.parallel_intake_stream_service
+                if parallel_service is None:
+                    return _error_response(
+                        503,
+                        "INTAKE_PARALLEL_RUNTIME_UNAVAILABLE",
+                        False,
+                    )
+                parallel_opened = await parallel_service.open_stream(
+                    command=command,
+                    verified_invocation=verified,
+                    expected_thread=expected_thread,
+                )
+                authority = parallel_opened.authority
+                if (
+                    authority.run_id != command.logical_run_id
+                    or authority.attempt_id != command.attempt_id
+                ):
+                    raise ParallelFrameStreamProtocolError(
+                        "parallel Frame authority differs from the signed command"
+                    )
+                parallel_validator = ParallelFrameStreamProtocolValidator(authority)
+                first_parallel_event = await anext(parallel_opened.events)
+                parallel_first_line = encode_parallel_frame_event(
+                    parallel_validator,
+                    first_parallel_event,
+                )
+            else:
+                iterator = await dependencies.stream_service.open_stream(
+                    command=command,
+                    verified_invocation=verified,
+                    expected_thread=expected_thread,
+                )
+                first = await anext(iterator)
+                validator = AgentStreamProtocolValidator(
+                    run_id=command.logical_run_id,
+                    attempt_id=command.attempt_id,
+                    audience=command.actor_scope.audience,
+                )
+                first_line = _encode_event(dependencies.codec, validator, first)
         except StopAsyncIteration:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
+            if parallel_opened is not None:
+                await _close_iterator_safely(parallel_opened.events)
             return _error_response(502, "GRAPH_STREAM_EMPTY", True)
         except GraphRuntimeError as error:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
+            if parallel_opened is not None:
+                await _close_iterator_safely(parallel_opened.events)
             return _graph_runtime_error(error)
-        except (AgentStreamProtocolError, TypeError, ValueError) as error:
+        except (
+            AgentStreamProtocolError,
+            ParallelFrameStreamProtocolError,
+            TypeError,
+            ValueError,
+        ) as error:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
+            if parallel_opened is not None:
+                await _close_iterator_safely(parallel_opened.events)
             _log_safe_failure("target-E2E graph stream startup protocol", error)
             return _error_response(
                 502,
@@ -513,6 +564,8 @@ def create_graph_commands_router(
         except Exception as error:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
+            if parallel_opened is not None:
+                await _close_iterator_safely(parallel_opened.events)
             persistence_error = normalize_transient_persistence_error(error)
             if persistence_error is not None:
                 _log_safe_failure("target-E2E graph stream startup persistence", error)
@@ -522,7 +575,30 @@ def create_graph_commands_router(
         except BaseException:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
+            if parallel_opened is not None:
+                await _close_iterator_safely(parallel_opened.events)
             raise
+
+        if parallel_opened is not None:
+            assert parallel_first_line is not None
+            assert parallel_validator is not None
+            return StreamingResponse(
+                stream_parallel_frame_ndjson(
+                    iterator=parallel_opened.events,
+                    validator=parallel_validator,
+                    first_line=parallel_first_line,
+                ),
+                media_type="application/x-ndjson",
+                headers={
+                    **_NO_STORE_HEADERS,
+                    "X-Accel-Buffering": "no",
+                    "X-Agent-Run-Id": command.logical_run_id,
+                    "X-Agent-Stream-Protocol": "agent-stream.v4",
+                    "X-Intake-Frame-Set-Id": parallel_opened.authority.frame_set_id,
+                    "X-Graph-Execution-Lane": envelope.execution_lane,
+                    "X-Graph-Activation-Id": envelope.activation_id,
+                },
+            )
 
         return StreamingResponse(
             _stream_ndjson(
