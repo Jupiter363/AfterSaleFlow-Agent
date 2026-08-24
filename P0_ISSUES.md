@@ -1,5 +1,16 @@
 # P0 / Confirmed Bug Ledger
 
+## P0-20260824-QWEN38-LITELLM-ROUTE-MISSING
+
+- Severity: P0
+- Status: FIXED_FOCUSED_VERIFIED
+- Component: Python model binding and LiteLLM deployment route
+- Confirmed fact: After the Python runtime default was changed to `qwen3.8-max`, `/health/model` returned HTTP 503 and two fresh USER-side imports ended before Intake with `intake infrastructure preparation is unavailable`; Python recorded both `/ready/intake-preparation` requests as HTTP 503.
+- Root cause and evidence: The running Python process requested model name `qwen3.8-max`, while the mounted LiteLLM configuration declared only `qwen3.7-max-2026-06-08`. The LiteLLM container itself remained healthy, but no provider route matched the requested 3.8 model, so the real model probe failed and the Intake readiness contract rejected preparation.
+- Impact: No fresh case can enter Intake under the requested 3.8 runtime, so all model and downstream E2E stages are blocked before the first generation.
+- Verification evidence: The application default, deployment default, and LiteLLM route now resolve the same `qwen3.8-max` identifier; the two focused repository-contract tests passed, the recreated proxy reported `Set models: qwen3.8-max`, and the live Python `/health/model` probe returned HTTP 200 with `model_status=CONNECTED`, `model=qwen3.8-max`.
+- Identifying metadata: observed 2026-08-24; Python PID `63028`; Java AGENT worker PID `51848`; LiteLLM container `order-fulfillment-dispute-system-litellm-proxy-1`; activation `p9act.v1.ae7eb72c010fd00e7f196fe13d87a30c`; browser route `/disputes`.
+
 ## P1-20260824-EVIDENCE-IMAGE-GRAPH-CONTRACT-REJECTED-6A8AC2C9-13
 
 - Severity: P1
@@ -1089,10 +1100,10 @@
 - Severity: P1
 - Status: RUNTIME_RECOVERED_UAT_RESUMED
 - Component: Fresh Target-lane Intake infrastructure preparation
-- Confirmed fact: Browser import created fresh case `CASE_P9_6A8AC2C9_6`, but its initial Intake preparation and one explicit retry both ended with the visible message `intake infrastructure preparation is unavailable`; the case remained at Intake and could not enter its room.
-- Root cause and evidence: The Java AGENT worker was started while Python was still failing its JWKS bootstrap. Its Graph readiness handshake was rejected and its Spring context exited, while Java API and Python later reported healthy; no AGENT worker remained to execute Intake preparation. Restarting only the AGENT worker after Python became healthy completed the handshake, and the next retry navigated the same case into `/intake` with a live opening turn.
-- Impact: The requested post-fix fresh browser UAT cannot start Intake, so Evidence V2 TXT/image verification and all downstream stages remain blocked.
-- Identifying metadata: observed 2026-08-23; case `CASE_P9_6A8AC2C9_6`; actor `user-local/USER`; route `/disputes`; activation `p9act.v1.aa7bf7653d871e6558a30de80ce8eb21`.
+- Confirmed fact: Browser import created fresh case `CASE_P9_6A8AC2C9_6`, but its initial Intake preparation and one explicit retry both ended with the visible message `intake infrastructure preparation is unavailable`; the case remained at Intake and could not enter its room. The same visible preparation failure recurred on 2026-08-24 immediately after the Python model service was restarted for `qwen3.8-max`, before the new case entered Intake.
+- Root cause and evidence: In the original 2026-08-23 observation no AGENT worker remained after its startup-time readiness handshake was rejected, and restarting that worker after Python health recovered restored Intake. The 2026-08-24 recurrence had a different mechanism: worker PID `51848` was alive and polling, but Python `/health/model` returned HTTP 503 because the runtime requested `qwen3.8-max` while LiteLLM exposed only the 3.7 route; restarting the worker alone did not recover preparation.
+- Impact: Each failed import remained outside Intake and exercised neither model output nor downstream stages. The 2026-08-24 route mismatch is tracked separately as `P0-20260824-QWEN38-LITELLM-ROUTE-MISSING`; after its focused verification, fresh USER-side UAT resumed.
+- Identifying metadata: first observed 2026-08-23 on case `CASE_P9_6A8AC2C9_6`, actor `user-local/USER`, activation `p9act.v1.aa7bf7653d871e6558a30de80ce8eb21`; recurrence observed 2026-08-24 on route `/disputes`, Python PID `63028`, replacement worker PID `51848`, activation `p9act.v1.ae7eb72c010fd00e7f196fe13d87a30c`.
 
 ## P1-20260823-INTAKE-ORDERED-SECTIONS-LONG-TAIL
 

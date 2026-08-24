@@ -380,7 +380,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-local}
       LITELLM_BASE_URL: http://litellm-proxy:4000
-      LITELLM_MODEL: ${LITELLM_DEFAULT_MODEL:-qwen3.7-max-2026-06-08}
+      LITELLM_MODEL: ${LITELLM_DEFAULT_MODEL:-qwen3.8-max}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
       LLM_STRICT_JSON_SCHEMA_ENABLED: ${LLM_STRICT_JSON_SCHEMA_ENABLED:-true}
       LANGFUSE_HOST: http://langfuse:3000
