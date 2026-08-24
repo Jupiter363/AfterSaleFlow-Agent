@@ -159,18 +159,42 @@ def intake_source_turn(memory: dict[str, Any]) -> int:
 
 
 def post_intake_text(ctx: Any, stage: str, text: str) -> str:
-    message = request_data(
-        ctx,
-        stage,
-        "POST",
-        f"/api/disputes/{CASE_ID}/rooms/INTAKE/messages",
-        payload={
-            "message_type": "PARTY_TEXT",
-            "text": text,
-            "attachment_refs": [],
-        },
-        idempotency_key=f"resume-{CASE_ID}-{ctx.actor_role.lower()}-{uuid.uuid4().hex}",
-    )
+    payload = {
+        "message_type": "PARTY_TEXT",
+        "text": text,
+        "attachment_refs": [],
+    }
+    headers = {
+        "X-User-Id": ctx.user_id,
+        "X-Role": ctx.actor_role,
+        "Idempotency-Key": (
+            f"resume-{CASE_ID}-{ctx.actor_role.lower()}-{uuid.uuid4().hex}"
+        ),
+    }
+    while True:
+        code, envelope = base.uat.request_json(
+            ctx,
+            stage,
+            "POST",
+            f"/api/disputes/{CASE_ID}/rooms/INTAKE/messages",
+            payload=payload,
+            extra_headers=headers,
+        )
+        if 200 <= code < 300:
+            message = base.uat.envelope_data(envelope, stage)
+            break
+        details = envelope.get("details") if isinstance(envelope, dict) else None
+        projection_pending = (
+            code == 409
+            and isinstance(details, dict)
+            and details.get("reason_code") == "TARGET_E2E_INTAKE_PROJECTION_PENDING"
+        )
+        if not projection_pending:
+            raise RuntimeError(
+                f"{stage} failed: status={code} "
+                f"envelope={json.dumps(envelope, ensure_ascii=False)}"
+            )
+        ctx.deadline.pause(stage, 0.25)
     message = base.uat.required_object(message, stage, "message")
     return base.uat.required_text(
         v(message, "agent_run_id", "agentRunId"), stage, "run_id"
