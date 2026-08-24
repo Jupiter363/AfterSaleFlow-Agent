@@ -16,6 +16,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.activity.agent.DurableAgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
+import com.example.dispute.workflow.activity.agent.ProfileSelectingAgentRunExecutionGateway;
 import com.example.dispute.workflow.config.GraphCommandClientProperties;
 import com.example.dispute.workflow.config.TemporalWorkerProperties;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
@@ -23,7 +24,13 @@ import com.example.dispute.workflow.infrastructure.security.MountedPemGraphEnvel
 import com.example.dispute.workflow.application.intake.IntakeAgentRunDomainResultCommitter;
 import com.example.dispute.workflow.application.intake.IntakeGraphResultFinalizer;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposalLoader;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyContextResolver;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameAdmissionAuthorityResolver;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameAssembler;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore;
 import com.example.dispute.workflow.infrastructure.persistence.intake.parallel.JdbcTargetE2eIntakeParallelAssemblyFinalizationPort;
 import com.example.dispute.workflow.targete2e.artifact.finalization.JdbcTargetE2eFinalizationAuthority;
 import com.example.dispute.workflow.targete2e.artifact.finalization.JdbcTargetE2eIntakeCommandCompletionWriter;
@@ -61,7 +68,9 @@ import com.example.dispute.workflow.targete2e.graph.JdbcTargetE2EAgentSessionRes
 import com.example.dispute.workflow.targete2e.graph.HttpTargetE2EGraphProposalClient;
 import com.example.dispute.workflow.targete2e.graph.HttpTargetE2EGraphProposalSourceClient;
 import com.example.dispute.workflow.targete2e.graph.HttpTargetE2EGraphReconciliationClient;
+import com.example.dispute.workflow.targete2e.graph.HttpTargetE2EIntakeParallelFrameExecutionClient;
 import com.example.dispute.workflow.targete2e.graph.JpaTargetE2EAgentRunIdentityResolver;
+import com.example.dispute.workflow.targete2e.graph.MaterializedIntakeParallelAssemblyContextResolver;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EAgentGraphCommandClient;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EAgentGraphReconciliationClient;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EAgentRunIdentityResolver;
@@ -69,12 +78,17 @@ import com.example.dispute.workflow.targete2e.graph.TargetE2EAgentSessionResolve
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeSigner;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphProposalClient;
+import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelAssemblyCoordinator;
+import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelExecutionGateway;
+import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelGraphReconciliationClient;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore;
 import com.example.dispute.workflow.targete2e.TargetE2eAgentDeploymentBinding;
 import com.example.dispute.workflow.targete2e.lifecycle.TargetE2eActivationLifecycleControl;
 import com.example.dispute.workflow.targete2e.lifecycle.TargetE2eActivationLifecycleControl.DeploymentBinding;
 import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eActivationStores;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
+import com.example.dispute.workflow.targete2e.persistence.material.JdbcTargetIntakeCommandMaterialStore;
+import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.temporal.client.WorkflowClient;
@@ -265,18 +279,87 @@ public class TargetE2eArtifactConfiguration {
     }
 
     @Bean
+    IntakeParallelFrameExecutionClient targetE2EIntakeParallelFrameExecutionClient(
+            GraphTransportBundle transports,
+            TargetE2EAgentRunIdentityResolver identityResolver,
+            TargetE2EGraphEnvelopeCodec codec,
+            TargetE2EGraphEnvelopeSigner signer,
+            GraphRegistryBindingPolicy registryBindingPolicy,
+            IntakeParallelFrameAdmissionAuthorityResolver admissionAuthorityResolver,
+            IntakeParallelFrameStagingPort staging,
+            ObjectMapper objectMapper,
+            TargetE2eAgentDeploymentBinding deploymentBinding,
+            GraphCommandClientProperties properties) {
+        requireTargetMode(properties);
+        return new HttpTargetE2EIntakeParallelFrameExecutionClient(
+                deploymentBinding.activationId(),
+                transports,
+                identityResolver,
+                codec,
+                signer,
+                registryBindingPolicy,
+                admissionAuthorityResolver,
+                staging,
+                objectMapper,
+                properties.baseUri(),
+                properties.requestTimeout());
+    }
+
+    @Bean
+    IntakeParallelAssemblyContextResolver targetE2EIntakeParallelAssemblyContextResolver(
+            TargetIntakeCommandMaterialStore materialStore, ObjectMapper objectMapper) {
+        return new MaterializedIntakeParallelAssemblyContextResolver(
+                materialStore, objectMapper);
+    }
+
+    @Bean
+    IntakeParallelFrameAssembler targetE2EIntakeParallelFrameAssembler() {
+        return new IntakeParallelFrameAssembler();
+    }
+
+    @Bean
+    TargetE2EIntakeParallelAssemblyCoordinator targetE2EIntakeParallelAssemblyCoordinator(
+            TargetE2EAgentRunIdentityResolver identityResolver,
+            GraphRegistryBindingPolicy registryBindingPolicy,
+            IntakeParallelAssemblyContextResolver contextResolver,
+            IntakeParallelAssemblyStore assemblyStore,
+            IntakeParallelFrameAssembler assembler,
+            TargetE2EGraphEnvelopeCodec envelopeCodec,
+            ObjectMapper objectMapper,
+            TargetE2eAgentDeploymentBinding deploymentBinding) {
+        return new TargetE2EIntakeParallelAssemblyCoordinator(
+                deploymentBinding.activationId(),
+                identityResolver,
+                registryBindingPolicy,
+                contextResolver,
+                assemblyStore,
+                assembler,
+                envelopeCodec,
+                objectMapper);
+    }
+
+    @Bean
     AgentRunExecutionGateway targetE2EAgentRunExecutionGateway(
             AgentGraphCommandClient commandClient,
             AgentGraphReconciliationClient reconciliationClient,
             AgentRunV2StreamStore streamStore,
             AgentRunReconciledFinalStore reconciledFinalStore,
-            AgentRunTransientStreamPublisher transientPublisher) {
-        return new DurableAgentRunExecutionGateway(
+            AgentRunTransientStreamPublisher transientPublisher,
+            IntakeParallelFrameExecutionClient frameExecutionClient,
+            TargetE2EIntakeParallelAssemblyCoordinator assemblyCoordinator,
+            IntakeParallelRunTerminalStore terminalStore) {
+        AgentRunExecutionGateway legacy = new DurableAgentRunExecutionGateway(
                 commandClient,
                 reconciliationClient,
                 streamStore,
                 reconciledFinalStore,
                 transientPublisher);
+        AgentRunExecutionGateway parallel = new TargetE2EIntakeParallelExecutionGateway(
+                frameExecutionClient,
+                assemblyCoordinator,
+                new TargetE2EIntakeParallelGraphReconciliationClient(assemblyCoordinator),
+                terminalStore);
+        return new ProfileSelectingAgentRunExecutionGateway(legacy, parallel);
     }
 
     @Bean
@@ -408,6 +491,15 @@ public class TargetE2eArtifactConfiguration {
     @Bean
     TargetE2EActivationLedger targetE2eAgentActivationLedger(DataSource dataSource) {
         return new TargetE2EActivationLedger(dataSource, Clock.systemUTC());
+    }
+
+    @Bean
+    TargetIntakeCommandMaterialStore targetE2eAgentIntakeCommandMaterialStore(
+            DataSource dataSource,
+            TargetE2EActivationLedger targetE2eAgentActivationLedger,
+            ObjectMapper objectMapper) {
+        return new JdbcTargetIntakeCommandMaterialStore(
+                dataSource, targetE2eAgentActivationLedger, objectMapper);
     }
 
     @Bean
