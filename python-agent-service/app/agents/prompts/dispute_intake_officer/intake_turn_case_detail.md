@@ -68,7 +68,7 @@
 - `stance` 取 `CONFIRM / DENY / PARTIAL / UNKNOWN / NOT_ADDRESSED`。未涉及的旧事实用 `NOT_ADDRESSED + PREVIOUS_MATRIX`；新事实不得用 `NOT_ADDRESSED`。
 - `source_scope` 取 `CURRENT_SOURCE / PREVIOUS_MATRIX / PREVIOUS_AND_CURRENT_SOURCE`。本轮形成的实质立场必须包含当前来源，不能标为纯 `PREVIOUS_MATRIX`。
 - `NEW_*` 禁止使用 `PREVIOUS_MATRIX`；本轮新事实同时承接历史语境时，`NEW_*` 使用 `PREVIOUS_AND_CURRENT_SOURCE` 合法。只提供当前授权来源，不得虚构窗口外来源。
-- `summary_source_fact_keys` 只列确实支撑本轮 `CASE_STORY.one_sentence_summary` 的事实键，至少一项。
+- `summary_source_fact_keys` 只列确实支撑本轮 `CASE_STORY.one_sentence_summary` 的事实键，至少一项；每一项必须从本轮 `fact_rows[].fact_key` 逐字复制完整键，包括 `FACT_` 或 `NEW_` 前缀，不得只写键主体、哈希片段或自行改写。
 - 不输出 `fact_id / content_hash / source_refs / truth_status / party_alignment / requires_resolution / matrix_version`；这些由服务端确定性生成。
 
 被发起方实质轮必须输出 `respondent_claim`：
