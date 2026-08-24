@@ -685,7 +685,10 @@ async def _invoke_frame_model(
                     raise IntakeGraphContractError(
                         "INTAKE_PARALLEL_FRAME_PROJECTION_SLOT_REPEATED"
                     )
-                canonical_item = _canonical_projection(frame_type, item_model)
+                canonical_item = canonical_parallel_public_projection(
+                    frame_type,
+                    item_model,
+                )
                 local_index = len(provider_items)
                 provider_items.append(normalized_provider_item)
                 canonical_items.append(
@@ -941,7 +944,7 @@ def _sealed_event(
     )
 
 
-def _canonical_projection(
+def canonical_parallel_public_projection(
     frame_type: ParallelFrameType,
     item: BaseModel,
 ) -> CanonicalPublicProjectionItem:
@@ -1261,6 +1264,7 @@ __all__ = [
     "ParallelFrameTechnicalEvent",
     "ParallelIntakeFrameOrchestrator",
     "build_parallel_frame_graph",
+    "canonical_parallel_public_projection",
     "compile_parallel_frame_graphs",
     "new_parallel_frame_state",
 ]
