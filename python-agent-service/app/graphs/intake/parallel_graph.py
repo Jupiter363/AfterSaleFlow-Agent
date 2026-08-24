@@ -96,6 +96,8 @@ class ParallelFrameExecutionRequest(StrictParallelRuntimeModel):
     generation: int = Field(ge=1)
     frame_id: Identifier
     model_input: IntakeFrameModelInputV1
+    resume_generation: int | None = Field(default=None, ge=1)
+    resume_frame_id: Identifier | None = None
     resume_local_index: int = Field(default=0, ge=0)
     emit_start: bool = True
 
@@ -108,7 +110,30 @@ class ParallelFrameExecutionRequest(StrictParallelRuntimeModel):
             != self.actor_role
         ):
             raise ValueError("model input belongs to a foreign actor role")
+        if (self.resume_generation is None) != (self.resume_frame_id is None):
+            raise ValueError("Frame resume generation and frame_id must be supplied together")
+        if self.resume_generation is not None:
+            if self.resume_generation not in {self.generation, self.generation + 1}:
+                raise ValueError("Frame resume generation is outside the bounded lineage")
+            if (
+                self.resume_generation == self.generation
+                and self.resume_frame_id != self.frame_id
+            ):
+                raise ValueError("initial Frame resume identity drifted")
+            if (
+                self.resume_generation > self.generation
+                and self.resume_frame_id == self.frame_id
+            ):
+                raise ValueError("replacement Frame resume identity did not advance")
+        if self.resume_local_index > FRAME_PUBLIC_ITEM_LIMITS[self.frame_type]:
+            raise ValueError("Frame resume index exceeds the bounded public projection")
         return self
+
+    def resume_position(self) -> tuple[int, str]:
+        return (
+            self.generation if self.resume_generation is None else self.resume_generation,
+            self.frame_id if self.resume_frame_id is None else self.resume_frame_id,
+        )
 
     def checkpoint_identity(self) -> dict[str, Any]:
         return {
@@ -268,6 +293,7 @@ class ParallelFrameGraphState(TypedDict, total=False):
     status: str
     generation: int
     frame_id: str
+    generation_transition_events: list[dict[str, Any]]
     provider_projection_items: list[dict[str, Any]]
     canonical_projection_items: list[dict[str, Any]]
     canonical_result: dict[str, Any]
@@ -325,6 +351,7 @@ def new_parallel_frame_state(
         "status": "PENDING",
         "generation": request.generation,
         "frame_id": request.frame_id,
+        "generation_transition_events": [],
         "provider_projection_items": [],
         "canonical_projection_items": [],
     }
@@ -497,6 +524,7 @@ class ParallelIntakeFrameOrchestrator:
                     "INTAKE_PARALLEL_FRAME_CHECKPOINT_INCOMPLETE"
                 )
             _require_checkpoint_authority(existing, request)
+            _require_complete_state(existing, request.frame_type)
             state = dict(existing)
             replayed = True
             await _replay_checkpoint_prefix(request, state, event_sink)
@@ -596,6 +624,7 @@ async def _invoke_frame_model(
     provider_items: list[dict[str, Any]] = []
     canonical_items: list[dict[str, Any]] = []
     reset_count = 0
+    generation_transition_events: list[dict[str, Any]] = []
     completed: HarnessStreamCompleted[Any] | None = None
     if request.emit_start:
         await runtime.event_sink.emit(
@@ -683,18 +712,17 @@ async def _invoke_frame_model(
                 # retry only after the current generation has durably entered FAILED or
                 # AMBIGUOUS, so make the superseded provider generation explicit before
                 # announcing the reset and replacement Frame identity.
-                await runtime.event_sink.emit(
-                    FrameInterrupted(
-                        frame_set_id=request.frame_set_id,
-                        run_id=request.run_id,
-                        attempt_id=request.attempt_id,
-                        frame_type=frame_type,
-                        generation=old_generation,
-                        frame_id=old_frame_id,
-                        error_code=update.reason_code,
-                        retryable=True,
-                    )
+                interrupted = FrameInterrupted(
+                    frame_set_id=request.frame_set_id,
+                    run_id=request.run_id,
+                    attempt_id=request.attempt_id,
+                    frame_type=frame_type,
+                    generation=old_generation,
+                    frame_id=old_frame_id,
+                    error_code=update.reason_code,
+                    retryable=True,
                 )
+                await runtime.event_sink.emit(interrupted)
                 generation += 1
                 frame_id = _replacement_frame_id(
                     request,
@@ -704,17 +732,22 @@ async def _invoke_frame_model(
                 reset_count = 1
                 provider_items.clear()
                 canonical_items.clear()
-                await runtime.event_sink.emit(
-                    FrameGenerationReset(
-                        frame_set_id=request.frame_set_id,
-                        run_id=request.run_id,
-                        attempt_id=request.attempt_id,
-                        frame_type=frame_type,
-                        old_generation=old_generation,
-                        new_generation=generation,
-                        old_frame_id=old_frame_id,
-                        new_frame_id=frame_id,
-                        reason_code=update.reason_code,
+                generation_reset = FrameGenerationReset(
+                    frame_set_id=request.frame_set_id,
+                    run_id=request.run_id,
+                    attempt_id=request.attempt_id,
+                    frame_type=frame_type,
+                    old_generation=old_generation,
+                    new_generation=generation,
+                    old_frame_id=old_frame_id,
+                    new_frame_id=frame_id,
+                    reason_code=update.reason_code,
+                )
+                await runtime.event_sink.emit(generation_reset)
+                generation_transition_events.extend(
+                    (
+                        interrupted.model_dump(mode="json"),
+                        generation_reset.model_dump(mode="json"),
                     )
                 )
                 await runtime.event_sink.emit(
@@ -752,6 +785,7 @@ async def _invoke_frame_model(
             "status": "MODEL_COMPLETED",
             "generation": generation,
             "frame_id": frame_id,
+            "generation_transition_events": generation_transition_events,
             "provider_projection_items": provider_items,
             "canonical_projection_items": canonical_items,
             "canonical_result": final_payload,
@@ -787,19 +821,45 @@ async def _replay_checkpoint_prefix(
     event_sink: ParallelFrameTechnicalEventSink,
 ) -> None:
     canonical_items = list(state["canonical_projection_items"])
-    if request.resume_local_index > len(canonical_items):
+    generation = int(state["generation"])
+    frame_id = str(state["frame_id"])
+    transitions = _validated_generation_transition_events(state, request.frame_type)
+    resume_generation, resume_frame_id = request.resume_position()
+    initial_position = (request.generation, request.frame_id)
+    terminal_position = (generation, frame_id)
+    if (resume_generation, resume_frame_id) == initial_position:
+        if request.emit_start:
+            await event_sink.emit(
+                _frame_started(
+                    request,
+                    generation=request.generation,
+                    frame_id=request.frame_id,
+                )
+            )
+        for event in transitions:
+            await event_sink.emit(event)
+        if transitions:
+            await event_sink.emit(
+                _frame_started(request, generation=generation, frame_id=frame_id)
+            )
+        resume_local_index = 0 if transitions else request.resume_local_index
+    elif (resume_generation, resume_frame_id) == terminal_position:
+        if request.emit_start:
+            await event_sink.emit(
+                _frame_started(request, generation=generation, frame_id=frame_id)
+            )
+        resume_local_index = request.resume_local_index
+    else:
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_RESUME_GENERATION_OUT_OF_RANGE"
+        )
+    if resume_local_index > len(canonical_items):
         raise IntakeGraphContractError(
             "INTAKE_PARALLEL_FRAME_RESUME_INDEX_OUT_OF_RANGE"
         )
-    generation = int(state["generation"])
-    frame_id = str(state["frame_id"])
-    if request.emit_start:
-        await event_sink.emit(
-            _frame_started(request, generation=generation, frame_id=frame_id)
-        )
     for local_index, raw_item in enumerate(
-        canonical_items[request.resume_local_index :],
-        start=request.resume_local_index,
+        canonical_items[resume_local_index:],
+        start=resume_local_index,
     ):
         item = CanonicalPublicProjectionItem.model_validate(raw_item)
         await event_sink.emit(
@@ -1111,10 +1171,67 @@ def _require_complete_state(
             raise ValueError("projection cardinality drift")
         FrameProviderUsage.model_validate(state["usage"])
         datetime.fromisoformat(str(state["completed_at"]))
+        _validated_generation_transition_events(state, frame_type)
     except Exception as error:
         raise IntakeGraphContractError(
             "INTAKE_PARALLEL_FRAME_CHECKPOINT_TERMINAL_INVALID"
         ) from error
+
+
+def _validated_generation_transition_events(
+    state: Mapping[str, Any],
+    frame_type: ParallelFrameType,
+) -> tuple[FrameInterrupted, FrameGenerationReset] | tuple[()]:
+    authority = state.get("authority")
+    if not isinstance(authority, Mapping):
+        raise ValueError("Frame checkpoint authority is absent")
+    initial_generation = int(authority["generation"])
+    initial_frame_id = str(authority["frame_id"])
+    terminal_generation = int(state["generation"])
+    terminal_frame_id = str(state["frame_id"])
+    raw_events = state.get("generation_transition_events")
+    if not isinstance(raw_events, list):
+        raise ValueError("Frame generation transition proof is absent")
+    if terminal_generation == initial_generation:
+        if raw_events or terminal_frame_id != initial_frame_id:
+            raise ValueError("Frame generation changed without a transition proof")
+        return ()
+    if terminal_generation != initial_generation + 1 or len(raw_events) != 2:
+        raise ValueError("Frame generation transition proof is incomplete")
+    interrupted = FrameInterrupted.model_validate(raw_events[0])
+    generation_reset = FrameGenerationReset.model_validate(raw_events[1])
+    common_authority = (
+        str(authority["frame_set_id"]),
+        str(authority["run_id"]),
+        str(authority["attempt_id"]),
+        frame_type,
+    )
+    if (
+        (
+            interrupted.frame_set_id,
+            interrupted.run_id,
+            interrupted.attempt_id,
+            interrupted.frame_type,
+        )
+        != common_authority
+        or (
+            generation_reset.frame_set_id,
+            generation_reset.run_id,
+            generation_reset.attempt_id,
+            generation_reset.frame_type,
+        )
+        != common_authority
+        or interrupted.generation != initial_generation
+        or interrupted.frame_id != initial_frame_id
+        or not interrupted.retryable
+        or interrupted.error_code != generation_reset.reason_code
+        or generation_reset.old_generation != initial_generation
+        or generation_reset.new_generation != terminal_generation
+        or generation_reset.old_frame_id != initial_frame_id
+        or generation_reset.new_frame_id != terminal_frame_id
+    ):
+        raise ValueError("Frame generation transition proof drifted")
+    return interrupted, generation_reset
 
 
 def _require_status(state: Mapping[str, Any], expected: str) -> None:

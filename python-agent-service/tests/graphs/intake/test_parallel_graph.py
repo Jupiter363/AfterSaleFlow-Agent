@@ -487,6 +487,71 @@ async def test_complete_checkpoint_replays_only_missing_prefix_without_provider(
 
 
 @pytest.mark.asyncio
+async def test_reset_checkpoint_replays_transition_before_replacement_generation() -> None:
+    saver = InMemorySaver()
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=saver)
+    )
+    requests, contexts = _requests_and_contexts()
+    dialogue_request = next(
+        request for request in requests if request.frame_type == "DIALOGUE_FRAME"
+    )
+    runner = _StreamingRunner(
+        _outputs(),
+        reset_node="intake_turn_dialogue_frame",
+    )
+    first_sink = _CollectingSink()
+    first = await orchestrator.execute_frame(
+        dialogue_request,
+        agent_context=contexts["DIALOGUE_FRAME"],
+        model_runner=runner,
+        event_sink=first_sink,
+    )
+
+    replay_sink = _CollectingSink()
+    replay = await orchestrator.execute_frame(
+        dialogue_request.model_copy(
+            update={"resume_local_index": 1, "emit_start": False}
+        ),
+        agent_context=contexts["DIALOGUE_FRAME"],
+        model_runner=runner,
+        event_sink=replay_sink,
+    )
+
+    assert replay.replayed_from_checkpoint
+    assert len(runner.calls) == 1
+    assert [type(event) for event in replay_sink.events] == [
+        FrameInterrupted,
+        FrameGenerationReset,
+        FrameStarted,
+        FrameProjectionItem,
+        FrameSealed,
+    ]
+    assert replay_sink.events[0].generation == dialogue_request.generation
+    assert replay_sink.events[2].generation == first.generation
+    assert replay_sink.events[3].local_index == 0
+
+    terminal_sink = _CollectingSink()
+    terminal_replay = await orchestrator.execute_frame(
+        dialogue_request.model_copy(
+            update={
+                "resume_generation": first.generation,
+                "resume_frame_id": first.frame_id,
+                "resume_local_index": 1,
+                "emit_start": False,
+            }
+        ),
+        agent_context=contexts["DIALOGUE_FRAME"],
+        model_runner=runner,
+        event_sink=terminal_sink,
+    )
+
+    assert terminal_replay.replayed_from_checkpoint
+    assert len(runner.calls) == 1
+    assert [type(event) for event in terminal_sink.events] == [FrameSealed]
+
+
+@pytest.mark.asyncio
 async def test_failed_lane_isolated_while_siblings_checkpoint_and_seal() -> None:
     orchestrator = ParallelIntakeFrameOrchestrator(
         compile_parallel_frame_graphs(checkpointer=InMemorySaver())
