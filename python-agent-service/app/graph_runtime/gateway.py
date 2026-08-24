@@ -57,6 +57,7 @@ from app.graph_runtime.ledger import (
     InvocationNonce,
     PostgresCommandLedger,
     ResultRecord,
+    TechnicalCompletionRecord,
 )
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.recovery import PostgresRecoveryCoordinator, RecoveryDecision
@@ -85,6 +86,7 @@ class AdmissionAction(StrEnum):
     OBSERVE_OR_TAKEOVER = "OBSERVE_OR_TAKEOVER"
     RECONCILE = "RECONCILE"
     RETURN_CACHED = "RETURN_CACHED"
+    RETURN_TECHNICAL_CACHED = "RETURN_TECHNICAL_CACHED"
     RETURN_CANCELLED = "RETURN_CANCELLED"
     RETURN_ABORTED = "RETURN_ABORTED"
 
@@ -102,6 +104,13 @@ _CONTROL_PLANE_LEASE_SAFETY_MARGIN: Final[timedelta] = timedelta(seconds=2)
 _TARGET_E2E_GRAPH_KEY: Final[str] = "all-rooms.target-e2e.v2"
 _TARGET_E2E_ROOM_PROMPT_VERSION: Final[str] = "all-rooms-prompt.target-e2e.v2"
 _TARGET_E2E_INTAKE_ROLES: Final[frozenset[str]] = frozenset({"USER", "MERCHANT"})
+_PARALLEL_INTAKE_AGENT_PROFILE_ID: Final[str] = (
+    "dispute-intake-officer.parallel-frames.v1"
+)
+_PARALLEL_INTAKE_OUTPUT_SCHEMA: Final[str] = "target-e2e-room-proposal-source.v2"
+_PARALLEL_TECHNICAL_COMPLETION_SCHEMA: Final[str] = (
+    "intake-parallel-technical-completion.v1"
+)
 _LEASE_OBSERVABILITY_EMPTY: Final[str] = "NONE"
 
 logger = logging.getLogger(__name__)
@@ -1296,6 +1305,7 @@ class GraphCommandGateway:
                 if current.status in {
                     CommandStatus.RESULT_CHECKPOINTED,
                     CommandStatus.COMPLETED,
+                    CommandStatus.TECHNICAL_COMPLETED,
                 }:
                     durable_attempt = await self._ledger.latest_attempt(
                         connection,
@@ -1368,6 +1378,193 @@ class GraphCommandGateway:
             # back.  This second pass is what makes retained cleanup replay-safe.
             return await finish_once()
 
+    async def load_technical_completion(
+        self,
+        admission: GatewayAdmission,
+    ) -> TechnicalCompletionRecord:
+        """Load the immutable technical replay log for a completed parallel command."""
+
+        self._require_shadow()
+        self._require_parallel_technical_admission(admission)
+
+        async def load_transaction(connection: Any) -> TechnicalCompletionRecord:
+            current = await self._ledger.load(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            self._ledger.require_same_binding(current.binding, admission.binding)
+            if current.status is not CommandStatus.TECHNICAL_COMPLETED:
+                raise GraphCommandStateError(
+                    "parallel technical completion is not durable"
+                )
+            completion = await self._ledger.load_technical_completion(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            self._require_technical_completion_binding(
+                admission,
+                completion,
+                attempt_id=admission.command.attempt_id,
+                fencing_token=current.fencing_token,
+            )
+            return completion
+
+        return await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=load_transaction,
+            operation_name="load technical completion",
+        )
+
+    async def complete_technical_execution(
+        self,
+        execution: GatewayExecution,
+        *,
+        completion: TechnicalCompletionRecord,
+    ) -> GatewayExecution:
+        """Release a parallel Python lease without creating a business Graph result."""
+
+        self._require_shadow()
+        self._require_parallel_technical_admission(execution.admission)
+        self._require_technical_completion_binding(
+            execution.admission,
+            completion,
+            attempt_id=execution.attempt.attempt_id,
+            fencing_token=execution.fence.fencing_token,
+        )
+        command: CommandRecord | None = None
+        attempt: AttemptRecord | None = None
+        lease: LeaseRecord | None = None
+
+        async def complete_transaction(connection: Any) -> None:
+            nonlocal command, attempt, lease
+            current = await self._ledger.load(
+                connection,
+                thread_id=execution.admission.binding.thread_id,
+                command_id=execution.admission.binding.command_id,
+            )
+            self._ledger.require_same_binding(
+                current.binding,
+                execution.admission.binding,
+            )
+            durable_attempt = await self._ledger.latest_attempt(
+                connection,
+                thread_id=execution.admission.binding.thread_id,
+                command_id=execution.admission.binding.command_id,
+            )
+            if current.status is CommandStatus.TECHNICAL_COMPLETED:
+                durable_completion = await self._ledger.load_technical_completion(
+                    connection,
+                    thread_id=current.binding.thread_id,
+                    command_id=current.binding.command_id,
+                )
+                if (
+                    durable_completion != completion
+                    or durable_attempt is None
+                    or durable_attempt.attempt_id != completion.attempt_id
+                    or durable_attempt.status is not AttemptStatus.COMPLETED
+                ):
+                    raise GraphTerminalBindingError(
+                        "technical completion replay differs from durable authority"
+                    )
+                command = current
+                attempt = durable_attempt
+                lease = execution.lease
+                return
+            if (
+                current.status is not CommandStatus.EXECUTING
+                or durable_attempt is None
+                or durable_attempt != execution.attempt
+                or durable_attempt.status is not AttemptStatus.EXECUTING
+            ):
+                raise GraphCommandStateError(
+                    "parallel technical completion lost its executing authority"
+                )
+            await self._ledger.store_technical_completion(
+                connection,
+                execution_attempt=durable_attempt,
+                completion=completion,
+            )
+            attempt = await self._ledger.complete_technical_attempt(
+                connection,
+                durable_attempt,
+            )
+            command = await self._ledger.complete_technical_command(
+                connection,
+                binding=execution.admission.binding,
+                fencing_token=execution.fence.fencing_token,
+                completion=completion,
+            )
+            lease = await self._leases.release(
+                connection,
+                thread_id=execution.fence.thread_id,
+                command_id=execution.fence.command_id,
+                owner_id=execution.fence.owner_id,
+                fencing_token=execution.fence.fencing_token,
+            )
+
+        await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=complete_transaction,
+            operation_name="complete technical execution",
+        )
+        if command is None or attempt is None or lease is None:
+            raise GraphContractError("technical completion returned no durable authority")
+        self.cleanup_execution_lease(execution)
+        return replace(
+            execution,
+            admission=replace(
+                execution.admission,
+                record=command,
+                action=self._admission_action(command.status),
+            ),
+            attempt=attempt,
+            lease=lease,
+        )
+
+    @staticmethod
+    def _require_parallel_technical_admission(admission: GatewayAdmission) -> None:
+        command = admission.command
+        invocation = command.invocation_context
+        if (
+            command.room_type != "INTAKE"
+            or command.event_ref is None
+            or command.actor_scope.actor_role not in _TARGET_E2E_INTAKE_ROLES
+            or command.actor_scope.audience != command.actor_scope.actor_role
+            or invocation.agent_profile_id != _PARALLEL_INTAKE_AGENT_PROFILE_ID
+            or invocation.output_schema_version != _PARALLEL_INTAKE_OUTPUT_SCHEMA
+            or admission.binding.execution_lane
+            is not GraphGatewayMode.TARGET_E2E_CANDIDATE
+        ):
+            raise GraphContractError(
+                "technical completion is reserved for parallel Intake ROOM_MESSAGE"
+            )
+
+    @staticmethod
+    def _require_technical_completion_binding(
+        admission: GatewayAdmission,
+        completion: TechnicalCompletionRecord,
+        *,
+        attempt_id: str,
+        fencing_token: int | None,
+    ) -> None:
+        if (
+            fencing_token is None
+            or completion.completion_schema_version
+            != _PARALLEL_TECHNICAL_COMPLETION_SCHEMA
+            or completion.thread_id != admission.binding.thread_id
+            or completion.command_id != admission.binding.command_id
+            or completion.request_hash != admission.binding.request_hash
+            or completion.attempt_id != attempt_id
+            or completion.fencing_token != fencing_token
+        ):
+            raise GraphTerminalBindingError(
+                "technical completion differs from its admitted command"
+            )
+
     @staticmethod
     def _completed_attempt_abort_adoption(
         execution: GatewayExecution,
@@ -1420,6 +1617,21 @@ class GraphCommandGateway:
             # its lease before the durable signal resumes this stream task.  Adopt
             # that exact completed attempt; cleanup must never overwrite it with an
             # abort merely because signal scheduling lagged the database commit.
+            return command, attempt
+        durable_technical_adoption = (
+            command.status is CommandStatus.TECHNICAL_COMPLETED
+            and attempt.status is AttemptStatus.COMPLETED
+            and command.fencing_token == execution.fence.fencing_token
+            and command.committed_checkpoint_ns is None
+            and command.committed_checkpoint_id is None
+            and command.result_ref is None
+            and command.result_hash is None
+            and command.error_code is None
+            and command.error_classification is None
+            and attempt.error_code is None
+            and attempt.error_classification is None
+        )
+        if durable_technical_adoption:
             return command, attempt
         if command.status in result_terminal_statuses:
             raise GraphCommandStateError(
@@ -1775,6 +1987,7 @@ class GraphCommandGateway:
             CommandStatus.EXECUTING: AdmissionAction.OBSERVE_OR_TAKEOVER,
             CommandStatus.RESULT_CHECKPOINTED: AdmissionAction.RECONCILE,
             CommandStatus.COMPLETED: AdmissionAction.RETURN_CACHED,
+            CommandStatus.TECHNICAL_COMPLETED: AdmissionAction.RETURN_TECHNICAL_CACHED,
             CommandStatus.CANCELLED: AdmissionAction.RETURN_CANCELLED,
             CommandStatus.ABORTED: AdmissionAction.RETURN_ABORTED,
         }[status]

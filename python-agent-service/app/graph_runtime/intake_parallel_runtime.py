@@ -15,6 +15,7 @@ from app.graph_runtime.checkpoint import (
 )
 from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.gateway import GatewayExecution
+from app.graph_runtime.ledger import TechnicalCompletionRecord
 from app.graph_runtime.persistence_models import GraphGatewayMode
 from app.graphs.intake.parallel_contracts import (
     FRAME_OUTPUT_SCHEMA,
@@ -22,12 +23,18 @@ from app.graphs.intake.parallel_contracts import (
     FRAME_TYPES,
     ParallelFrameType,
 )
-from app.graphs.intake.parallel_graph import ParallelFrameExecutionRequest
+from app.graphs.intake.parallel_graph import (
+    FrameSealed,
+    ParallelFrameBatchResult,
+    ParallelFrameExecutionRequest,
+    ParallelFrameTechnicalEvent,
+)
 
 
 PARALLEL_INTAKE_AGENT_PROFILE_ID = "dispute-intake-officer.parallel-frames.v1"
 PARALLEL_INTAKE_OUTPUT_SCHEMA = "target-e2e-room-proposal-source.v2"
 _MAX_COGNITIVE_REVISION = (1 << 63) - 1
+PARALLEL_TECHNICAL_COMPLETION_SCHEMA = "intake-parallel-technical-completion.v1"
 
 
 def build_parallel_checkpoint_configs(
@@ -175,6 +182,102 @@ def require_parallel_intake_execution(execution: GatewayExecution) -> None:
         raise GraphContractError("parallel Intake execution fence drifted")
 
 
+def build_parallel_technical_completion(
+    execution: GatewayExecution,
+    *,
+    frame_set_id: str,
+    events: Sequence[ParallelFrameTechnicalEvent],
+    batch_result: ParallelFrameBatchResult,
+) -> TechnicalCompletionRecord:
+    """Freeze one replayable technical log after all three child checkpoints succeed."""
+
+    require_parallel_intake_execution(execution)
+    if not isinstance(frame_set_id, str) or not frame_set_id:
+        raise GraphContractError("parallel technical completion frame_set_id is invalid")
+    if not batch_result.all_succeeded or set(batch_result.completed) != set(FRAME_TYPES):
+        raise GraphContractError("parallel technical completion requires exact-three success")
+    if not events:
+        raise GraphContractError("parallel technical completion has no replay events")
+    command = execution.admission.command
+    event_documents: list[dict[str, Any]] = []
+    sealed_by_type: dict[ParallelFrameType, FrameSealed] = {}
+    for event in events:
+        if (
+            event.frame_set_id != frame_set_id
+            or event.run_id != command.logical_run_id
+            or event.attempt_id != command.attempt_id
+        ):
+            raise GraphContractError("parallel technical event crossed completion authority")
+        if event.frame_type in sealed_by_type:
+            raise GraphContractError("parallel technical event followed a sealed Frame")
+        if isinstance(event, FrameSealed):
+            sealed_by_type[event.frame_type] = event
+        event_documents.append(event.model_dump(mode="json", exclude_none=True))
+    if set(sealed_by_type) != set(FRAME_TYPES):
+        raise GraphContractError("parallel technical completion requires three sealed events")
+
+    frame_documents: list[dict[str, Any]] = []
+    for frame_type in FRAME_TYPES:
+        result = batch_result.completed[frame_type]
+        sealed = sealed_by_type[frame_type]
+        if (
+            result.frame_type != frame_type
+            or result.generation != sealed.generation
+            or result.frame_id != sealed.frame_id
+            or result.result_sha256 != sealed.result_sha256
+            or result.public_projection_sha256 != sealed.public_projection_sha256
+            or result.child_checkpoint_ref != sealed.child_checkpoint_ref
+            or result.child_checkpoint_sha256 != sealed.child_checkpoint_sha256
+        ):
+            raise GraphContractError("parallel sealed event differs from child checkpoint result")
+        frame_documents.append(
+            {
+                "frame_type": frame_type,
+                "generation": result.generation,
+                "frame_id": result.frame_id,
+                "result_sha256": result.result_sha256,
+                "public_projection_sha256": result.public_projection_sha256,
+                "child_checkpoint_ref": result.child_checkpoint_ref,
+                "child_checkpoint_sha256": result.child_checkpoint_sha256,
+            }
+        )
+
+    completion_id = "IPTC_" + canonical_sha256(
+        {
+            "contract_version": PARALLEL_TECHNICAL_COMPLETION_SCHEMA,
+            "thread_id": execution.fence.thread_id,
+            "command_id": execution.fence.command_id,
+            "attempt_id": execution.attempt.attempt_id,
+            "frame_set_id": frame_set_id,
+        }
+    )[:32]
+    document: dict[str, Any] = {
+        "schema_version": PARALLEL_TECHNICAL_COMPLETION_SCHEMA,
+        "completion_id": completion_id,
+        "thread_id": execution.fence.thread_id,
+        "command_id": execution.fence.command_id,
+        "request_hash": execution.fence.request_hash,
+        "attempt_id": execution.attempt.attempt_id,
+        "fencing_token": execution.fence.fencing_token,
+        "frame_set_id": frame_set_id,
+        "events": event_documents,
+        "frames": frame_documents,
+    }
+    completion_hash = canonical_sha256(document)
+    document["completion_hash"] = completion_hash
+    return TechnicalCompletionRecord(
+        completion_id=completion_id,
+        thread_id=execution.fence.thread_id,
+        command_id=execution.fence.command_id,
+        request_hash=execution.fence.request_hash,
+        attempt_id=execution.attempt.attempt_id,
+        fencing_token=execution.fence.fencing_token,
+        completion_schema_version=PARALLEL_TECHNICAL_COMPLETION_SCHEMA,
+        completion_json=document,
+        completion_hash=completion_hash,
+    )
+
+
 def _require_request_binding(
     execution: GatewayExecution,
     request: ParallelFrameExecutionRequest,
@@ -219,6 +322,8 @@ def _require_request_binding(
 __all__ = [
     "PARALLEL_INTAKE_AGENT_PROFILE_ID",
     "PARALLEL_INTAKE_OUTPUT_SCHEMA",
+    "PARALLEL_TECHNICAL_COMPLETION_SCHEMA",
+    "build_parallel_technical_completion",
     "build_parallel_checkpoint_configs",
     "require_parallel_intake_execution",
 ]

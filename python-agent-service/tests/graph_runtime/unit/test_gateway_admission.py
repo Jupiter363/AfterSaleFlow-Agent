@@ -1944,6 +1944,26 @@ async def test_terminal_attempt_failure_fences_lease_before_command_and_attempt(
     assert "transaction:commit" in pool.events
 
 
+def test_cleanup_adopts_exact_parallel_technical_completion() -> None:
+    execution = _execution()
+    command = replace(
+        execution.admission.record,
+        status=CommandStatus.TECHNICAL_COMPLETED,
+    )
+    attempt = replace(execution.attempt, status=AttemptStatus.COMPLETED)
+
+    adopted = GraphCommandGateway._completed_attempt_abort_adoption(  # noqa: SLF001
+        execution,
+        command=command,
+        attempt=attempt,
+        status=AttemptStatus.FAILED,
+        error_code="CLIENT_DISCONNECTED",
+        error_classification="TRANSPORT_FAILURE",
+    )
+
+    assert adopted == (command, attempt)
+
+
 @pytest.mark.asyncio
 async def test_stream_reconciles_durable_result_before_yielding_final() -> None:
     gateway = _StreamGateway()

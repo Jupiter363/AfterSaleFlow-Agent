@@ -56,6 +56,7 @@ from app.graph_runtime.intake_parallel_runtime import (
     PARALLEL_INTAKE_AGENT_PROFILE_ID,
     PARALLEL_INTAKE_OUTPUT_SCHEMA,
     build_parallel_checkpoint_configs,
+    build_parallel_technical_completion,
 )
 from app.graph_runtime.intake_parallel_context import (
     build_parallel_turn_model_material,
@@ -202,6 +203,18 @@ async def test_three_physical_graphs_stream_independently_before_fan_in() -> Non
     assert all("checkpoint_id" not in request.model_input.model_dump_json()
                for request in requests)
     assert len([event for event in sink.events if isinstance(event, FrameSealed)]) == 3
+
+    completion = build_parallel_technical_completion(
+        _parallel_execution(requests),
+        frame_set_id=requests[0].frame_set_id,
+        events=sink.events,
+        batch_result=result,
+    )
+    assert completion.completion_json["frame_set_id"] == requests[0].frame_set_id
+    assert [frame["frame_type"] for frame in completion.completion_json["frames"]] == list(
+        FRAME_TYPES
+    )
+    assert completion.canonical_json_text()
 
 
 @pytest.mark.asyncio

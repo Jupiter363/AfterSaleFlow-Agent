@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 import hmac
@@ -42,6 +42,7 @@ class CommandStatus(StrEnum):
     EXECUTING = "EXECUTING"
     RESULT_CHECKPOINTED = "RESULT_CHECKPOINTED"
     COMPLETED = "COMPLETED"
+    TECHNICAL_COMPLETED = "TECHNICAL_COMPLETED"
     CANCELLED = "CANCELLED"
     ABORTED = "ABORTED"
 
@@ -69,12 +70,14 @@ LEGAL_TRANSITIONS: Final[dict[CommandStatus, frozenset[CommandStatus]]] = {
     CommandStatus.EXECUTING: frozenset(
         {
             CommandStatus.RESULT_CHECKPOINTED,
+            CommandStatus.TECHNICAL_COMPLETED,
             CommandStatus.CANCELLED,
             CommandStatus.ABORTED,
         }
     ),
     CommandStatus.RESULT_CHECKPOINTED: frozenset({CommandStatus.COMPLETED}),
     CommandStatus.COMPLETED: frozenset(),
+    CommandStatus.TECHNICAL_COMPLETED: frozenset(),
     CommandStatus.CANCELLED: frozenset(),
     CommandStatus.ABORTED: frozenset(),
 }
@@ -258,6 +261,7 @@ class CommandRecord:
     def terminal(self) -> bool:
         return self.status in {
             CommandStatus.COMPLETED,
+            CommandStatus.TECHNICAL_COMPLETED,
             CommandStatus.CANCELLED,
             CommandStatus.ABORTED,
         }
@@ -281,6 +285,77 @@ class AttemptRecord:
     provider_call_count: int
     error_code: str | None
     error_classification: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TechnicalCompletionRecord:
+    completion_id: str
+    thread_id: str
+    command_id: str
+    request_hash: str
+    attempt_id: str
+    fencing_token: int
+    completion_schema_version: str
+    completion_json: Mapping[str, Any]
+    completion_hash: str
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "completion_id",
+            "command_id",
+            "attempt_id",
+            "completion_schema_version",
+        ):
+            _identifier(getattr(self, field_name), field_name)
+        if THREAD_ID_PATTERN.fullmatch(self.thread_id) is None:
+            raise GraphContractError("technical completion thread_id is invalid")
+        _sha256(self.request_hash, "request_hash")
+        _sha256(self.completion_hash, "completion_hash")
+        if isinstance(self.fencing_token, bool) or self.fencing_token < 1:
+            raise GraphContractError("technical completion fence is invalid")
+        if not isinstance(self.completion_json, Mapping):
+            raise GraphContractError("technical completion JSON must be an object")
+        document = dict(self.completion_json)
+        try:
+            canonical = canonicalize(document)
+        except (TypeError, ValueError) as error:
+            raise GraphContractError(
+                "technical completion JSON is not RFC 8785 serializable"
+            ) from error
+        if len(canonical) > 1_048_576:
+            raise GraphContractError("technical completion exceeds the 1 MiB ledger limit")
+        expected_bindings = {
+            "completion_id": self.completion_id,
+            "thread_id": self.thread_id,
+            "command_id": self.command_id,
+            "request_hash": self.request_hash,
+            "attempt_id": self.attempt_id,
+            "fencing_token": self.fencing_token,
+            "schema_version": self.completion_schema_version,
+            "completion_hash": self.completion_hash,
+        }
+        if any(document.get(key) != value for key, value in expected_bindings.items()):
+            raise GraphTerminalBindingError(
+                "technical completion document differs from its ledger binding"
+            )
+        if canonical_sha256_omitting(document, "completion_hash") != self.completion_hash:
+            raise GraphTerminalBindingError("technical completion self-hash is invalid")
+
+    def canonical_json_text(self) -> str:
+        """Revalidate mutable nested values immediately before persistence."""
+
+        refreshed = TechnicalCompletionRecord(
+            completion_id=self.completion_id,
+            thread_id=self.thread_id,
+            command_id=self.command_id,
+            request_hash=self.request_hash,
+            attempt_id=self.attempt_id,
+            fencing_token=self.fencing_token,
+            completion_schema_version=self.completion_schema_version,
+            completion_json=self.completion_json,
+            completion_hash=self.completion_hash,
+        )
+        return canonicalize(dict(refreshed.completion_json)).decode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -779,6 +854,83 @@ returning attempt_id, thread_id, command_id, attempt_no, owner_id,
           error_code, error_classification
 """
 
+TECHNICAL_COMPLETION_COLUMNS: Final[str] = """
+completion_id, thread_id, command_id, request_hash, attempt_id, fencing_token,
+completion_schema_version, completion_json, completion_hash
+"""
+
+LOAD_TECHNICAL_COMPLETION_SQL: Final[str] = f"""
+select {TECHNICAL_COMPLETION_COLUMNS}
+  from agent_graph_technical_completion
+ where thread_id = %s and command_id = %s
+"""
+
+INSERT_TECHNICAL_COMPLETION_SQL: Final[str] = f"""
+insert into agent_graph_technical_completion (
+    completion_id, thread_id, command_id, request_hash, attempt_id, fencing_token,
+    completion_schema_version, completion_json, completion_hash
+)
+select %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s
+ where exists (
+       select 1
+         from agent_graph_command command
+         join agent_graph_command_attempt attempt
+           on attempt.thread_id = command.thread_id
+          and attempt.command_id = command.command_id
+         join agent_graph_lease lease
+           on lease.thread_id = command.thread_id
+          and lease.command_id = command.command_id
+        where command.thread_id = %s
+          and command.command_id = %s
+          and command.request_hash = %s
+          and command.status = 'EXECUTING'
+          and command.fencing_token = %s
+          and attempt.attempt_id = %s
+          and attempt.owner_id = %s
+          and attempt.fencing_token = %s
+          and attempt.attempt_status = 'EXECUTING'
+          and lease.owner_id = attempt.owner_id
+          and lease.fencing_token = attempt.fencing_token
+          and lease.released_at is null
+          and lease.cancelled_at is null
+          and lease.lease_expires_at > clock_timestamp()
+   )
+on conflict (thread_id, command_id) do nothing
+returning {TECHNICAL_COMPLETION_COLUMNS}
+"""
+
+COMPLETE_TECHNICAL_ATTEMPT_SQL: Final[str] = """
+update agent_graph_command_attempt
+   set attempt_status = 'COMPLETED', completed_at = clock_timestamp(),
+       last_heartbeat_at = clock_timestamp()
+ where attempt_id = %s and thread_id = %s and command_id = %s
+   and owner_id = %s and fencing_token = %s
+   and attempt_status = 'EXECUTING'
+returning attempt_id, thread_id, command_id, attempt_no, owner_id,
+          fencing_token, attempt_status, provider_call_count,
+          error_code, error_classification
+"""
+
+COMPLETE_TECHNICAL_COMMAND_SQL: Final[str] = f"""
+update agent_graph_command
+   set status = 'TECHNICAL_COMPLETED', technical_completed_at = clock_timestamp(),
+       updated_at = clock_timestamp(), command_revision = command_revision + 1
+ where thread_id = %s and command_id = %s and request_hash = %s
+   and status = 'EXECUTING' and fencing_token = %s
+   and committed_checkpoint_ns is null and committed_checkpoint_id is null
+   and result_ref is null and result_hash is null
+   and exists (
+       select 1 from agent_graph_technical_completion completion
+        where completion.thread_id = agent_graph_command.thread_id
+          and completion.command_id = agent_graph_command.command_id
+          and completion.request_hash = agent_graph_command.request_hash
+          and completion.attempt_id = %s
+          and completion.fencing_token = %s
+          and completion.completion_hash = %s
+   )
+returning {COMMAND_COLUMNS}
+"""
+
 TERMINATE_COMMAND_SQL: Final[str] = f"""
 update agent_graph_command
    set status = %s, error_code = %s, error_classification = %s,
@@ -1200,6 +1352,154 @@ class PostgresCommandLedger:
         if row is None:
             raise GraphCommandStateError()
         return self._attempt_from_row(row)
+
+    async def load_technical_completion(
+        self,
+        connection: Any,
+        *,
+        thread_id: str,
+        command_id: str,
+    ) -> TechnicalCompletionRecord:
+        row = await (
+            await connection.execute(
+                LOAD_TECHNICAL_COMPLETION_SQL,
+                (thread_id, command_id),
+            )
+        ).fetchone()
+        if row is None:
+            raise GraphTerminalBindingError("technical completion row is missing")
+        return self._technical_completion_from_row(row)
+
+    async def store_technical_completion(
+        self,
+        connection: Any,
+        *,
+        execution_attempt: AttemptRecord,
+        completion: TechnicalCompletionRecord,
+    ) -> TechnicalCompletionRecord:
+        if (
+            completion.thread_id != execution_attempt.thread_id
+            or completion.command_id != execution_attempt.command_id
+            or completion.attempt_id != execution_attempt.attempt_id
+            or completion.fencing_token != execution_attempt.fencing_token
+            or execution_attempt.status is not AttemptStatus.EXECUTING
+        ):
+            raise GraphTerminalBindingError(
+                "technical completion differs from its executing attempt"
+            )
+        row = await (
+            await connection.execute(
+                INSERT_TECHNICAL_COMPLETION_SQL,
+                (
+                    completion.completion_id,
+                    completion.thread_id,
+                    completion.command_id,
+                    completion.request_hash,
+                    completion.attempt_id,
+                    completion.fencing_token,
+                    completion.completion_schema_version,
+                    completion.canonical_json_text(),
+                    completion.completion_hash,
+                    completion.thread_id,
+                    completion.command_id,
+                    completion.request_hash,
+                    completion.fencing_token,
+                    completion.attempt_id,
+                    execution_attempt.owner_id,
+                    completion.fencing_token,
+                ),
+            )
+        ).fetchone()
+        if row is not None:
+            return self._technical_completion_from_row(row)
+        existing = await self.load_technical_completion(
+            connection,
+            thread_id=completion.thread_id,
+            command_id=completion.command_id,
+        )
+        if existing != completion:
+            raise GraphTerminalBindingError(
+                "immutable technical completion conflicts with existing row"
+            )
+        return existing
+
+    async def complete_technical_attempt(
+        self,
+        connection: Any,
+        attempt: AttemptRecord,
+    ) -> AttemptRecord:
+        row = await (
+            await connection.execute(
+                COMPLETE_TECHNICAL_ATTEMPT_SQL,
+                (
+                    attempt.attempt_id,
+                    attempt.thread_id,
+                    attempt.command_id,
+                    attempt.owner_id,
+                    attempt.fencing_token,
+                ),
+            )
+        ).fetchone()
+        if row is not None:
+            return self._attempt_from_row(row)
+        existing = await self.latest_attempt(
+            connection,
+            thread_id=attempt.thread_id,
+            command_id=attempt.command_id,
+        )
+        if existing != replace(attempt, status=AttemptStatus.COMPLETED):
+            raise GraphTerminalBindingError("technical attempt cannot be completed")
+        return existing
+
+    async def complete_technical_command(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        fencing_token: int,
+        completion: TechnicalCompletionRecord,
+    ) -> CommandRecord:
+        if (
+            completion.thread_id != binding.thread_id
+            or completion.command_id != binding.command_id
+            or completion.request_hash != binding.request_hash
+            or completion.fencing_token != fencing_token
+        ):
+            raise GraphTerminalBindingError(
+                "technical completion differs from its command binding"
+            )
+        row = await (
+            await connection.execute(
+                COMPLETE_TECHNICAL_COMMAND_SQL,
+                (
+                    binding.thread_id,
+                    binding.command_id,
+                    binding.request_hash,
+                    fencing_token,
+                    completion.attempt_id,
+                    fencing_token,
+                    completion.completion_hash,
+                ),
+            )
+        ).fetchone()
+        if row is not None:
+            return self._command_from_row(row)
+        existing = await self.load(
+            connection,
+            thread_id=binding.thread_id,
+            command_id=binding.command_id,
+        )
+        self.require_same_binding(existing.binding, binding)
+        if existing.status is not CommandStatus.TECHNICAL_COMPLETED:
+            raise GraphTerminalBindingError("technical command cannot be completed")
+        durable = await self.load_technical_completion(
+            connection,
+            thread_id=binding.thread_id,
+            command_id=binding.command_id,
+        )
+        if durable != completion:
+            raise GraphTerminalBindingError("technical completion replay drifted")
+        return existing
 
     async def terminate(
         self,
@@ -1878,6 +2178,27 @@ class PostgresCommandLedger:
             )
         except (KeyError, TypeError, ValueError) as error:
             raise GraphCommandBindingError("persisted attempt binding is invalid") from error
+
+    @staticmethod
+    def _technical_completion_from_row(
+        row: Mapping[str, Any],
+    ) -> TechnicalCompletionRecord:
+        try:
+            return TechnicalCompletionRecord(
+                completion_id=row["completion_id"],
+                thread_id=row["thread_id"],
+                command_id=row["command_id"],
+                request_hash=row["request_hash"],
+                attempt_id=row["attempt_id"],
+                fencing_token=row["fencing_token"],
+                completion_schema_version=row["completion_schema_version"],
+                completion_json=row["completion_json"],
+                completion_hash=row["completion_hash"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise GraphTerminalBindingError(
+                "persisted technical completion binding is invalid"
+            ) from error
 
     @staticmethod
     def _result_from_row(row: Mapping[str, Any]) -> ResultRecord:

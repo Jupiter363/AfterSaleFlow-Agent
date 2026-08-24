@@ -23,6 +23,7 @@ from app.graph_runtime.ledger import (
     InvocationNonce,
     PostgresCommandLedger,
     ResultRecord,
+    TechnicalCompletionRecord,
     require_transition,
 )
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
@@ -83,6 +84,33 @@ def _nonce(jti: str = "jti-1") -> InvocationNonce:
         issued_at=NOW,
         token_expires_at=NOW + timedelta(seconds=60),
         retained_until=NOW + timedelta(hours=24),
+    )
+
+
+def _technical_completion(binding: CommandBinding) -> TechnicalCompletionRecord:
+    document: dict[str, Any] = {
+        "schema_version": "intake-parallel-technical-completion.v1",
+        "completion_id": "IPTC_123",
+        "thread_id": binding.thread_id,
+        "command_id": binding.command_id,
+        "request_hash": binding.request_hash,
+        "attempt_id": "attempt-1",
+        "fencing_token": 1,
+        "frame_set_id": "IPFS_123",
+        "events": [],
+        "frames": [],
+    }
+    document["completion_hash"] = canonical_sha256(document)
+    return TechnicalCompletionRecord(
+        completion_id=document["completion_id"],
+        thread_id=binding.thread_id,
+        command_id=binding.command_id,
+        request_hash=binding.request_hash,
+        attempt_id=document["attempt_id"],
+        fencing_token=1,
+        completion_schema_version=document["schema_version"],
+        completion_json=document,
+        completion_hash=document["completion_hash"],
     )
 
 
@@ -571,6 +599,77 @@ async def test_terminal_result_insert_is_fence_and_checkpoint_guarded() -> None:
     assert "command.committed_checkpoint_id = %s" in sql
 
 
+@pytest.mark.asyncio
+async def test_parallel_technical_completion_is_attempt_lease_and_command_guarded() -> None:
+    binding = _binding()
+    completion = _technical_completion(binding)
+    attempt = AttemptRecord(
+        attempt_id=completion.attempt_id,
+        thread_id=binding.thread_id,
+        command_id=binding.command_id,
+        attempt_no=1,
+        owner_id="worker-1",
+        fencing_token=1,
+        status=AttemptStatus.EXECUTING,
+        provider_call_count=3,
+        error_code=None,
+        error_classification=None,
+    )
+    completion_row = {
+        "completion_id": completion.completion_id,
+        "thread_id": completion.thread_id,
+        "command_id": completion.command_id,
+        "request_hash": completion.request_hash,
+        "attempt_id": completion.attempt_id,
+        "fencing_token": completion.fencing_token,
+        "completion_schema_version": completion.completion_schema_version,
+        "completion_json": dict(completion.completion_json),
+        "completion_hash": completion.completion_hash,
+    }
+    attempt_row = {
+        "attempt_id": attempt.attempt_id,
+        "thread_id": attempt.thread_id,
+        "command_id": attempt.command_id,
+        "attempt_no": attempt.attempt_no,
+        "owner_id": attempt.owner_id,
+        "fencing_token": attempt.fencing_token,
+        "attempt_status": "COMPLETED",
+        "provider_call_count": attempt.provider_call_count,
+        "error_code": None,
+        "error_classification": None,
+    }
+    command_row = _command_row(binding, status="TECHNICAL_COMPLETED")
+    command_row.update({"attempt_count": 1, "fencing_token": 1, "command_revision": 2})
+    connection = _Connection([completion_row, attempt_row, command_row])
+    ledger = PostgresCommandLedger()
+
+    assert await ledger.store_technical_completion(
+        connection,
+        execution_attempt=attempt,
+        completion=completion,
+    ) == completion
+    assert (
+        await ledger.complete_technical_attempt(connection, attempt)
+    ).status is AttemptStatus.COMPLETED
+    assert (
+        await ledger.complete_technical_command(
+            connection,
+            binding=binding,
+            fencing_token=1,
+            completion=completion,
+        )
+    ).status is CommandStatus.TECHNICAL_COMPLETED
+
+    insert_sql = connection.calls[0][0]
+    assert "join agent_graph_command_attempt attempt" in insert_sql
+    assert "join agent_graph_lease lease" in insert_sql
+    assert "lease.lease_expires_at > clock_timestamp()" in insert_sql
+    assert "attempt.attempt_status = 'executing'" in insert_sql
+    assert "status = 'technical_completed'" in connection.calls[2][0]
+    assert "committed_checkpoint_ns is null" in connection.calls[2][0]
+    assert "result_ref is null" in connection.calls[2][0]
+
+
 def test_command_size_uses_rfc8785_bytes_not_python_dict_rendering() -> None:
     request: dict[str, Any] = {
         "schema_version": "room-graph-command.v1",
@@ -880,12 +979,13 @@ def test_cached_result_must_match_original_run_attempt_and_profiles() -> None:
         PostgresCommandLedger.require_result_matches_command(command, result)
 
 
-def test_six_state_transition_table_is_exact() -> None:
+def test_seven_state_transition_table_is_exact() -> None:
     allowed = {
         (CommandStatus.REGISTERED, CommandStatus.EXECUTING),
         (CommandStatus.REGISTERED, CommandStatus.CANCELLED),
         (CommandStatus.REGISTERED, CommandStatus.ABORTED),
         (CommandStatus.EXECUTING, CommandStatus.RESULT_CHECKPOINTED),
+        (CommandStatus.EXECUTING, CommandStatus.TECHNICAL_COMPLETED),
         (CommandStatus.EXECUTING, CommandStatus.CANCELLED),
         (CommandStatus.EXECUTING, CommandStatus.ABORTED),
         (CommandStatus.RESULT_CHECKPOINTED, CommandStatus.COMPLETED),
@@ -897,3 +997,36 @@ def test_six_state_transition_table_is_exact() -> None:
             else:
                 with pytest.raises(GraphCommandStateError):
                     require_transition(current, target)
+
+
+def test_technical_completion_revalidates_nested_json_before_persistence() -> None:
+    document: dict[str, Any] = {
+        "schema_version": "intake-parallel-technical-completion.v1",
+        "completion_id": "IPTC_123",
+        "thread_id": THREAD,
+        "command_id": "command-1",
+        "request_hash": "a" * 64,
+        "attempt_id": "attempt-1",
+        "fencing_token": 1,
+        "frame_set_id": "IPFS_123",
+        "events": [{"frame_type": "DIALOGUE_FRAME", "local_index": 0}],
+        "frames": [],
+    }
+    document["completion_hash"] = canonical_sha256(document)
+    completion = TechnicalCompletionRecord(
+        completion_id="IPTC_123",
+        thread_id=THREAD,
+        command_id="command-1",
+        request_hash="a" * 64,
+        attempt_id="attempt-1",
+        fencing_token=1,
+        completion_schema_version="intake-parallel-technical-completion.v1",
+        completion_json=document,
+        completion_hash=document["completion_hash"],
+    )
+
+    assert completion.canonical_json_text() == canonicalize(document).decode("utf-8")
+    document["events"][0]["local_index"] = 1
+
+    with pytest.raises(GraphTerminalBindingError, match="self-hash is invalid"):
+        completion.canonical_json_text()

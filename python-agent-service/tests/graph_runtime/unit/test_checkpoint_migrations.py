@@ -42,6 +42,8 @@ def test_repository_migrations_are_exact_ordered_and_hash_bound() -> None:
         "G007",
         "G008",
         "G009",
+        "G010",
+        "G011",
     )
     assert all(len(migration.sha256) == 64 for migration in migrations)
     assert len(graph_application_signature(migrations)) == 64
@@ -63,6 +65,18 @@ def test_application_signature_changes_when_a_migration_changes() -> None:
     assert graph_application_signature((changed, *migrations[1:])) != (
         graph_application_signature(migrations)
     )
+
+
+def test_parallel_technical_completion_migration_is_immutable_and_attempt_bound() -> None:
+    migration = load_graph_migrations()[-1]
+    normalized = " ".join(migration.sql_text.split()).lower()
+
+    assert migration.version == "G011"
+    assert "'technical_completed'" in normalized
+    assert "create table agent_graph_technical_completion" in normalized
+    assert "unique (attempt_id, thread_id, command_id, fencing_token)" in normalized
+    assert "foreign key (attempt_id, thread_id, command_id, fencing_token)" in normalized
+    assert "graph technical completion rows are immutable" in normalized
 
 
 def test_runtime_package_versions_match_the_frozen_pins() -> None:

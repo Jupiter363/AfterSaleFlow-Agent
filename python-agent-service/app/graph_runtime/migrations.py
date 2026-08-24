@@ -1,7 +1,7 @@
 """Controlled Graph PostgreSQL migration job.
 
 Application replicas call readiness only. This module is the sole owner of checkpointer setup and
-G001-G010 DDL under a session advisory lock.
+G001-G011 DDL under a session advisory lock.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ MIGRATION_FILENAMES: Final[tuple[str, ...]] = (
     "G008_graph_thread_fresh_bootstrap.sql",
     "G009_graph_lease_sixty_second_window.sql",
     "G010_target_e2e_activation_month_window.sql",
+    "G011_parallel_technical_completion.sql",
 )
 MIGRATIONS_DIRECTORY: Final[Path] = Path(__file__).resolve().parents[2] / "migrations" / "graph"
 CONTROL_KEY: Final[str] = "primary"
@@ -54,6 +55,7 @@ REQUIRED_MIGRATION_RELATIONS: Final[tuple[str, ...]] = (
     "graph_thread_registry",
     "agent_graph_command",
     "agent_graph_command_attempt",
+    "agent_graph_technical_completion",
     "agent_graph_result",
     "agent_graph_lease",
     "agent_graph_invocation_nonce",
@@ -675,6 +677,11 @@ class GraphMigrationRunner:
                     schema,
                     runtime,
                 )
+            )
+            await connection.execute(
+                sql.SQL(
+                    "grant select, insert on {}.agent_graph_technical_completion to {}"
+                ).format(schema, runtime)
             )
             await connection.execute(
                 sql.SQL("grant select, insert on {}.agent_graph_invocation_nonce to {}").format(

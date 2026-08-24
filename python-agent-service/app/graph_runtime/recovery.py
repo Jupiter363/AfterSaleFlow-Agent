@@ -31,6 +31,7 @@ class RecoveryAction(StrEnum):
     REQUIRE_NEW_AGENT_ATTEMPT = "REQUIRE_NEW_AGENT_ATTEMPT"
     RECONCILE_TERMINAL = "RECONCILE_TERMINAL"
     RETURN_CACHED = "RETURN_CACHED"
+    RETURN_TECHNICAL_CACHED = "RETURN_TECHNICAL_CACHED"
     RETURN_CANCELLED = "RETURN_CANCELLED"
     RETURN_ABORTED = "RETURN_ABORTED"
 
@@ -74,6 +75,13 @@ def decide_recovery(
             invoke_model=False,
             emit_attempt_reset=False,
             reason_code="COMMAND_ALREADY_COMPLETED",
+        )
+    if command.status is CommandStatus.TECHNICAL_COMPLETED:
+        return RecoveryDecision(
+            RecoveryAction.RETURN_TECHNICAL_CACHED,
+            invoke_model=False,
+            emit_attempt_reset=False,
+            reason_code="TECHNICAL_COMMAND_ALREADY_COMPLETED",
         )
     if command.status is CommandStatus.RESULT_CHECKPOINTED:
         return RecoveryDecision(

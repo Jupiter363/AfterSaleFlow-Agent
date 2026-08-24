@@ -277,6 +277,18 @@ def test_crash_after_completion_returns_cached_without_second_model_call() -> No
     assert decision.invoke_model is False
 
 
+def test_parallel_technical_completion_returns_replay_without_model_call() -> None:
+    decision = decide_recovery(
+        _command(CommandStatus.TECHNICAL_COMPLETED),
+        latest_attempt=replace(_attempt(1), status=AttemptStatus.COMPLETED),
+        retry_allowed=True,
+    )
+
+    assert decision.action is RecoveryAction.RETURN_TECHNICAL_CACHED
+    assert decision.invoke_model is False
+    assert decision.emit_attempt_reset is False
+
+
 def test_started_attempt_requires_new_public_attempt_even_when_budget_is_closed() -> None:
     decision = decide_recovery(
         _command(CommandStatus.EXECUTING),
