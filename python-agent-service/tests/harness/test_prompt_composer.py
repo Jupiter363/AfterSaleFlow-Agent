@@ -5,11 +5,79 @@ from pathlib import Path
 import pytest
 
 from app.harness.prompt_composer import (
+    INTAKE_PARALLEL_FRAME_PROMPT_BUNDLES,
     PromptComposer,
     PromptRepository,
     PromptResourceError,
     TARGET_E2E_PROMPT_BUNDLE_NODES,
 )
+
+
+@pytest.mark.parametrize(
+    ("node_name", "own_rule", "foreign_rules"),
+    (
+        (
+            "intake_turn_dialogue_frame",
+            "你只负责 DIALOGUE_FRAME 的公开回复投影",
+            ("DOSSIER_FRAME 的本轮卷宗增量", "QUALITY_FRAME 的六项质量评估"),
+        ),
+        (
+            "intake_turn_dossier_frame",
+            "你只负责 DOSSIER_FRAME 的本轮卷宗增量",
+            ("DIALOGUE_FRAME 的公开回复投影", "QUALITY_FRAME 的六项质量评估"),
+        ),
+        (
+            "intake_turn_quality_frame",
+            "你只负责 QUALITY_FRAME 的六项质量评估和缺口候选",
+            ("DIALOGUE_FRAME 的公开回复投影", "DOSSIER_FRAME 的本轮卷宗增量"),
+        ),
+    ),
+)
+def test_parallel_intake_frame_prompts_share_authority_but_isolate_frame_rules(
+    node_name: str,
+    own_rule: str,
+    foreign_rules: tuple[str, str],
+) -> None:
+    repository = PromptRepository()
+
+    system_prompt = repository.render_system_prompt(
+        node_name,
+        prompt_profile_id=node_name,
+    )
+
+    shared_rule = "common_model_context 是本次指令唯一、不可变的业务事实视图"
+    assert shared_rule in system_prompt
+    assert own_rule in system_prompt
+    assert system_prompt.index(shared_rule) < system_prompt.index(own_rule)
+    assert all(foreign_rule not in system_prompt for foreign_rule in foreign_rules)
+    assert repository.template_path(
+        node_name,
+        prompt_profile_id=node_name,
+    ) == Path(
+        f"app/agents/prompts/dispute_intake_officer/{node_name}.md"
+    )
+    assert repository.require_prompt_bundle(
+        node_name,
+        required_node_names=(node_name,),
+    ) == (
+        Path(f"app/agents/prompts/dispute_intake_officer/{node_name}.md"),
+    )
+
+
+def test_parallel_intake_frame_prompt_profile_cannot_authorize_another_frame() -> None:
+    repository = PromptRepository()
+
+    with pytest.raises(PromptResourceError):
+        repository.render_system_prompt(
+            "intake_turn_quality_frame",
+            prompt_profile_id="intake_turn_dialogue_frame",
+        )
+
+    assert set(INTAKE_PARALLEL_FRAME_PROMPT_BUNDLES) == {
+        "intake_turn_dialogue_frame",
+        "intake_turn_dossier_frame",
+        "intake_turn_quality_frame",
+    }
 
 
 def test_target_e2e_v2_prompt_bundle_resolves_evidence_contract() -> None:

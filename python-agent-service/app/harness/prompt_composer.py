@@ -24,6 +24,22 @@ TARGET_E2E_PROMPT_BUNDLE_NODES = (
     "hearing_judge_v2",
 )
 
+INTAKE_PARALLEL_FRAME_PROMPT_BUNDLES: Mapping[str, frozenset[str]] = (
+    MappingProxyType(
+        {
+            "intake_turn_dialogue_frame": frozenset(
+                {"intake_turn_dialogue_frame"}
+            ),
+            "intake_turn_dossier_frame": frozenset(
+                {"intake_turn_dossier_frame"}
+            ),
+            "intake_turn_quality_frame": frozenset(
+                {"intake_turn_quality_frame"}
+            ),
+        }
+    )
+)
+
 
 class PromptResourceError(FileNotFoundError):
     """A versioned Prompt bundle is absent, unreadable, or bound to the wrong node."""
@@ -63,6 +79,18 @@ class PromptComposer:
         "intake_turn_case_detail": PromptTemplateRef(
             "dispute_intake_officer",
             "intake_turn_case_detail.md",
+        ),
+        "intake_turn_dialogue_frame": PromptTemplateRef(
+            "dispute_intake_officer",
+            "intake_turn_dialogue_frame.md",
+        ),
+        "intake_turn_dossier_frame": PromptTemplateRef(
+            "dispute_intake_officer",
+            "intake_turn_dossier_frame.md",
+        ),
+        "intake_turn_quality_frame": PromptTemplateRef(
+            "dispute_intake_officer",
+            "intake_turn_quality_frame.md",
         ),
         "target_intake_cognition": PromptTemplateRef(
             "dispute_intake_officer",
@@ -158,6 +186,24 @@ class PromptComposer:
                         "presiding_judge", "hearing_judge_shared_core.md"
                     ),
                 ),
+                "intake_turn_dialogue_frame": (
+                    PromptTemplateRef(
+                        "dispute_intake_officer",
+                        "intake_turn_parallel_authority.md",
+                    ),
+                ),
+                "intake_turn_dossier_frame": (
+                    PromptTemplateRef(
+                        "dispute_intake_officer",
+                        "intake_turn_parallel_authority.md",
+                    ),
+                ),
+                "intake_turn_quality_frame": (
+                    PromptTemplateRef(
+                        "dispute_intake_officer",
+                        "intake_turn_parallel_authority.md",
+                    ),
+                ),
             }
         )
     )
@@ -165,6 +211,7 @@ class PromptComposer:
     VERSIONED_PROMPT_BUNDLES: Mapping[str, frozenset[str]] = MappingProxyType(
         {
             TARGET_E2E_PROMPT_VERSION: frozenset(TARGET_E2E_PROMPT_BUNDLE_NODES),
+            **INTAKE_PARALLEL_FRAME_PROMPT_BUNDLES,
         }
     )
 
