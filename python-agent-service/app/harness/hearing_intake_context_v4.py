@@ -317,8 +317,6 @@ def _binding_authority_catalog(
         "existing_fact_ids": existing_fact_ids,
         "authorized_new_issue_slots": deepcopy(issue_slots),
         "authorized_new_fact_slots": deepcopy(fact_slots),
-        "allowed_issue_refs": [*issue_ids, *deepcopy(issue_slots)],
-        "allowed_fact_refs": [*existing_fact_ids, *deepcopy(fact_slots)],
     }
 
 

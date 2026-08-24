@@ -513,7 +513,10 @@ def test_v4_synthesis_context_exposes_one_copy_only_binding_catalog() -> None:
     assert catalog["binding_policy"] == "COPY_EXACT_VALUE_FROM_THIS_CATALOG_ONLY"
     assert catalog["formal_issue_ids"] == [issue_id]
     assert catalog["existing_fact_ids"] == [fact_id]
-    assert catalog["allowed_fact_refs"] == [fact_id, *request.new_fact_slots]
+    assert catalog["authorized_new_issue_slots"] == request.new_issue_slots
+    assert catalog["authorized_new_fact_slots"] == request.new_fact_slots
+    assert "allowed_issue_refs" not in catalog
+    assert "allowed_fact_refs" not in catalog
     assert catalog["answer_binding_catalog"][0]["role_bindings"] == {
         "USER": {
             "answer_bundle_id": request.party_answer_bundles[0].answer_bundle_id,
@@ -528,8 +531,28 @@ def test_v4_synthesis_context_exposes_one_copy_only_binding_catalog() -> None:
     assert "FACT_01" not in prompt
     assert "`binding_authority_catalog` 是所有引用字段的唯一取值权威" in prompt
     assert "本轮有效事实引用集合严格等于 `existing_fact_ids` 加“已激活新事实槽”" in prompt
+    assert "本轮有效争点引用集合严格等于 `formal_issue_ids` 加“已激活新争点槽”" in prompt
+    assert "若 `new_issue_proposals` 为空" in prompt
     assert "如果 `new_fact_effects` 为空" in prompt
     assert "未激活新槽引用为零" in prompt
+    assert "allowed_issue_refs" not in prompt
+    assert "allowed_fact_refs" not in prompt
+
+
+def test_v5_synthesis_rejects_unactivated_reserved_issue_slot() -> None:
+    request, output = _synthesis_fixture()
+    invalid = deepcopy(output.model_dump(mode="json"))
+    invalid["matrix_effects"]["claim_effects"][0]["source_issue_refs"] = [
+        request.new_issue_slots[0]
+    ]
+
+    with pytest.raises(AgentOutputSchemaError) as raised:
+        materialize_hearing_synthesis_v5(
+            request,
+            HearingIntakeSynthesisLlmOutputV5.model_validate(invalid),
+        )
+
+    assert raised.value.diagnostic_code == "HEARING_SYNTHESIS_MATRIX_ISSUE_AUTHORITY"
 
 
 @pytest.mark.parametrize("malformed_prefix", ["FACCT_", "FACt_"])
@@ -684,3 +707,33 @@ async def test_v4_agent_context_reaches_governed_harness_invocation() -> None:
     assert captured["context_pack"].configuration_profile_key == (
         "HEARING_INTAKE_CONTEXT_PACK_V4"
     )
+
+
+@pytest.mark.asyncio
+async def test_v5_synthesis_materialization_is_inside_model_retry_boundary() -> None:
+    captured: dict[str, object] = {}
+    request, output = _synthesis_fixture()
+
+    class Runner:
+        def invoke_structured(self, **kwargs):  # pragma: no cover - async-only proof
+            raise AssertionError(kwargs)
+
+        async def ainvoke_structured(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(value=output)
+
+    result = await HearingFlowWorkflows(Runner())._aintake_synthesis_proposal(  # noqa: SLF001
+        request
+    )
+
+    assert result.schema_version == "hearing_intake_synthesis.v5"
+    validator = captured["semantic_validator"]
+    assert callable(validator)
+    assert validator(output) is output
+
+    invalid = deepcopy(output.model_dump(mode="json"))
+    invalid["matrix_effects"]["claim_effects"][0]["source_issue_refs"] = [
+        request.new_issue_slots[0]
+    ]
+    with pytest.raises(ValueError):
+        validator(HearingIntakeSynthesisLlmOutputV5.model_validate(invalid))

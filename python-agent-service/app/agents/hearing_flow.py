@@ -153,6 +153,9 @@ class HearingFlowWorkflows:
             "hearing_intake_synthesis",
             request,
             HearingIntakeSynthesisLlmOutputV5,
+            semantic_validator=lambda candidate: _validate_intake_synthesis_model_output(
+                request, candidate
+            ),
             agent_context=agent_context,
         )
         return materialize_hearing_synthesis_v5(request, output)
@@ -172,6 +175,9 @@ class HearingFlowWorkflows:
             "hearing_intake_synthesis",
             request,
             HearingIntakeSynthesisLlmOutputV5,
+            semantic_validator=lambda candidate: _validate_intake_synthesis_model_output(
+                request, candidate
+            ),
             agent_context=agent_context,
         )
         return self._intake_synthesis_proposal(
@@ -1735,6 +1741,17 @@ def _validate_review_responses(
             "review responses must preserve the assembled review_source binding; "
             f"mismatched={mismatched_sources}",
         )
+
+
+def _validate_intake_synthesis_model_output(
+    request: HearingIntakeSynthesisRequestV4,
+    output: HearingIntakeSynthesisLlmOutputV5,
+) -> HearingIntakeSynthesisLlmOutputV5:
+    try:
+        materialize_hearing_synthesis_v5(request, output)
+    except AgentOutputSchemaError as error:
+        raise ValueError(str(error)) from error
+    return output
 
 
 def _validate_v2_model_output(

@@ -63,6 +63,7 @@ from app.graphs.hearing.state import (
 from app.streaming import (
     STREAM_MAX_VISIBLE_OUTPUT_CHARS,
     AgentStreamObserver,
+    StreamGenerationResetEvent,
     StreamVisibleDeltaEvent,
     bind_stream_observer,
 )
@@ -723,7 +724,9 @@ class _HearingV5ObserverBridge:
     """Bounded thread-safe handoff from native Provider deltas to Target stream."""
 
     def __init__(self) -> None:
-        self._pending: deque[StreamVisibleDeltaEvent] = deque()
+        self._pending: deque[
+            StreamVisibleDeltaEvent | StreamGenerationResetEvent
+        ] = deque()
         self._available = asyncio.Event()
         self._loop = asyncio.get_running_loop()
         self._lock = Lock()
@@ -738,10 +741,13 @@ class _HearingV5ObserverBridge:
         self._observer = observer
 
     def publish(self, event: Any) -> None:
-        if not isinstance(event, StreamVisibleDeltaEvent):
+        if not isinstance(
+            event, (StreamVisibleDeltaEvent, StreamGenerationResetEvent)
+        ):
             return
         with self._lock:
-            next_pending_chars = self._pending_chars + len(event.delta)
+            delta_chars = len(event.delta) if isinstance(event, StreamVisibleDeltaEvent) else 0
+            next_pending_chars = self._pending_chars + delta_chars
             if next_pending_chars > STREAM_MAX_VISIBLE_OUTPUT_CHARS:
                 raise HearingGraphContractError(
                     "HEARING_TARGET_V5_STREAM_BACKPRESSURE_EXCEEDED"
@@ -753,12 +759,15 @@ class _HearingV5ObserverBridge:
         if should_wake:
             self._wake_consumer()
 
-    async def next_event(self) -> StreamVisibleDeltaEvent | None:
+    async def next_event(
+        self,
+    ) -> StreamVisibleDeltaEvent | StreamGenerationResetEvent | None:
         while True:
             with self._lock:
                 if self._pending:
                     event = self._pending.popleft()
-                    self._pending_chars -= len(event.delta)
+                    if isinstance(event, StreamVisibleDeltaEvent):
+                        self._pending_chars -= len(event.delta)
                     return event
                 if self._completed:
                     return None
@@ -807,6 +816,7 @@ class _HearingV5FrameStream:
         self.texts: dict[int, str] = {}
         self.delta_indexes: dict[int, int] = {}
         self.committed: set[int] = set()
+        self.generation_reset_seen = False
 
     def accept(self, candidate: Any) -> tuple[tuple[str, AgentStreamPayload], ...]:
         events = _governed_hearing_events(
@@ -826,6 +836,34 @@ class _HearingV5FrameStream:
             raise HearingGraphContractError("HEARING_TARGET_VISIBLE_DELTA_INVALID")
         return self._accept_projector_event(
             {"field": event.field, "delta": event.delta}
+        )
+
+    def accept_reset(
+        self, event: StreamGenerationResetEvent
+    ) -> tuple[tuple[str, AgentStreamPayload], ...]:
+        if (
+            event.node_name != self.model_node
+            or event.generation != 2
+            or event.reason_code != "OUTPUT_SCHEMA_INVALID"
+            or self.generation_reset_seen
+            or not self.frame_ids
+        ):
+            raise HearingGraphContractError("HEARING_TARGET_GENERATION_RESET_INVALID")
+        self.generation_reset_seen = True
+        self.frame_ids.clear()
+        self.headers.clear()
+        self.texts.clear()
+        self.delta_indexes.clear()
+        self.committed.clear()
+        return (
+            (
+                "generation_reset",
+                AgentStreamPayload(
+                    node=self.model_node,
+                    generation=event.generation,
+                    reason_code=event.reason_code,
+                ),
+            ),
         )
 
     def _accept_projector_event(
@@ -1192,7 +1230,12 @@ class HearingTargetE2ERuntimeAdapter:
                     visible = await bridge.next_event()
                     if visible is None:
                         break
-                    for event_type, payload in frame_stream.accept_visible(visible):
+                    projected = (
+                        frame_stream.accept_reset(visible)
+                        if isinstance(visible, StreamGenerationResetEvent)
+                        else frame_stream.accept_visible(visible)
+                    )
+                    for event_type, payload in projected:
                         yield self._event(
                             execution,
                             sequence_no=sequence,

@@ -1218,6 +1218,43 @@ def test_non_frame_hearing_stream_projects_generation_reset_control_event() -> N
 
 
 @pytest.mark.asyncio
+async def test_v5_frame_bridge_resets_provisional_generation_before_retry() -> None:
+    operation = HearingOperation.INTAKE_QUESTIONS
+    execution, _ = _execution(operation)
+    frame_stream = hearing_target_e2e._HearingV5FrameStream(  # noqa: SLF001
+        execution, operation
+    )
+    bridge = hearing_target_e2e._HearingV5ObserverBridge()  # noqa: SLF001
+    observer = AgentStreamObserver(
+        operation=frame_stream.model_node,
+        run_id=execution.admission.command.attempt_id,
+        publish=bridge.publish,
+    )
+    bridge.bind(observer)
+
+    observer.visible_delta(frame_stream.model_node, "lead_public_text", "首轮临时文本")
+    observer.generation_reset(
+        node_name=frame_stream.model_node,
+        generation=2,
+        reason_code="OUTPUT_SCHEMA_INVALID",
+    )
+    observer.visible_delta(frame_stream.model_node, "lead_public_text", "重试有效文本")
+    bridge.finish()
+
+    first = await bridge.next_event()
+    reset = await bridge.next_event()
+    second = await bridge.next_event()
+    assert first is not None
+    assert reset is not None
+    assert second is not None
+    assert frame_stream.accept_visible(first)[-1][1].delta == "首轮临时文本"
+    projected_reset = frame_stream.accept_reset(reset)
+    assert projected_reset[0][0] == "generation_reset"
+    assert frame_stream.accept_visible(second)[-1][1].delta == "重试有效文本"
+    assert await bridge.next_event() is None
+
+
+@pytest.mark.asyncio
 async def test_v5_target_stream_binds_native_observer_before_graph_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

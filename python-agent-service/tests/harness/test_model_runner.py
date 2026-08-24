@@ -602,6 +602,69 @@ def test_model_runner_preserves_generation_reset_between_stream_generations() ->
     assert updates[-1].generation.value.answer == "第二代"
 
 
+@pytest.mark.asyncio
+async def test_async_stream_preserves_semantic_validator_and_generation_reset() -> None:
+    class AsyncResettingRecordingLlm(RecordingLlm):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bad_generation_rejected = False
+
+        async def agenerate(self, **kwargs):  # pragma: no cover - stream-only proof
+            raise AssertionError(kwargs)
+
+        async def agenerate_stream(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            output_type = kwargs["output_type"]
+            with pytest.raises(ValueError):
+                output_type(answer="第一代")
+            self.bad_generation_rejected = True
+            yield StructuredStreamDelta(
+                kind="visible_delta", field="answer", delta="第一代"
+            )
+            yield StructuredStreamReset(kind="generation_reset", generation=2)
+            yield StructuredStreamDelta(
+                kind="visible_delta", field="answer", delta="第二代"
+            )
+            yield StructuredStreamCompleted(
+                kind="completed",
+                generation=StructuredGeneration(
+                    value=output_type(answer="第二代"),
+                    model="fake-model",
+                    latency_ms=20,
+                    token_usage={"input": 60, "output": 10, "total": 70},
+                    provider_attempts_used=2,
+                    repairs_used=1,
+                ),
+            )
+
+    def require_second_generation(value: RunnerOutput) -> RunnerOutput:
+        if value.answer != "第二代":
+            raise ValueError("semantic contract requires the second generation")
+        return value
+
+    llm = AsyncResettingRecordingLlm()
+    runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
+    updates = [
+        update
+        async for update in runner.ainvoke_structured_stream(
+            node_name="intake_analyze",
+            case_data={"raw_text": "用户文本"},
+            output_type=RunnerOutput,
+            visible_fields=(VisibleFieldSpec("answer", "answer"),),
+            semantic_validator=require_second_generation,
+        )
+    ]
+
+    assert llm.bad_generation_rejected
+    assert [update.kind for update in updates] == [
+        "visible_delta",
+        "generation_reset",
+        "visible_delta",
+        "completed",
+    ]
+    assert updates[-1].generation.value.answer == "第二代"
+
+
 # 所属模块：Agent Harness > test_model_runner；函数角色：回归测试用例。
 # 具体功能：`test_context_window_rejects_required_section_that_cannot_fit` 验证案件与会话上下文在固定案例中的输出、边界和失败行为；关键协作调用：`ContextWindowManager`、`manager.assemble`、`AssertionError`。
 # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `ContextWindowManager`、`manager.assemble`、`AssertionError`、`PromptSection`。

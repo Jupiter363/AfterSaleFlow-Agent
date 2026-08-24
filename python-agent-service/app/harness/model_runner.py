@@ -263,7 +263,7 @@ class HarnessModelRunner:
         # the one-call contract while allowing the observer to receive the
         # explicitly whitelisted fields before the terminal JSON document.
         observer = current_stream_observer()
-        if observer is not None and semantic_validator is None:
+        if observer is not None:
             visible_fields = observer.visible_fields_for(node_name)
             if visible_fields:
                 generation: HarnessGeneration[T] | None = None
@@ -279,6 +279,7 @@ class HarnessModelRunner:
                     agent_context=agent_context,
                     prompt_profile_id=prompt_profile_id,
                     evidence_assets=evidence_assets,
+                    semantic_validator=semantic_validator,
                 ):
                     if isinstance(update, HarnessStreamDelta):
                         observer.visible_delta(node_name, update.field, update.delta)
@@ -388,6 +389,7 @@ class HarnessModelRunner:
         agent_context: AgentInvocationContext | None = None,
         prompt_profile_id: str | None = None,
         evidence_assets: LoadedEvidenceAssets | None = None,
+        semantic_validator: Callable[[T], T] | None = None,
     ) -> AsyncIterator[HarnessStreamUpdate[T]]:
         """Run one native async structured call and expose governed deltas.
 
@@ -404,10 +406,13 @@ class HarnessModelRunner:
             if evidence_assets is not None
             else ()
         )
+        governed_output_type = _semantic_output_type(
+            output_type, semantic_validator
+        )
         prepared = self._prepare(
             node_name=node_name,
             case_data=case_data,
-            output_type=output_type,
+            output_type=governed_output_type,
             context_sections=context_sections,
             context_pack=context_pack,
             max_input_tokens=max_input_tokens,
@@ -416,10 +421,11 @@ class HarnessModelRunner:
         )
         built = self._build_node(
             node_name=node_name,
-            output_type=output_type,
+            output_type=governed_output_type,
             prepared=prepared,
             visible_fields=visible_fields,
             user_content_parts=user_content_parts,
+            semantic_repair=semantic_validator is not None,
         )
         capture = InvocationMetadataCapture()
         state = {"human_prompt": prepared.user_prompt}

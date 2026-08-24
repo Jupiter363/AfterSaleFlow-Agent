@@ -40,19 +40,21 @@
 
 - `issue_rebindings.issue_id`、`frame_manifest` 的旧 `issue_ref` 必须按 `formal_issue_ids` 原顺序逐项复制；
 - 每个旧 issue 的 USER/MERCHANT `answer_bundle_id` 与 `answer_unit_id` 必须从同一项 `answer_binding_catalog.role_bindings` 复制；
-- 所有 `source_issue_refs` 以及新 issue 的 `issue_ref` 只能取自 `allowed_issue_refs`；
+- 所有旧 `source_issue_refs` 只能取自 `formal_issue_ids`；新 issue 引用只能使用本轮 `new_issue_proposals` 中实际声明的 `new_issue_slot_id`；
 - `existing_fact_effects.fact_id` 只能取自 `existing_fact_ids`；
 - `new_fact_effects.new_fact_slot_id` 只能按需使用 `authorized_new_fact_slots` 的连续前缀；
-- `fact_refs`、`from_fact_ref`、`to_fact_ref`、`summary_fact_refs` 只能取自 `allowed_fact_refs`；若无需新增事实，优先引用已有 fact ID；
+- `fact_refs`、`from_fact_ref`、`to_fact_ref`、`summary_fact_refs` 只能取自 `existing_fact_ids` 加本轮 `new_fact_effects` 中实际声明的 `new_fact_slot_id`；若无需新增事实，只引用已有 fact ID；
 - 只有实际生成了对应 `new_issue_proposals` 的新 issue slot，才可被 `source_issue_refs` 引用；
 - 只有实际生成了对应 `new_fact_effects` 的新 fact slot，才可被其他 fact 引用字段引用；
 - 禁止输出任何不在本次动态目录中的示意别名；结构形状以响应 JSON Schema 为准，ID 值只看本次动态目录。
 
-事实绑定必须先完成“归类与激活”，再生成引用。`authorized_new_fact_slots` 和 `allowed_fact_refs` 只表示本轮可用的命名空间上限，不表示其中每个新槽已经成为事实。生成最终 JSON 前，在内部按以下顺序完成一致性检查；不要把检查过程或集合名称输出给用户：
+争点绑定必须先完成“归类与激活”，再生成引用：先完整确定 `new_issue_proposals`，只有其中实际声明的 `new_issue_slot_id` 才是已激活新争点槽。有效争点引用严格等于 `formal_issue_ids` 加已激活新争点槽；若 `new_issue_proposals` 为空，任何 `NEW_ISSUE_SLOT_*` 都不得出现在其他字段。
+
+事实绑定必须先完成“归类与激活”，再生成引用。`authorized_new_fact_slots` 只表示本轮可用的命名空间上限，不表示其中每个新槽已经成为事实。生成最终 JSON 前，在内部按以下顺序完成一致性检查；不要把检查过程或集合名称输出给用户：
 
 1. 先逐项判断本轮陈述是在更新哪个 `existing_fact_ids`。能够归入既有事实命题时，只使用 `existing_fact_effects`；不得仅因措辞、数值或立场发生变化就重复创建新事实。
 2. 只有本轮首次出现且无法归入任何既有 `fact_target` 的独立事实命题，才使用 `new_fact_effects`。新事实只能依次占用 `authorized_new_fact_slots` 的连续前缀，禁止自行生成正式 `FACT_*` ID。
-3. 先完整确定 `matrix_effects.new_fact_effects`，再把其中实际出现的 `new_fact_slot_id` 视为“已激活新事实槽”。本轮有效事实引用集合严格等于 `existing_fact_ids` 加“已激活新事实槽”，不是整个 `allowed_fact_refs`。
+3. 先完整确定 `matrix_effects.new_fact_effects`，再把其中实际出现的 `new_fact_slot_id` 视为“已激活新事实槽”。本轮有效事实引用集合严格等于 `existing_fact_ids` 加“已激活新事实槽”。
 4. `new_issue_proposals.fact_refs`、`relationship_effects.from_fact_ref`、`relationship_effects.to_fact_ref` 和 `matrix_summary.summary_fact_refs` 中的每个值，都必须逐字属于上述有效事实引用集合。任何新事实槽在被引用前，必须已经且只能在 `new_fact_effects` 中声明一次。
 5. 如果 `new_fact_effects` 为空，则所有 fact 引用字段只能使用 `existing_fact_ids`，任何 `NEW_FACT_SLOT_*` 都不得出现在其他字段。
 6. `matrix_summary.summary_fact_refs` 必须非空、去重，并只列出实际支撑 `summary_text` 与 `core_conflict` 的既有事实或已激活新事实；不得根据事实含义创造别名、缩写或猜测 ID。
