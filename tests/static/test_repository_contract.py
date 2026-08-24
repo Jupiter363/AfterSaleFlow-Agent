@@ -187,8 +187,8 @@ def test_env_example_is_complete_and_contains_only_placeholders() -> None:
     assert REQUIRED_ENV_KEYS <= values.keys()
     assert values["DASHSCOPE_API_KEY"] == "__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__"
     assert values["DEFAULT_LLM_PROVIDER"] == "litellm"
-    assert values["DEFAULT_LLM_MODEL"] == "qwen3.8-max"
-    assert values["LITELLM_DEFAULT_MODEL"] == "qwen3.8-max"
+    assert values["DEFAULT_LLM_MODEL"] == "qwen3.7-max-2026-06-08"
+    assert values["LITELLM_DEFAULT_MODEL"] == "qwen3.7-max-2026-06-08"
     assert values["LLM_ENABLE_THINKING"] == "false"
     assert values["LLM_STRICT_JSON_SCHEMA_ENABLED"] == "true"
     for key in GENERATED_SECRET_KEYS:
@@ -223,14 +223,14 @@ def test_qwen_credentials_stop_at_litellm_gateway() -> None:
     assert "DASHSCOPE_API_KEY" in proxy_environment
     assert "DASHSCOPE_API_KEY" not in agent_environment
     assert agent_environment["LITELLM_MODEL"] == (
-        "${LITELLM_DEFAULT_MODEL:-qwen3.8-max}"
+        "${LITELLM_DEFAULT_MODEL:-qwen3.7-max-2026-06-08}"
     )
     assert agent_environment["LLM_STRICT_JSON_SCHEMA_ENABLED"] == (
         "${LLM_STRICT_JSON_SCHEMA_ENABLED:-true}"
     )
     model = litellm_config["model_list"][0]
-    assert model["model_name"] == "qwen3.8-max"
-    assert model["litellm_params"]["model"] == "openai/qwen3.8-max"
+    assert model["model_name"] == "qwen3.7-max-2026-06-08"
+    assert model["litellm_params"]["model"] == "openai/qwen3.7-max-2026-06-08"
     assert model["litellm_params"]["extra_body"] == {"enable_thinking": False}
 
 

@@ -4,7 +4,7 @@
 
 ```text
 plan_status: RISK_REVIEWED_FINAL_DESIGN
-implementation_status: R0_PLAN_ARCHIVED_MODEL_RESTORE_PENDING
+implementation_status: R0_ACCEPTED_R1_CONTRACTS_IN_PROGRESS
 runtime_change: NONE
 database_change: PLANNED_EXECUTION_FRAME_STAGING_AND_PROGRESS_ONLY
 uat_status: NOT_STARTED
