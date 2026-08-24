@@ -242,6 +242,8 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
     }
 
     private static ExecuteAgentRunRequest request(String agentProfileId) {
+        boolean parallel = TargetE2EIntakeParallelAssemblyCoordinator.AGENT_PROFILE_ID.equals(
+                agentProfileId);
         Instant deadline = Instant.parse("2030-08-25T00:00:00Z");
         SnapshotRef snapshot = new SnapshotRef(
                 "SNAPSHOT_1",
@@ -272,6 +274,7 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 "ATTEMPT_1",
                 "TENANT_1",
                 "CASE_1",
+                parallel ? "ROOM_1" : null,
                 RoomType.INTAKE,
                 1,
                 "all-rooms.target-e2e.v2",
@@ -285,7 +288,7 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 snapshot,
                 event,
                 invocation,
-                new RetryBudget(2, 3, 1),
+                new RetryBudget(parallel ? 6 : 2, 3, 1),
                 deadline,
                 "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
                 "0".repeat(64));
@@ -300,6 +303,7 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 unsigned.attemptId(),
                 unsigned.tenantSurrogate(),
                 unsigned.caseId(),
+                unsigned.roomId(),
                 unsigned.roomType(),
                 unsigned.roomEpoch(),
                 unsigned.graphKey(),

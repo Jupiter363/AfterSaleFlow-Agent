@@ -17,6 +17,8 @@ from psycopg import errors as psycopg_errors
 from app.contracts.v1.models import (
     AGENT_STREAM_PAYLOAD_FIELDS,
     AgentStreamEvent,
+    PARALLEL_INTAKE_AGENT_PROFILE_ID,
+    PARALLEL_INTAKE_OUTPUT_SCHEMA,
     RoomGraphCommand,
 )
 from app.graph_runtime.errors import (
@@ -104,10 +106,6 @@ _CONTROL_PLANE_LEASE_SAFETY_MARGIN: Final[timedelta] = timedelta(seconds=2)
 _TARGET_E2E_GRAPH_KEY: Final[str] = "all-rooms.target-e2e.v2"
 _TARGET_E2E_ROOM_PROMPT_VERSION: Final[str] = "all-rooms-prompt.target-e2e.v2"
 _TARGET_E2E_INTAKE_ROLES: Final[frozenset[str]] = frozenset({"USER", "MERCHANT"})
-_PARALLEL_INTAKE_AGENT_PROFILE_ID: Final[str] = (
-    "dispute-intake-officer.parallel-frames.v1"
-)
-_PARALLEL_INTAKE_OUTPUT_SCHEMA: Final[str] = "target-e2e-room-proposal-source.v2"
 _PARALLEL_TECHNICAL_COMPLETION_SCHEMA: Final[str] = (
     "intake-parallel-technical-completion.v1"
 )
@@ -1531,11 +1529,13 @@ class GraphCommandGateway:
         invocation = command.invocation_context
         if (
             command.room_type != "INTAKE"
+            or command.room_id is None
             or command.event_ref is None
             or command.actor_scope.actor_role not in _TARGET_E2E_INTAKE_ROLES
             or command.actor_scope.audience != command.actor_scope.actor_role
-            or invocation.agent_profile_id != _PARALLEL_INTAKE_AGENT_PROFILE_ID
-            or invocation.output_schema_version != _PARALLEL_INTAKE_OUTPUT_SCHEMA
+            or invocation.agent_profile_id != PARALLEL_INTAKE_AGENT_PROFILE_ID
+            or invocation.output_schema_version != PARALLEL_INTAKE_OUTPUT_SCHEMA
+            or not 3 <= command.retry_budget.provider_attempts_remaining <= 6
             or admission.binding.execution_lane
             is not GraphGatewayMode.TARGET_E2E_CANDIDATE
         ):

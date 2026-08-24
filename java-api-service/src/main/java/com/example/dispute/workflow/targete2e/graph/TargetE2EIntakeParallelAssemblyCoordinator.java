@@ -20,7 +20,6 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameAssembler.SealedFrame;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameType;
 import com.example.dispute.workflow.contract.v1.ContractJson;
-import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
@@ -428,14 +427,7 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
 
     private static RoomGraphCommand requireParallelRequest(ExecuteAgentRunRequest request) {
         RoomGraphCommand command = request.command();
-        var invocation = command.invocationContext();
-        boolean exact = command.roomType() == RoomType.INTAKE
-                && AGENT_PROFILE_ID.equals(invocation.agentProfileId())
-                && EXECUTION_OUTPUT_SCHEMA.equals(invocation.outputSchemaVersion())
-                && command.eventRef() != null
-                && (command.actorScope().actorRole() == ActorRole.USER
-                        || command.actorScope().actorRole() == ActorRole.MERCHANT);
-        if (!exact) {
+        if (!command.isExactParallelIntakeProfile()) {
             throw new AssemblyConflictException(
                     "INTAKE_PARALLEL_PROFILE_INVALID",
                     "parallel Intake assembly requires the explicit ROOM_MESSAGE profile");
@@ -455,6 +447,7 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
                 && command.requestHash().equals(authority.commandRequestSha256())
                 && command.tenantSurrogate().equals(authority.tenantSurrogate())
                 && command.caseId().equals(authority.caseId())
+                && command.roomId().equals(authority.roomId())
                 && command.roomEpoch() == authority.roomEpoch()
                 && roomFencingToken == authority.fencingToken()
                 && command.threadId().equals(authority.threadId())

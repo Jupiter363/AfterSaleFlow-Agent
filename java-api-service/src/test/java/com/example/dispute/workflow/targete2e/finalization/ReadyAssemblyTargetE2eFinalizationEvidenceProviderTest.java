@@ -188,6 +188,8 @@ class ReadyAssemblyTargetE2eFinalizationEvidenceProviderTest {
         when(command.commandId()).thenReturn(COMMAND);
         when(command.requestHash()).thenReturn(REQUEST_HASH);
         when(command.roomType()).thenReturn(RoomType.INTAKE);
+        when(command.roomId()).thenReturn("ROOM_1");
+        when(command.isExactParallelIntakeProfile()).thenReturn(true);
         when(command.invocationContext()).thenReturn(invocation);
         when(command.actorScope()).thenReturn(actor);
         when(command.eventRef()).thenReturn(mock(SnapshotRef.class));

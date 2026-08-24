@@ -314,6 +314,7 @@ public final class AgentRunPersistenceFixtures {
                 "ATTEMPT_V4_1",
                 "tenant-persistence",
                 CASE_ID,
+                "ROOM_PERSISTENCE_INTAKE",
                 RoomType.INTAKE,
                 2,
                 "all-rooms.target-e2e.v2",
@@ -350,7 +351,7 @@ public final class AgentRunPersistenceFixtures {
                         List.of(),
                         "kms-key-v2",
                         "nonce-v4-1"),
-                new RoomGraphCommand.RetryBudget(2, 1, 1),
+                new RoomGraphCommand.RetryBudget(6, 1, 1),
                 STARTED_AT.plusSeconds(600),
                 "00-0123456789abcdef0123456789abcdef-0000000000000001-01",
                 "0".repeat(64));

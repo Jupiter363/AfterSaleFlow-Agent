@@ -22,9 +22,9 @@ public record ExecuteAgentRunRequest(
     public static final String SCHEMA_VERSION = "execute-agent-run.v3";
     public static final int MAXIMUM_ATTEMPT_LIMIT = 3;
     public static final String PARALLEL_INTAKE_AGENT_PROFILE_ID =
-            "dispute-intake-officer.parallel-frames.v1";
+            RoomGraphCommand.PARALLEL_INTAKE_AGENT_PROFILE_ID;
     public static final String PARALLEL_INTAKE_OUTPUT_SCHEMA =
-            "target-e2e-room-proposal-source.v2";
+            RoomGraphCommand.PARALLEL_INTAKE_OUTPUT_SCHEMA;
 
     public ExecuteAgentRunRequest(
             String schemaVersion,
@@ -105,22 +105,6 @@ public record ExecuteAgentRunRequest(
     }
 
     public static boolean isParallelIntakeCommand(RoomGraphCommand command) {
-        if (command == null) {
-            return false;
-        }
-        var invocation = command.invocationContext();
-        if (invocation == null) {
-            return false;
-        }
-        var actorScope = command.actorScope();
-        if (actorScope == null
-                || (actorScope.actorRole() != ContractTypes.ActorRole.USER
-                        && actorScope.actorRole() != ContractTypes.ActorRole.MERCHANT)) {
-            return false;
-        }
-        return command.roomType() == ContractTypes.RoomType.INTAKE
-                && PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(invocation.agentProfileId())
-                && PARALLEL_INTAKE_OUTPUT_SCHEMA.equals(invocation.outputSchemaVersion())
-                && command.eventRef() != null;
+        return command != null && command.isExactParallelIntakeProfile();
     }
 }

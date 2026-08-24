@@ -115,6 +115,68 @@ def test_valid_room_graph_command_uses_opaque_identity_and_exact_self_hash(
     assert canonical_sha256_omitting(command, "request_hash") == command.request_hash
 
 
+@pytest.mark.parametrize("provider_budget", [3, 6])
+def test_parallel_intake_command_binds_signed_room_and_aggregate_budget(
+    provider_budget: int,
+    codec: ContractCodec,
+) -> None:
+    instance = _parallel_intake_command(provider_budget)
+
+    command = codec.decode("room-graph-command.schema.json", instance)
+
+    assert isinstance(command, RoomGraphCommand)
+    assert command.room_id == "ROOM_PARALLEL_1"
+    assert command.retry_budget.provider_attempts_remaining == provider_budget
+    assert command.is_parallel_intake_command
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["retry_budget"].update(
+            {"provider_attempts_remaining": 2}
+        ),
+        lambda value: value["retry_budget"].update(
+            {"provider_attempts_remaining": 7}
+        ),
+        lambda value: value.pop("room_id"),
+        lambda value: value.pop("event_ref"),
+        lambda value: value["actor_scope"].update({"audience": "MERCHANT"}),
+        lambda value: value["invocation_context"].update(
+            {"agent_profile_id": "dispute-intake-officer.v1"}
+        ),
+    ],
+)
+def test_parallel_intake_command_rejects_partial_or_foreign_authority(
+    mutate,
+    codec: ContractCodec,
+) -> None:
+    instance = _parallel_intake_command(6)
+    mutate(instance)
+
+    with pytest.raises(ValueError):
+        codec.decode("room-graph-command.schema.json", instance)
+
+
+def test_shared_output_schema_does_not_route_a_legacy_intake_command(
+    codec: ContractCodec,
+) -> None:
+    fixture = json.loads(
+        (FIXTURE_ROOT / "valid/room-graph-command-valid.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    instance = deepcopy(fixture["instance"])
+    instance["invocation_context"]["output_schema_version"] = (
+        "target-e2e-room-proposal-source.v2"
+    )
+
+    command = codec.decode("room-graph-command.schema.json", instance)
+
+    assert isinstance(command, RoomGraphCommand)
+    assert not command.is_parallel_intake_command
+
+
 def test_duplicate_json_member_fails_before_contract_or_hash_use(
     codec: ContractCodec,
 ) -> None:
@@ -130,6 +192,31 @@ def test_duplicate_json_member_fails_before_contract_or_hash_use(
 
     with pytest.raises(ValueError, match="duplicate JSON member: command_id"):
         codec.decode(fixture["schema"], duplicate)
+
+
+def _parallel_intake_command(provider_budget: int) -> dict[str, object]:
+    fixture = json.loads(
+        (FIXTURE_ROOT / "valid/room-graph-command-valid.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    instance = deepcopy(fixture["instance"])
+    instance["room_id"] = "ROOM_PARALLEL_1"
+    instance["event_ref"] = {
+        "artifact_id": "intake.event.parallel-1",
+        "schema_version": "intake-turn-event.v2",
+        "uri": "urn:intake:event:parallel-1",
+        "sha256": "e" * 64,
+        "size_bytes": 256,
+    }
+    instance["invocation_context"]["agent_profile_id"] = (
+        "dispute-intake-officer.parallel-frames.v1"
+    )
+    instance["invocation_context"]["output_schema_version"] = (
+        "target-e2e-room-proposal-source.v2"
+    )
+    instance["retry_budget"]["provider_attempts_remaining"] = provider_budget
+    return instance
 
 
 def test_schema_valid_shape_still_respects_total_payload_limit(codec: ContractCodec) -> None:

@@ -109,7 +109,6 @@ class ParallelTurnModelMaterial:
 def build_parallel_turn_model_material(
     execution: GatewayExecution,
     *,
-    room_id: str,
     snapshot_context: IntakeTurnContext,
     event_context: IntakeTurnContext,
     instruction_packs: Sequence[IntakeFrameInstructionPackV1],
@@ -126,6 +125,9 @@ def build_parallel_turn_model_material(
         raise GraphContractError("parallel Intake ingress schema is invalid") from error
 
     command = execution.admission.command
+    room_id = command.room_id
+    if room_id is None:
+        raise GraphContractError("parallel Intake room authority is absent")
     identity = execution.admission.thread
     snapshot_ref = command.domain_snapshot_ref
     event_ref = command.event_ref

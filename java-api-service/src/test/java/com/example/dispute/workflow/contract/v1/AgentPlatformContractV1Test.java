@@ -187,6 +187,50 @@ class AgentPlatformContractV1Test {
     }
 
     @Test
+    void parallelIntakeCommandBindsSignedRoomAndAggregateProviderBudget()
+            throws IOException {
+        for (int providerBudget : new int[] {3, 6}) {
+            ObjectNode parallel = parallelIntakeCommand(providerBudget);
+
+            RoomGraphCommand decoded = codec.decode(
+                    "room-graph-command.schema.json", parallel, RoomGraphCommand.class);
+
+            assertThat(decoded.roomId()).isEqualTo("ROOM_PARALLEL_1");
+            assertThat(decoded.retryBudget().providerAttemptsRemaining())
+                    .isEqualTo(providerBudget);
+            assertThat(decoded.isExactParallelIntakeProfile()).isTrue();
+        }
+    }
+
+    @Test
+    void parallelIntakeCommandRejectsPartialAuthorityButNotTheSharedOutputSchema()
+            throws IOException {
+        ObjectNode insufficientBudget = parallelIntakeCommand(2);
+        assertThatThrownBy(() -> codec.decode(
+                        "room-graph-command.schema.json",
+                        insufficientBudget,
+                        RoomGraphCommand.class))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        ObjectNode missingRoom = parallelIntakeCommand(6);
+        missingRoom.remove("room_id");
+        assertThatThrownBy(() -> codec.decode(
+                        "room-graph-command.schema.json", missingRoom, RoomGraphCommand.class))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        JsonNode fixture = MAPPER.readTree(
+                FIXTURE_ROOT.resolve("valid/room-graph-command-valid.json").toFile());
+        ObjectNode legacy = (ObjectNode) fixture.required("instance").deepCopy();
+        ((ObjectNode) legacy.required("invocation_context"))
+                .put(
+                        "output_schema_version",
+                        RoomGraphCommand.PARALLEL_INTAKE_OUTPUT_SCHEMA);
+        RoomGraphCommand decoded = codec.decode(
+                "room-graph-command.schema.json", legacy, RoomGraphCommand.class);
+        assertThat(decoded.isExactParallelIntakeProfile()).isFalse();
+    }
+
+    @Test
     void schemaValidShapeStillRespectsTotalPayloadLimit() throws IOException {
         JsonNode fixture =
                 MAPPER.readTree(
@@ -240,5 +284,30 @@ class AgentPlatformContractV1Test {
         assertThat(new String(ContractJson.canonicalize(input), StandardCharsets.UTF_8))
                 .isEqualTo(fixture.required("canonical_utf8").asText());
         assertThat(ContractJson.sha256Hex(input)).isEqualTo(fixture.required("sha256").asText());
+    }
+
+    private static ObjectNode parallelIntakeCommand(int providerBudget) throws IOException {
+        JsonNode fixture = MAPPER.readTree(
+                FIXTURE_ROOT.resolve("valid/room-graph-command-valid.json").toFile());
+        ObjectNode instance = (ObjectNode) fixture.required("instance").deepCopy();
+        instance.put("room_id", "ROOM_PARALLEL_1");
+        ObjectNode event = MAPPER.createObjectNode();
+        event.put("artifact_id", "intake.event.parallel-1");
+        event.put("schema_version", "intake-turn-event.v2");
+        event.put("uri", "urn:intake:event:parallel-1");
+        event.put("sha256", "e".repeat(64));
+        event.put("size_bytes", 256);
+        instance.set("event_ref", event);
+        ObjectNode invocation = (ObjectNode) instance.required("invocation_context");
+        invocation.put(
+                "agent_profile_id", RoomGraphCommand.PARALLEL_INTAKE_AGENT_PROFILE_ID);
+        invocation.put(
+                "output_schema_version", RoomGraphCommand.PARALLEL_INTAKE_OUTPUT_SCHEMA);
+        ((ObjectNode) instance.required("retry_budget"))
+                .put("provider_attempts_remaining", providerBudget);
+        ObjectNode preimage = instance.deepCopy();
+        preimage.remove("request_hash");
+        instance.put("request_hash", ContractJson.sha256Hex(preimage));
+        return instance;
     }
 }

@@ -38,6 +38,7 @@ public final class IntakeGraphCommandFactory {
                 request.attemptId(),
                 registration.tenantSurrogate(),
                 registration.caseId(),
+                request.roomId(),
                 RoomType.INTAKE,
                 registration.roomEpoch(),
                 registration.graphKey(),
@@ -113,6 +114,7 @@ public final class IntakeGraphCommandFactory {
             String commandId,
             String logicalRunId,
             String attemptId,
+            String roomId,
             IntakeGraphThreadBinding threadBinding,
             IntakeSnapshotReference initialSnapshot,
             IntakeEventReference event,
@@ -128,18 +130,79 @@ public final class IntakeGraphCommandFactory {
             String envelopeKeyId,
             String envelopeNonce) {
 
+        /** Legacy constructor keeps opening and monolithic Intake callers source-compatible. */
+        public CommandRequest(
+                String commandId,
+                String logicalRunId,
+                String attemptId,
+                IntakeGraphThreadBinding threadBinding,
+                IntakeSnapshotReference initialSnapshot,
+                IntakeEventReference event,
+                long processRevision,
+                String stageCode,
+                long stageSequence,
+                String agentProfileId,
+                int providerAttemptsRemaining,
+                int activityAttemptsRemaining,
+                int repairsRemaining,
+                Instant deadlineAt,
+                String traceparent,
+                String envelopeKeyId,
+                String envelopeNonce) {
+            this(
+                    commandId,
+                    logicalRunId,
+                    attemptId,
+                    null,
+                    threadBinding,
+                    initialSnapshot,
+                    event,
+                    processRevision,
+                    stageCode,
+                    stageSequence,
+                    agentProfileId,
+                    providerAttemptsRemaining,
+                    activityAttemptsRemaining,
+                    repairsRemaining,
+                    deadlineAt,
+                    traceparent,
+                    envelopeKeyId,
+                    envelopeNonce);
+        }
+
         public CommandRequest {
             commandId = IntakeContractSupport.identifier(commandId, "commandId");
             logicalRunId = IntakeContractSupport.identifier(logicalRunId, "logicalRunId");
             attemptId = IntakeContractSupport.identifier(attemptId, "attemptId");
+            if (roomId != null) {
+                roomId = IntakeContractSupport.identifier(roomId, "roomId");
+            }
             threadBinding = Objects.requireNonNull(threadBinding, "threadBinding");
             initialSnapshot = Objects.requireNonNull(initialSnapshot, "initialSnapshot");
             IntakeContractSupport.nonNegative(processRevision, "processRevision");
             stageCode = IntakeContractSupport.identifier(stageCode, "stageCode");
             IntakeContractSupport.nonNegative(stageSequence, "stageSequence");
             agentProfileId = IntakeContractSupport.identifier(agentProfileId, "agentProfileId");
-            if (providerAttemptsRemaining < 0 || providerAttemptsRemaining > 2) {
-                throw new IllegalArgumentException("providerAttemptsRemaining must be between 0 and 2");
+            boolean reservedParallel =
+                    RoomGraphCommand.PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(agentProfileId)
+                            || roomId != null;
+            boolean exactParallel =
+                    RoomGraphCommand.PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(agentProfileId)
+                            && roomId != null
+                            && event != null
+                            && RoomGraphCommand.PARALLEL_INTAKE_OUTPUT_SCHEMA.equals(
+                                    threadBinding.registration().outputSchemaVersion())
+                            && providerAttemptsRemaining >= 3
+                            && providerAttemptsRemaining
+                                    <= RoomGraphCommand.PARALLEL_INTAKE_PROVIDER_ATTEMPT_LIMIT;
+            if (reservedParallel && !exactParallel) {
+                throw new IllegalArgumentException(
+                        "parallel Intake command authority is incomplete");
+            }
+            if (!exactParallel
+                    && (providerAttemptsRemaining < 0 || providerAttemptsRemaining > 2)) {
+                throw new IllegalArgumentException(
+                        "providerAttemptsRemaining must be between 0 and 2");
             }
             if (activityAttemptsRemaining < 0 || activityAttemptsRemaining > 3) {
                 throw new IllegalArgumentException("activityAttemptsRemaining must be between 0 and 3");

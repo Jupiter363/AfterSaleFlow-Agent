@@ -8,6 +8,10 @@ import json
 from typing import Protocol
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
+from app.contracts.v1.models import (
+    PARALLEL_INTAKE_AGENT_PROFILE_ID,
+    PARALLEL_INTAKE_OUTPUT_SCHEMA,
+)
 from app.graphs.intake.parallel_contracts import FRAME_TYPES, ParallelFrameType
 from app.graphs.intake.parallel_graph import (
     FrameGenerationReset,
@@ -19,10 +23,6 @@ from app.graphs.intake.parallel_graph import (
     canonical_parallel_public_projection,
 )
 from app.graphs.intake.parallel_outputs import validate_parallel_frame_output
-
-
-PARALLEL_INTAKE_AGENT_PROFILE_ID = "dispute-intake-officer.parallel-frames.v1"
-PARALLEL_INTAKE_OUTPUT_SCHEMA = "target-e2e-room-proposal-source.v2"
 
 
 class ParallelFrameStreamProtocolError(RuntimeError):

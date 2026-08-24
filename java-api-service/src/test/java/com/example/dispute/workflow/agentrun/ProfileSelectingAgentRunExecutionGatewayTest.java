@@ -65,22 +65,10 @@ class ProfileSelectingAgentRunExecutionGatewayTest {
     }
 
     @Test
-    void rejectsReservedParallelMarkersWhenTheRemainingAuthorityIsMissing() {
-        AgentRunExecutionGateway legacy = mock(AgentRunExecutionGateway.class);
-        AgentRunExecutionGateway parallel = mock(AgentRunExecutionGateway.class);
-        ExecuteAgentRunRequest mixed = mixedParallelMarkerRequest();
-
-        assertThatThrownBy(() -> new ProfileSelectingAgentRunExecutionGateway(legacy, parallel)
-                        .execute(
-                                mixed,
-                                ExecutionMode.EXECUTE_OR_RECONCILE,
-                                ignored -> {},
-                                new AgentRunCancellationToken()))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("mixed parallel Intake authority");
-
-        verify(legacy, never()).execute(any(), any(), any(), any());
-        verify(parallel, never()).execute(any(), any(), any(), any());
+    void rejectsReservedParallelMarkersAtTheSignedCommandBoundary() {
+        assertThatThrownBy(ProfileSelectingAgentRunExecutionGatewayTest::mixedParallelMarkerRequest)
+                .isInstanceOf(IllegalStateException.class)
+                .hasRootCauseInstanceOf(IllegalArgumentException.class);
     }
 
     private static ExecuteAgentRunRequest mixedParallelMarkerRequest() {

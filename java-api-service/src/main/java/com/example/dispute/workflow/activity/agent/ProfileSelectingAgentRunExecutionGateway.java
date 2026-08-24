@@ -38,10 +38,10 @@ public final class ProfileSelectingAgentRunExecutionGateway implements AgentRunE
         boolean parallel = ExecuteAgentRunRequest.isParallelIntakeCommand(request.command());
         var invocation = request.command().invocationContext();
         boolean reservedParallelMarker = invocation != null
-                && (ExecuteAgentRunRequest.PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(
-                                invocation.agentProfileId())
-                        || ExecuteAgentRunRequest.PARALLEL_INTAKE_OUTPUT_SCHEMA.equals(
-                                invocation.outputSchemaVersion()));
+                && ExecuteAgentRunRequest.PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(
+                        invocation.agentProfileId());
+        reservedParallelMarker =
+                reservedParallelMarker || request.command().roomId() != null;
         if (!parallel && reservedParallelMarker) {
             throw new IllegalArgumentException(
                     "incomplete or mixed parallel Intake authority cannot use the legacy lane");

@@ -8,6 +8,10 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 
 from app.contracts.v1.codec import canonical_sha256
+from app.contracts.v1.models import (
+    PARALLEL_INTAKE_AGENT_PROFILE_ID,
+    PARALLEL_INTAKE_OUTPUT_SCHEMA,
+)
 from app.graph_runtime.checkpoint import (
     TechnicalChildCheckpointBinding,
     bind_fence_context,
@@ -31,8 +35,6 @@ from app.graphs.intake.parallel_graph import (
 )
 
 
-PARALLEL_INTAKE_AGENT_PROFILE_ID = "dispute-intake-officer.parallel-frames.v1"
-PARALLEL_INTAKE_OUTPUT_SCHEMA = "target-e2e-room-proposal-source.v2"
 _MAX_COGNITIVE_REVISION = (1 << 63) - 1
 PARALLEL_TECHNICAL_COMPLETION_SCHEMA = "intake-parallel-technical-completion.v1"
 
@@ -153,11 +155,13 @@ def require_parallel_intake_execution(execution: GatewayExecution) -> None:
         or not isinstance(fence.room_fencing_token, int)
         or fence.room_fencing_token < 1
         or command.room_type != "INTAKE"
+        or command.room_id is None
         or command.event_ref is None
         or invocation.agent_profile_id != PARALLEL_INTAKE_AGENT_PROFILE_ID
         or invocation.output_schema_version != PARALLEL_INTAKE_OUTPUT_SCHEMA
         or actor_scope.actor_role not in {"USER", "MERCHANT"}
         or actor_scope.audience != actor_scope.actor_role
+        or not 3 <= command.retry_budget.provider_attempts_remaining <= 6
     ):
         raise GraphContractError("execution is not an authorized parallel Intake turn")
     if (

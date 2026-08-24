@@ -178,9 +178,22 @@ class PostgresRecoveryCoordinator:
             raise GraphRecoveryError("GRAPH_RETRY_BUDGET_MISSING")
         provider_remaining = request_budget.get("provider_attempts_remaining")
         activity_remaining = request_budget.get("activity_attempts_remaining")
+        invocation = binding.request_json.get("invocation_context")
+        agent_profile_id = (
+            invocation.get("agent_profile_id")
+            if isinstance(invocation, Mapping)
+            else None
+        )
+        output_schema_version = (
+            invocation.get("output_schema_version")
+            if isinstance(invocation, Mapping)
+            else None
+        )
         provider_limit = command_provider_attempt_limit(
             binding.request_json.get("room_type"),
             binding.request_json.get("stage_code"),
+            agent_profile_id,
+            output_schema_version,
         )
         if (
             not isinstance(provider_remaining, int)

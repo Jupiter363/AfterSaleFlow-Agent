@@ -345,14 +345,12 @@ def test_frozen_parallel_ingress_projects_one_shared_model_context_for_three_fra
 
     material = build_parallel_turn_model_material(
         execution,
-        room_id="ROOM_PARALLEL_1",
         snapshot_context=IntakeTurnContext("SNAPSHOT", snapshot),
         event_context=IntakeTurnContext("EVENT", event),
         instruction_packs=_instruction_packs(),
     )
     replay = build_parallel_turn_model_material(
         execution,
-        room_id="ROOM_PARALLEL_1",
         snapshot_context=IntakeTurnContext("SNAPSHOT", snapshot),
         event_context=IntakeTurnContext("EVENT", event),
         instruction_packs=_instruction_packs(),
@@ -381,7 +379,6 @@ def test_frozen_parallel_ingress_projects_one_shared_model_context_for_three_fra
     with pytest.raises(GraphContractError, match="differs from command authority"):
         build_parallel_turn_model_material(
             execution,
-            room_id="ROOM_PARALLEL_1",
             snapshot_context=IntakeTurnContext("SNAPSHOT", drifted),
             event_context=IntakeTurnContext("EVENT", event),
             instruction_packs=_instruction_packs(),
@@ -706,6 +703,7 @@ def _parallel_execution(
             "logical_run_id": request.run_id,
             "attempt_id": request.attempt_id,
             "case_id": request.case_id,
+            "room_id": "ROOM_PARALLEL_1",
             "thread_id": "grt.v1." + "1" * 32,
             "actor_scope": {
                 "actor_id": request.actor_id,
@@ -723,6 +721,7 @@ def _parallel_execution(
             "request_hash": request.command_request_sha256,
         }
     )
+    fixture["retry_budget"]["provider_attempts_remaining"] = 6
     fixture["invocation_context"].update(
         {
             "agent_profile_id": PARALLEL_INTAKE_AGENT_PROFILE_ID,

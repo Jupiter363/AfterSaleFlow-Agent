@@ -161,6 +161,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 .orElseThrow(() -> new IllegalStateException(
                         "target Intake activation has no persisted room epoch authority"));
         String roomEpochId = requireEpochAuthority(epoch, request, activation, activePins);
+        String authoritativeRoomId = epoch.getRoomId();
         CaseProcessProjectionEntity projection = projections.findByIdForUpdate(request.caseId())
                 .orElseThrow(() -> new IllegalStateException(
                         "target Intake activation has no persisted process projection authority"));
@@ -234,20 +235,24 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         String executionAgentProfileId = parallelRoomMessage
                 ? ExecuteAgentRunRequest.PARALLEL_INTAKE_AGENT_PROFILE_ID
                 : activePins.agentProfileId();
+        int aggregateProviderBudget = parallelRoomMessage
+                ? RoomGraphCommand.PARALLEL_INTAKE_PROVIDER_ATTEMPT_LIMIT
+                : RoomGraphCommand.MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT;
         int attemptLimit = parallelRoomMessage ? 1 : ATTEMPT_LIMIT;
         String attemptId = "target-intake-attempt:" + messageIdentity + ":1";
         Instant deadline = request.commandDeadlineAt();
         RoomGraphCommand graph = commands.create(new IntakeGraphCommandFactory.CommandRequest(
-                commandId, logicalRunId, attemptId, thread, snapshot, event, activation.processRevision(),
-                stage.code(), stage.sequence(), executionAgentProfileId, 2, 3, 1, deadline,
+                commandId, logicalRunId, attemptId, parallelRoomMessage ? authoritativeRoomId : null,
+                thread, snapshot, event, activation.processRevision(),
+                stage.code(), stage.sequence(), executionAgentProfileId, aggregateProviderBudget, 3, 1, deadline,
                 traceparent(request.traceId()), activePins.envelopeKeyId(), nonce(request)));
         TargetE2EGraphCommandEnvelope envelope = envelopes.wrapCommand(
                 activation.activationId(), activation.roomFencingToken(), graph);
         AgentRunCommandBindingFactory.Binding binding = bindings.bind(
                 new AgentRunCommandBindingFactory.Context(
-                        request.roomId(), roomEpochId, OPERATION, request.idempotencyKey()), graph);
+                        authoritativeRoomId, roomEpochId, OPERATION, request.idempotencyKey()), graph);
         LogicalRun logical = ledger.createOrLoad(new CreateLogicalRun(
-                logicalRunId, activation.tenantSurrogate(), request.caseId(), request.roomId(), OPERATION,
+                logicalRunId, activation.tenantSurrogate(), request.caseId(), authoritativeRoomId, OPERATION,
                 request.idempotencyKey(), runProtocol, AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                 roomEpochId, graph.roomType(), graph.roomEpoch(),
                 graph.processRevision(), activation.roomFencingToken(), graph.requestHash(),
@@ -343,6 +348,8 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         }
         boolean expectedParallel = isParallelRoomMessage(request);
         if (expectedParallel != ExecuteAgentRunRequest.isParallelIntakeCommand(graph)
+                || (expectedParallel && !request.roomId().equals(graph.roomId()))
+                || (!expectedParallel && graph.roomId() != null)
                 || !expectedProtocol(request).wireValue().equals(persistedRequest.streamProtocol())) {
             throw new IllegalStateException(
                     "persisted target Intake execution profile does not match the source authority");

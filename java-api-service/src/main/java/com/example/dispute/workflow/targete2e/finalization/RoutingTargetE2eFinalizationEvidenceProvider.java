@@ -32,16 +32,13 @@ public final class RoutingTargetE2eFinalizationEvidenceProvider
                 && command.invocationContext() != null
                 && ExecuteAgentRunRequest.PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(
                         command.invocationContext().agentProfileId());
-        boolean schemaMarker = command != null
-                && command.invocationContext() != null
-                && ExecuteAgentRunRequest.PARALLEL_INTAKE_OUTPUT_SCHEMA.equals(
-                        command.invocationContext().outputSchemaVersion());
+        boolean roomMarker = command != null && command.roomId() != null;
         boolean v4Marker = "agent-stream.v4".equals(request.streamProtocol());
         if (exactParallel) {
             if (!v4Marker) {
                 throw mixedProfile();
             }
-        } else if (profileMarker || schemaMarker || v4Marker || command == null) {
+        } else if (profileMarker || roomMarker || v4Marker || command == null) {
             throw mixedProfile();
         } else if (!"agent-stream.v3".equals(request.streamProtocol())) {
             throw mixedProfile();

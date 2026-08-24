@@ -42,13 +42,26 @@ Audience = Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "SYSTEM"]
 RoomType = Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]
 
 MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT: Final[int] = 2
+PARALLEL_INTAKE_PROVIDER_ATTEMPT_LIMIT: Final[int] = 6
 HEARING_EVIDENCE_SYNTHESIS_PROVIDER_ATTEMPT_LIMIT: Final[int] = 202
+PARALLEL_INTAKE_AGENT_PROFILE_ID: Final[str] = (
+    "dispute-intake-officer.parallel-frames.v1"
+)
+PARALLEL_INTAKE_OUTPUT_SCHEMA: Final[str] = "target-e2e-room-proposal-source.v2"
 
 
 def command_provider_attempt_limit(
     room_type: str | None,
     stage_code: str | None,
+    agent_profile_id: str | None = None,
+    output_schema_version: str | None = None,
 ) -> int:
+    if (
+        room_type == "INTAKE"
+        and agent_profile_id == PARALLEL_INTAKE_AGENT_PROFILE_ID
+        and output_schema_version == PARALLEL_INTAKE_OUTPUT_SCHEMA
+    ):
+        return PARALLEL_INTAKE_PROVIDER_ATTEMPT_LIMIT
     if room_type == "HEARING" and stage_code == "EVIDENCE_SYNTHESIZING":
         return HEARING_EVIDENCE_SYNTHESIS_PROVIDER_ATTEMPT_LIMIT
     return MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT
@@ -546,6 +559,7 @@ class RoomGraphCommand(StrictContractModel):
     attempt_id: Identifier
     tenant_surrogate: Identifier
     case_id: Identifier
+    room_id: Identifier | None = None
     room_type: RoomType
     room_epoch: int = Field(ge=0)
     graph_key: Identifier
@@ -566,14 +580,50 @@ class RoomGraphCommand(StrictContractModel):
 
     @model_validator(mode="after")
     def bind_aggregate_provider_budget_to_stage(self) -> "RoomGraphCommand":
+        invocation = self.invocation_context
+        reserved_parallel = (
+            invocation.agent_profile_id == PARALLEL_INTAKE_AGENT_PROFILE_ID
+            or self.room_id is not None
+        )
+        exact_parallel = (
+            self.room_type == "INTAKE"
+            and invocation.agent_profile_id == PARALLEL_INTAKE_AGENT_PROFILE_ID
+            and invocation.output_schema_version == PARALLEL_INTAKE_OUTPUT_SCHEMA
+            and self.event_ref is not None
+            and self.room_id is not None
+            and self.actor_scope.actor_role in {"USER", "MERCHANT"}
+            and self.actor_scope.audience == self.actor_scope.actor_role
+            and 3 <= self.retry_budget.provider_attempts_remaining <= 6
+        )
+        if reserved_parallel and not exact_parallel:
+            raise ValueError("parallel Intake command authority is incomplete")
+        if exact_parallel:
+            return self
         if self.retry_budget.provider_attempts_remaining > command_provider_attempt_limit(
             self.room_type,
             self.stage_code,
+            invocation.agent_profile_id,
+            invocation.output_schema_version,
         ):
             raise ValueError(
                 "aggregate provider budget is reserved for Hearing evidence synthesis"
             )
         return self
+
+    @property
+    def is_parallel_intake_command(self) -> bool:
+        return (
+            self.room_type == "INTAKE"
+            and self.room_id is not None
+            and self.event_ref is not None
+            and self.invocation_context.agent_profile_id
+            == PARALLEL_INTAKE_AGENT_PROFILE_ID
+            and self.invocation_context.output_schema_version
+            == PARALLEL_INTAKE_OUTPUT_SCHEMA
+            and self.actor_scope.actor_role in {"USER", "MERCHANT"}
+            and self.actor_scope.audience == self.actor_scope.actor_role
+            and 3 <= self.retry_budget.provider_attempts_remaining <= 6
+        )
 
 
 class ArtifactPointer(StrictContractModel):

@@ -32,19 +32,79 @@
   "allOf": [
     {
       "if": {
+        "anyOf": [
+          {
+            "properties": {
+              "invocation_context": {
+                "properties": {
+                  "agent_profile_id": {
+                    "const": "dispute-intake-officer.parallel-frames.v1"
+                  }
+                }
+              }
+            }
+          },
+          {"required": ["room_id"]}
+        ]
+      },
+      "then": {
+        "required": ["room_id", "event_ref"],
         "properties": {
+          "room_type": {"const": "INTAKE"},
+          "actor_scope": {
+            "oneOf": [
+              {
+                "properties": {
+                  "actor_role": {"const": "USER"},
+                  "audience": {"const": "USER"}
+                }
+              },
+              {
+                "properties": {
+                  "actor_role": {"const": "MERCHANT"},
+                  "audience": {"const": "MERCHANT"}
+                }
+              }
+            ]
+          },
+          "invocation_context": {
+            "properties": {
+              "agent_profile_id": {
+                "const": "dispute-intake-officer.parallel-frames.v1"
+              },
+              "output_schema_version": {
+                "const": "target-e2e-room-proposal-source.v2"
+              }
+            }
+          },
           "retry_budget": {
             "properties": {
-              "provider_attempts_remaining": {"minimum": 3}
+              "provider_attempts_remaining": {"minimum": 3, "maximum": 6}
             }
           }
         }
       },
-      "then": {
-        "properties": {
-          "room_type": {"const": "HEARING"},
-          "stage_code": {"const": "EVIDENCE_SYNTHESIZING"}
-        }
+      "else": {
+        "properties": {"room_id": false},
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "retry_budget": {
+                  "properties": {
+                    "provider_attempts_remaining": {"minimum": 3}
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "room_type": {"const": "HEARING"},
+                "stage_code": {"const": "EVIDENCE_SYNTHESIZING"}
+              }
+            }
+          }
+        ]
       }
     }
   ],
@@ -55,6 +115,7 @@
     "attempt_id": {"$ref": "#/$defs/identifier"},
     "tenant_surrogate": {"$ref": "#/$defs/identifier"},
     "case_id": {"$ref": "#/$defs/identifier"},
+    "room_id": {"$ref": "#/$defs/identifier"},
     "room_type": {"type": "string", "enum": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]},
     "room_epoch": {"type": "integer", "minimum": 0},
     "graph_key": {"$ref": "#/$defs/identifier"},

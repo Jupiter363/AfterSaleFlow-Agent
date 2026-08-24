@@ -7,6 +7,7 @@ import static com.example.dispute.workflow.contract.v1.ContractTypes.version;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import java.time.Instant;
@@ -20,6 +21,7 @@ public record RoomGraphCommand(
         String attemptId,
         String tenantSurrogate,
         String caseId,
+        String roomId,
         RoomType roomType,
         long roomEpoch,
         String graphKey,
@@ -39,7 +41,64 @@ public record RoomGraphCommand(
         String requestHash) {
 
     public static final int MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT = 2;
+    public static final int PARALLEL_INTAKE_PROVIDER_ATTEMPT_LIMIT = 6;
     public static final int HEARING_EVIDENCE_SYNTHESIS_PROVIDER_ATTEMPT_LIMIT = 202;
+    public static final String PARALLEL_INTAKE_AGENT_PROFILE_ID =
+            "dispute-intake-officer.parallel-frames.v1";
+    public static final String PARALLEL_INTAKE_OUTPUT_SCHEMA =
+            "target-e2e-room-proposal-source.v2";
+
+    /** Legacy constructor kept so non-parallel command producers preserve their canonical shape. */
+    public RoomGraphCommand(
+            String schemaVersion,
+            String commandId,
+            String logicalRunId,
+            String attemptId,
+            String tenantSurrogate,
+            String caseId,
+            RoomType roomType,
+            long roomEpoch,
+            String graphKey,
+            String graphVersion,
+            String checkpointSchemaVersion,
+            String threadId,
+            ActorScope actorScope,
+            long processRevision,
+            String stageCode,
+            long stageSequence,
+            SnapshotRef domainSnapshotRef,
+            SnapshotRef eventRef,
+            InvocationContext invocationContext,
+            RetryBudget retryBudget,
+            Instant deadlineAt,
+            String traceparent,
+            String requestHash) {
+        this(
+                schemaVersion,
+                commandId,
+                logicalRunId,
+                attemptId,
+                tenantSurrogate,
+                caseId,
+                null,
+                roomType,
+                roomEpoch,
+                graphKey,
+                graphVersion,
+                checkpointSchemaVersion,
+                threadId,
+                actorScope,
+                processRevision,
+                stageCode,
+                stageSequence,
+                domainSnapshotRef,
+                eventRef,
+                invocationContext,
+                retryBudget,
+                deadlineAt,
+                traceparent,
+                requestHash);
+    }
 
     public RoomGraphCommand {
         schemaVersion = version(schemaVersion, "room-graph-command.v1");
@@ -58,16 +117,58 @@ public record RoomGraphCommand(
         required(domainSnapshotRef, "domainSnapshotRef");
         required(invocationContext, "invocationContext");
         required(retryBudget, "retryBudget");
-        if (retryBudget.providerAttemptsRemaining()
-                        > MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT
-                && (roomType != RoomType.HEARING
-                        || !"EVIDENCE_SYNTHESIZING".equals(stageCode))) {
+        boolean reservedParallel =
+                PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(invocationContext.agentProfileId())
+                        || roomId != null;
+        boolean exactParallel =
+                roomType == RoomType.INTAKE
+                        && PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(
+                                invocationContext.agentProfileId())
+                        && PARALLEL_INTAKE_OUTPUT_SCHEMA.equals(
+                                invocationContext.outputSchemaVersion())
+                        && eventRef != null
+                        && roomId != null
+                        && !roomId.isBlank()
+                        && (actorScope.actorRole() == ActorRole.USER
+                                || actorScope.actorRole() == ActorRole.MERCHANT)
+                        && actorScope.audience().name().equals(actorScope.actorRole().name())
+                        && retryBudget.providerAttemptsRemaining() >= 3
+                        && retryBudget.providerAttemptsRemaining()
+                                <= PARALLEL_INTAKE_PROVIDER_ATTEMPT_LIMIT;
+        if (reservedParallel && !exactParallel) {
             throw new IllegalArgumentException(
-                    "aggregate provider budget is reserved for Hearing evidence synthesis");
+                    "parallel Intake command authority is incomplete");
+        }
+        if (!exactParallel) {
+            if (roomId != null) {
+                throw new IllegalArgumentException(
+                        "roomId is reserved for parallel Intake commands");
+            }
+            if (retryBudget.providerAttemptsRemaining()
+                            > MODEL_INVOCATION_PROVIDER_ATTEMPT_LIMIT
+                    && (roomType != RoomType.HEARING
+                            || !"EVIDENCE_SYNTHESIZING".equals(stageCode))) {
+                throw new IllegalArgumentException(
+                        "aggregate provider budget is reserved for Hearing evidence synthesis");
+            }
         }
         required(deadlineAt, "deadlineAt");
         required(traceparent, "traceparent");
         required(requestHash, "requestHash");
+    }
+
+    @JsonIgnore
+    public boolean isExactParallelIntakeProfile() {
+        return roomType == RoomType.INTAKE
+                && roomId != null
+                && eventRef != null
+                && PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(
+                        invocationContext.agentProfileId())
+                && PARALLEL_INTAKE_OUTPUT_SCHEMA.equals(
+                        invocationContext.outputSchemaVersion())
+                && retryBudget.providerAttemptsRemaining() >= 3
+                && retryBudget.providerAttemptsRemaining()
+                        <= PARALLEL_INTAKE_PROVIDER_ATTEMPT_LIMIT;
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
