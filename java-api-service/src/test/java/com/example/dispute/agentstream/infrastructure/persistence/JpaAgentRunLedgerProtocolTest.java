@@ -25,7 +25,7 @@ import org.junit.jupiter.api.Test;
 class JpaAgentRunLedgerProtocolTest {
 
     @Test
-    void createsAndReplaysOnlyTheCurrentV3LogicalRunProtocol() {
+    void createsAndReplaysOnlyTheCurrentV3AndParallelV4LogicalRunProtocols() {
         AgentRunRepository runs = mock(AgentRunRepository.class);
         AgentRunAttemptRepository attempts = mock(AgentRunAttemptRepository.class);
         AgentRunStreamEventRepository events = mock(AgentRunStreamEventRepository.class);
@@ -57,14 +57,23 @@ class JpaAgentRunLedgerProtocolTest {
         assertThat(created.protocol()).isEqualTo(AgentRunProtocol.V3);
         assertThat(persisted.get().getProtocol()).isEqualTo(AgentRunProtocol.V3.wireValue());
         assertThat(persisted.get().getTraceId()).startsWith("agent-run-v3:");
-        verify(runs, times(1)).saveAndFlush(any(AgentRunEntity.class));
+        persisted.set(null);
+        CreateLogicalRun parallel = AgentRunPersistenceFixtures.logicalRunV4();
+        var createdParallel = ledger.createOrLoad(parallel);
+        var replayedParallel = ledger.createOrLoad(parallel);
+
+        assertThat(createdParallel).isEqualTo(replayedParallel);
+        assertThat(createdParallel.protocol()).isEqualTo(AgentRunProtocol.V4);
+        assertThat(persisted.get().getProtocol()).isEqualTo(AgentRunProtocol.V4.wireValue());
+        assertThat(persisted.get().getTraceId()).startsWith("agent-run-v4:");
+        verify(runs, times(2)).saveAndFlush(any(AgentRunEntity.class));
 
         assertThatThrownBy(() -> ledger.createOrLoad(withProtocol(current, AgentRunProtocol.V2)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("only accepts protocol V3");
+                .hasMessageContaining("V3 or V4");
         assertThatThrownBy(() -> ledger.createOrLoad(withProtocol(current, AgentRunProtocol.V1)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("only accepts protocol V3");
+                .hasMessageContaining("V3 or V4");
         assertThatThrownBy(() -> AgentRunEntity.logicalV3(
                         withProtocol(current, AgentRunProtocol.V2)))
                 .isInstanceOf(IllegalArgumentException.class)

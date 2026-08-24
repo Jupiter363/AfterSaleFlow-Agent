@@ -4,6 +4,7 @@ import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
 import com.example.dispute.workflow.config.GraphShadowRegistryProperties;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphStreamVisibility;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -73,7 +74,20 @@ public class TargetE2eGraphRegistryConfiguration {
       catalog.put(binding(template, template.promptProfileId(), audience), template);
     }
     for (var intakeProfile : INTAKE_BASELINE_PROMPT_PROFILES.entrySet()) {
-      catalog.put(binding(template, intakeProfile.getValue(), intakeProfile.getKey()), template);
+      catalog.put(
+          binding(
+              template,
+              template.agentProfileId(),
+              intakeProfile.getValue(),
+              intakeProfile.getKey()),
+          template);
+      catalog.put(
+          binding(
+              template,
+              ExecuteAgentRunRequest.PARALLEL_INTAKE_AGENT_PROFILE_ID,
+              intakeProfile.getValue(),
+              intakeProfile.getKey()),
+          template);
     }
     return Map.copyOf(catalog);
   }
@@ -91,11 +105,19 @@ public class TargetE2eGraphRegistryConfiguration {
 
   private static GraphStreamVisibilityPolicy.Binding binding(
       GraphShadowRegistryProperties.BindingEntry template, String promptProfileId, Audience audience) {
+    return binding(template, template.agentProfileId(), promptProfileId, audience);
+  }
+
+  private static GraphStreamVisibilityPolicy.Binding binding(
+      GraphShadowRegistryProperties.BindingEntry template,
+      String agentProfileId,
+      String promptProfileId,
+      Audience audience) {
     return new GraphStreamVisibilityPolicy.Binding(
         template.graphKey(),
         template.graphVersion(),
         template.checkpointSchemaVersion(),
-        template.agentProfileId(),
+        agentProfileId,
         promptProfileId,
         template.modelProfileId(),
         template.outputSchemaVersion(),

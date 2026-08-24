@@ -196,6 +196,43 @@ class CanonicalTargetIntakeMaterializerTest {
     }
 
     @Test
+    void routesOnlyAuthenticatedRoomMessagesToTheParallelV4ExecutionProfile() {
+        TargetIntakeActivationGrant activation = activation();
+
+        assertThat(CanonicalTargetIntakeMaterializer.expectedProtocol(request(activation)))
+                .isEqualTo(AgentRunProtocol.V4);
+        assertThat(CanonicalTargetIntakeMaterializer.isParallelRoomMessage(request(activation)))
+                .isTrue();
+        assertThat(CanonicalTargetIntakeMaterializer.expectedProtocol(initialFormRequest(activation)))
+                .isEqualTo(AgentRunProtocol.V3);
+        assertThat(CanonicalTargetIntakeMaterializer.expectedProtocol(respondentOpeningRequest(
+                        activation,
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT))))
+                .isEqualTo(AgentRunProtocol.V3);
+    }
+
+    @Test
+    void rejectsANonPartyRoomMessageInsteadOfFallingBackToV3() {
+        TargetIntakeActivationGrant activation = activation();
+        TargetIntakeMessageRequest request = TargetIntakeMessageRequest.roomMessage(
+                CASE_ID,
+                "ROOM_1",
+                "MSG_SYSTEM",
+                com.example.dispute.room.domain.MessageType.PARTY_TEXT,
+                "message",
+                List.of(),
+                new AuthenticatedActor("system-local", ActorRole.SYSTEM),
+                "idempotency-system",
+                "TRACE_0123456789abcdef0123456789abcdef",
+                Instant.parse("2026-07-29T00:00:00Z"),
+                activation);
+
+        assertThatThrownBy(() -> CanonicalTargetIntakeMaterializer.expectedProtocol(request))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("case-party actor authority");
+    }
+
+    @Test
     void replaysTheInitialFormAcrossActivationRotationWithTheOriginalRunAndDeadline() {
         assertOpeningMaterialization(
                 false, "OPEN", 0L, 1L, true);

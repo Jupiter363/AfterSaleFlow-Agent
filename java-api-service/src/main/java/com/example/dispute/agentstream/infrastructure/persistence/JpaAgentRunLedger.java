@@ -75,11 +75,14 @@ public class JpaAgentRunLedger implements AgentRunLedger {
     @Override
     @Transactional
     public LogicalRun createOrLoad(CreateLogicalRun command) {
-        if (command.protocol() != AgentRunProtocol.V3) {
-            throw new IllegalArgumentException("logical AgentRun creation only accepts protocol V3");
+        if (command.protocol() != AgentRunProtocol.V3
+                && command.protocol() != AgentRunProtocol.V4) {
+            throw new IllegalArgumentException(
+                    "logical AgentRun creation accepts only protocol V3 or V4");
         }
         if (command.executorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
-            throw new IllegalArgumentException("AgentRun V3 requires the Temporal Activity executor");
+            throw new IllegalArgumentException(
+                    "versioned AgentRun requires the Temporal Activity executor");
         }
         lockLogicalKey(command.caseId(), command.logicalIdempotencyKey());
         Optional<AgentRunEntity> existing =
@@ -92,7 +95,10 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         if (runRepository.existsById(command.agentRunId())) {
             throw new IllegalStateException("agentRunId is already bound to another logical run");
         }
-        AgentRunEntity created = runRepository.saveAndFlush(AgentRunEntity.logicalV3(command));
+        AgentRunEntity created = runRepository.saveAndFlush(
+                command.protocol() == AgentRunProtocol.V4
+                        ? AgentRunEntity.logicalV4(command)
+                        : AgentRunEntity.logicalV3(command));
         return logical(created);
     }
 
@@ -234,13 +240,23 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         requireEqual(command.logicalRunId(), agentRunId, "logicalRunId");
         AgentRunEntity run = lockRun(agentRunId);
         run.requireAttemptCommand(command);
+        AgentRunProtocol runProtocol = supportedExecutionProtocol(run);
+        if (runProtocol == AgentRunProtocol.V4
+                && !ExecuteAgentRunRequest.isParallelIntakeCommand(command)) {
+            throw new IllegalStateException(
+                    "agent-stream.v4 requires an exact parallel Intake command");
+        }
         Binding binding = requireVerifiedBinding(run, command, allocation.binding());
         AttemptAllocation verified =
                 new AttemptAllocation(allocation.attemptNo(), command, binding);
-        run.bindV3Audience(
-                command.actorScope().actorRole().name(),
-                json(List.of(command.actorScope().audience().name())),
-                json(List.of(command.actorScope().actorId())));
+        String actorRole = command.actorScope().actorRole().name();
+        String audienceJson = json(List.of(command.actorScope().audience().name()));
+        String actorIdsJson = json(List.of(command.actorScope().actorId()));
+        if (runProtocol == AgentRunProtocol.V4) {
+            run.bindV4Audience(actorRole, audienceJson, actorIdsJson);
+        } else {
+            run.bindV3Audience(actorRole, audienceJson, actorIdsJson);
+        }
 
         Optional<AgentRunAttemptEntity> replay =
                 attemptRepository.findByAgentRunIdAndAttemptNo(
@@ -251,7 +267,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             persisted.requireSameAllocation(verified);
             requireCanonicalCommand(persisted, binding);
             requirePersistedPredecessor(persisted, binding.logicalInputHash());
-            requirePersistedPrelude(persisted, command);
+            requireProtocolAdmission(runProtocol, persisted, command);
             return attempt(persisted);
         }
         attemptRepository
@@ -283,6 +299,10 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         if (nextAttemptNo > run.getAttemptLimit()) {
             throw new IllegalStateException("logical AgentRun attempt limit is exhausted");
         }
+        if (runProtocol == AgentRunProtocol.V4 && nextAttemptNo != 1) {
+            throw new IllegalStateException(
+                    "parallel Intake owns retries inside Frame generations, not outer attempts");
+        }
 
         String previousAttemptId = null;
         boolean resetRequired = false;
@@ -309,18 +329,25 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             resetReasonCode = predecessor.getTerminationCode();
         }
 
-        AgentRunAttemptEntity created =
-                AgentRunAttemptEntity.start(
-                        agentRunId,
-                        verified,
-                        previousAttemptId,
-                        resetRequired,
-                        publicSequenceOffset,
-                        persistedStartedAt);
-        run.markV3AttemptStarted();
+        AgentRunAttemptEntity created;
+        if (runProtocol == AgentRunProtocol.V4) {
+            created = AgentRunAttemptEntity.startV4(agentRunId, verified, persistedStartedAt);
+            run.markV4AttemptStarted();
+        } else {
+            created = AgentRunAttemptEntity.start(
+                    agentRunId,
+                    verified,
+                    previousAttemptId,
+                    resetRequired,
+                    publicSequenceOffset,
+                    persistedStartedAt);
+            run.markV3AttemptStarted();
+        }
         attemptRepository.saveAndFlush(created);
-        persistPublicPrelude(created, command, resetReasonCode);
-        requirePersistedPrelude(created, command);
+        if (runProtocol == AgentRunProtocol.V3) {
+            persistPublicPrelude(created, command, resetReasonCode);
+        }
+        requireProtocolAdmission(runProtocol, created, command);
         return attempt(created);
     }
 
@@ -347,7 +374,12 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         persisted.requireAllocatedRequest(request);
         requireCanonicalCommand(persisted, binding);
         requirePersistedPredecessor(persisted, binding.logicalInputHash());
-        requirePersistedPrelude(persisted, request.command());
+        requireProtocolAdmission(
+                AgentRunProtocol.V4.wireValue().equals(request.streamProtocol())
+                        ? AgentRunProtocol.V4
+                        : AgentRunProtocol.V3,
+                persisted,
+                request.command());
         return attempt(persisted);
     }
 
@@ -375,7 +407,11 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             requireEqual(run.getFinalResultHash(), result.resultHash(), "finalResultHash");
             return;
         }
-        run.markV3ResultReady(result.attemptId(), result.resultHash(), result.completedAt());
+        if (AgentRunProtocol.V4.wireValue().equals(run.getProtocol())) {
+            run.markV4ResultReady(result.attemptId(), result.resultHash(), result.completedAt());
+        } else {
+            run.markV3ResultReady(result.attemptId(), result.resultHash(), result.completedAt());
+        }
     }
 
     @Override
@@ -595,11 +631,13 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 run.getId(),
                 run.getCaseId(),
                 run.getLogicalIdempotencyKey(),
-                AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
-                        ? AgentRunProtocol.V3
-                        : AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
-                                ? AgentRunProtocol.V2
-                                : AgentRunProtocol.V1,
+                AgentRunProtocol.V4.wireValue().equals(run.getProtocol())
+                        ? AgentRunProtocol.V4
+                        : AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
+                                ? AgentRunProtocol.V3
+                                : AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
+                                        ? AgentRunProtocol.V2
+                                        : AgentRunProtocol.V1,
                 run.getExecutorKind(),
                 run.getRoomEpochId(),
                 run.getRoomEpoch(),
@@ -1100,6 +1138,36 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 canonicalJson(attempt.getCommandJson()),
                 binding.canonicalCommandJson(),
                 "canonicalCommandJson");
+    }
+
+    private static AgentRunProtocol supportedExecutionProtocol(AgentRunEntity run) {
+        if (AgentRunProtocol.V3.wireValue().equals(run.getProtocol())) {
+            return AgentRunProtocol.V3;
+        }
+        if (AgentRunProtocol.V4.wireValue().equals(run.getProtocol())) {
+            return AgentRunProtocol.V4;
+        }
+        throw new IllegalStateException(
+                "AgentRun execution accepts only an exact V3 or V4 protocol row");
+    }
+
+    private void requireProtocolAdmission(
+            AgentRunProtocol protocol,
+            AgentRunAttemptEntity attempt,
+            RoomGraphCommand command) {
+        if (protocol == AgentRunProtocol.V3) {
+            requirePersistedPrelude(attempt, command);
+            return;
+        }
+        if (protocol != AgentRunProtocol.V4
+                || !ExecuteAgentRunRequest.isParallelIntakeCommand(command)
+                || attempt.getAttemptNo() != 1
+                || attempt.getPreviousAttemptId() != null
+                || attempt.isResetRequired()
+                || attempt.getPublicSequenceOffset() != 0) {
+            throw new IllegalStateException(
+                    "agent-stream.v4 attempt admission differs from the parallel Intake authority");
+        }
     }
 
     private void persistPublicPrelude(

@@ -21,6 +21,22 @@ import org.junit.jupiter.api.Test;
 class AgentRunAttemptEntityTest {
 
     @Test
+    void startsParallelV4WithoutV3PredecessorOrPreludeOffset() {
+        AgentRunAttemptEntity attempt = AgentRunAttemptEntity.startV4(
+                RUN_ID,
+                AgentRunPersistenceFixtures.parallelIntakeAllocation(),
+                STARTED_AT);
+
+        assertThat(attempt.getAttemptNo()).isEqualTo(1);
+        assertThat(attempt.getLastSequenceNo()).isEqualTo(-1L);
+        assertThat(attempt.getPreviousAttemptId()).isNull();
+        assertThat(attempt.isResetRequired()).isFalse();
+        assertThat(attempt.getPublicSequenceOffset()).isZero();
+        assertThat(attempt.isPublicOutputEmitted()).isFalse();
+        assertThat(attempt.isFinalFrameObserved()).isFalse();
+    }
+
+    @Test
     void initializesProgressAtTheJavaOwnedPreludeHighWatermark() {
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(

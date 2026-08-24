@@ -180,7 +180,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         String commandId = TargetIntakeCommandIdentity.messageCommandId(activation, request);
         String logicalRunId = "target-intake-run:" + messageIdentity;
         MaterializedIntake replay =
-                replayOpening(request, activation, commandId, logicalRunId);
+                replayPersistedMaterial(request, activation, commandId, logicalRunId);
         if (replay != null) {
             return replay;
         }
@@ -228,11 +228,18 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                         List.of(request.messageId()), request.createdAt(), now)).value());
         long eventPublishedAt = System.nanoTime();
 
+        boolean parallelRoomMessage = isParallelRoomMessage(request);
+        AgentRunProtocol runProtocol =
+                parallelRoomMessage ? AgentRunProtocol.V4 : AgentRunProtocol.V3;
+        String executionAgentProfileId = parallelRoomMessage
+                ? ExecuteAgentRunRequest.PARALLEL_INTAKE_AGENT_PROFILE_ID
+                : activePins.agentProfileId();
+        int attemptLimit = parallelRoomMessage ? 1 : ATTEMPT_LIMIT;
         String attemptId = "target-intake-attempt:" + messageIdentity + ":1";
         Instant deadline = request.commandDeadlineAt();
         RoomGraphCommand graph = commands.create(new IntakeGraphCommandFactory.CommandRequest(
                 commandId, logicalRunId, attemptId, thread, snapshot, event, activation.processRevision(),
-                stage.code(), stage.sequence(), activePins.agentProfileId(), 2, 3, 1, deadline,
+                stage.code(), stage.sequence(), executionAgentProfileId, 2, 3, 1, deadline,
                 traceparent(request.traceId()), activePins.envelopeKeyId(), nonce(request)));
         TargetE2EGraphCommandEnvelope envelope = envelopes.wrapCommand(
                 activation.activationId(), activation.roomFencingToken(), graph);
@@ -241,10 +248,10 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                         request.roomId(), roomEpochId, OPERATION, request.idempotencyKey()), graph);
         LogicalRun logical = ledger.createOrLoad(new CreateLogicalRun(
                 logicalRunId, activation.tenantSurrogate(), request.caseId(), request.roomId(), OPERATION,
-                request.idempotencyKey(), AgentRunProtocol.V3, AgentRunExecutorKind.TEMPORAL_ACTIVITY,
+                request.idempotencyKey(), runProtocol, AgentRunExecutorKind.TEMPORAL_ACTIVITY,
                 roomEpochId, graph.roomType(), graph.roomEpoch(),
                 graph.processRevision(), activation.roomFencingToken(), graph.requestHash(),
-                binding.logicalInputHash(), ATTEMPT_LIMIT, deadline, now));
+                binding.logicalInputHash(), attemptLimit, deadline, now));
         if (!logical.agentRunId().equals(logicalRunId)) {
             throw new IllegalStateException("target Intake logical run replay drifted");
         }
@@ -257,7 +264,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             throw new IllegalStateException("target Intake AgentRun attempt allocation drifted");
         }
         ExecuteAgentRunRequest run = new ExecuteAgentRunRequest(ExecuteAgentRunRequest.SCHEMA_VERSION,
-                logical.agentRunId(), attempt.attemptNo(), logical.attemptLimit(), "agent-stream.v3",
+                logical.agentRunId(), attempt.attemptNo(), logical.attemptLimit(), runProtocol.wireValue(),
                 attempt.logicalInputHash(), attempt.previousAttemptId(), attempt.resetRequired(),
                 attempt.publicSequenceOffset(), graph);
         IntakeParallelTurnContext parallelTurnContext =
@@ -306,15 +313,11 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         return (completedAt - startedAt) / 1_000_000.0d;
     }
 
-    private MaterializedIntake replayOpening(
+    private MaterializedIntake replayPersistedMaterial(
             TargetIntakeMessageRequest request,
             TargetIntakeActivationGrant activation,
             String commandId,
             String logicalRunId) {
-        if (request.sourceType() != TargetIntakeMessageRequest.SourceType.INITIAL_FORM
-                && !isRespondentOpening(request)) {
-            return null;
-        }
         MaterialSnapshot material =
                 materialStore
                         .readByRoute(
@@ -328,13 +331,36 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         if (material == null) {
             return null;
         }
-        RoomGraphCommand graph = material.context().targetAgentRun().request().command();
+        ExecuteAgentRunRequest persistedRequest =
+                material.context().targetAgentRun().request();
+        RoomGraphCommand graph = persistedRequest.command();
         if (!commandId.equals(graph.commandId())
                 || !logicalRunId.equals(graph.logicalRunId())
                 || graph.eventRef() == null
                 || graph.deadlineAt() == null) {
             throw new IllegalStateException(
-                    "persisted target Intake opening identity does not match the active authority");
+                    "persisted target Intake identity does not match the active authority");
+        }
+        boolean expectedParallel = isParallelRoomMessage(request);
+        if (expectedParallel != ExecuteAgentRunRequest.isParallelIntakeCommand(graph)
+                || !expectedProtocol(request).wireValue().equals(persistedRequest.streamProtocol())) {
+            throw new IllegalStateException(
+                    "persisted target Intake execution profile does not match the source authority");
+        }
+        IntakeParallelTurnContext parallelContext =
+                material.context().targetAgentRun().parallelTurnContext();
+        if (expectedParallel) {
+            if (parallelContext == null
+                    || !request.messageId().equals(parallelContext.sourceMessageId())
+                    || !request.text().equals(parallelContext.currentMessageText())
+                    || !IntakeParallelTurnContext.messageHash(request.text())
+                            .equals(parallelContext.currentMessageSha256())) {
+                throw new IllegalStateException(
+                        "persisted target Intake parallel context does not match the source message");
+            }
+        } else if (parallelContext != null) {
+            throw new IllegalStateException(
+                    "persisted target Intake opening unexpectedly carries parallel context");
         }
         return new MaterializedIntake(
                 commandId,
@@ -381,6 +407,23 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
 
     private static boolean isRespondentOpening(TargetIntakeMessageRequest request) {
         return request.sourceType() == TargetIntakeMessageRequest.SourceType.RESPONDENT_OPENING;
+    }
+
+    static boolean isParallelRoomMessage(TargetIntakeMessageRequest request) {
+        Objects.requireNonNull(request, "request");
+        if (request.sourceType() != TargetIntakeMessageRequest.SourceType.ROOM_MESSAGE) {
+            return false;
+        }
+        if (request.actor().role() != com.example.dispute.config.ActorRole.USER
+                && request.actor().role() != com.example.dispute.config.ActorRole.MERCHANT) {
+            throw new IllegalStateException(
+                    "target Intake room messages require a case-party actor authority");
+        }
+        return true;
+    }
+
+    static AgentRunProtocol expectedProtocol(TargetIntakeMessageRequest request) {
+        return isParallelRoomMessage(request) ? AgentRunProtocol.V4 : AgentRunProtocol.V3;
     }
 
     static String requireEpochAuthority(

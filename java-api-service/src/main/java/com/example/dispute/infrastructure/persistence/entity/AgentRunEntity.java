@@ -379,6 +379,10 @@ public class AgentRunEntity extends AbstractEntity {
         return logicalTemporal(command, AgentRunProtocol.V3);
     }
 
+    public static AgentRunEntity logicalV4(CreateLogicalRun command) {
+        return logicalTemporal(command, AgentRunProtocol.V4);
+    }
+
     private static AgentRunEntity logicalTemporal(
             CreateLogicalRun command, AgentRunProtocol expectedProtocol) {
         if (command.protocol() != expectedProtocol) {
@@ -535,6 +539,10 @@ public class AgentRunEntity extends AbstractEntity {
         bindAudience(AgentRunProtocol.V3, actorRole, audienceJson, actorIdsJson);
     }
 
+    public void bindV4Audience(String actorRole, String audienceJson, String actorIdsJson) {
+        bindAudience(AgentRunProtocol.V4, actorRole, audienceJson, actorIdsJson);
+    }
+
     private void bindAudience(
             AgentRunProtocol expectedProtocol,
             String actorRole,
@@ -560,6 +568,10 @@ public class AgentRunEntity extends AbstractEntity {
         markAttemptStarted(AgentRunProtocol.V3);
     }
 
+    public void markV4AttemptStarted() {
+        markAttemptStarted(AgentRunProtocol.V4);
+    }
+
     private void markAttemptStarted(AgentRunProtocol expectedProtocol) {
         requireMutable(expectedProtocol);
         if (!"PENDING".equals(runStatus) && !"RUNNING".equals(runStatus)) {
@@ -575,6 +587,10 @@ public class AgentRunEntity extends AbstractEntity {
 
     public void markV3ResultReady(String attemptId, String resultHash, Instant completedAt) {
         markResultReady(AgentRunProtocol.V3, attemptId, resultHash, completedAt);
+    }
+
+    public void markV4ResultReady(String attemptId, String resultHash, Instant completedAt) {
+        markResultReady(AgentRunProtocol.V4, attemptId, resultHash, completedAt);
     }
 
     private void markResultReady(
@@ -605,6 +621,11 @@ public class AgentRunEntity extends AbstractEntity {
     public void markV3AttemptFailed(
             AgentRunAttemptStatus attemptStatus, boolean retryable, Instant completedAt) {
         markAttemptFailed(AgentRunProtocol.V3, attemptStatus, retryable, completedAt);
+    }
+
+    public void markV4AttemptFailed(
+            AgentRunAttemptStatus attemptStatus, boolean retryable, Instant completedAt) {
+        markAttemptFailed(AgentRunProtocol.V4, attemptStatus, retryable, completedAt);
     }
 
     private void markAttemptFailed(
@@ -1298,7 +1319,8 @@ public class AgentRunEntity extends AbstractEntity {
     private void requireTemporalProtocol() {
         if (executorKind != AgentRunExecutorKind.TEMPORAL_ACTIVITY
                 || (!AgentRunProtocol.V2.wireValue().equals(protocol)
-                        && !AgentRunProtocol.V3.wireValue().equals(protocol))) {
+                        && !AgentRunProtocol.V3.wireValue().equals(protocol)
+                        && !AgentRunProtocol.V4.wireValue().equals(protocol))) {
             throw new IllegalStateException("operation requires a versioned Temporal AgentRun row");
         }
     }

@@ -49,6 +49,11 @@ public final class AgentRunPersistenceFixtures {
             "EPOCH_V2_PERSISTENCE",
             "EVIDENCE_ANALYZE",
             "logical-persistence-key");
+    private static final Context PARALLEL_INTAKE_BINDING_CONTEXT = new Context(
+            "ROOM_V2_PERSISTENCE",
+            "EPOCH_V2_PERSISTENCE",
+            "INTAKE_MESSAGE",
+            "logical-persistence-key");
     public static final Instant STARTED_AT = Instant.parse("2026-07-19T01:00:00Z");
     public static final Instant COMPLETED_AT = Instant.parse("2026-07-19T01:00:03Z");
     public static final String RUN_ID = "RUN_V2_PERSISTENCE";
@@ -113,6 +118,30 @@ public final class AgentRunPersistenceFixtures {
                 source.attemptLimit(),
                 source.deadlineAt(),
                 source.createdAt());
+    }
+
+    public static CreateLogicalRun logicalRunV4() {
+        RoomGraphCommand command = parallelIntakeCommand();
+        Binding binding = BINDING_FACTORY.bind(PARALLEL_INTAKE_BINDING_CONTEXT, command);
+        return new CreateLogicalRun(
+                RUN_ID,
+                "tenant-persistence",
+                CASE_ID,
+                "ROOM_V2_PERSISTENCE",
+                "INTAKE_MESSAGE",
+                "logical-persistence-key",
+                AgentRunProtocol.V4,
+                AgentRunExecutorKind.TEMPORAL_ACTIVITY,
+                "EPOCH_V2_PERSISTENCE",
+                RoomType.INTAKE,
+                2,
+                7,
+                11,
+                command.requestHash(),
+                binding.logicalInputHash(),
+                1,
+                STARTED_AT.plusSeconds(600),
+                STARTED_AT);
     }
 
     public static ExecuteAgentRunRequest request(long attemptNo, String attemptId) {
@@ -188,6 +217,14 @@ public final class AgentRunPersistenceFixtures {
         return new AttemptAllocation(attemptNo, command, binding(command));
     }
 
+    public static AttemptAllocation parallelIntakeAllocation() {
+        RoomGraphCommand command = parallelIntakeCommand();
+        return new AttemptAllocation(
+                1,
+                command,
+                BINDING_FACTORY.bind(PARALLEL_INTAKE_BINDING_CONTEXT, command));
+    }
+
     private static RoomGraphCommand command(long attemptNo, String attemptId) {
         return command(
                 attemptNo,
@@ -250,6 +287,64 @@ public final class AgentRunPersistenceFixtures {
             return MAPPER.treeToValue(commandJson, RoomGraphCommand.class);
         } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
             throw new IllegalStateException("test command encoding failed", exception);
+        }
+    }
+
+    private static RoomGraphCommand parallelIntakeCommand() {
+        RoomGraphCommand unsigned = new RoomGraphCommand(
+                "room-graph-command.v1",
+                "intake-message:persistence",
+                RUN_ID,
+                "ATTEMPT_V4_1",
+                "tenant-persistence",
+                CASE_ID,
+                RoomType.INTAKE,
+                2,
+                "all-rooms.target-e2e.v2",
+                "target-e2e-graph.2026-08-18.1",
+                "target-e2e-checkpoint.v2",
+                "thread-persistence",
+                new RoomGraphCommand.ActorScope(
+                        "user-persistence",
+                        ActorRole.USER,
+                        Audience.USER,
+                        List.of("case:" + CASE_ID + ":command:INTAKE_MESSAGE")),
+                7,
+                "READY_TO_CONFIRM",
+                4,
+                new RoomGraphCommand.SnapshotRef(
+                        "SNAP_INTAKE",
+                        "domain-snapshot.v1",
+                        "s3://snapshots/intake",
+                        "d".repeat(64),
+                        100),
+                new RoomGraphCommand.SnapshotRef(
+                        "EVENT_INTAKE",
+                        "intake-event.v1",
+                        "s3://events/intake",
+                        "e".repeat(64),
+                        100),
+                new RoomGraphCommand.InvocationContext(
+                        ExecuteAgentRunRequest.PARALLEL_INTAKE_AGENT_PROFILE_ID,
+                        "DISPUTE_INTAKE_OFFICER:USER:v1",
+                        "model-profile-v2",
+                        ExecuteAgentRunRequest.PARALLEL_INTAKE_OUTPUT_SCHEMA,
+                        "policy-v2",
+                        "guardrail-v2",
+                        List.of(),
+                        "kms-key-v2",
+                        "nonce-v4-1"),
+                new RoomGraphCommand.RetryBudget(2, 1, 1),
+                STARTED_AT.plusSeconds(600),
+                "00-0123456789abcdef0123456789abcdef-0000000000000001-01",
+                "0".repeat(64));
+        ObjectNode commandJson = MAPPER.valueToTree(unsigned);
+        commandJson.remove("request_hash");
+        commandJson.put("request_hash", ContractJson.sha256Hex(commandJson));
+        try {
+            return MAPPER.treeToValue(commandJson, RoomGraphCommand.class);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+            throw new IllegalStateException("parallel Intake command encoding failed", exception);
         }
     }
 

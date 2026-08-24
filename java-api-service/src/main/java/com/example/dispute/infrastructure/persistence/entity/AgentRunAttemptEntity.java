@@ -236,6 +236,26 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         return attempt;
     }
 
+    /**
+     * Starts the one outer attempt that owns a parallel Intake turn.
+     *
+     * <p>Frame-local generations own retry for this protocol, so V4 never carries a V3
+     * predecessor/reset prelude. The first public Frame event owns global sequence zero.
+     */
+    public static AgentRunAttemptEntity startV4(
+            String agentRunId, AttemptAllocation allocation, Instant startedAt) {
+        Objects.requireNonNull(allocation, "allocation");
+        if (allocation.attemptNo() != 1
+                || !ExecuteAgentRunRequest.isParallelIntakeCommand(allocation.command())) {
+            throw new IllegalArgumentException(
+                    "agent-stream.v4 admission requires attempt one of an exact parallel Intake command");
+        }
+        AgentRunAttemptEntity attempt =
+                start(agentRunId, allocation, null, false, 0, startedAt);
+        attempt.lastSequenceNo = -1L;
+        return attempt;
+    }
+
     public void requireSameAllocation(AttemptAllocation allocation) {
         Objects.requireNonNull(allocation, "allocation");
         requireProofCarryingLineage();
@@ -661,7 +681,8 @@ public class AgentRunAttemptEntity extends AbstractEntity {
 
     private static String requiredTemporalStreamProtocol(String value) {
         if (!AgentRunProtocol.V2.wireValue().equals(value)
-                && !AgentRunProtocol.V3.wireValue().equals(value)) {
+                && !AgentRunProtocol.V3.wireValue().equals(value)
+                && !AgentRunProtocol.V4.wireValue().equals(value)) {
             throw new IllegalArgumentException(
                     "expectedStreamProtocol must identify a versioned Temporal stream");
         }
