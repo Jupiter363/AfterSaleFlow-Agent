@@ -127,6 +127,74 @@ public record AgentStreamEventV4(
             String finalResultHash,
             String errorCode) {
 
+        public static Payload finalPayload(String receiptId, String resultHash) {
+            return new Payload(
+                    null, // frameId
+                    null, // frameType
+                    null, // generation
+                    null, // frameSetReceiptId
+                    null, // projectionRegistryVersion
+                    DeliveryClass.DURABLE_TERMINAL,
+                    null, // localIndex
+                    null, // nextLocalIndex
+                    null, // canonicalItemId
+                    null, // projectionKind
+                    null, // projectionPathId
+                    null, // valueKind
+                    null, // canonicalValueJson
+                    null, // publicText
+                    null, // itemSha256
+                    null, // frameRevision
+                    null, // projectionSha256
+                    null, // oldFrameId
+                    null, // newFrameId
+                    null, // oldGeneration
+                    null, // newGeneration
+                    null, // reasonCode
+                    null, // frameReceiptId
+                    null, // resultSha256
+                    null, // publicProjectionSha256
+                    null, // retryable
+                    null, // usage
+                    required(receiptId, "finalReceiptId"),
+                    required(resultHash, "finalResultHash"),
+                    null); // errorCode
+        }
+
+        public static Payload errorPayload(String errorCode, boolean retryable) {
+            return new Payload(
+                    null, // frameId
+                    null, // frameType
+                    null, // generation
+                    null, // frameSetReceiptId
+                    null, // projectionRegistryVersion
+                    DeliveryClass.DURABLE_TERMINAL,
+                    null, // localIndex
+                    null, // nextLocalIndex
+                    null, // canonicalItemId
+                    null, // projectionKind
+                    null, // projectionPathId
+                    null, // valueKind
+                    null, // canonicalValueJson
+                    null, // publicText
+                    null, // itemSha256
+                    null, // frameRevision
+                    null, // projectionSha256
+                    null, // oldFrameId
+                    null, // newFrameId
+                    null, // oldGeneration
+                    null, // newGeneration
+                    null, // reasonCode
+                    null, // frameReceiptId
+                    null, // resultSha256
+                    null, // publicProjectionSha256
+                    retryable,
+                    null, // usage
+                    null, // finalReceiptId
+                    null, // finalResultHash
+                    required(errorCode, "errorCode"));
+        }
+
         private void validateFor(EventType eventType) {
             Set<String> expected = switch (eventType) {
                 case PUBLIC_FRAME_START -> Set.of(

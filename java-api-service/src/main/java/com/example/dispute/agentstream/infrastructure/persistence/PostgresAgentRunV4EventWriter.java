@@ -65,6 +65,43 @@ public final class PostgresAgentRunV4EventWriter {
     }
 
     public EventWriteReceipt appendInCurrentTransaction(EventWriteCommand command) {
+        AppendOutcome outcome = append(command, false);
+        return new EventWriteReceipt(
+                outcome.eventId(),
+                outcome.canonicalEventJson(),
+                outcome.eventSha256(),
+                outcome.durableHighWatermark());
+    }
+
+    /**
+     * Appends or loads one exact V4 terminal event inside the caller transaction.
+     *
+     * <p>Frame ingress remains collision-intolerant through {@link #appendInCurrentTransaction}.
+     * Only terminal Activity/reconciliation replay may return the already persisted event, and
+     * the delivery watermark must end exactly at that terminal sequence.
+     */
+    public TerminalWriteReceipt appendOrLoadExactTerminalInCurrentTransaction(
+            EventWriteCommand command) {
+        Objects.requireNonNull(command, "command");
+        if (command.eventType() != AgentStreamEventV4.EventType.FINAL
+                && command.eventType() != AgentStreamEventV4.EventType.ERROR) {
+            throw new IllegalArgumentException(
+                    "exact terminal append accepts only FINAL or ERROR");
+        }
+        AppendOutcome outcome = append(command, true);
+        if (outcome.durableHighWatermark() != command.sequenceNo()) {
+            throw new IllegalStateException(
+                    "agent-stream.v4 terminal is not the exact durable high-watermark");
+        }
+        return new TerminalWriteReceipt(
+                outcome.eventId(),
+                outcome.inserted(),
+                outcome.canonicalEventJson(),
+                outcome.eventSha256(),
+                outcome.durableHighWatermark());
+    }
+
+    private AppendOutcome append(EventWriteCommand command, boolean allowExactReplay) {
         Objects.requireNonNull(command, "command");
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException(
@@ -97,7 +134,7 @@ public final class PostgresAgentRunV4EventWriter {
                 .addValue("audienceActorIdsJson", command.audienceActorIdsJson());
 
         int inserted = jdbc.update(INSERT_SOURCE_SQL, parameters);
-        if (inserted != 1) {
+        if (inserted != 1 && !allowExactReplay) {
             throw new IllegalStateException(
                     "agent-stream.v4 sequence was already bound before ingress admission");
         }
@@ -112,7 +149,11 @@ public final class PostgresAgentRunV4EventWriter {
                     "agent-stream.v4 delivery append returned ambiguous authority");
         }
         DeliveryRow row = delivery.getFirst();
-        if (!row.inserted()) {
+        if (row.inserted() != (inserted == 1)) {
+            throw new IllegalStateException(
+                    "agent-stream.v4 source and delivery replay authorities differ");
+        }
+        if (!row.inserted() && !allowExactReplay) {
             throw new IllegalStateException(
                     "new agent-stream.v4 source event replayed an existing delivery row");
         }
@@ -120,8 +161,9 @@ public final class PostgresAgentRunV4EventWriter {
             throw new IllegalStateException(
                     "agent-stream.v4 delivery watermark is behind the source event");
         }
-        return new EventWriteReceipt(
+        return new AppendOutcome(
                 command.eventId(),
+                inserted == 1,
                 canonicalEventJson,
                 eventHash,
                 row.highestContiguousSequenceNo());
@@ -170,6 +212,31 @@ public final class PostgresAgentRunV4EventWriter {
             }
         }
     }
+
+    public record TerminalWriteReceipt(
+            String eventId,
+            boolean inserted,
+            String canonicalEventJson,
+            String eventSha256,
+            long durableHighWatermark) {
+
+        public TerminalWriteReceipt {
+            requireText(eventId, "eventId");
+            requireText(canonicalEventJson, "canonicalEventJson");
+            requireText(eventSha256, "eventSha256");
+            if (durableHighWatermark < 0) {
+                throw new IllegalArgumentException(
+                        "durableHighWatermark must not be negative");
+            }
+        }
+    }
+
+    private record AppendOutcome(
+            String eventId,
+            boolean inserted,
+            String canonicalEventJson,
+            String eventSha256,
+            long durableHighWatermark) {}
 
     private record DeliveryRow(boolean inserted, long highestContiguousSequenceNo) {}
 

@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentRunV4EventWriter;
@@ -82,6 +83,63 @@ class PostgresAgentRunV4EventWriterTest {
                 .hasMessageContaining("already bound");
     }
 
+    @Test
+    void returnsTheExactPersistedTerminalReceiptOnActivityReplay() throws Exception {
+        NamedParameterJdbcTemplate jdbc = mock(NamedParameterJdbcTemplate.class);
+        when(jdbc.update(anyString(), any(SqlParameterSource.class))).thenReturn(0);
+        when(jdbc.query(
+                        anyString(),
+                        any(SqlParameterSource.class),
+                        org.mockito.ArgumentMatchers.<RowMapper<Object>>any()))
+                .thenAnswer(invocation -> {
+                    @SuppressWarnings("unchecked")
+                    RowMapper<Object> mapper = invocation.getArgument(2);
+                    ResultSet resultSet = mock(ResultSet.class);
+                    when(resultSet.getBoolean("was_inserted")).thenReturn(false);
+                    when(resultSet.getLong("highest_contiguous_sequence_no")).thenReturn(5L);
+                    return List.of(mapper.mapRow(resultSet, 0));
+                });
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        PostgresAgentRunV4EventWriter writer = new PostgresAgentRunV4EventWriter(
+                jdbc, new ObjectMapper().findAndRegisterModules());
+
+        var receipt = writer.appendOrLoadExactTerminalInCurrentTransaction(finalCommand());
+
+        assertThat(receipt.inserted()).isFalse();
+        assertThat(receipt.eventId()).isEqualTo("ARSE4_FINAL_1");
+        assertThat(receipt.durableHighWatermark()).isEqualTo(5L);
+        assertThat(receipt.canonicalEventJson())
+                .contains("final_receipt_id")
+                .contains("final_result_hash");
+        verify(jdbc, times(1)).update(anyString(), any(SqlParameterSource.class));
+    }
+
+    @Test
+    void rejectsTerminalReplayWhenTheDurableWatermarkHasAdvanced() throws Exception {
+        NamedParameterJdbcTemplate jdbc = mock(NamedParameterJdbcTemplate.class);
+        when(jdbc.update(anyString(), any(SqlParameterSource.class))).thenReturn(0);
+        when(jdbc.query(
+                        anyString(),
+                        any(SqlParameterSource.class),
+                        org.mockito.ArgumentMatchers.<RowMapper<Object>>any()))
+                .thenAnswer(invocation -> {
+                    @SuppressWarnings("unchecked")
+                    RowMapper<Object> mapper = invocation.getArgument(2);
+                    ResultSet resultSet = mock(ResultSet.class);
+                    when(resultSet.getBoolean("was_inserted")).thenReturn(false);
+                    when(resultSet.getLong("highest_contiguous_sequence_no")).thenReturn(6L);
+                    return List.of(mapper.mapRow(resultSet, 0));
+                });
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        PostgresAgentRunV4EventWriter writer = new PostgresAgentRunV4EventWriter(
+                jdbc, new ObjectMapper().findAndRegisterModules());
+
+        assertThatThrownBy(() -> writer.appendOrLoadExactTerminalInCurrentTransaction(
+                        finalCommand()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("exact durable high-watermark");
+    }
+
     private static EventWriteCommand command() {
         return new EventWriteCommand(
                 "ARSE4_EVENT_1",
@@ -92,6 +150,21 @@ class PostgresAgentRunV4EventWriterTest {
                 Audience.USER,
                 Instant.parse("2026-08-24T08:00:00Z"),
                 startPayload(),
+                "user-local",
+                "[\"user-local\"]");
+    }
+
+    private static EventWriteCommand finalCommand() {
+        return new EventWriteCommand(
+                "ARSE4_FINAL_1",
+                "RUN_1",
+                "ATTEMPT_1",
+                5,
+                AgentStreamEventV4.EventType.FINAL,
+                Audience.USER,
+                Instant.parse("2026-08-24T08:00:05Z"),
+                AgentStreamEventV4.Payload.finalPayload(
+                        "IPFTR_1", "f".repeat(64)),
                 "user-local",
                 "[\"user-local\"]");
     }
