@@ -613,7 +613,7 @@ class CanonicalTargetRoomCommandMaterializerTest {
     private static TargetIntakeRuntimePins pins() {
         return new TargetIntakeRuntimePins(
                 "case-build", "agent-build", "c".repeat(64), "graph-build", "d".repeat(64),
-                "evidence-clerk", "evidence-prompt-v1", "evidence-model-v1", "policy-v1",
+                "evidence-clerk", "evidence-prompt-v1", "evidence-model-v1", "litellm", "policy-v1",
                 "guardrail-v1", "tools-v1", "memory-v1", "key-v1");
     }
 

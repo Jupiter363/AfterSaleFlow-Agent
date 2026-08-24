@@ -8,6 +8,7 @@ import java.util.Objects;
 public record TargetIntakeRuntimePins(
         String caseBuildId, String agentBuildId, String graphBindingHash, String graphCodeBuildId,
         String isolatedDomainDbBindingHash, String agentProfileId, String promptVersion, String modelProfileId,
+        String executionProviderId,
         String policyVersion, String guardrailVersion, String toolPolicyVersion,
         String memoryPolicyVersion, String envelopeKeyId) {
     private static final String INTAKE_AGENT_KEY = "DISPUTE_INTAKE_OFFICER";
@@ -15,7 +16,7 @@ public record TargetIntakeRuntimePins(
     public TargetIntakeRuntimePins {
         for (String value : java.util.List.of(caseBuildId, agentBuildId, graphBindingHash, graphCodeBuildId,
                 isolatedDomainDbBindingHash, agentProfileId, promptVersion, modelProfileId, policyVersion,
-                guardrailVersion, toolPolicyVersion, memoryPolicyVersion, envelopeKeyId)) {
+                executionProviderId, guardrailVersion, toolPolicyVersion, memoryPolicyVersion, envelopeKeyId)) {
             if (value == null || value.isBlank()) throw new IllegalArgumentException("target Intake runtime pin is blank");
         }
         if (!graphBindingHash.matches("[0-9a-f]{64}") || !isolatedDomainDbBindingHash.matches("[0-9a-f]{64}")) {

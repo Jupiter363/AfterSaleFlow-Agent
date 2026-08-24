@@ -130,6 +130,72 @@ class CanonicalTargetIntakeMaterializerTest {
     }
 
     @Test
+    void freezesRoomMessageContextButLeavesOpeningPathsOnTheirDedicatedFlow() {
+        TargetIntakeActivationGrant activation = activation();
+        var previousDossier = new ObjectMapper().createObjectNode();
+        previousDossier.put("dossier_version", 8);
+
+        var frozen = CanonicalTargetIntakeMaterializer.frozenParallelTurnContext(
+                request(activation),
+                7L,
+                "a".repeat(64),
+                "b".repeat(64),
+                previousDossier,
+                pins());
+
+        assertThat(frozen).isNotNull();
+        assertThat(frozen.sourceType()).isEqualTo("ROOM_MESSAGE");
+        assertThat(frozen.sourceMessageId()).isEqualTo("MSG_1");
+        assertThat(frozen.currentMessageText()).isEqualTo("message");
+        assertThat(frozen.cognitiveRevision()).isEqualTo(7L);
+        assertThat(frozen.previousDossier().path("dossier_version").asInt()).isEqualTo(8);
+        assertThat(frozen.executionProvider()).isEqualTo("litellm");
+        assertThat(frozen.executionModel()).isEqualTo("model-profile");
+
+        previousDossier.put("dossier_version", 99);
+        assertThat(frozen.previousDossier().path("dossier_version").asInt()).isEqualTo(8);
+        assertThat(CanonicalTargetIntakeMaterializer.frozenParallelTurnContext(
+                        initialFormRequest(activation),
+                        1L,
+                        "a".repeat(64),
+                        "b".repeat(64),
+                        previousDossier,
+                        pins()))
+                .isNull();
+        assertThat(CanonicalTargetIntakeMaterializer.frozenParallelTurnContext(
+                        respondentOpeningRequest(
+                                activation,
+                                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT)),
+                        1L,
+                        "a".repeat(64),
+                        "b".repeat(64),
+                        previousDossier,
+                        pins()))
+                .isNull();
+    }
+
+    @Test
+    void givesEachRoomMessageAnImmutablePerCommandSnapshotIdentity() {
+        TargetIntakeActivationGrant activation = activation();
+        String registrationId = "target-intake-registration:registration-1";
+
+        String first = CanonicalTargetIntakeMaterializer.snapshotBindingId(
+                registrationId, "message-identity-1", request(activation));
+        String second = CanonicalTargetIntakeMaterializer.snapshotBindingId(
+                registrationId, "message-identity-2", request(activation));
+        String opening = CanonicalTargetIntakeMaterializer.snapshotBindingId(
+                registrationId, "opening-identity", initialFormRequest(activation));
+
+        assertThat(first).startsWith("target-intake-snapshot:");
+        assertThat(first).isNotEqualTo(second);
+        assertThat(opening)
+                .isEqualTo(CanonicalTargetIntakeMaterializer.snapshotBindingId(
+                        registrationId,
+                        "another-opening-replay-identity",
+                        initialFormRequest(activation)));
+    }
+
+    @Test
     void replaysTheInitialFormAcrossActivationRotationWithTheOriginalRunAndDeadline() {
         assertOpeningMaterialization(
                 false, "OPEN", 0L, 1L, true);
@@ -576,6 +642,7 @@ class CanonicalTargetIntakeMaterializerTest {
                 "agent-profile",
                 "prompt-v1",
                 "model-profile",
+                "litellm",
                 "policy-v1",
                 "guardrail-v1",
                 "tool-policy-v1",

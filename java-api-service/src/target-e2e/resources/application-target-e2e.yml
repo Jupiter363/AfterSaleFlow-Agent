@@ -39,6 +39,7 @@ target:
       agent-profile-id: ${TARGET_E2E_INTAKE_AGENT_PROFILE_ID:}
       prompt-version: ${TARGET_E2E_INTAKE_PROMPT_VERSION:}
       model-profile-id: ${TARGET_E2E_INTAKE_MODEL_PROFILE_ID:}
+      execution-provider-id: ${TARGET_E2E_INTAKE_EXECUTION_PROVIDER_ID:}
       policy-version: ${TARGET_E2E_INTAKE_POLICY_VERSION:}
       guardrail-version: ${TARGET_E2E_INTAKE_GUARDRAIL_VERSION:}
       tool-policy-version: ${TARGET_E2E_INTAKE_TOOL_POLICY_VERSION:}

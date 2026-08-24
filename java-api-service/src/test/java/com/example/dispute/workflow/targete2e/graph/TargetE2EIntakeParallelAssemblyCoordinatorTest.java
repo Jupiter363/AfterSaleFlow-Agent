@@ -311,7 +311,9 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 command.logicalRunId(),
                 1,
                 3,
-                "agent-stream.v3",
+                ExecuteAgentRunRequest.isParallelIntakeCommand(command)
+                        ? "agent-stream.v4"
+                        : "agent-stream.v3",
                 "7".repeat(64),
                 null,
                 false,

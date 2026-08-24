@@ -21,6 +21,10 @@ public record ExecuteAgentRunRequest(
 
     public static final String SCHEMA_VERSION = "execute-agent-run.v3";
     public static final int MAXIMUM_ATTEMPT_LIMIT = 3;
+    public static final String PARALLEL_INTAKE_AGENT_PROFILE_ID =
+            "dispute-intake-officer.parallel-frames.v1";
+    public static final String PARALLEL_INTAKE_OUTPUT_SCHEMA =
+            "target-e2e-room-proposal-source.v2";
 
     public ExecuteAgentRunRequest(
             String schemaVersion,
@@ -57,8 +61,11 @@ public record ExecuteAgentRunRequest(
         if (attemptNo > attemptLimit) {
             throw new IllegalArgumentException("attemptNo exceeds attemptLimit");
         }
-        if (!"agent-stream.v3".equals(streamProtocol)) {
-            throw new IllegalArgumentException("streamProtocol must be agent-stream.v3");
+        boolean parallelIntake = isParallelIntakeCommand(command);
+        if ((parallelIntake && !"agent-stream.v4".equals(streamProtocol))
+                || (!parallelIntake && !"agent-stream.v3".equals(streamProtocol))) {
+            throw new IllegalArgumentException(
+                    "streamProtocol must match the explicit graph execution profile");
         }
         required(logicalInputHash, "logicalInputHash");
         if (!logicalInputHash.matches("[0-9a-f]{64}")) {
@@ -95,5 +102,25 @@ public record ExecuteAgentRunRequest(
 
     public String attemptId() {
         return command.attemptId();
+    }
+
+    public static boolean isParallelIntakeCommand(RoomGraphCommand command) {
+        if (command == null) {
+            return false;
+        }
+        var invocation = command.invocationContext();
+        if (invocation == null) {
+            return false;
+        }
+        var actorScope = command.actorScope();
+        if (actorScope == null
+                || (actorScope.actorRole() != ContractTypes.ActorRole.USER
+                        && actorScope.actorRole() != ContractTypes.ActorRole.MERCHANT)) {
+            return false;
+        }
+        return command.roomType() == ContractTypes.RoomType.INTAKE
+                && PARALLEL_INTAKE_AGENT_PROFILE_ID.equals(invocation.agentProfileId())
+                && PARALLEL_INTAKE_OUTPUT_SCHEMA.equals(invocation.outputSchemaVersion())
+                && command.eventRef() != null;
     }
 }

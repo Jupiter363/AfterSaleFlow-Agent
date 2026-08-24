@@ -32,6 +32,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKi
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
@@ -53,6 +54,7 @@ import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeC
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore.MaterialSnapshot;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
+import com.example.dispute.workflow.temporal.room.intake.IntakeParallelTurnContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -204,11 +206,12 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                         WriterMode.TEMPORAL, request.createdAt())).value();
         long threadRegisteredAt = System.nanoTime();
 
+        JsonNode frozenPreviousDossier = currentDossier(request.caseId());
         IntakeSnapshotReference snapshot = snapshots.publishOrLoad(new IntakeDomainSnapshotPublisher.SnapshotRequest(
-                "target-intake-snapshot:" + token(registrationId), thread,
+                snapshotBindingId(registrationId, messageIdentity, request), thread,
                 activation.processRevision(), activation.processRevision(), activation.processRevision(),
                 List.of(request.messageId()), initialCaseFacts(dispute),
-                shareableProjection(dispute), List.of(), currentDossier(request.caseId()),
+                shareableProjection(dispute), List.of(), frozenPreviousDossier,
                 request.createdAt())).value();
         long snapshotPublishedAt = System.nanoTime();
         String eventId = "target-intake-event:" + messageIdentity;
@@ -257,12 +260,22 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 logical.agentRunId(), attempt.attemptNo(), logical.attemptLimit(), "agent-stream.v3",
                 attempt.logicalInputHash(), attempt.previousAttemptId(), attempt.resetRequired(),
                 attempt.publicSequenceOffset(), graph);
+        IntakeParallelTurnContext parallelTurnContext =
+                request.sourceType() == TargetIntakeMessageRequest.SourceType.ROOM_MESSAGE
+                        ? frozenParallelTurnContext(
+                                request,
+                                event.sequenceNo(),
+                                snapshot.payloadRef().sha256(),
+                                event.payloadRef().sha256(),
+                                frozenPreviousDossier,
+                                activePins)
+                        : null;
         IntakeTargetAgentRunContext target = new IntakeTargetAgentRunContext(
                 "intake-target-agent-run-context.v1", IntakeTargetAgentRunContext.TARGET_LANE,
                 activation.activationId(), activation.manifestHash(), activation.roomFencingToken(),
                 activation.processRevision(), activation.roomRevision(), activePins.caseBuildId(),
                 activation.temporalBuildId(), activePins.agentBuildId(), activePins.graphBindingHash(), activePins.graphCodeBuildId(),
-                envelope.commandHash(), envelope.commandEnvelopeHash(), run);
+                envelope.commandHash(), envelope.commandEnvelopeHash(), run, parallelTurnContext);
         IntakeCommandExecutionContext context = new IntakeCommandExecutionContext(
                 "intake-command-execution-context.v2", thread.registration().threadId(), session.getId(),
                 deadline.toEpochMilli(), new RetryBudget("intake-retry-budget.v1", 2, 3, 1), null, target);
@@ -491,6 +504,46 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         } catch (java.io.IOException error) {
             throw new IllegalStateException("target Intake dossier is not valid JSON", error);
         }
+    }
+
+    static IntakeParallelTurnContext frozenParallelTurnContext(
+            TargetIntakeMessageRequest request,
+            long eventSequence,
+            String snapshotSha256,
+            String eventSha256,
+            JsonNode previousDossier,
+            TargetIntakeRuntimePins pins) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(pins, "pins");
+        if (request.sourceType() != TargetIntakeMessageRequest.SourceType.ROOM_MESSAGE) {
+            return null;
+        }
+        return new IntakeParallelTurnContext(
+                IntakeParallelTurnContext.SCHEMA_VERSION,
+                IntakeParallelTurnContext.SOURCE_TYPE,
+                request.messageId(),
+                request.text(),
+                IntakeParallelTurnContext.messageHash(request.text()),
+                eventSequence,
+                previousDossier,
+                ContractJson.sha256Hex(previousDossier),
+                snapshotSha256,
+                eventSha256,
+                pins.executionProviderId(),
+                pins.modelProfileId());
+    }
+
+    static String snapshotBindingId(
+            String registrationId,
+            String messageIdentity,
+            TargetIntakeMessageRequest request) {
+        Objects.requireNonNull(registrationId, "registrationId");
+        Objects.requireNonNull(messageIdentity, "messageIdentity");
+        Objects.requireNonNull(request, "request");
+        String authority = request.sourceType() == TargetIntakeMessageRequest.SourceType.ROOM_MESSAGE
+                ? registrationId + "\n" + messageIdentity
+                : registrationId;
+        return "target-intake-snapshot:" + token(authority);
     }
 
     private static void putIfPresent(ObjectNode target, String field, String value) {

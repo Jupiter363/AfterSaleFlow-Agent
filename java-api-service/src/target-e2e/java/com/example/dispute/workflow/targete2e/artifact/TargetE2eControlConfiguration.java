@@ -608,6 +608,7 @@ public class TargetE2eControlConfiguration {
         required(environment, "target.e2e.intake.agent-profile-id"),
         required(environment, "target.e2e.intake.prompt-version"),
         required(environment, "target.e2e.intake.model-profile-id"),
+        required(environment, "target.e2e.intake.execution-provider-id"),
         required(environment, "target.e2e.intake.policy-version"),
         required(environment, "target.e2e.intake.guardrail-version"),
         required(environment, "target.e2e.intake.tool-policy-version"),

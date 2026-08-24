@@ -112,7 +112,7 @@ public class TargetE2eEvidenceManifestPublisherCrossLanguageTest {
 
   private static TargetIntakeRuntimePins pins() {
     return new TargetIntakeRuntimePins("case-build", "agent-build", "a".repeat(64), "graph-build",
-        "b".repeat(64), "agent-v1", "prompt-v1", "model-v1", "policy-v1", "guardrail-v1",
+        "b".repeat(64), "agent-v1", "prompt-v1", "model-v1", "litellm", "policy-v1", "guardrail-v1",
         "tools-v1", "memory-v1", KEY_ID);
   }
 

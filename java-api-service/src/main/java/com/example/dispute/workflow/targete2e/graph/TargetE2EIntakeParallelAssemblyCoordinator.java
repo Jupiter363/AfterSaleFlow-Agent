@@ -45,10 +45,10 @@ import java.util.Optional;
 public final class TargetE2EIntakeParallelAssemblyCoordinator {
 
     public static final String AGENT_PROFILE_ID =
-            "dispute-intake-officer.parallel-frames.v1";
+            ExecuteAgentRunRequest.PARALLEL_INTAKE_AGENT_PROFILE_ID;
     public static final String EXECUTION_PROFILE_ID = "PARALLEL_FRAMES_V1";
     public static final String EXECUTION_OUTPUT_SCHEMA =
-            "target-e2e-room-proposal-source.v2";
+            ExecuteAgentRunRequest.PARALLEL_INTAKE_OUTPUT_SCHEMA;
     private static final String PROPOSAL_PAYLOAD_SCHEMA = "intake-turn-proposal.v2";
     private static final String TARGET_PROPOSAL_SCHEMA = "target-e2e-intake-proposal.v1";
     private static final String READY_RACE_CODE = "INTAKE_PARALLEL_ASSEMBLY_NOT_COLLECTING";

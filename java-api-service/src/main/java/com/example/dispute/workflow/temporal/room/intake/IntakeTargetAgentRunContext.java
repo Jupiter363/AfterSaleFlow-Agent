@@ -24,11 +24,47 @@ public record IntakeTargetAgentRunContext(
     String graphCodeBuildId,
     String commandHash,
     String commandEnvelopeHash,
-    ExecuteAgentRunRequest request) {
+    ExecuteAgentRunRequest request,
+    IntakeParallelTurnContext parallelTurnContext) {
 
   public static final String TARGET_LANE = "TARGET_E2E_CANDIDATE";
   public static final String INITIAL_SCHEMA_VERSION = "intake-target-agent-run-context.v1";
   public static final String RETRY_SCHEMA_VERSION = "intake-target-agent-run-context.v2";
+
+  public IntakeTargetAgentRunContext(
+      String schemaVersion,
+      String executionLane,
+      String activationId,
+      String activationManifestHash,
+      long roomFencingToken,
+      long expectedProcessRevision,
+      long expectedRoomRevision,
+      String caseBuildId,
+      String controlBuildId,
+      String agentBuildId,
+      String graphBindingHash,
+      String graphCodeBuildId,
+      String commandHash,
+      String commandEnvelopeHash,
+      ExecuteAgentRunRequest request) {
+    this(
+        schemaVersion,
+        executionLane,
+        activationId,
+        activationManifestHash,
+        roomFencingToken,
+        expectedProcessRevision,
+        expectedRoomRevision,
+        caseBuildId,
+        controlBuildId,
+        agentBuildId,
+        graphBindingHash,
+        graphCodeBuildId,
+        commandHash,
+        commandEnvelopeHash,
+        request,
+        null);
+  }
 
   public IntakeTargetAgentRunContext {
     if (!INITIAL_SCHEMA_VERSION.equals(schemaVersion)
@@ -66,6 +102,14 @@ public record IntakeTargetAgentRunContext(
     }
     requireHash(request.logicalInputHash(), "logicalInputHash");
     requireHash(graphCommand.requestHash(), "graph command requestHash");
+    if (ExecuteAgentRunRequest.isParallelIntakeCommand(graphCommand)) {
+      Objects.requireNonNull(
+              parallelTurnContext,
+              "parallel Intake AgentRun requires frozen per-command turn context")
+          .requireMatches(graphCommand);
+    } else if (parallelTurnContext != null) {
+      parallelTurnContext.requireMatches(graphCommand);
+    }
   }
 
   public void requireMatches(
