@@ -1313,3 +1313,13 @@
 - Root cause and evidence: The recovery candidate selection admits a run whose global terminal stream event already exists, while `JpaAgentRunLedger.requireRecoveryTerminalPosition` rejects that same state before `terminalizeV2RecoveryCandidate`. The selector and terminalization boundary therefore disagree on whether an existing global terminal event is recoverable.
 - Impact: Historical stale-run reconciliation emits repeated scheduled-task errors and cannot converge that candidate; fresh requests remain serviceable, but any new run entering the same split state could lose automatic recovery progress.
 - Identifying metadata: observed 2026-08-24 at 19:37 CST; API PID `75264`; activation `p9act.v1.c039c93da0c89267127b15c357ed4630`; run `target-hearing-run:24afa4da7d3732b4ad7d2bfa8f116016`; rejecting method `JpaAgentRunLedger.requireRecoveryTerminalPosition`.
+
+## P0-20260825-INTAKE-PARALLEL-RUNTIME-INTEGRATION-INCOMPLETE
+
+- Severity: P0
+- Status: CONFIRMED / IMPLEMENTATION_IN_PROGRESS
+- Component: Intake exact-three parallel AgentRun runtime integration
+- Confirmed fact: The technical V4 frame contract, exact-three staging, immutable READY artifacts, and Java assembly coordinator exist, but no production runtime path can yet execute that profile end to end. `ExecuteAgentRunRequest` and the canonical Intake materializer still admit only `agent-stream.v3`; the only configured execution gateway consumes legacy `AgentStreamEvent`; no V4 terminal append/replay owner exists; and the coordinator's trusted per-command context resolver has no production implementation or bean.
+- Root cause and evidence: The parallel frame work was intentionally delivered in isolated slices before activation. `ExecuteAgentRunRequest` rejects non-v3 protocols, `CanonicalTargetIntakeMaterializer` creates V3 logical runs and requests, `DurableAgentRunExecutionGateway` owns one V3 accumulator/client path, while `TargetE2EIntakeParallelAssemblyCoordinator` only publishes technical READY artifacts and explicitly does not append FINAL or advance RESULT_READY. The frozen initial snapshot's `current_dossier` is replayed on later turns, so it cannot serve as authoritative previous-turn context for the new coordinator.
+- Impact: Activating the parallel profile now would either be rejected before execution or bypass the unique durable FINAL/RESULT_READY and frozen-context authorities; the three-frame refactor is not eligible for integrated UAT until these runtime boundaries are connected.
+- Identifying metadata: observed 2026-08-25; execution profile `PARALLEL_FRAMES_V1`; agent profile `dispute-intake-officer.parallel-frames.v1`; technical protocols/artifacts `agent-stream.v4`, `intake-turn-proposal.v2`, `room-graph-result.v1`.
