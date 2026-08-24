@@ -31,6 +31,7 @@ MERCHANT_INTAKE_ANSWER = os.environ.get(
         "仓库交接、物流轨迹和客服记录可供核验，无其他事实或附加条件。"
     ),
 )
+MERCHANT_INTAKE_ANSWERS = (MERCHANT_INTAKE_ANSWER,)
 CONFIRM_DISPUTE_TYPE = os.environ.get("UAT_CONFIRM_DISPUTE_TYPE", "DELIVERY_DELAY")
 CONFIRM_RISK_LEVEL = os.environ.get("UAT_CONFIRM_RISK_LEVEL", "MEDIUM")
 
@@ -120,7 +121,7 @@ def wait_run(ctx: Any, stage: str, run_id: str) -> dict[str, Any]:
         status = v(run, "status")
         if status == "COMPLETED":
             return run
-        if status == "FAILED":
+        if status not in {"PENDING", "RUNNING"}:
             raise RuntimeError(f"{stage} failed: {json.dumps(run, ensure_ascii=False)}")
         ctx.deadline.pause(stage, 0.25)
 
@@ -311,14 +312,20 @@ def complete_merchant_intake() -> None:
     )
 
     source_turn = intake_source_turn(memory)
-    for follow_up in range(1, 7):
+    for follow_up in range(1, len(MERCHANT_INTAKE_ANSWERS) + 2):
         phase = actor_intake_phase(memory, "MERCHANT")
         if phase in {"HAS_REMARKS", "NO_EXTRA_REMARKS"}:
             break
         if phase == "WAITING_FOR_REMARK":
             answer = "无额外备注，确认按现有陈述提交。"
         else:
-            answer = MERCHANT_INTAKE_ANSWER
+            answer_index = follow_up - 1
+            if answer_index >= len(MERCHANT_INTAKE_ANSWERS):
+                raise RuntimeError(
+                    "merchant intake remains substantive after all question-aligned "
+                    "fixture answers were submitted"
+                )
+            answer = MERCHANT_INTAKE_ANSWERS[answer_index]
         source_turn += 1
         run_id = post_intake_text(
             MERCHANT, f"resume_merchant_follow_up_{follow_up}", answer
