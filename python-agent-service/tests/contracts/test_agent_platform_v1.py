@@ -13,7 +13,12 @@ from app.contracts.v1.codec import (
     canonical_sha256_omitting,
     canonicalize,
 )
-from app.contracts.v1.models import MODEL_BY_SCHEMA, GraphReconcileResponse, RoomGraphCommand
+from app.contracts.v1.models import (
+    MODEL_BY_SCHEMA,
+    AgentStreamEventV4,
+    GraphReconcileResponse,
+    RoomGraphCommand,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_ROOT = ROOT / "contracts/agent-platform/v1"
@@ -46,6 +51,55 @@ def test_invalid_shared_fixture_fails_closed(path: Path, codec: ContractCodec) -
 def test_unknown_schema_file_fails_closed(codec: ContractCodec) -> None:
     with pytest.raises(ValueError, match="unknown contract schema"):
         codec.decode("room-graph-command.v99.schema.json", {})
+
+
+def test_parallel_stream_projection_binds_local_cursor(codec: ContractCodec) -> None:
+    fixture = json.loads(
+        (FIXTURE_ROOT / "valid/agent-stream-event-v4-valid.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    invalid = deepcopy(fixture["instance"])
+    invalid["payload"]["next_local_index"] = 2
+
+    with pytest.raises(ValueError, match="next_local_index"):
+        codec.decode(fixture["schema"], invalid)
+
+
+def test_parallel_stream_generation_reset_is_adjacent(codec: ContractCodec) -> None:
+    event = {
+        "schema_version": "agent-stream.v4",
+        "run_id": "run-parallel-001",
+        "attempt_id": "attempt-parallel-001",
+        "sequence_no": 4,
+        "event_type": "frame_generation_reset",
+        "audience": "USER",
+        "occurred_at": "2026-08-24T08:00:01Z",
+        "payload": {
+            "old_frame_id": "frame-dialogue-001",
+            "new_frame_id": "frame-dialogue-003",
+            "frame_type": "DIALOGUE_FRAME",
+            "old_generation": 1,
+            "new_generation": 3,
+            "reason_code": "OUTPUT_SCHEMA_INVALID",
+            "delivery_class": "DURABLE_CONTROL",
+        },
+    }
+
+    with pytest.raises(ValueError, match="new_generation"):
+        codec.decode("agent-stream-event-v4.schema.json", event)
+
+
+def test_parallel_stream_uses_a_separate_model_from_v3(codec: ContractCodec) -> None:
+    fixture = json.loads(
+        (FIXTURE_ROOT / "valid/agent-stream-event-v4-valid.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    decoded = codec.decode(fixture["schema"], fixture["instance"])
+
+    assert isinstance(decoded, AgentStreamEventV4)
 
 
 def test_valid_room_graph_command_uses_opaque_identity_and_exact_self_hash(

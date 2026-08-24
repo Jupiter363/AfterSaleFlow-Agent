@@ -283,6 +283,226 @@ class AgentStreamEvent(StrictContractModel):
         return self
 
 
+ParallelFrameType = Literal[
+    "DIALOGUE_FRAME",
+    "DOSSIER_FRAME",
+    "QUALITY_FRAME",
+]
+ParallelFrameDeliveryClass = Literal[
+    "DURABLE_CONTROL",
+    "DURABLE_PREVIEW",
+    "DURABLE_STAGING",
+    "DURABLE_TERMINAL",
+]
+ParallelFrameValueKind = Literal["TEXT", "JSON_VALUE"]
+ParallelStreamEventType = Literal[
+    "public_frame_start",
+    "public_frame_projection_item",
+    "active_frame_snapshot",
+    "frame_generation_reset",
+    "public_frame_sealed",
+    "public_frame_interrupted",
+    "usage",
+    "final",
+    "error",
+]
+
+
+class AgentStreamPayloadV4(StrictContractModel):
+    frame_id: Identifier | None = None
+    frame_type: ParallelFrameType | None = None
+    generation: int | None = Field(default=None, ge=1, le=16)
+    frame_set_receipt_id: Identifier | None = None
+    projection_registry_version: Identifier | None = None
+    delivery_class: ParallelFrameDeliveryClass | None = None
+    local_index: int | None = Field(default=None, ge=0, le=255)
+    next_local_index: int | None = Field(default=None, ge=0, le=256)
+    canonical_item_id: Identifier | None = None
+    projection_kind: Identifier | None = None
+    projection_path_id: Identifier | None = None
+    value_kind: ParallelFrameValueKind | None = None
+    canonical_value_json: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=8192),
+    ] | None = None
+    public_text: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=8192),
+    ] | None = None
+    item_sha256: Sha256 | None = None
+    frame_revision: int | None = Field(default=None, ge=1, le=1024)
+    projection_sha256: Sha256 | None = None
+    old_frame_id: Identifier | None = None
+    new_frame_id: Identifier | None = None
+    old_generation: int | None = Field(default=None, ge=1, le=16)
+    new_generation: int | None = Field(default=None, ge=1, le=16)
+    reason_code: Identifier | None = None
+    frame_receipt_id: Identifier | None = None
+    result_sha256: Sha256 | None = None
+    public_projection_sha256: Sha256 | None = None
+    retryable: bool | None = None
+    usage: Usage | None = None
+    final_receipt_id: Identifier | None = None
+    final_result_hash: Sha256 | None = None
+    error_code: Identifier | None = None
+
+
+AGENT_STREAM_V4_PAYLOAD_FIELDS: Final[Mapping[str, frozenset[str]]] = (
+    MappingProxyType(
+        {
+            "public_frame_start": frozenset(
+                {
+                    "frame_id",
+                    "frame_type",
+                    "generation",
+                    "frame_set_receipt_id",
+                    "projection_registry_version",
+                    "delivery_class",
+                }
+            ),
+            "public_frame_projection_item": frozenset(
+                {
+                    "frame_id",
+                    "frame_type",
+                    "generation",
+                    "local_index",
+                    "next_local_index",
+                    "canonical_item_id",
+                    "projection_kind",
+                    "projection_path_id",
+                    "value_kind",
+                    "item_sha256",
+                    "delivery_class",
+                }
+            ),
+            "active_frame_snapshot": frozenset(
+                {
+                    "frame_id",
+                    "frame_type",
+                    "generation",
+                    "frame_revision",
+                    "next_local_index",
+                    "projection_sha256",
+                    "delivery_class",
+                }
+            ),
+            "frame_generation_reset": frozenset(
+                {
+                    "old_frame_id",
+                    "new_frame_id",
+                    "frame_type",
+                    "old_generation",
+                    "new_generation",
+                    "reason_code",
+                    "delivery_class",
+                }
+            ),
+            "public_frame_sealed": frozenset(
+                {
+                    "frame_id",
+                    "frame_type",
+                    "generation",
+                    "frame_receipt_id",
+                    "next_local_index",
+                    "result_sha256",
+                    "public_projection_sha256",
+                    "delivery_class",
+                }
+            ),
+            "public_frame_interrupted": frozenset(
+                {
+                    "frame_id",
+                    "frame_type",
+                    "generation",
+                    "next_local_index",
+                    "reason_code",
+                    "retryable",
+                    "delivery_class",
+                }
+            ),
+            "usage": frozenset(
+                {"frame_type", "generation", "usage", "delivery_class"}
+            ),
+            "final": frozenset(
+                {"final_receipt_id", "final_result_hash", "delivery_class"}
+            ),
+            "error": frozenset(
+                {"error_code", "retryable", "delivery_class"}
+            ),
+        }
+    )
+)
+
+
+AGENT_STREAM_V4_DELIVERY_CLASS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "public_frame_start": "DURABLE_CONTROL",
+        "public_frame_projection_item": "DURABLE_PREVIEW",
+        "active_frame_snapshot": "DURABLE_PREVIEW",
+        "frame_generation_reset": "DURABLE_CONTROL",
+        "public_frame_sealed": "DURABLE_STAGING",
+        "public_frame_interrupted": "DURABLE_CONTROL",
+        "usage": "DURABLE_STAGING",
+        "final": "DURABLE_TERMINAL",
+        "error": "DURABLE_TERMINAL",
+    }
+)
+
+
+class AgentStreamEventV4(StrictContractModel):
+    schema_version: Literal["agent-stream.v4"]
+    run_id: Identifier
+    attempt_id: Identifier
+    sequence_no: int = Field(ge=0)
+    event_type: ParallelStreamEventType
+    audience: Audience
+    occurred_at: AwareDatetime
+    payload: AgentStreamPayloadV4
+
+    @model_validator(mode="after")
+    def validate_event_payload(self) -> AgentStreamEventV4:
+        required = set(AGENT_STREAM_V4_PAYLOAD_FIELDS[self.event_type])
+        if self.event_type == "public_frame_projection_item":
+            if self.payload.value_kind == "TEXT":
+                required.add("public_text")
+            elif self.payload.value_kind == "JSON_VALUE":
+                required.add("canonical_value_json")
+
+        present = set(self.payload.model_dump(exclude_none=True))
+        missing = required - present
+        if missing:
+            raise ValueError(f"{self.event_type} payload missing {sorted(missing)}")
+        unexpected = present - required
+        if unexpected:
+            raise ValueError(
+                f"{self.event_type} payload contains incompatible fields "
+                f"{sorted(unexpected)}"
+            )
+
+        expected_delivery = AGENT_STREAM_V4_DELIVERY_CLASS[self.event_type]
+        if self.payload.delivery_class != expected_delivery:
+            raise ValueError(
+                f"{self.event_type} delivery_class must be {expected_delivery}"
+            )
+        if (
+            self.event_type == "public_frame_projection_item"
+            and self.payload.next_local_index != self.payload.local_index + 1
+        ):
+            raise ValueError("next_local_index must equal local_index + 1")
+        if (
+            self.event_type == "frame_generation_reset"
+            and self.payload.new_generation != self.payload.old_generation + 1
+        ):
+            raise ValueError("new_generation must equal old_generation + 1")
+        if (
+            self.event_type == "usage"
+            and self.payload.usage.total_tokens
+            != self.payload.usage.input_tokens + self.payload.usage.output_tokens
+        ):
+            raise ValueError("usage total_tokens must equal input_tokens + output_tokens")
+        return self
+
+
 class ActorScope(StrictContractModel):
     actor_id: Identifier
     actor_role: ActorRole
@@ -547,5 +767,6 @@ MODEL_BY_SCHEMA: dict[str, type[StrictContractModel]] = {
     "artifact-ref.schema.json": ArtifactRef,
     "process-projection.schema.json": ProcessProjection,
     "agent-stream-event.schema.json": AgentStreamEvent,
+    "agent-stream-event-v4.schema.json": AgentStreamEventV4,
     "agent-execution-manifest.schema.json": AgentExecutionManifest,
 }

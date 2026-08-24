@@ -131,7 +131,8 @@ public final class ContractTypes {
     public enum AgentRunProtocol {
         V1("agent_stream.v1"),
         V2("agent-stream.v2"),
-        V3("agent-stream.v3");
+        V3("agent-stream.v3"),
+        V4("agent-stream.v4");
 
         private final String wireValue;
 

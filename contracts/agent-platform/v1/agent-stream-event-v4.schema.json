@@ -1,0 +1,313 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/v1/agent-stream-event-v4.schema.json",
+  "title": "AgentStreamEvent v4",
+  "description": "Durable multiplex public stream event for the Intake parallel-frame execution profile.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "attempt_id",
+    "sequence_no",
+    "event_type",
+    "audience",
+    "occurred_at",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "agent-stream.v4"},
+    "run_id": {"$ref": "#/$defs/identifier"},
+    "attempt_id": {"$ref": "#/$defs/identifier"},
+    "sequence_no": {"type": "integer", "minimum": 0},
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "public_frame_start",
+        "public_frame_projection_item",
+        "active_frame_snapshot",
+        "frame_generation_reset",
+        "public_frame_sealed",
+        "public_frame_interrupted",
+        "usage",
+        "final",
+        "error"
+      ]
+    },
+    "audience": {
+      "type": "string",
+      "enum": ["USER", "MERCHANT", "PLATFORM_REVIEWER", "SYSTEM"]
+    },
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "payload": {"type": "object"}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "event_type": {"const": "public_frame_start"},
+        "payload": {"$ref": "#/$defs/public_frame_start_payload"}
+      }
+    },
+    {
+      "properties": {
+        "event_type": {"const": "public_frame_projection_item"},
+        "payload": {"$ref": "#/$defs/public_frame_projection_item_payload"}
+      }
+    },
+    {
+      "properties": {
+        "event_type": {"const": "active_frame_snapshot"},
+        "payload": {"$ref": "#/$defs/active_frame_snapshot_payload"}
+      }
+    },
+    {
+      "properties": {
+        "event_type": {"const": "frame_generation_reset"},
+        "payload": {"$ref": "#/$defs/frame_generation_reset_payload"}
+      }
+    },
+    {
+      "properties": {
+        "event_type": {"const": "public_frame_sealed"},
+        "payload": {"$ref": "#/$defs/public_frame_sealed_payload"}
+      }
+    },
+    {
+      "properties": {
+        "event_type": {"const": "public_frame_interrupted"},
+        "payload": {"$ref": "#/$defs/public_frame_interrupted_payload"}
+      }
+    },
+    {
+      "properties": {
+        "event_type": {"const": "usage"},
+        "payload": {"$ref": "#/$defs/usage_payload"}
+      }
+    },
+    {
+      "properties": {
+        "event_type": {"const": "final"},
+        "payload": {"$ref": "#/$defs/final_payload"}
+      }
+    },
+    {
+      "properties": {
+        "event_type": {"const": "error"},
+        "payload": {"$ref": "#/$defs/error_payload"}
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "frame_type": {
+      "type": "string",
+      "enum": ["DIALOGUE_FRAME", "DOSSIER_FRAME", "QUALITY_FRAME"]
+    },
+    "generation": {"type": "integer", "minimum": 1, "maximum": 16},
+    "delivery_control": {"type": "string", "const": "DURABLE_CONTROL"},
+    "delivery_preview": {"type": "string", "const": "DURABLE_PREVIEW"},
+    "delivery_staging": {"type": "string", "const": "DURABLE_STAGING"},
+    "delivery_terminal": {"type": "string", "const": "DURABLE_TERMINAL"},
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_tokens", "output_tokens", "total_tokens"],
+      "properties": {
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0},
+        "total_tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "public_frame_start_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "frame_type",
+        "generation",
+        "frame_set_receipt_id",
+        "projection_registry_version",
+        "delivery_class"
+      ],
+      "properties": {
+        "frame_id": {"$ref": "#/$defs/identifier"},
+        "frame_type": {"$ref": "#/$defs/frame_type"},
+        "generation": {"$ref": "#/$defs/generation"},
+        "frame_set_receipt_id": {"$ref": "#/$defs/identifier"},
+        "projection_registry_version": {"$ref": "#/$defs/identifier"},
+        "delivery_class": {"$ref": "#/$defs/delivery_control"}
+      }
+    },
+    "public_frame_projection_item_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "frame_type",
+        "generation",
+        "local_index",
+        "next_local_index",
+        "canonical_item_id",
+        "projection_kind",
+        "projection_path_id",
+        "value_kind",
+        "item_sha256",
+        "delivery_class"
+      ],
+      "properties": {
+        "frame_id": {"$ref": "#/$defs/identifier"},
+        "frame_type": {"$ref": "#/$defs/frame_type"},
+        "generation": {"$ref": "#/$defs/generation"},
+        "local_index": {"type": "integer", "minimum": 0, "maximum": 255},
+        "next_local_index": {"type": "integer", "minimum": 1, "maximum": 256},
+        "canonical_item_id": {"$ref": "#/$defs/identifier"},
+        "projection_kind": {"$ref": "#/$defs/identifier"},
+        "projection_path_id": {"$ref": "#/$defs/identifier"},
+        "value_kind": {"type": "string", "enum": ["TEXT", "JSON_VALUE"]},
+        "canonical_value_json": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "public_text": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "item_sha256": {"$ref": "#/$defs/sha256"},
+        "delivery_class": {"$ref": "#/$defs/delivery_preview"}
+      },
+      "oneOf": [
+        {
+          "properties": {"value_kind": {"const": "TEXT"}},
+          "required": ["public_text"],
+          "not": {"required": ["canonical_value_json"]}
+        },
+        {
+          "properties": {"value_kind": {"const": "JSON_VALUE"}},
+          "required": ["canonical_value_json"],
+          "not": {"required": ["public_text"]}
+        }
+      ]
+    },
+    "active_frame_snapshot_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "frame_type",
+        "generation",
+        "frame_revision",
+        "next_local_index",
+        "projection_sha256",
+        "delivery_class"
+      ],
+      "properties": {
+        "frame_id": {"$ref": "#/$defs/identifier"},
+        "frame_type": {"$ref": "#/$defs/frame_type"},
+        "generation": {"$ref": "#/$defs/generation"},
+        "frame_revision": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "next_local_index": {"type": "integer", "minimum": 0, "maximum": 256},
+        "projection_sha256": {"$ref": "#/$defs/sha256"},
+        "delivery_class": {"$ref": "#/$defs/delivery_preview"}
+      }
+    },
+    "frame_generation_reset_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "old_frame_id",
+        "new_frame_id",
+        "frame_type",
+        "old_generation",
+        "new_generation",
+        "reason_code",
+        "delivery_class"
+      ],
+      "properties": {
+        "old_frame_id": {"$ref": "#/$defs/identifier"},
+        "new_frame_id": {"$ref": "#/$defs/identifier"},
+        "frame_type": {"$ref": "#/$defs/frame_type"},
+        "old_generation": {"$ref": "#/$defs/generation"},
+        "new_generation": {"$ref": "#/$defs/generation"},
+        "reason_code": {"$ref": "#/$defs/identifier"},
+        "delivery_class": {"$ref": "#/$defs/delivery_control"}
+      }
+    },
+    "public_frame_sealed_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "frame_type",
+        "generation",
+        "frame_receipt_id",
+        "next_local_index",
+        "result_sha256",
+        "public_projection_sha256",
+        "delivery_class"
+      ],
+      "properties": {
+        "frame_id": {"$ref": "#/$defs/identifier"},
+        "frame_type": {"$ref": "#/$defs/frame_type"},
+        "generation": {"$ref": "#/$defs/generation"},
+        "frame_receipt_id": {"$ref": "#/$defs/identifier"},
+        "next_local_index": {"type": "integer", "minimum": 0, "maximum": 256},
+        "result_sha256": {"$ref": "#/$defs/sha256"},
+        "public_projection_sha256": {"$ref": "#/$defs/sha256"},
+        "delivery_class": {"$ref": "#/$defs/delivery_staging"}
+      }
+    },
+    "public_frame_interrupted_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "frame_type",
+        "generation",
+        "next_local_index",
+        "reason_code",
+        "retryable",
+        "delivery_class"
+      ],
+      "properties": {
+        "frame_id": {"$ref": "#/$defs/identifier"},
+        "frame_type": {"$ref": "#/$defs/frame_type"},
+        "generation": {"$ref": "#/$defs/generation"},
+        "next_local_index": {"type": "integer", "minimum": 0, "maximum": 256},
+        "reason_code": {"$ref": "#/$defs/identifier"},
+        "retryable": {"type": "boolean"},
+        "delivery_class": {"$ref": "#/$defs/delivery_control"}
+      }
+    },
+    "usage_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame_type", "generation", "usage", "delivery_class"],
+      "properties": {
+        "frame_type": {"$ref": "#/$defs/frame_type"},
+        "generation": {"$ref": "#/$defs/generation"},
+        "usage": {"$ref": "#/$defs/usage"},
+        "delivery_class": {"$ref": "#/$defs/delivery_staging"}
+      }
+    },
+    "final_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["final_receipt_id", "final_result_hash", "delivery_class"],
+      "properties": {
+        "final_receipt_id": {"$ref": "#/$defs/identifier"},
+        "final_result_hash": {"$ref": "#/$defs/sha256"},
+        "delivery_class": {"$ref": "#/$defs/delivery_terminal"}
+      }
+    },
+    "error_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["error_code", "retryable", "delivery_class"],
+      "properties": {
+        "error_code": {"$ref": "#/$defs/identifier"},
+        "retryable": {"type": "boolean"},
+        "delivery_class": {"$ref": "#/$defs/delivery_terminal"}
+      }
+    }
+  }
+}

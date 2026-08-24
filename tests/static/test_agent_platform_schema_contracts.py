@@ -16,6 +16,7 @@ CONTRACT_ROOT = ROOT / "contracts/agent-platform/v1"
 FIXTURE_ROOT = CONTRACT_ROOT / "fixtures"
 EXPECTED_SCHEMAS = {
     "agent-execution-manifest.schema.json",
+    "agent-stream-event-v4.schema.json",
     "agent-stream-event.schema.json",
     "artifact-ref.schema.json",
     "case-command-ref.schema.json",
@@ -53,6 +54,9 @@ SUPPORTED_SCHEMA_KEYWORDS = {
     "anyOf",
     "allOf",
     "not",
+    "if",
+    "then",
+    "else",
 }
 
 
@@ -166,6 +170,16 @@ def _validate(
             forbidden_matched = False
         if forbidden_matched:
             raise ContractValidationError(f"{path}: forbidden schema matched")
+    if "if" in schema:
+        condition_matched = True
+        try:
+            _validate(instance, schema["if"], root_schema, path)
+        except ContractValidationError:
+            condition_matched = False
+        if condition_matched and "then" in schema:
+            _validate(instance, schema["then"], root_schema, path)
+        elif not condition_matched and "else" in schema:
+            _validate(instance, schema["else"], root_schema, path)
 
     if "const" in schema and instance != schema["const"]:
         raise ContractValidationError(f"{path}: value does not match const")
@@ -245,6 +259,9 @@ def _assert_supported_schema(schema: dict) -> None:
             _assert_supported_schema(child)
     if isinstance(schema.get("not"), dict):
         _assert_supported_schema(schema["not"])
+    for keyword in ("if", "then", "else"):
+        if isinstance(schema.get(keyword), dict):
+            _assert_supported_schema(schema[keyword])
 
 
 def _restricted_jcs(value: object) -> str:

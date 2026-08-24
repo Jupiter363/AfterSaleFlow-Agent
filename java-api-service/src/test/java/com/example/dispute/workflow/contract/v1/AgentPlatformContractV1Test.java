@@ -36,6 +36,7 @@ class AgentPlatformContractV1Test {
                     "artifact-ref.schema.json", ArtifactRef.class,
                     "process-projection.schema.json", ProcessProjection.class,
                     "agent-stream-event.schema.json", AgentStreamEvent.class,
+                    "agent-stream-event-v4.schema.json", AgentStreamEventV4.class,
                     "agent-execution-manifest.schema.json", AgentExecutionManifest.class);
 
     private static AgentPlatformContractCodec codec;
@@ -111,6 +112,24 @@ class AgentPlatformContractV1Test {
                                         RoomGraphCommand.class))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("unknown contract schema");
+    }
+
+    @Test
+    void parallelStreamProjectionBindsItsLocalCursor() throws IOException {
+        JsonNode fixture =
+                MAPPER.readTree(
+                        FIXTURE_ROOT.resolve("valid/agent-stream-event-v4-valid.json").toFile());
+        ObjectNode instance = (ObjectNode) fixture.required("instance").deepCopy();
+        ((ObjectNode) instance.required("payload")).put("next_local_index", 2);
+
+        assertThatThrownBy(
+                        () ->
+                                codec.decode(
+                                        fixture.required("schema").asText(),
+                                        instance,
+                                        AgentStreamEventV4.class))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot be decoded");
     }
 
     @Test

@@ -34,6 +34,7 @@ public final class AgentPlatformContractCodec {
                     "artifact-ref.schema.json", ArtifactRef.class,
                     "process-projection.schema.json", ProcessProjection.class,
                     "agent-stream-event.schema.json", AgentStreamEvent.class,
+                    "agent-stream-event-v4.schema.json", AgentStreamEventV4.class,
                     "agent-execution-manifest.schema.json", AgentExecutionManifest.class);
 
     private final ObjectMapper mapper;

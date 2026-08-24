@@ -1,0 +1,27 @@
+{
+  "case": "parallel intake dialogue projection item",
+  "schema": "agent-stream-event-v4.schema.json",
+  "instance": {
+    "schema_version": "agent-stream.v4",
+    "run_id": "run-parallel-001",
+    "attempt_id": "attempt-parallel-001",
+    "sequence_no": 3,
+    "event_type": "public_frame_projection_item",
+    "audience": "USER",
+    "occurred_at": "2026-08-24T08:00:00Z",
+    "payload": {
+      "frame_id": "frame-dialogue-001",
+      "frame_type": "DIALOGUE_FRAME",
+      "generation": 1,
+      "local_index": 0,
+      "next_local_index": 1,
+      "canonical_item_id": "dialogue-room-utterance",
+      "projection_kind": "ROOM_UTTERANCE",
+      "projection_path_id": "intake.dialogue.room_utterance",
+      "value_kind": "TEXT",
+      "public_text": "已记录本轮说明。",
+      "item_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "delivery_class": "DURABLE_PREVIEW"
+    }
+  }
+}

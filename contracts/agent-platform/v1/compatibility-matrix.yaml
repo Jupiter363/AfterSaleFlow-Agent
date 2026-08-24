@@ -89,6 +89,17 @@
       "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
     },
     {
+      "schema_file": "agent-stream-event-v4.schema.json",
+      "schema_version": "agent-stream.v4",
+      "max_serialized_bytes": 32768,
+      "current_reader": "ACCEPT",
+      "previous_reader": "NONE_FOR_INITIAL_VERSION",
+      "future_reader": "REJECT",
+      "writer": "CURRENT_ONLY",
+      "additive_optional_fields": "REQUIRES_NEW_SCHEMA_VERSION",
+      "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
+    },
+    {
       "schema_file": "agent-execution-manifest.schema.json",
       "schema_version": "agent-execution-manifest.v1",
       "max_serialized_bytes": 131072,
