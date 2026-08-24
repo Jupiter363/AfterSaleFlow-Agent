@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.contracts.v1.codec import canonical_sha256
+from app.contracts.v1.models import RoomGraphCommand
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.parallel_contracts import (
     FRAME_OUTPUT_SCHEMA,
@@ -34,9 +37,27 @@ from app.graphs.intake.parallel_graph import (
     compile_parallel_frame_graphs,
 )
 from app.graph_runtime.checkpoint import (
+    TECHNICAL_CHILD_CHECKPOINT_CONTEXT_KEY,
     TechnicalChildCheckpointBinding,
     bind_technical_child_checkpoint,
 )
+from app.graph_runtime.errors import GraphContractError
+from app.graph_runtime.gateway import GatewayExecution
+from app.graph_runtime.identity import (
+    ActorScopeBinding,
+    RoomType,
+    ThreadIdentity,
+    ThreadLifecycle,
+    ThreadRecord,
+)
+from app.graph_runtime.intake_parallel_runtime import (
+    PARALLEL_INTAKE_AGENT_PROFILE_ID,
+    PARALLEL_INTAKE_OUTPUT_SCHEMA,
+    build_parallel_checkpoint_configs,
+)
+from app.graph_runtime.lease import LeaseRecord
+from app.graph_runtime.ledger import AttemptRecord, AttemptStatus
+from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.model_runner import (
     HarnessGeneration,
@@ -263,6 +284,41 @@ async def test_parallel_children_reject_shared_checkpoint_namespace() -> None:
         )
 
 
+def test_checkpoint_config_issuer_binds_exact_execution_and_three_private_namespaces() -> None:
+    requests, _ = _requests_and_contexts()
+    execution = _parallel_execution(requests)
+
+    configs = build_parallel_checkpoint_configs(execution, requests)
+
+    assert set(configs) == set(FRAME_TYPES)
+    bindings = {
+        frame_type: config["configurable"][
+            TECHNICAL_CHILD_CHECKPOINT_CONTEXT_KEY
+        ]
+        for frame_type, config in configs.items()
+    }
+    assert all(
+        config["configurable"]["checkpoint_ns"] == ""
+        for config in configs.values()
+    )
+    assert all(
+        config["configurable"]["thread_id"] == execution.fence.thread_id
+        for config in configs.values()
+    )
+    assert len({binding.checkpoint_ns for binding in bindings.values()}) == 3
+    assert all(binding.cognitive_revision == 9 for binding in bindings.values())
+    assert all(
+        binding.frame_type == frame_type for frame_type, binding in bindings.items()
+    )
+
+    drifted = list(requests)
+    drifted[0] = drifted[0].model_copy(
+        update={"command_request_sha256": "c" * 64}
+    )
+    with pytest.raises(GraphContractError, match="cross turn authority"):
+        build_parallel_checkpoint_configs(execution, tuple(drifted))
+
+
 @pytest.mark.asyncio
 async def test_one_lane_reset_does_not_change_sibling_generation() -> None:
     orchestrator = ParallelIntakeFrameOrchestrator(
@@ -473,6 +529,135 @@ def _requests_and_contexts() -> tuple[
         for frame_type in FRAME_TYPES
     }
     return requests, contexts
+
+
+def _parallel_execution(
+    requests: tuple[ParallelFrameExecutionRequest, ...],
+) -> GatewayExecution:
+    request = requests[0]
+    fixture = json.loads(
+        (
+            ROOT
+            / "contracts"
+            / "agent-platform"
+            / "v1"
+            / "fixtures"
+            / "valid"
+            / "room-graph-command-valid.json"
+        ).read_text(encoding="utf-8")
+    )["instance"]
+    fixture.update(
+        {
+            "command_id": request.command_id,
+            "logical_run_id": request.run_id,
+            "attempt_id": request.attempt_id,
+            "case_id": request.case_id,
+            "thread_id": "grt.v1." + "1" * 32,
+            "actor_scope": {
+                "actor_id": request.actor_id,
+                "actor_role": request.actor_role,
+                "audience": request.actor_role,
+                "capabilities": ["INTAKE_ROOM_WRITE"],
+            },
+            "event_ref": {
+                "artifact_id": "intake.event.parallel-1",
+                "schema_version": "intake-turn-event.v2",
+                "uri": "urn:intake:event:parallel-1",
+                "sha256": "e" * 64,
+                "size_bytes": 256,
+            },
+            "request_hash": request.command_request_sha256,
+        }
+    )
+    fixture["invocation_context"].update(
+        {
+            "agent_profile_id": PARALLEL_INTAKE_AGENT_PROFILE_ID,
+            "output_schema_version": PARALLEL_INTAKE_OUTPUT_SCHEMA,
+        }
+    )
+    command = RoomGraphCommand.model_validate(fixture)
+    actor_scope = ActorScopeBinding.from_json(
+        command.actor_scope.model_dump(mode="json")
+    )
+    identity = ThreadIdentity(
+        thread_id=command.thread_id,
+        tenant_surrogate=command.tenant_surrogate,
+        case_id=command.case_id,
+        room_type=RoomType.INTAKE,
+        room_epoch=command.room_epoch,
+        actor_scope=actor_scope,
+        agent_session_id="SESSION_PARALLEL_1",
+        shared_session=False,
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+    )
+    record = ThreadRecord(
+        identity=identity,
+        lifecycle=ThreadLifecycle.ACTIVE,
+        cognitive_revision=8,
+        last_checkpoint_ns="intake",
+        last_checkpoint_id="cp-8",
+    )
+    now = datetime.now(timezone.utc)
+    lease = LeaseRecord(
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        owner_id="worker-parallel-1",
+        fencing_token=4,
+        lease_expires_at=now + timedelta(seconds=30),
+        acquired_at=now,
+        renewed_at=now,
+        released_at=None,
+        cancelled_at=None,
+        cancelled_by_command_id=None,
+        revision=1,
+    )
+    attempt = AttemptRecord(
+        attempt_id=command.attempt_id,
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        attempt_no=1,
+        owner_id=lease.owner_id,
+        fencing_token=lease.fencing_token,
+        status=AttemptStatus.EXECUTING,
+        provider_call_count=0,
+        error_code=None,
+        error_classification=None,
+    )
+    fence = GraphFenceContext(
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        owner_id=lease.owner_id,
+        fencing_token=lease.fencing_token,
+        request_hash=command.request_hash,
+        room_epoch=command.room_epoch,
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        activation_id="p9act.v1." + "2" * 32,
+        room_fencing_token=7,
+        command_hash="3" * 64,
+        command_envelope_hash="4" * 64,
+        execution_provider="litellm",
+        execution_model="qwen3.7-max-2026-06-08",
+        environment_id="target-e2e-test",
+        environment_generation=1,
+        tenant_surrogate=command.tenant_surrogate,
+        case_id=command.case_id,
+        room_type=command.room_type,
+        binding_hash="5" * 64,
+        code_build_id="parallel-test-build",
+    )
+    admission = SimpleNamespace(command=command, thread=identity)
+    return GatewayExecution(
+        admission=admission,  # type: ignore[arg-type]
+        attempt=attempt,
+        lease=lease,
+        fence=fence,
+        thread_record=record,
+    )
 
 
 def _model_context() -> IntakeModelContextViewV1:
