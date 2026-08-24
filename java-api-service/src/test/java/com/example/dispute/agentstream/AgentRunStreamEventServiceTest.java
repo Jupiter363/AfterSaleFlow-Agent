@@ -36,7 +36,9 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSess
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
+import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunStreamProjection;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
@@ -229,6 +231,126 @@ class AgentRunStreamEventServiceTest {
         assertThat(replay.get(2).resetAttemptId()).isEqualTo(firstAttemptId);
         assertThat(replay.get(3).delta()).isEqualTo("new");
         assertThat(replay.get(3).audience()).isEqualTo("USER");
+    }
+
+    @Test
+    void v4ReplayUsesAnAttemptScopedCursorAndPreservesTypedFramePayloads() throws Exception {
+        AgentRunEntity run = v4Run();
+        AgentRunAttemptEntity attempt = v4Attempt();
+        AuthenticatedActor actor = allowV2(run);
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV4ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v4Event(
+                                run.getId(),
+                                attempt.getId(),
+                                0,
+                                AgentStreamEventV4.EventType.PUBLIC_FRAME_START,
+                                AgentStreamEventV4.Payload.frameStartPayload(
+                                        "FRAME_DIALOGUE_1",
+                                        AgentStreamEventV4.FrameType.DIALOGUE_FRAME,
+                                        1,
+                                        "FRAME_SET_RECEIPT_1",
+                                        "intake-parallel-projection-registry.v1")),
+                        v4Event(
+                                run.getId(),
+                                attempt.getId(),
+                                1,
+                                AgentStreamEventV4.EventType.PUBLIC_FRAME_PROJECTION_ITEM,
+                                AgentStreamEventV4.Payload.projectionItemPayload(
+                                        "FRAME_DIALOGUE_1",
+                                        AgentStreamEventV4.FrameType.DIALOGUE_FRAME,
+                                        1,
+                                        0,
+                                        1,
+                                        "dialogue.segment.0",
+                                        "DIALOGUE_SEGMENT",
+                                        "ROOM_UTTERANCE",
+                                        AgentStreamEventV4.ValueKind.TEXT,
+                                        null,
+                                        "已收到您的说明。",
+                                        "a".repeat(64)))));
+
+        List<AgentRunEventView> replay = service.replay(run.getId(), "-1", actor);
+
+        assertThat(replay).extracting(AgentRunEventView::cursor)
+                .containsExactly(
+                        "v4:" + attempt.getId() + ":0",
+                        "v4:" + attempt.getId() + ":1");
+        assertThat(replay).extracting(AgentRunEventView::type)
+                .containsExactly("public_frame_start", "public_frame_projection_item");
+        assertThat(replay.get(1).payload().path("frame_type").asText())
+                .isEqualTo("DIALOGUE_FRAME");
+        assertThat(replay.get(1).payload().path("public_text").asText())
+                .isEqualTo("已收到您的说明。");
+    }
+
+    @Test
+    void v4FinalRemainsHiddenUntilFormalCommit() throws Exception {
+        AgentRunEntity run = v4Run();
+        AgentRunAttemptEntity attempt = v4Attempt();
+        AuthenticatedActor actor = allowV2(run);
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV4ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v4Event(
+                                run.getId(),
+                                attempt.getId(),
+                                0,
+                                AgentStreamEventV4.EventType.PUBLIC_FRAME_START,
+                                AgentStreamEventV4.Payload.frameStartPayload(
+                                        "FRAME_DIALOGUE_1",
+                                        AgentStreamEventV4.FrameType.DIALOGUE_FRAME,
+                                        1,
+                                        "FRAME_SET_RECEIPT_1",
+                                        "intake-parallel-projection-registry.v1")),
+                        finalV4Event(run.getId(), attempt.getId(), 1)));
+
+        assertThat(service.replay(run.getId(), -1L, actor))
+                .extracting(AgentRunEventView::type)
+                .containsExactly("public_frame_start");
+    }
+
+    @Test
+    void matchingFormalCommitMakesV4FinalVisible() throws Exception {
+        AgentRunEntity run = v4Run();
+        AgentRunAttemptEntity attempt = v4Attempt();
+        markFinalCommitted(run, attempt.getId(), 1L);
+        AuthenticatedActor actor = allowV2(run);
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV4ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v4Event(
+                                run.getId(),
+                                attempt.getId(),
+                                0,
+                                AgentStreamEventV4.EventType.PUBLIC_FRAME_START,
+                                AgentStreamEventV4.Payload.frameStartPayload(
+                                        "FRAME_DIALOGUE_1",
+                                        AgentStreamEventV4.FrameType.DIALOGUE_FRAME,
+                                        1,
+                                        "FRAME_SET_RECEIPT_1",
+                                        "intake-parallel-projection-registry.v1")),
+                        finalV4Event(run.getId(), attempt.getId(), 1)));
+
+        assertThat(service.replay(run.getId(), -1L, actor))
+                .extracting(AgentRunEventView::type)
+                .containsExactly("public_frame_start", "final");
     }
 
     @Test
@@ -1350,6 +1472,66 @@ class AgentRunStreamEventServiceTest {
                 AgentRunEntity.logicalV3(AgentRunPersistenceFixtures.logicalRunV3());
         run.bindV3Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
         return run;
+    }
+
+    private AgentRunEntity v4Run() {
+        AgentRunEntity run =
+                AgentRunEntity.logicalV4(AgentRunPersistenceFixtures.logicalRunV4());
+        run.bindV4Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
+        return run;
+    }
+
+    private static AgentRunAttemptEntity v4Attempt() {
+        return AgentRunAttemptEntity.startV4(
+                AgentRunPersistenceFixtures.RUN_ID,
+                AgentRunPersistenceFixtures.parallelIntakeAllocation(),
+                AgentRunPersistenceFixtures.STARTED_AT);
+    }
+
+    private AgentRunStreamEventEntity v4Event(
+            String runId,
+            String attemptId,
+            long sequence,
+            AgentStreamEventV4.EventType eventType,
+            AgentStreamEventV4.Payload payload) throws Exception {
+        Instant occurredAt = Instant.parse("2026-07-19T02:00:00Z").plusSeconds(sequence);
+        AgentStreamEventV4 event = new AgentStreamEventV4(
+                AgentRunProtocol.V4.wireValue(),
+                runId,
+                attemptId,
+                sequence,
+                eventType,
+                Audience.USER,
+                occurredAt,
+                payload);
+        var json = objectMapper.valueToTree(event);
+        AgentRunStreamEventEntity entity = AgentRunStreamEventEntity.createV2(
+                "ARSE_V4_" + attemptId + '_' + sequence,
+                runId,
+                attemptId,
+                sequence,
+                eventType.wireValue(),
+                Audience.USER,
+                objectMapper.writeValueAsString(event),
+                ContractJson.sha256Hex(json));
+        ReflectionTestUtils.setField(entity, "streamProtocol", AgentRunProtocol.V4.wireValue());
+        ReflectionTestUtils.setField(
+                entity,
+                "createdAt",
+                occurredAt.atOffset(java.time.ZoneOffset.UTC));
+        return entity;
+    }
+
+    private AgentRunStreamEventEntity finalV4Event(
+            String runId, String attemptId, long sequence) throws Exception {
+        return v4Event(
+                runId,
+                attemptId,
+                sequence,
+                AgentStreamEventV4.EventType.FINAL,
+                AgentStreamEventV4.Payload.finalPayload(
+                        "intake-parallel-final-receipt.v1",
+                        "f".repeat(64)));
     }
 
     private AgentRunEntity systemV3Run(AgentRunStreamProjection projection) {

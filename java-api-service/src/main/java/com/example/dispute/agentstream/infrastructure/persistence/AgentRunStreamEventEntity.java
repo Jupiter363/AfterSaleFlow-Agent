@@ -221,7 +221,8 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
             String canonicalHash = ContractJson.sha256Hex(
                     java.util.Objects.requireNonNull(objectMapper, "objectMapper")
                             .readTree(payloadJson));
-            if (AgentRunProtocol.V3.wireValue().equals(streamProtocol)
+            if ((AgentRunProtocol.V3.wireValue().equals(streamProtocol)
+                            || AgentRunProtocol.V4.wireValue().equals(streamProtocol))
                     && !canonicalHash.equals(payloadHash)) {
                 throw new IllegalStateException(
                         "V2 source stream payload hash conflicts with canonical payload");
@@ -239,10 +240,12 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
             throw new IllegalStateException("source stream event has no attempt identity");
         }
         if (!AgentRunProtocol.V1.wireValue().equals(streamProtocol)
-                && !AgentRunProtocol.V3.wireValue().equals(streamProtocol)) {
+                && !AgentRunProtocol.V3.wireValue().equals(streamProtocol)
+                && !AgentRunProtocol.V4.wireValue().equals(streamProtocol)) {
             throw new IllegalStateException("source stream event has an unsupported protocol");
         }
-        if (AgentRunProtocol.V3.wireValue().equals(streamProtocol)
+        if ((AgentRunProtocol.V3.wireValue().equals(streamProtocol)
+                        || AgentRunProtocol.V4.wireValue().equals(streamProtocol))
                 && (audience == null || payloadHash == null)) {
             throw new IllegalStateException("V2 source stream event is missing audience or hash");
         }

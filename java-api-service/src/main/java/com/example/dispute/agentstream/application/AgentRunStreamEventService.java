@@ -21,6 +21,7 @@ import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStream
 import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeup;
 import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeupPublisher;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
+import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
@@ -411,6 +412,9 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
                     .map(event -> projectForActor(event, actor))
                     .toList();
         }
+        if (cursor.protocol() == AgentRunProtocol.V4) {
+            return replayV4Authorized(run, cursor, limit, actor);
+        }
 
         Audience runAudience = requireV2Audience(run);
         List<AgentRunAttemptEntity> attempts =
@@ -484,6 +488,81 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
         return events.stream()
                 .map(event -> projectForActor(event, actor))
                 .toList();
+    }
+
+    private List<AgentRunEventView> replayV4Authorized(
+            AgentRunEntity run,
+            AgentRunStreamCursor cursor,
+            int limit,
+            AuthenticatedActor actor) {
+        Audience runAudience = requireV2Audience(run);
+        List<AgentRunAttemptEntity> attempts =
+                attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId());
+        if (attempts.isEmpty()) {
+            if (cursor.attemptId() != null) {
+                throw new IllegalArgumentException(
+                        "V4 cursor attempt does not belong to this run");
+            }
+            return List.of();
+        }
+        if (attempts.size() != 1 || attempts.getFirst().getAttemptNo() != 1) {
+            throw new IllegalStateException("V4 stream must bind exactly one first attempt");
+        }
+
+        AgentRunAttemptEntity attempt = attempts.getFirst();
+        if (cursor.attemptId() != null
+                && !attempt.getId().equals(cursor.attemptId())) {
+            throw new IllegalArgumentException(
+                    "V4 cursor attempt does not belong to this run");
+        }
+
+        AgentRunEventView cursorEvent = null;
+        if (cursor.sequence() >= 0) {
+            AgentRunStreamEventEntity entity = eventRepository
+                    .findV4Event(run.getId(), attempt.getId(), cursor.sequence())
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            "V4 cursor does not identify a persisted event"));
+            cursorEvent = viewV4(entity, attempt.getAttemptNo(), runAudience);
+            if (!requireFinalCommitFence(run, cursorEvent)) {
+                throw new IllegalArgumentException(
+                        "V4 cursor identifies a final event that is not formally committed");
+            }
+        }
+
+        List<AgentRunEventView> events = eventRepository
+                .findV4ReplayPage(
+                        run.getId(),
+                        attempt.getId(),
+                        cursor.sequence(),
+                        PageRequest.of(0, limit))
+                .stream()
+                .map(entity -> viewV4(entity, attempt.getAttemptNo(), runAudience))
+                .toList();
+        validateV4Page(run, attempt, cursor.sequence(), cursorEvent, events);
+        return applyFinalCommitFence(run, events).stream()
+                .map(event -> projectForActor(event, actor))
+                .toList();
+    }
+
+    private static void validateV4Page(
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            long afterSequence,
+            AgentRunEventView cursorEvent,
+            List<AgentRunEventView> events) {
+        long expected = afterSequence + 1;
+        AgentRunEventView terminal = isAttemptTerminal(cursorEvent) ? cursorEvent : null;
+        for (AgentRunEventView event : events) {
+            if (event.sequence() != expected) {
+                throw new IllegalStateException("V4 stream sequence is not contiguous");
+            }
+            if (terminal != null
+                    && !isFinalizationTerminalError(run, attempt, terminal, event)) {
+                throw new IllegalStateException("V4 stream contains events after a terminal");
+            }
+            terminal = isAttemptTerminal(event) ? event : null;
+            expected++;
+        }
     }
 
     private static List<AgentRunEventView> applyFinalCommitFence(
@@ -795,12 +874,78 @@ public class AgentRunStreamEventService implements AgentRunTransientStreamPublis
         }
     }
 
+    private AgentRunEventView viewV4(
+            AgentRunStreamEventEntity entity, long attemptNo, Audience runAudience) {
+        try {
+            JsonNode encoded = objectMapper.readTree(entity.getPayloadJson());
+            if (entity.getPayloadHash() == null
+                    || !ContractJson.sha256Hex(encoded).equals(entity.getPayloadHash())) {
+                throw new IllegalStateException("V4 stream payload hash verification failed");
+            }
+            AgentStreamEventV4 event =
+                    objectMapper.treeToValue(encoded, AgentStreamEventV4.class);
+            if (!entity.getAgentRunId().equals(event.runId())
+                    || !entity.getAgentRunAttemptId().equals(event.attemptId())
+                    || entity.getSequenceNo() != event.sequenceNo()
+                    || !entity.getEventType().equals(event.eventType().wireValue())
+                    || entity.getAudience() != event.audience()
+                    || event.audience() != runAudience
+                    || !AgentRunProtocol.V4.wireValue().equals(entity.getStreamProtocol())
+                    || !entity.getCreatedAt().toInstant().equals(event.occurredAt())) {
+                throw new IllegalStateException(
+                        "V4 stream columns conflict with the hash-bound event");
+            }
+            JsonNode payload = objectMapper.valueToTree(event.payload());
+            JsonNode usage = event.payload().usage() == null
+                    ? null
+                    : objectMapper.valueToTree(event.payload().usage());
+            JsonNode response = event.eventType() == AgentStreamEventV4.EventType.FINAL
+                    ? payload.deepCopy()
+                    : null;
+            String cursor = new AgentRunStreamCursor(
+                            AgentRunProtocol.V4, event.attemptId(), event.sequenceNo())
+                    .wireValue();
+            return new AgentRunEventView(
+                    event.schemaVersion(),
+                    AgentRunProtocol.V4.wireValue(),
+                    event.runId(),
+                    event.attemptId(),
+                    attemptNo,
+                    event.sequenceNo(),
+                    cursor,
+                    event.eventType().wireValue(),
+                    event.audience().name(),
+                    null,
+                    payload,
+                    null,
+                    null,
+                    null,
+                    null,
+                    usage,
+                    null,
+                    null,
+                    response,
+                    event.payload().errorCode(),
+                    event.eventType() == AgentStreamEventV4.EventType.ERROR
+                            ? "数字人生成失败，请稍后重试。"
+                            : null,
+                    event.payload().retryable(),
+                    null,
+                    entity.getCreatedAt());
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("invalid persisted V4 agent stream event", exception);
+        }
+    }
+
     private static AgentRunProtocol protocol(AgentRunEntity run) {
         if (AgentRunProtocol.V1.wireValue().equals(run.getProtocol())) {
             return AgentRunProtocol.V1;
         }
         if (AgentRunProtocol.V3.wireValue().equals(run.getProtocol())) {
             return AgentRunProtocol.V3;
+        }
+        if (AgentRunProtocol.V4.wireValue().equals(run.getProtocol())) {
+            return AgentRunProtocol.V4;
         }
         throw new IllegalStateException("unsupported persisted agent run protocol");
     }

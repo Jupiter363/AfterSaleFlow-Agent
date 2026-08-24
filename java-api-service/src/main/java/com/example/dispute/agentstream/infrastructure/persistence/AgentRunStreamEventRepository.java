@@ -87,6 +87,19 @@ public interface AgentRunStreamEventRepository
             @Param("attemptId") String attemptId,
             @Param("sequenceNo") long sequenceNo);
 
+    @Query("select event from AgentRunStreamEventEntity event where event.agentRunId = :runId and event.agentRunAttemptId = :attemptId and event.streamProtocol = 'agent-stream.v4' and event.sequenceNo > :sequenceNo order by event.sequenceNo asc")
+    List<AgentRunStreamEventEntity> findV4ReplayPage(
+            @Param("runId") String runId,
+            @Param("attemptId") String attemptId,
+            @Param("sequenceNo") long sequenceNo,
+            Pageable pageable);
+
+    @Query("select event from AgentRunStreamEventEntity event where event.agentRunId = :runId and event.agentRunAttemptId = :attemptId and event.streamProtocol = 'agent-stream.v4' and event.sequenceNo = :sequenceNo")
+    Optional<AgentRunStreamEventEntity> findV4Event(
+            @Param("runId") String runId,
+            @Param("attemptId") String attemptId,
+            @Param("sequenceNo") long sequenceNo);
+
     @Query("select coalesce(max(event.sequenceNo), -1) from AgentRunStreamEventEntity event where event.agentRunId = :runId and event.agentRunAttemptId = :attemptId and event.streamProtocol = 'agent-stream.v3'")
     long findMaxV2Sequence(
             @Param("runId") String runId, @Param("attemptId") String attemptId);
