@@ -45,7 +45,7 @@
 9. `HANDOFF_SUMMARY`
 10. `TURN_EVALUATION`
 
-除 `CASE_MATRIX` 外，各卡片均输出基于本轮完整上下文的累计最新值，不输出增量补丁。`initial_case_facts` 不属于输出 section，也不得在输出中创建同名字段。
+除 `CASE_MATRIX` 外，各卡片均输出基于本轮完整上下文的累计最新值，不输出增量补丁；但被发起方的 `CLAIM_AND_RESPONSE` 只描述本轮当前消息是否新增诉求态度，不负责重新输出历史态度。历史已持久化的被发起方态度由服务端确定性沿用。`initial_case_facts` 不属于输出 section，也不得在输出中创建同名字段。
 
 ## 回复与轮次动作
 
@@ -90,7 +90,7 @@
 - `CASE_STORY`：中立标题和一段第三人称累计事件摘要；覆盖表单、旧矩阵/轮廓和本轮新增或更正，语义去重，不拼接原话。
 - `PARTY_POSITIONS`：发起方 Schema 只输出 `initiator_position`，被发起方 Schema 只输出 `respondent_position`；两者都可输出平台中立观察。不得填充另一方位置字段；带来源的转述只留在当前方陈述，另一方直接位置由服务端从其本人轮次装填。
 - 发起方轮的 `CLAIM_AND_RESPONSE` 只输出 `claim_resolution`，只表示发起方本人诉求；`normalized_statement` 使用第三人称整理本方诉求。
-- 被发起方轮的 `CLAIM_AND_RESPONSE` 只输出 `respondent_attitude`，只表示被发起方本人的直接回应。发起方已冻结诉求由服务端自动复制，Schema 不要求也不允许模型再次输出。本人有实质回应时使用 `source_attribution=RESPONDENT_DIRECT` 并与同轮 `respondent_claim` 一致；本轮未表达诉求态度时使用 `NO_DIRECT_POSITION`。
+- 被发起方轮的 `CLAIM_AND_RESPONSE` 只输出 `respondent_attitude`，只表示被发起方在本轮当前消息中的直接回应，不重写历史累计态度。发起方已冻结诉求及被发起方上一轮已持久化态度均由服务端自动复制，Schema 不要求也不允许模型再次输出。本人本轮有实质回应时使用 `source_attribution=RESPONDENT_DIRECT` 并与同轮 `respondent_claim` 一致；本轮只补充事实、未新增诉求态度时必须使用 `source_attribution=NO_DIRECT_POSITION`，历史态度仍由服务端保留。
 - `DISPUTE_FOCUS`：写核心冲突、争议事实和争议焦点；它分别投影为正式 `dispute_core_state` 与 `dispute_focus`，不写流程占位语。
 - `VERIFICATION_FOCUS.items`：保留最多 4 个去重的动作式事实核验方向，如“核验……是否……”，不写裸材料名、疑问句或证据索要。
 - `RISK_ASSESSMENT`：只评估案情复杂度与冲突风险，不作责任或真实性结论。

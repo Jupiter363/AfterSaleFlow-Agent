@@ -699,16 +699,18 @@ class IntakeRespondentRoomLlmOutputV3(StrictIntakeRoomModel):
         claim = self.ordered_sections[0].value.respondent_claim
         display = self.ordered_sections[3].value.respondent_attitude
         binding = claim.source_binding
+        # ``respondent_claim`` is a current-message delta, while the display card
+        # is cumulative.  A fact-only respondent turn therefore has no new claim
+        # authority even when the card still renders a previously persisted,
+        # grounded direct position.  The dossier binder carries that prior value
+        # deterministically; this provider display is ignored for that branch.
+        if claim.attitude == "NOT_ADDRESSED":
+            return self
         if binding.subject_role is not None and display.respondent_role != binding.subject_role:
             raise ValueError("respondent display role must match the bound claim role")
-        if claim.attitude != "NOT_ADDRESSED" and display.attitude != claim.attitude:
+        if display.attitude != claim.attitude:
             raise ValueError("respondent display attitude must match the bound matrix claim")
-        expected_attribution = (
-            "NO_DIRECT_POSITION"
-            if claim.attitude == "NOT_ADDRESSED"
-            else "RESPONDENT_DIRECT"
-        )
-        if display.source_attribution != expected_attribution:
+        if display.source_attribution != "RESPONDENT_DIRECT":
             raise ValueError(
                 "respondent display attribution must match the bound matrix claim"
             )

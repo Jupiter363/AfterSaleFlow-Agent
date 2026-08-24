@@ -3002,6 +3002,28 @@ def _bind_model_trusted_respondent_attitude(
 
     claim_payload = claim.model_dump(mode="json")
     if claim_payload["attitude"] == "NOT_ADDRESSED":
+        previous_attitude = (
+            previous.get("respondent_attitude")
+            if isinstance(previous, dict)
+            else None
+        )
+        carried_previous_attitude = (
+            _grounded_prior_respondent_attitude(
+                previous_attitude,
+                expected_respondent_role=respondent_role,
+            )
+            if isinstance(previous_attitude, dict)
+            else None
+        )
+        detail["respondent_attitude"] = (
+            copy.deepcopy(carried_previous_attitude)
+            if carried_previous_attitude is not None
+            else _default_respondent_attitude(
+                request.initial_case_facts,
+                allow_subjective_seed=False,
+                initiator_role=initiator_role,
+            )
+        )
         return
     model_claim = _current_respondent_model_claim(
         request,

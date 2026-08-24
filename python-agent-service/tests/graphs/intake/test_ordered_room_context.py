@@ -203,6 +203,144 @@ def _respondent_v3_payload() -> dict[str, object]:
     return payload
 
 
+def test_v3_fact_only_respondent_turn_carries_grounded_prior_attitude() -> None:
+    case_id = "CASE_ORDERED_ROOM_CARRY_RESPONDENT_ATTITUDE"
+    prior_attitude = {
+        "respondent_role": "MERCHANT",
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position": "商家此前提出按标准工况复测，未达标则退货退款。",
+        "alternative_proposal": "按标准工况复测",
+        "source": dossier_skill.DIRECT_RESPONDENT_SOURCE,
+        "confidence": dossier_skill.DIRECT_RESPONDENT_CONFIDENCE,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_PRIOR_DIRECT_ATTITUDE",
+        },
+    }
+    previous = {
+        "schema_version": "intake_case_detail.v1",
+        "claim_resolution": {
+            "initiator_role": "USER",
+            "requested_resolution": "RETURN_REFUND",
+            "requested_amount": 1899,
+            "requested_items": "空气净化器一台",
+            "request_reason": "商品性能与页面宣传不符。",
+            "normalized_statement": "用户要求退货退款。",
+        },
+        "case_fact_matrix": {
+            "schema_version": "case_fact_matrix.v2",
+            "party_map": {
+                "initiator_role": "USER",
+                "respondent_role": "MERCHANT",
+            },
+        },
+        "respondent_attitude": copy.deepcopy(prior_attitude),
+    }
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_CURRENT_FACT_ONLY",
+                "sequence_no": 5,
+                "role": "MERCHANT",
+                "source": "ROOM_MESSAGE",
+                "text": "订单于8月11日发货，8月12日已经签收。",
+            },
+            "previous_case_detail": previous,
+            "agent_context": _agent_context(case_id=case_id, role="MERCHANT"),
+        }
+    )
+    payload = _respondent_v3_payload()
+    matrix = payload["ordered_sections"][0]["value"]
+    matrix["respondent_claim"] = {
+        "attitude": "NOT_ADDRESSED",
+        "position_summary": "本轮只补充发货和签收事实。",
+        "alternative_proposal": None,
+        "source_binding": {
+            "schema_version": "respondent-claim-binding.v1",
+            "binding_kind": "NO_DIRECT_POSITION",
+            "subject_role": None,
+            "source_quote": None,
+            "linked_fact_keys": [],
+        },
+    }
+    payload["ordered_sections"][3]["value"]["respondent_attitude"] = {
+        "respondent_role": "MERCHANT",
+        "source_attribution": "RESPONDENT_DIRECT",
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position": prior_attitude["position"],
+        "alternative_proposal": prior_attitude["alternative_proposal"],
+    }
+    original_payload = copy.deepcopy(payload)
+
+    output_type = intake_case_detail_output_type(request)
+    validated = output_type.model_validate(payload)
+    materialized = materialize_intake_case_detail_output(request, validated)
+    detail = copy.deepcopy(materialized.case_detail)
+    dossier_skill._bind_model_trusted_respondent_attitude(
+        detail,
+        request,
+        copy.deepcopy(previous),
+        copy.deepcopy(materialized.case_detail),
+        materialized.case_matrix_delta,
+        materialized.respondent_source_binding,
+    )
+    replay = copy.deepcopy(materialized.case_detail)
+    dossier_skill._bind_model_trusted_respondent_attitude(
+        replay,
+        request,
+        copy.deepcopy(previous),
+        copy.deepcopy(materialized.case_detail),
+        materialized.case_matrix_delta,
+        materialized.respondent_source_binding,
+    )
+
+    assert detail["respondent_attitude"] == prior_attitude
+    assert replay == detail
+    assert payload == original_payload
+
+    no_prior = copy.deepcopy(previous)
+    no_prior.pop("respondent_attitude")
+    neutral = copy.deepcopy(materialized.case_detail)
+    dossier_skill._bind_model_trusted_respondent_attitude(
+        neutral,
+        request,
+        no_prior,
+        copy.deepcopy(materialized.case_detail),
+        materialized.case_matrix_delta,
+        materialized.respondent_source_binding,
+    )
+    assert neutral["respondent_attitude"] == {
+        "respondent_role": "MERCHANT",
+        "attitude": "NOT_RESPONDED",
+        "position": "尚未直接陈述",
+        "source": "尚未回应",
+        "confidence": 0.5,
+    }
+
+    conflicting = copy.deepcopy(payload)
+    conflicting_matrix = conflicting["ordered_sections"][0]["value"]
+    conflicting_matrix["respondent_claim"] = {
+        "attitude": "DISAGREE",
+        "position_summary": "商家不同意退货退款。",
+        "alternative_proposal": None,
+        "source_binding": {
+            "schema_version": "respondent-claim-binding.v1",
+            "binding_kind": "CURRENT_ACTOR_DIRECT",
+            "subject_role": "MERCHANT",
+            "source_quote": "不同意退货退款",
+            "linked_fact_keys": ["NEW_DELIVERY_STATE"],
+        },
+    }
+    with pytest.raises(
+        ValidationError,
+        match="respondent display attitude must match the bound matrix claim",
+    ):
+        output_type.model_validate(conflicting)
+
+
 def test_ordered_room_matrix_rebinds_only_unique_case_drifted_summary_keys() -> None:
     payload = _initiator_v3_payload()
     matrix = payload["ordered_sections"][0]["value"]
@@ -1131,7 +1269,9 @@ def test_respondent_turn_generates_only_own_view_and_server_copies_frozen_claim(
     respondent_output_type = intake_case_detail_output_type(respondent_request)
     respondent_schema = respondent_output_type.model_json_schema()
     Draft202012Validator.check_schema(respondent_schema)
-    assert len(respondent_schema["properties"]["ordered_sections"]["anyOf"]) == 5
+    # Previous NOT_READY narrows the provider-visible contract to the three
+    # ASK_SUBSTANTIVE branches; invitation branches are not exposed this turn.
+    assert len(respondent_schema["properties"]["ordered_sections"]["anyOf"]) == 3
     assert "claim_resolution" not in json.dumps(respondent_schema, sort_keys=True)
     assert "initiator_position" not in json.dumps(respondent_schema, sort_keys=True)
     assert "INITIATOR_REPORTED" not in json.dumps(respondent_schema, sort_keys=True)
