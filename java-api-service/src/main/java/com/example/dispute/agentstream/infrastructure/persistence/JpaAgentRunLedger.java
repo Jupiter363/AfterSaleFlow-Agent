@@ -15,6 +15,7 @@ import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
+import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
@@ -32,6 +33,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -48,6 +50,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
     private final AgentRunAttemptRepository attemptRepository;
     private final AgentRunStreamEventRepository eventRepository;
     private final PostgresAgentRunV2EventStore recoveryEventStore;
+    private final PostgresAgentRunV4EventWriter v4EventWriter;
     private final EntityManager entityManager;
     private final ObjectMapper objectMapper;
     private final ObjectMapper streamObjectMapper;
@@ -58,12 +61,14 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             AgentRunAttemptRepository attemptRepository,
             AgentRunStreamEventRepository eventRepository,
             PostgresAgentRunV2EventStore recoveryEventStore,
+            PostgresAgentRunV4EventWriter v4EventWriter,
             EntityManager entityManager,
             ObjectMapper objectMapper) {
         this.runRepository = runRepository;
         this.attemptRepository = attemptRepository;
         this.eventRepository = eventRepository;
         this.recoveryEventStore = recoveryEventStore;
+        this.v4EventWriter = v4EventWriter;
         this.entityManager = entityManager;
         this.objectMapper = objectMapper;
         this.streamObjectMapper = objectMapper.copy();
@@ -536,6 +541,13 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         requireEqual(attempt.getAgentRunId(), result.agentRunId(), "agentRunId");
         requireEqual(attempt.getAttemptNo(), result.attemptNo(), "attemptNo");
         ExecuteAgentRunResult replay = durableFailureResult(attempt);
+        if (AgentRunProtocol.V4.wireValue().equals(run.getProtocol())) {
+            return recordV4AttemptFailureResult(status, result, run, attempt, replay);
+        }
+        if (!AgentRunProtocol.V3.wireValue().equals(run.getProtocol())) {
+            throw new IllegalStateException(
+                    "Activity failure result requires an exact V3 or V4 AgentRun");
+        }
         if (replay != null) {
             if (result.lastSequenceNo() != replay.lastSequenceNo()) {
                 throw new IllegalStateException(
@@ -589,6 +601,65 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             persistFailureTerminalError(
                     run, attempt, durableResult, terminal);
         }
+        return durableResult;
+    }
+
+    private ExecuteAgentRunResult recordV4AttemptFailureResult(
+            AgentRunAttemptStatus status,
+            ExecuteAgentRunResult sourceResult,
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            ExecuteAgentRunResult replay) {
+        requireV4FailureAuthority(run, attempt, sourceResult);
+        if (sourceResult.recoveryAction() != AgentRunRecoveryAction.FAIL_LOGICAL_RUN
+                || sourceResult.retryable()) {
+            throw new IllegalStateException(
+                    "agent-stream.v4 failure must close the single outer attempt");
+        }
+
+        if (replay != null) {
+            long durableSourceSequence = Math.subtractExact(replay.lastSequenceNo(), 1L);
+            boolean exactSourceOrDurable = sourceResult.lastSequenceNo() == durableSourceSequence
+                    || sourceResult.lastSequenceNo() == replay.lastSequenceNo();
+            requireEqual(exactSourceOrDurable, true, "v4FailureReplaySequence");
+            requireEqual(
+                    withLastSequence(sourceResult, replay.lastSequenceNo()),
+                    replay,
+                    "v4DurableFailureResult");
+            requireV4FailureProjection(run, attempt, status, replay);
+            PostgresAgentRunV4EventWriter.TerminalWriteReceipt terminal =
+                    appendV4FailureTerminal(run, attempt, replay);
+            requireEqual(terminal.inserted(), false, "v4FailureTerminalReplayInserted");
+            return replay;
+        }
+
+        requireEqual(run.getRunStatus(), "RUNNING", "v4FailureRunStatus");
+        requireEqual(
+                attempt.getAttemptStatus(), AgentRunAttemptStatus.RUNNING, "v4FailureAttemptStatus");
+        requireEqual(
+                sourceResult.lastSequenceNo(), attempt.getLastSequenceNo(), "v4FailureSourceSequence");
+        requireEqual(
+                sourceResult.publicOutputEmitted(),
+                attempt.isPublicOutputEmitted(),
+                "v4FailurePublicOutputEmitted");
+        requireEqual(attempt.isFinalFrameObserved(), false, "v4FailureFinalFrameObserved");
+
+        long terminalSequence = Math.addExact(sourceResult.lastSequenceNo(), 1L);
+        ExecuteAgentRunResult durableResult = withLastSequence(sourceResult, terminalSequence);
+        PostgresAgentRunV4EventWriter.TerminalWriteReceipt terminal =
+                appendV4FailureTerminal(run, attempt, durableResult);
+        requireEqual(terminal.inserted(), true, "v4FailureTerminalInserted");
+        requireEqual(
+                terminal.durableHighWatermark(),
+                terminalSequence,
+                "v4FailureTerminalHighWatermark");
+
+        attempt.recordFailureResultWithTerminal(
+                status, sourceResult, durableResult, json(durableResult));
+        projectV4AttemptFailure(run, status, durableResult);
+        requireV4FailureProjection(run, attempt, status, durableResult);
+        attemptRepository.save(attempt);
+        runRepository.saveAndFlush(run);
         return durableResult;
     }
 
@@ -814,6 +885,155 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 run.getCompletedAt() == null ? null : run.getCompletedAt().toInstant();
         requireEqual(
                 runCompletedAt, retryable ? null : completedAt, "v3FailureRunCompletedAt");
+    }
+
+    private static void projectV4AttemptFailure(
+            AgentRunEntity run,
+            AgentRunAttemptStatus status,
+            ExecuteAgentRunResult durableResult) {
+        run.markFailed(
+                durableResult.errorCode(),
+                AgentRunEntity.V3_LOGICAL_FAILURE_MESSAGE,
+                false,
+                null);
+        run.markV4AttemptFailed(status, false, durableResult.completedAt());
+    }
+
+    private void requireV4FailureAuthority(
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            ExecuteAgentRunResult result) {
+        if (!AgentRunProtocol.V4.wireValue().equals(run.getProtocol())
+                || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
+            throw new IllegalStateException(
+                    "agent-stream.v4 failure requires an exact Temporal AgentRun V4");
+        }
+        requireEqual(run.getId(), result.logicalRunId(), "v4FailureLogicalRunId");
+        requireEqual(run.getFinalizationStatus(), "UNCOMMITTED", "v4FailureFinalizationStatus");
+        requireEqual(run.getResultReadyAttemptId(), null, "v4FailureResultReadyAttemptId");
+        requireEqual(run.getCommittedAttemptId(), null, "v4FailureCommittedAttemptId");
+        requireEqual(run.getFinalResultHash(), null, "v4FailureFinalResultHash");
+        requireEqual(run.getCommittedManifestId(), null, "v4FailureCommittedManifestId");
+        requireEqual(run.getCommittedManifestHash(), null, "v4FailureCommittedManifestHash");
+        requireEqual(run.getFinalStreamSequenceNo(), null, "v4FailureFinalSequenceNo");
+        requireEqual(run.getFinalizedAt(), null, "v4FailureFinalizedAt");
+        requireEqual(attempt.getAttemptNo(), 1L, "v4FailureAttemptNo");
+        requireEqual(attempt.getPreviousAttemptId(), null, "v4FailurePreviousAttemptId");
+        requireEqual(attempt.isResetRequired(), false, "v4FailureResetRequired");
+        requireEqual(attempt.getPublicSequenceOffset(), 0, "v4FailurePublicSequenceOffset");
+        attempt.requireProofCarryingLineage();
+        requireEqual(result.outcome(), ExecuteAgentRunResult.Outcome.FAILED, "v4FailureOutcome");
+    }
+
+    private void requireV4FailureProjection(
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            AgentRunAttemptStatus status,
+            ExecuteAgentRunResult replay) {
+        AgentRunAttemptStatus expectedStatus = replay.publicOutputEmitted()
+                ? AgentRunAttemptStatus.ABORTED
+                : AgentRunAttemptStatus.FAILED;
+        requireEqual(status, expectedStatus, "v4FailureAttemptStatus");
+        requireEqual(attempt.getAttemptStatus(), status, "v4DurableFailureAttemptStatus");
+        attempt.requireDurableFailureResult(replay);
+        requireEqual(
+                attempt.getLastSequenceNo(), replay.lastSequenceNo(), "v4DurableFailureSequence");
+        requireEqual(
+                attempt.isPublicOutputEmitted(),
+                replay.publicOutputEmitted(),
+                "v4DurableFailurePublicOutput");
+        requireEqual(attempt.isFinalFrameObserved(), false, "v4DurableFailureFinalFrame");
+        requireEqual(run.getRunStatus(), status.name(), "v4FailureRunStatus");
+        requireEqual(run.getErrorCode(), replay.errorCode(), "v4FailureRunErrorCode");
+        requireEqual(run.getErrorRetryable(), Boolean.FALSE, "v4FailureRunRetryable");
+        requireEqual(
+                run.getErrorMessage(),
+                AgentRunEntity.V3_LOGICAL_FAILURE_MESSAGE,
+                "v4FailureRunErrorMessage");
+        requireEqual(
+                run.getStopReason(),
+                AgentRunEntity.V3_LOGICAL_FAILURE_STOP_REASON,
+                "v4FailureRunStopReason");
+        requireEqual(
+                run.getCompletedAt() == null ? null : run.getCompletedAt().toInstant(),
+                replay.completedAt(),
+                "v4FailureRunCompletedAt");
+    }
+
+    private PostgresAgentRunV4EventWriter.TerminalWriteReceipt appendV4FailureTerminal(
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            ExecuteAgentRunResult durableResult) {
+        V4AudienceBinding binding = requireV4AudienceBinding(run);
+        long terminalSequence = durableResult.lastSequenceNo();
+        String eventId = v4FailureEventId(
+                attempt,
+                binding,
+                terminalSequence,
+                durableResult.completedAt(),
+                durableResult.errorCode());
+        return v4EventWriter.appendOrLoadExactTerminalInCurrentTransaction(
+                new PostgresAgentRunV4EventWriter.EventWriteCommand(
+                        eventId,
+                        run.getId(),
+                        attempt.getId(),
+                        terminalSequence,
+                        AgentStreamEventV4.EventType.ERROR,
+                        binding.audience(),
+                        durableResult.completedAt(),
+                        AgentStreamEventV4.Payload.errorPayload(
+                                durableResult.errorCode(), false),
+                        binding.actorId(),
+                        binding.audienceActorIdsJson()));
+    }
+
+    private String v4FailureEventId(
+            AgentRunAttemptEntity attempt,
+            V4AudienceBinding binding,
+            long terminalSequence,
+            Instant terminalAt,
+            String errorCode) {
+        ObjectNode identity = streamObjectMapper.createObjectNode();
+        identity.put("schema_version", "agent-run-v4-failure-terminal-id.v1");
+        identity.put("run_id", attempt.getAgentRunId());
+        identity.put("attempt_id", attempt.getId());
+        identity.put("attempt_no", attempt.getAttemptNo());
+        identity.put("command_id", attempt.getCommandId());
+        identity.put("command_request_sha256", attempt.getCommandRequestHash());
+        identity.put("terminal_sequence", terminalSequence);
+        identity.put("event_type", AgentStreamEventV4.EventType.ERROR.wireValue());
+        identity.put("audience", binding.audience().name());
+        identity.put("actor_id", binding.actorId());
+        identity.put("occurred_at", terminalAt.toString());
+        identity.put("error_code", errorCode);
+        identity.put("retryable", false);
+        return ContractJson.sha256Hex(identity);
+    }
+
+    private V4AudienceBinding requireV4AudienceBinding(AgentRunEntity run) {
+        try {
+            List<Audience> audiences = streamObjectMapper.readValue(
+                    run.getStreamAudienceJson(), new TypeReference<>() {});
+            List<String> actorIds = streamObjectMapper.readValue(
+                    run.getStreamAudienceActorIdsJson(), new TypeReference<>() {});
+            if (audiences == null
+                    || audiences.size() != 1
+                    || audiences.getFirst() == null
+                    || actorIds == null
+                    || actorIds.size() != 1
+                    || actorIds.getFirst() == null
+                    || actorIds.getFirst().isBlank()) {
+                throw new IllegalStateException(
+                        "agent-stream.v4 failure requires one audience and one actor binding");
+            }
+            String canonicalActorIds = ContractJson.canonicalString(
+                    streamObjectMapper.valueToTree(List.of(actorIds.getFirst())));
+            return new V4AudienceBinding(
+                    audiences.getFirst(), actorIds.getFirst(), canonicalActorIds);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "agent-stream.v4 failure has an invalid audience binding", exception);
+        }
     }
 
     private void requireV3RecoveryTerminalProjection(
@@ -1455,6 +1675,9 @@ public class JpaAgentRunLedger implements AgentRunLedger {
 
     private record FailureTerminalPosition(
             long sequenceNo, Audience audience, boolean appendRequired) {}
+
+    private record V4AudienceBinding(
+            Audience audience, String actorId, String audienceActorIdsJson) {}
 
     private record RecoveryTerminalPosition(long sequenceNo, Audience audience) {}
 

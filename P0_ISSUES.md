@@ -1435,7 +1435,7 @@
 ## P0-20260825-PARALLEL-V4-EMPTY-STREAM-FAILURE-RESULT-REJECTED
 
 - Severity: P0
-- Status: CONFIRMED / IMPLEMENTATION_IN_PROGRESS
+- Status: FIXED / FOCUSED_VERIFIED / DEPLOY_PENDING
 - Component: Target Intake V4 AgentRun terminal failure reconciliation
 - Confirmed fact: In fresh case `CASE_P9_6A8D520B_1`, the first authenticated USER parallel ROOM_MESSAGE was submitted exactly once and its V4 run exhausted three Temporal Activity attempts without any public Frame event or FINAL. When the Activity closed the failure, `ExecuteAgentRunResult` rejected the persisted empty-stream baseline `lastSequenceNo=-1` with `IllegalArgumentException: attemptNo and lastSequenceNo are invalid`; Temporal then ended the workflow as `NON_RETRYABLE_FAILURE` while the durable AgentRun and frontend projection remained `RUNNING/PENDING`.
 - Root cause and evidence: V4 intentionally starts an empty attempt at sequence `-1`, as already accepted by `AgentRunAttemptHeartbeat`, but `ExecuteAgentRunResult` still enforces the legacy `lastSequenceNo >= 0` rule for every outcome. `ExecuteAgentRunActivityImpl.failedResult` forwards the heartbeat/gateway sequence unchanged, so a failure before the first V4 event cannot be represented and never reaches the durable terminal-failure ledger boundary. Source inspection also confirms that the current `JpaAgentRunLedger.recordAttemptFailureResult` appends only a V3 terminal error, so simply relaxing the result constructor would still leave V4 terminal ownership incomplete.

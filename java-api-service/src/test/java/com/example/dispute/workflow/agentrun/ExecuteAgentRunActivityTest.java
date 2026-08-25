@@ -212,6 +212,43 @@ class ExecuteAgentRunActivityTest {
     }
 
     @Test
+    void parallelFailureBeforeTheFirstFramePersistsAnErrorAtSequenceZero() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.requireAllocatedAttempt(request))
+                .thenReturn(parallelRunningAttempt(request, -1, false));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                        any(),
+                        any()))
+                .thenThrow(AgentRunExecutionException.failLogicalRun(
+                        "INTAKE_PARALLEL_ADMISSION_FAILED",
+                        "parallel execution failed before the first public Frame",
+                        -1,
+                        false,
+                        null));
+        when(ledger.recordAttemptFailureResult(
+                        eq(AgentRunAttemptStatus.FAILED), any()))
+                .thenAnswer(invocation -> {
+                    ExecuteAgentRunResult source = invocation.getArgument(1);
+                    return withLastSequence(source, 0);
+                });
+
+        ExecuteAgentRunResult result =
+                activity(ledger, gateway, () -> context(1)).execute(request);
+
+        assertThat(result.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.FAILED);
+        assertThat(result.lastSequenceNo()).isZero();
+        assertThat(result.publicOutputEmitted()).isFalse();
+        assertThat(result.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+        verify(ledger).recordAttemptFailureResult(
+                AgentRunAttemptStatus.FAILED, withLastSequence(result, -1));
+    }
+
+    @Test
     void visibleOutputFailureMarksTheAttemptForResetBeforeTheNextLogicalAttempt()
             throws Exception {
         ExecuteAgentRunRequest request = request();

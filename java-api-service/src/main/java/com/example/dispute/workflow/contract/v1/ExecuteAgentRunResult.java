@@ -37,8 +37,13 @@ public record ExecuteAgentRunResult(
             throw new IllegalArgumentException(
                     "agentRunId must equal logicalRunId");
         }
-        if (attemptNo < 1 || lastSequenceNo < 0) {
+        if (attemptNo < 1 || lastSequenceNo < -1) {
             throw new IllegalArgumentException("attemptNo and lastSequenceNo are invalid");
+        }
+        if (lastSequenceNo == -1
+                && (outcome == Outcome.COMPLETED || publicOutputEmitted)) {
+            throw new IllegalArgumentException(
+                    "empty stream baseline cannot carry a completed or public result");
         }
         if (outcome == Outcome.COMPLETED) {
             required(graphResult, "graphResult");

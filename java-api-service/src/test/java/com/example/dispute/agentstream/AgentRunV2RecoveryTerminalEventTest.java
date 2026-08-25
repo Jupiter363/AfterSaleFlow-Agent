@@ -16,6 +16,7 @@ import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStream
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventRepository;
 import com.example.dispute.agentstream.infrastructure.persistence.JpaAgentRunLedger;
 import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentRunV2EventStore;
+import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentRunV4EventWriter;
 import com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunAttemptEntity;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
@@ -364,7 +365,7 @@ class AgentRunV2RecoveryTerminalEventTest {
         assertThatThrownBy(() -> harness.ledger().recordAttemptFailureResult(
                         AgentRunAttemptStatus.ABORTED, source))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("v2FailureRunStatus");
+                .hasMessageContaining("v3FailureRunStatus");
         assertThat(harness.run().getRunStatus()).isEqualTo("RUNNING");
         ReflectionTestUtils.setField(harness.run(), "runStatus", "ABORTED");
 
@@ -640,6 +641,7 @@ class AgentRunV2RecoveryTerminalEventTest {
                 attemptRepository,
                 eventRepository,
                 recoveryEventStore,
+                mock(PostgresAgentRunV4EventWriter.class),
                 entityManager,
                 MAPPER);
         AgentRunEntity run = AgentRunEntity.logicalV3(
@@ -970,6 +972,7 @@ class AgentRunV2RecoveryTerminalEventTest {
                 attemptRepository,
                 eventRepository,
                 recoveryEventStore,
+                mock(PostgresAgentRunV4EventWriter.class),
                 mock(EntityManager.class),
                 MAPPER);
         AgentRunEntity run = AgentRunEntity.logicalV3(
@@ -1028,6 +1031,7 @@ class AgentRunV2RecoveryTerminalEventTest {
                 attemptRepository,
                 eventRepository,
                 recoveryEventStore,
+                mock(PostgresAgentRunV4EventWriter.class),
                 mock(EntityManager.class),
                 MAPPER);
         AgentRunEntity run = AgentRunEntity.logicalV3(
@@ -1312,6 +1316,7 @@ class AgentRunV2RecoveryTerminalEventTest {
                 attemptRepository,
                 eventRepository,
                 recoveryEventStore,
+                mock(PostgresAgentRunV4EventWriter.class),
                 entityManager,
                 MAPPER);
         AgentRunEntity run = AgentRunEntity.logicalV3(
