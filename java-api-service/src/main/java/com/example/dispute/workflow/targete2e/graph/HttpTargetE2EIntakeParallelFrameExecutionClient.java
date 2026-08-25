@@ -20,6 +20,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressKind;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.SlotState;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.StagingConflictException;
 import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
@@ -204,6 +205,12 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                 cancellationToken.throwIfCancellationRequested();
                 throw failure;
             }
+        } catch (StagingConflictException failure) {
+            TargetE2EGraphClientException typedFailure =
+                    TargetE2EGraphClientException.protocol(
+                            "parallel technical staging rejected execution", failure);
+            terminalizeUncommittedFailure(request, prepared, typedFailure);
+            throw typedFailure;
         } catch (TargetE2EGraphClientException failure) {
             if (failure.recoveryAction()
                     == TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN) {
@@ -217,9 +224,17 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
             ExecuteAgentRunRequest request,
             PreparedAdmission prepared,
             TargetE2EGraphClientException failure) {
+        terminalizeUncommittedFailure(
+                request, prepared.executionPlan().frameSetId(), failure);
+    }
+
+    private void terminalizeUncommittedFailure(
+            ExecuteAgentRunRequest request,
+            String frameSetId,
+            TargetE2EGraphClientException failure) {
         try {
             staging.failUncommitted(new FrameSetFailureCommand(
-                    prepared.executionPlan().frameSetId(),
+                    frameSetId,
                     request.agentRunId(),
                     request.attemptId(),
                     request.command().commandId(),
@@ -260,6 +275,7 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
             long roomFencingToken,
             GraphRegistryBindingPolicy.ExpectedBinding registryBinding,
             AgentRunCancellationToken cancellationToken) {
+        String admittedFrameSetId = null;
         TargetE2ESealedGraphCommand sealed = envelopeCodec.sealParallelCommand(
                 activationId,
                 roomFencingToken,
@@ -281,7 +297,9 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
             StreamAuthority authority = preparation.finish();
             requirePreparedStreamAuthority(request, authority);
             FrameSetAdmission admission = preparedAdmission(request, authority);
-            IntakeParallelFrameStagingPort.FrameSetReceipt frameSetReceipt = staging.admit(admission);
+            IntakeParallelFrameStagingPort.FrameSetReceipt frameSetReceipt =
+                    staging.admit(admission);
+            admittedFrameSetId = admission.frameSetId();
             ExecutionPlan executionPlan = staging.planExecution(admission);
             StreamAuthority executionAuthority = executionAuthority(authority, executionPlan);
             EncodedAdmissionReceipt encodedReceipt = technicalCodec.encodeAdmissionReceipt(
@@ -295,7 +313,20 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                     frameSetReceipt,
                     executionPlan,
                     encodedReceipt);
+        } catch (StagingConflictException failure) {
+            TargetE2EGraphClientException typedFailure =
+                    TargetE2EGraphClientException.protocol(
+                            "parallel technical preparation was rejected", failure);
+            if (admittedFrameSetId != null) {
+                terminalizeUncommittedFailure(request, admittedFrameSetId, typedFailure);
+            }
+            throw typedFailure;
         } catch (TargetE2EGraphClientException failure) {
+            if (admittedFrameSetId != null
+                    && failure.recoveryAction()
+                            == TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN) {
+                terminalizeUncommittedFailure(request, admittedFrameSetId, failure);
+            }
             throw failure;
         } catch (GraphCommandTransportException failure) {
             cancellationToken.throwIfCancellationRequested();
@@ -306,8 +337,13 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
             throw TargetE2EGraphClientException.transport(
                     "parallel target Graph preparation failed", failure);
         } catch (IllegalArgumentException failure) {
-            throw TargetE2EGraphClientException.protocol(
+            TargetE2EGraphClientException typedFailure =
+                    TargetE2EGraphClientException.protocol(
                     "parallel target Graph preparation is invalid", failure);
+            if (admittedFrameSetId != null) {
+                terminalizeUncommittedFailure(request, admittedFrameSetId, typedFailure);
+            }
+            throw typedFailure;
         }
     }
 

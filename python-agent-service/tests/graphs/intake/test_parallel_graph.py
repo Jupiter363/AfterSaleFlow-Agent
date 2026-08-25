@@ -165,6 +165,61 @@ class _StreamingRunner:
         )
 
 
+class _CrossItemRepairRunner:
+    def __init__(
+        self,
+        outputs: dict[str, dict[str, Any]],
+        *,
+        node_name: str,
+        first_generation_items: list[dict[str, Any]],
+        reset: bool,
+    ) -> None:
+        self.outputs = outputs
+        self.node_name = node_name
+        self.first_generation_items = first_generation_items
+        self.reset = reset
+        self.calls: list[dict[str, Any]] = []
+
+    async def ainvoke_structured_stream(self, **kwargs: Any):
+        self.calls.append(kwargs)
+        assert kwargs["node_name"] == self.node_name
+        value = self.outputs[self.node_name]
+        for item in self.first_generation_items:
+            yield HarnessStreamDelta(
+                kind="visible_delta",
+                field="public_projection_items",
+                delta=_json(item),
+            )
+        if self.reset:
+            yield HarnessStreamReset(
+                kind="generation_reset",
+                generation=2,
+                reason_code="OUTPUT_SCHEMA_INVALID",
+            )
+            for item in value["public_projection_items"]:
+                yield HarnessStreamDelta(
+                    kind="visible_delta",
+                    field="public_projection_items",
+                    delta=_json(item),
+                )
+        output_type = kwargs["output_type"]
+        typed_value = output_type.model_validate(value)
+        semantic_validator = kwargs.get("semantic_validator")
+        if semantic_validator is not None:
+            typed_value = semantic_validator(typed_value)
+        yield HarnessStreamCompleted(
+            kind="completed",
+            generation=HarnessGeneration(
+                value=typed_value,
+                model="qwen3.7-max-2026-06-08",
+                latency_ms=12,
+                token_usage={"input": 10, "output": 5, "total": 15},
+                context=None,
+                messages=(),
+            ),
+        )
+
+
 @pytest.mark.asyncio
 async def test_three_physical_graphs_stream_independently_before_fan_in() -> None:
     saver = InMemorySaver()
@@ -684,6 +739,162 @@ async def test_quality_gap_cannot_stream_before_the_fixed_score_prefix() -> None
         and event.frame_type == "QUALITY_FRAME"
         for event in sink.events
     )
+
+
+@pytest.mark.asyncio
+async def test_quality_cross_item_violation_uses_bounded_native_regeneration() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "QUALITY_FRAME"
+    )
+    outputs = deepcopy(_outputs())
+    node_name = "intake_turn_quality_frame"
+    wrong_first_item = deepcopy(outputs[node_name]["public_projection_items"][1])
+    runner = _CrossItemRepairRunner(
+        outputs,
+        node_name=node_name,
+        first_generation_items=[wrong_first_item],
+        reset=True,
+    )
+    sink = _CollectingSink()
+
+    result = await orchestrator.execute_frame(
+        request,
+        agent_context=contexts["QUALITY_FRAME"],
+        model_runner=runner,
+        event_sink=sink,
+    )
+
+    assert result.generation == 2
+    assert [type(event) for event in sink.events[:4]] == [
+        FrameStarted,
+        FrameInterrupted,
+        FrameGenerationReset,
+        FrameStarted,
+    ]
+    projections = [
+        event for event in sink.events if isinstance(event, FrameProjectionItem)
+    ]
+    assert [event.generation for event in projections] == [2] * 7
+    assert [event.local_index for event in projections] == list(range(7))
+    assert isinstance(sink.events[-1], FrameSealed)
+    assert sink.events[-1].usage.provider_call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_dialogue_duplicate_slot_uses_bounded_native_regeneration() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "DIALOGUE_FRAME"
+    )
+    outputs = deepcopy(_outputs())
+    node_name = "intake_turn_dialogue_frame"
+    first_item = deepcopy(outputs[node_name]["public_projection_items"][0])
+    runner = _CrossItemRepairRunner(
+        outputs,
+        node_name=node_name,
+        first_generation_items=[first_item, deepcopy(first_item)],
+        reset=True,
+    )
+    sink = _CollectingSink()
+
+    result = await orchestrator.execute_frame(
+        request,
+        agent_context=contexts["DIALOGUE_FRAME"],
+        model_runner=runner,
+        event_sink=sink,
+    )
+
+    assert result.generation == 2
+    projections = [
+        event for event in sink.events if isinstance(event, FrameProjectionItem)
+    ]
+    assert [(event.generation, event.local_index) for event in projections] == [
+        (1, 0),
+        (2, 0),
+    ]
+    assert [type(event) for event in sink.events[2:5]] == [
+        FrameInterrupted,
+        FrameGenerationReset,
+        FrameStarted,
+    ]
+    assert isinstance(sink.events[-1], FrameSealed)
+    assert sink.events[-1].usage.provider_call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_adapter_divergence_without_reset_keeps_first_error() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "DIALOGUE_FRAME"
+    )
+    outputs = deepcopy(_outputs())
+    node_name = "intake_turn_dialogue_frame"
+    first_item = deepcopy(outputs[node_name]["public_projection_items"][0])
+    runner = _CrossItemRepairRunner(
+        outputs,
+        node_name=node_name,
+        first_generation_items=[first_item, deepcopy(first_item)],
+        reset=False,
+    )
+    sink = _CollectingSink()
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_PARALLEL_FRAME_PROJECTION_SLOT_REPEATED",
+    ):
+        await orchestrator.execute_frame(
+            request,
+            agent_context=contexts["DIALOGUE_FRAME"],
+            model_runner=runner,
+            event_sink=sink,
+        )
+
+    assert [
+        event.local_index
+        for event in sink.events
+        if isinstance(event, FrameProjectionItem)
+    ] == [0]
+    assert not any(isinstance(event, FrameSealed) for event in sink.events)
+
+
+@pytest.mark.asyncio
+async def test_quality_semantic_validator_binds_gap_role_to_authenticated_actor() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "QUALITY_FRAME"
+    )
+    runner = _StreamingRunner(_outputs())
+
+    await orchestrator.execute_frame(
+        request,
+        agent_context=contexts["QUALITY_FRAME"],
+        model_runner=runner,
+        event_sink=_CollectingSink(),
+    )
+
+    call = runner.calls[0]
+    invalid = deepcopy(_quality_output())
+    invalid["public_projection_items"][-1]["source_role"] = "MERCHANT"
+    invalid["quality"]["gap_proposals"][0]["source_role"] = "MERCHANT"
+    value = call["output_type"].model_validate(invalid)
+    with pytest.raises(
+        ValueError,
+        match="authenticated actor",
+    ):
+        call["semantic_validator"](value)
 
 
 @pytest.mark.asyncio

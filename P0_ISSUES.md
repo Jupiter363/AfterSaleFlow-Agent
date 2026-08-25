@@ -1574,3 +1574,33 @@
 - Root cause and evidence: `intake_parallel_stream_service.py:1325-1329` omits an exact-three sealed assertion; `intake_parallel_stream.py:380-389` accepts sealed or interrupted lane terminals; normal completion construction is stricter in `intake_parallel_runtime.py:201-221`; the G012 completion guard validates outer identity but not nested lane terminal kind.
 - Impact: Malformed legacy, cross-version, or anomalously persisted technical completion data can be replayed as completed even though one lane never produced a sealed result.
 - Identifying metadata: confirmed by static production call-chain audit at HEAD `e07063db3f9c3c8560ceecc07fba45dda08a6bfa`; normal fresh producers were not observed generating this state.
+
+## P0-20260826-PARALLEL-QUALITY-PROJECTION-ORDER-REJECTED
+
+- Severity: P0
+- Status: FIXED / FOCUSED_CHECK_PASSED / UAT_PENDING
+- Component: Intake parallel `QUALITY_FRAME` public projection contract
+- Confirmed fact: On fresh activation `p9act.v1.71326c7df99d5578916b93c6efa57936`, the only USER ROOM_MESSAGE in fresh case `CASE_P9_6A8DC7A7_1` started all three V4 lanes within approximately 2.3 ms and invoked each Provider once, but `QUALITY_FRAME` failed before persisting any projection or sealed result with `INTAKE_PARALLEL_QUALITY_SCORE_ORDER_INVALID`.
+- Root cause and evidence: The Quality lane emitted a public projection prefix that did not match the fixed `QUALITY_DIMENSION_ORDER`. `_validate_public_projection_prefix` rejected it at `python-agent-service/app/graphs/intake/parallel_graph.py:1050` before the offending item entered the durable ingress ledger. The parent Graph command then aborted as `INTAKE_PARALLEL_FRAME_BATCH_FAILED / TECHNICAL_FRAME_FAILURE`; the Frame set contains three failed slots, zero results, and no READY, proposal artifact, RoomGraphResult artifact, FINAL, RESULT_READY, formal commit, dossier/matrix revision, or Agent reply.
+- Impact: The first substantive parallel Intake turn cannot seal its exact-three result or commit any business state, blocking response-time acceptance and all downstream UAT stages.
+- Identifying metadata: observed 2026-08-26; candidate `3b8ca8df958b895c1b0b36c09a960e00b3789903`; case `CASE_P9_6A8DC7A7_1`; message `MESSAGE_262690d15cc44d55bc841b72a9cb5d61`; run `target-intake-run:04d1332aa7a039fcaccbb513e4a2070b`; attempt `target-intake-attempt:04d1332aa7a039fcaccbb513e4a2070b:1`; command `intake-message:04d1332aa7a039fcaccbb513e4a2070b`; Frame set `IFS_0cc2b0f86cd625d0a04acb7fcc66919d`; first Quality failure approximately 5.723 seconds after browser submit.
+
+## P0-20260826-PARALLEL-DIALOGUE-PROJECTION-SLOT-REPEATED
+
+- Severity: P0
+- Status: FIXED / FOCUSED_CHECK_PASSED / UAT_PENDING
+- Component: Intake parallel `DIALOGUE_FRAME` public projection streaming
+- Confirmed fact: In the same single-turn UAT, `DIALOGUE_FRAME` durably accepted one substantive projection and then failed with `INTAKE_PARALLEL_FRAME_PROJECTION_SLOT_REPEATED`; it did not seal a Frame result.
+- Root cause and evidence: The Dialogue lane attempted to emit a second public projection for a slot already occupied in the same generation. The V4 ingress boundary rejected the duplicate after one accepted projection; the lane was subsequently marked FAILED and the parent exact-three batch could not complete. The runtime recorded no lane retry or reset and `provider_call_count=3` for the whole Graph attempt.
+- Impact: Even if the independent Quality ordering failure were absent, the Dialogue lane would still prevent exact-three sealing, Java assembly READY, FINAL, RESULT_READY, and the single formal Intake write.
+- Identifying metadata: observed 2026-08-26 in activation/case/run/attempt/command/Frame set recorded by `P0-20260826-PARALLEL-QUALITY-PROJECTION-ORDER-REJECTED`; Dialogue first substantive event was approximately 4.958 seconds after submit and the duplicate-slot failure occurred approximately 6.077 seconds after submit.
+
+## P0-20260826-PARALLEL-PARTIAL-COMPLETION-ORPHANED
+
+- Severity: P0
+- Status: FIXED / FOCUSED_CHECK_PASSED / UAT_PENDING
+- Component: Target E2E Intake V4 partial-failure convergence
+- Confirmed fact: When one or two parallel Intake lanes have a current sealed result and another lane terminates without a result, the production completion query returns only the result-bearing rows and `findExactThreeCompletion()` raises `INTAKE_PARALLEL_COMPLETION_INCOMPLETE`.
+- Root cause and evidence: The completion query in `JdbcIntakeParallelFrameStagingStore` uses an inner join to the current result, while the incomplete-cardinality error is a `StagingConflictException` extending `IllegalStateException`. `HttpTargetE2EIntakeParallelFrameExecutionClient` performs `prepare()` outside its typed terminal-failure convergence boundary and rethrows runtime failures from EOF `finish()` unchanged; only `TargetE2EGraphClientException` with `FAIL_LOGICAL_RUN` invokes `terminalizeUncommittedFailure()`. The mixed sealed/failed state therefore bypasses `failUncommitted()`.
+- Impact: The Frame set can remain `COLLECTING` with mixed `SEALED` and `FAILED` slots after the AgentRun has failed. The state cannot publish READY, FINAL, RESULT_READY, or formal business writes, but nonretryable or exhausted replay can encounter the same untyped conflict and remain orphaned instead of converging to `FAILED_UNCOMMITTED`.
+- Identifying metadata: confirmed by reverse static audit on 2026-08-26 at candidate `3b8ca8df958b895c1b0b36c09a960e00b3789903`; affected anchors include `HttpTargetE2EIntakeParallelFrameExecutionClient.java:141,188,207,562`, `JdbcIntakeParallelFrameStagingStore.java:364,717,888`, and `IntakeParallelFrameStagingPort.java:766`; no incorrect READY, duplicate FINAL, RESULT_READY, or formal commit path was found.

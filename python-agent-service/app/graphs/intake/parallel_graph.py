@@ -32,6 +32,8 @@ from app.graphs.intake.parallel_outputs import (
     FRAME_OUTPUT_MODELS,
     DialoguePublicSegmentProposalV1,
     DossierPublicPatchProposalV1,
+    IntakeDossierFrameV1,
+    IntakeQualityFrameV1,
     ParallelFrameOutput,
     QUALITY_DIMENSION_ORDER,
     QualityPublicGapProposalV1,
@@ -644,6 +646,7 @@ async def _invoke_frame_model(
     frame_id = str(state["frame_id"])
     provider_items: list[dict[str, Any]] = []
     canonical_items: list[dict[str, Any]] = []
+    pending_projection_error: BaseException | None = None
     reset_count = 0
     generation_transition_events: list[dict[str, Any]] = []
     completed: HarnessStreamCompleted[Any] | None = None
@@ -687,6 +690,10 @@ async def _invoke_frame_model(
             max_input_tokens=20_000,
             agent_context=runtime.agent_context,
             prompt_profile_id=request.model_input.instruction_pack.prompt_profile_id,
+            semantic_validator=_request_bound_frame_semantic_validator(
+                frame_type,
+                actor_role=request.actor_role,
+            ),
         )
         async for update in stream:
             if isinstance(update, HarnessStreamDelta):
@@ -694,28 +701,41 @@ async def _invoke_frame_model(
                     raise IntakeGraphContractError(
                         "INTAKE_PARALLEL_FRAME_FOREIGN_VISIBLE_FIELD"
                     )
-                provider_item = _decode_visible_item(update.delta)
-                item_model = FRAME_PUBLIC_ITEM_MODELS[frame_type].model_validate(
-                    provider_item
-                )
-                normalized_provider_item = item_model.model_dump(mode="json")
-                _validate_public_projection_prefix(
-                    frame_type,
-                    provider_items,
-                    normalized_provider_item,
-                    actor_role=request.actor_role,
-                )
-                slot_id = str(normalized_provider_item["provider_slot_id"])
-                if slot_id in {
-                    str(item["provider_slot_id"]) for item in provider_items
-                }:
-                    raise IntakeGraphContractError(
-                        "INTAKE_PARALLEL_FRAME_PROJECTION_SLOT_REPEATED"
+                # Cross-item rules are not representable in the provider's item-local
+                # JSON Schema.  Keep the first violation sticky for this generation,
+                # suppress the offending suffix, and allow the governed structured
+                # stream to finish validating the complete document.  A final Schema
+                # failure then produces the already-authorized bounded generation reset.
+                # If the final document is valid, the mismatch came from the stream
+                # adapter rather than the model document and is rejected at completion.
+                if pending_projection_error is not None:
+                    continue
+                try:
+                    provider_item = _decode_visible_item(update.delta)
+                    item_model = FRAME_PUBLIC_ITEM_MODELS[frame_type].model_validate(
+                        provider_item
                     )
-                canonical_item = canonical_parallel_public_projection(
-                    frame_type,
-                    item_model,
-                )
+                    normalized_provider_item = item_model.model_dump(mode="json")
+                    _validate_public_projection_prefix(
+                        frame_type,
+                        provider_items,
+                        normalized_provider_item,
+                        actor_role=request.actor_role,
+                    )
+                    slot_id = str(normalized_provider_item["provider_slot_id"])
+                    if slot_id in {
+                        str(item["provider_slot_id"]) for item in provider_items
+                    }:
+                        raise IntakeGraphContractError(
+                            "INTAKE_PARALLEL_FRAME_PROJECTION_SLOT_REPEATED"
+                        )
+                    canonical_item = canonical_parallel_public_projection(
+                        frame_type,
+                        item_model,
+                    )
+                except (IntakeGraphContractError, TypeError, ValueError) as error:
+                    pending_projection_error = error
+                    continue
                 local_index = len(provider_items)
                 provider_items.append(normalized_provider_item)
                 canonical_items.append(
@@ -766,6 +786,7 @@ async def _invoke_frame_model(
                 reset_count = 1
                 provider_items.clear()
                 canonical_items.clear()
+                pending_projection_error = None
                 generation_reset = FrameGenerationReset(
                     frame_set_id=request.frame_set_id,
                     run_id=request.run_id,
@@ -793,6 +814,8 @@ async def _invoke_frame_model(
                     raise IntakeGraphContractError(
                         "INTAKE_PARALLEL_FRAME_MULTIPLE_COMPLETIONS"
                     )
+                if pending_projection_error is not None:
+                    raise pending_projection_error
                 completed = update
                 continue
             raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_STREAM_EVENT_INVALID")
@@ -1089,6 +1112,32 @@ def _validate_public_projection_prefix(
         raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_PUBLIC_ITEM_LIMIT")
     if len("；".join(candidates)) > 20_000:
         raise IntakeGraphContractError("INTAKE_PARALLEL_DOSSIER_SUMMARY_LIMIT")
+
+
+def _request_bound_frame_semantic_validator(
+    frame_type: ParallelFrameType,
+    *,
+    actor_role: PartyRole,
+) -> Callable[[Any], Any]:
+    """Attach request authority without changing the provider-visible JSON Schema."""
+
+    def validate(value: Any) -> Any:
+        frame = validate_parallel_frame_output(frame_type, value)
+        if isinstance(frame, IntakeQualityFrameV1):
+            if any(
+                gap.source_role != actor_role
+                for gap in frame.quality.gap_proposals
+            ):
+                raise ValueError(
+                    "Quality gap source role differs from the authenticated actor"
+                )
+        elif isinstance(frame, IntakeDossierFrameV1):
+            # This is an aggregate persisted-field bound and is intentionally not
+            # weakened to the per-item string limit exposed in JSON Schema.
+            frame.materialized_dossier_patch()
+        return value
+
+    return validate
 
 
 def _provider_usage(

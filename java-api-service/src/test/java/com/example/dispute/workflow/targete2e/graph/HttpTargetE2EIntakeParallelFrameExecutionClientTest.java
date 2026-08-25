@@ -31,6 +31,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.SlotState;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.StagingConflictException;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -180,6 +181,71 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                         "find-completion",
                         "fail:TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
         assertThat(staging.nextSequence).isEqualTo(1L);
+    }
+
+    @Test
+    void partialSealedCompletionConflictDurablyFailsTheAdmittedFrameSet() {
+        ExecuteAgentRunRequest request = validParallelRequest();
+        StreamFixture complete = StreamFixture.complete(request);
+        StreamFixture partial = complete.withLines(complete.lines().subList(0, 10));
+        GraphTransportSecurityProof proof = mutualTlsProof();
+        RecordingStaging staging = new RecordingStaging(request, partial)
+                .withIncompleteCompletionConflict();
+
+        assertThatThrownBy(() -> client(
+                                request,
+                                proof,
+                                new FakeCommandTransport(proof, partial),
+                                staging)
+                        .executeOrResume(
+                                request,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOfSatisfying(
+                        TargetE2EGraphClientException.class,
+                        failure -> {
+                            assertThat(failure.errorCode())
+                                    .isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+                            assertThat(failure.recoveryAction())
+                                    .isEqualTo(
+                                            TargetE2EGraphClientException.RecoveryAction
+                                                    .FAIL_LOGICAL_RUN);
+                        });
+
+        assertThat(staging.actions)
+                .endsWith(
+                        "seal:QUALITY_FRAME",
+                        "find-completion",
+                        "fail:TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+    }
+
+    @Test
+    void planningConflictAfterAdmissionDurablyFailsTheAdmittedFrameSet() {
+        ExecuteAgentRunRequest request = validParallelRequest();
+        StreamFixture fixture = StreamFixture.complete(request);
+        GraphTransportSecurityProof proof = mutualTlsProof();
+        RecordingStaging staging = new RecordingStaging(request, fixture)
+                .withPlanningConflict();
+
+        assertThatThrownBy(() -> client(
+                                request,
+                                proof,
+                                new FakeCommandTransport(proof, fixture),
+                                staging)
+                        .executeOrResume(
+                                request,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOfSatisfying(
+                        TargetE2EGraphClientException.class,
+                        failure -> assertThat(failure.errorCode())
+                                .isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED"));
+
+        assertThat(staging.actions)
+                .containsExactly(
+                        "admit",
+                        "plan",
+                        "fail:TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
     }
 
     @Test
@@ -533,6 +599,8 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         private long nextSequence;
         private int sealed;
         private long frameSetVersion;
+        private boolean incompleteCompletionConflict;
+        private boolean planningConflict;
 
         private RecordingStaging(ExecuteAgentRunRequest request, StreamFixture fixture) {
             this.request = request;
@@ -544,6 +612,16 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                     1L,
                     0L,
                     request.command().requestHash());
+        }
+
+        private RecordingStaging withIncompleteCompletionConflict() {
+            incompleteCompletionConflict = true;
+            return this;
+        }
+
+        private RecordingStaging withPlanningConflict() {
+            planningConflict = true;
+            return this;
         }
 
         @Override
@@ -611,6 +689,11 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         @Override
         public ExecutionPlan planExecution(FrameSetAdmission value) {
             actions.add("plan");
+            if (planningConflict) {
+                throw new StagingConflictException(
+                        "INTAKE_PARALLEL_RETRY_AUTHORITY_INVALID",
+                        "parallel execution plan no longer matches current authority");
+            }
             EnumMap<FrameType, ExecutionLane> lanes = new EnumMap<>(FrameType.class);
             value.manifests().forEach(manifest -> lanes.put(
                     manifest.frameType(),
@@ -663,6 +746,11 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                 String frameSetId, String runId, String attemptId) {
             actions.add("find-completion");
             if (seals.size() != FrameType.values().length) {
+                if (incompleteCompletionConflict && !seals.isEmpty()) {
+                    throw new StagingConflictException(
+                            "INTAKE_PARALLEL_COMPLETION_INCOMPLETE",
+                            "parallel exact-three completion is incomplete");
+                }
                 return Optional.empty();
             }
             EnumMap<FrameType, ExactThreeFrame> frames = new EnumMap<>(FrameType.class);
