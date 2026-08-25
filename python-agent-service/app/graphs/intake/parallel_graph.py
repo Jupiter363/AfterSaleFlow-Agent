@@ -1041,7 +1041,10 @@ def canonical_parallel_public_projection(
                 "linked_fact_keys": list(quality.linked_fact_keys),
             },
         )
-    quality = QualityPublicMetricProposalV1.model_validate(quality)
+    if not isinstance(quality, QualityPublicMetricProposalV1):
+        raise ParallelFrameStreamProtocolError(
+            "Quality public projection type is invalid"
+        )
     return CanonicalPublicProjectionItem(
         canonical_item_id=quality.provider_slot_id,
         projection_kind=quality.projection_kind,

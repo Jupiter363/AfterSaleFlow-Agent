@@ -10,6 +10,7 @@
 
 - `public_projection_items` 必须是根对象第一个字段。
 - `public_projection_items` 必须先严格按 `REFERENCES` → `EVENT_STORY` → `PARTY_POSITIONS` → `REQUESTED_RESOLUTION` → `RISK_AND_CONFLICTS` → `NEXT_ACTION_CLARITY` 输出六个 `DIMENSION_SCORE`，再按 `quality.gap_proposals` 的相同顺序输出零到六个 `BLOCKING_GAP`；每个 `provider_slot_id` 必须唯一，不得交错、遗漏、重复、重排或改写。
+- 六项分数上限固定为：`REFERENCES=15`、`EVENT_STORY=20`、`PARTY_POSITIONS=20`、`REQUESTED_RESOLUTION=15`、`RISK_AND_CONFLICTS=15`、`NEXT_ACTION_CLARITY=15`。公开 `candidate_score` 与最终 `quality.scores` 必须同时遵守对应维度上限并逐项相等。
 - 每个公开缺口的 dimension、question、source_role、linked_fact_keys 必须与最终 `quality.gap_proposals` 对应项逐字段相同；没有合法缺口时只输出六个分数项。
 - 只输出六项分数、合法缺口及其结构化评估理由。
 - 不输出独立 `total_score`；服务端只以六项整数之和作为唯一总分。

@@ -22,7 +22,14 @@ from app.graphs.intake.parallel_contracts import (
 from app.graphs.intake.contracts import CaseFactDeltaRowV2, CaseFactMatrixDeltaV2
 
 
-BoundedChineseText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
+DialogueSegmentText = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=500,
+        pattern=r"^[^?？]+$",
+    ),
+]
 BoundedReasoning = Annotated[str, StringConstraints(min_length=1, max_length=2000)]
 BoundedQuestion = Annotated[str, StringConstraints(min_length=2, max_length=1000)]
 Dimension = Literal[
@@ -59,7 +66,7 @@ class DialoguePublicSegmentProposalV1(StrictFrameOutput):
         "TRANSITION",
         "REMARK_ACKNOWLEDGEMENT",
     ]
-    candidate_text: BoundedChineseText
+    candidate_text: DialogueSegmentText
 
     @model_validator(mode="after")
     def reject_model_authored_questions(self) -> DialoguePublicSegmentProposalV1:
@@ -186,6 +193,42 @@ class QualityPublicMetricProposalV1(StrictFrameOutput):
     linked_fact_keys: tuple[Identifier, ...] = Field(max_length=16)
 
 
+class QualityReferencesPublicMetricProposalV1(QualityPublicMetricProposalV1):
+    dimension: Literal["REFERENCES"]
+    candidate_score: int = Field(ge=0, le=15)
+
+
+class QualityEventStoryPublicMetricProposalV1(QualityPublicMetricProposalV1):
+    dimension: Literal["EVENT_STORY"]
+    candidate_score: int = Field(ge=0, le=20)
+
+
+class QualityPartyPositionsPublicMetricProposalV1(QualityPublicMetricProposalV1):
+    dimension: Literal["PARTY_POSITIONS"]
+    candidate_score: int = Field(ge=0, le=20)
+
+
+class QualityRequestedResolutionPublicMetricProposalV1(
+    QualityPublicMetricProposalV1
+):
+    dimension: Literal["REQUESTED_RESOLUTION"]
+    candidate_score: int = Field(ge=0, le=15)
+
+
+class QualityRiskAndConflictsPublicMetricProposalV1(
+    QualityPublicMetricProposalV1
+):
+    dimension: Literal["RISK_AND_CONFLICTS"]
+    candidate_score: int = Field(ge=0, le=15)
+
+
+class QualityNextActionClarityPublicMetricProposalV1(
+    QualityPublicMetricProposalV1
+):
+    dimension: Literal["NEXT_ACTION_CLARITY"]
+    candidate_score: int = Field(ge=0, le=15)
+
+
 class QualityPublicGapProposalV1(StrictFrameOutput):
     schema_version: Literal["intake.quality-public-gap-proposal.v1"]
     provider_slot_id: Identifier
@@ -201,10 +244,15 @@ class QualityPublicGapProposalV1(StrictFrameOutput):
         return self
 
 
-QualityPublicProjectionValueV1: TypeAlias = Annotated[
-    QualityPublicMetricProposalV1 | QualityPublicGapProposalV1,
-    Field(discriminator="projection_kind"),
-]
+QualityPublicProjectionValueV1: TypeAlias = (
+    QualityReferencesPublicMetricProposalV1
+    | QualityEventStoryPublicMetricProposalV1
+    | QualityPartyPositionsPublicMetricProposalV1
+    | QualityRequestedResolutionPublicMetricProposalV1
+    | QualityRiskAndConflictsPublicMetricProposalV1
+    | QualityNextActionClarityPublicMetricProposalV1
+    | QualityPublicGapProposalV1
+)
 
 
 class QualityPublicProjectionProposalV1(

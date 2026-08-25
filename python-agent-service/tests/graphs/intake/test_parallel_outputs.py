@@ -75,6 +75,33 @@ def test_frame_schema_rejects_projection_reordering_and_full_score_gap() -> None
         validate_parallel_frame_output("QUALITY_FRAME", reordered)
 
 
+def test_provider_visible_schema_rejects_question_segments_and_dimension_score_overflow(
+) -> None:
+    dialogue_schema = IntakeDialogueFrameV1.model_json_schema()
+    dialogue_text_schema = dialogue_schema["$defs"][
+        "DialoguePublicSegmentProposalV1"
+    ]["properties"]["candidate_text"]
+    assert dialogue_text_schema["pattern"] == r"^[^?？]+$"
+
+    dialogue = _dialogue_frame()
+    dialogue["public_projection_items"][0]["candidate_text"] = "还需要补充吗？"
+    with pytest.raises(ValidationError, match="string_pattern_mismatch"):
+        validate_parallel_frame_output("DIALOGUE_FRAME", dialogue)
+
+    references = _quality_frame()["public_projection_items"][0]
+    references["candidate_score"] = 18
+    with pytest.raises(ValidationError, match="less_than_equal"):
+        QualityPublicProjectionProposalV1.model_validate(references)
+
+    event_story = _quality_frame()["public_projection_items"][1]
+    event_story["candidate_score"] = 18
+    assert (
+        QualityPublicProjectionProposalV1.model_validate(event_story)
+        .root.candidate_score
+        == 18
+    )
+
+
 def test_quality_public_gap_is_a_root_discriminated_item_and_must_match_seal() -> None:
     quality = _quality_frame()
     validated = validate_parallel_frame_output("QUALITY_FRAME", quality)
