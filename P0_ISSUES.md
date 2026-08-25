@@ -1364,9 +1364,19 @@
 ## P0-20260825-V081-LEGACY-GENERATION-RESET-CONSTRAINT
 
 - Severity: P0
-- Status: FIXED_FOCUSED_VERIFIED / ACTIVATION_PENDING
+- Status: FIXED_ACTIVATION_MIGRATION_VERIFIED
 - Component: V081 Intake parallel-frame staging migration compatibility
 - Confirmed fact: The fresh activation migration preflight rolled back V081 and exited before activation provisioning because PostgreSQL rejected the new `ck_agent_run_stream_event_type_v4` constraint with SQLSTATE `23514`.
 - Root cause and evidence: The existing schema at version 080 contains eleven `agent-stream.v3` rows whose persisted `event_type` is `generation_reset`. V081 drops the V3 event-type constraint and replaces it with a V4 superset that includes `frame_generation_reset` but omits the still-valid legacy `generation_reset`, so adding the replacement constraint rejects historical rows.
 - Impact: No candidate activation can pass Flyway preflight or start against an existing valid V080 database, so the parallel Intake refactor cannot enter integrated UAT even though the application slices pass focused verification.
 - Identifying metadata: observed 2026-08-25 12:07 CST; database schema version `080`; failing migration `V081__intake_parallel_frame_staging.sql` line 12; constraint `ck_agent_run_stream_event_type_v4`; launcher outcome `SOURCE_TOPOLOGY_STOPPED_BEFORE_IRREVERSIBLE_PROVISION`.
+
+## P0-20260825-PARALLEL-ASSEMBLY-STORE-FINAL-PROXY
+
+- Severity: P0
+- Status: FIXED_FOCUSED_VERIFIED / ACTIVATION_PENDING
+- Component: Java Intake parallel assembly persistence bean activation
+- Confirmed fact: After V081 through V084 migrated successfully, the fresh activation preflight still exited before readiness while creating the `jdbcIntakeParallelAssemblyStore` bean.
+- Root cause and evidence: `JdbcIntakeParallelAssemblyStore` is a final concrete Spring bean with transactional advice. Spring selected a CGLIB class proxy during application-context startup, and CGLIB rejected the bean with `Cannot subclass final class com.example.dispute.workflow.infrastructure.persistence.intake.parallel.JdbcIntakeParallelAssemblyStore`.
+- Impact: The migrated candidate schema cannot start the Java application context, so no API, worker, Python, frontend, or integrated UAT stage can be activated.
+- Identifying metadata: observed 2026-08-25 12:11 CST; latest migrated version observed `084`; bean `jdbcIntakeParallelAssemblyStore`; exception `AopConfigException` caused by `IllegalArgumentException: Cannot subclass final class`.

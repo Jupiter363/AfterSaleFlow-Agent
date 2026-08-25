@@ -2,6 +2,7 @@ package com.example.dispute.workflow.infrastructure.persistence.intake.parallel;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
@@ -22,6 +23,11 @@ class JdbcIntakeParallelAssemblyStoreContractTest {
             "intake",
             "parallel",
             "JdbcIntakeParallelAssemblyStore.java");
+
+    @Test
+    void transactionalRepositoryRemainsProxyable() {
+        assertThat(Modifier.isFinal(JdbcIntakeParallelAssemblyStore.class.getModifiers())).isFalse();
+    }
 
     @Test
     void publishesReadyOnlyInsideOneTechnicalTransactionAfterLockingExactThree() throws Exception {

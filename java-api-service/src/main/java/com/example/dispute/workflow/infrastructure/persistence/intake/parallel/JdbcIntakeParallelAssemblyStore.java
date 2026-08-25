@@ -46,7 +46,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 /** PostgreSQL exact-three technical assembler artifact store. */
 @Repository
-public final class JdbcIntakeParallelAssemblyStore implements IntakeParallelAssemblyStore {
+public class JdbcIntakeParallelAssemblyStore implements IntakeParallelAssemblyStore {
 
     private static final String GRAPH_RESULT_SCHEMA = "room-graph-result.schema.json";
     private static final String FRAME_ORDER =
