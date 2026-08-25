@@ -51,7 +51,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 /** PostgreSQL technical staging store for one exact-three parallel Intake attempt. */
 @Repository
-public final class JdbcIntakeParallelFrameStagingStore
+public class JdbcIntakeParallelFrameStagingStore
         implements IntakeParallelFrameStagingPort {
 
     private static final String LOCK_ADMISSION_AUTHORITY_SQL =

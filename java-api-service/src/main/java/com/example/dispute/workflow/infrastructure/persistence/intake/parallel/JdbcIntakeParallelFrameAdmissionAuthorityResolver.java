@@ -18,7 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 /** Read-side resolver for the exact current event binding used by V4 Frame-set admission. */
 @Repository
-public final class JdbcIntakeParallelFrameAdmissionAuthorityResolver
+public class JdbcIntakeParallelFrameAdmissionAuthorityResolver
         implements IntakeParallelFrameAdmissionAuthorityResolver {
 
     private static final String LOAD_SQL =

@@ -25,8 +25,16 @@ class JdbcIntakeParallelAssemblyStoreContractTest {
             "JdbcIntakeParallelAssemblyStore.java");
 
     @Test
-    void transactionalRepositoryRemainsProxyable() {
+    void transactionalParallelRepositoriesRemainProxyable() {
         assertThat(Modifier.isFinal(JdbcIntakeParallelAssemblyStore.class.getModifiers())).isFalse();
+        assertThat(Modifier.isFinal(
+                        JdbcIntakeParallelFrameAdmissionAuthorityResolver.class.getModifiers()))
+                .isFalse();
+        assertThat(Modifier.isFinal(JdbcIntakeParallelFrameStagingStore.class.getModifiers()))
+                .isFalse();
+        assertThat(Modifier.isFinal(
+                        TransactionalIntakeParallelRunTerminalStore.class.getModifiers()))
+                .isFalse();
     }
 
     @Test

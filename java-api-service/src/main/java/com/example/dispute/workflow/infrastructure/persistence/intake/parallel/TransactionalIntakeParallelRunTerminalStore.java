@@ -40,7 +40,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 /** PostgreSQL/JPA owner of the atomic V4 FINAL + RESULT_READY technical transaction. */
 @Repository
-public final class TransactionalIntakeParallelRunTerminalStore
+public class TransactionalIntakeParallelRunTerminalStore
         implements IntakeParallelRunTerminalStore {
 
     private static final String RECEIPT_SCHEMA = "intake-parallel-final-receipt.v1";
