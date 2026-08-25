@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterator, Mapping, Sequence
 import re
 from typing import Any, Protocol, cast
@@ -188,13 +189,11 @@ class _StreamingTechnicalEventSink:
         *,
         validator: ParallelFrameStreamProtocolValidator,
         event_log: list[ParallelFrameTechnicalEvent],
-        queue: asyncio.Queue[ParallelFrameTechnicalEvent | object],
-        event_capacity: int,
+        queue: "_FairFrameMergeQueue",
     ) -> None:
         self._validator = validator
         self._event_log = event_log
         self._queue = queue
-        self._event_capacity = event_capacity
         self._seals: dict[ParallelFrameType, FrameSealed] = {}
 
     @property
@@ -202,8 +201,6 @@ class _StreamingTechnicalEventSink:
         return dict(self._seals)
 
     async def emit(self, event: ParallelFrameTechnicalEvent) -> None:
-        if self._queue.qsize() >= self._event_capacity:
-            raise GraphContractError("parallel Intake stream queue is saturated")
         typed_event = _EVENT_ADAPTER.validate_python(event)
         self._validator.accept(typed_event)
         if isinstance(typed_event, FrameSealed):
@@ -212,6 +209,56 @@ class _StreamingTechnicalEventSink:
             self._seals[typed_event.frame_type] = typed_event
         self._event_log.append(typed_event)
         self._queue.put_nowait(typed_event)
+
+
+class _FairFrameMergeQueue:
+    """Bound each lane independently and drain active lanes round-robin.
+
+    A single shared FIFO lets a fast Dialogue or Dossier provider consume every
+    buffered slot before either sibling gets one. Each Frame therefore owns the
+    same bounded quota while one cursor selects the next non-empty lane. The
+    transport remains single-writer, but producer skew cannot starve a sibling.
+    """
+
+    def __init__(self, *, per_frame_capacity: int) -> None:
+        if per_frame_capacity < 1:
+            raise ValueError("parallel Intake per-Frame queue capacity is invalid")
+        self._per_frame_capacity = per_frame_capacity
+        self._lanes: dict[
+            ParallelFrameType, deque[ParallelFrameTechnicalEvent]
+        ] = {frame_type: deque() for frame_type in FRAME_TYPES}
+        self._available = asyncio.Event()
+        self._closed = False
+        self._next_lane = 0
+
+    def put_nowait(self, event: ParallelFrameTechnicalEvent) -> None:
+        if self._closed:
+            raise GraphContractError("parallel Intake stream queue is closed")
+        lane = self._lanes[event.frame_type]
+        if len(lane) >= self._per_frame_capacity:
+            raise GraphContractError(
+                f"parallel Intake {event.frame_type} stream queue is saturated"
+            )
+        lane.append(event)
+        self._available.set()
+
+    def close(self) -> None:
+        self._closed = True
+        self._available.set()
+
+    async def get(self) -> ParallelFrameTechnicalEvent | object:
+        while True:
+            for offset in range(len(FRAME_TYPES)):
+                lane_index = (self._next_lane + offset) % len(FRAME_TYPES)
+                frame_type = FRAME_TYPES[lane_index]
+                lane = self._lanes[frame_type]
+                if lane:
+                    self._next_lane = (lane_index + 1) % len(FRAME_TYPES)
+                    return lane.popleft()
+            if self._closed:
+                return _RUNNER_TERMINAL
+            self._available.clear()
+            await self._available.wait()
 
 
 class GatewayBackedParallelIntakeFrameStreamService:
@@ -550,16 +597,16 @@ class GatewayBackedParallelIntakeFrameStreamService:
             authority,
             active_frame_types,
         )
-        queue: asyncio.Queue[ParallelFrameTechnicalEvent | object] = asyncio.Queue(
-            # Reserve one private slot for the runner sentinel.  Public events
-            # remain bounded by ``_queue_capacity`` and fail closed on saturation.
-            maxsize=self._queue_capacity + 1
+        queue = _FairFrameMergeQueue(
+            # This is a per-Frame quota. Total memory remains bounded by the
+            # fixed exact-three topology while one noisy lane cannot consume a
+            # sibling's capacity.
+            per_frame_capacity=self._queue_capacity
         )
         sink = _StreamingTechnicalEventSink(
             validator=validator,
             event_log=event_log,
             queue=queue,
-            event_capacity=self._queue_capacity,
         )
         recorder = GatewayProviderCallIntentRecorder(
             gateway=self._gateway,
@@ -610,9 +657,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
                             checkpoint_configs=checkpoint_configs,
                         )
                 finally:
-                    # A dedicated queue slot makes this non-blocking even if the
-                    # Java reader is momentarily behind every public event.
-                    queue.put_nowait(_RUNNER_TERMINAL)
+                    queue.close()
 
             runner = asyncio.create_task(
                 execute_frames(),
@@ -711,7 +756,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
 
     async def _drain_live_queue(
         self,
-        queue: asyncio.Queue[ParallelFrameTechnicalEvent | object],
+        queue: _FairFrameMergeQueue,
         heartbeat: asyncio.Task[None],
     ) -> AsyncIterator[ParallelFrameTechnicalEvent]:
         next_event: asyncio.Task[ParallelFrameTechnicalEvent | object] | None = None

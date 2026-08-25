@@ -19,6 +19,8 @@ from app.api.intake_parallel_stream import (
 )
 from app.api.intake_parallel_stream_service import (
     GatewayBackedParallelIntakeFrameStreamService,
+    _FairFrameMergeQueue,
+    _RUNNER_TERMINAL,
     _batch_failure_is_retryable,
 )
 from app.contracts.v1.codec import canonical_sha256
@@ -44,6 +46,49 @@ RUN_ID = "run_test"
 ATTEMPT_ID = "attempt_test"
 CONTEXT_HASH = "a" * 64
 MODEL_CONTEXT_HASH = "b" * 64
+
+
+def _started(frame_type: ParallelFrameType, *, suffix: str) -> FrameStarted:
+    return FrameStarted(
+        frame_set_id=FRAME_SET_ID,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        frame_type=frame_type,
+        generation=1,
+        frame_id=f"frame_{frame_type}_{suffix}",
+        frame_model_input_sha256="c" * 64,
+        frame_prompt_sha256="d" * 64,
+        context_envelope_sha256=CONTEXT_HASH,
+        model_context_view_sha256=MODEL_CONTEXT_HASH,
+    )
+
+
+@pytest.mark.asyncio
+async def test_fair_merge_queue_round_robins_and_isolates_lane_capacity() -> None:
+    queue = _FairFrameMergeQueue(per_frame_capacity=3)
+    dialogue = [_started(FRAME_TYPES[0], suffix=str(index)) for index in range(3)]
+    dossier = _started(FRAME_TYPES[1], suffix="0")
+    quality = _started(FRAME_TYPES[2], suffix="0")
+
+    for event in dialogue:
+        queue.put_nowait(event)
+    with pytest.raises(GraphContractError, match="DIALOGUE_FRAME.*saturated"):
+        queue.put_nowait(_started(FRAME_TYPES[0], suffix="overflow"))
+
+    # A saturated Dialogue lane cannot consume either sibling's quota.
+    queue.put_nowait(dossier)
+    queue.put_nowait(quality)
+    queue.close()
+
+    drained = [await queue.get() for _ in range(5)]
+    assert [event.frame_type for event in drained] == [
+        FRAME_TYPES[0],
+        FRAME_TYPES[1],
+        FRAME_TYPES[2],
+        FRAME_TYPES[0],
+        FRAME_TYPES[0],
+    ]
+    assert await queue.get() is _RUNNER_TERMINAL
 
 
 @dataclass(frozen=True)
@@ -381,8 +426,8 @@ async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for
     remaining = [event async for event in iterator]
     assert [first_seal.frame_type, *(event.frame_type for event in remaining)] == [
         FRAME_TYPES[0],
-        FRAME_TYPES[2],
         FRAME_TYPES[1],
+        FRAME_TYPES[2],
     ]
     assert gateway.completed == [completion]
     assert gateway.finished == []
