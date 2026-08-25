@@ -9,6 +9,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAs
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.FrameExecutionReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.DurableProgress;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalConflictException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalReceipt;
@@ -54,6 +55,7 @@ public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunEx
 
         ProgressTracker progress = new ProgressTracker(progressListener);
         try {
+            progress.merge(terminalStore.loadProgress(request));
             GraphReconcileResponse reconciliation;
             if (executionMode == ExecutionMode.RECONCILE_ONLY) {
                 reconciliation = reconciliationClient.reconcile(request, cancellationToken);
@@ -74,21 +76,25 @@ public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunEx
                     terminal.result());
         } catch (TargetE2EGraphClientException failure) {
             cancellationToken.throwIfCancellationRequested();
+            refreshProgress(request, progress, failure);
             throw executionFailure(failure, progress);
         } catch (AssemblyConflictException failure) {
             cancellationToken.throwIfCancellationRequested();
+            refreshProgress(request, progress, failure);
             throw executionFailure(
                     TargetE2EGraphClientException.remote(
                             failure.code(), false, "parallel Intake assembly authority was rejected"),
                     progress);
         } catch (TerminalConflictException failure) {
             cancellationToken.throwIfCancellationRequested();
+            refreshProgress(request, progress, failure);
             throw executionFailure(
                     TargetE2EGraphClientException.remote(
                             failure.code(), false, "parallel Intake terminal authority was rejected"),
                     progress);
         } catch (RuntimeException failure) {
             cancellationToken.throwIfCancellationRequested();
+            refreshProgress(request, progress, failure);
             TargetE2EGraphClientException typedFailure = progress.publicOutputEmitted
                     ? TargetE2EGraphClientException.transport(
                             "parallel Intake execution failed after durable public output", failure)
@@ -97,6 +103,19 @@ public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunEx
                             true,
                             "parallel Intake execution failed before durable public output");
             throw executionFailure(typedFailure, progress);
+        }
+    }
+
+    private void refreshProgress(
+            ExecuteAgentRunRequest request,
+            ProgressTracker progress,
+            RuntimeException originalFailure) {
+        try {
+            progress.merge(terminalStore.loadProgress(request));
+        } catch (RuntimeException refreshFailure) {
+            if (refreshFailure != originalFailure) {
+                originalFailure.addSuppressed(refreshFailure);
+            }
         }
     }
 
@@ -167,6 +186,12 @@ public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunEx
 
         private ProgressTracker(ProgressListener delegate) {
             this.delegate = Objects.requireNonNull(delegate, "delegate");
+        }
+
+        private void merge(DurableProgress durable) {
+            DurableProgress required = Objects.requireNonNull(durable, "durableProgress");
+            lastSequenceNo = Math.max(lastSequenceNo, required.lastSequenceNo());
+            publicOutputEmitted |= required.publicOutputEmitted();
         }
 
         @Override

@@ -13,7 +13,27 @@ import java.util.Objects;
  */
 public interface IntakeParallelRunTerminalStore {
 
+    /** Reloads the monotonic V4 attempt progress for failure classification and Activity replay. */
+    DurableProgress loadProgress(ExecuteAgentRunRequest request);
+
     TerminalReceipt appendOrLoad(TerminalCommand command);
+
+    record DurableProgress(
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            boolean finalFrameObserved) {
+
+        public DurableProgress {
+            if (lastSequenceNo < -1) {
+                throw new IllegalArgumentException(
+                        "lastSequenceNo is below the empty V4 stream baseline");
+            }
+            if (lastSequenceNo == -1 && (publicOutputEmitted || finalFrameObserved)) {
+                throw new IllegalArgumentException(
+                        "empty V4 stream progress cannot be public or terminal");
+            }
+        }
+    }
 
     record TerminalCommand(
             ExecuteAgentRunRequest request, GraphReconcileResponse reconciliation) {

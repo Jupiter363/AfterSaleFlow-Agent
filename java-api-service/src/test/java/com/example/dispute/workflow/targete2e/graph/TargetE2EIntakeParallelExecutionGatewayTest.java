@@ -21,6 +21,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAs
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.FrameExecutionReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.DurableProgress;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalReceipt;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
@@ -44,6 +45,7 @@ class TargetE2EIntakeParallelExecutionGatewayTest {
                 mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
         AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
         IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(terminal.loadProgress(request)).thenReturn(emptyProgress());
         AssemblyResult assembly = mock(AssemblyResult.class);
         when(reconciliation.reconcile(eq(request), any()))
                 .thenThrow(new AssemblyConflictException(
@@ -85,6 +87,7 @@ class TargetE2EIntakeParallelExecutionGatewayTest {
                 mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
         AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
         IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(terminal.loadProgress(request)).thenReturn(emptyProgress());
         when(reconciliation.reconcile(eq(request), any())).thenReturn(response);
         when(terminal.appendOrLoad(any())).thenReturn(terminal(durable, response));
 
@@ -110,6 +113,7 @@ class TargetE2EIntakeParallelExecutionGatewayTest {
                 mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
         AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
         IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(terminal.loadProgress(request)).thenReturn(emptyProgress());
         when(reconciliation.reconcile(eq(request), any()))
                 .thenThrow(new AssemblyConflictException(
                         "INTAKE_PARALLEL_READY_MISSING", "not ready"));
@@ -148,6 +152,7 @@ class TargetE2EIntakeParallelExecutionGatewayTest {
                 mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
         AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
         IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(terminal.loadProgress(request)).thenReturn(emptyProgress());
         when(reconciliation.reconcile(eq(request), any()))
                 .thenThrow(new AssemblyConflictException(
                         "INTAKE_PARALLEL_READY_MISSING", "not ready"));
@@ -184,6 +189,7 @@ class TargetE2EIntakeParallelExecutionGatewayTest {
                 mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
         AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
         IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(terminal.loadProgress(request)).thenReturn(emptyProgress());
         when(reconciliation.reconcile(eq(request), any()))
                 .thenThrow(new AssemblyConflictException(
                         "INTAKE_PARALLEL_READY_MISSING", "not ready"));
@@ -205,6 +211,43 @@ class TargetE2EIntakeParallelExecutionGatewayTest {
                 .isEqualTo(AgentRunRecoveryAction.RETRY_SAME_COMMAND);
         assertThat(failure.lastSequenceNo()).isEqualTo(-1L);
         assertThat(failure.publicOutputEmitted()).isFalse();
+        verify(coordinator, never()).assembleReady(any(), any(), any());
+        verify(terminal, never()).appendOrLoad(any());
+    }
+
+    @Test
+    void reloadsDurableProgressWhenIngressCommittedBeforeItsCallbackFailed() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        IntakeParallelFrameExecutionClient frames = mock(IntakeParallelFrameExecutionClient.class);
+        TargetE2EIntakeParallelAssemblyCoordinator coordinator =
+                mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
+        AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
+        IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(terminal.loadProgress(request))
+                .thenReturn(emptyProgress())
+                .thenReturn(new DurableProgress(7L, true, false));
+        when(reconciliation.reconcile(eq(request), any()))
+                .thenThrow(new AssemblyConflictException(
+                        "INTAKE_PARALLEL_READY_MISSING", "not ready"));
+        when(frames.executeOrResume(eq(request), any(), any()))
+                .thenThrow(new IllegalStateException("callback failed after durable ingress"));
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                () -> new TargetE2EIntakeParallelExecutionGateway(
+                                frames, coordinator, reconciliation, terminal)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()),
+                AgentRunExecutionException.class);
+
+        assertThat(failure.errorCode()).isEqualTo("TARGET_E2E_GRAPH_TRANSPORT_FAILED");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RECONCILE_TERMINAL);
+        assertThat(failure.lastSequenceNo()).isEqualTo(7L);
+        assertThat(failure.publicOutputEmitted()).isTrue();
+        verify(terminal, times(2)).loadProgress(request);
         verify(coordinator, never()).assembleReady(any(), any(), any());
         verify(terminal, never()).appendOrLoad(any());
     }
@@ -243,5 +286,9 @@ class TargetE2EIntakeParallelExecutionGatewayTest {
                 "f".repeat(64),
                 true,
                 result.lastSequenceNo());
+    }
+
+    private static DurableProgress emptyProgress() {
+        return new DurableProgress(-1L, false, false);
     }
 }

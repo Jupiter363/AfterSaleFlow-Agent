@@ -60,6 +60,49 @@ class TransactionalIntakeParallelRunTerminalStoreTest {
     }
 
     @Test
+    void reloadsMonotonicAttemptProgressAsTheFailureClassificationAuthority() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        AgentRunEntity run = AgentRunEntity.logicalV4(
+                AgentRunPersistenceFixtures.logicalRunV4());
+        run.bindV4Audience(
+                request.command().actorScope().actorRole().name(),
+                canonicalJson(List.of(request.command().actorScope().audience().name())),
+                canonicalJson(List.of(request.command().actorScope().actorId())));
+        run.markV4AttemptStarted();
+        AgentRunAttemptEntity attempt = AgentRunAttemptEntity.startV4(
+                request.agentRunId(),
+                AgentRunPersistenceFixtures.parallelIntakeAllocation(),
+                AgentRunPersistenceFixtures.STARTED_AT);
+        attempt.recordHeartbeat(new AgentRunAttemptHeartbeat(
+                AgentRunAttemptHeartbeat.SCHEMA_VERSION,
+                request.agentRunId(),
+                request.attemptId(),
+                request.attemptNo(),
+                6,
+                true,
+                false,
+                AgentRunPersistenceFixtures.STARTED_AT.plusSeconds(2)));
+
+        AgentRunRepository runRepository = mock(AgentRunRepository.class);
+        AgentRunAttemptRepository attemptRepository = mock(AgentRunAttemptRepository.class);
+        when(runRepository.findById(request.agentRunId())).thenReturn(Optional.of(run));
+        when(attemptRepository.findById(request.attemptId())).thenReturn(Optional.of(attempt));
+        TransactionalIntakeParallelRunTerminalStore store =
+                new TransactionalIntakeParallelRunTerminalStore(
+                        runRepository,
+                        attemptRepository,
+                        mock(IntakeParallelAssemblyStore.class),
+                        mock(PostgresAgentRunV4EventWriter.class),
+                        MAPPER);
+
+        var progress = store.loadProgress(request);
+
+        assertThat(progress.lastSequenceNo()).isEqualTo(6);
+        assertThat(progress.publicOutputEmitted()).isTrue();
+        assertThat(progress.finalFrameObserved()).isFalse();
+    }
+
+    @Test
     void atomicallyBindsReadyToOneDeterministicFinalAndReplaysItExactly() {
         ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
         RoomGraphResult graphResult = AgentRunPersistenceFixtures.parallelIntakeGraphResult();

@@ -13,6 +13,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAs
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.ReadyLookup;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.DurableProgress;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalConflictException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalReceipt;
@@ -63,6 +64,34 @@ public class TransactionalIntakeParallelRunTerminalStore
         this.assemblyStore = Objects.requireNonNull(assemblyStore, "assemblyStore");
         this.eventWriter = Objects.requireNonNull(eventWriter, "eventWriter");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
+    }
+
+    @Override
+    @Transactional(
+            readOnly = true,
+            propagation = Propagation.REQUIRES_NEW,
+            isolation = Isolation.READ_COMMITTED)
+    public DurableProgress loadProgress(ExecuteAgentRunRequest request) {
+        requireParallelRequest(request);
+        AgentRunEntity run = runRepository
+                .findById(request.agentRunId())
+                .orElseThrow(() -> conflict(
+                        "INTAKE_PARALLEL_PROGRESS_RUN_MISSING",
+                        "parallel Intake AgentRun was not found"));
+        AgentRunAttemptEntity attempt = attemptRepository
+                .findById(request.attemptId())
+                .orElseThrow(() -> conflict(
+                        "INTAKE_PARALLEL_PROGRESS_ATTEMPT_MISSING",
+                        "parallel Intake AgentRun attempt was not found"));
+        run.requireAttemptRequest(request);
+        attempt.requireAllocatedRequest(request);
+        requireEqual(run.getProtocol(), AgentRunProtocol.V4.wireValue(), "streamProtocol");
+        return new DurableProgress(
+                attempt.getLastSequenceNo(),
+                attempt.isPublicOutputEmitted(),
+                attempt.isFinalFrameObserved()
+                        || attempt.getAttemptStatus() == AgentRunAttemptStatus.RESULT_READY
+                        || attempt.getAttemptStatus() == AgentRunAttemptStatus.COMPLETED);
     }
 
     @Override
