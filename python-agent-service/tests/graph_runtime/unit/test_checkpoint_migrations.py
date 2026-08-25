@@ -379,9 +379,10 @@ def test_migration_and_restore_validation_use_the_same_schema_lock() -> None:
     )
 
 
-def test_runtime_grants_only_the_race_safe_fanout_cancellation_routine() -> None:
+def test_runtime_grants_only_explicit_graph_execution_routines() -> None:
     source = inspect.getsource(GraphMigrationRunner._apply_runtime_grants)
 
+    assert "require_parallel_intake_graph_command" in source
     assert "agent_graph_cancel_or_release_fanout_permit" in source
     assert "agent_graph_cancel_queued_fanout_permit" not in source
 

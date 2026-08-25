@@ -740,6 +740,10 @@ class GraphMigrationRunner:
             )
             for routine, argument_types in (
                 (
+                    "require_parallel_intake_graph_command",
+                    ("varchar", "varchar", "varchar"),
+                ),
+                (
                     "agent_graph_acquire_fanout_permit",
                     (
                         "varchar", "varchar", "varchar", "varchar", "varchar", "varchar",

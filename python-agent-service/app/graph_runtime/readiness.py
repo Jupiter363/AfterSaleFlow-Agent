@@ -468,6 +468,37 @@ class GraphPersistenceReadinessProbe:
         )
         self._require(checks["runtime_role_read_only"], "GRAPH_RUNTIME_ROLE_PRIVILEGED", checks)
 
+        parallel_receipt = await self._fetchone(
+            connection,
+            """
+            select exists (
+                       select 1
+                         from pg_proc procedure
+                         join pg_namespace namespace
+                           on namespace.oid = procedure.pronamespace
+                        where namespace.nspname = %s
+                          and procedure.proname
+                              = 'require_parallel_intake_graph_command'
+                          and oidvectortypes(procedure.proargtypes)
+                              = 'character varying, character varying, character varying'
+                          and not procedure.prosecdef
+                          and has_function_privilege(
+                              current_user, procedure.oid, 'EXECUTE'
+                          )
+                   ) as can_execute_parallel_receipt_guard
+            """,
+            (self._config.schema,),
+        )
+        checks["runtime_parallel_receipt_authority"] = bool(
+            parallel_receipt
+            and parallel_receipt["can_execute_parallel_receipt_guard"]
+        )
+        self._require(
+            checks["runtime_parallel_receipt_authority"],
+            "GRAPH_RUNTIME_ROLE_PRIVILEGED",
+            checks,
+        )
+
         fanout = await self._fetchone(
             connection,
             """

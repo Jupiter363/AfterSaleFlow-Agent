@@ -71,6 +71,7 @@ class _Connection:
         unsafe_privilege: str | None = None,
         can_create_temporary: bool = False,
         can_write_checkpoints: bool = True,
+        can_execute_parallel_receipt: bool = True,
         can_execute_fanout: bool = True,
         can_mutate_fanout: bool = False,
         migration_status: str = "CURRENT",
@@ -86,6 +87,7 @@ class _Connection:
         self.unsafe_privilege = unsafe_privilege
         self.can_create_temporary = can_create_temporary
         self.can_write_checkpoints = can_write_checkpoints
+        self.can_execute_parallel_receipt = can_execute_parallel_receipt
         self.can_execute_fanout = can_execute_fanout
         self.can_mutate_fanout = can_mutate_fanout
         self.migration_status = migration_status
@@ -136,6 +138,14 @@ class _Connection:
                     "can_read_fanout": True,
                     "can_mutate_fanout": self.can_mutate_fanout,
                     "can_execute_fanout": self.can_execute_fanout,
+                }
+            )
+        if "can_execute_parallel_receipt_guard" in normalized:
+            return _Cursor(
+                row={
+                    "can_execute_parallel_receipt_guard": (
+                        self.can_execute_parallel_receipt
+                    )
                 }
             )
         if "from unnest" in normalized:
@@ -353,6 +363,19 @@ async def test_runtime_role_without_checkpoint_write_privileges_is_not_ready() -
 
     assert not report.ready
     assert report.code == "GRAPH_RUNTIME_ROLE_PRIVILEGED"
+
+
+@pytest.mark.asyncio
+async def test_runtime_role_without_parallel_receipt_guard_execute_is_not_ready() -> None:
+    config = _config()
+    report = await GraphPersistenceReadinessProbe(
+        config,
+        _Pool(_Connection(config, can_execute_parallel_receipt=False)),
+    ).check()
+
+    assert not report.ready
+    assert report.code == "GRAPH_RUNTIME_ROLE_PRIVILEGED"
+    assert report.checks["runtime_parallel_receipt_authority"] is False
 
 
 @pytest.mark.asyncio

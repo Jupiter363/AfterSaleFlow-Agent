@@ -206,6 +206,13 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
 
     with psycopg.connect(graph_database.runtime_dsn, autocommit=True) as connection:
         connection.execute(sql.SQL("set search_path to {}, pg_catalog").format(sql.Identifier(SCHEMA)))
+        parallel_guard = connection.execute(
+            """
+            select require_parallel_intake_graph_command(%s, %s, %s)
+            """,
+            (f"grt.v1.{'0' * 32}", "missing-command", "0" * 64),
+        ).fetchone()
+        assert parallel_guard == (False,)
         with pytest.raises(InsufficientPrivilege):
             connection.execute("delete from agent_graph_command")
         with pytest.raises(InsufficientPrivilege):
