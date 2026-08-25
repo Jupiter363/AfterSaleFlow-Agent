@@ -248,6 +248,67 @@ class _Gateway:
         return None
 
 
+class _ProviderGroupPermit:
+    def __init__(
+        self,
+        *,
+        renewal_interval_seconds: float = 60.0,
+        renew_error: BaseException | None = None,
+    ) -> None:
+        self.renewal_interval_seconds = renewal_interval_seconds
+        self.renew_error = renew_error
+        self.released = False
+        self.renew_calls = 0
+        self.release_calls = 0
+        self.renew_attempted = asyncio.Event()
+
+    async def renew(self) -> datetime:
+        self.renew_calls += 1
+        self.renew_attempted.set()
+        if self.renew_error is not None:
+            raise self.renew_error
+        return datetime.now(timezone.utc)
+
+    async def release(self) -> bool:
+        self.release_calls += 1
+        if self.released:
+            return False
+        self.released = True
+        return True
+
+
+class _ProviderGroupBulkhead:
+    def __init__(
+        self,
+        *,
+        initially_granted: bool = True,
+        permit: _ProviderGroupPermit | None = None,
+        acquire_error: BaseException | None = None,
+        return_permit_on_cancel: bool = False,
+    ) -> None:
+        self.grant = asyncio.Event()
+        if initially_granted:
+            self.grant.set()
+        self.acquire_started = asyncio.Event()
+        self.acquire_calls: list[dict[str, Any]] = []
+        self.permit = permit or _ProviderGroupPermit()
+        self.acquire_error = acquire_error
+        self.return_permit_on_cancel = return_permit_on_cancel
+
+    async def acquire(self, scope: Any, fence: Any, **kwargs: Any) -> Any:
+        self.acquire_calls.append({"scope": scope, "fence": fence, **kwargs})
+        self.acquire_started.set()
+        try:
+            await self.grant.wait()
+        except asyncio.CancelledError:
+            if self.return_permit_on_cancel:
+                return self.permit
+            raise
+        if self.acquire_error is not None:
+            raise self.acquire_error
+        return self.permit
+
+
 class _SuccessfulOrchestrator:
     def __init__(self, requests: tuple[_FakeRequest, ...]) -> None:
         self.requests = requests
@@ -356,6 +417,7 @@ async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for
         agent_contexts={frame_type: object() for frame_type in FRAME_TYPES},
     )
     gateway = _Gateway()
+    provider_bulkhead = _ProviderGroupBulkhead(initially_granted=False)
     gate = GraphStreamAdmissionGate()
     await gate.start()
     orchestrator = _SuccessfulOrchestrator(requests)
@@ -384,6 +446,7 @@ async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for
         model_runner=object(),
         provider="litellm",
         model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=provider_bulkhead,
         owner_id="python:test",
         admission_gate=gate,
     )
@@ -408,7 +471,13 @@ async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for
     )
     iterator = opened.events
 
-    starts = [await anext(iterator) for _ in FRAME_TYPES]
+    first_start_task = asyncio.create_task(anext(iterator))
+    await asyncio.wait_for(provider_bulkhead.acquire_started.wait(), timeout=1)
+    assert not first_start_task.done()
+    assert orchestrator.calls == 0
+    provider_bulkhead.grant.set()
+    starts = [await asyncio.wait_for(first_start_task, timeout=1)]
+    starts.extend([await anext(iterator) for _ in FRAME_TYPES[1:]])
     assert [event.frame_type for event in starts] == list(FRAME_TYPES)
     assert all(isinstance(event, FrameStarted) for event in starts)
     assert orchestrator.calls == 0
@@ -432,6 +501,239 @@ async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for
     assert gateway.completed == [completion]
     assert gateway.finished == []
     assert gate.accepting is True
+    assert len(provider_bulkhead.acquire_calls) == 1
+    assert provider_bulkhead.acquire_calls[0]["permit_count"] == 3
+    assert provider_bulkhead.permit.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_group_denial_emits_nothing_and_never_starts_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.intake_parallel_stream_service as service_module
+
+    requests = _requests()
+    bundle = SimpleNamespace(
+        frame_set_id=FRAME_SET_ID,
+        requests=requests,
+        agent_contexts={frame_type: object() for frame_type in FRAME_TYPES},
+    )
+    gateway = _Gateway()
+    provider_bulkhead = _ProviderGroupBulkhead(
+        acquire_error=GraphContractError("provider group unavailable")
+    )
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    orchestrator = _SuccessfulOrchestrator(requests)
+    monkeypatch.setattr(
+        service_module,
+        "build_parallel_checkpoint_configs",
+        lambda _execution, _requests: {frame_type: {} for frame_type in FRAME_TYPES},
+    )
+    service = GatewayBackedParallelIntakeFrameStreamService(
+        gateway=gateway,
+        input_loader=object(),
+        prompts=object(),
+        orchestrator=orchestrator,
+        model_runner=object(),
+        provider="litellm",
+        model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=provider_bulkhead,
+        owner_id="python:test",
+        admission_gate=gate,
+    )
+
+    events: list[Any] = []
+    with pytest.raises(GraphContractError, match="provider group unavailable"):
+        async for event in service._execute_live(  # noqa: SLF001 - admission ordering proof
+            execution=gateway.execution,
+            bundle=bundle,
+            authority=_authority(),
+            admission_receipt=_admission_receipt(gateway.execution.admission.command),
+            selected_requests=requests,  # type: ignore[arg-type]
+        ):
+            events.append(event)
+
+    assert events == []
+    assert orchestrator.calls == 0
+    assert gateway.finished == [(AttemptStatus.FAILED, "GRAPH_CONTRACT_REJECTED")]
+    assert provider_bulkhead.permit.release_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_group_acquire_releases_a_racing_grant_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.intake_parallel_stream_service as service_module
+
+    requests = _requests()
+    bundle = SimpleNamespace(
+        frame_set_id=FRAME_SET_ID,
+        requests=requests,
+        agent_contexts={frame_type: object() for frame_type in FRAME_TYPES},
+    )
+    gateway = _Gateway()
+    provider_bulkhead = _ProviderGroupBulkhead(
+        initially_granted=False,
+        return_permit_on_cancel=True,
+    )
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    orchestrator = _SuccessfulOrchestrator(requests)
+    monkeypatch.setattr(
+        service_module,
+        "build_parallel_checkpoint_configs",
+        lambda _execution, _requests: {frame_type: {} for frame_type in FRAME_TYPES},
+    )
+    service = GatewayBackedParallelIntakeFrameStreamService(
+        gateway=gateway,
+        input_loader=object(),
+        prompts=object(),
+        orchestrator=orchestrator,
+        model_runner=object(),
+        provider="litellm",
+        model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=provider_bulkhead,
+        owner_id="python:test",
+        admission_gate=gate,
+    )
+    iterator = service._execute_live(  # noqa: SLF001 - cancellation race proof
+        execution=gateway.execution,
+        bundle=bundle,
+        authority=_authority(),
+        admission_receipt=_admission_receipt(gateway.execution.admission.command),
+        selected_requests=requests,  # type: ignore[arg-type]
+    )
+    first_event = asyncio.create_task(anext(iterator))
+    await asyncio.wait_for(provider_bulkhead.acquire_started.wait(), timeout=1)
+
+    first_event.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_event
+
+    assert orchestrator.calls == 0
+    assert gateway.finished == [(AttemptStatus.CANCELLED, "INTAKE_PARALLEL_TECHNICAL_EXECUTION_FAILED")]
+    assert provider_bulkhead.permit.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_subset_reserves_only_its_active_provider_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.intake_parallel_stream_service as service_module
+
+    requests = _requests()[:2]
+    bundle = SimpleNamespace(
+        frame_set_id=FRAME_SET_ID,
+        requests=requests,
+        agent_contexts={request.frame_type: object() for request in requests},
+    )
+    gateway = _Gateway()
+    provider_bulkhead = _ProviderGroupBulkhead()
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    orchestrator = _SuccessfulOrchestrator(requests)  # type: ignore[arg-type]
+    orchestrator.continue_remaining.set()
+    completion = object()
+    monkeypatch.setattr(service_module, "ParallelFrameStreamProtocolValidator", _FakeValidator)
+    monkeypatch.setattr(
+        service_module,
+        "build_parallel_checkpoint_configs",
+        lambda _execution, _requests: {request.frame_type: {} for request in requests},
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_build_subset_technical_completion",
+        lambda *_args, **_kwargs: completion,
+    )
+    service = GatewayBackedParallelIntakeFrameStreamService(
+        gateway=gateway,
+        input_loader=object(),
+        prompts=object(),
+        orchestrator=orchestrator,
+        model_runner=object(),
+        provider="litellm",
+        model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=provider_bulkhead,
+        owner_id="python:test",
+        admission_gate=gate,
+    )
+
+    events = [
+        event
+        async for event in service._execute_live(  # noqa: SLF001 - subset capacity proof
+            execution=gateway.execution,
+            bundle=bundle,
+            authority=_authority(),
+            admission_receipt=_admission_receipt(gateway.execution.admission.command),
+            selected_requests=requests,  # type: ignore[arg-type]
+        )
+    ]
+
+    assert len(events) == 4
+    assert provider_bulkhead.acquire_calls[0]["permit_count"] == 2
+    assert provider_bulkhead.permit.release_calls == 1
+    assert gateway.completed == [completion]
+
+
+@pytest.mark.asyncio
+async def test_provider_group_renewal_failure_cancels_the_batch_and_releases_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.intake_parallel_stream_service as service_module
+
+    requests = _requests()
+    bundle = SimpleNamespace(
+        frame_set_id=FRAME_SET_ID,
+        requests=requests,
+        agent_contexts={frame_type: object() for frame_type in FRAME_TYPES},
+    )
+    gateway = _Gateway()
+    permit = _ProviderGroupPermit(
+        renewal_interval_seconds=0.01,
+        renew_error=GraphContractError("provider permit lost"),
+    )
+    provider_bulkhead = _ProviderGroupBulkhead(permit=permit)
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    orchestrator = _SuccessfulOrchestrator(requests)
+    monkeypatch.setattr(service_module, "ParallelFrameStreamProtocolValidator", _FakeValidator)
+    monkeypatch.setattr(
+        service_module,
+        "build_parallel_checkpoint_configs",
+        lambda _execution, _requests: {frame_type: {} for frame_type in FRAME_TYPES},
+    )
+    service = GatewayBackedParallelIntakeFrameStreamService(
+        gateway=gateway,
+        input_loader=object(),
+        prompts=object(),
+        orchestrator=orchestrator,
+        model_runner=object(),
+        provider="litellm",
+        model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=provider_bulkhead,
+        owner_id="python:test",
+        admission_gate=gate,
+    )
+    iterator = service._execute_live(  # noqa: SLF001 - renewal failure proof
+        execution=gateway.execution,
+        bundle=bundle,
+        authority=_authority(),
+        admission_receipt=_admission_receipt(gateway.execution.admission.command),
+        selected_requests=requests,  # type: ignore[arg-type]
+    )
+
+    starts = [await anext(iterator) for _ in FRAME_TYPES]
+    assert all(isinstance(event, FrameStarted) for event in starts)
+    first_seal = await anext(iterator)
+    assert isinstance(first_seal, FrameSealed)
+    await asyncio.wait_for(permit.renew_attempted.wait(), timeout=1)
+    with pytest.raises(GraphContractError, match="provider permit lost"):
+        await anext(iterator)
+
+    assert orchestrator.calls == 1
+    assert gateway.finished == [(AttemptStatus.FAILED, "GRAPH_CONTRACT_REJECTED")]
+    assert permit.release_calls == 1
 
 
 @pytest.mark.asyncio
@@ -460,6 +762,7 @@ async def test_cached_technical_completion_replays_without_acquire_or_model(
     gate = GraphStreamAdmissionGate()
     await gate.start()
     orchestrator = _SuccessfulOrchestrator(_requests())
+    provider_bulkhead = _ProviderGroupBulkhead()
     monkeypatch.setattr(
         service_module,
         "_decode_cached_completion",
@@ -473,6 +776,7 @@ async def test_cached_technical_completion_replays_without_acquire_or_model(
         model_runner=object(),
         provider="litellm",
         model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=provider_bulkhead,
         owner_id="python:test",
         admission_gate=gate,
     )
@@ -502,6 +806,7 @@ async def test_cached_technical_completion_replays_without_acquire_or_model(
     assert gateway.acquire_calls == 0
     assert orchestrator.calls == 0
     assert gateway.completed == []
+    assert provider_bulkhead.acquire_calls == []
 
 
 @pytest.mark.asyncio
@@ -520,6 +825,7 @@ async def test_retryable_failed_receipt_is_durable_and_same_receipt_replays_with
     gate = GraphStreamAdmissionGate()
     await gate.start()
     orchestrator = _RetryableFailureOrchestrator()
+    provider_bulkhead = _ProviderGroupBulkhead()
     monkeypatch.setattr(service_module, "ParallelFrameStreamProtocolValidator", _FakeValidator)
     monkeypatch.setattr(
         service_module,
@@ -539,6 +845,7 @@ async def test_retryable_failed_receipt_is_durable_and_same_receipt_replays_with
         model_runner=object(),
         provider="litellm",
         model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=provider_bulkhead,
         owner_id="python:test",
         admission_gate=gate,
     )
@@ -584,6 +891,8 @@ async def test_retryable_failed_receipt_is_durable_and_same_receipt_replays_with
     assert replay_events == first_events
     assert orchestrator.calls == 1
     assert gateway.acquire_calls == 1
+    assert len(provider_bulkhead.acquire_calls) == 1
+    assert provider_bulkhead.permit.release_calls == 1
 
 
 def _execution() -> Any:
@@ -592,6 +901,10 @@ def _execution() -> Any:
         attempt_id=ATTEMPT_ID,
         request_hash="f" * 64,
         traceparent=None,
+        tenant_surrogate="tenant-test",
+        case_id="case-test",
+        room_type="INTAKE",
+        room_epoch=1,
     )
     return SimpleNamespace(
         admission=SimpleNamespace(command=command),

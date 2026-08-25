@@ -23,6 +23,7 @@ from app.api.intake_parallel_stream import (
 )
 from app.contracts.v1.codec import canonical_sha256
 from app.contracts.v1.models import RoomGraphCommand
+from app.graph_runtime.bulkhead import GraphBulkheadScope, GraphPermitFenceContext
 from app.graph_runtime.errors import (
     GraphContractError,
     GraphNewAgentAttemptRequiredError,
@@ -181,6 +182,31 @@ class _ParallelInputLoader(Protocol):
     ) -> LoadedIntakePayload: ...
 
 
+class _ProviderGroupPermit(Protocol):
+    @property
+    def renewal_interval_seconds(self) -> float: ...
+
+    @property
+    def released(self) -> bool: ...
+
+    async def renew(self) -> Any: ...
+
+    async def release(self) -> bool: ...
+
+
+class _ProviderGroupBulkhead(Protocol):
+    async def acquire(
+        self,
+        scope: GraphBulkheadScope,
+        fence: GraphPermitFenceContext,
+        *,
+        request_id: str,
+        owner_id: str,
+        takeover: bool,
+        permit_count: int,
+    ) -> _ProviderGroupPermit: ...
+
+
 class _StreamingTechnicalEventSink:
     """Validate and expose each lane independently while retaining its replay log."""
 
@@ -281,6 +307,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
         model_runner: HarnessModelRunner,
         provider: str,
         model: str,
+        provider_bulkhead: _ProviderGroupBulkhead,
         owner_id: str,
         admission_gate: GraphStreamAdmissionGate,
         lease_renewal_seconds: float = 10.0,
@@ -301,6 +328,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
         self._model_runner = model_runner
         self._provider = provider
         self._model = model
+        self._provider_bulkhead = provider_bulkhead
         self._owner_id = owner_id
         self._gate = admission_gate
         self._renewal_seconds = lease_renewal_seconds
@@ -620,12 +648,60 @@ class GatewayBackedParallelIntakeFrameStreamService:
             self._run_heartbeat(recorder, heartbeat_stop),
             name="intake-parallel-lease-heartbeat",
         )
+        provider_permit: _ProviderGroupPermit | None = None
+        provider_permit_heartbeat: asyncio.Task[None] | None = None
+        provider_permit_acquire = asyncio.create_task(
+            self._provider_bulkhead.acquire(
+                _provider_group_scope(execution, bundle.frame_set_id),
+                _provider_group_fence(execution),
+                request_id=_provider_group_request_id(
+                    execution,
+                    authority=authority,
+                    admission_receipt=admission_receipt,
+                    requests=requests,
+                ),
+                owner_id=_provider_group_owner_id(
+                    execution,
+                    service_owner_id=self._owner_id,
+                    admission_receipt=admission_receipt,
+                ),
+                takeover=True,
+                permit_count=len(requests),
+            ),
+            name="intake-parallel-provider-group-acquire",
+        )
         runner: asyncio.Task[ParallelFrameBatchResult] | None = None
         durable_terminal = False
         try:
+            acquired, _ = await asyncio.wait(
+                {provider_permit_acquire, heartbeat},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat in acquired:
+                if (
+                    provider_permit_acquire.done()
+                    and not provider_permit_acquire.cancelled()
+                    and provider_permit_acquire.exception() is None
+                ):
+                    provider_permit = provider_permit_acquire.result()
+                heartbeat.result()
+                raise GraphContractError(
+                    "parallel Intake heartbeat stopped before provider admission"
+                )
+            provider_permit = provider_permit_acquire.result()
+            provider_permit_heartbeat = asyncio.create_task(
+                self._run_provider_permit_heartbeat(
+                    provider_permit,
+                    heartbeat_stop,
+                ),
+                name="intake-parallel-provider-group-heartbeat",
+            )
+            heartbeats = (heartbeat, provider_permit_heartbeat)
+
             # These three control frames are the public prefix.  The async generator
             # does not start the provider task until the caller resumes after all three.
             for request in requests:
+                _raise_if_heartbeat_stopped(heartbeats)
                 started = FrameStarted(
                     frame_set_id=request.frame_set_id,
                     run_id=request.run_id,
@@ -646,6 +722,8 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 event_log.append(started)
                 yield started
 
+            _raise_if_heartbeat_stopped(heartbeats)
+
             async def execute_frames() -> ParallelFrameBatchResult:
                 try:
                     with bind_provider_call_intent_recorder(recorder):
@@ -663,9 +741,10 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 execute_frames(),
                 name="intake-parallel-active-subset",
             )
-            async for event in self._drain_live_queue(queue, heartbeat):
+            async for event in self._drain_live_queue(queue, heartbeats):
                 yield event
             batch_result = await runner
+            _raise_if_heartbeat_stopped(heartbeats)
             heartbeat_stop.set()
             await heartbeat
             heartbeat = None
@@ -750,14 +829,30 @@ class GatewayBackedParallelIntakeFrameStreamService:
             raise
         finally:
             heartbeat_stop.set()
+            if not provider_permit_acquire.done():
+                provider_permit_acquire.cancel()
+            acquire_result = (
+                await asyncio.gather(provider_permit_acquire, return_exceptions=True)
+            )[0]
+            if provider_permit is None and not isinstance(acquire_result, BaseException):
+                provider_permit = cast(_ProviderGroupPermit, acquire_result)
             if heartbeat is not None:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
+            if provider_permit_heartbeat is not None:
+                provider_permit_heartbeat.cancel()
+                await asyncio.gather(
+                    provider_permit_heartbeat,
+                    return_exceptions=True,
+                )
+            if provider_permit is not None and not provider_permit.released:
+                with anyio.CancelScope(shield=True):
+                    await provider_permit.release()
 
     async def _drain_live_queue(
         self,
         queue: _FairFrameMergeQueue,
-        heartbeat: asyncio.Task[None],
+        heartbeats: tuple[asyncio.Task[None], ...],
     ) -> AsyncIterator[ParallelFrameTechnicalEvent]:
         next_event: asyncio.Task[ParallelFrameTechnicalEvent | object] | None = None
         try:
@@ -767,12 +862,16 @@ class GatewayBackedParallelIntakeFrameStreamService:
                     name="intake-parallel-next-event",
                 )
                 done, _ = await asyncio.wait(
-                    {next_event, heartbeat},
+                    {next_event, *heartbeats},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if heartbeat in done:
-                    heartbeat.result()
-                    raise GraphContractError("parallel Intake heartbeat stopped unexpectedly")
+                stopped = tuple(heartbeat for heartbeat in heartbeats if heartbeat in done)
+                if stopped:
+                    for heartbeat in stopped:
+                        heartbeat.result()
+                    raise GraphContractError(
+                        "parallel Intake heartbeat stopped unexpectedly"
+                    )
                 event = next_event.result()
                 next_event = None
                 if event is _RUNNER_TERMINAL:
@@ -795,6 +894,19 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 return
             except TimeoutError:
                 await self._gateway.renew_execution(recorder.execution)
+
+    async def _run_provider_permit_heartbeat(
+        self,
+        permit: _ProviderGroupPermit,
+        stop: asyncio.Event,
+    ) -> None:
+        while True:
+            try:
+                async with asyncio.timeout(permit.renewal_interval_seconds):
+                    await stop.wait()
+                return
+            except TimeoutError:
+                await permit.renew()
 
     async def _finish_failed_execution(
         self,
@@ -907,6 +1019,96 @@ def _select_execution_requests(
             "all-sealed execution must be completed from Java durable state"
         )
     return tuple(selected)
+
+
+def _provider_group_scope(
+    execution: GatewayExecution,
+    frame_set_id: str,
+) -> GraphBulkheadScope:
+    command = execution.admission.command
+    return GraphBulkheadScope.from_graph_identity(
+        tenant_surrogate=command.tenant_surrogate,
+        case_id=command.case_id,
+        room_type=str(command.room_type),
+        room_epoch=command.room_epoch,
+        item_key=frame_set_id,
+    )
+
+
+def _provider_group_fence(execution: GatewayExecution) -> GraphPermitFenceContext:
+    return GraphPermitFenceContext(
+        thread_id=execution.fence.thread_id,
+        command_id=execution.fence.command_id,
+        graph_lease_owner_id=execution.fence.owner_id,
+        graph_lease_fencing_token=execution.fence.fencing_token,
+    )
+
+
+def _provider_group_request_id(
+    execution: GatewayExecution,
+    *,
+    authority: ParallelFrameStreamAuthority,
+    admission_receipt: ParallelFrameAdmissionReceipt,
+    requests: Sequence[ParallelFrameExecutionRequest],
+) -> str:
+    digest = canonical_sha256(
+        {
+            "schema_version": "intake.parallel-provider-group.v1",
+            "thread_id": execution.fence.thread_id,
+            "command_id": execution.fence.command_id,
+            "request_hash": execution.fence.request_hash,
+            "attempt_id": execution.attempt.attempt_id,
+            "frame_set_id": authority.frame_set_id,
+            "authority_sha256": parallel_frame_authority_sha256(authority),
+            "admission_receipt_sha256": admission_receipt.receipt_sha256,
+            "frames": [
+                {
+                    "frame_type": request.frame_type,
+                    "generation": request.generation,
+                    "frame_id": request.frame_id,
+                    "frame_model_input_sha256": (
+                        request.model_input.frame_model_input_sha256
+                    ),
+                }
+                for request in sorted(
+                    requests,
+                    key=lambda candidate: FRAME_TYPES.index(candidate.frame_type),
+                )
+            ],
+        }
+    )
+    return f"provider-group:{digest}"
+
+
+def _provider_group_owner_id(
+    execution: GatewayExecution,
+    *,
+    service_owner_id: str,
+    admission_receipt: ParallelFrameAdmissionReceipt,
+) -> str:
+    digest = canonical_sha256(
+        {
+            "schema_version": "intake.parallel-provider-group-owner.v1",
+            "service_owner_id": service_owner_id,
+            "thread_id": execution.fence.thread_id,
+            "command_id": execution.fence.command_id,
+            "graph_lease_owner_id": execution.fence.owner_id,
+            "graph_lease_fencing_token": execution.fence.fencing_token,
+            "admission_receipt_sha256": admission_receipt.receipt_sha256,
+        }
+    )
+    return f"provider-worker:{digest}"
+
+
+def _raise_if_heartbeat_stopped(
+    heartbeats: tuple[asyncio.Task[None], ...],
+) -> None:
+    stopped = tuple(heartbeat for heartbeat in heartbeats if heartbeat.done())
+    if not stopped:
+        return
+    for heartbeat in stopped:
+        heartbeat.result()
+    raise GraphContractError("parallel Intake heartbeat stopped unexpectedly")
 
 
 def _build_subset_technical_completion(

@@ -426,6 +426,11 @@ def build_graph_runtime_bindings(
             or parallel_intake_model_runner is None
         ):
             raise GraphContractError("parallel Intake production dependencies are incomplete")
+        durable_bulkhead = getattr(kernel, "durable_bulkhead", None)
+        if not isinstance(durable_bulkhead, PostgresGraphFanoutBulkhead):
+            raise GraphContractError(
+                "parallel Intake durable PostgreSQL provider bulkhead is required"
+            )
         return GatewayBackedParallelIntakeFrameStreamService(
             gateway=kernel.gateway,
             input_loader=intake_exchange,
@@ -436,6 +441,7 @@ def build_graph_runtime_bindings(
             model_runner=parallel_intake_model_runner,
             provider=structured_client.governed_provider,
             model=structured_client.governed_model,
+            provider_bulkhead=durable_bulkhead,
             owner_id=owner_id,
             admission_gate=admission_gate,
         )
