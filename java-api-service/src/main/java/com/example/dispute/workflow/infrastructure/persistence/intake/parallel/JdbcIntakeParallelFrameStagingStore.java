@@ -60,7 +60,7 @@ public class JdbcIntakeParallelFrameStagingStore
                    attempt.model_profile_id as attempt_model_profile_id,
                    run.protocol, run.run_status, run.finalization_status,
                    run.tenant_surrogate as run_tenant_surrogate,
-                   run.case_id as run_case_id, run.room_epoch_id, run.room_epoch,
+                   run.case_id as run_case_id, run.room_id as run_room_id, run.room_epoch,
                    run.fencing_token, binding.binding_id,
                    binding.thread_registration_id, binding.event_sequence,
                    binding.binding_generation, binding.tenant_surrogate,
@@ -2067,7 +2067,7 @@ public class JdbcIntakeParallelFrameStagingStore
                 && admission.tenantSurrogate().equals(text(row, "tenant_surrogate"))
                 && admission.caseId().equals(text(row, "run_case_id"))
                 && admission.caseId().equals(text(row, "case_id"))
-                && admission.roomId().equals(text(row, "room_epoch_id"))
+                && admission.roomId().equals(text(row, "run_room_id"))
                 && admission.roomEpoch() == number(row, "room_epoch")
                 && admission.roomEpoch() == number(row, "binding_room_epoch")
                 && admission.fencingToken() == number(row, "fencing_token")

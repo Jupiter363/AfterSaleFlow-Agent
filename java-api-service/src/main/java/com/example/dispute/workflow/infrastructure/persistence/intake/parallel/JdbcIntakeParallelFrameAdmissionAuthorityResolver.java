@@ -27,7 +27,7 @@ public class JdbcIntakeParallelFrameAdmissionAuthorityResolver
                    attempt.attempt_status, attempt.model_profile_id,
                    run.protocol, run.run_status, run.finalization_status,
                    run.tenant_surrogate as run_tenant_surrogate,
-                   run.case_id as run_case_id, run.room_epoch_id,
+                   run.case_id as run_case_id, run.room_id as run_room_id,
                    run.room_epoch as run_room_epoch, run.fencing_token as run_fencing_token,
                    binding.binding_id, binding.thread_registration_id,
                    binding.event_sequence, binding.binding_generation,
@@ -104,7 +104,7 @@ public class JdbcIntakeParallelFrameAdmissionAuthorityResolver
                 && command.tenantSurrogate().equals(text(row, "tenant_surrogate"))
                 && command.caseId().equals(text(row, "run_case_id"))
                 && command.caseId().equals(text(row, "case_id"))
-                && command.roomId().equals(text(row, "room_epoch_id"))
+                && command.roomId().equals(text(row, "run_room_id"))
                 && command.roomEpoch() == number(row, "run_room_epoch")
                 && command.roomEpoch() == number(row, "room_epoch")
                 && number(row, "run_fencing_token") == number(row, "fencing_token")

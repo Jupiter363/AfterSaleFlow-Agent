@@ -108,6 +108,16 @@ class JdbcIntakeParallelFrameStagingStoreContractTest {
                 .contains("requireretrypredecessor(admission)");
     }
 
+    @Test
+    void keepsRoomIdentitySeparateFromRoomEpochIdentityDuringAdmission() throws Exception {
+        String source = normalizedSource();
+
+        assertThat(source)
+                .contains("run.room_id as run_room_id")
+                .contains("admission.roomid().equals(text(row, \"run_room_id\"))")
+                .doesNotContain("admission.roomid().equals(text(row, \"room_epoch_id\"))");
+    }
+
     private static String normalizedSource() throws Exception {
         return Files.readString(SOURCE)
                 .replace("\r\n", "\n")
