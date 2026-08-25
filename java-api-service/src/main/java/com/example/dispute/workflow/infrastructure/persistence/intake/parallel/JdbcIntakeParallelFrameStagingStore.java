@@ -258,6 +258,7 @@ public class JdbcIntakeParallelFrameStagingStore
                    run.run_status, run.protocol, run.finalization_status,
                    run.created_by as actor_id,
                    run.stream_audience_actor_ids_json::text as audience_actor_ids_json,
+                   slot.frame_type,
                    slot.current_generation as current_frame_generation,
                    slot.current_frame_id, slot.slot_state,
                    slot.current_result_id, slot.slot_version,

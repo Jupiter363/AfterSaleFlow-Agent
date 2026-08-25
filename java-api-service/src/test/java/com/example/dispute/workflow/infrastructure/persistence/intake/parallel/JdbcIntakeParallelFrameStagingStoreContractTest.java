@@ -170,6 +170,21 @@ class JdbcIntakeParallelFrameStagingStoreContractTest {
                                 .isEqualTo("INTAKE_PARALLEL_FRAME_USAGE_AUTHORITY_DRIFT"));
     }
 
+    @Test
+    void selectsFrameTypeIntoTheLockedAuthorityUsedByUsageIngress() throws Exception {
+        String source = normalizedSource();
+        int lockFrame = source.indexOf("private static final string lock_frame_sql");
+        int nextQuery = source.indexOf(
+                "private static final string lock_execution_plan_sql", lockFrame);
+
+        assertThat(lockFrame).isGreaterThanOrEqualTo(0);
+        assertThat(nextQuery).isGreaterThan(lockFrame);
+        assertThat(source.substring(lockFrame, nextQuery))
+                .contains("slot.frame_type, slot.current_generation as current_frame_generation");
+        assertThat(source)
+                .contains("text(row, \"frame_type\").equals(payload.frametype().name())");
+    }
+
     private static String normalizedSource() throws Exception {
         return Files.readString(SOURCE)
                 .replace("\r\n", "\n")
