@@ -332,23 +332,46 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
       "schema_version": "intake.dossier-public-patch-proposal.v1",
       "provider_slot_id": "DPATCH_01",
       "projection_kind": "CURRENT_FACT",
-      "projection_path_id": "case_story.current_facts",
-      "fact_key": "FACT_...",
-      "source_binding_id": "SOURCE_...",
-      "candidate_value": {}
+      "projection_path_id": "case_story.one_sentence_summary",
+      "source_row": {
+        "fact_key": "FACT_01",
+        "category": "PRODUCT_STATE",
+        "fact_target": "商品使用状态",
+        "materiality": "CORE",
+        "stance": "CONFIRM",
+        "position_summary": "当前来源事实摘要",
+        "asserted_value": "当前来源事实",
+        "source_scope": "CURRENT_SOURCE",
+        "agreed_statement": null,
+        "conflict_summary": null
+      },
+      "candidate_value": "当前来源事实摘要"
     }
   ],
   "frame_type": "DOSSIER_FRAME",
   "schema_version": "intake.dossier-frame.v1",
-  "case_matrix_delta": {},
-  "case_story_delta": {},
-  "party_position_delta": {},
-  "claim_response_delta": {},
-  "dispute_focus_delta": {},
-  "verification_focus_delta": {},
-  "risk_delta": {},
-  "source_bindings": [],
-  "public_projection_slots": ["DPATCH_01"]
+  "dossier_delta": {
+    "matrix_patch": {
+      "schema_version": "case_fact_matrix.delta.v2",
+      "fact_rows": [
+        {
+          "fact_key": "FACT_01",
+          "category": "PRODUCT_STATE",
+          "fact_target": "商品使用状态",
+          "materiality": "CORE",
+          "stance": "CONFIRM",
+          "position_summary": "当前来源事实摘要",
+          "asserted_value": "当前来源事实",
+          "source_scope": "CURRENT_SOURCE",
+          "agreed_statement": null,
+          "conflict_summary": null
+        }
+      ],
+      "summary_source_fact_keys": ["FACT_01"],
+      "respondent_claim": null
+    },
+    "public_projection_slots": ["DPATCH_01"]
+  }
 }
 ```
 
@@ -358,9 +381,9 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
 - 当前消息未表达态度时，current delta 为 `NOT_ADDRESSED`；这不允许抹掉历史 grounded attitude。
 - 不输出任何评分、缺口、ready、动作、remark 或 handoff。
 - fact key 必须逐字复制 authority 中的完整 key；新事实必须使用服务端提供的 namespace。
-- 每个完整 `DossierPublicPatchProposalV1` 必须绑定 allowlisted path、当前 actor 可写 partition、fact key 和 current source binding；prefix validator 返回 canonical typed patch 后才可公开。Provider 不能提供 canonical item id、hash、revision 或任意前端路径。
-- `candidate_value` 不是任意对象；Provider Schema 必须按 `projection_kind + projection_path_id` 使用封闭 discriminated union，逐路径冻结 value Schema。未知组合或额外字段在 Provider output validation 阶段直接拒绝。
-- Final Dossier Frame 的 delta/source bindings 必须与所有 accepted `public_projection_slots` exact reconciliation；不能遗漏、重排、重复或把 provisional patch 改成另一值。
+- Dossier 可见面只允许 `CURRENT_FACT + case_story.one_sentence_summary`；该字段复用现有持久化结构，不引入新的卷宗成员。
+- typed `matrix_patch.fact_rows` 中每条 current-source、非 `NOT_ADDRESSED` 行都必须按原顺序形成一个可见 item；item 内完整 `source_row` 是首包阶段的 typed authority，`candidate_value` 必须与其 `position_summary` 逐字一致。前端按 item 顺序用中文分号拼接；0 条时允许 0 item。
+- Final Dossier Frame 的 matrix delta 必须与所有 accepted item 的完整 `source_row` 和 `public_projection_slots` exact reconciliation；不能遗漏、重排、重复或把 provisional item 改成另一值。claim/response 只留在 typed matrix，不能形成第二写主。
 - 初始输出预算建议不超过 4,096 tokens，后续按数据分布收敛。
 
 ### 7.3 Quality Frame
@@ -859,7 +882,7 @@ Parallel Profile 使用新的 `agent-stream.v4`；既有 `agent-stream.v3` 的�
 
 1. Python 取得 command-level exact-three Provider group lease 后，一次向 Java 提交三个 Frame manifest。Java 原子写 `PARALLEL_FRAME_SET_ADMITTED`、三个 provider-call lease 和三条 `public_frame_start` outbox；Python 只有收到该 durable admission ack 才可 fan-out。admission 失败时 Provider 调用数必须为零。
 2. 三个模型随后并发运行。Provider 首包只记录 `provider_first_byte_at[frame]` telemetry，不进入公开 SSE，也不被当作首个可见内容。
-3. 三个 Provider Schema 的物理首字段都是 `public_projection_items`。增量 projector 只在一个数组对象完整闭合后产生内部 item；对应 request-bound prefix validator 返回 canonical item 后，才进入 Python bounded fair merge queue。半 JSON、arbitrary string prefix、raw proposal、reasoning 或校验失败 item 永不公开。
+3. 三个 Provider Schema 的物理首字段都是 `public_projection_items`。增量 projector 只在一个数组对象完整闭合后产生内部 item；对应 request-bound prefix validator 返回 canonical item 后，才进入 Python bounded fair merge queue。Dossier item 还必须在此边界证明其 typed current-source `source_row` 合法且 `candidate_value` 逐字等于 `position_summary`。半 JSON、arbitrary string prefix、raw proposal、reasoning 或单 item 校验失败永不公开；完整 Frame 后续与 matrix trace 不一致时整代 reset，不能沿用该代 item。
 4. 唯一 multiplex ingress 交错发送三路 canonical item。每个 item 必须先由 Java 原子持久化 immutable item、per-Frame `next_local_index`/projection hash、durable stream event 和 outbox，事务提交后才能由 SSE relay。每路只依赖自己的 local index；connection-scoped `transport_sequence` 仅检查当前会话完整性。
 5. 任一 Frame 完整 Schema 校验、accepted item trace terminal reconciliation 和 child checkpoint 全部完成后，private ingress 发送 `FRAME_SEALED`、canonical Frame payload 与 checkpoint proof。Java 在同一 staging 事务中写 immutable result/current slot、public sealed event/outbox 和 opaque receipt；完整私有 payload不转发前端。
 6. exact three current slots 首次齐全后，Java technical assembly 写 READY、不可变 Proposal artifact 与 Graph FINAL/RoomGraphResult；ledger 进入 RESULT_READY 后，由现有 Target outer finalizer 在唯一正式事务中提交业务事实并写正式 terminal receipt。Python 只等待正式 terminal receipt并结束 Graph，绝不生产或补发 run-level final。
@@ -1224,7 +1247,7 @@ protocol_conflict_count
 - V3 strict contract 对未知 V4 event/field 继续拒绝；V4 exact-three admission/outbox 后能先接收三个 start，再交错接收三路 canonical item，且每路 local index 与当前 session transport sequence 分别连续。
 - Java batch admission 未 ack 或失败时三个 Provider 调用均为零；group permit 只能 all-or-none 获取和释放，同一 admitted manifest exact replay 返回同一 receipt。
 - 模拟 Python 在 admission 前、admission 后调用前、Provider `STARTED` 后无 item、首个 item durable 前后崩溃：分别证明零调用、唯一 lease、歧义代不自动重用、已公开 item 不丢失也不在旧代续写。
-- fragmented Provider JSON 的 partial item 始终隐藏；每类 Frame 至少一个完整、有效 item 在 Provider completion 前 durable/可见；invalid item 永不进入 Java/DOM，Provider 每 Frame 只调用一次。
+- fragmented Provider JSON 的 partial item 始终隐藏；Dialogue/Quality 至少一个完整有效 item、Dossier 每条可投影 current-source row 一个有效 item在 Provider completion 前 durable/可见，Dossier 没有可投影行时允许 0 item；单 item prefix-invalid 永不进入 Java/DOM，完整 Frame trace-invalid 必须 reset 该 generation，Provider 每 Frame 无错误时只调用一次。
 - `next_local_index` 覆盖 `[0,n)`：低 index 同 hash replay no-op、低 index 异 hash冲突、高 index gap 拒绝；重连重置 transport sequence 但保持 durable cursor/index/hash。
 - 三个 pre-provider start 不设置 `public_output_emitted/final_frame_observed`，也不触发 legacy `RECONCILE_ONLY`；首个实际 preview 只设置 frame progress，重启后仅恢复缺失 Frame。
 - Quality 只基于同一 frozen Model View 评分；Dossier 证明 gap 已覆盖时只删除 gap、不改六项，foreign/矛盾 binding 时 Java 拒绝 assembly。

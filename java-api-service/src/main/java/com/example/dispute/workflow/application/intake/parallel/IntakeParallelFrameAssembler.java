@@ -64,15 +64,6 @@ public final class IntakeParallelFrameAssembler {
             Map.entry("REQUESTED_RESOLUTION", "requested_resolution"),
             Map.entry("RISK_AND_CONFLICTS", "risk_and_conflicts"),
             Map.entry("NEXT_ACTION_CLARITY", "next_action_clarity"));
-    private static final Set<String> DOSSIER_SERVER_OWNED = Set.of(
-            "intake_quality",
-            "missing_information",
-            "handoff_notes",
-            "admission",
-            "party_intake_state",
-            "handoff_remark_partition",
-            "case_fact_matrix",
-            "unilateral_case_matrix");
     private static final ObjectMapper MAPPER = JsonMapper.builder()
             .findAndAddModules()
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
@@ -252,22 +243,100 @@ public final class IntakeParallelFrameAssembler {
         JsonNode delta = requireObject(frame.path("dossier_delta"), "dossier_delta");
         requireExactFields(
                 delta,
-                Set.of("dossier_patch", "matrix_patch", "public_projection_slots"),
+                Set.of("matrix_patch", "public_projection_slots"),
                 "dossier_delta");
-        ObjectNode dossierPatch = requireObject(delta.path("dossier_patch"), "dossier_patch")
-                .deepCopy();
-        for (String field : DOSSIER_SERVER_OWNED) {
-            if (dossierPatch.has(field)) {
-                throw invalid("Dossier Frame attempted to write server-owned branch " + field);
-            }
-        }
         JsonNode matrixPatch = delta.get("matrix_patch");
         if (matrixPatch != null && !matrixPatch.isNull() && !matrixPatch.isObject()) {
             throw invalid("matrix_patch must be an object or null");
         }
+        ObjectNode dossierPatch = materializeDossierPatch(
+                requireArray(
+                        frame.path("public_projection_items"),
+                        "dossier public_projection_items"),
+                matrixPatch);
         return new DossierOutcome(
                 dossierPatch,
                 matrixPatch == null || matrixPatch.isNull() ? null : matrixPatch.deepCopy());
+    }
+
+    private static ObjectNode materializeDossierPatch(ArrayNode items, JsonNode matrixPatch) {
+        List<JsonNode> expectedRows = currentSourceFactRows(matrixPatch);
+        if (items.size() != expectedRows.size()) {
+            throw invalid("Dossier public facts differ from the typed matrix delta");
+        }
+        ObjectNode patch = JsonNodeFactory.instance.objectNode();
+        if (items.isEmpty()) {
+            return patch;
+        }
+        List<String> summaries = new ArrayList<>();
+        for (int index = 0; index < items.size(); index++) {
+            JsonNode item = items.get(index);
+            requireExactFields(
+                    item,
+                    Set.of(
+                            "schema_version",
+                            "provider_slot_id",
+                            "projection_kind",
+                            "projection_path_id",
+                            "source_row",
+                            "candidate_value"),
+                    "Dossier projection item");
+            requireText(
+                    item,
+                    "schema_version",
+                    "intake.dossier-public-patch-proposal.v1");
+            identifier(item.path("provider_slot_id").asText(null), "provider_slot_id");
+            requireText(item, "projection_kind", "CURRENT_FACT");
+            requireText(item, "projection_path_id", "case_story.one_sentence_summary");
+            JsonNode sourceRow = requireObject(item.path("source_row"), "source_row");
+            if (!sourceRow.equals(expectedRows.get(index))) {
+                throw invalid("Dossier public fact source row differs from the typed matrix delta");
+            }
+            String sourceScope = sourceRow.path("source_scope").asText("");
+            String stance = sourceRow.path("stance").asText("");
+            if (!("CURRENT_SOURCE".equals(sourceScope)
+                            || "PREVIOUS_AND_CURRENT_SOURCE".equals(sourceScope))
+                    || "NOT_ADDRESSED".equals(stance)) {
+                throw invalid("Dossier public fact has no substantive current-source authority");
+            }
+            String positionSummary = preservedBoundedText(
+                    sourceRow.path("position_summary"),
+                    20_000,
+                    "source_row.position_summary");
+            String candidate = preservedBoundedText(
+                    item.path("candidate_value"),
+                    20_000,
+                    "candidate_value");
+            if (!candidate.equals(positionSummary)) {
+                throw invalid("Dossier public fact differs from its typed source row");
+            }
+            summaries.add(candidate);
+        }
+        String summary = preservedBoundedText(
+                String.join("；", summaries),
+                20_000,
+                "matrix summary");
+        patch.putObject("case_story").put("one_sentence_summary", summary);
+        return patch;
+    }
+
+    private static List<JsonNode> currentSourceFactRows(JsonNode matrixPatch) {
+        if (matrixPatch == null || matrixPatch.isNull()) {
+            return List.of();
+        }
+        requireText(matrixPatch, "schema_version", "case_fact_matrix.delta.v2");
+        ArrayNode rows = requireArray(matrixPatch.path("fact_rows"), "matrix_patch.fact_rows");
+        List<JsonNode> selected = new ArrayList<>();
+        for (JsonNode row : rows) {
+            String sourceScope = row.path("source_scope").asText("");
+            String stance = row.path("stance").asText("");
+            if (("CURRENT_SOURCE".equals(sourceScope)
+                            || "PREVIOUS_AND_CURRENT_SOURCE".equals(sourceScope))
+                    && !"NOT_ADDRESSED".equals(stance)) {
+                selected.add(row);
+            }
+        }
+        return List.copyOf(selected);
     }
 
     private static QualityOutcome quality(JsonNode frame, String actorRole) {
@@ -771,6 +840,22 @@ public final class IntakeParallelFrameAssembler {
             throw invalid(field + " must contain 1.." + maximum + " characters");
         }
         return value.strip();
+    }
+
+    private static String preservedBoundedText(JsonNode value, int maximum, String field) {
+        if (value == null || !value.isTextual()) {
+            throw invalid(field + " must be a text value");
+        }
+        return preservedBoundedText(value.textValue(), maximum, field);
+    }
+
+    private static String preservedBoundedText(String value, int maximum, String field) {
+        if (value == null
+                || value.isBlank()
+                || value.codePointCount(0, value.length()) > maximum) {
+            throw invalid(field + " must contain 1.." + maximum + " Unicode characters");
+        }
+        return value;
     }
 
     private static String identifier(String value, String field) {

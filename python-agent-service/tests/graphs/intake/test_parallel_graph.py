@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -630,6 +631,33 @@ async def test_failed_lane_isolated_while_siblings_checkpoint_and_seal() -> None
 
 
 @pytest.mark.asyncio
+async def test_invalid_dossier_source_row_never_emits_a_public_projection() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    outputs = deepcopy(_outputs())
+    outputs["intake_turn_dossier_frame"]["public_projection_items"][0][
+        "candidate_value"
+    ] = "与 typed source row 不一致"
+    sink = _CollectingSink()
+
+    result = await orchestrator.execute(
+        requests,
+        agent_contexts=contexts,
+        model_runner=_StreamingRunner(outputs),
+        event_sink=sink,
+    )
+
+    assert set(result.failed) == {"DOSSIER_FRAME"}
+    assert not any(
+        isinstance(event, FrameProjectionItem)
+        and event.frame_type == "DOSSIER_FRAME"
+        for event in sink.events
+    )
+
+
+@pytest.mark.asyncio
 async def test_same_generation_incomplete_checkpoint_fails_closed() -> None:
     saver = InMemorySaver()
     graphs = dict(compile_parallel_frame_graphs(checkpointer=saver))
@@ -1163,19 +1191,44 @@ def _outputs() -> dict[str, dict[str, Any]]:
                     "schema_version": "intake.dossier-public-patch-proposal.v1",
                     "provider_slot_id": "DPATCH_01",
                     "projection_kind": "CURRENT_FACT",
-                    "projection_path_id": "case_story.current_facts",
-                    "fact_key": "FACT_01",
-                    "source_binding_id": "SOURCE_01",
-                    "candidate_value": {"summary": "商品已使用约半小时。"},
+                    "projection_path_id": "case_story.one_sentence_summary",
+                    "source_row": {
+                        "fact_key": "FACT_01",
+                        "category": "PRODUCT_STATE",
+                        "fact_target": "商品使用状态",
+                        "materiality": "CORE",
+                        "stance": "CONFIRM",
+                        "position_summary": "商品已使用约半小时。",
+                        "asserted_value": "约半小时",
+                        "source_scope": "CURRENT_SOURCE",
+                        "agreed_statement": None,
+                        "conflict_summary": None,
+                    },
+                    "candidate_value": "商品已使用约半小时。",
                 }
             ],
             "frame_type": "DOSSIER_FRAME",
             "schema_version": "intake.dossier-frame.v1",
             "dossier_delta": {
-                "dossier_patch": {
-                    "case_story": {"current_facts": ["商品已使用约半小时。"]}
+                "matrix_patch": {
+                    "schema_version": "case_fact_matrix.delta.v2",
+                    "fact_rows": [
+                        {
+                            "fact_key": "FACT_01",
+                            "category": "PRODUCT_STATE",
+                            "fact_target": "商品使用状态",
+                            "materiality": "CORE",
+                            "stance": "CONFIRM",
+                            "position_summary": "商品已使用约半小时。",
+                            "asserted_value": "约半小时",
+                            "source_scope": "CURRENT_SOURCE",
+                            "agreed_statement": None,
+                            "conflict_summary": None,
+                        }
+                    ],
+                    "summary_source_fact_keys": ["FACT_01"],
+                    "respondent_claim": None,
                 },
-                "matrix_patch": {"facts": [{"fact_key": "FACT_01"}]},
                 "public_projection_slots": ["DPATCH_01"],
             },
         },

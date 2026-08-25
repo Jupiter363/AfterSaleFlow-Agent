@@ -346,7 +346,11 @@ async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for
     async def load_bundle(_execution: Any) -> Any:
         return bundle
 
-    async def load_prepared_bundle(_command: Any, _expected_thread: Any) -> Any:
+    async def load_prepared_bundle(
+        _command: Any,
+        _expected_thread: Any,
+        **_kwargs: Any,
+    ) -> Any:
         return bundle
 
     service._load_bundle = load_bundle  # type: ignore[method-assign]
@@ -428,7 +432,11 @@ async def test_cached_technical_completion_replays_without_acquire_or_model(
         admission_gate=gate,
     )
 
-    async def load_prepared_bundle(_command: Any, _expected_thread: Any) -> Any:
+    async def load_prepared_bundle(
+        _command: Any,
+        _expected_thread: Any,
+        **_kwargs: Any,
+    ) -> Any:
         return SimpleNamespace(
             frame_set_id=FRAME_SET_ID,
             requests=_requests(),
@@ -493,7 +501,11 @@ async def test_retryable_failed_receipt_is_durable_and_same_receipt_replays_with
     async def load_bundle(_execution: Any) -> Any:
         return bundle
 
-    async def load_prepared_bundle(_command: Any, _expected_thread: Any) -> Any:
+    async def load_prepared_bundle(
+        _command: Any,
+        _expected_thread: Any,
+        **_kwargs: Any,
+    ) -> Any:
         return bundle
 
     service._load_bundle = load_bundle  # type: ignore[method-assign]
@@ -643,6 +655,7 @@ def _admission_receipt(command: Any) -> ParallelFrameAdmissionReceipt:
 
 def _verified(receipt: ParallelFrameAdmissionReceipt) -> Any:
     return SimpleNamespace(
+        room_fencing_token=17,
         claims=SimpleNamespace(
             parallel_phase="EXECUTE",
             parallel_admission_receipt_sha256=receipt.receipt_sha256,

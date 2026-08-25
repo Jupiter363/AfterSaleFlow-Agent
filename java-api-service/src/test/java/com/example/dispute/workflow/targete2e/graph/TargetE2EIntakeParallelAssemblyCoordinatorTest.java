@@ -359,15 +359,32 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
 
     private static ObjectNode dossier() {
         ObjectNode root = MAPPER.createObjectNode();
-        root.putArray("public_projection_items");
+        ObjectNode item = root.putArray("public_projection_items").addObject();
+        item.put("schema_version", "intake.dossier-public-patch-proposal.v1");
+        item.put("provider_slot_id", "DPATCH_01");
+        item.put("projection_kind", "CURRENT_FACT");
+        item.put("projection_path_id", "case_story.one_sentence_summary");
+        item.put("candidate_value", "本轮补充了核心事实");
         root.put("frame_type", "DOSSIER_FRAME");
         root.put("schema_version", "intake.dossier-frame.v1");
         ObjectNode delta = root.putObject("dossier_delta");
-        ObjectNode patch = delta.putObject("dossier_patch");
-        patch.put("schema_version", "intake-dossier.v2");
-        patch.putObject("case_story").put("summary", "本轮补充了核心事实");
-        delta.putNull("matrix_patch");
-        delta.putArray("public_projection_slots");
+        ObjectNode matrix = delta.putObject("matrix_patch");
+        matrix.put("schema_version", "case_fact_matrix.delta.v2");
+        ObjectNode row = matrix.putArray("fact_rows").addObject();
+        row.put("fact_key", "FACT_01");
+        row.put("category", "OTHER");
+        row.put("fact_target", "本轮核心事实");
+        row.put("materiality", "CORE");
+        row.put("stance", "CONFIRM");
+        row.put("position_summary", "本轮补充了核心事实");
+        row.put("asserted_value", "本轮补充了核心事实");
+        row.put("source_scope", "CURRENT_SOURCE");
+        row.putNull("agreed_statement");
+        row.putNull("conflict_summary");
+        item.set("source_row", row.deepCopy());
+        matrix.putArray("summary_source_fact_keys").add("FACT_01");
+        matrix.putNull("respondent_claim");
+        delta.putArray("public_projection_slots").add("DPATCH_01");
         return root;
     }
 

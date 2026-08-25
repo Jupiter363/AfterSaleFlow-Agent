@@ -121,6 +121,7 @@ def build_parallel_turn_model_material(
     return build_parallel_turn_model_material_from_command(
         execution.admission.command,
         thread=execution.admission.thread,
+        room_fencing_token=execution.fence.room_fencing_token,
         snapshot_context=snapshot_context,
         event_context=event_context,
         instruction_packs=instruction_packs,
@@ -131,10 +132,17 @@ def build_parallel_turn_model_material_from_command(
     command: RoomGraphCommand,
     *,
     thread: ThreadIdentity,
+    room_fencing_token: int,
     snapshot_context: IntakeTurnContext,
     event_context: IntakeTurnContext,
     instruction_packs: Sequence[IntakeFrameInstructionPackV1],
 ) -> ParallelTurnModelMaterial:
+    if (
+        isinstance(room_fencing_token, bool)
+        or not isinstance(room_fencing_token, int)
+        or room_fencing_token < 1
+    ):
+        raise GraphContractError("parallel Intake room fencing authority is invalid")
     if snapshot_context.ingress_kind != "SNAPSHOT" or event_context.ingress_kind != "EVENT":
         raise GraphContractError("parallel Intake requires exact snapshot and event ingress")
     try:
@@ -279,7 +287,7 @@ def build_parallel_turn_model_material_from_command(
                 "thread_id": command.thread_id,
                 "room_id": room_id,
                 "room_epoch": command.room_epoch,
-                "fence_token": str(execution.fence.room_fencing_token),
+                "fence_token": str(room_fencing_token),
             }
         ),
         source_event=IntakeSourceEventRefV1.model_validate(

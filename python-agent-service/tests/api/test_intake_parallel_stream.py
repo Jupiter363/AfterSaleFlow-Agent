@@ -517,19 +517,44 @@ def _result_payload(frame_type: ParallelFrameType) -> dict[str, Any]:
                     "schema_version": "intake.dossier-public-patch-proposal.v1",
                     "provider_slot_id": "DPATCH_01",
                     "projection_kind": "CURRENT_FACT",
-                    "projection_path_id": "case_story.current_facts",
-                    "fact_key": "FACT_01",
-                    "source_binding_id": "SOURCE_01",
-                    "candidate_value": {"summary": "商品已使用约半小时。"},
+                    "projection_path_id": "case_story.one_sentence_summary",
+                    "source_row": {
+                        "fact_key": "FACT_01",
+                        "category": "PRODUCT_STATE",
+                        "fact_target": "商品使用状态",
+                        "materiality": "CORE",
+                        "stance": "CONFIRM",
+                        "position_summary": "商品已使用约半小时。",
+                        "asserted_value": "约半小时",
+                        "source_scope": "CURRENT_SOURCE",
+                        "agreed_statement": None,
+                        "conflict_summary": None,
+                    },
+                    "candidate_value": "商品已使用约半小时。",
                 }
             ],
             "frame_type": frame_type,
             "schema_version": "intake.dossier-frame.v1",
             "dossier_delta": {
-                "dossier_patch": {
-                    "case_story": {"current_facts": ["商品已使用约半小时。"]}
+                "matrix_patch": {
+                    "schema_version": "case_fact_matrix.delta.v2",
+                    "fact_rows": [
+                        {
+                            "fact_key": "FACT_01",
+                            "category": "PRODUCT_STATE",
+                            "fact_target": "商品使用状态",
+                            "materiality": "CORE",
+                            "stance": "CONFIRM",
+                            "position_summary": "商品已使用约半小时。",
+                            "asserted_value": "约半小时",
+                            "source_scope": "CURRENT_SOURCE",
+                            "agreed_statement": None,
+                            "conflict_summary": None,
+                        }
+                    ],
+                    "summary_source_fact_keys": ["FACT_01"],
+                    "respondent_claim": None,
                 },
-                "matrix_patch": {"facts": [{"fact_key": "FACT_01"}]},
                 "public_projection_slots": ["DPATCH_01"],
             },
         }

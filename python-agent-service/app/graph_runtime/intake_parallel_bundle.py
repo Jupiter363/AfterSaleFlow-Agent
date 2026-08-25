@@ -66,6 +66,7 @@ def build_parallel_intake_production_bundle(
     return _build_parallel_intake_bundle(
         command=execution.admission.command,
         thread=execution.admission.thread,
+        room_fencing_token=execution.fence.room_fencing_token,
         snapshot_context=snapshot_context,
         event_context=event_context,
         prompts=prompts,
@@ -76,6 +77,7 @@ def build_parallel_intake_prepared_bundle(
     command: RoomGraphCommand,
     *,
     thread: ThreadIdentity,
+    room_fencing_token: int,
     snapshot_context: IntakeTurnContext,
     event_context: IntakeTurnContext,
     prompts: PromptRepository,
@@ -97,6 +99,7 @@ def build_parallel_intake_prepared_bundle(
     return _build_parallel_intake_bundle(
         command=command,
         thread=thread,
+        room_fencing_token=room_fencing_token,
         snapshot_context=snapshot_context,
         event_context=event_context,
         prompts=prompts,
@@ -107,6 +110,7 @@ def _build_parallel_intake_bundle(
     *,
     command: RoomGraphCommand,
     thread: ThreadIdentity,
+    room_fencing_token: int,
     snapshot_context: IntakeTurnContext,
     event_context: IntakeTurnContext,
     prompts: PromptRepository,
@@ -129,6 +133,7 @@ def _build_parallel_intake_bundle(
     material = build_parallel_turn_model_material_from_command(
         command,
         thread=thread,
+        room_fencing_token=room_fencing_token,
         snapshot_context=snapshot_context,
         event_context=event_context,
         instruction_packs=tuple(instruction_packs),

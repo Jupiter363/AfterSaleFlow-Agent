@@ -277,7 +277,11 @@ class GatewayBackedParallelIntakeFrameStreamService:
             )
         token = await self._gate.enter()
         try:
-            prepared_bundle = await self._load_prepared_bundle(command, expected_thread)
+            prepared_bundle = await self._load_prepared_bundle(
+                command,
+                expected_thread,
+                room_fencing_token=verified_invocation.room_fencing_token,
+            )
             prepared_authority = _authority_from_command_bundle(
                 command,
                 prepared_bundle,
@@ -373,7 +377,11 @@ class GatewayBackedParallelIntakeFrameStreamService:
             raise GraphContractError("parallel Intake preparation crossed invocation authority")
         token = await self._gate.enter()
         try:
-            bundle = await self._load_prepared_bundle(command, expected_thread)
+            bundle = await self._load_prepared_bundle(
+                command,
+                expected_thread,
+                room_fencing_token=verified_invocation.room_fencing_token,
+            )
             return _authority_from_command_bundle(command, bundle)
         finally:
             await self._gate.leave(token)
@@ -473,6 +481,8 @@ class GatewayBackedParallelIntakeFrameStreamService:
         self,
         command: RoomGraphCommand,
         expected_thread: ThreadIdentity,
+        *,
+        room_fencing_token: int,
     ) -> ParallelIntakeProductionBundle:
         if command.domain_snapshot_ref is None or command.event_ref is None:
             raise GraphContractError("parallel Intake command has no exact input pair")
@@ -514,6 +524,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
         return build_parallel_intake_prepared_bundle(
             command,
             thread=expected_thread,
+            room_fencing_token=room_fencing_token,
             snapshot_context=snapshot_context,
             event_context=event_context,
             prompts=self._prompts,

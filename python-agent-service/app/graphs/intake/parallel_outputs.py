@@ -12,6 +12,7 @@ from app.graphs.intake.parallel_contracts import (
     PartyRole,
     Sha256,
 )
+from app.graphs.intake.contracts import CaseFactDeltaRowV2, CaseFactMatrixDeltaV2
 
 
 BoundedChineseText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
@@ -24,6 +25,10 @@ Dimension = Literal[
     "REQUESTED_RESOLUTION",
     "RISK_AND_CONFLICTS",
     "NEXT_ACTION_CLARITY",
+]
+DossierSummary = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=20_000),
 ]
 
 
@@ -81,36 +86,31 @@ class IntakeDialogueFrameV1(StrictFrameOutput):
 class DossierPublicPatchProposalV1(StrictFrameOutput):
     schema_version: Literal["intake.dossier-public-patch-proposal.v1"]
     provider_slot_id: Identifier
-    projection_kind: Identifier
-    projection_path_id: Identifier
-    fact_key: Identifier | None = None
-    source_binding_id: Identifier | None = None
-    candidate_value: Any
+    projection_kind: Literal["CURRENT_FACT"]
+    projection_path_id: Literal["case_story.one_sentence_summary"]
+    source_row: CaseFactDeltaRowV2
+    candidate_value: DossierSummary
+
+    @model_validator(mode="after")
+    def validate_current_source_authority(self) -> DossierPublicPatchProposalV1:
+        if (
+            self.source_row.source_scope
+            not in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
+            or self.source_row.stance == "NOT_ADDRESSED"
+        ):
+            raise ValueError(
+                "Dossier public facts require one substantive current-source row"
+            )
+        if self.candidate_value != self.source_row.position_summary:
+            raise ValueError(
+                "Dossier public fact must be derived from its typed source row"
+            )
+        return self
 
 
 class DossierFrameDeltaV1(StrictFrameOutput):
-    dossier_patch: dict[str, Any]
-    matrix_patch: dict[str, Any] | None
+    matrix_patch: CaseFactMatrixDeltaV2 | None
     public_projection_slots: tuple[Identifier, ...] = Field(max_length=32)
-
-    @model_validator(mode="after")
-    def reject_server_owned_branches(self) -> DossierFrameDeltaV1:
-        forbidden = {
-            "intake_quality",
-            "missing_information",
-            "handoff_notes",
-            "admission",
-            "party_intake_state",
-            "handoff_remark_partition",
-            "case_fact_matrix",
-            "unilateral_case_matrix",
-        }
-        conflict = forbidden.intersection(self.dossier_patch)
-        if conflict:
-            raise ValueError(
-                f"Dossier Frame attempted to write server-owned branches: {sorted(conflict)}"
-            )
-        return self
 
 
 class IntakeDossierFrameV1(StrictFrameOutput):
@@ -127,7 +127,18 @@ class IntakeDossierFrameV1(StrictFrameOutput):
             self.public_projection_items,
             self.dossier_delta.public_projection_slots,
         )
+        expected_rows = _current_fact_rows(self.dossier_delta.matrix_patch)
+        projected_rows = tuple(
+            item.source_row for item in self.public_projection_items
+        )
+        if projected_rows != expected_rows:
+            raise ValueError(
+                "Dossier public facts must exactly project the typed matrix delta"
+            )
         return self
+
+    def materialized_dossier_patch(self) -> dict[str, Any]:
+        return _materialize_dossier_patch(self.public_projection_items)
 
 
 class IntakeQualityScoresV1(StrictFrameOutput):
@@ -244,6 +255,34 @@ def validate_parallel_frame_output(
     payload = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
     result = model.model_validate(payload)
     return result  # type: ignore[return-value]
+
+
+def _materialize_dossier_patch(
+    items: tuple[DossierPublicPatchProposalV1, ...],
+) -> dict[str, Any]:
+    if not items:
+        return {}
+    summary = "；".join(item.candidate_value for item in items)
+    if len(summary) > 20_000:
+        raise ValueError("Dossier current-source summary exceeds the persisted field limit")
+    return {
+        "case_story": {
+            "one_sentence_summary": summary,
+        }
+    }
+
+
+def _current_fact_rows(
+    matrix_patch: CaseFactMatrixDeltaV2 | None,
+) -> tuple[CaseFactDeltaRowV2, ...]:
+    if matrix_patch is None:
+        return ()
+    return tuple(
+        row
+        for row in matrix_patch.fact_rows
+        if row.source_scope in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
+        and row.stance != "NOT_ADDRESSED"
+    )
 
 
 def _require_exact_projection_slots(

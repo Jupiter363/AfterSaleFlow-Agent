@@ -70,6 +70,8 @@ class IntakeParallelFrameAssemblerTest {
                 .isEqualTo("intake.proposal." + first.proposalSha256().substring(0, 32));
         assertThat(first.artifactUri())
                 .isEqualTo("urn:target-e2e:proposal:intake:" + first.proposalSha256());
+        assertThat(first.proposal().dossierPatch().at("/case_story/one_sentence_summary").asText())
+                .isEqualTo("本轮补充了核心事实");
     }
 
     @Test
@@ -152,12 +154,11 @@ class IntakeParallelFrameAssemblerTest {
     }
 
     @Test
-    void rejectsDossierFrameWritingServerOwnedQualityState() {
+    void rejectsDossierFrameWritingAnUnregisteredPublicPath() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode dossier = dossier();
-        ((ObjectNode) dossier.at("/dossier_delta/dossier_patch"))
-                .putObject("intake_quality")
-                .put("score", 100);
+        ((ObjectNode) dossier.at("/public_projection_items/0"))
+                .put("projection_path_id", "intake_quality.score");
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
                         dialogue(previous, "ASK_SUBSTANTIVE"),
                         dossier,
@@ -170,7 +171,135 @@ class IntakeParallelFrameAssemblerTest {
                                 "next_action_clarity", 15),
                                 List.of())))))
                 .isInstanceOf(AssemblyRejectedException.class)
-                .hasMessageContaining("server-owned branch");
+                .hasMessageContaining("projection_path_id");
+    }
+
+    @Test
+    void rejectsProviderAuthoredDossierSourceBinding() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode dossier = dossier();
+        ((ObjectNode) dossier.at("/public_projection_items/0"))
+                .put("source_binding_id", "SOURCE_01");
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        dossier,
+                        quality(Map.of(
+                                "references", 15,
+                                "event_story", 20,
+                                "party_positions", 20,
+                                "requested_resolution", 15,
+                                "risk_and_conflicts", 15,
+                                "next_action_clarity", 15),
+                                List.of())))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("fields differ");
+    }
+
+    @Test
+    void rejectsOverlappingDossierProjectionPaths() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode dossier = dossier();
+        ObjectNode overlapping = ((ObjectNode) dossier.at("/public_projection_items/0"))
+                .deepCopy();
+        overlapping.put("provider_slot_id", "DPATCH_02");
+        overlapping.put("projection_path_id", "case_story.one_sentence_summary");
+        ((ArrayNode) dossier.path("public_projection_items")).add(overlapping);
+        ((ArrayNode) dossier.at("/dossier_delta/public_projection_slots")).add("DPATCH_02");
+
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        dossier,
+                        quality(Map.of(
+                                "references", 15,
+                                "event_story", 20,
+                                "party_positions", 20,
+                                "requested_resolution", 15,
+                                "risk_and_conflicts", 15,
+                                "next_action_clarity", 15),
+                                List.of())))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("public facts differ");
+    }
+
+    @Test
+    void derivesTheExistingCaseStorySummaryFromCurrentMatrixRowsInOrder() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode dossier = dossier();
+        ObjectNode matrix = (ObjectNode) dossier.at("/dossier_delta/matrix_patch");
+        ObjectNode second = ((ObjectNode) matrix.at("/fact_rows/0")).deepCopy();
+        second.put("fact_key", "FACT_02");
+        second.put("fact_target", "补充事实");
+        second.put("position_summary", "第二项当前事实");
+        second.put("asserted_value", "第二项当前事实");
+        ((ArrayNode) matrix.path("fact_rows")).add(second);
+        ((ArrayNode) matrix.path("summary_source_fact_keys")).add("FACT_02");
+        ObjectNode secondItem = dossier.withArray("public_projection_items").addObject();
+        secondItem.put("schema_version", "intake.dossier-public-patch-proposal.v1");
+        secondItem.put("provider_slot_id", "DPATCH_02");
+        secondItem.put("projection_kind", "CURRENT_FACT");
+        secondItem.put("projection_path_id", "case_story.one_sentence_summary");
+        secondItem.set("source_row", second.deepCopy());
+        secondItem.put("candidate_value", "第二项当前事实");
+        dossier.with("dossier_delta").withArray("public_projection_slots").add("DPATCH_02");
+
+        var output = assembler.assemble(command(previous, frames(
+                dialogue(previous, "ASK_SUBSTANTIVE"),
+                dossier,
+                quality(Map.of(
+                        "references", 15,
+                        "event_story", 20,
+                        "party_positions", 20,
+                        "requested_resolution", 15,
+                        "risk_and_conflicts", 15,
+                        "next_action_clarity", 15),
+                        List.of()))));
+
+        assertThat(output.proposal().dossierPatch()
+                        .at("/case_story/one_sentence_summary").asText())
+                .isEqualTo("本轮补充了核心事实；第二项当前事实");
+
+        ((ObjectNode) dossier.at("/public_projection_items/1"))
+                .put("candidate_value", "内容发生漂移");
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        dossier,
+                        quality(Map.of(
+                                "references", 15,
+                                "event_story", 20,
+                                "party_positions", 20,
+                                "requested_resolution", 15,
+                                "risk_and_conflicts", 15,
+                                "next_action_clarity", 15),
+                                List.of())))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("typed source row");
+    }
+
+    @Test
+    void preservesAuthoritativeDossierWhitespaceAcrossAssembly() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode dossier = dossier();
+        ObjectNode row = (ObjectNode) dossier.at("/dossier_delta/matrix_patch/fact_rows/0");
+        row.put("position_summary", "  本轮补充了核心事实  ");
+        ObjectNode item = (ObjectNode) dossier.at("/public_projection_items/0");
+        item.set("source_row", row.deepCopy());
+        item.put("candidate_value", "  本轮补充了核心事实  ");
+
+        var output = assembler.assemble(command(previous, frames(
+                dialogue(previous, "ASK_SUBSTANTIVE"),
+                dossier,
+                quality(Map.of(
+                        "references", 15,
+                        "event_story", 20,
+                        "party_positions", 20,
+                        "requested_resolution", 15,
+                        "risk_and_conflicts", 15,
+                        "next_action_clarity", 15),
+                        List.of()))));
+
+        assertThat(output.proposal().dossierPatch()
+                        .at("/case_story/one_sentence_summary").asText())
+                .isEqualTo("  本轮补充了核心事实  ");
     }
 
     @Test
@@ -292,15 +421,32 @@ class IntakeParallelFrameAssemblerTest {
 
     private static ObjectNode dossier() {
         ObjectNode root = MAPPER.createObjectNode();
-        root.putArray("public_projection_items");
+        ObjectNode item = root.putArray("public_projection_items").addObject();
+        item.put("schema_version", "intake.dossier-public-patch-proposal.v1");
+        item.put("provider_slot_id", "DPATCH_01");
+        item.put("projection_kind", "CURRENT_FACT");
+        item.put("projection_path_id", "case_story.one_sentence_summary");
+        item.put("candidate_value", "本轮补充了核心事实");
         root.put("frame_type", "DOSSIER_FRAME");
         root.put("schema_version", "intake.dossier-frame.v1");
         ObjectNode delta = root.putObject("dossier_delta");
-        ObjectNode patch = delta.putObject("dossier_patch");
-        patch.put("schema_version", "intake-dossier.v2");
-        patch.putObject("case_story").put("summary", "本轮补充了核心事实");
-        delta.putNull("matrix_patch");
-        delta.putArray("public_projection_slots");
+        ObjectNode matrix = delta.putObject("matrix_patch");
+        matrix.put("schema_version", "case_fact_matrix.delta.v2");
+        ObjectNode row = matrix.putArray("fact_rows").addObject();
+        row.put("fact_key", "FACT_01");
+        row.put("category", "OTHER");
+        row.put("fact_target", "本轮核心事实");
+        row.put("materiality", "CORE");
+        row.put("stance", "CONFIRM");
+        row.put("position_summary", "本轮补充了核心事实");
+        row.put("asserted_value", "本轮补充了核心事实");
+        row.put("source_scope", "CURRENT_SOURCE");
+        row.putNull("agreed_statement");
+        row.putNull("conflict_summary");
+        item.set("source_row", row.deepCopy());
+        matrix.putArray("summary_source_fact_keys").add("FACT_01");
+        matrix.putNull("respondent_claim");
+        delta.putArray("public_projection_slots").add("DPATCH_01");
         return root;
     }
 

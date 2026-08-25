@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from app.graphs.intake.parallel_outputs import (
     FRAME_OUTPUT_MODELS,
     IntakeDialogueFrameV1,
+    DossierPublicPatchProposalV1,
     IntakeDossierFrameV1,
     IntakeQualityFrameV1,
     validate_parallel_frame_output,
@@ -28,6 +29,9 @@ def test_exact_three_output_schemas_accept_java_assembler_shapes() -> None:
 
     assert isinstance(dialogue, IntakeDialogueFrameV1)
     assert isinstance(dossier, IntakeDossierFrameV1)
+    assert dossier.materialized_dossier_patch() == {
+        "case_story": {"one_sentence_summary": "商品已使用约半小时。"}
+    }
     assert isinstance(quality, IntakeQualityFrameV1)
     assert sum(quality.quality.scores.model_dump().values()) == 85
     for model in FRAME_OUTPUT_MODELS.values():
@@ -58,6 +62,96 @@ def test_frame_schema_rejects_projection_reordering_and_full_score_gap() -> None
         validate_parallel_frame_output("QUALITY_FRAME", quality)
 
 
+def test_dossier_public_items_are_the_only_registered_patch_authority() -> None:
+    false_binding = _dossier_frame()
+    false_binding["public_projection_items"][0]["fact_key"] = "FACT_01"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        validate_parallel_frame_output("DOSSIER_FRAME", false_binding)
+
+    foreign = _dossier_frame()
+    foreign["public_projection_items"][0]["projection_path_id"] = (
+        "intake_quality.score"
+    )
+    with pytest.raises(ValidationError, match="case_story.one_sentence_summary"):
+        validate_parallel_frame_output("DOSSIER_FRAME", foreign)
+
+    overlapping = _dossier_frame()
+    repeated = dict(overlapping["public_projection_items"][0])
+    repeated["provider_slot_id"] = "DPATCH_02"
+    overlapping["public_projection_items"].append(repeated)
+    overlapping["dossier_delta"]["public_projection_slots"].append("DPATCH_02")
+    with pytest.raises(ValidationError, match="exactly project"):
+        validate_parallel_frame_output("DOSSIER_FRAME", overlapping)
+
+
+def test_dossier_public_item_requires_typed_current_source_authority_before_streaming() -> None:
+    item = _dossier_frame()["public_projection_items"][0]
+    item["candidate_value"] = "与 typed source row 不一致"
+    with pytest.raises(ValidationError, match="typed source row"):
+        DossierPublicPatchProposalV1.model_validate(item)
+
+    item = _dossier_frame()["public_projection_items"][0]
+    item["source_row"]["source_scope"] = "PREVIOUS_MATRIX"
+    with pytest.raises(ValidationError, match="current-source row"):
+        DossierPublicPatchProposalV1.model_validate(item)
+
+
+def test_dossier_summary_is_the_exact_ordered_projection_of_current_matrix_rows() -> None:
+    dossier = _dossier_frame()
+    matrix = dossier["dossier_delta"]["matrix_patch"]
+    matrix["fact_rows"].append(
+        {
+            "fact_key": "FACT_02",
+            "category": "LOGISTICS",
+            "fact_target": "商品外观状态",
+            "materiality": "SUPPORTING",
+            "stance": "CONFIRM",
+            "position_summary": "商品外观完整。",
+            "asserted_value": "外观完整",
+            "source_scope": "CURRENT_SOURCE",
+            "agreed_statement": None,
+            "conflict_summary": None,
+        }
+    )
+    matrix["summary_source_fact_keys"].append("FACT_02")
+    dossier["public_projection_items"].append(
+        {
+            "schema_version": "intake.dossier-public-patch-proposal.v1",
+            "provider_slot_id": "DPATCH_02",
+            "projection_kind": "CURRENT_FACT",
+            "projection_path_id": "case_story.one_sentence_summary",
+            "source_row": dict(matrix["fact_rows"][1]),
+            "candidate_value": "商品外观完整。",
+        }
+    )
+    dossier["dossier_delta"]["public_projection_slots"].append("DPATCH_02")
+
+    validated = validate_parallel_frame_output("DOSSIER_FRAME", dossier)
+    assert validated.materialized_dossier_patch() == {
+        "case_story": {
+            "one_sentence_summary": "商品已使用约半小时。；商品外观完整。"
+        }
+    }
+
+    dossier["public_projection_items"][1]["candidate_value"] = "顺序或内容发生漂移"
+    with pytest.raises(ValidationError, match="typed source row"):
+        validate_parallel_frame_output("DOSSIER_FRAME", dossier)
+
+
+def test_dossier_materialization_preserves_authoritative_whitespace() -> None:
+    dossier = _dossier_frame()
+    row = dossier["dossier_delta"]["matrix_patch"]["fact_rows"][0]
+    row["position_summary"] = "  商品已使用约半小时。  "
+    item = dossier["public_projection_items"][0]
+    item["source_row"] = dict(row)
+    item["candidate_value"] = row["position_summary"]
+
+    validated = validate_parallel_frame_output("DOSSIER_FRAME", dossier)
+    assert validated.materialized_dossier_patch() == {
+        "case_story": {"one_sentence_summary": "  商品已使用约半小时。  "}
+    }
+
+
 def _dialogue_frame() -> dict[str, object]:
     return {
         "public_projection_items": [
@@ -82,25 +176,46 @@ def _dialogue_frame() -> dict[str, object]:
 
 
 def _dossier_frame() -> dict[str, object]:
+    matrix_patch = _matrix_patch()
     return {
         "public_projection_items": [
             {
                 "schema_version": "intake.dossier-public-patch-proposal.v1",
                 "provider_slot_id": "DPATCH_01",
                 "projection_kind": "CURRENT_FACT",
-                "projection_path_id": "case_story.current_facts",
-                "fact_key": "FACT_01",
-                "source_binding_id": "SOURCE_01",
-                "candidate_value": {"summary": "商品已使用约半小时。"},
+                "projection_path_id": "case_story.one_sentence_summary",
+                "source_row": dict(matrix_patch["fact_rows"][0]),
+                "candidate_value": "商品已使用约半小时。",
             }
         ],
         "frame_type": "DOSSIER_FRAME",
         "schema_version": "intake.dossier-frame.v1",
         "dossier_delta": {
-            "dossier_patch": {"case_story": {"current_facts": ["商品已使用约半小时。"]}},
-            "matrix_patch": {"facts": [{"fact_key": "FACT_01"}]},
+            "matrix_patch": matrix_patch,
             "public_projection_slots": ["DPATCH_01"],
         },
+    }
+
+
+def _matrix_patch() -> dict[str, object]:
+    return {
+        "schema_version": "case_fact_matrix.delta.v2",
+        "fact_rows": [
+            {
+                "fact_key": "FACT_01",
+                "category": "PRODUCT_STATE",
+                "fact_target": "商品使用状态",
+                "materiality": "CORE",
+                "stance": "CONFIRM",
+                "position_summary": "商品已使用约半小时。",
+                "asserted_value": "约半小时",
+                "source_scope": "CURRENT_SOURCE",
+                "agreed_statement": None,
+                "conflict_summary": None,
+            }
+        ],
+        "summary_source_fact_keys": ["FACT_01"],
+        "respondent_claim": None,
     }
 
 

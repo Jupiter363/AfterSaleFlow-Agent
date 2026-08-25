@@ -687,6 +687,11 @@ async def _invoke_frame_model(
                     provider_item
                 )
                 normalized_provider_item = item_model.model_dump(mode="json")
+                _validate_public_projection_prefix(
+                    frame_type,
+                    provider_items,
+                    normalized_provider_item,
+                )
                 slot_id = str(normalized_provider_item["provider_slot_id"])
                 if slot_id in {
                     str(item["provider_slot_id"]) for item in provider_items
@@ -994,6 +999,23 @@ def canonical_parallel_public_projection(
         value_kind="JSON_VALUE",
         canonical_value=quality.candidate_score,
     )
+
+
+def _validate_public_projection_prefix(
+    frame_type: ParallelFrameType,
+    previous_items: list[dict[str, Any]],
+    current_item: dict[str, Any],
+) -> None:
+    if frame_type != "DOSSIER_FRAME":
+        return
+    candidates = tuple(
+        str(item["candidate_value"])
+        for item in (*previous_items, current_item)
+    )
+    if len(candidates) > FRAME_PUBLIC_ITEM_LIMITS[frame_type]:
+        raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_PUBLIC_ITEM_LIMIT")
+    if len("；".join(candidates)) > 20_000:
+        raise IntakeGraphContractError("INTAKE_PARALLEL_DOSSIER_SUMMARY_LIMIT")
 
 
 def _provider_usage(
