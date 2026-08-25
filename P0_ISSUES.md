@@ -1608,7 +1608,7 @@
 ## P0-20260826-PARALLEL-EXECUTE-TRANSPORT-PROTOCOL-REJECTED
 
 - Severity: P0
-- Status: OPEN / UAT_BLOCKED / RUNTIME_CONFIRMED
+- Status: OPEN / ROOT_MECHANISM_FIXED / UAT_PENDING
 - Component: Target E2E Intake V4 multiplexed EXECUTE stream consumption
 - Confirmed fact: On fresh activation `p9act.v1.172f8047688af02f532d7c400be18a55`, the first USER ROOM_MESSAGE of fresh case `CASE_P9_6A8DD149_1` durably accepted all three generation-1 Frame starts and two DIALOGUE projections, then emitted public V4 error `TARGET_E2E_GRAPH_PROTOCOL_REJECTED` at approximately 7.790 seconds without accepting any `FRAME_INTERRUPTED`, `FRAME_GENERATION_RESET`, `FRAME_SEALED`, usage, or FINAL event.
 - Root cause and evidence: The rejection is inside Java `HttpTargetE2EIntakeParallelFrameExecutionClient.executeOrResume -> transport.stream/StreamSession`, on the sixth complete technical Frame event before its staging append. The five accepted technical NDJSON lines reconstruct byte-for-byte to 4,017 response bytes, while the mTLS proxy recorded 4,862 response-body bytes, proving that one additional newline-terminated event of 845 bytes was emitted by Python and reached the Java response boundary. A natural Python EOF is excluded: `_execute_live` cannot close normally before its runner terminates, all three Provider calls completed later, all three child checkpoints remained inside `invoke_model`, and the Graph attempt stayed `EXECUTING`. The retained public ledger does not preserve the private sixth event or the exact Java predicate that rejected it. Java subsequently marked the Frame set `FAILED_UNCOMMITTED` with all three slots still generation-1 `STARTED` and no current result.
@@ -1618,9 +1618,19 @@
 ## P0-20260826-PARALLEL-PROJECTION-IDENTITY-NAMESPACE-CONFLICT
 
 - Severity: P0
-- Status: OPEN / CONTRACT_CONFIRMED
+- Status: FIXED / FOCUSED_VERIFIED / UAT_PENDING
 - Component: Intake V4 per-Frame projection staging and generation retry
 - Confirmed fact: Each of the three independent Provider Frame contracts requires `provider_slot_id` to be unique only inside that Frame output. The technical staging schema instead enforces `unique (frame_set_id, canonical_item_id)` across all three Frame types and every generation in the Frame set.
 - Root cause and evidence: Python carries the Provider-local `provider_slot_id` unchanged into `CanonicalPublicProjectionItem.canonical_item_id`; neither the Pydantic output contracts nor the three Frame prompts establish a shared cross-Frame namespace. `V081__intake_parallel_frame_staging.sql` then applies one Frame-set-wide uniqueness constraint. The same constraint also rejects a valid generation-2 single-lane retry that deterministically re-emits the generation-1 slot identifiers, even though the staging primary key and all local-index authority are generation-scoped.
 - Impact: A valid first-attempt interleaving can be rejected when two independent Frames select the same local slot identifier, and a valid single-Frame generation retry can be rejected when it reuses its own stable slot identifiers. Either case prevents the affected lane from sealing and blocks exact-three assembly despite structurally valid Provider output.
 - Identifying metadata: confirmed by static contract comparison on 2026-08-26 at candidate `216041dbada7caffc38453435f4f1d38e0093803`; affected anchors include `parallel_outputs.py:54-62,101-107,180-196`, `parallel_graph.py:1008-1051`, the three `intake_turn_*_frame.md` prompts, and `V081__intake_parallel_frame_staging.sql:384-420`.
+
+## P0-20260826-PARALLEL-JSON-SCALAR-CANONICALIZATION-REJECTED
+
+- Severity: P0
+- Status: FIXED / FOCUSED_VERIFIED / UAT_PENDING
+- Component: Java RFC 8785 consumer for Intake V4 `JSON_VALUE` projections
+- Confirmed fact: The Python Dossier and Quality Frames legitimately emit `JSON_VALUE` projections whose canonical values are JSON strings and numbers. A focused interleaved Java consumer test accepts the Dialogue TEXT projection, then fails when the Quality Frame supplies the first numeric JSON value.
+- Root cause and evidence: `TargetE2EIntakeParallelTransportCodec` and `JdbcIntakeParallelFrameStagingStore` call `ContractJson.canonicalString` on the projection value itself. `ContractJson` passes the root JSON text directly to `org.erdtman.jcs.JsonCanonicalizer`, whose implementation rejects a primitive root instead of canonicalizing it. Quality scores are primitive numbers by contract, while Dossier summaries are primitive strings, so both legal Frame output shapes cross this unsupported root-value boundary before they can be durably staged.
+- Impact: A valid three-lane first attempt cannot reliably pass the first Dossier or Quality public projection. The lane fails before seal, exact-three READY, FINAL, RESULT_READY, and formal Intake commit; Provider regeneration cannot repair the deterministic Java consumer mismatch.
+- Identifying metadata: confirmed on 2026-08-26 by `HttpTargetE2EIntakeParallelFrameExecutionClientTest` after replacing TEXT-only fixtures with the real Dialogue TEXT, Dossier JSON string, and Quality JSON number projection shapes; candidate base `7b097e8cba0ed969f47b9d96692e8483ef8f9633`.

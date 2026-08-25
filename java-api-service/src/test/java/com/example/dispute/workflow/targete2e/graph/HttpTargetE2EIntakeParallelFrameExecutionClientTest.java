@@ -953,12 +953,41 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         root.put("local_index", 0);
         root.put("next_local_index", 1);
         ObjectNode item = root.putObject("item");
-        item.put("canonical_item_id", "item." + frame.type().name().toLowerCase());
-        item.put("projection_kind", "PUBLIC_TEXT");
-        item.put("projection_path_id", "intake.preview");
-        item.put("value_kind", "TEXT");
-        item.put("public_text", "公开输出 " + frame.type());
-        root.put("item_sha256", ContractJson.sha256Hex(item));
+        // Provider slot identifiers are local to a Frame generation. Reusing this
+        // value across all three lanes proves that Java orders and validates each
+        // Frame independently instead of inventing a shared namespace.
+        item.put("canonical_item_id", "shared_slot_0");
+        switch (frame.type()) {
+            case DIALOGUE_FRAME -> {
+                item.put("projection_kind", "ACKNOWLEDGEMENT");
+                item.put("projection_path_id", "intake.dialogue.public_segments");
+                item.put("value_kind", "TEXT");
+                item.put("public_text", "已收到本轮补充说明。");
+            }
+            case DOSSIER_FRAME -> {
+                item.put("projection_kind", "CURRENT_FACT");
+                item.put("projection_path_id", "case_story.one_sentence_summary");
+                item.put("value_kind", "JSON_VALUE");
+                item.put("canonical_value", "用户提交了本轮争议事实与处理诉求。");
+            }
+            case QUALITY_FRAME -> {
+                item.put("projection_kind", "DIMENSION_SCORE");
+                item.put("projection_path_id", "intake.quality.scores.references");
+                item.put("value_kind", "JSON_VALUE");
+                item.put("canonical_value", 15);
+            }
+        }
+        String itemSha256 = switch (frame.type()) {
+            case DIALOGUE_FRAME -> ContractJson.sha256Hex(item);
+            // Golden hashes produced by Python app.contracts.v1.codec.canonical_sha256.
+            // Keeping them literal makes this test a producer/consumer contract check
+            // instead of letting Java validate hashes that it authored itself.
+            case DOSSIER_FRAME ->
+                    "5e08fa34909b50c6e0e48944fd1dfd965b10b7c2e75ea0a8d908b46fc8bb70f6";
+            case QUALITY_FRAME ->
+                    "65211dfe7817dd88f8e1bffabc800b3d13fafb78d9193e2701cea7a6bc1b6a6d";
+        };
+        root.put("item_sha256", itemSha256);
         return ContractJson.canonicalString(root);
     }
 
