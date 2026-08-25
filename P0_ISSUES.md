@@ -1374,7 +1374,7 @@
 ## P0-20260825-PARALLEL-ASSEMBLY-STORE-FINAL-PROXY
 
 - Severity: P0
-- Status: FIXED_FOCUSED_VERIFIED / ACTIVATION_PENDING
+- Status: FIXED_ACTIVATION_VERIFIED / UAT_PENDING
 - Component: Java Intake parallel assembly persistence bean activation
 - Confirmed fact: After V081 through V084 migrated successfully, the fresh activation preflight still exited before readiness while creating the `jdbcIntakeParallelAssemblyStore` bean.
 - Root cause and evidence: `JdbcIntakeParallelAssemblyStore` is a final concrete Spring bean with transactional advice. Spring selected a CGLIB class proxy during application-context startup, and CGLIB rejected the bean with `Cannot subclass final class com.example.dispute.workflow.infrastructure.persistence.intake.parallel.JdbcIntakeParallelAssemblyStore`.
