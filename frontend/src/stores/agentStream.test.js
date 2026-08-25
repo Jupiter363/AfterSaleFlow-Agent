@@ -824,7 +824,13 @@ describe("agentStreamStore", () => {
         canonical_value_json: JSON.stringify("补充事实"),
         item_sha256: hash,
       }),
-      v4SseFrame(runId, attemptId, 17, "public_frame_sealed", {
+      v4SseFrame(runId, attemptId, 17, "usage", {
+        frame_type: "DIALOGUE_FRAME",
+        generation: 1,
+        usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+        delivery_class: "DURABLE_STAGING",
+      }),
+      v4SseFrame(runId, attemptId, 18, "public_frame_sealed", {
         frame_id: dialogueFrameId,
         frame_type: "DIALOGUE_FRAME",
         generation: 1,
@@ -834,7 +840,13 @@ describe("agentStreamStore", () => {
         result_sha256: hash,
         public_projection_sha256: "b".repeat(64),
       }),
-      v4SseFrame(runId, attemptId, 18, "public_frame_sealed", {
+      v4SseFrame(runId, attemptId, 19, "usage", {
+        frame_type: "DOSSIER_FRAME",
+        generation: 2,
+        usage: { input_tokens: 110, output_tokens: 30, total_tokens: 140 },
+        delivery_class: "DURABLE_STAGING",
+      }),
+      v4SseFrame(runId, attemptId, 20, "public_frame_sealed", {
         frame_id: replacementDossierFrameId,
         frame_type: "DOSSIER_FRAME",
         generation: 2,
@@ -844,7 +856,13 @@ describe("agentStreamStore", () => {
         result_sha256: hash,
         public_projection_sha256: "b".repeat(64),
       }),
-      v4SseFrame(runId, attemptId, 19, "public_frame_sealed", {
+      v4SseFrame(runId, attemptId, 21, "usage", {
+        frame_type: "QUALITY_FRAME",
+        generation: 1,
+        usage: { input_tokens: 90, output_tokens: 10, total_tokens: 100 },
+        delivery_class: "DURABLE_STAGING",
+      }),
+      v4SseFrame(runId, attemptId, 22, "public_frame_sealed", {
         frame_id: qualityFrameId,
         frame_type: "QUALITY_FRAME",
         generation: 1,
@@ -854,7 +872,7 @@ describe("agentStreamStore", () => {
         result_sha256: hash,
         public_projection_sha256: "b".repeat(64),
       }),
-      v4SseFrame(runId, attemptId, 20, "final", {
+      v4SseFrame(runId, attemptId, 23, "final", {
         delivery_class: "DURABLE_TERMINAL",
         final_receipt_id: "FINAL_RECEIPT_1",
         final_result_hash: "c".repeat(64),
@@ -895,7 +913,17 @@ describe("agentStreamStore", () => {
     expect(run.frames[qualityFrameId].items.QGAP_REFERENCES.value.question)
       .toBe("请补充第三方检测报告的机构名称？");
     expect(run.frames[dialogueFrameId].status).toBe("SEALED");
-    expect(run.lastEventId).toBe(`v4:${attemptId}:20`);
+    expect(run.usage).toEqual({
+      inputTokens: 300,
+      outputTokens: 60,
+      totalTokens: 360,
+    });
+    expect(run.usageByFrame.DOSSIER_FRAME).toEqual({
+      inputTokens: 110,
+      outputTokens: 30,
+      totalTokens: 140,
+    });
+    expect(run.lastEventId).toBe(`v4:${attemptId}:23`);
   });
 
   it("rejects a V4 Dossier item outside the exact current-facts projection", async () => {

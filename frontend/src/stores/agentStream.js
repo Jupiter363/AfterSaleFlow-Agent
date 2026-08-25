@@ -62,8 +62,8 @@ const V4_QUALITY_DIMENSION_ORDER = [
   "next_action_clarity",
 ];
 const V4_FRAME_ITEM_LIMITS = {
-  DIALOGUE_FRAME: 4,
-  DOSSIER_FRAME: 32,
+  DIALOGUE_FRAME: 2,
+  DOSSIER_FRAME: 6,
   QUALITY_FRAME: 12,
 };
 
@@ -407,6 +407,8 @@ function ensureV4Frame(run, event) {
     frameReceiptId: "",
     resultSha256: "",
     publicProjectionSha256: "",
+    pendingUsage: null,
+    usage: null,
   });
   run.frames[event.frameId] = frame;
   run.frameOrder.push(event.frameId);
@@ -450,7 +452,7 @@ function validateV4ProjectionContract(frame, event, value) {
       !V4_DIALOGUE_PROJECTION_KINDS.has(event.projectionKind) ||
       typeof value !== "string" ||
       unicodeLength(value) < 1 ||
-      unicodeLength(value) > 500 ||
+      unicodeLength(value) > 200 ||
       value.includes("?") ||
       value.includes("？")
     ) rejectV4ProjectionContract();
@@ -469,8 +471,8 @@ function validateV4ProjectionContract(frame, event, value) {
       event.projectionPathId !== "case_story.one_sentence_summary" ||
       typeof value !== "string" ||
       value.trim().length < 1 ||
-      unicodeLength(value) > 20_000 ||
-      unicodeLength(projectedSummary) > 20_000
+      unicodeLength(value) > 240 ||
+      unicodeLength(projectedSummary) > 1_445
     ) rejectV4ProjectionContract();
     return;
   }
@@ -553,11 +555,47 @@ function resetV4Frame(run, event) {
     error.code = "AGENT_STREAM_V4_GENERATION_RESET_MISMATCH";
     throw error;
   }
+  current.pendingUsage = null;
   current.status = "RESET";
   run.parallelFrameIds[event.frameType] = event.newFrameId;
   if (event.frameType === "DIALOGUE_FRAME") {
     rebuildV4DialogueProjection(run);
   }
+}
+
+function normalizeV4FrameUsage(usage) {
+  const inputTokens = Number(usage?.inputTokens ?? usage?.input_tokens);
+  const outputTokens = Number(usage?.outputTokens ?? usage?.output_tokens);
+  const totalTokens = Number(usage?.totalTokens ?? usage?.total_tokens);
+  if (
+    !Number.isSafeInteger(inputTokens) ||
+    !Number.isSafeInteger(outputTokens) ||
+    !Number.isSafeInteger(totalTokens) ||
+    inputTokens < 0 ||
+    outputTokens < 0 ||
+    totalTokens !== inputTokens + outputTokens
+  ) {
+    const error = new Error("并行接待流 usage 计数无效");
+    error.code = "AGENT_STREAM_V4_USAGE_INVALID";
+    throw error;
+  }
+  return { inputTokens, outputTokens, totalTokens };
+}
+
+function commitV4FrameUsage(run, frame) {
+  if (!frame.pendingUsage || frame.usage) {
+    const error = new Error("并行接待流 sealed 缺少唯一 usage 证明");
+    error.code = "AGENT_STREAM_V4_USAGE_INVALID";
+    throw error;
+  }
+  frame.usage = frame.pendingUsage;
+  frame.pendingUsage = null;
+  run.usageByFrame[frame.frameType] = frame.usage;
+  run.usage = Object.values(run.usageByFrame).reduce((total, usage) => ({
+    inputTokens: total.inputTokens + usage.inputTokens,
+    outputTokens: total.outputTokens + usage.outputTokens,
+    totalTokens: total.totalTokens + usage.totalTokens,
+  }), { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
 }
 
 function applyV4FrameEvent(run, event) {
@@ -579,18 +617,15 @@ function applyV4FrameEvent(run, event) {
       !event.usage ||
       !selectedFrame ||
       selectedFrame.generation !== event.generation ||
-      selectedFrame.status !== "SEALED"
+      selectedFrame.status !== "STREAMING" ||
+      selectedFrame.pendingUsage ||
+      selectedFrame.usage
     ) {
       const error = new Error("并行接待流 usage 无效");
       error.code = "AGENT_STREAM_V4_USAGE_INVALID";
       throw error;
     }
-    run.usageByFrame[event.frameType] = event.usage;
-    run.usage = Object.values(run.usageByFrame).reduce((total, usage) => ({
-      inputTokens: Number(total.inputTokens || 0) + Number(usage.inputTokens || usage.input_tokens || 0),
-      outputTokens: Number(total.outputTokens || 0) + Number(usage.outputTokens || usage.output_tokens || 0),
-      totalTokens: Number(total.totalTokens || 0) + Number(usage.totalTokens || usage.total_tokens || 0),
-    }), { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+    selectedFrame.pendingUsage = normalizeV4FrameUsage(event.usage);
     return;
   }
 
@@ -675,6 +710,7 @@ function applyV4FrameEvent(run, event) {
     frame.frameReceiptId = event.frameReceiptId;
     frame.resultSha256 = event.resultSha256;
     frame.publicProjectionSha256 = event.publicProjectionSha256;
+    commitV4FrameUsage(run, frame);
     return;
   }
   if (event.event === "public_frame_interrupted") {
@@ -687,6 +723,7 @@ function applyV4FrameEvent(run, event) {
       error.code = "AGENT_STREAM_V4_FRAME_INTERRUPTED_INVALID";
       throw error;
     }
+    frame.pendingUsage = null;
     frame.status = "INTERRUPTED";
     frame.retryable = Boolean(event.retryable);
   }
@@ -695,7 +732,8 @@ function applyV4FrameEvent(run, event) {
 function requireV4ExactThreeSealed(run) {
   const complete = [...V4_FRAME_TYPES].every((frameType) => {
     const frameId = run.parallelFrameIds[frameType];
-    return frameId && run.frames[frameId]?.status === "SEALED";
+    const frame = frameId ? run.frames[frameId] : null;
+    return frame?.status === "SEALED" && frame.usage && !frame.pendingUsage;
   });
   if (!complete) {
     const error = new Error("并行接待终态早于三路 sealed 证明");
