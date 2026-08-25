@@ -28,7 +28,7 @@ alter table agent_run_stream_event
             'public_frame_start', 'public_text_delta',
             'public_frame_projection_item', 'active_frame_snapshot',
             'frame_generation_reset', 'public_frame_committed',
-            'public_frame_sealed', 'public_frame_interrupted',
+            'public_frame_sealed', 'public_frame_interrupted', 'generation_reset',
             'attempt_aborted', 'attempt_reset', 'usage', 'final', 'error'
         ));
 
@@ -56,7 +56,7 @@ alter table agent_run_stream_event_delivery
             'public_frame_start', 'public_text_delta',
             'public_frame_projection_item', 'active_frame_snapshot',
             'frame_generation_reset', 'public_frame_committed',
-            'public_frame_sealed', 'public_frame_interrupted',
+            'public_frame_sealed', 'public_frame_interrupted', 'generation_reset',
             'attempt_aborted', 'attempt_reset', 'usage', 'final', 'error'
         ));
 

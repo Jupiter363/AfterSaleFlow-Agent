@@ -26,6 +26,7 @@ class IntakeParallelFrameStagingMigrationContractTest {
                 .contains("uq_agent_run_stream_event_attempt_sequence_v4")
                 .contains("where stream_protocol = 'agent-stream.v4'")
                 .contains("'public_frame_projection_item'")
+                .contains("'generation_reset'")
                 .contains("'frame_generation_reset'")
                 .contains("'public_frame_sealed'")
                 .doesNotContain("drop index if exists uq_agent_run_stream_event_attempt_sequence_v3");
