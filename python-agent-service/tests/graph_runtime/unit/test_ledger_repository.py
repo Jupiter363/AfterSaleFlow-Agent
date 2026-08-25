@@ -21,6 +21,8 @@ from app.graph_runtime.ledger import (
     CommandBinding,
     CommandStatus,
     InvocationNonce,
+    ParallelReceiptCycleRecord,
+    ParallelReceiptExecutionRecord,
     PostgresCommandLedger,
     ResultRecord,
     TechnicalCompletionRecord,
@@ -1030,3 +1032,213 @@ def test_technical_completion_revalidates_nested_json_before_persistence() -> No
 
     with pytest.raises(GraphTerminalBindingError, match="self-hash is invalid"):
         completion.canonical_json_text()
+
+
+def test_parallel_receipt_cycle_is_deterministic_and_revalidates_events() -> None:
+    events: list[dict[str, Any]] = [
+        {
+            "event_type": "frame_interrupted",
+            "frame_type": "QUALITY_FRAME",
+            "retryable": True,
+        }
+    ]
+    receipt: dict[str, Any] = {
+        "schema_version": "intake.parallel-admission-receipt.v1",
+        "request_hash": "a" * 64,
+        "frame_set_id": "IPFS_123",
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "java_receipt_id": "FRAME_SET_RECEIPT_V4_1",
+        "authority_sha256": "c" * 64,
+        "lanes": [
+            {
+                "frame_type": frame_type,
+                "generation": 1,
+                "frame_id": f"frame.{frame_type.lower()}",
+                "slot_state": "ADMITTED",
+                "action": "RUN_CURRENT",
+                "next_local_index": 0,
+                "slot_version": 0,
+                "result_id": None,
+                "result_sha256": None,
+                "public_projection_sha256": None,
+                "predecessor_failure_code": None,
+            }
+            for frame_type in ("DIALOGUE_FRAME", "DOSSIER_FRAME", "QUALITY_FRAME")
+        ],
+    }
+    receipt["receipt_sha256"] = canonical_sha256(receipt)
+    cycle = ParallelReceiptCycleRecord.create(
+        thread_id=THREAD,
+        command_id="command-1",
+        request_hash="a" * 64,
+        attempt_id="attempt-1",
+        frame_set_id="IPFS_123",
+        receipt_sha256=receipt["receipt_sha256"],
+        authority_sha256="c" * 64,
+        admission_receipt=receipt,
+        canonical_events=events,
+        terminal_error_code="INTAKE_PARALLEL_FRAME_BATCH_FAILED",
+        terminal_retryable=True,
+        provider_call_count_before=2,
+        provider_call_count_after=3,
+        owner_id="python:test",
+        fencing_token=4,
+    )
+
+    assert cycle.cycle_id == (
+        "parallel-receipt-cycle." + receipt["receipt_sha256"][:32]
+    )
+    assert json.loads(cycle.canonical_events_json_text()) == events
+    events[0]["retryable"] = False
+    assert json.loads(cycle.canonical_events_json_text())[0]["retryable"] is True
+
+    mutated = dict(cycle.canonical_events[0])
+    mutated["retryable"] = False
+    with pytest.raises(GraphTerminalBindingError, match="self-hash is invalid"):
+        replace(cycle, canonical_events=(mutated,))
+
+
+def test_parallel_receipt_execution_and_successor_are_deterministic() -> None:
+    def receipt(lanes: list[dict[str, Any]], receipt_id: str) -> dict[str, Any]:
+        document: dict[str, Any] = {
+            "schema_version": "intake.parallel-admission-receipt.v1",
+            "request_hash": "a" * 64,
+            "frame_set_id": "IPFS_123",
+            "run_id": "run-1",
+            "attempt_id": "attempt-1",
+            "java_receipt_id": receipt_id,
+            "authority_sha256": "c" * 64,
+            "lanes": lanes,
+        }
+        document["receipt_sha256"] = canonical_sha256(document)
+        return document
+
+    initial_lanes = [
+        {
+            "frame_type": frame_type,
+            "generation": 1,
+            "frame_id": f"frame.{frame_type.lower()}.1",
+            "slot_state": "ADMITTED",
+            "action": "RUN_CURRENT",
+            "next_local_index": 0,
+            "slot_version": 0,
+            "result_id": None,
+            "result_sha256": None,
+            "public_projection_sha256": None,
+            "predecessor_failure_code": None,
+        }
+        for frame_type in ("DIALOGUE_FRAME", "DOSSIER_FRAME", "QUALITY_FRAME")
+    ]
+    initial = receipt(initial_lanes, "FRAME_SET_RECEIPT_V4_1")
+    events = [
+        {
+            "event_kind": "FRAME_SEALED",
+            "frame_type": frame_type,
+            "generation": 1,
+            "frame_id": f"frame.{frame_type.lower()}.1",
+            "next_local_index": index + 1,
+            "result_sha256": character * 64,
+            "public_projection_sha256": projection_character * 64,
+        }
+        for index, (frame_type, character, projection_character) in enumerate(
+            (("DIALOGUE_FRAME", "d", "a"), ("DOSSIER_FRAME", "e", "b"))
+        )
+    ]
+    events.append(
+        {
+            "event_kind": "FRAME_INTERRUPTED",
+            "frame_type": "QUALITY_FRAME",
+            "generation": 1,
+            "frame_id": "frame.quality_frame.1",
+            "error_code": "OUTPUT_SCHEMA_INVALID",
+            "retryable": True,
+        }
+    )
+    cycle = ParallelReceiptCycleRecord.create(
+        thread_id=THREAD,
+        command_id="command-1",
+        request_hash="a" * 64,
+        attempt_id="attempt-1",
+        frame_set_id="IPFS_123",
+        receipt_sha256=initial["receipt_sha256"],
+        authority_sha256="c" * 64,
+        admission_receipt=initial,
+        canonical_events=events,
+        terminal_error_code="INTAKE_PARALLEL_FRAME_BATCH_FAILED",
+        terminal_retryable=True,
+        provider_call_count_before=0,
+        provider_call_count_after=3,
+        owner_id="python:test",
+        fencing_token=1,
+    )
+    execution = ParallelReceiptExecutionRecord.create(
+        thread_id=THREAD,
+        command_id="command-1",
+        request_hash="a" * 64,
+        attempt_id="attempt-1",
+        frame_set_id="IPFS_123",
+        receipt_sha256=initial["receipt_sha256"],
+        authority_sha256="c" * 64,
+        predecessor_cycle_id=None,
+        provider_call_count_at_admission=0,
+        owner_id="python:test",
+        fencing_token=1,
+    )
+    assert execution.execution_id == cycle.execution_id
+
+    adopted = ParallelReceiptExecutionRecord.create(
+        thread_id=THREAD,
+        command_id="command-1",
+        request_hash="a" * 64,
+        attempt_id="attempt-1",
+        frame_set_id="IPFS_123",
+        receipt_sha256=initial["receipt_sha256"],
+        authority_sha256="c" * 64,
+        predecessor_cycle_id=None,
+        predecessor_execution_id=execution.execution_id,
+        provider_call_count_at_admission=0,
+        owner_id="python:replacement",
+        fencing_token=2,
+    )
+    assert adopted.execution_id.endswith(".2")
+    assert adopted.receipt_sha256 == execution.receipt_sha256
+    assert adopted.predecessor_execution_id == execution.execution_id
+
+    successor_lanes: list[dict[str, Any]] = []
+    for lane in initial_lanes[:2]:
+        frame_type = lane["frame_type"]
+        terminal = next(event for event in events if event["frame_type"] == frame_type)
+        successor_lanes.append(
+            {
+                **lane,
+                "slot_state": "SEALED",
+                "action": "SKIP_SEALED",
+                "next_local_index": terminal["next_local_index"],
+                "slot_version": 1,
+                "result_id": f"result.{frame_type.lower()}",
+                "result_sha256": terminal["result_sha256"],
+                "public_projection_sha256": terminal["public_projection_sha256"],
+            }
+        )
+    successor_lanes.append(
+        {
+            **initial_lanes[2],
+            "generation": 2,
+            "frame_id": "frame.quality_frame.2",
+            "action": "RUN_RETRY",
+            "slot_version": 1,
+            "predecessor_failure_code": "OUTPUT_SCHEMA_INVALID",
+        }
+    )
+    successor = receipt(successor_lanes, "FRAME_SET_RECEIPT_V4_2")
+    assert cycle.require_successor_receipt(successor) == successor
+
+    stale_lanes = [dict(lane) for lane in successor_lanes]
+    stale_lanes[2]["slot_version"] = 0
+    stale = receipt(stale_lanes, "FRAME_SET_RECEIPT_V4_STALE")
+    with pytest.raises(
+        GraphTerminalBindingError,
+        match="did not advance a retryable failed lane",
+    ):
+        cycle.require_successor_receipt(stale)

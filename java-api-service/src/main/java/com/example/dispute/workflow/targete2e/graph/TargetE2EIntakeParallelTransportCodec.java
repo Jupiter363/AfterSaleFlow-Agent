@@ -1,6 +1,8 @@
 package com.example.dispute.workflow.targete2e.graph;
 
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameType;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionLane;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionPlan;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTransport;
 import com.fasterxml.jackson.core.JsonParser;
@@ -116,11 +118,16 @@ final class TargetE2EIntakeParallelTransportCodec {
     EncodedAdmissionReceipt encodeAdmissionReceipt(
             String requestHash,
             String javaReceiptId,
-            StreamAuthority authority) {
+            StreamAuthority authority,
+            ExecutionPlan plan) {
         if (!SHA256.matcher(Objects.requireNonNull(requestHash, "requestHash")).matches()
                 || !IDENTIFIER.matcher(Objects.requireNonNull(javaReceiptId, "javaReceiptId")).matches()
                 || authority == null
-                || authority.frames().size() != FrameType.values().length) {
+                || authority.frames().size() != FrameType.values().length
+                || plan == null
+                || !authority.frameSetId().equals(plan.frameSetId())
+                || !authority.runId().equals(plan.runId())
+                || !authority.attemptId().equals(plan.attemptId())) {
             throw invalid("parallel admission receipt input is invalid");
         }
         ObjectNode document = mapper.createObjectNode();
@@ -137,12 +144,28 @@ final class TargetE2EIntakeParallelTransportCodec {
             if (frame.frameType() != FrameType.values()[index]) {
                 throw invalid("parallel admission receipt lane order drifted");
             }
+            ExecutionLane execution = plan.lanes().get(frame.frameType());
+            if (execution == null) {
+                throw invalid("parallel admission receipt lacks an execution lane");
+            }
             ObjectNode lane = lanes.addObject();
             lane.put("frame_type", frame.frameType().name());
-            lane.put("generation", frame.generation());
-            lane.put("frame_id", frame.frameId());
-            lane.put("action", "RUN");
-            lane.put("next_local_index", 0);
+            lane.put("generation", execution.generation());
+            lane.put("frame_id", execution.frameId());
+            lane.put("slot_state", execution.slotState().name());
+            lane.put("action", execution.action().name());
+            lane.put("next_local_index", execution.nextLocalIndex());
+            lane.put("slot_version", execution.slotVersion());
+            putNullable(lane, "result_id", execution.resultId());
+            putNullable(lane, "result_sha256", execution.resultSha256());
+            putNullable(
+                    lane,
+                    "public_projection_sha256",
+                    execution.publicProjectionSha256());
+            putNullable(
+                    lane,
+                    "predecessor_failure_code",
+                    execution.predecessorFailureCode());
         }
         String receiptHash = ContractJson.sha256Hex(document);
         document.put("receipt_sha256", receiptHash);
@@ -410,6 +433,14 @@ final class TargetE2EIntakeParallelTransportCodec {
             return Instant.parse(text(node, field));
         } catch (DateTimeParseException failure) {
             throw invalid(field + " must be RFC3339 UTC time", failure);
+        }
+    }
+
+    private static void putNullable(ObjectNode node, String field, String value) {
+        if (value == null) {
+            node.putNull(field);
+        } else {
+            node.put(field, value);
         }
     }
 

@@ -13,6 +13,11 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyView;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.EventAuthority;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExactThreeCompletion;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExactThreeFrame;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionAction;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionLane;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionPlan;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealCommand;
@@ -86,6 +91,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         assertThat(staging.actions)
                 .containsExactly(
                         "admit",
+                        "plan",
                         "append:PUBLIC_FRAME_START:DIALOGUE_FRAME",
                         "append:PUBLIC_FRAME_START:DOSSIER_FRAME",
                         "append:PUBLIC_FRAME_START:QUALITY_FRAME",
@@ -102,7 +108,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                         "seal:DIALOGUE_FRAME",
                         "append:USAGE:DOSSIER_FRAME",
                         "seal:DOSSIER_FRAME",
-                        "find");
+                        "find-completion");
         assertThat(transport.requests).hasSize(2);
         assertThat(transport.requests.get(0).headers())
                 .containsEntry(HttpTargetE2EIntakeParallelFrameExecutionClient.PHASE_HEADER, "PREPARE")
@@ -165,7 +171,11 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                 .isInstanceOf(TargetE2EGraphClientException.class);
 
         assertThat(staging.actions)
-                .containsExactly("admit", "append:PUBLIC_FRAME_START:DIALOGUE_FRAME");
+                .containsExactly(
+                        "admit",
+                        "plan",
+                        "append:PUBLIC_FRAME_START:DIALOGUE_FRAME",
+                        "find-completion");
         assertThat(staging.nextSequence).isEqualTo(1L);
     }
 
@@ -363,6 +373,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         private final List<TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding>
                 deliveryBindings = new ArrayList<>();
         private final EnumMap<FrameType, FrameSlotView> slots = new EnumMap<>(FrameType.class);
+        private final EnumMap<FrameType, FrameSealCommand> seals = new EnumMap<>(FrameType.class);
         private FrameSetAdmission admission;
         private long nextSequence;
         private int sealed;
@@ -430,11 +441,34 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         }
 
         @Override
+        public ExecutionPlan planExecution(FrameSetAdmission value) {
+            actions.add("plan");
+            EnumMap<FrameType, ExecutionLane> lanes = new EnumMap<>(FrameType.class);
+            value.manifests().forEach(manifest -> lanes.put(
+                    manifest.frameType(),
+                    new ExecutionLane(
+                            manifest.frameType(),
+                            manifest.generation(),
+                            manifest.frameId(),
+                            SlotState.ADMITTED,
+                            ExecutionAction.RUN_CURRENT,
+                            0,
+                            0,
+                            null,
+                            null,
+                            null,
+                            null)));
+            return new ExecutionPlan(
+                    value.frameSetId(), value.runId(), value.attemptId(), lanes);
+        }
+
+        @Override
         public FrameSealReceipt seal(FrameSealCommand command) {
             actions.add("seal:" + command.frameType());
             long sequence = nextSequence++;
             sealed++;
             String resultId = "FRAME_RESULT_" + command.frameType();
+            seals.put(command.frameType(), command);
             slots.put(
                     command.frameType(),
                     new FrameSlotView(
@@ -454,6 +488,36 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                     AssemblyState.COLLECTING,
                     sequence,
                     sequence);
+        }
+
+        @Override
+        public Optional<ExactThreeCompletion> findExactThreeCompletion(
+                String frameSetId, String runId, String attemptId) {
+            actions.add("find-completion");
+            if (seals.size() != FrameType.values().length) {
+                return Optional.empty();
+            }
+            EnumMap<FrameType, ExactThreeFrame> frames = new EnumMap<>(FrameType.class);
+            for (FrameType type : FrameType.values()) {
+                FrameSealCommand seal = seals.get(type);
+                FrameSlotView slot = slots.get(type);
+                frames.put(type, new ExactThreeFrame(
+                        type,
+                        seal.generation(),
+                        seal.frameId(),
+                        0,
+                        slot.resultId(),
+                        seal.resultSha256(),
+                        seal.publicProjectionSha256(),
+                        seal.nextLocalIndex()));
+            }
+            return Optional.of(new ExactThreeCompletion(
+                    frameSetId,
+                    runId,
+                    attemptId,
+                    nextSequence - 1,
+                    true,
+                    frames));
         }
 
         @Override

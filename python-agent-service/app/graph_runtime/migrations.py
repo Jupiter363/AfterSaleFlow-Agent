@@ -40,6 +40,7 @@ MIGRATION_FILENAMES: Final[tuple[str, ...]] = (
     "G009_graph_lease_sixty_second_window.sql",
     "G010_target_e2e_activation_month_window.sql",
     "G011_parallel_technical_completion.sql",
+    "G012_parallel_subset_technical_completion.sql",
 )
 MIGRATIONS_DIRECTORY: Final[Path] = Path(__file__).resolve().parents[2] / "migrations" / "graph"
 CONTROL_KEY: Final[str] = "primary"
@@ -56,6 +57,8 @@ REQUIRED_MIGRATION_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_command",
     "agent_graph_command_attempt",
     "agent_graph_technical_completion",
+    "agent_graph_parallel_receipt_execution",
+    "agent_graph_parallel_receipt_cycle",
     "agent_graph_result",
     "agent_graph_lease",
     "agent_graph_invocation_nonce",
@@ -681,6 +684,16 @@ class GraphMigrationRunner:
             await connection.execute(
                 sql.SQL(
                     "grant select, insert on {}.agent_graph_technical_completion to {}"
+                ).format(schema, runtime)
+            )
+            await connection.execute(
+                sql.SQL(
+                    "grant select, insert on {}.agent_graph_parallel_receipt_execution to {}"
+                ).format(schema, runtime)
+            )
+            await connection.execute(
+                sql.SQL(
+                    "grant select, insert on {}.agent_graph_parallel_receipt_cycle to {}"
                 ).format(schema, runtime)
             )
             await connection.execute(

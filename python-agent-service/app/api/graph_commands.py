@@ -601,7 +601,10 @@ def create_graph_commands_router(
                     raise ParallelFrameStreamProtocolError(
                         "parallel Frame authority differs from the signed command"
                     )
-                parallel_validator = ParallelFrameStreamProtocolValidator(authority)
+                parallel_validator = ParallelFrameStreamProtocolValidator(
+                    authority,
+                    parallel_opened.active_frame_types,
+                )
                 first_parallel_event = await anext(parallel_opened.events)
                 parallel_first_line = encode_parallel_frame_event(
                     parallel_validator,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,6 +10,8 @@ import pytest
 from app.api.intake_parallel_stream import (
     decode_parallel_admission_receipt_header,
     ExpectedParallelFrame,
+    ParallelFrameAdmissionLane,
+    ParallelFrameAdmissionReceipt,
     parallel_frame_authority_sha256,
     ParallelFrameStreamAuthority,
     ParallelFrameStreamProtocolError,
@@ -43,6 +46,68 @@ def test_admission_receipt_decodes_exact_three_literal_frame_types() -> None:
     assert receipt.frame_set_id == FRAME_SET_ID
     assert tuple(lane.frame_type for lane in receipt.lanes) == FRAME_TYPES
     assert receipt.receipt_sha256 == document["receipt_sha256"]
+
+
+def test_admission_receipt_projects_one_retry_and_preserves_sealed_siblings() -> None:
+    prepared = _authority()
+    retry_id = "frame.dialogue_frame.retry"
+    receipt = ParallelFrameAdmissionReceipt(
+        request_hash="f" * 64,
+        frame_set_id=FRAME_SET_ID,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        java_receipt_id="FRAME_SET_RECEIPT_V4_1",
+        authority_sha256=parallel_frame_authority_sha256(prepared),
+        lanes=(
+            ParallelFrameAdmissionLane(
+                frame_type="DIALOGUE_FRAME",
+                generation=2,
+                frame_id=retry_id,
+                slot_state="ADMITTED",
+                action="RUN_RETRY",
+                next_local_index=0,
+                slot_version=2,
+                result_id=None,
+                result_sha256=None,
+                public_projection_sha256=None,
+                predecessor_failure_code="OUTPUT_SCHEMA_INVALID",
+            ),
+            *tuple(
+                ParallelFrameAdmissionLane(
+                    frame_type=frame.frame_type,
+                    generation=frame.generation,
+                    frame_id=frame.frame_id,
+                    slot_state="SEALED",
+                    action="SKIP_SEALED",
+                    next_local_index=1,
+                    slot_version=1,
+                    result_id=f"result.{frame.frame_type.lower()}",
+                    result_sha256="d" * 64,
+                    public_projection_sha256="e" * 64,
+                    predecessor_failure_code=None,
+                )
+                for frame in prepared.frames[1:]
+            ),
+        ),  # type: ignore[arg-type]
+        receipt_sha256="e" * 64,
+    )
+
+    projected = receipt.require_authority(command=_command(), authority=prepared)
+
+    assert projected.frames[0].generation == 2
+    assert projected.frames[0].frame_id == retry_id
+    assert projected.frames[1:] == prepared.frames[1:]
+
+    invalid = replace(
+        receipt,
+        lanes=(
+            replace(receipt.lanes[0], action="RUN_UNKNOWN"),
+            receipt.lanes[1],
+            receipt.lanes[2],
+        ),
+    )
+    with pytest.raises(ParallelFrameStreamProtocolError, match="lane state is invalid"):
+        invalid.require_authority(command=_command(), authority=prepared)
 
 
 @pytest.mark.parametrize("mutation", ["unknown", "reordered", "tampered_hash"])
@@ -92,6 +157,19 @@ def test_interleaved_exact_three_lanes_seal_against_their_public_results() -> No
                 validator.accept(remaining[frame_type].pop(0))
 
     validator.finish()
+
+
+def test_validator_accepts_only_the_planned_active_subset() -> None:
+    validator = ParallelFrameStreamProtocolValidator(
+        _authority(),
+        ("DIALOGUE_FRAME",),
+    )
+    for event in _successful_lane("DIALOGUE_FRAME"):
+        validator.accept(event)
+    validator.finish()
+
+    with pytest.raises(ParallelFrameStreamProtocolError, match="crossed stream authority"):
+        validator.accept(_successful_lane("DOSSIER_FRAME")[0])
 
 
 def test_reset_requires_interruption_and_replacement_start_before_projection() -> None:
@@ -271,8 +349,14 @@ def _admission_receipt_document() -> dict[str, Any]:
                 "frame_type": frame.frame_type,
                 "generation": frame.generation,
                 "frame_id": frame.frame_id,
-                "action": "RUN",
+                "slot_state": "ADMITTED",
+                "action": "RUN_CURRENT",
                 "next_local_index": 0,
+                "slot_version": 0,
+                "result_id": None,
+                "result_sha256": None,
+                "public_projection_sha256": None,
+                "predecessor_failure_code": None,
             }
             for frame in authority.frames
         ],
@@ -292,6 +376,18 @@ def _authority() -> ParallelFrameStreamAuthority:
         attempt_id=ATTEMPT_ID,
         frames=tuple(_expected(frame_type) for frame_type in FRAME_TYPES),
     )
+
+
+def _command() -> Any:
+    return type(
+        "Command",
+        (),
+        {
+            "request_hash": "f" * 64,
+            "logical_run_id": RUN_ID,
+            "attempt_id": ATTEMPT_ID,
+        },
+    )()
 
 
 def _expected(frame_type: ParallelFrameType) -> ExpectedParallelFrame:

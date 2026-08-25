@@ -22,6 +22,8 @@ import java.util.regex.Pattern;
  */
 public interface IntakeParallelFrameStagingPort {
 
+    String RETRY_VALIDATION_PATH = "$";
+
     FrameSetReceipt admit(FrameSetAdmission admission);
 
     IngressReceipt append(IngressCommand command);
@@ -30,7 +32,12 @@ public interface IntakeParallelFrameStagingPort {
 
     FrameRetryReceipt admitRetry(FrameRetryAdmission admission);
 
+    ExecutionPlan planExecution(FrameSetAdmission admission);
+
     Optional<AssemblyView> findAssembly(String frameSetId);
+
+    Optional<ExactThreeCompletion> findExactThreeCompletion(
+            String frameSetId, String runId, String attemptId);
 
     enum FrameType {
         DIALOGUE_FRAME("intake_turn_dialogue_frame", "intake-dialogue-frame.v1"),
@@ -67,6 +74,12 @@ public interface IntakeParallelFrameStagingPort {
         SEALED,
         FAILED,
         AMBIGUOUS
+    }
+
+    enum ExecutionAction {
+        SKIP_SEALED,
+        RUN_CURRENT,
+        RUN_RETRY
     }
 
     enum IngressKind {
@@ -487,6 +500,148 @@ public interface IntakeParallelFrameStagingPort {
             positive(generation, "generation");
             frameId = identifier(frameId, "frameId");
             receiptId = identifier(receiptId, "receiptId");
+        }
+    }
+
+    record ExecutionLane(
+            FrameType frameType,
+            long generation,
+            String frameId,
+            SlotState slotState,
+            ExecutionAction action,
+            long nextLocalIndex,
+            long slotVersion,
+            String resultId,
+            String resultSha256,
+            String publicProjectionSha256,
+            String predecessorFailureCode) {
+
+        public ExecutionLane {
+            frameType = Objects.requireNonNull(frameType, "frameType");
+            positive(generation, "generation");
+            wireInteger(generation, "generation");
+            frameId = identifier(frameId, "frameId");
+            slotState = Objects.requireNonNull(slotState, "slotState");
+            action = Objects.requireNonNull(action, "action");
+            nonNegative(nextLocalIndex, "nextLocalIndex");
+            wireInteger(nextLocalIndex, "nextLocalIndex");
+            nonNegative(slotVersion, "slotVersion");
+            resultSha256 = optionalSha256(resultSha256, "resultSha256");
+            publicProjectionSha256 =
+                    optionalSha256(publicProjectionSha256, "publicProjectionSha256");
+            if (resultId != null) {
+                resultId = identifier(resultId, "resultId");
+            }
+            if (predecessorFailureCode != null) {
+                predecessorFailureCode = identifier(
+                        predecessorFailureCode, "predecessorFailureCode");
+            }
+            boolean skip = action == ExecutionAction.SKIP_SEALED;
+            if (skip
+                    != (slotState == SlotState.SEALED
+                            && resultId != null
+                            && resultSha256 != null
+                            && publicProjectionSha256 != null
+                            && predecessorFailureCode == null)) {
+                throw new IllegalArgumentException(
+                        "only a sealed immutable result may be skipped");
+            }
+            if (!skip
+                    && (slotState != SlotState.ADMITTED
+                            || nextLocalIndex != 0
+                            || resultId != null
+                            || resultSha256 != null
+                            || publicProjectionSha256 != null)) {
+                throw new IllegalArgumentException(
+                        "a runnable Frame must be a fresh admitted generation");
+            }
+            if ((action == ExecutionAction.RUN_RETRY)
+                    != (predecessorFailureCode != null)) {
+                throw new IllegalArgumentException(
+                        "RUN_RETRY must carry its persisted predecessor failure");
+            }
+        }
+    }
+
+    record ExecutionPlan(
+            String frameSetId,
+            String runId,
+            String attemptId,
+            Map<FrameType, ExecutionLane> lanes) {
+
+        public ExecutionPlan {
+            frameSetId = identifier(frameSetId, "frameSetId");
+            runId = identifier(runId, "runId");
+            attemptId = identifier(attemptId, "attemptId");
+            lanes = Map.copyOf(Objects.requireNonNull(lanes, "lanes"));
+            if (!lanes.keySet().equals(Set.of(FrameType.values()))) {
+                throw new IllegalArgumentException(
+                        "execution plan must contain exactly three Frame lanes");
+            }
+            lanes.forEach((type, lane) -> {
+                if (type != lane.frameType()) {
+                    throw new IllegalArgumentException(
+                            "execution plan lane key differs from its Frame type");
+                }
+            });
+        }
+
+        public boolean allSealed() {
+            return lanes.values().stream()
+                    .allMatch(lane -> lane.action() == ExecutionAction.SKIP_SEALED);
+        }
+    }
+
+    record ExactThreeFrame(
+            FrameType frameType,
+            long generation,
+            String frameId,
+            long slotVersion,
+            String resultId,
+            String resultSha256,
+            String publicProjectionSha256,
+            long nextLocalIndex) {
+
+        public ExactThreeFrame {
+            frameType = Objects.requireNonNull(frameType, "frameType");
+            positive(generation, "generation");
+            wireInteger(generation, "generation");
+            frameId = identifier(frameId, "frameId");
+            nonNegative(slotVersion, "slotVersion");
+            resultId = identifier(resultId, "resultId");
+            resultSha256 = sha256(resultSha256, "resultSha256");
+            publicProjectionSha256 =
+                    sha256(publicProjectionSha256, "publicProjectionSha256");
+            nonNegative(nextLocalIndex, "nextLocalIndex");
+            wireInteger(nextLocalIndex, "nextLocalIndex");
+        }
+    }
+
+    record ExactThreeCompletion(
+            String frameSetId,
+            String runId,
+            String attemptId,
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            Map<FrameType, ExactThreeFrame> frames) {
+
+        public ExactThreeCompletion {
+            frameSetId = identifier(frameSetId, "frameSetId");
+            runId = identifier(runId, "runId");
+            attemptId = identifier(attemptId, "attemptId");
+            nonNegative(lastSequenceNo, "lastSequenceNo");
+            frames = Map.copyOf(Objects.requireNonNull(frames, "frames"));
+            if (!publicOutputEmitted
+                    || !frames.keySet().equals(Set.of(FrameType.values()))) {
+                throw new IllegalArgumentException(
+                        "exact-three completion requires three public sealed Frames");
+            }
+            frames.forEach((type, frame) -> {
+                if (type != frame.frameType()) {
+                    throw new IllegalArgumentException(
+                            "completion Frame key differs from its Frame type");
+                }
+            });
         }
     }
 

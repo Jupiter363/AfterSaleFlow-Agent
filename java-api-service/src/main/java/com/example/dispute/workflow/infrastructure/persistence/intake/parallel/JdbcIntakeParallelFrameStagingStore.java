@@ -5,6 +5,11 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyView;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.EventAuthority;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExactThreeCompletion;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExactThreeFrame;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionAction;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionLane;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionPlan;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameManifest;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryReceipt;
@@ -152,8 +157,9 @@ public final class JdbcIntakeParallelFrameStagingStore
             select frame_type, frame_generation, frame_id, prompt_profile_id,
                    output_schema_id, model_profile_id, frame_model_input_sha256,
                    frame_prompt_sha256, repair_code, validation_path
-              from intake_parallel_frame_generation
+             from intake_parallel_frame_generation
              where frame_set_id = :frameSetId
+               and frame_generation = 1
              order by frame_type, frame_generation
             """;
 
@@ -252,6 +258,117 @@ public final class JdbcIntakeParallelFrameStagingStore
                and authority.logical_sequence = frame_set.logical_sequence
              where frame_set.frame_set_id = :frameSetId
              for update of frame_set, attempt, slot, generation, authority
+            """;
+
+    private static final String LOCK_EXECUTION_PLAN_SQL =
+            """
+            select frame_set.frame_set_id, frame_set.agent_run_id,
+                   frame_set.agent_run_attempt_id, frame_set.command_id,
+                   frame_set.command_request_sha256, frame_set.tenant_surrogate,
+                   frame_set.case_id, frame_set.room_id, frame_set.room_epoch,
+                   frame_set.fencing_token, frame_set.thread_id,
+                   frame_set.actor_scope_hash, frame_set.agent_session_id,
+                   frame_set.event_binding_id, frame_set.thread_registration_id,
+                   frame_set.logical_sequence, frame_set.binding_generation,
+                   frame_set.authority_version, frame_set.context_envelope_sha256,
+                   frame_set.model_context_view_sha256,
+                   frame_set.execution_profile_id,
+                   frame_set.projection_registry_version,
+                   frame_set.model_profile_id, frame_set.turn_deadline_at,
+                   frame_set.assembly_state,
+                   frame_set.turn_deadline_at > clock_timestamp() as deadline_open,
+                   attempt.attempt_status, attempt.last_sequence_no,
+                   attempt.public_output_emitted,
+                   run.run_status, run.protocol, run.finalization_status,
+                   slot.frame_type, slot.current_generation,
+                   slot.current_frame_id, slot.slot_state,
+                   slot.current_result_id, slot.slot_version,
+                   generation.prompt_profile_id, generation.output_schema_id,
+                   generation.model_profile_id as generation_model_profile_id,
+                    generation.frame_model_input_sha256,
+                    generation.frame_prompt_sha256,
+                    generation.repair_code, generation.validation_path,
+                    generation.provider_call_lease_state,
+                   generation.next_local_index, generation.staging_state,
+                   generation.provider_call_count, generation.result_id,
+                   generation.failure_code, generation.failure_retryable,
+                   result.result_sha256, result.public_projection_sha256,
+                   result.next_local_index as result_next_local_index,
+                   authority.current_binding_id,
+                   authority.current_generation as current_binding_generation,
+                   authority.authority_version as current_authority_version
+              from intake_parallel_frame_set frame_set
+              join agent_run_attempt attempt
+                on attempt.id = frame_set.agent_run_attempt_id
+               and attempt.agent_run_id = frame_set.agent_run_id
+              join agent_run run on run.id = frame_set.agent_run_id
+              join intake_parallel_frame_slot slot
+                on slot.frame_set_id = frame_set.frame_set_id
+              join intake_parallel_frame_generation generation
+                on generation.frame_set_id = slot.frame_set_id
+               and generation.frame_type = slot.frame_type
+               and generation.frame_generation = slot.current_generation
+              left join intake_parallel_frame_result result
+                on result.frame_set_id = slot.frame_set_id
+               and result.frame_type = slot.frame_type
+               and result.frame_generation = slot.current_generation
+               and result.result_id = slot.current_result_id
+              join case_intake_event_slot_authority authority
+                on authority.thread_registration_id = frame_set.thread_registration_id
+               and authority.logical_sequence = frame_set.logical_sequence
+             where frame_set.frame_set_id = :frameSetId
+             order by case slot.frame_type
+                        when 'DIALOGUE_FRAME' then 1
+                        when 'DOSSIER_FRAME' then 2
+                        when 'QUALITY_FRAME' then 3
+                        else 4
+                      end
+            for update of frame_set, attempt, slot, generation, authority
+            """;
+
+    private static final String LOAD_EXACT_THREE_COMPLETION_SQL =
+            """
+            select frame_set.frame_set_id, frame_set.agent_run_id,
+                   frame_set.agent_run_attempt_id, frame_set.event_binding_id,
+                   frame_set.thread_registration_id, frame_set.logical_sequence,
+                   frame_set.binding_generation, frame_set.authority_version,
+                   frame_set.assembly_state, attempt.last_sequence_no,
+                   attempt.public_output_emitted,
+                   slot.frame_type, slot.current_generation,
+                   slot.current_frame_id, slot.slot_state,
+                   slot.current_result_id, slot.slot_version,
+                   generation.staging_state, generation.result_id,
+                   generation.next_local_index,
+                   result.result_sha256, result.public_projection_sha256,
+                   result.next_local_index as result_next_local_index,
+                   authority.current_binding_id,
+                   authority.current_generation as current_binding_generation,
+                   authority.authority_version as current_authority_version
+              from intake_parallel_frame_set frame_set
+              join agent_run_attempt attempt
+                on attempt.id = frame_set.agent_run_attempt_id
+               and attempt.agent_run_id = frame_set.agent_run_id
+              join intake_parallel_frame_slot slot
+                on slot.frame_set_id = frame_set.frame_set_id
+              join intake_parallel_frame_generation generation
+                on generation.frame_set_id = slot.frame_set_id
+               and generation.frame_type = slot.frame_type
+               and generation.frame_generation = slot.current_generation
+              join intake_parallel_frame_result result
+                on result.frame_set_id = slot.frame_set_id
+               and result.frame_type = slot.frame_type
+               and result.frame_generation = slot.current_generation
+               and result.result_id = slot.current_result_id
+              join case_intake_event_slot_authority authority
+                on authority.thread_registration_id = frame_set.thread_registration_id
+               and authority.logical_sequence = frame_set.logical_sequence
+             where frame_set.frame_set_id = :frameSetId
+             order by case slot.frame_type
+                        when 'DIALOGUE_FRAME' then 1
+                        when 'DOSSIER_FRAME' then 2
+                        when 'QUALITY_FRAME' then 3
+                        else 4
+                      end
             """;
 
     private static final String FIND_INGRESS_REPLAY_SQL =
@@ -449,6 +566,291 @@ public final class JdbcIntakeParallelFrameStagingStore
                 replacement.frameId(),
                 deterministicId("IPFRR", replacement.frameId()),
                 true);
+    }
+
+    @Override
+    @Transactional(
+            propagation = Propagation.REQUIRES_NEW,
+            isolation = Isolation.READ_COMMITTED)
+    public ExecutionPlan planExecution(FrameSetAdmission admission) {
+        Objects.requireNonNull(admission, "admission");
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                LOCK_EXECUTION_PLAN_SQL,
+                Map.of("frameSetId", admission.frameSetId()));
+        if (rows.size() != FrameType.values().length) {
+            throw conflict(
+                    "INTAKE_PARALLEL_EXECUTION_PLAN_INCOMPLETE",
+                    "execution planning requires exactly three current Frame slots");
+        }
+        requireExactAdmissionReplay(admission);
+        EnumMap<FrameType, Map<String, Object>> current = new EnumMap<>(FrameType.class);
+        for (Map<String, Object> row : rows) {
+            if (!sameAdmission(admission, row)) {
+                throw conflict(
+                        "INTAKE_PARALLEL_EXECUTION_PLAN_AUTHORITY_DRIFT",
+                        "execution plan differs from its durable admission");
+            }
+            requireCurrentEventAuthority(row);
+            FrameType type = FrameType.valueOf(text(row, "frame_type"));
+            if (current.put(type, row) != null) {
+                throw conflict(
+                        "INTAKE_PARALLEL_EXECUTION_PLAN_AMBIGUOUS",
+                        "execution plan contains a duplicate Frame slot");
+            }
+        }
+        if (!current.keySet().equals(java.util.Set.of(FrameType.values()))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_EXECUTION_PLAN_INCOMPLETE",
+                    "execution plan is missing a required Frame slot");
+        }
+        boolean allSealed = current.values().stream()
+                .allMatch(row -> SlotState.SEALED.name().equals(text(row, "slot_state")));
+        if (!allSealed) {
+            current.values().forEach(JdbcIntakeParallelFrameStagingStore::requireRunningCollecting);
+        }
+
+        EnumMap<FrameType, FrameManifest> replacements = new EnumMap<>(FrameType.class);
+        for (FrameType type : FrameType.values()) {
+            Map<String, Object> row = current.get(type);
+            SlotState state = SlotState.valueOf(text(row, "slot_state"));
+            if (state != SlotState.FAILED && state != SlotState.AMBIGUOUS) {
+                continue;
+            }
+            requireRetryablePlanningPredecessor(row, state);
+            long currentGeneration = number(row, "current_generation");
+            if (currentGeneration != 1) {
+                throw conflict(
+                        "INTAKE_PARALLEL_EXECUTION_RETRY_EXHAUSTED",
+                        "parallel Frame recovery permits exactly one replacement generation");
+            }
+            long nextGeneration = currentGeneration + 1;
+            replacements.put(type, new FrameManifest(
+                    type,
+                    nextGeneration,
+                    replacementFrameId(
+                            admission.frameSetId(),
+                            type,
+                            text(row, "current_frame_id"),
+                            nextGeneration,
+                            text(row, "frame_model_input_sha256")),
+                    text(row, "prompt_profile_id"),
+                    text(row, "output_schema_id"),
+                    text(row, "generation_model_profile_id"),
+                    text(row, "frame_model_input_sha256"),
+                    text(row, "frame_prompt_sha256")));
+        }
+
+        for (FrameType type : FrameType.values()) {
+            FrameManifest replacement = replacements.get(type);
+            if (replacement == null) {
+                continue;
+            }
+            Map<String, Object> predecessor = current.get(type);
+            MapSqlParameterSource parameters = manifestParameters(
+                    admission.frameSetId(),
+                    replacement,
+                    text(predecessor, "failure_code"),
+                    IntakeParallelFrameStagingPort.RETRY_VALIDATION_PATH);
+            if (jdbc.update(INSERT_GENERATION_SQL, parameters) != 1) {
+                throw conflict(
+                        "INTAKE_PARALLEL_EXECUTION_RETRY_CONFLICT",
+                        "replacement generation identity already exists");
+            }
+        }
+
+        for (FrameType type : FrameType.values()) {
+            FrameManifest replacement = replacements.get(type);
+            if (replacement == null) {
+                continue;
+            }
+            Map<String, Object> predecessor = current.get(type);
+            MapSqlParameterSource parameters = manifestParameters(
+                            admission.frameSetId(),
+                            replacement,
+                            text(predecessor, "failure_code"),
+                            IntakeParallelFrameStagingPort.RETRY_VALIDATION_PATH)
+                    .addValue("expectedGeneration", number(predecessor, "current_generation"))
+                    .addValue("expectedFrameId", text(predecessor, "current_frame_id"))
+                    .addValue("expectedState", text(predecessor, "slot_state"))
+                    .addValue("expectedSlotVersion", number(predecessor, "slot_version"));
+            int advanced = jdbc.update(
+                    """
+                    update intake_parallel_frame_slot
+                       set current_generation = :frameGeneration,
+                           current_frame_id = :frameId,
+                           slot_state = 'ADMITTED', current_result_id = null,
+                           slot_version = slot_version + 1,
+                           updated_at = clock_timestamp()
+                     where frame_set_id = :frameSetId and frame_type = :frameType
+                       and current_generation = :expectedGeneration
+                       and current_frame_id = :expectedFrameId
+                       and slot_state = :expectedState
+                       and slot_version = :expectedSlotVersion
+                    """,
+                    parameters);
+            if (advanced != 1) {
+                throw conflict(
+                        "INTAKE_PARALLEL_EXECUTION_RETRY_CAS_FAILED",
+                        "replacement generation did not atomically advance its slot");
+            }
+        }
+
+        EnumMap<FrameType, ExecutionLane> lanes = new EnumMap<>(FrameType.class);
+        for (FrameType type : FrameType.values()) {
+            Map<String, Object> row = current.get(type);
+            FrameManifest replacement = replacements.get(type);
+            if (replacement != null) {
+                lanes.put(type, new ExecutionLane(
+                        type,
+                        replacement.generation(),
+                        replacement.frameId(),
+                        SlotState.ADMITTED,
+                        ExecutionAction.RUN_RETRY,
+                        0,
+                        number(row, "slot_version") + 1,
+                        null,
+                        null,
+                        null,
+                        text(row, "failure_code")));
+                continue;
+            }
+            SlotState state = SlotState.valueOf(text(row, "slot_state"));
+            if (state == SlotState.STARTED) {
+                throw conflict(
+                        "INTAKE_PARALLEL_EXECUTION_STARTED_AMBIGUOUS",
+                        "a started Frame has no safe cross-process resume authority");
+            }
+            if (state == SlotState.SEALED) {
+                requireSealedPlanningResult(row);
+                lanes.put(type, new ExecutionLane(
+                        type,
+                        number(row, "current_generation"),
+                        text(row, "current_frame_id"),
+                        SlotState.SEALED,
+                        ExecutionAction.SKIP_SEALED,
+                        number(row, "result_next_local_index"),
+                        number(row, "slot_version"),
+                        text(row, "current_result_id"),
+                        text(row, "result_sha256"),
+                        text(row, "public_projection_sha256"),
+                        null));
+                continue;
+            }
+            if (state != SlotState.ADMITTED
+                    || !"ADMITTED".equals(text(row, "staging_state"))
+                    || !"ADMITTED".equals(text(row, "provider_call_lease_state"))
+                    || number(row, "next_local_index") != 0
+                    || number(row, "provider_call_count") != 0
+                    || nullableText(row, "current_result_id") != null
+                    || nullableText(row, "result_id") != null
+                    || nullableText(row, "failure_code") != null) {
+                throw conflict(
+                        "INTAKE_PARALLEL_EXECUTION_ADMISSION_DRIFT",
+                        "current admitted Frame is not a fresh runnable generation");
+            }
+            long currentGeneration = number(row, "current_generation");
+            String repairCode = nullableText(row, "repair_code");
+            String validationPath = nullableText(row, "validation_path");
+            ExecutionAction action;
+            if (currentGeneration == 1 && repairCode == null && validationPath == null) {
+                action = ExecutionAction.RUN_CURRENT;
+            } else if (currentGeneration == 2
+                    && repairCode != null
+                    && IntakeParallelFrameStagingPort.RETRY_VALIDATION_PATH.equals(validationPath)) {
+                action = ExecutionAction.RUN_RETRY;
+            } else {
+                throw conflict(
+                        "INTAKE_PARALLEL_EXECUTION_LINEAGE_DRIFT",
+                        "admitted Frame generation has no exact execution lineage");
+            }
+            lanes.put(type, new ExecutionLane(
+                    type,
+                    currentGeneration,
+                    text(row, "current_frame_id"),
+                    SlotState.ADMITTED,
+                    action,
+                    0,
+                    number(row, "slot_version"),
+                    null,
+                    null,
+                    null,
+                    repairCode));
+        }
+        return new ExecutionPlan(
+                admission.frameSetId(), admission.runId(), admission.attemptId(), lanes);
+    }
+
+    @Override
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
+    public Optional<ExactThreeCompletion> findExactThreeCompletion(
+            String frameSetId, String runId, String attemptId) {
+        Objects.requireNonNull(frameSetId, "frameSetId");
+        Objects.requireNonNull(runId, "runId");
+        Objects.requireNonNull(attemptId, "attemptId");
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                LOAD_EXACT_THREE_COMPLETION_SQL,
+                Map.of("frameSetId", frameSetId));
+        if (rows.isEmpty()) {
+            return Optional.empty();
+        }
+        if (rows.size() != FrameType.values().length) {
+            throw conflict(
+                    "INTAKE_PARALLEL_COMPLETION_INCOMPLETE",
+                    "durable completion does not expose exactly three Frame results");
+        }
+        EnumMap<FrameType, ExactThreeFrame> frames = new EnumMap<>(FrameType.class);
+        long lastSequenceNo = -1;
+        boolean publicOutputEmitted = false;
+        for (Map<String, Object> row : rows) {
+            if (!frameSetId.equals(text(row, "frame_set_id"))
+                    || !runId.equals(text(row, "agent_run_id"))
+                    || !attemptId.equals(text(row, "agent_run_attempt_id"))) {
+                throw conflict(
+                        "INTAKE_PARALLEL_COMPLETION_AUTHORITY_DRIFT",
+                        "durable completion belongs to another run or attempt");
+            }
+            requireCurrentEventAuthority(row);
+            requireSealedPlanningResult(row);
+            FrameType type = FrameType.valueOf(text(row, "frame_type"));
+            if (frames.put(type, new ExactThreeFrame(
+                            type,
+                            number(row, "current_generation"),
+                            text(row, "current_frame_id"),
+                            number(row, "slot_version"),
+                            text(row, "current_result_id"),
+                            text(row, "result_sha256"),
+                            text(row, "public_projection_sha256"),
+                            number(row, "result_next_local_index")))
+                    != null) {
+                throw conflict(
+                        "INTAKE_PARALLEL_COMPLETION_AMBIGUOUS",
+                        "durable completion contains a duplicate Frame result");
+            }
+            long observedLast = number(row, "last_sequence_no");
+            boolean observedPublic = Boolean.TRUE.equals(row.get("public_output_emitted"));
+            if ((lastSequenceNo >= 0 && lastSequenceNo != observedLast)
+                    || (publicOutputEmitted && !observedPublic)) {
+                throw conflict(
+                        "INTAKE_PARALLEL_COMPLETION_WATERMARK_DRIFT",
+                        "durable completion rows disagree on attempt progress");
+            }
+            lastSequenceNo = observedLast;
+            publicOutputEmitted = observedPublic;
+        }
+        if (!frames.keySet().equals(java.util.Set.of(FrameType.values()))
+                || lastSequenceNo < 0
+                || !publicOutputEmitted) {
+            throw conflict(
+                    "INTAKE_PARALLEL_COMPLETION_NOT_PUBLIC",
+                    "exact-three completion lacks durable public progress");
+        }
+        return Optional.of(new ExactThreeCompletion(
+                frameSetId,
+                runId,
+                attemptId,
+                lastSequenceNo,
+                true,
+                frames));
     }
 
     @Override
@@ -1775,6 +2177,53 @@ public final class JdbcIntakeParallelFrameStagingStore
                     "INTAKE_PARALLEL_RETRY_REPLAY_CONFLICT",
                     "retry replay does not match its terminal predecessor");
         }
+    }
+
+    private static void requireRetryablePlanningPredecessor(
+            Map<String, Object> row, SlotState state) {
+        String expectedLease = state == SlotState.AMBIGUOUS ? "AMBIGUOUS" : "TERMINAL";
+        if (!state.name().equals(text(row, "staging_state"))
+                || !expectedLease.equals(text(row, "provider_call_lease_state"))
+                || nullableText(row, "failure_code") == null
+                || !Boolean.TRUE.equals(row.get("failure_retryable"))
+                || nullableText(row, "current_result_id") != null
+                || nullableText(row, "result_id") != null) {
+            throw conflict(
+                    "INTAKE_PARALLEL_EXECUTION_RETRY_NOT_AUTHORIZED",
+                    "terminal Frame generation does not grant a retry replacement");
+        }
+    }
+
+    private static void requireSealedPlanningResult(Map<String, Object> row) {
+        String currentResultId = nullableText(row, "current_result_id");
+        if (!"SEALED".equals(text(row, "slot_state"))
+                || !"SEALED".equals(text(row, "staging_state"))
+                || currentResultId == null
+                || !currentResultId.equals(nullableText(row, "result_id"))
+                || nullableText(row, "result_sha256") == null
+                || nullableText(row, "public_projection_sha256") == null
+                || nullableNumber(row, "result_next_local_index") == null
+                || number(row, "next_local_index")
+                        != number(row, "result_next_local_index")) {
+            throw conflict(
+                    "INTAKE_PARALLEL_EXECUTION_SEALED_RESULT_DRIFT",
+                    "sealed Frame slot is not bound to one immutable current result");
+        }
+    }
+
+    private String replacementFrameId(
+            String frameSetId,
+            FrameType frameType,
+            String oldFrameId,
+            long generation,
+            String frameModelInputSha256) {
+        ObjectNode identity = objectMapper.createObjectNode();
+        identity.put("frame_set_id", frameSetId);
+        identity.put("frame_type", frameType.name());
+        identity.put("old_frame_id", oldFrameId);
+        identity.put("generation", generation);
+        identity.put("frame_model_input_sha256", frameModelInputSha256);
+        return "intake.frame." + ContractJson.sha256Hex(identity).substring(0, 32);
     }
 
     private static boolean sameManifest(FrameManifest manifest, Map<String, Object> row) {

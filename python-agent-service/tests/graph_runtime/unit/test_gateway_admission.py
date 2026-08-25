@@ -7,8 +7,18 @@ from typing import Any
 
 import pytest
 
+from app.config import (
+    GraphTargetE2EBindingSettings,
+    GraphTargetE2ERuntimeContextSettings,
+)
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
-from app.contracts.v1.models import AgentStreamEvent, AgentStreamPayload, RoomGraphCommand
+from app.contracts.v1.models import (
+    PARALLEL_INTAKE_AGENT_PROFILE_ID,
+    PARALLEL_INTAKE_OUTPUT_SCHEMA,
+    AgentStreamEvent,
+    AgentStreamPayload,
+    RoomGraphCommand,
+)
 from app.graph_runtime.errors import (
     GraphCommandAbortedError,
     GraphCommandCancelledError,
@@ -48,12 +58,15 @@ from app.graph_runtime.ledger import (
     CommandRecord,
     CommandRegistration,
     CommandStatus,
+    ParallelReceiptExecutionRecord,
     ResultRecord,
+    TechnicalCompletionRecord,
 )
 from app.graph_runtime.lease import (
     LeaseAcquisition,
     LeaseAcquisitionKind,
     LeaseDisplacement,
+    LeaseInspection,
     LeaseRecord,
 )
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
@@ -63,6 +76,7 @@ from app.graph_runtime.registry import (
     RegistryState,
     VersionBinding,
 )
+from app.graph_runtime.target_e2e import TargetE2ERuntimeAuthority
 from app.security.invocation_envelope import (
     InvocationClaims,
     ReconciliationClaims,
@@ -299,6 +313,88 @@ def _target_e2e_thread(command: RoomGraphCommand) -> ThreadIdentity:
         graph_version=command.graph_version,
         checkpoint_schema_version=command.checkpoint_schema_version,
     )
+
+
+def _target_e2e_authority(
+    command: RoomGraphCommand,
+    registry: RegistryRecord,
+    *,
+    activation_id: str,
+) -> TargetE2ERuntimeAuthority:
+    context = GraphTargetE2ERuntimeContextSettings.model_validate(
+        {
+            "schemaVersion": "graph-target-e2e-runtime-context.v1",
+            "executionLane": "TARGET_E2E_CANDIDATE",
+            "activationId": activation_id,
+            "activationManifestHash": "f" * 64,
+            "environmentId": "target-e2e-test",
+            "environmentGeneration": 1,
+            "candidateSha": "c" * 40,
+            "issuedAt": NOW,
+            "expiresAt": NOW + timedelta(hours=1),
+            "runNonce": "target-e2e-test-run-nonce-000001",
+            "tenantSurrogate": command.tenant_surrogate,
+            "caseScope": {
+                "mode": "EXPLICIT_CASE_IDS",
+                "allowedCaseIds": [command.case_id],
+            },
+            "allowedRoomTypes": [command.room_type],
+            "composeProject": "p9_target_e2e",
+            "temporalNamespace": "target-e2e-test",
+            "buildBindings": {
+                "caseBuildId": "case-build-1",
+                "controlBuildId": "control-build-1",
+                "agentBuildId": "agent-build-1",
+            },
+            "imageDigests": {
+                "javaApi": f"sha256:{'1' * 64}",
+                "temporalControlWorker": f"sha256:{'2' * 64}",
+                "temporalAgentWorker": f"sha256:{'3' * 64}",
+                "pythonAgent": f"sha256:{'4' * 64}",
+                "frontend": f"sha256:{'5' * 64}",
+            },
+            "databaseIdentities": {
+                "domain": {
+                    "service": "domain-db",
+                    "database": "target_domain",
+                    "schema": "domain_runtime",
+                    "expectedUser": "java_domain_runtime",
+                },
+                "graph": {
+                    "service": "graph-db",
+                    "database": "target_graph",
+                    "schema": "graph_runtime",
+                    "runtimeUser": "graph_runtime",
+                    "environmentGeneration": 1,
+                    "restoreVerificationHash": "6" * 64,
+                },
+            },
+            "trustedSigningKeyIds": ["target-test-key-1"],
+            "perCommandManifestAllowed": False,
+        }
+    )
+    invocation = command.invocation_context
+    runtime_binding = GraphTargetE2EBindingSettings(
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+        state_schema_version="target-e2e-state.v2",
+        state_schema_hash="d" * 64,
+        command_schema_version=command.schema_version,
+        result_schema_version="room-graph-result.v1",
+        agent_profile_id=invocation.agent_profile_id,
+        prompt_version=invocation.prompt_profile_id,
+        model_profile_id=invocation.model_profile_id,
+        output_schema_version=invocation.output_schema_version,
+        policy_version=invocation.policy_version,
+        guardrail_version=invocation.guardrail_version,
+        tool_policy_version=registry.binding.tool_policy_version,
+        binding_hash=registry.binding.binding_hash,
+        code_build_id=registry.binding.code_build_id,
+        allowed_room_types=("INTAKE", "EVIDENCE", "HEARING", "REVIEW"),
+        allowed_stage_codes=(command.stage_code,),
+    )
+    return TargetE2ERuntimeAuthority.from_context(context, (runtime_binding,))
 
 
 def _command_profile(command: RoomGraphCommand) -> CommandProfileBinding:
@@ -1235,6 +1331,156 @@ def _execution() -> GatewayExecution:
     return GatewayExecution(admission, attempt, lease, fence)
 
 
+def _parallel_execution(*, provider_call_count: int = 0) -> GatewayExecution:
+    payload = _target_e2e_command().model_dump(
+        mode="json",
+        exclude={"request_hash"},
+        exclude_none=True,
+    )
+    payload["room_id"] = "ROOM_PARALLEL_1"
+    payload["event_ref"] = {
+        "artifact_id": "intake.event.parallel-1",
+        "schema_version": "intake-turn-event.v2",
+        "uri": "urn:intake:event:parallel-1",
+        "sha256": "7" * 64,
+        "size_bytes": 256,
+    }
+    payload["invocation_context"] = {
+        **payload["invocation_context"],
+        "agent_profile_id": PARALLEL_INTAKE_AGENT_PROFILE_ID,
+        "output_schema_version": PARALLEL_INTAKE_OUTPUT_SCHEMA,
+    }
+    payload["retry_budget"] = {
+        **payload["retry_budget"],
+        "provider_attempts_remaining": 3,
+    }
+    payload["request_hash"] = canonical_sha256(payload)
+    command = RoomGraphCommand.model_validate(payload)
+    registry = _target_e2e_registry()
+    binding = CommandBinding.from_command(
+        command,
+        tool_policy_version=registry.binding.tool_policy_version,
+        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        activation_id=f"p9act.v1.{'8' * 32}",
+        room_fencing_token=1,
+        command_hash="9" * 64,
+        command_envelope_hash="a" * 64,
+    )
+    authority = _target_e2e_authority(
+        command,
+        registry,
+        activation_id=binding.activation_id,
+    )
+    record = CommandRecord(
+        binding=binding,
+        status=CommandStatus.EXECUTING,
+        attempt_count=1,
+        fencing_token=1,
+        start_checkpoint_ns=None,
+        start_checkpoint_id=None,
+        committed_checkpoint_ns=None,
+        committed_checkpoint_id=None,
+        result_ref=None,
+        result_hash=None,
+        error_code=None,
+        error_classification=None,
+        revision=1,
+    )
+    admission = GatewayAdmission(
+        command=command,
+        binding=binding,
+        thread=_target_e2e_thread(command),
+        registry=registry,
+        record=record,
+        action=AdmissionAction.OBSERVE_OR_TAKEOVER,
+        created=False,
+        candidate_authority=authority,
+    )
+    attempt = AttemptRecord(
+        attempt_id=command.attempt_id,
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        attempt_no=1,
+        owner_id="worker-1",
+        fencing_token=1,
+        status=AttemptStatus.EXECUTING,
+        provider_call_count=provider_call_count,
+        error_code=None,
+        error_classification=None,
+    )
+    lease = LeaseRecord(
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        owner_id="worker-1",
+        fencing_token=1,
+        lease_expires_at=NOW + timedelta(seconds=30),
+        acquired_at=NOW,
+        renewed_at=NOW,
+        released_at=None,
+        cancelled_at=None,
+        cancelled_by_command_id=None,
+        revision=0,
+    )
+    fence = GraphFenceContext(
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        owner_id="worker-1",
+        fencing_token=1,
+        request_hash=command.request_hash,
+        room_epoch=command.room_epoch,
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        activation_id=binding.activation_id,
+        room_fencing_token=binding.room_fencing_token,
+        command_hash=binding.command_hash,
+        command_envelope_hash=binding.command_envelope_hash,
+        environment_id=authority.context.environmentId,
+        environment_generation=authority.context.environmentGeneration,
+        tenant_surrogate=command.tenant_surrogate,
+        case_id=command.case_id,
+        room_type=command.room_type,
+        binding_hash=registry.binding.binding_hash,
+        code_build_id=registry.binding.code_build_id,
+    )
+    return GatewayExecution(admission, attempt, lease, fence)
+
+
+def _parallel_receipt(execution: GatewayExecution) -> dict[str, Any]:
+    document: dict[str, Any] = {
+        "schema_version": "intake.parallel-admission-receipt.v1",
+        "request_hash": execution.admission.binding.request_hash,
+        "frame_set_id": "IPFS_PARALLEL_1",
+        "run_id": execution.admission.command.logical_run_id,
+        "attempt_id": execution.attempt.attempt_id,
+        "java_receipt_id": "FRAME_SET_RECEIPT_V4_1",
+        "authority_sha256": "b" * 64,
+        "lanes": [
+            {
+                "frame_type": frame_type,
+                "generation": 1,
+                "frame_id": f"frame.{frame_type.lower()}.1",
+                "slot_state": "ADMITTED",
+                "action": "RUN_CURRENT",
+                "next_local_index": 0,
+                "slot_version": 0,
+                "result_id": None,
+                "result_sha256": None,
+                "public_projection_sha256": None,
+                "predecessor_failure_code": None,
+            }
+            for frame_type in (
+                "DIALOGUE_FRAME",
+                "DOSSIER_FRAME",
+                "QUALITY_FRAME",
+            )
+        ],
+    }
+    document["receipt_sha256"] = canonical_sha256(document)
+    return document
+
+
 class _Executor:
     def __init__(self, events: list[AgentStreamEvent]) -> None:
         self.events = events
@@ -1453,6 +1699,13 @@ class _FinishLedger:
         self.events.append("command_locked")
         return _execution().admission.record
 
+    async def latest_attempt(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> AttemptRecord:
+        return _execution().attempt
+
     @staticmethod
     def require_same_binding(actual: CommandBinding, expected: CommandBinding) -> None:
         assert actual == expected
@@ -1655,6 +1908,7 @@ class _DisplacingLeases:
             "command_id": self.admission.binding.command_id,
             "owner_id": "worker-new",
             "fencing_token": 2,
+            "command_deadline_at": self.admission.command.deadline_at,
         }
         return replace(
             _execution().lease,
@@ -1786,6 +2040,7 @@ class _FresheningLeases:
             "command_id": self.admission.binding.command_id,
             "owner_id": "worker-1",
             "fencing_token": self.acquired_lease.fencing_token,
+            "command_deadline_at": self.admission.command.deadline_at,
         }
         if self.lose_on_renew:
             raise GraphLeaseLostError()
@@ -1962,6 +2217,311 @@ def test_cleanup_adopts_exact_parallel_technical_completion() -> None:
     )
 
     assert adopted == (command, attempt)
+
+
+class _ParallelTakeoverLedger:
+    def __init__(self, execution: GatewayExecution) -> None:
+        self.command = execution.admission.record
+        self.attempt = execution.attempt
+        receipt = _parallel_receipt(execution)
+        self.receipt_execution = ParallelReceiptExecutionRecord.create(
+            thread_id=execution.fence.thread_id,
+            command_id=execution.fence.command_id,
+            request_hash=execution.fence.request_hash,
+            attempt_id=execution.attempt.attempt_id,
+            frame_set_id=receipt["frame_set_id"],
+            receipt_sha256=receipt["receipt_sha256"],
+            authority_sha256=receipt["authority_sha256"],
+            predecessor_cycle_id=None,
+            provider_call_count_at_admission=0,
+            owner_id=execution.fence.owner_id,
+            fencing_token=execution.fence.fencing_token,
+        )
+        self.rebind_predecessor: ParallelReceiptExecutionRecord | None = None
+
+    async def load(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        return self.command
+
+    @staticmethod
+    def require_same_binding(actual: CommandBinding, expected: CommandBinding) -> None:
+        assert actual == expected
+
+    async def latest_attempt(self, connection: Any, **kwargs: Any) -> AttemptRecord:
+        return self.attempt
+
+    async def load_latest_parallel_receipt_cycle(self, connection: Any, **kwargs: Any) -> None:
+        return None
+
+    async def load_parallel_receipt_cycle(self, connection: Any, **kwargs: Any) -> None:
+        return None
+
+    async def load_parallel_receipt_execution(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> ParallelReceiptExecutionRecord:
+        assert kwargs["receipt_sha256"] == self.receipt_execution.receipt_sha256
+        return self.receipt_execution
+
+    async def rebind_parallel_attempt(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> tuple[CommandRecord, AttemptRecord]:
+        assert kwargs["prior_cycle"] is None
+        prior_execution = kwargs["prior_execution"]
+        assert prior_execution == self.receipt_execution
+        receipt_execution = kwargs["receipt_execution"]
+        assert receipt_execution.predecessor_execution_id == prior_execution.execution_id
+        assert receipt_execution.provider_call_count_at_admission == 0
+        self.rebind_predecessor = prior_execution
+        self.command = replace(
+            self.command,
+            fencing_token=kwargs["next_fencing_token"],
+            revision=self.command.revision + 1,
+        )
+        self.attempt = replace(
+            self.attempt,
+            owner_id=kwargs["next_owner_id"],
+            fencing_token=kwargs["next_fencing_token"],
+        )
+        return self.command, self.attempt
+
+
+class _ParallelTakeoverLeases:
+    def __init__(self, execution: GatewayExecution) -> None:
+        self.old = execution.lease
+        self.current = replace(
+            execution.lease,
+            owner_id="worker-2",
+            fencing_token=2,
+            acquired_at=NOW + timedelta(seconds=31),
+            renewed_at=NOW + timedelta(seconds=31),
+            lease_expires_at=NOW + timedelta(seconds=60),
+            revision=1,
+        )
+
+    async def acquire(self, connection: Any, **kwargs: Any) -> LeaseAcquisition:
+        return LeaseAcquisition(
+            LeaseAcquisitionKind.TAKEOVER,
+            self.current,
+            LeaseDisplacement(
+                command_id=self.old.command_id,
+                owner_id=self.old.owner_id,
+                fencing_token=self.old.fencing_token,
+            ),
+        )
+
+    async def renew(self, connection: Any, **kwargs: Any) -> LeaseRecord:
+        return self.current
+
+
+@pytest.mark.asyncio
+async def test_parallel_same_receipt_takeover_rebinds_without_provider_replay() -> None:
+    original = _parallel_execution(provider_call_count=0)
+    receipt = _parallel_receipt(original)
+    pool = _Pool()
+    ledger = _ParallelTakeoverLedger(original)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=_ParallelTakeoverLeases(original),  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    resumed = await gateway.resume_parallel_technical_execution(
+        original.admission,
+        owner_id="worker-2",
+        attempt_id=original.attempt.attempt_id,
+        frame_set_id=receipt["frame_set_id"],
+        receipt_sha256=receipt["receipt_sha256"],
+        authority_sha256=receipt["authority_sha256"],
+        admission_receipt=receipt,
+    )
+
+    assert resumed.attempt.provider_call_count == 0
+    assert resumed.fence.fencing_token == 2
+    assert resumed.fence.owner_id == "worker-2"
+    assert ledger.rebind_predecessor == ledger.receipt_execution
+    assert "transaction:commit" in pool.events
+
+
+@pytest.mark.asyncio
+async def test_parallel_same_receipt_takeover_rejects_started_provider_call() -> None:
+    original = _parallel_execution(provider_call_count=1)
+    receipt = _parallel_receipt(original)
+    pool = _Pool()
+    ledger = _ParallelTakeoverLedger(original)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=_ParallelTakeoverLeases(original),  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    with pytest.raises(
+        GraphNewAgentAttemptRequiredError,
+        match="began Provider execution",
+    ):
+        await gateway.resume_parallel_technical_execution(
+            original.admission,
+            owner_id="worker-2",
+            attempt_id=original.attempt.attempt_id,
+            frame_set_id=receipt["frame_set_id"],
+            receipt_sha256=receipt["receipt_sha256"],
+            authority_sha256=receipt["authority_sha256"],
+            admission_receipt=receipt,
+        )
+
+    assert ledger.rebind_predecessor is None
+    assert "transaction:rollback" in pool.events
+
+
+class _ParallelCompletionLedger:
+    def __init__(self, execution: GatewayExecution) -> None:
+        self.command = execution.admission.record
+        self.attempt = execution.attempt
+        self.completion: TechnicalCompletionRecord | None = None
+
+    async def load(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        return self.command
+
+    @staticmethod
+    def require_same_binding(actual: CommandBinding, expected: CommandBinding) -> None:
+        assert actual == expected
+
+    async def latest_attempt(self, connection: Any, **kwargs: Any) -> AttemptRecord:
+        return self.attempt
+
+    async def load_technical_completion(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> TechnicalCompletionRecord:
+        assert self.completion is not None
+        return self.completion
+
+    async def store_technical_completion(
+        self,
+        connection: Any,
+        *,
+        execution_attempt: AttemptRecord,
+        completion: TechnicalCompletionRecord,
+    ) -> TechnicalCompletionRecord:
+        assert execution_attempt == self.attempt
+        self.completion = completion
+        return completion
+
+    async def complete_technical_attempt(
+        self,
+        connection: Any,
+        attempt: AttemptRecord,
+    ) -> AttemptRecord:
+        self.attempt = replace(attempt, status=AttemptStatus.COMPLETED)
+        return self.attempt
+
+    async def complete_technical_command(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> CommandRecord:
+        self.command = replace(
+            self.command,
+            status=CommandStatus.TECHNICAL_COMPLETED,
+            revision=self.command.revision + 1,
+        )
+        return self.command
+
+
+class _ParallelCompletionLeases:
+    def __init__(self, execution: GatewayExecution) -> None:
+        self.lease = execution.lease
+
+    async def lock_for_recovery(self, connection: Any, **kwargs: Any) -> LeaseInspection:
+        return LeaseInspection(self.lease, NOW + timedelta(seconds=1))
+
+    async def release(self, connection: Any, **kwargs: Any) -> LeaseRecord:
+        self.lease = replace(
+            self.lease,
+            released_at=NOW + timedelta(seconds=1),
+            revision=self.lease.revision + 1,
+        )
+        return self.lease
+
+
+def _parallel_completion(execution: GatewayExecution) -> TechnicalCompletionRecord:
+    completion_id = "parallel-technical-completion-1"
+    schema_version = "intake-parallel-technical-completion.v2"
+    document: dict[str, Any] = {
+        "completion_id": completion_id,
+        "thread_id": execution.fence.thread_id,
+        "command_id": execution.fence.command_id,
+        "request_hash": execution.fence.request_hash,
+        "attempt_id": execution.attempt.attempt_id,
+        "fencing_token": execution.fence.fencing_token,
+        "schema_version": schema_version,
+        "sealed_frame_types": [
+            "DIALOGUE_FRAME",
+            "DOSSIER_FRAME",
+            "QUALITY_FRAME",
+        ],
+    }
+    document["completion_hash"] = canonical_sha256(document)
+    return TechnicalCompletionRecord(
+        completion_id=completion_id,
+        thread_id=execution.fence.thread_id,
+        command_id=execution.fence.command_id,
+        request_hash=execution.fence.request_hash,
+        attempt_id=execution.attempt.attempt_id,
+        fencing_token=execution.fence.fencing_token,
+        completion_schema_version=schema_version,
+        completion_json=document,
+        completion_hash=document["completion_hash"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_technical_completion_adopts_commit_response_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution = _parallel_execution(provider_call_count=3)
+    ledger = _ParallelCompletionLedger(execution)
+    leases = _ParallelCompletionLeases(execution)
+    calls = 0
+
+    async def ambiguous_transaction(pool: Any, **kwargs: Any) -> None:
+        nonlocal calls
+        assert pool is gateway._pool
+        await kwargs["operation"](object())
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("commit response lost")
+
+    monkeypatch.setattr(
+        "app.graph_runtime.gateway.run_postgres_transaction",
+        ambiguous_transaction,
+    )
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        pool=object(),
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=leases,  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    completed = await gateway.complete_technical_execution(
+        execution,
+        completion=_parallel_completion(execution),
+    )
+
+    assert calls == 2
+    assert completed.admission.record.status is CommandStatus.TECHNICAL_COMPLETED
+    assert completed.attempt.status is AttemptStatus.COMPLETED
+    assert completed.lease.released_at == NOW + timedelta(seconds=1)
 
 
 @pytest.mark.asyncio

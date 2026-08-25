@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -57,6 +57,8 @@ from app.graph_runtime.ledger import (
     CommandRegistration,
     CommandStatus,
     InvocationNonce,
+    ParallelReceiptCycleRecord,
+    ParallelReceiptExecutionRecord,
     PostgresCommandLedger,
     ResultRecord,
     TechnicalCompletionRecord,
@@ -106,8 +108,11 @@ _CONTROL_PLANE_LEASE_SAFETY_MARGIN: Final[timedelta] = timedelta(seconds=2)
 _TARGET_E2E_GRAPH_KEY: Final[str] = "all-rooms.target-e2e.v2"
 _TARGET_E2E_ROOM_PROMPT_VERSION: Final[str] = "all-rooms-prompt.target-e2e.v2"
 _TARGET_E2E_INTAKE_ROLES: Final[frozenset[str]] = frozenset({"USER", "MERCHANT"})
-_PARALLEL_TECHNICAL_COMPLETION_SCHEMA: Final[str] = (
-    "intake-parallel-technical-completion.v1"
+_PARALLEL_TECHNICAL_COMPLETION_SCHEMAS: Final[frozenset[str]] = frozenset(
+    {
+        "intake-parallel-technical-completion.v1",
+        "intake-parallel-technical-completion.v2",
+    }
 )
 _LEASE_OBSERVABILITY_EMPTY: Final[str] = "NONE"
 
@@ -596,6 +601,628 @@ class GraphCommandGateway:
             fencing_token=fence.fencing_token,
         )
         return execution
+
+    async def bind_parallel_receipt_execution(
+        self,
+        execution: GatewayExecution,
+        *,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+    ) -> GatewayExecution:
+        """Bind the first Java receipt before any parallel Provider call starts."""
+
+        self._require_shadow()
+        self._require_parallel_technical_admission(execution.admission)
+        receipt_execution = ParallelReceiptExecutionRecord.create(
+            thread_id=execution.fence.thread_id,
+            command_id=execution.fence.command_id,
+            request_hash=execution.fence.request_hash,
+            attempt_id=execution.attempt.attempt_id,
+            frame_set_id=frame_set_id,
+            receipt_sha256=receipt_sha256,
+            authority_sha256=authority_sha256,
+            predecessor_cycle_id=None,
+            provider_call_count_at_admission=execution.attempt.provider_call_count,
+            owner_id=execution.fence.owner_id,
+            fencing_token=execution.fence.fencing_token,
+        )
+
+        async def bind_transaction(connection: Any) -> None:
+            lease = await self._leases.lock_for_recovery(
+                connection,
+                thread_id=execution.fence.thread_id,
+            )
+            current = await self._ledger.load(
+                connection,
+                thread_id=execution.fence.thread_id,
+                command_id=execution.fence.command_id,
+            )
+            self._ledger.require_same_binding(
+                current.binding,
+                execution.admission.binding,
+            )
+            attempt = await self._ledger.latest_attempt(
+                connection,
+                thread_id=execution.fence.thread_id,
+                command_id=execution.fence.command_id,
+            )
+            if (
+                current.status is not CommandStatus.EXECUTING
+                or current.fencing_token != execution.fence.fencing_token
+                or attempt != execution.attempt
+                or attempt is None
+                or attempt.status is not AttemptStatus.EXECUTING
+                or attempt.fencing_token != 1
+                or attempt.provider_call_count != 0
+                or lease is None
+                or not lease.active
+                or lease.lease.command_id != execution.fence.command_id
+                or lease.lease.owner_id != execution.fence.owner_id
+                or lease.lease.fencing_token != execution.fence.fencing_token
+            ):
+                raise GraphCommandStateError(
+                    "initial parallel receipt lost its exact execution"
+                )
+            stored = await self._ledger.store_parallel_receipt_execution(
+                connection,
+                execution_attempt=attempt,
+                receipt_execution=receipt_execution,
+            )
+            if stored != receipt_execution:
+                raise GraphTerminalBindingError(
+                    "initial parallel receipt execution drifted"
+                )
+
+        await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=bind_transaction,
+            operation_name="bind initial parallel receipt execution",
+        )
+        return execution
+
+    async def resume_parallel_technical_execution(
+        self,
+        admission: GatewayAdmission,
+        *,
+        owner_id: str,
+        attempt_id: str,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+        admission_receipt: Mapping[str, Any],
+    ) -> GatewayExecution:
+        """Advance one parallel receipt while preserving the original Graph attempt."""
+
+        self._require_shadow()
+        self._require_parallel_technical_admission(admission)
+        if admission.action is not AdmissionAction.OBSERVE_OR_TAKEOVER:
+            raise GraphContractError("parallel technical execution is not resumable")
+        if (
+            attempt_id != admission.command.attempt_id
+            or admission_receipt.get("receipt_sha256") != receipt_sha256
+            or admission_receipt.get("frame_set_id") != frame_set_id
+            or admission_receipt.get("authority_sha256") != authority_sha256
+        ):
+            raise GraphContractError("parallel resume attempt differs from the command")
+        acquisition: LeaseAcquisition | None = None
+        current: CommandRecord | None = None
+        attempt: AttemptRecord | None = None
+        lease: LeaseRecord | None = None
+        thread_record: ThreadRecord | None = None
+
+        async def resume_transaction(connection: Any) -> None:
+            nonlocal acquisition, current, attempt, lease, thread_record
+            acquisition = await self._leases.acquire(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+                owner_id=owner_id,
+            )
+            current = await self._ledger.load(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            self._ledger.require_same_binding(current.binding, admission.binding)
+            attempt = await self._ledger.latest_attempt(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            candidate = acquisition.lease
+            prior_cycle = (
+                None
+                if attempt is None
+                else await self._ledger.load_latest_parallel_receipt_cycle(
+                    connection,
+                    thread_id=admission.binding.thread_id,
+                    command_id=admission.binding.command_id,
+                    attempt_id=attempt.attempt_id,
+                )
+            )
+            existing_execution = (
+                None
+                if attempt is None
+                else await self._ledger.load_parallel_receipt_execution(
+                    connection,
+                    thread_id=admission.binding.thread_id,
+                    command_id=admission.binding.command_id,
+                    attempt_id=attempt.attempt_id,
+                    receipt_sha256=receipt_sha256,
+                )
+            )
+            receipt_cycle = (
+                None
+                if attempt is None
+                else await self._ledger.load_parallel_receipt_cycle(
+                    connection,
+                    thread_id=admission.binding.thread_id,
+                    command_id=admission.binding.command_id,
+                    attempt_id=attempt.attempt_id,
+                    receipt_sha256=receipt_sha256,
+                )
+            )
+            displaced = acquisition.displaced
+            if current.status is not CommandStatus.EXECUTING or attempt is None or (
+                attempt.attempt_id != attempt_id
+                or attempt.status is not AttemptStatus.EXECUTING
+            ):
+                raise GraphNewAgentAttemptRequiredError(
+                    "parallel technical resume lost its exact command attempt"
+                )
+            if acquisition.kind is LeaseAcquisitionKind.IDEMPOTENT:
+                predecessor_cycle_id = (
+                    None
+                    if existing_execution is None
+                    else existing_execution.predecessor_cycle_id
+                )
+                predecessor_execution_id = (
+                    None
+                    if existing_execution is None
+                    else existing_execution.predecessor_execution_id
+                )
+                provider_call_count_at_admission = (
+                    attempt.provider_call_count
+                    if existing_execution is None
+                    else existing_execution.provider_call_count_at_admission
+                )
+                expected_execution = ParallelReceiptExecutionRecord.create(
+                    thread_id=admission.binding.thread_id,
+                    command_id=admission.binding.command_id,
+                    request_hash=admission.binding.request_hash,
+                    attempt_id=attempt.attempt_id,
+                    frame_set_id=frame_set_id,
+                    receipt_sha256=receipt_sha256,
+                    authority_sha256=authority_sha256,
+                    predecessor_cycle_id=predecessor_cycle_id,
+                    predecessor_execution_id=predecessor_execution_id,
+                    provider_call_count_at_admission=(
+                        provider_call_count_at_admission
+                    ),
+                    owner_id=owner_id,
+                    fencing_token=candidate.fencing_token,
+                )
+                if (
+                    current.fencing_token != candidate.fencing_token
+                    or attempt.owner_id != owner_id
+                    or attempt.fencing_token != candidate.fencing_token
+                ):
+                    raise GraphNewAgentAttemptRequiredError(
+                        "parallel receipt adoption lost its exact fence"
+                    )
+                if existing_execution is None:
+                    if (
+                        prior_cycle is not None
+                        or receipt_cycle is not None
+                        or candidate.fencing_token != 1
+                        or attempt.provider_call_count != 0
+                    ):
+                        raise GraphNewAgentAttemptRequiredError(
+                            "parallel active lease belongs to another receipt"
+                        )
+                    existing_execution = await self._ledger.store_parallel_receipt_execution(
+                        connection,
+                        execution_attempt=attempt,
+                        receipt_execution=expected_execution,
+                    )
+                if existing_execution != expected_execution:
+                    raise GraphTerminalBindingError(
+                        "parallel receipt execution adoption drifted"
+                    )
+            elif acquisition.kind is LeaseAcquisitionKind.TAKEOVER:
+                if (
+                    displaced is None
+                    or displaced.command_id != admission.binding.command_id
+                    or displaced.owner_id != attempt.owner_id
+                    or displaced.fencing_token != attempt.fencing_token
+                    or current.fencing_token != attempt.fencing_token
+                    or candidate.fencing_token != attempt.fencing_token + 1
+                ):
+                    raise GraphNewAgentAttemptRequiredError(
+                        "parallel technical resume lost its exact predecessor"
+                    )
+                if existing_execution is not None:
+                    if (
+                        receipt_cycle is not None
+                        or existing_execution.frame_set_id != frame_set_id
+                        or existing_execution.owner_id != attempt.owner_id
+                        or existing_execution.fencing_token != attempt.fencing_token
+                        or existing_execution.provider_call_count_at_admission
+                        != attempt.provider_call_count
+                        or not hmac.compare_digest(
+                            existing_execution.authority_sha256,
+                            authority_sha256,
+                        )
+                    ):
+                        raise GraphNewAgentAttemptRequiredError(
+                            "parallel receipt began Provider execution before takeover"
+                        )
+                    receipt_execution = ParallelReceiptExecutionRecord.create(
+                        thread_id=admission.binding.thread_id,
+                        command_id=admission.binding.command_id,
+                        request_hash=admission.binding.request_hash,
+                        attempt_id=attempt.attempt_id,
+                        frame_set_id=frame_set_id,
+                        receipt_sha256=receipt_sha256,
+                        authority_sha256=authority_sha256,
+                        predecessor_cycle_id=None,
+                        predecessor_execution_id=existing_execution.execution_id,
+                        provider_call_count_at_admission=attempt.provider_call_count,
+                        owner_id=owner_id,
+                        fencing_token=candidate.fencing_token,
+                    )
+                    rebind_prior_cycle = None
+                    rebind_prior_execution = existing_execution
+                else:
+                    if (
+                        prior_cycle is None
+                        or prior_cycle.frame_set_id != frame_set_id
+                        or prior_cycle.provider_call_count_after
+                        != attempt.provider_call_count
+                        or not hmac.compare_digest(
+                            prior_cycle.authority_sha256,
+                            authority_sha256,
+                        )
+                        or hmac.compare_digest(
+                            prior_cycle.receipt_sha256,
+                            receipt_sha256,
+                        )
+                    ):
+                        raise GraphNewAgentAttemptRequiredError(
+                            "parallel technical resume lost its completed receipt"
+                        )
+                    prior_cycle.require_successor_receipt(admission_receipt)
+                    receipt_execution = ParallelReceiptExecutionRecord.create(
+                        thread_id=admission.binding.thread_id,
+                        command_id=admission.binding.command_id,
+                        request_hash=admission.binding.request_hash,
+                        attempt_id=attempt.attempt_id,
+                        frame_set_id=frame_set_id,
+                        receipt_sha256=receipt_sha256,
+                        authority_sha256=authority_sha256,
+                        predecessor_cycle_id=prior_cycle.cycle_id,
+                        provider_call_count_at_admission=attempt.provider_call_count,
+                        owner_id=owner_id,
+                        fencing_token=candidate.fencing_token,
+                    )
+                    rebind_prior_cycle = prior_cycle
+                    rebind_prior_execution = None
+                current, attempt = await self._ledger.rebind_parallel_attempt(
+                    connection,
+                    binding=admission.binding,
+                    attempt=attempt,
+                    prior_cycle=rebind_prior_cycle,
+                    prior_execution=rebind_prior_execution,
+                    receipt_execution=receipt_execution,
+                    next_owner_id=owner_id,
+                    next_fencing_token=candidate.fencing_token,
+                )
+            else:
+                raise GraphNewAgentAttemptRequiredError(
+                    "parallel technical resume requires an existing attempt"
+                )
+            if (
+                current.status is not CommandStatus.EXECUTING
+                or attempt.attempt_id != attempt_id
+                or attempt.status is not AttemptStatus.EXECUTING
+                or current.fencing_token != candidate.fencing_token
+                or attempt.owner_id != owner_id
+                or attempt.fencing_token != candidate.fencing_token
+            ):
+                raise GraphNewAgentAttemptRequiredError(
+                    "parallel technical resume lost its exact command attempt"
+                )
+            thread_record = await self._threads.require_binding(
+                connection,
+                admission.thread,
+            )
+            if thread_record.lifecycle is not ThreadLifecycle.ACTIVE:
+                raise GraphThreadBindingError("GRAPH_THREAD_NOT_ACTIVE")
+            lease = await self._leases.renew(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+                owner_id=owner_id,
+                fencing_token=candidate.fencing_token,
+                command_deadline_at=admission.command.deadline_at,
+            )
+
+        await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=resume_transaction,
+            operation_name="resume parallel technical execution",
+        )
+        if current is None or attempt is None or lease is None or thread_record is None:
+            raise GraphContractError("parallel technical resume returned no execution")
+        fence = GraphFenceContext(
+            thread_id=admission.binding.thread_id,
+            command_id=admission.binding.command_id,
+            owner_id=owner_id,
+            fencing_token=lease.fencing_token,
+            request_hash=admission.binding.request_hash,
+            room_epoch=admission.binding.room_epoch,
+            graph_key=admission.binding.graph_key,
+            graph_version=admission.binding.graph_version,
+            checkpoint_schema_version=admission.binding.checkpoint_schema_version,
+            execution_lane=admission.binding.execution_lane,
+            activation_id=admission.binding.activation_id,
+            room_fencing_token=admission.binding.room_fencing_token,
+            command_hash=admission.binding.command_hash,
+            command_envelope_hash=admission.binding.command_envelope_hash,
+            environment_id=(
+                admission.candidate_authority.context.environmentId
+                if admission.candidate_authority is not None
+                else None
+            ),
+            environment_generation=(
+                admission.candidate_authority.context.environmentGeneration
+                if admission.candidate_authority is not None
+                else None
+            ),
+            tenant_surrogate=(
+                admission.thread.tenant_surrogate
+                if admission.candidate_authority is not None
+                else None
+            ),
+            case_id=(
+                admission.thread.case_id
+                if admission.candidate_authority is not None
+                else None
+            ),
+            room_type=(
+                admission.thread.room_type.value
+                if admission.candidate_authority is not None
+                else None
+            ),
+            binding_hash=(
+                admission.registry.binding.binding_hash
+                if admission.candidate_authority is not None
+                else None
+            ),
+            code_build_id=(
+                admission.registry.binding.code_build_id
+                if admission.candidate_authority is not None
+                else None
+            ),
+        )
+        resumed_admission = replace(admission, record=current)
+        execution = GatewayExecution(
+            resumed_admission,
+            attempt,
+            lease,
+            fence,
+            thread_record,
+        )
+        self._remember_lease(execution, lease)
+        await self._emit(
+            resumed_admission,
+            event_type="graph.command.parallel_execution_resumed",
+            code=(
+                acquisition.kind.value
+                if acquisition is not None
+                else LeaseAcquisitionKind.IDEMPOTENT.value
+            ),
+            fencing_token=fence.fencing_token,
+        )
+        return execution
+
+    async def load_parallel_receipt_cycle(
+        self,
+        admission: GatewayAdmission,
+        *,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+    ) -> ParallelReceiptCycleRecord | None:
+        """Load an immutable failed-receipt replay without acquiring a lease."""
+
+        self._require_shadow()
+        self._require_parallel_technical_admission(admission)
+
+        async def load_transaction(
+            connection: Any,
+        ) -> ParallelReceiptCycleRecord | None:
+            current = await self._ledger.load(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            self._ledger.require_same_binding(current.binding, admission.binding)
+            cycle = await self._ledger.load_parallel_receipt_cycle(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+                attempt_id=admission.command.attempt_id,
+                receipt_sha256=receipt_sha256,
+            )
+            if cycle is None:
+                return None
+            if (
+                cycle.request_hash != admission.binding.request_hash
+                or cycle.frame_set_id != frame_set_id
+                or not hmac.compare_digest(cycle.authority_sha256, authority_sha256)
+            ):
+                raise GraphTerminalBindingError(
+                    "parallel receipt replay differs from admitted authority"
+                )
+            return cycle
+
+        return await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=load_transaction,
+            operation_name="load parallel receipt cycle",
+        )
+
+    async def complete_parallel_receipt_cycle(
+        self,
+        execution: GatewayExecution,
+        *,
+        cycle: ParallelReceiptCycleRecord,
+    ) -> GatewayExecution:
+        """Persist one failed receipt and release its lease without ending the attempt."""
+
+        self._require_shadow()
+        self._require_parallel_technical_admission(execution.admission)
+        if (
+            cycle.thread_id != execution.fence.thread_id
+            or cycle.command_id != execution.fence.command_id
+            or cycle.request_hash != execution.fence.request_hash
+            or cycle.attempt_id != execution.attempt.attempt_id
+            or cycle.owner_id != execution.fence.owner_id
+            or cycle.fencing_token != execution.fence.fencing_token
+        ):
+            raise GraphTerminalBindingError(
+                "parallel receipt cycle differs from its live execution"
+            )
+        durable_attempt: AttemptRecord | None = None
+        released_lease: LeaseRecord | None = None
+
+        async def complete_cycle_transaction(connection: Any) -> None:
+            nonlocal durable_attempt, released_lease
+            lease_inspection = await self._leases.lock_for_recovery(
+                connection,
+                thread_id=execution.fence.thread_id,
+            )
+            current = await self._ledger.load(
+                connection,
+                thread_id=execution.fence.thread_id,
+                command_id=execution.fence.command_id,
+            )
+            self._ledger.require_same_binding(
+                current.binding,
+                execution.admission.binding,
+            )
+            durable_attempt = await self._ledger.latest_attempt(
+                connection,
+                thread_id=execution.fence.thread_id,
+                command_id=execution.fence.command_id,
+            )
+            existing = await self._ledger.load_parallel_receipt_cycle(
+                connection,
+                thread_id=cycle.thread_id,
+                command_id=cycle.command_id,
+                attempt_id=cycle.attempt_id,
+                receipt_sha256=cycle.receipt_sha256,
+            )
+            if existing is not None:
+                if existing != cycle:
+                    raise GraphTerminalBindingError(
+                        "parallel receipt cycle replay drifted"
+                    )
+                if lease_inspection is None:
+                    raise GraphCommandStateError(
+                        "parallel receipt cycle lost its released lease"
+                    )
+                released_lease = lease_inspection.lease
+                if (
+                    released_lease.command_id != cycle.command_id
+                    or released_lease.owner_id != cycle.owner_id
+                    or released_lease.fencing_token != cycle.fencing_token
+                    or released_lease.released_at is None
+                ):
+                    raise GraphTerminalBindingError(
+                        "parallel receipt cycle replay lost its lease proof"
+                    )
+                return
+            receipt_execution = await self._ledger.load_parallel_receipt_execution(
+                connection,
+                thread_id=cycle.thread_id,
+                command_id=cycle.command_id,
+                attempt_id=cycle.attempt_id,
+                receipt_sha256=cycle.receipt_sha256,
+            )
+            if (
+                current.status is not CommandStatus.EXECUTING
+                or current.fencing_token != execution.fence.fencing_token
+                or durable_attempt != execution.attempt
+                or durable_attempt is None
+                or durable_attempt.status is not AttemptStatus.EXECUTING
+                or lease_inspection is None
+                or not lease_inspection.active
+                or lease_inspection.lease.command_id != cycle.command_id
+                or lease_inspection.lease.owner_id != cycle.owner_id
+                or lease_inspection.lease.fencing_token != cycle.fencing_token
+                or receipt_execution is None
+                or receipt_execution.execution_id != cycle.execution_id
+                or receipt_execution.thread_id != cycle.thread_id
+                or receipt_execution.command_id != cycle.command_id
+                or receipt_execution.request_hash != cycle.request_hash
+                or receipt_execution.attempt_id != cycle.attempt_id
+                or receipt_execution.frame_set_id != cycle.frame_set_id
+                or receipt_execution.receipt_sha256 != cycle.receipt_sha256
+                or receipt_execution.authority_sha256 != cycle.authority_sha256
+                or receipt_execution.owner_id != cycle.owner_id
+                or receipt_execution.fencing_token != cycle.fencing_token
+            ):
+                raise GraphCommandStateError(
+                    "parallel receipt cycle lost its exact execution"
+                )
+            stored = await self._ledger.store_parallel_receipt_cycle(
+                connection,
+                execution_attempt=durable_attempt,
+                cycle=cycle,
+            )
+            if stored != cycle:
+                raise GraphTerminalBindingError(
+                    "parallel receipt cycle persistence drifted"
+                )
+            released_lease = await self._leases.release(
+                connection,
+                thread_id=cycle.thread_id,
+                command_id=cycle.command_id,
+                owner_id=cycle.owner_id,
+                fencing_token=cycle.fencing_token,
+            )
+
+        try:
+            await run_postgres_transaction(
+                self._pool,
+                timeout=self._acquire_timeout_seconds,
+                operation=complete_cycle_transaction,
+                operation_name="complete parallel receipt cycle",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Adopt a commit whose response was lost, or perform the same exact
+            # mutation after a rollback.  The immutable cycle and released lease
+            # make this second pass byte- and fence-stable.
+            durable_attempt = None
+            released_lease = None
+            await run_postgres_transaction(
+                self._pool,
+                timeout=self._acquire_timeout_seconds,
+                operation=complete_cycle_transaction,
+                operation_name="adopt parallel receipt cycle",
+            )
+        if durable_attempt is None or released_lease is None:
+            raise GraphContractError("parallel receipt cycle returned no durable authority")
+        self.cleanup_execution_lease(execution)
+        return replace(execution, attempt=durable_attempt, lease=released_lease)
 
     async def _resolve_displaced_execution(
         self,
@@ -1246,8 +1873,9 @@ class GraphCommandGateway:
             attempt: AttemptRecord | None = None
             lease: LeaseRecord | None = None
 
-            async def finish_transaction(connection: Any) -> None:
-                nonlocal command, attempt, lease, mutation_started
+            async def load_terminal_adoption(
+                connection: Any,
+            ) -> tuple[CommandRecord, AttemptRecord] | None:
                 current = await self._ledger.load(
                     connection,
                     thread_id=execution.admission.binding.thread_id,
@@ -1262,7 +1890,7 @@ class GraphCommandGateway:
                     thread_id=execution.admission.binding.thread_id,
                     command_id=execution.admission.binding.command_id,
                 )
-                replay = self._completed_attempt_abort_adoption(
+                return self._completed_attempt_abort_adoption(
                     execution,
                     command=current,
                     attempt=durable_attempt,
@@ -1270,10 +1898,37 @@ class GraphCommandGateway:
                     error_code=error_code,
                     error_classification=error_classification,
                 )
-                if replay is not None:
-                    command, attempt = replay
+
+            if mutation_started:
+                # An earlier terminal transaction may have committed while its
+                # response was lost.  Resolve that ambiguity in a separate
+                # transaction so a non-terminal replay releases the command
+                # lock before the mutation transaction restores the global
+                # lease -> command -> attempt lock order.
+                adopted = await run_postgres_transaction(
+                    self._pool,
+                    timeout=self._acquire_timeout_seconds,
+                    operation=load_terminal_adoption,
+                    operation_name="adopt finished execution attempt",
+                )
+                if adopted is not None:
+                    command, attempt = adopted
                     lease = execution.lease
-                    return
+                    admission = replace(
+                        execution.admission,
+                        record=command,
+                        action=self._admission_action(command.status),
+                    )
+                    self.cleanup_execution_lease(execution)
+                    return replace(
+                        execution,
+                        admission=admission,
+                        attempt=attempt,
+                        lease=lease,
+                    )
+
+            async def finish_transaction(connection: Any) -> None:
+                nonlocal command, attempt, lease, mutation_started
                 try:
                     lease = await self._leases.cancel(
                         connection,
@@ -1435,9 +2090,14 @@ class GraphCommandGateway:
         command: CommandRecord | None = None
         attempt: AttemptRecord | None = None
         lease: LeaseRecord | None = None
+        mutation_started = False
 
         async def complete_transaction(connection: Any) -> None:
-            nonlocal command, attempt, lease
+            nonlocal command, attempt, lease, mutation_started
+            lease_inspection = await self._leases.lock_for_recovery(
+                connection,
+                thread_id=execution.fence.thread_id,
+            )
             current = await self._ledger.load(
                 connection,
                 thread_id=execution.admission.binding.thread_id,
@@ -1469,17 +2129,36 @@ class GraphCommandGateway:
                     )
                 command = current
                 attempt = durable_attempt
-                lease = execution.lease
+                if (
+                    lease_inspection is None
+                    or lease_inspection.lease.command_id
+                    != execution.fence.command_id
+                    or lease_inspection.lease.owner_id != execution.fence.owner_id
+                    or lease_inspection.lease.fencing_token
+                    != execution.fence.fencing_token
+                    or lease_inspection.lease.released_at is None
+                ):
+                    raise GraphTerminalBindingError(
+                        "technical completion replay lost its released lease"
+                    )
+                lease = lease_inspection.lease
                 return
             if (
                 current.status is not CommandStatus.EXECUTING
                 or durable_attempt is None
                 or durable_attempt != execution.attempt
                 or durable_attempt.status is not AttemptStatus.EXECUTING
+                or lease_inspection is None
+                or not lease_inspection.active
+                or lease_inspection.lease.command_id != execution.fence.command_id
+                or lease_inspection.lease.owner_id != execution.fence.owner_id
+                or lease_inspection.lease.fencing_token
+                != execution.fence.fencing_token
             ):
                 raise GraphCommandStateError(
                     "parallel technical completion lost its executing authority"
                 )
+            mutation_started = True
             await self._ledger.store_technical_completion(
                 connection,
                 execution_attempt=durable_attempt,
@@ -1503,12 +2182,30 @@ class GraphCommandGateway:
                 fencing_token=execution.fence.fencing_token,
             )
 
-        await run_postgres_transaction(
-            self._pool,
-            timeout=self._acquire_timeout_seconds,
-            operation=complete_transaction,
-            operation_name="complete technical execution",
-        )
+        try:
+            await run_postgres_transaction(
+                self._pool,
+                timeout=self._acquire_timeout_seconds,
+                operation=complete_transaction,
+                operation_name="complete technical execution",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if not mutation_started:
+                raise
+            # The first transaction may have committed before its response was
+            # lost.  Re-running the same exact operation either adopts that
+            # immutable terminal authority or performs the rolled-back write.
+            command = None
+            attempt = None
+            lease = None
+            await run_postgres_transaction(
+                self._pool,
+                timeout=self._acquire_timeout_seconds,
+                operation=complete_transaction,
+                operation_name="adopt technical completion",
+            )
         if command is None or attempt is None or lease is None:
             raise GraphContractError("technical completion returned no durable authority")
         self.cleanup_execution_lease(execution)
@@ -1554,7 +2251,7 @@ class GraphCommandGateway:
         if (
             fencing_token is None
             or completion.completion_schema_version
-            != _PARALLEL_TECHNICAL_COMPLETION_SCHEMA
+            not in _PARALLEL_TECHNICAL_COMPLETION_SCHEMAS
             or completion.thread_id != admission.binding.thread_id
             or completion.command_id != admission.binding.command_id
             or completion.request_hash != admission.binding.request_hash

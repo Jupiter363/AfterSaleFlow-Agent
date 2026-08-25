@@ -44,6 +44,7 @@ def test_repository_migrations_are_exact_ordered_and_hash_bound() -> None:
         "G009",
         "G010",
         "G011",
+        "G012",
     )
     assert all(len(migration.sha256) == 64 for migration in migrations)
     assert len(graph_application_signature(migrations)) == 64
@@ -68,7 +69,7 @@ def test_application_signature_changes_when_a_migration_changes() -> None:
 
 
 def test_parallel_technical_completion_migration_is_immutable_and_attempt_bound() -> None:
-    migration = load_graph_migrations()[-1]
+    migration = load_graph_migrations()[-2]
     normalized = " ".join(migration.sql_text.split()).lower()
 
     assert migration.version == "G011"
@@ -77,6 +78,33 @@ def test_parallel_technical_completion_migration_is_immutable_and_attempt_bound(
     assert "unique (attempt_id, thread_id, command_id, fencing_token)" in normalized
     assert "foreign key (attempt_id, thread_id, command_id, fencing_token)" in normalized
     assert "graph technical completion rows are immutable" in normalized
+
+
+def test_parallel_receipt_cycle_migration_is_immutable_and_fence_bound() -> None:
+    migration = load_graph_migrations()[-1]
+    normalized = " ".join(migration.sql_text.split()).lower()
+
+    assert migration.version == "G012"
+    assert "create table agent_graph_parallel_receipt_cycle" in normalized
+    assert "create table agent_graph_parallel_receipt_execution" in normalized
+    assert (
+        "unique ( thread_id, command_id, attempt_id, receipt_sha256, fencing_token )"
+        in normalized
+    )
+    assert "unique (attempt_id, fencing_token)" in normalized
+    assert "foreign key (attempt_id) references agent_graph_command_attempt(attempt_id)" in normalized
+    assert "foreign key (attempt_id, thread_id, command_id, fencing_token)" not in normalized
+    assert "predecessor_execution_id varchar(128)" in normalized
+    assert "provider_call_count_at_admission integer not null" in normalized
+    assert "references agent_graph_parallel_receipt_execution(execution_id)" in normalized
+    assert "predecessor.provider_call_count_at_admission" in normalized
+    assert "completed.receipt_sha256 = execution.receipt_sha256" in normalized
+    assert "parallel receipt authority rows are immutable" in normalized
+    assert "require_parallel_intake_graph_command" in normalized
+    assert "jsonb_typeof(command.request_json -> 'event_ref') = 'object'" in normalized
+    assert "parallel command fence handoff failed" not in normalized
+    assert "cycle.fencing_token = old.fencing_token" in normalized
+    assert "execution.fencing_token = new.fencing_token" in normalized
 
 
 def test_runtime_package_versions_match_the_frozen_pins() -> None:

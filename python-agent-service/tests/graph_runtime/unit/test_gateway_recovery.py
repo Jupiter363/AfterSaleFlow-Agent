@@ -7,6 +7,10 @@ from typing import Any
 import pytest
 
 from app.contracts.v1.codec import canonical_sha256
+from app.contracts.v1.models import (
+    PARALLEL_INTAKE_AGENT_PROFILE_ID,
+    PARALLEL_INTAKE_OUTPUT_SCHEMA,
+)
 from app.graph_runtime.errors import (
     GraphLeaseUnavailableError,
     GraphRecoveryError,
@@ -25,6 +29,7 @@ from app.graph_runtime.ledger import (
     CommandBinding,
     CommandRecord,
     CommandStatus,
+    ParallelReceiptCycleRecord,
     RecoveryBudget,
     ResultRecord,
 )
@@ -85,6 +90,52 @@ def _binding(
         ),
         deadline_at=NOW + timedelta(minutes=1),
     )
+
+
+def _parallel_binding() -> CommandBinding:
+    base = _binding(room_type="INTAKE", provider_attempt_budget=6)
+    request = dict(base.request_json)
+    request.pop("request_hash")
+    request["invocation_context"] = {
+        "agent_profile_id": PARALLEL_INTAKE_AGENT_PROFILE_ID,
+        "output_schema_version": PARALLEL_INTAKE_OUTPUT_SCHEMA,
+    }
+    request["request_hash"] = canonical_sha256(request)
+    return replace(
+        base,
+        request_json=request,
+        request_hash=request["request_hash"],
+    )
+
+
+def _parallel_receipt_document(binding: CommandBinding) -> dict[str, Any]:
+    document: dict[str, Any] = {
+        "schema_version": "intake.parallel-admission-receipt.v1",
+        "request_hash": binding.request_hash,
+        "frame_set_id": "IPFS_123",
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "java_receipt_id": "FRAME_SET_RECEIPT_V4_1",
+        "authority_sha256": "b" * 64,
+        "lanes": [
+            {
+                "frame_type": frame_type,
+                "generation": 1,
+                "frame_id": f"frame.{frame_type.lower()}",
+                "slot_state": "ADMITTED",
+                "action": "RUN_CURRENT",
+                "next_local_index": 0,
+                "slot_version": 0,
+                "result_id": None,
+                "result_sha256": None,
+                "public_projection_sha256": None,
+                "predecessor_failure_code": None,
+            }
+            for frame_type in ("DIALOGUE_FRAME", "DOSSIER_FRAME", "QUALITY_FRAME")
+        ],
+    }
+    document["receipt_sha256"] = canonical_sha256(document)
+    return document
 
 
 def _command(
@@ -301,14 +352,25 @@ def test_started_attempt_requires_new_public_attempt_even_when_budget_is_closed(
 
 
 class _InspectionLedger:
-    def __init__(self, *, deadline_open: bool, attempt_count: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        deadline_open: bool,
+        attempt_count: int = 1,
+        binding: CommandBinding | None = None,
+        cycle: ParallelReceiptCycleRecord | None = None,
+    ) -> None:
         self.deadline_open = deadline_open
         self.attempt_count = attempt_count
+        self.binding = binding or _binding()
+        self.cycle = cycle
+        self.terminated = False
 
     async def load(self, connection: Any, **kwargs: Any) -> CommandRecord:
         return replace(
             _command(CommandStatus.EXECUTING),
             attempt_count=self.attempt_count,
+            binding=self.binding,
         )
 
     async def latest_attempt(self, connection: Any, **kwargs: Any) -> AttemptRecord:
@@ -321,13 +383,21 @@ class _InspectionLedger:
         )
 
     async def terminate(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        self.terminated = True
         return replace(
-            _command(CommandStatus.EXECUTING),
+            _command(CommandStatus.EXECUTING, binding=self.binding),
             attempt_count=self.attempt_count,
             status=CommandStatus.ABORTED,
             error_code=kwargs["error_code"],
             error_classification=kwargs["error_classification"],
         )
+
+    async def load_latest_parallel_receipt_cycle(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> ParallelReceiptCycleRecord | None:
+        return self.cycle
 
     async def finish_attempt(
         self,
@@ -440,6 +510,54 @@ async def test_activity_attempt_budget_never_reexecutes_the_started_attempt() ->
 
     assert decision.action is RecoveryAction.REQUIRE_NEW_AGENT_ATTEMPT
     assert decision.invoke_model is False
+
+
+@pytest.mark.asyncio
+async def test_completed_parallel_receipt_cycle_waits_for_next_receipt_without_abort() -> None:
+    binding = _parallel_binding()
+    receipt = _parallel_receipt_document(binding)
+    cycle = ParallelReceiptCycleRecord.create(
+        thread_id=THREAD,
+        command_id="command-1",
+        request_hash=binding.request_hash,
+        attempt_id="attempt-1",
+        frame_set_id="IPFS_123",
+        receipt_sha256=receipt["receipt_sha256"],
+        authority_sha256="b" * 64,
+        admission_receipt=receipt,
+        canonical_events=({"event_kind": "FRAME_INTERRUPTED"},),
+        terminal_error_code="INTAKE_PARALLEL_FRAME_BATCH_FAILED",
+        terminal_retryable=True,
+        provider_call_count_before=0,
+        provider_call_count_after=1,
+        owner_id="worker-old",
+        fencing_token=1,
+    )
+    ledger = _InspectionLedger(
+        deadline_open=True,
+        binding=binding,
+        cycle=cycle,
+    )
+    released = LeaseInspection(
+        lease=replace(
+            _lease(token=1, owner_id="worker-old"),
+            released_at=NOW,
+        ),
+        database_now=NOW + timedelta(seconds=1),
+    )
+    leases = _Leases(inspection=released)
+    coordinator = PostgresRecoveryCoordinator(
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=leases,  # type: ignore[arg-type]
+    )
+
+    decision = await coordinator.inspect(object(), binding=binding)
+
+    assert decision.action is RecoveryAction.REQUIRE_NEW_AGENT_ATTEMPT
+    assert decision.reason_code == "PARALLEL_RECEIPT_CONTINUATION_REQUIRED"
+    assert decision.invoke_model is False
+    assert ledger.terminated is False
+    assert leases.cancelled is False
 
 
 @pytest.mark.asyncio

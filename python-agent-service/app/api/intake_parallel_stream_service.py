@@ -18,7 +18,9 @@ from app.api.intake_parallel_stream import (
     ParallelFrameStreamAuthority,
     ParallelFrameStreamProtocolError,
     ParallelFrameStreamProtocolValidator,
+    parallel_frame_authority_sha256,
 )
+from app.contracts.v1.codec import canonical_sha256
 from app.contracts.v1.models import RoomGraphCommand
 from app.graph_runtime.errors import (
     GraphContractError,
@@ -43,16 +45,22 @@ from app.graph_runtime.intake_parallel_runtime import (
     build_parallel_technical_completion,
 )
 from app.graph_runtime.lease import LEASE_DURATION_SECONDS
-from app.graph_runtime.ledger import AttemptStatus, TechnicalCompletionRecord
+from app.graph_runtime.ledger import (
+    AttemptStatus,
+    ParallelReceiptCycleRecord,
+    TechnicalCompletionRecord,
+)
 from app.graph_runtime.provider_intent import GatewayProviderCallIntentRecorder
 from app.graph_runtime.recovery import RecoveryAction
 from app.graph_runtime.target_e2e import VerifiedTargetE2EInvocation
 from app.graphs.intake.parallel_contracts import FRAME_TYPES, ParallelFrameType
 from app.graphs.intake.parallel_graph import (
     FRAME_NODE_NAMES,
+    FrameInterrupted,
     FrameSealed,
     FrameStarted,
     ParallelFrameBatchResult,
+    ParallelFrameExecutionRequest,
     ParallelFrameTechnicalEvent,
     ParallelIntakeFrameOrchestrator,
 )
@@ -65,6 +73,7 @@ _EVENT_ADAPTER = TypeAdapter(ParallelFrameTechnicalEvent)
 _SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _QUEUE_CAPACITY = 32
 _RUNNER_TERMINAL = object()
+_SUBSET_TECHNICAL_COMPLETION_SCHEMA = "intake-parallel-technical-completion.v2"
 
 
 class _ParallelGateway(Protocol):
@@ -84,6 +93,43 @@ class _ParallelGateway(Protocol):
         *,
         owner_id: str,
         attempt_id: str,
+    ) -> GatewayExecution: ...
+
+    async def resume_parallel_technical_execution(
+        self,
+        admission: GatewayAdmission,
+        *,
+        owner_id: str,
+        attempt_id: str,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+        admission_receipt: Mapping[str, Any],
+    ) -> GatewayExecution: ...
+
+    async def bind_parallel_receipt_execution(
+        self,
+        execution: GatewayExecution,
+        *,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+    ) -> GatewayExecution: ...
+
+    async def load_parallel_receipt_cycle(
+        self,
+        admission: GatewayAdmission,
+        *,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+    ) -> ParallelReceiptCycleRecord | None: ...
+
+    async def complete_parallel_receipt_cycle(
+        self,
+        execution: GatewayExecution,
+        *,
+        cycle: ParallelReceiptCycleRecord,
     ) -> GatewayExecution: ...
 
     async def renew_execution(self, execution: GatewayExecution) -> Any: ...
@@ -221,40 +267,98 @@ class GatewayBackedParallelIntakeFrameStreamService:
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> OpenedParallelFrameStream:
+        if (
+            verified_invocation.claims.parallel_phase != "EXECUTE"
+            or verified_invocation.claims.parallel_admission_receipt_sha256
+            != admission_receipt.receipt_sha256
+        ):
+            raise GraphContractError(
+                "parallel Intake receipt differs from its verified invocation"
+            )
         token = await self._gate.enter()
         try:
+            prepared_bundle = await self._load_prepared_bundle(command, expected_thread)
+            prepared_authority = _authority_from_command_bundle(
+                command,
+                prepared_bundle,
+            )
+            authority = admission_receipt.require_authority(
+                command=command,
+                authority=prepared_authority,
+            )
+            active_frame_types = tuple(
+                lane.frame_type
+                for lane in admission_receipt.lanes
+                if lane.action != "SKIP_SEALED"
+            )
+            if not active_frame_types:
+                raise ParallelFrameStreamProtocolError(
+                    "all-sealed execution must be completed from Java durable state"
+                )
             admission = await self._gateway.admit(
                 command=command,
                 verified_invocation=verified_invocation,
                 expected_thread=expected_thread,
             )
-            if admission.action is AdmissionAction.RETURN_TECHNICAL_CACHED:
+            receipt_cycle = await self._gateway.load_parallel_receipt_cycle(
+                admission,
+                frame_set_id=admission_receipt.frame_set_id,
+                receipt_sha256=admission_receipt.receipt_sha256,
+                authority_sha256=admission_receipt.authority_sha256,
+            )
+            if receipt_cycle is not None:
+                events = _decode_parallel_receipt_cycle(
+                    receipt_cycle,
+                    authority=authority,
+                    admission_receipt=admission_receipt,
+                    active_frame_types=active_frame_types,
+                )
+                stream = _replay_failed_receipt_cycle(
+                    events,
+                    error_code=receipt_cycle.terminal_error_code,
+                )
+            elif admission.action is AdmissionAction.RETURN_TECHNICAL_CACHED:
                 completion = await self._gateway.load_technical_completion(admission)
-                authority, events = _decode_cached_completion(completion)
+                events = _decode_cached_completion(
+                    completion,
+                    authority=authority,
+                    admission_receipt=admission_receipt,
+                    active_frame_types=active_frame_types,
+                )
                 stream = _replay_events(events)
             else:
-                execution = await self._acquire_new_execution(admission)
+                execution = await self._acquire_new_execution(
+                    admission,
+                    authority=authority,
+                    admission_receipt=admission_receipt,
+                )
                 try:
                     bundle = await self._load_bundle(execution)
                 except BaseException as error:
                     with anyio.CancelScope(shield=True):
                         await self._finish_failed_execution(execution, error)
                     raise
-                authority = _authority_from_bundle(execution, bundle)
+                if _authority_from_bundle(execution, bundle) != prepared_authority:
+                    raise ParallelFrameStreamProtocolError(
+                        "parallel live bundle differs from its prepared authority"
+                    )
+                selected_requests = _select_execution_requests(
+                    bundle,
+                    admission_receipt,
+                )
                 stream = self._execute_live(
                     execution=execution,
                     bundle=bundle,
                     authority=authority,
+                    admission_receipt=admission_receipt,
+                    selected_requests=selected_requests,
                 )
-            admission_receipt.require_authority(
-                command=command,
-                authority=authority,
-            )
         except BaseException:
             await self._gate.leave(token)
             raise
         return OpenedParallelFrameStream(
             authority=authority,
+            active_frame_types=active_frame_types,
             events=self._guarded(stream, token),
         )
 
@@ -277,7 +381,20 @@ class GatewayBackedParallelIntakeFrameStreamService:
     async def _acquire_new_execution(
         self,
         admission: GatewayAdmission,
+        *,
+        authority: ParallelFrameStreamAuthority,
+        admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> GatewayExecution:
+        if admission.action is AdmissionAction.OBSERVE_OR_TAKEOVER:
+            return await self._gateway.resume_parallel_technical_execution(
+                admission,
+                owner_id=self._owner_id,
+                attempt_id=admission.command.attempt_id,
+                frame_set_id=authority.frame_set_id,
+                receipt_sha256=admission_receipt.receipt_sha256,
+                authority_sha256=admission_receipt.authority_sha256,
+                admission_receipt=admission_receipt.canonical_document(),
+            )
         if admission.action is not AdmissionAction.ACQUIRE:
             raise GraphNewAgentAttemptRequiredError(
                 "PARALLEL_INTAKE_SAME_ATTEMPT_RECOVERY_REQUIRED"
@@ -291,10 +408,16 @@ class GatewayBackedParallelIntakeFrameStreamService:
             raise GraphNewAgentAttemptRequiredError(
                 "PARALLEL_INTAKE_SAME_ATTEMPT_RECOVERY_REQUIRED"
             )
-        return await self._gateway.acquire_execution(
+        execution = await self._gateway.acquire_execution(
             admission,
             owner_id=self._owner_id,
             attempt_id=admission.command.attempt_id,
+        )
+        return await self._gateway.bind_parallel_receipt_execution(
+            execution,
+            frame_set_id=authority.frame_set_id,
+            receipt_sha256=admission_receipt.receipt_sha256,
+            authority_sha256=admission_receipt.authority_sha256,
         )
 
     async def _load_bundle(
@@ -402,13 +525,20 @@ class GatewayBackedParallelIntakeFrameStreamService:
         execution: GatewayExecution,
         bundle: ParallelIntakeProductionBundle,
         authority: ParallelFrameStreamAuthority,
+        admission_receipt: ParallelFrameAdmissionReceipt,
+        selected_requests: tuple[ParallelFrameExecutionRequest, ...],
     ) -> AsyncIterator[ParallelFrameTechnicalEvent]:
         requests = tuple(
-            request.model_copy(update={"emit_start": False}) for request in bundle.requests
+            request.model_copy(update={"emit_start": False})
+            for request in selected_requests
         )
         checkpoint_configs = build_parallel_checkpoint_configs(execution, requests)
         event_log: list[ParallelFrameTechnicalEvent] = []
-        validator = ParallelFrameStreamProtocolValidator(authority)
+        active_frame_types = tuple(request.frame_type for request in requests)
+        validator = ParallelFrameStreamProtocolValidator(
+            authority,
+            active_frame_types,
+        )
         queue: asyncio.Queue[ParallelFrameTechnicalEvent | object] = asyncio.Queue(
             # Reserve one private slot for the runner sentinel.  Public events
             # remain bounded by ``_queue_capacity`` and fail closed on saturation.
@@ -475,7 +605,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
 
             runner = asyncio.create_task(
                 execute_frames(),
-                name="intake-parallel-exact-three",
+                name="intake-parallel-active-subset",
             )
             async for event in self._drain_live_queue(queue, heartbeat):
                 yield event
@@ -484,31 +614,76 @@ class GatewayBackedParallelIntakeFrameStreamService:
             await heartbeat
             heartbeat = None
 
-            if batch_result.all_succeeded and set(batch_result.completed) == set(FRAME_TYPES):
-                if set(sink.seals) != set(FRAME_TYPES):
+            if batch_result.all_succeeded and set(batch_result.completed) == set(
+                active_frame_types
+            ):
+                if set(sink.seals) != set(active_frame_types):
                     raise ParallelFrameStreamProtocolError(
-                        "parallel Frame batch is not exact-three sealed"
+                        "parallel Frame batch is not active-subset sealed"
                     )
-                completion = build_parallel_technical_completion(
-                    recorder.execution,
-                    frame_set_id=bundle.frame_set_id,
-                    events=event_log,
-                    batch_result=batch_result,
-                )
+                validator.finish()
+                if set(active_frame_types) == set(FRAME_TYPES):
+                    completion = build_parallel_technical_completion(
+                        recorder.execution,
+                        frame_set_id=bundle.frame_set_id,
+                        events=event_log,
+                        batch_result=batch_result,
+                    )
+                else:
+                    completion = _build_subset_technical_completion(
+                        recorder.execution,
+                        authority=authority,
+                        admission_receipt=admission_receipt,
+                        events=event_log,
+                        batch_result=batch_result,
+                    )
                 await self._gateway.complete_technical_execution(
                     recorder.execution,
                     completion=completion,
                 )
                 durable_terminal = True
             else:
-                await self._gateway.finish_execution_attempt(
-                    recorder.execution,
-                    status=AttemptStatus.FAILED,
-                    error_code="INTAKE_PARALLEL_FRAME_BATCH_FAILED",
-                    error_classification="TECHNICAL_FRAME_FAILURE",
-                )
+                if _batch_failure_is_retryable(
+                    batch_result,
+                    event_log,
+                    active_frame_types=active_frame_types,
+                ):
+                    validator.finish()
+                    cycle = ParallelReceiptCycleRecord.create(
+                        thread_id=recorder.execution.fence.thread_id,
+                        command_id=recorder.execution.fence.command_id,
+                        request_hash=recorder.execution.fence.request_hash,
+                        attempt_id=recorder.execution.attempt.attempt_id,
+                        frame_set_id=authority.frame_set_id,
+                        receipt_sha256=admission_receipt.receipt_sha256,
+                        authority_sha256=admission_receipt.authority_sha256,
+                        admission_receipt=admission_receipt.canonical_document(),
+                        canonical_events=tuple(
+                            _EVENT_ADAPTER.dump_python(event, mode="json")
+                            for event in event_log
+                        ),
+                        terminal_error_code="INTAKE_PARALLEL_FRAME_BATCH_FAILED",
+                        terminal_retryable=True,
+                        provider_call_count_before=execution.attempt.provider_call_count,
+                        provider_call_count_after=(
+                            recorder.execution.attempt.provider_call_count
+                        ),
+                        owner_id=recorder.execution.fence.owner_id,
+                        fencing_token=recorder.execution.fence.fencing_token,
+                    )
+                    await self._gateway.complete_parallel_receipt_cycle(
+                        recorder.execution,
+                        cycle=cycle,
+                    )
+                else:
+                    await self._gateway.finish_execution_attempt(
+                        recorder.execution,
+                        status=AttemptStatus.FAILED,
+                        error_code="INTAKE_PARALLEL_FRAME_BATCH_FAILED",
+                        error_classification="TECHNICAL_FRAME_FAILURE",
+                    )
                 durable_terminal = True
-            validator.finish()
+                raise GraphContractError("INTAKE_PARALLEL_FRAME_BATCH_FAILED")
         except BaseException as error:
             if runner is not None and not runner.done():
                 runner.cancel()
@@ -640,55 +815,356 @@ def _authority_from_command_bundle(
     )
 
 
-def _decode_cached_completion(
-    completion: TechnicalCompletionRecord,
-) -> tuple[
-    ParallelFrameStreamAuthority,
-    tuple[ParallelFrameTechnicalEvent, ...],
-]:
-    document = completion.completion_json
-    raw_events = document.get("events")
-    if (
-        document.get("schema_version") != "intake-parallel-technical-completion.v1"
-        or not isinstance(raw_events, list)
-        or not raw_events
-    ):
-        raise ParallelFrameStreamProtocolError("cached parallel completion is invalid")
-    events = tuple(_EVENT_ADAPTER.validate_python(item) for item in raw_events)
-    starts: dict[ParallelFrameType, FrameStarted] = {}
-    seals: dict[ParallelFrameType, FrameSealed] = {}
-    for event in events:
-        if isinstance(event, FrameStarted) and event.frame_type not in starts:
-            starts[event.frame_type] = event
-        if isinstance(event, FrameSealed):
-            seals[event.frame_type] = event
-    if set(starts) != set(FRAME_TYPES) or set(seals) != set(FRAME_TYPES):
-        raise ParallelFrameStreamProtocolError("cached parallel completion is not exact-three")
-    authority = ParallelFrameStreamAuthority(
-        frame_set_id=str(document.get("frame_set_id", "")),
-        run_id=events[0].run_id,
-        attempt_id=events[0].attempt_id,
-        frames=cast(
-            tuple[ExpectedParallelFrame, ExpectedParallelFrame, ExpectedParallelFrame],
-            tuple(
-                ExpectedParallelFrame(
-                    frame_type=frame_type,
-                    generation=starts[frame_type].generation,
-                    frame_id=starts[frame_type].frame_id,
-                    frame_model_input_sha256=(starts[frame_type].frame_model_input_sha256),
-                    frame_prompt_sha256=starts[frame_type].frame_prompt_sha256,
-                    context_envelope_sha256=(seals[frame_type].context_envelope_sha256),
-                    model_context_view_sha256=(seals[frame_type].model_context_view_sha256),
-                )
-                for frame_type in FRAME_TYPES
-            ),
-        ),
+def _select_execution_requests(
+    bundle: ParallelIntakeProductionBundle,
+    admission_receipt: ParallelFrameAdmissionReceipt,
+) -> tuple[ParallelFrameExecutionRequest, ...]:
+    requests = {request.frame_type: request for request in bundle.requests}
+    if set(requests) != set(FRAME_TYPES):
+        raise ParallelFrameStreamProtocolError(
+            "parallel execution bundle is not exact-three"
+        )
+    selected: list[ParallelFrameExecutionRequest] = []
+    for lane in admission_receipt.lanes:
+        prepared = requests[lane.frame_type]
+        if lane.action == "SKIP_SEALED":
+            continue
+        if lane.next_local_index != 0:
+            raise ParallelFrameStreamProtocolError(
+                "parallel execution plan cannot resume a partial public projection"
+            )
+        selected.append(
+            ParallelFrameExecutionRequest.model_validate(
+                {
+                    **prepared.model_dump(mode="python"),
+                    "generation": lane.generation,
+                    "frame_id": lane.frame_id,
+                    "resume_generation": None,
+                    "resume_frame_id": None,
+                    "resume_local_index": 0,
+                    "allow_generation_reset": lane.action != "RUN_RETRY",
+                }
+            )
+        )
+    if not selected:
+        raise ParallelFrameStreamProtocolError(
+            "all-sealed execution must be completed from Java durable state"
+        )
+    return tuple(selected)
+
+
+def _build_subset_technical_completion(
+    execution: GatewayExecution,
+    *,
+    authority: ParallelFrameStreamAuthority,
+    admission_receipt: ParallelFrameAdmissionReceipt,
+    events: Sequence[ParallelFrameTechnicalEvent],
+    batch_result: ParallelFrameBatchResult,
+) -> TechnicalCompletionRecord:
+    active_frame_types = tuple(
+        frame_type for frame_type in FRAME_TYPES if frame_type in batch_result.completed
     )
-    validator = ParallelFrameStreamProtocolValidator(authority)
+    if (
+        not batch_result.all_succeeded
+        or not active_frame_types
+        or set(active_frame_types) == set(FRAME_TYPES)
+        or not events
+    ):
+        raise ParallelFrameStreamProtocolError(
+            "parallel subset completion requires a proper successful Frame subset"
+        )
+    command = execution.admission.command
+    sealed: dict[ParallelFrameType, FrameSealed] = {}
+    event_documents: list[dict[str, Any]] = []
+    for event in events:
+        if (
+            event.frame_type not in active_frame_types
+            or event.frame_set_id != authority.frame_set_id
+            or event.run_id != authority.run_id
+            or event.attempt_id != authority.attempt_id
+        ):
+            raise ParallelFrameStreamProtocolError(
+                "parallel subset event crossed its execution receipt"
+            )
+        if isinstance(event, FrameSealed):
+            if event.frame_type in sealed:
+                raise ParallelFrameStreamProtocolError(
+                    "parallel subset completion repeats a Frame seal"
+                )
+            sealed[event.frame_type] = event
+        event_documents.append(event.model_dump(mode="json", exclude_none=True))
+    if set(sealed) != set(active_frame_types):
+        raise ParallelFrameStreamProtocolError(
+            "parallel subset completion is not sealed"
+        )
+
+    frames: list[dict[str, Any]] = []
+    for lane in admission_receipt.lanes:
+        if lane.action == "SKIP_SEALED":
+            result_sha256 = lane.result_sha256
+            public_projection_sha256 = lane.public_projection_sha256
+        else:
+            result = batch_result.completed.get(lane.frame_type)
+            frame_seal = sealed.get(lane.frame_type)
+            if (
+                result is None
+                or frame_seal is None
+                or result.generation != lane.generation
+                or result.frame_id != lane.frame_id
+                or result.result_sha256 != frame_seal.result_sha256
+                or result.public_projection_sha256
+                != frame_seal.public_projection_sha256
+            ):
+                raise ParallelFrameStreamProtocolError(
+                    "parallel subset result differs from its sealed Frame"
+                )
+            result_sha256 = result.result_sha256
+            public_projection_sha256 = result.public_projection_sha256
+        if result_sha256 is None or public_projection_sha256 is None:
+            raise ParallelFrameStreamProtocolError(
+                "parallel subset completion lost a sibling result proof"
+            )
+        frames.append(
+            {
+                "frame_type": lane.frame_type,
+                "generation": lane.generation,
+                "frame_id": lane.frame_id,
+                "action": lane.action,
+                "result_sha256": result_sha256,
+                "public_projection_sha256": public_projection_sha256,
+            }
+        )
+
+    completion_id = "IPTC_" + canonical_sha256(
+        {
+            "contract_version": _SUBSET_TECHNICAL_COMPLETION_SCHEMA,
+            "thread_id": execution.fence.thread_id,
+            "command_id": execution.fence.command_id,
+            "attempt_id": execution.attempt.attempt_id,
+            "admission_receipt_sha256": admission_receipt.receipt_sha256,
+        }
+    )[:32]
+    document: dict[str, Any] = {
+        "schema_version": _SUBSET_TECHNICAL_COMPLETION_SCHEMA,
+        "completion_id": completion_id,
+        "thread_id": execution.fence.thread_id,
+        "command_id": execution.fence.command_id,
+        "request_hash": execution.fence.request_hash,
+        "attempt_id": execution.attempt.attempt_id,
+        "fencing_token": execution.fence.fencing_token,
+        "frame_set_id": authority.frame_set_id,
+        "authority_sha256": parallel_frame_authority_sha256(authority),
+        "admission_receipt_sha256": admission_receipt.receipt_sha256,
+        "active_frame_types": list(active_frame_types),
+        "events": event_documents,
+        "frames": frames,
+    }
+    completion_hash = canonical_sha256(document)
+    document["completion_hash"] = completion_hash
+    return TechnicalCompletionRecord(
+        completion_id=completion_id,
+        thread_id=execution.fence.thread_id,
+        command_id=execution.fence.command_id,
+        request_hash=execution.fence.request_hash,
+        attempt_id=execution.attempt.attempt_id,
+        fencing_token=execution.fence.fencing_token,
+        completion_schema_version=_SUBSET_TECHNICAL_COMPLETION_SCHEMA,
+        completion_json=document,
+        completion_hash=completion_hash,
+    )
+
+
+def _batch_failure_is_retryable(
+    batch_result: ParallelFrameBatchResult,
+    events: Sequence[ParallelFrameTechnicalEvent],
+    *,
+    active_frame_types: tuple[ParallelFrameType, ...],
+) -> bool:
+    completed = set(batch_result.completed)
+    failed = set(batch_result.failed)
+    active = set(active_frame_types)
+    if (
+        not failed
+        or completed & failed
+        or completed | failed != active
+    ):
+        return False
+    terminals: dict[ParallelFrameType, FrameSealed | FrameInterrupted] = {}
+    for event in events:
+        if isinstance(event, (FrameSealed, FrameInterrupted)):
+            terminals[event.frame_type] = event
+    if set(terminals) != active:
+        return False
+    for frame_type in completed:
+        terminal = terminals[frame_type]
+        result = batch_result.completed[frame_type]
+        if (
+            not isinstance(terminal, FrameSealed)
+            or getattr(result, "frame_type", None) != frame_type
+            or getattr(result, "generation", terminal.generation) != terminal.generation
+            or getattr(result, "frame_id", terminal.frame_id) != terminal.frame_id
+            or getattr(result, "result_sha256", terminal.result_sha256)
+            != terminal.result_sha256
+            or getattr(
+                result,
+                "public_projection_sha256",
+                terminal.public_projection_sha256,
+            )
+            != terminal.public_projection_sha256
+        ):
+            return False
+    return all(
+        isinstance(terminals[frame_type], FrameInterrupted)
+        and terminals[frame_type].retryable
+        and terminals[frame_type].generation < 2
+        and terminals[frame_type].error_code
+        == batch_result.failed[frame_type].error_code
+        and batch_result.failed[frame_type].frame_type == frame_type
+        for frame_type in failed
+    )
+
+
+def _decode_parallel_receipt_cycle(
+    cycle: ParallelReceiptCycleRecord,
+    *,
+    authority: ParallelFrameStreamAuthority,
+    admission_receipt: ParallelFrameAdmissionReceipt,
+    active_frame_types: tuple[ParallelFrameType, ...],
+) -> tuple[ParallelFrameTechnicalEvent, ...]:
+    if (
+        cycle.frame_set_id != authority.frame_set_id
+        or cycle.receipt_sha256 != admission_receipt.receipt_sha256
+        or cycle.authority_sha256 != admission_receipt.authority_sha256
+        or cycle.admission_receipt != admission_receipt.canonical_document()
+    ):
+        raise ParallelFrameStreamProtocolError(
+            "parallel receipt cycle differs from its current authority"
+        )
+    events = tuple(
+        _EVENT_ADAPTER.validate_python(dict(event))
+        for event in cycle.canonical_events
+    )
+    validator = ParallelFrameStreamProtocolValidator(authority, active_frame_types)
     for event in events:
         validator.accept(event)
     validator.finish()
-    return authority, events
+    return events
+
+
+def _decode_cached_completion(
+    completion: TechnicalCompletionRecord,
+    *,
+    authority: ParallelFrameStreamAuthority,
+    admission_receipt: ParallelFrameAdmissionReceipt,
+    active_frame_types: tuple[ParallelFrameType, ...],
+) -> tuple[ParallelFrameTechnicalEvent, ...]:
+    document = completion.completion_json
+    raw_events = document.get("events")
+    schema_version = document.get("schema_version")
+    if not isinstance(raw_events, list) or not raw_events:
+        raise ParallelFrameStreamProtocolError("cached parallel completion is invalid")
+    events = tuple(_EVENT_ADAPTER.validate_python(item) for item in raw_events)
+    if schema_version == "intake-parallel-technical-completion.v1":
+        if set(active_frame_types) != set(FRAME_TYPES):
+            raise ParallelFrameStreamProtocolError(
+                "exact-three cached completion cannot satisfy a subset receipt"
+            )
+    elif schema_version == _SUBSET_TECHNICAL_COMPLETION_SCHEMA:
+        expected_fields = {
+            "schema_version",
+            "completion_id",
+            "thread_id",
+            "command_id",
+            "request_hash",
+            "attempt_id",
+            "fencing_token",
+            "frame_set_id",
+            "authority_sha256",
+            "admission_receipt_sha256",
+            "active_frame_types",
+            "events",
+            "frames",
+            "completion_hash",
+        }
+        raw_frames = document.get("frames")
+        if (
+            set(document) != expected_fields
+            or document.get("frame_set_id") != authority.frame_set_id
+            or document.get("authority_sha256")
+            != parallel_frame_authority_sha256(authority)
+            or document.get("admission_receipt_sha256")
+            != admission_receipt.receipt_sha256
+            or document.get("active_frame_types") != list(active_frame_types)
+            or not isinstance(raw_frames, list)
+            or len(raw_frames) != len(FRAME_TYPES)
+        ):
+            raise ParallelFrameStreamProtocolError(
+                "cached parallel subset completion differs from its receipt"
+            )
+        seals = {
+            event.frame_type: event
+            for event in events
+            if isinstance(event, FrameSealed)
+        }
+        if set(seals) != set(active_frame_types):
+            raise ParallelFrameStreamProtocolError(
+                "cached parallel subset completion is not sealed"
+            )
+        frame_fields = {
+            "frame_type",
+            "generation",
+            "frame_id",
+            "action",
+            "result_sha256",
+            "public_projection_sha256",
+        }
+        for raw_frame, lane in zip(
+            raw_frames,
+            admission_receipt.lanes,
+            strict=True,
+        ):
+            if (
+                not isinstance(raw_frame, dict)
+                or set(raw_frame) != frame_fields
+                or raw_frame.get("frame_type") != lane.frame_type
+                or raw_frame.get("generation") != lane.generation
+                or raw_frame.get("frame_id") != lane.frame_id
+                or raw_frame.get("action") != lane.action
+            ):
+                raise ParallelFrameStreamProtocolError(
+                    "cached parallel subset Frame proof drifted"
+                )
+            if lane.action == "SKIP_SEALED":
+                expected_hashes = (
+                    lane.result_sha256,
+                    lane.public_projection_sha256,
+                )
+            else:
+                frame_seal = seals.get(lane.frame_type)
+                if frame_seal is None:
+                    raise ParallelFrameStreamProtocolError(
+                        "cached parallel subset lost an active seal"
+                    )
+                expected_hashes = (
+                    frame_seal.result_sha256,
+                    frame_seal.public_projection_sha256,
+                )
+            if (
+                raw_frame.get("result_sha256"),
+                raw_frame.get("public_projection_sha256"),
+            ) != expected_hashes:
+                raise ParallelFrameStreamProtocolError(
+                    "cached parallel subset result proof drifted"
+                )
+    else:
+        raise ParallelFrameStreamProtocolError(
+            "cached parallel completion schema is unsupported"
+        )
+    validator = ParallelFrameStreamProtocolValidator(authority, active_frame_types)
+    for event in events:
+        validator.accept(event)
+    validator.finish()
+    return events
 
 
 async def _replay_events(
@@ -696,6 +1172,16 @@ async def _replay_events(
 ) -> AsyncIterator[ParallelFrameTechnicalEvent]:
     for event in events:
         yield event
+
+
+async def _replay_failed_receipt_cycle(
+    events: Sequence[ParallelFrameTechnicalEvent],
+    *,
+    error_code: str,
+) -> AsyncIterator[ParallelFrameTechnicalEvent]:
+    for event in events:
+        yield event
+    raise GraphContractError(error_code)
 
 
 def _public_error_code(error: BaseException) -> str:

@@ -101,6 +101,7 @@ class ParallelFrameExecutionRequest(StrictParallelRuntimeModel):
     resume_frame_id: Identifier | None = None
     resume_local_index: int = Field(default=0, ge=0)
     emit_start: bool = True
+    allow_generation_reset: bool = True
 
     @model_validator(mode="after")
     def validate_frame_authority(self) -> "ParallelFrameExecutionRequest":
@@ -128,6 +129,8 @@ class ParallelFrameExecutionRequest(StrictParallelRuntimeModel):
                 raise ValueError("replacement Frame resume identity did not advance")
         if self.resume_local_index > FRAME_PUBLIC_ITEM_LIMITS[self.frame_type]:
             raise ValueError("Frame resume index exceeds the bounded public projection")
+        if self.generation > 1 and self.allow_generation_reset:
+            raise ValueError("replacement Frame cannot authorize another generation reset")
         return self
 
     def resume_position(self) -> tuple[int, str]:
@@ -151,6 +154,7 @@ class ParallelFrameExecutionRequest(StrictParallelRuntimeModel):
             "frame_type": self.frame_type,
             "generation": self.generation,
             "frame_id": self.frame_id,
+            "allow_generation_reset": self.allow_generation_reset,
             "frame_model_input_sha256": self.model_input.frame_model_input_sha256,
             "model_context_view_sha256": (
                 self.model_input.common_model_context.model_context_view_sha256
@@ -710,6 +714,10 @@ async def _invoke_frame_model(
                 )
                 continue
             if isinstance(update, HarnessStreamReset):
+                if not request.allow_generation_reset:
+                    raise IntakeGraphContractError(
+                        "INTAKE_PARALLEL_FRAME_RETRY_EXHAUSTED"
+                    )
                 if reset_count != 0 or update.generation != 2:
                     raise IntakeGraphContractError(
                         "INTAKE_PARALLEL_FRAME_GENERATION_RESET_INVALID"

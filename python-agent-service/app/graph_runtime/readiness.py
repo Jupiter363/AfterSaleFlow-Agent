@@ -32,6 +32,9 @@ REQUIRED_RELATIONS: Final[tuple[str, ...]] = (
     "graph_thread_registry",
     "agent_graph_command",
     "agent_graph_command_attempt",
+    "agent_graph_technical_completion",
+    "agent_graph_parallel_receipt_execution",
+    "agent_graph_parallel_receipt_cycle",
     "agent_graph_result",
     "agent_graph_lease",
     "agent_graph_invocation_nonce",
@@ -51,6 +54,9 @@ REQUIRED_RELATIONS: Final[tuple[str, ...]] = (
 )
 RUNTIME_DELETE_FORBIDDEN_RELATIONS: Final[tuple[str, ...]] = REQUIRED_RELATIONS
 RUNTIME_APPEND_ONLY_RELATIONS: Final[tuple[str, ...]] = (
+    "agent_graph_technical_completion",
+    "agent_graph_parallel_receipt_execution",
+    "agent_graph_parallel_receipt_cycle",
     "agent_graph_result",
     "agent_graph_invocation_nonce",
     "agent_graph_shadow_comparison",

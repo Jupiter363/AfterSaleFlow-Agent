@@ -8,7 +8,11 @@ from enum import StrEnum
 import hmac
 from typing import Any, Final
 
-from app.contracts.v1.models import command_provider_attempt_limit
+from app.contracts.v1.models import (
+    PARALLEL_INTAKE_AGENT_PROFILE_ID,
+    PARALLEL_INTAKE_OUTPUT_SCHEMA,
+    command_provider_attempt_limit,
+)
 from app.graph_runtime.errors import (
     GraphLeaseUnavailableError,
     GraphRecoveryError,
@@ -126,6 +130,16 @@ def decide_recovery(
             if latest_attempt.provider_call_count
             else "PUBLIC_ATTEMPT_EXECUTION_ALREADY_STARTED"
         ),
+    )
+
+
+def _is_parallel_intake_binding(binding: CommandBinding) -> bool:
+    invocation = binding.request_json.get("invocation_context")
+    return (
+        binding.request_json.get("room_type") == "INTAKE"
+        and isinstance(invocation, Mapping)
+        and invocation.get("agent_profile_id") == PARALLEL_INTAKE_AGENT_PROFILE_ID
+        and invocation.get("output_schema_version") == PARALLEL_INTAKE_OUTPUT_SCHEMA
     )
 
 
@@ -278,6 +292,40 @@ class PostgresRecoveryCoordinator:
             and not same_execution
         ):
             raise GraphRecoveryError("GRAPH_ACTIVE_LEASE_BINDING_INCONSISTENT")
+
+        prior_cycle = None
+        if _is_parallel_intake_binding(binding):
+            prior_cycle = await self._ledger.load_latest_parallel_receipt_cycle(
+                connection,
+                thread_id=binding.thread_id,
+                command_id=binding.command_id,
+                attempt_id=attempt.attempt_id,
+            )
+        if prior_cycle is not None:
+            if (
+                current is None
+                or current.command_id != binding.command_id
+                or current.owner_id != attempt.owner_id
+                or current.fencing_token != attempt.fencing_token
+                or current.released_at is None
+                or prior_cycle.thread_id != binding.thread_id
+                or prior_cycle.command_id != binding.command_id
+                or prior_cycle.request_hash != binding.request_hash
+                or prior_cycle.attempt_id != attempt.attempt_id
+                or prior_cycle.owner_id != attempt.owner_id
+                or prior_cycle.fencing_token != attempt.fencing_token
+                or prior_cycle.provider_call_count_after
+                != attempt.provider_call_count
+            ):
+                raise GraphRecoveryError(
+                    "GRAPH_PARALLEL_RECEIPT_CONTINUATION_AUTHORITY_INVALID"
+                )
+            return RecoveryDecision(
+                RecoveryAction.REQUIRE_NEW_AGENT_ATTEMPT,
+                invoke_model=False,
+                emit_attempt_reset=False,
+                reason_code="PARALLEL_RECEIPT_CONTINUATION_REQUIRED",
+            )
 
         if (
             same_execution

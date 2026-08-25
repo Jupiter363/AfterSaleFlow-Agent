@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 import hmac
 import json
 import re
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 
-from app.contracts.v1.codec import canonical_sha256_omitting, canonicalize
+from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting, canonicalize
 from app.contracts.v1.models import RoomGraphCommand, RoomGraphResult
 from app.graph_runtime.errors import (
     GraphCommandBindingError,
@@ -356,6 +356,584 @@ class TechnicalCompletionRecord:
             completion_hash=self.completion_hash,
         )
         return canonicalize(dict(refreshed.completion_json)).decode("utf-8")
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelReceiptExecutionRecord:
+    """One immutable Java admission receipt bound to one attempt fence."""
+
+    execution_id: str
+    thread_id: str
+    command_id: str
+    request_hash: str
+    attempt_id: str
+    frame_set_id: str
+    receipt_sha256: str
+    authority_sha256: str
+    predecessor_cycle_id: str | None
+    predecessor_execution_id: str | None
+    provider_call_count_at_admission: int
+    owner_id: str
+    fencing_token: int
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "execution_id",
+            "command_id",
+            "attempt_id",
+            "frame_set_id",
+            "owner_id",
+        ):
+            _identifier(getattr(self, field_name), field_name)
+        if self.predecessor_cycle_id is not None:
+            _identifier(self.predecessor_cycle_id, "predecessor_cycle_id")
+        if self.predecessor_execution_id is not None:
+            _identifier(self.predecessor_execution_id, "predecessor_execution_id")
+        if THREAD_ID_PATTERN.fullmatch(self.thread_id) is None:
+            raise GraphContractError("parallel receipt execution thread_id is invalid")
+        for field_name in ("request_hash", "receipt_sha256", "authority_sha256"):
+            _sha256(getattr(self, field_name), field_name)
+        if (
+            isinstance(self.fencing_token, bool)
+            or self.fencing_token < 1
+            or isinstance(self.provider_call_count_at_admission, bool)
+            or self.provider_call_count_at_admission < 0
+        ):
+            raise GraphContractError("parallel receipt execution fence is invalid")
+        if self.fencing_token == 1:
+            if (
+                self.predecessor_cycle_id is not None
+                or self.predecessor_execution_id is not None
+            ):
+                raise GraphTerminalBindingError(
+                    "initial parallel receipt execution cannot have a predecessor"
+                )
+        elif (self.predecessor_cycle_id is None) == (
+            self.predecessor_execution_id is None
+        ):
+            raise GraphTerminalBindingError(
+                "parallel receipt execution requires one exact predecessor"
+            )
+        if self.execution_id != self.execution_id_for_receipt(
+            self.receipt_sha256,
+            self.fencing_token,
+        ):
+            raise GraphTerminalBindingError(
+                "parallel receipt execution ID is not deterministic"
+            )
+
+    @staticmethod
+    def execution_id_for_receipt(receipt_sha256: str, fencing_token: int) -> str:
+        _sha256(receipt_sha256, "receipt_sha256")
+        if isinstance(fencing_token, bool) or fencing_token < 1:
+            raise GraphContractError("parallel receipt execution fence is invalid")
+        return f"parallel-receipt-execution.{receipt_sha256[:24]}.{fencing_token}"
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        thread_id: str,
+        command_id: str,
+        request_hash: str,
+        attempt_id: str,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+        predecessor_cycle_id: str | None,
+        predecessor_execution_id: str | None = None,
+        provider_call_count_at_admission: int,
+        owner_id: str,
+        fencing_token: int,
+    ) -> ParallelReceiptExecutionRecord:
+        return cls(
+            execution_id=cls.execution_id_for_receipt(receipt_sha256, fencing_token),
+            thread_id=thread_id,
+            command_id=command_id,
+            request_hash=request_hash,
+            attempt_id=attempt_id,
+            frame_set_id=frame_set_id,
+            receipt_sha256=receipt_sha256,
+            authority_sha256=authority_sha256,
+            predecessor_cycle_id=predecessor_cycle_id,
+            predecessor_execution_id=predecessor_execution_id,
+            provider_call_count_at_admission=provider_call_count_at_admission,
+            owner_id=owner_id,
+            fencing_token=fencing_token,
+        )
+
+
+_PARALLEL_FRAME_TYPES: Final[tuple[str, str, str]] = (
+    "DIALOGUE_FRAME",
+    "DOSSIER_FRAME",
+    "QUALITY_FRAME",
+)
+_PARALLEL_RECEIPT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "schema_version",
+        "request_hash",
+        "frame_set_id",
+        "run_id",
+        "attempt_id",
+        "java_receipt_id",
+        "authority_sha256",
+        "lanes",
+        "receipt_sha256",
+    }
+)
+
+
+def _validated_parallel_receipt_document(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    document = dict(value)
+    lanes = document.get("lanes")
+    if (
+        set(document) != _PARALLEL_RECEIPT_FIELDS
+        or document.get("schema_version")
+        != "intake.parallel-admission-receipt.v1"
+        or not isinstance(lanes, list)
+        or len(lanes) != len(_PARALLEL_FRAME_TYPES)
+        or tuple(
+            lane.get("frame_type") if isinstance(lane, Mapping) else None
+            for lane in lanes
+        )
+        != _PARALLEL_FRAME_TYPES
+    ):
+        raise GraphTerminalBindingError(
+            "parallel admission receipt document is invalid"
+        )
+    for field_name in (
+        "frame_set_id",
+        "run_id",
+        "attempt_id",
+        "java_receipt_id",
+    ):
+        _identifier(document.get(field_name), field_name)
+    for field_name in ("request_hash", "authority_sha256"):
+        _sha256(document.get(field_name), field_name)
+    lane_fields = {
+        "frame_type",
+        "generation",
+        "frame_id",
+        "slot_state",
+        "action",
+        "next_local_index",
+        "slot_version",
+        "result_id",
+        "result_sha256",
+        "public_projection_sha256",
+        "predecessor_failure_code",
+    }
+    for expected_frame_type, lane in zip(
+        _PARALLEL_FRAME_TYPES,
+        lanes,
+        strict=True,
+    ):
+        if not isinstance(lane, Mapping) or set(lane) != lane_fields:
+            raise GraphTerminalBindingError(
+                "parallel admission receipt lane fields are invalid"
+            )
+        action = lane.get("action")
+        slot_state = lane.get("slot_state")
+        generation = lane.get("generation")
+        next_local_index = lane.get("next_local_index")
+        slot_version = lane.get("slot_version")
+        result_id = lane.get("result_id")
+        result_sha256 = lane.get("result_sha256")
+        public_projection_sha256 = lane.get("public_projection_sha256")
+        predecessor_failure_code = lane.get("predecessor_failure_code")
+        if (
+            lane.get("frame_type") != expected_frame_type
+            or type(generation) is not int
+            or not 1 <= generation <= 2
+            or type(next_local_index) is not int
+            or next_local_index < 0
+            or type(slot_version) is not int
+            or slot_version < 0
+            or action not in {"RUN_CURRENT", "RUN_RETRY", "SKIP_SEALED"}
+            or slot_state not in {"ADMITTED", "SEALED"}
+        ):
+            raise GraphTerminalBindingError(
+                "parallel admission receipt lane authority is invalid"
+            )
+        _identifier(lane.get("frame_id"), "frame_id")
+        if result_id is not None:
+            _identifier(result_id, "result_id")
+        for field_name, field_value in (
+            ("result_sha256", result_sha256),
+            ("public_projection_sha256", public_projection_sha256),
+        ):
+            if field_value is not None:
+                _sha256(field_value, field_name)
+        if predecessor_failure_code is not None:
+            _identifier(predecessor_failure_code, "predecessor_failure_code")
+        if (
+            (action == "SKIP_SEALED")
+            != (
+                slot_state == "SEALED"
+                and result_id is not None
+                and result_sha256 is not None
+                and public_projection_sha256 is not None
+                and predecessor_failure_code is None
+            )
+            or (
+                action != "SKIP_SEALED"
+                and (
+                    slot_state != "ADMITTED"
+                    or next_local_index != 0
+                    or result_id is not None
+                    or result_sha256 is not None
+                    or public_projection_sha256 is not None
+                )
+            )
+            or ((action == "RUN_RETRY") != (predecessor_failure_code is not None))
+            or (action == "RUN_RETRY" and generation != 2)
+        ):
+            raise GraphTerminalBindingError(
+                "parallel admission receipt lane state is invalid"
+            )
+    receipt_sha256 = document.get("receipt_sha256")
+    if not isinstance(receipt_sha256, str):
+        raise GraphTerminalBindingError("parallel admission receipt hash is invalid")
+    _sha256(receipt_sha256, "receipt_sha256")
+    unsigned = dict(document)
+    unsigned.pop("receipt_sha256")
+    if canonical_sha256(unsigned) != receipt_sha256:
+        raise GraphTerminalBindingError(
+            "parallel admission receipt self-hash is invalid"
+        )
+    return json.loads(canonicalize(document))
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelReceiptCycleRecord:
+    """One immutable, non-terminal parallel execution receipt.
+
+    A cycle records the exact public technical events produced for one Java
+    admission receipt.  It does not complete the Graph command or attempt.  A
+    later receipt may use this record to advance the lease fence while keeping
+    the same attempt and the already sealed sibling Frames.
+    """
+
+    cycle_id: str
+    execution_id: str
+    thread_id: str
+    command_id: str
+    request_hash: str
+    attempt_id: str
+    frame_set_id: str
+    receipt_sha256: str
+    authority_sha256: str
+    admission_receipt: Mapping[str, Any]
+    canonical_events: tuple[Mapping[str, Any], ...]
+    terminal_error_code: str
+    terminal_retryable: bool
+    completion_sha256: str
+    provider_call_count_before: int
+    provider_call_count_after: int
+    owner_id: str
+    fencing_token: int
+
+    SCHEMA_VERSION: ClassVar[str] = "intake-parallel-receipt-cycle.v1"
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "cycle_id",
+            "execution_id",
+            "command_id",
+            "attempt_id",
+            "frame_set_id",
+            "owner_id",
+        ):
+            _identifier(getattr(self, field_name), field_name)
+        if THREAD_ID_PATTERN.fullmatch(self.thread_id) is None:
+            raise GraphContractError("parallel receipt cycle thread_id is invalid")
+        for field_name in (
+            "request_hash",
+            "receipt_sha256",
+            "authority_sha256",
+            "completion_sha256",
+        ):
+            _sha256(getattr(self, field_name), field_name)
+        if (
+            isinstance(self.fencing_token, bool)
+            or self.fencing_token < 1
+            or isinstance(self.provider_call_count_before, bool)
+            or isinstance(self.provider_call_count_after, bool)
+            or self.provider_call_count_before < 0
+            or self.provider_call_count_after <= self.provider_call_count_before
+        ):
+            raise GraphContractError("parallel receipt cycle counters are invalid")
+        if (
+            not isinstance(self.canonical_events, Sequence)
+            or isinstance(self.canonical_events, (str, bytes, bytearray))
+            or not self.canonical_events
+        ):
+            raise GraphContractError("parallel receipt cycle requires public events")
+        normalized: list[dict[str, Any]] = []
+        for event in self.canonical_events:
+            if not isinstance(event, Mapping):
+                raise GraphContractError("parallel receipt cycle event must be an object")
+            normalized.append(dict(event))
+        object.__setattr__(self, "canonical_events", tuple(normalized))
+        receipt_document = _validated_parallel_receipt_document(
+            self.admission_receipt
+        )
+        object.__setattr__(self, "admission_receipt", receipt_document)
+        if (
+            receipt_document["request_hash"] != self.request_hash
+            or receipt_document["frame_set_id"] != self.frame_set_id
+            or receipt_document["attempt_id"] != self.attempt_id
+            or receipt_document["receipt_sha256"] != self.receipt_sha256
+            or receipt_document["authority_sha256"] != self.authority_sha256
+        ):
+            raise GraphTerminalBindingError(
+                "parallel admission receipt differs from its cycle"
+            )
+        if len(canonicalize(normalized)) > 1_048_576:
+            raise GraphContractError("parallel receipt cycle exceeds the 1 MiB ledger limit")
+        if self.cycle_id != self.cycle_id_for_receipt(self.receipt_sha256):
+            raise GraphTerminalBindingError("parallel receipt cycle ID is not deterministic")
+        if self.execution_id != ParallelReceiptExecutionRecord.execution_id_for_receipt(
+            self.receipt_sha256,
+            self.fencing_token,
+        ):
+            raise GraphTerminalBindingError(
+                "parallel receipt cycle execution ID is not deterministic"
+            )
+        if (
+            re.fullmatch(r"[A-Z][A-Z0-9_]{2,127}", self.terminal_error_code)
+            is None
+            or self.terminal_retryable is not True
+        ):
+            raise GraphContractError("parallel receipt cycle terminal outcome is invalid")
+        if canonical_sha256(self.hash_document()) != self.completion_sha256:
+            raise GraphTerminalBindingError("parallel receipt cycle self-hash is invalid")
+
+    @staticmethod
+    def cycle_id_for_receipt(receipt_sha256: str) -> str:
+        _sha256(receipt_sha256, "receipt_sha256")
+        return f"parallel-receipt-cycle.{receipt_sha256[:32]}"
+
+    def hash_document(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "cycle_id": self.cycle_id,
+            "execution_id": self.execution_id,
+            "thread_id": self.thread_id,
+            "command_id": self.command_id,
+            "request_hash": self.request_hash,
+            "attempt_id": self.attempt_id,
+            "frame_set_id": self.frame_set_id,
+            "receipt_sha256": self.receipt_sha256,
+            "authority_sha256": self.authority_sha256,
+            "admission_receipt": dict(self.admission_receipt),
+            "events": [dict(event) for event in self.canonical_events],
+            "terminal_error_code": self.terminal_error_code,
+            "terminal_retryable": self.terminal_retryable,
+            "provider_call_count_before": self.provider_call_count_before,
+            "provider_call_count_after": self.provider_call_count_after,
+            "owner_id": self.owner_id,
+            "fencing_token": self.fencing_token,
+        }
+
+    def canonical_events_json_text(self) -> str:
+        """Revalidate nested mutable values immediately before persistence."""
+
+        refreshed = ParallelReceiptCycleRecord(
+            cycle_id=self.cycle_id,
+            execution_id=self.execution_id,
+            thread_id=self.thread_id,
+            command_id=self.command_id,
+            request_hash=self.request_hash,
+            attempt_id=self.attempt_id,
+            frame_set_id=self.frame_set_id,
+            receipt_sha256=self.receipt_sha256,
+            authority_sha256=self.authority_sha256,
+            admission_receipt=self.admission_receipt,
+            canonical_events=self.canonical_events,
+            terminal_error_code=self.terminal_error_code,
+            terminal_retryable=self.terminal_retryable,
+            completion_sha256=self.completion_sha256,
+            provider_call_count_before=self.provider_call_count_before,
+            provider_call_count_after=self.provider_call_count_after,
+            owner_id=self.owner_id,
+            fencing_token=self.fencing_token,
+        )
+        return canonicalize(
+            [dict(event) for event in refreshed.canonical_events]
+        ).decode("utf-8")
+
+    def canonical_admission_receipt_json_text(self) -> str:
+        refreshed = _validated_parallel_receipt_document(self.admission_receipt)
+        return canonicalize(refreshed).decode("utf-8")
+
+    def require_successor_receipt(
+        self,
+        successor: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Prove one Java plan is the direct monotonic successor of this cycle."""
+
+        current = _validated_parallel_receipt_document(self.admission_receipt)
+        candidate = _validated_parallel_receipt_document(successor)
+        if (
+            candidate["receipt_sha256"] == current["receipt_sha256"]
+            or any(
+                candidate[field] != current[field]
+                for field in (
+                    "request_hash",
+                    "frame_set_id",
+                    "run_id",
+                    "attempt_id",
+                    "authority_sha256",
+                )
+            )
+        ):
+            raise GraphTerminalBindingError(
+                "parallel successor receipt crossed its predecessor authority"
+            )
+        terminal_events: dict[str, Mapping[str, Any]] = {}
+        for event in self.canonical_events:
+            frame_type = event.get("frame_type")
+            if (
+                frame_type in _PARALLEL_FRAME_TYPES
+                and event.get("event_kind") in {"FRAME_SEALED", "FRAME_INTERRUPTED"}
+            ):
+                terminal_events[str(frame_type)] = event
+        for prior_lane, next_lane in zip(
+            current["lanes"], candidate["lanes"], strict=True
+        ):
+            frame_type = prior_lane["frame_type"]
+            if next_lane["frame_type"] != frame_type:
+                raise GraphTerminalBindingError(
+                    "parallel successor receipt Frame order drifted"
+                )
+            if prior_lane["action"] == "SKIP_SEALED":
+                stable_fields = (
+                    "generation",
+                    "frame_id",
+                    "slot_state",
+                    "action",
+                    "next_local_index",
+                    "slot_version",
+                    "result_id",
+                    "result_sha256",
+                    "public_projection_sha256",
+                    "predecessor_failure_code",
+                )
+                if any(next_lane[field] != prior_lane[field] for field in stable_fields):
+                    raise GraphTerminalBindingError(
+                        "parallel successor changed an already sealed sibling"
+                    )
+                continue
+            terminal = terminal_events.get(frame_type)
+            if terminal is None:
+                raise GraphTerminalBindingError(
+                    "parallel receipt cycle lost an active lane terminal event"
+                )
+            if terminal["event_kind"] == "FRAME_SEALED":
+                if (
+                    next_lane["slot_state"] != "SEALED"
+                    or next_lane["action"] != "SKIP_SEALED"
+                    or next_lane["generation"] != terminal["generation"]
+                    or next_lane["frame_id"] != terminal["frame_id"]
+                    or next_lane["next_local_index"] != terminal["next_local_index"]
+                    or next_lane["result_id"] is None
+                    or next_lane["result_sha256"] != terminal["result_sha256"]
+                    or next_lane["public_projection_sha256"]
+                    != terminal["public_projection_sha256"]
+                    or next_lane["predecessor_failure_code"] is not None
+                    or next_lane["slot_version"] <= prior_lane["slot_version"]
+                ):
+                    raise GraphTerminalBindingError(
+                        "parallel successor did not preserve a newly sealed lane"
+                    )
+                continue
+            if (
+                terminal.get("retryable") is not True
+                or terminal["generation"] >= 2
+                or next_lane["slot_state"] != "ADMITTED"
+                or next_lane["action"] != "RUN_RETRY"
+                or next_lane["generation"] != terminal["generation"] + 1
+                or next_lane["frame_id"] == terminal["frame_id"]
+                or next_lane["next_local_index"] != 0
+                or next_lane["result_id"] is not None
+                or next_lane["result_sha256"] is not None
+                or next_lane["public_projection_sha256"] is not None
+                or next_lane["predecessor_failure_code"] != terminal["error_code"]
+                or next_lane["slot_version"] <= prior_lane["slot_version"]
+            ):
+                raise GraphTerminalBindingError(
+                    "parallel successor did not advance a retryable failed lane"
+                )
+        return candidate
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        thread_id: str,
+        command_id: str,
+        request_hash: str,
+        attempt_id: str,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+        admission_receipt: Mapping[str, Any],
+        canonical_events: Sequence[Mapping[str, Any]],
+        terminal_error_code: str,
+        terminal_retryable: bool,
+        provider_call_count_before: int,
+        provider_call_count_after: int,
+        owner_id: str,
+        fencing_token: int,
+    ) -> ParallelReceiptCycleRecord:
+        cycle_id = cls.cycle_id_for_receipt(receipt_sha256)
+        execution_id = ParallelReceiptExecutionRecord.execution_id_for_receipt(
+            receipt_sha256,
+            fencing_token,
+        )
+        values = {
+            "schema_version": cls.SCHEMA_VERSION,
+            "cycle_id": cycle_id,
+            "execution_id": execution_id,
+            "thread_id": thread_id,
+            "command_id": command_id,
+            "request_hash": request_hash,
+            "attempt_id": attempt_id,
+            "frame_set_id": frame_set_id,
+            "receipt_sha256": receipt_sha256,
+            "authority_sha256": authority_sha256,
+            "admission_receipt": dict(admission_receipt),
+            "events": [dict(event) for event in canonical_events],
+            "terminal_error_code": terminal_error_code,
+            "terminal_retryable": terminal_retryable,
+            "provider_call_count_before": provider_call_count_before,
+            "provider_call_count_after": provider_call_count_after,
+            "owner_id": owner_id,
+            "fencing_token": fencing_token,
+        }
+        return cls(
+            cycle_id=cycle_id,
+            execution_id=execution_id,
+            thread_id=thread_id,
+            command_id=command_id,
+            request_hash=request_hash,
+            attempt_id=attempt_id,
+            frame_set_id=frame_set_id,
+            receipt_sha256=receipt_sha256,
+            authority_sha256=authority_sha256,
+            admission_receipt=dict(admission_receipt),
+            canonical_events=tuple(values["events"]),
+            terminal_error_code=terminal_error_code,
+            terminal_retryable=terminal_retryable,
+            completion_sha256=canonical_sha256(values),
+            provider_call_count_before=provider_call_count_before,
+            provider_call_count_after=provider_call_count_after,
+            owner_id=owner_id,
+            fencing_token=fencing_token,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -865,6 +1443,170 @@ select {TECHNICAL_COMPLETION_COLUMNS}
  where thread_id = %s and command_id = %s
 """
 
+PARALLEL_RECEIPT_EXECUTION_COLUMNS: Final[str] = """
+execution_id, thread_id, command_id, request_hash, attempt_id, frame_set_id,
+receipt_sha256, authority_sha256, predecessor_cycle_id, predecessor_execution_id,
+provider_call_count_at_admission, owner_id, fencing_token
+"""
+
+LOAD_PARALLEL_RECEIPT_EXECUTION_SQL: Final[str] = f"""
+select {PARALLEL_RECEIPT_EXECUTION_COLUMNS}
+  from agent_graph_parallel_receipt_execution
+ where thread_id = %s
+   and command_id = %s
+   and attempt_id = %s
+   and receipt_sha256 = %s
+ order by fencing_token desc
+ limit 1
+"""
+
+INSERT_PARALLEL_RECEIPT_EXECUTION_SQL: Final[str] = f"""
+insert into agent_graph_parallel_receipt_execution (
+    execution_id, thread_id, command_id, request_hash, attempt_id, frame_set_id,
+    receipt_sha256, authority_sha256, predecessor_cycle_id,
+    predecessor_execution_id, provider_call_count_at_admission, owner_id,
+    fencing_token
+)
+values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+on conflict (thread_id, command_id, attempt_id, receipt_sha256, fencing_token)
+do nothing
+returning {PARALLEL_RECEIPT_EXECUTION_COLUMNS}
+"""
+
+PARALLEL_RECEIPT_CYCLE_COLUMNS: Final[str] = """
+cycle_id, execution_id, thread_id, command_id, request_hash, attempt_id, frame_set_id,
+receipt_sha256, authority_sha256, admission_receipt_json, canonical_events_json,
+terminal_error_code, terminal_retryable, completion_sha256,
+provider_call_count_before, provider_call_count_after, owner_id, fencing_token
+"""
+
+LOAD_PARALLEL_RECEIPT_CYCLE_SQL: Final[str] = f"""
+select {PARALLEL_RECEIPT_CYCLE_COLUMNS}
+  from agent_graph_parallel_receipt_cycle
+ where thread_id = %s
+   and command_id = %s
+   and attempt_id = %s
+   and receipt_sha256 = %s
+"""
+
+LOAD_LATEST_PARALLEL_RECEIPT_CYCLE_SQL: Final[str] = f"""
+select {PARALLEL_RECEIPT_CYCLE_COLUMNS}
+  from agent_graph_parallel_receipt_cycle
+ where thread_id = %s
+   and command_id = %s
+   and attempt_id = %s
+ order by fencing_token desc
+ limit 1
+"""
+
+INSERT_PARALLEL_RECEIPT_CYCLE_SQL: Final[str] = f"""
+insert into agent_graph_parallel_receipt_cycle (
+    cycle_id, execution_id, thread_id, command_id, request_hash, attempt_id,
+    frame_set_id, receipt_sha256, authority_sha256, admission_receipt_json,
+    canonical_events_json, terminal_error_code, terminal_retryable,
+    completion_sha256, provider_call_count_before, provider_call_count_after,
+    owner_id, fencing_token
+)
+select %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb,
+       %s, %s, %s, %s, %s, %s, %s
+ where exists (
+       select 1
+         from agent_graph_command command
+         join agent_graph_command_attempt attempt
+           on attempt.thread_id = command.thread_id
+          and attempt.command_id = command.command_id
+         join agent_graph_lease lease
+           on lease.thread_id = command.thread_id
+          and lease.command_id = command.command_id
+        where command.thread_id = %s
+          and command.command_id = %s
+          and command.request_hash = %s
+          and command.status = 'EXECUTING'
+          and command.fencing_token = %s
+          and attempt.attempt_id = %s
+          and attempt.attempt_status = 'EXECUTING'
+          and attempt.owner_id = %s
+          and attempt.fencing_token = %s
+          and lease.owner_id = attempt.owner_id
+          and lease.fencing_token = attempt.fencing_token
+          and lease.released_at is null
+          and lease.cancelled_at is null
+          and lease.lease_expires_at > clock_timestamp()
+   )
+on conflict (thread_id, command_id, attempt_id, receipt_sha256) do nothing
+returning {PARALLEL_RECEIPT_CYCLE_COLUMNS}
+"""
+
+REBIND_PARALLEL_COMMAND_FENCE_SQL: Final[str] = f"""
+update agent_graph_command
+   set fencing_token = %s,
+       updated_at = clock_timestamp(),
+       command_revision = command_revision + 1
+ where thread_id = %s
+   and command_id = %s
+   and request_hash = %s
+   and status = 'EXECUTING'
+   and fencing_token = %s
+returning {COMMAND_COLUMNS}
+"""
+
+REBIND_PARALLEL_ATTEMPT_FENCE_SQL: Final[str] = """
+update agent_graph_command_attempt attempt
+   set owner_id = %s,
+       fencing_token = %s,
+       last_heartbeat_at = clock_timestamp()
+ where attempt.attempt_id = %s
+   and attempt.thread_id = %s
+   and attempt.command_id = %s
+   and attempt.owner_id = %s
+   and attempt.fencing_token = %s
+   and attempt.attempt_status = 'EXECUTING'
+   and exists (
+       select 1
+         from agent_graph_parallel_receipt_execution execution
+         left join agent_graph_parallel_receipt_cycle cycle
+           on cycle.cycle_id = execution.predecessor_cycle_id
+         left join agent_graph_parallel_receipt_execution predecessor
+           on predecessor.execution_id = execution.predecessor_execution_id
+        where execution.execution_id = %s
+          and execution.attempt_id = attempt.attempt_id
+          and execution.thread_id = attempt.thread_id
+          and execution.command_id = attempt.command_id
+          and execution.owner_id = %s
+          and execution.fencing_token = %s
+          and (
+              (
+                  execution.predecessor_cycle_id is not null
+                  and execution.predecessor_execution_id is null
+                  and cycle.owner_id = attempt.owner_id
+                  and cycle.fencing_token = attempt.fencing_token
+                  and cycle.provider_call_count_after = attempt.provider_call_count
+              )
+              or (
+                  execution.predecessor_cycle_id is null
+                  and execution.predecessor_execution_id is not null
+                  and predecessor.attempt_id = attempt.attempt_id
+                  and predecessor.thread_id = attempt.thread_id
+                  and predecessor.command_id = attempt.command_id
+                  and predecessor.receipt_sha256 = execution.receipt_sha256
+                  and predecessor.owner_id = attempt.owner_id
+                  and predecessor.fencing_token = attempt.fencing_token
+                  and predecessor.provider_call_count_at_admission
+                      = attempt.provider_call_count
+                  and not exists (
+                      select 1
+                        from agent_graph_parallel_receipt_cycle receipt_cycle
+                       where receipt_cycle.attempt_id = attempt.attempt_id
+                         and receipt_cycle.receipt_sha256 = execution.receipt_sha256
+                  )
+              )
+          )
+   )
+returning attempt_id, thread_id, command_id, attempt_no, owner_id,
+          fencing_token, attempt_status, provider_call_count,
+          error_code, error_classification
+"""
+
 INSERT_TECHNICAL_COMPLETION_SQL: Final[str] = f"""
 insert into agent_graph_technical_completion (
     completion_id, thread_id, command_id, request_hash, attempt_id, fencing_token,
@@ -1369,6 +2111,311 @@ class PostgresCommandLedger:
         if row is None:
             raise GraphTerminalBindingError("technical completion row is missing")
         return self._technical_completion_from_row(row)
+
+    async def load_parallel_receipt_cycle(
+        self,
+        connection: Any,
+        *,
+        thread_id: str,
+        command_id: str,
+        attempt_id: str,
+        receipt_sha256: str,
+    ) -> ParallelReceiptCycleRecord | None:
+        row = await (
+            await connection.execute(
+                LOAD_PARALLEL_RECEIPT_CYCLE_SQL,
+                (thread_id, command_id, attempt_id, receipt_sha256),
+            )
+        ).fetchone()
+        return None if row is None else self._parallel_receipt_cycle_from_row(row)
+
+    async def load_parallel_receipt_execution(
+        self,
+        connection: Any,
+        *,
+        thread_id: str,
+        command_id: str,
+        attempt_id: str,
+        receipt_sha256: str,
+    ) -> ParallelReceiptExecutionRecord | None:
+        row = await (
+            await connection.execute(
+                LOAD_PARALLEL_RECEIPT_EXECUTION_SQL,
+                (thread_id, command_id, attempt_id, receipt_sha256),
+            )
+        ).fetchone()
+        return None if row is None else self._parallel_receipt_execution_from_row(row)
+
+    async def store_parallel_receipt_execution(
+        self,
+        connection: Any,
+        *,
+        execution_attempt: AttemptRecord,
+        receipt_execution: ParallelReceiptExecutionRecord,
+    ) -> ParallelReceiptExecutionRecord:
+        if (
+            receipt_execution.thread_id != execution_attempt.thread_id
+            or receipt_execution.command_id != execution_attempt.command_id
+            or receipt_execution.attempt_id != execution_attempt.attempt_id
+            or receipt_execution.owner_id != execution_attempt.owner_id
+            or receipt_execution.fencing_token != execution_attempt.fencing_token
+            or execution_attempt.status is not AttemptStatus.EXECUTING
+        ):
+            raise GraphTerminalBindingError(
+                "parallel receipt execution differs from its Graph attempt"
+            )
+        row = await (
+            await connection.execute(
+                INSERT_PARALLEL_RECEIPT_EXECUTION_SQL,
+                (
+                    receipt_execution.execution_id,
+                    receipt_execution.thread_id,
+                    receipt_execution.command_id,
+                    receipt_execution.request_hash,
+                    receipt_execution.attempt_id,
+                    receipt_execution.frame_set_id,
+                    receipt_execution.receipt_sha256,
+                    receipt_execution.authority_sha256,
+                    receipt_execution.predecessor_cycle_id,
+                    receipt_execution.predecessor_execution_id,
+                    receipt_execution.provider_call_count_at_admission,
+                    receipt_execution.owner_id,
+                    receipt_execution.fencing_token,
+                ),
+            )
+        ).fetchone()
+        if row is not None:
+            return self._parallel_receipt_execution_from_row(row)
+        existing = await self.load_parallel_receipt_execution(
+            connection,
+            thread_id=receipt_execution.thread_id,
+            command_id=receipt_execution.command_id,
+            attempt_id=receipt_execution.attempt_id,
+            receipt_sha256=receipt_execution.receipt_sha256,
+        )
+        if existing != receipt_execution:
+            raise GraphTerminalBindingError(
+                "immutable parallel receipt execution conflicts with existing row"
+            )
+        return existing
+
+    async def load_latest_parallel_receipt_cycle(
+        self,
+        connection: Any,
+        *,
+        thread_id: str,
+        command_id: str,
+        attempt_id: str,
+    ) -> ParallelReceiptCycleRecord | None:
+        row = await (
+            await connection.execute(
+                LOAD_LATEST_PARALLEL_RECEIPT_CYCLE_SQL,
+                (thread_id, command_id, attempt_id),
+            )
+        ).fetchone()
+        return None if row is None else self._parallel_receipt_cycle_from_row(row)
+
+    async def store_parallel_receipt_cycle(
+        self,
+        connection: Any,
+        *,
+        execution_attempt: AttemptRecord,
+        cycle: ParallelReceiptCycleRecord,
+    ) -> ParallelReceiptCycleRecord:
+        if (
+            cycle.thread_id != execution_attempt.thread_id
+            or cycle.command_id != execution_attempt.command_id
+            or cycle.attempt_id != execution_attempt.attempt_id
+            or cycle.owner_id != execution_attempt.owner_id
+            or cycle.fencing_token != execution_attempt.fencing_token
+            or cycle.provider_call_count_after
+            != execution_attempt.provider_call_count
+            or execution_attempt.status is not AttemptStatus.EXECUTING
+        ):
+            raise GraphTerminalBindingError(
+                "parallel receipt cycle differs from its executing attempt"
+            )
+        row = await (
+            await connection.execute(
+                INSERT_PARALLEL_RECEIPT_CYCLE_SQL,
+                (
+                    cycle.cycle_id,
+                    cycle.execution_id,
+                    cycle.thread_id,
+                    cycle.command_id,
+                    cycle.request_hash,
+                    cycle.attempt_id,
+                    cycle.frame_set_id,
+                    cycle.receipt_sha256,
+                    cycle.authority_sha256,
+                    cycle.canonical_admission_receipt_json_text(),
+                    cycle.canonical_events_json_text(),
+                    cycle.terminal_error_code,
+                    cycle.terminal_retryable,
+                    cycle.completion_sha256,
+                    cycle.provider_call_count_before,
+                    cycle.provider_call_count_after,
+                    cycle.owner_id,
+                    cycle.fencing_token,
+                    cycle.thread_id,
+                    cycle.command_id,
+                    cycle.request_hash,
+                    cycle.fencing_token,
+                    cycle.attempt_id,
+                    cycle.owner_id,
+                    cycle.fencing_token,
+                ),
+            )
+        ).fetchone()
+        if row is not None:
+            return self._parallel_receipt_cycle_from_row(row)
+        existing = await self.load_parallel_receipt_cycle(
+            connection,
+            thread_id=cycle.thread_id,
+            command_id=cycle.command_id,
+            attempt_id=cycle.attempt_id,
+            receipt_sha256=cycle.receipt_sha256,
+        )
+        if existing != cycle:
+            raise GraphTerminalBindingError(
+                "immutable parallel receipt cycle conflicts with existing row"
+            )
+        return existing
+
+    async def rebind_parallel_attempt(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        attempt: AttemptRecord,
+        prior_cycle: ParallelReceiptCycleRecord | None,
+        prior_execution: ParallelReceiptExecutionRecord | None,
+        receipt_execution: ParallelReceiptExecutionRecord,
+        next_owner_id: str,
+        next_fencing_token: int,
+    ) -> tuple[CommandRecord, AttemptRecord]:
+        _identifier(next_owner_id, "next_owner_id")
+        if (prior_cycle is None) == (prior_execution is None):
+            raise GraphTerminalBindingError(
+                "parallel attempt handoff requires one exact predecessor"
+            )
+        predecessor_frame_set_id = (
+            prior_cycle.frame_set_id
+            if prior_cycle is not None
+            else prior_execution.frame_set_id
+        )
+        predecessor_authority_sha256 = (
+            prior_cycle.authority_sha256
+            if prior_cycle is not None
+            else prior_execution.authority_sha256
+        )
+        common_invalid = (
+            receipt_execution.thread_id != binding.thread_id
+            or receipt_execution.command_id != binding.command_id
+            or receipt_execution.request_hash != binding.request_hash
+            or receipt_execution.attempt_id != attempt.attempt_id
+            or receipt_execution.frame_set_id != predecessor_frame_set_id
+            or receipt_execution.authority_sha256
+            != predecessor_authority_sha256
+            or receipt_execution.owner_id != next_owner_id
+            or receipt_execution.fencing_token != next_fencing_token
+            or attempt.status is not AttemptStatus.EXECUTING
+            or next_fencing_token != attempt.fencing_token + 1
+        )
+        cycle_invalid = prior_cycle is not None and (
+            prior_cycle.thread_id != binding.thread_id
+            or prior_cycle.command_id != binding.command_id
+            or prior_cycle.request_hash != binding.request_hash
+            or prior_cycle.attempt_id != attempt.attempt_id
+            or prior_cycle.owner_id != attempt.owner_id
+            or prior_cycle.fencing_token != attempt.fencing_token
+            or prior_cycle.provider_call_count_after != attempt.provider_call_count
+            or receipt_execution.predecessor_cycle_id != prior_cycle.cycle_id
+            or receipt_execution.predecessor_execution_id is not None
+            or receipt_execution.provider_call_count_at_admission
+            != attempt.provider_call_count
+        )
+        execution_invalid = prior_execution is not None and (
+            prior_execution.thread_id != binding.thread_id
+            or prior_execution.command_id != binding.command_id
+            or prior_execution.request_hash != binding.request_hash
+            or prior_execution.attempt_id != attempt.attempt_id
+            or prior_execution.frame_set_id != receipt_execution.frame_set_id
+            or prior_execution.receipt_sha256 != receipt_execution.receipt_sha256
+            or prior_execution.authority_sha256 != receipt_execution.authority_sha256
+            or prior_execution.owner_id != attempt.owner_id
+            or prior_execution.fencing_token != attempt.fencing_token
+            or prior_execution.provider_call_count_at_admission
+            != attempt.provider_call_count
+            or receipt_execution.predecessor_cycle_id is not None
+            or receipt_execution.predecessor_execution_id
+            != prior_execution.execution_id
+            or receipt_execution.provider_call_count_at_admission
+            != attempt.provider_call_count
+        )
+        if common_invalid or cycle_invalid or execution_invalid:
+            raise GraphTerminalBindingError(
+                "parallel attempt handoff lacks exact prior receipt authority"
+            )
+        command_row = await (
+            await connection.execute(
+                REBIND_PARALLEL_COMMAND_FENCE_SQL,
+                (
+                    next_fencing_token,
+                    binding.thread_id,
+                    binding.command_id,
+                    binding.request_hash,
+                    attempt.fencing_token,
+                ),
+            )
+        ).fetchone()
+        if command_row is None:
+            raise GraphCommandStateError("parallel command fence handoff failed")
+        command = self._command_from_row(command_row)
+        self.require_same_binding(command.binding, binding)
+        stored_execution = await self.store_parallel_receipt_execution(
+            connection,
+            execution_attempt=replace(
+                attempt,
+                owner_id=next_owner_id,
+                fencing_token=next_fencing_token,
+            ),
+            receipt_execution=receipt_execution,
+        )
+        if stored_execution != receipt_execution:
+            raise GraphTerminalBindingError(
+                "parallel receipt execution persistence drifted"
+            )
+        attempt_row = await (
+            await connection.execute(
+                REBIND_PARALLEL_ATTEMPT_FENCE_SQL,
+                (
+                    next_owner_id,
+                    next_fencing_token,
+                    attempt.attempt_id,
+                    attempt.thread_id,
+                    attempt.command_id,
+                    attempt.owner_id,
+                    attempt.fencing_token,
+                    receipt_execution.execution_id,
+                    next_owner_id,
+                    next_fencing_token,
+                ),
+            )
+        ).fetchone()
+        if attempt_row is None:
+            raise GraphCommandStateError("parallel attempt fence handoff failed")
+        rebound = self._attempt_from_row(attempt_row)
+        if (
+            rebound.attempt_id != attempt.attempt_id
+            or rebound.attempt_no != attempt.attempt_no
+            or rebound.provider_call_count != attempt.provider_call_count
+            or rebound.owner_id != next_owner_id
+            or rebound.fencing_token != next_fencing_token
+            or rebound.status is not AttemptStatus.EXECUTING
+        ):
+            raise GraphTerminalBindingError("parallel attempt handoff drifted")
+        return command, rebound
 
     async def store_technical_completion(
         self,
@@ -2198,6 +3245,69 @@ class PostgresCommandLedger:
         except (KeyError, TypeError, ValueError) as error:
             raise GraphTerminalBindingError(
                 "persisted technical completion binding is invalid"
+            ) from error
+
+    @staticmethod
+    def _parallel_receipt_cycle_from_row(
+        row: Mapping[str, Any],
+    ) -> ParallelReceiptCycleRecord:
+        try:
+            raw_events = row["canonical_events_json"]
+            if (
+                not isinstance(raw_events, Sequence)
+                or isinstance(raw_events, (str, bytes, bytearray))
+            ):
+                raise TypeError("canonical receipt events are not an array")
+            return ParallelReceiptCycleRecord(
+                cycle_id=row["cycle_id"],
+                execution_id=row["execution_id"],
+                thread_id=row["thread_id"],
+                command_id=row["command_id"],
+                request_hash=row["request_hash"],
+                attempt_id=row["attempt_id"],
+                frame_set_id=row["frame_set_id"],
+                receipt_sha256=row["receipt_sha256"],
+                authority_sha256=row["authority_sha256"],
+                admission_receipt=row["admission_receipt_json"],
+                canonical_events=tuple(raw_events),
+                terminal_error_code=row["terminal_error_code"],
+                terminal_retryable=row["terminal_retryable"],
+                completion_sha256=row["completion_sha256"],
+                provider_call_count_before=row["provider_call_count_before"],
+                provider_call_count_after=row["provider_call_count_after"],
+                owner_id=row["owner_id"],
+                fencing_token=row["fencing_token"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise GraphTerminalBindingError(
+                "persisted parallel receipt cycle binding is invalid"
+            ) from error
+
+    @staticmethod
+    def _parallel_receipt_execution_from_row(
+        row: Mapping[str, Any],
+    ) -> ParallelReceiptExecutionRecord:
+        try:
+            return ParallelReceiptExecutionRecord(
+                execution_id=row["execution_id"],
+                thread_id=row["thread_id"],
+                command_id=row["command_id"],
+                request_hash=row["request_hash"],
+                attempt_id=row["attempt_id"],
+                frame_set_id=row["frame_set_id"],
+                receipt_sha256=row["receipt_sha256"],
+                authority_sha256=row["authority_sha256"],
+                predecessor_cycle_id=row["predecessor_cycle_id"],
+                predecessor_execution_id=row["predecessor_execution_id"],
+                provider_call_count_at_admission=row[
+                    "provider_call_count_at_admission"
+                ],
+                owner_id=row["owner_id"],
+                fencing_token=row["fencing_token"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise GraphTerminalBindingError(
+                "persisted parallel receipt execution binding is invalid"
             ) from error
 
     @staticmethod

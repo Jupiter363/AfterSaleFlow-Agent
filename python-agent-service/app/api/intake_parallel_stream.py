@@ -100,8 +100,14 @@ class ParallelFrameAdmissionLane:
     frame_type: ParallelFrameType
     generation: int
     frame_id: str
-    action: Literal["RUN"]
+    slot_state: Literal["ADMITTED", "SEALED"]
+    action: Literal["SKIP_SEALED", "RUN_CURRENT", "RUN_RETRY"]
     next_local_index: int
+    slot_version: int
+    result_id: str | None
+    result_sha256: str | None
+    public_projection_sha256: str | None
+    predecessor_failure_code: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,18 +125,50 @@ class ParallelFrameAdmissionReceipt:
     ]
     receipt_sha256: str
 
+    def canonical_document(self) -> dict[str, object]:
+        document: dict[str, object] = {
+            "schema_version": "intake.parallel-admission-receipt.v1",
+            "request_hash": self.request_hash,
+            "frame_set_id": self.frame_set_id,
+            "run_id": self.run_id,
+            "attempt_id": self.attempt_id,
+            "java_receipt_id": self.java_receipt_id,
+            "authority_sha256": self.authority_sha256,
+            "lanes": [
+                {
+                    "frame_type": lane.frame_type,
+                    "generation": lane.generation,
+                    "frame_id": lane.frame_id,
+                    "slot_state": lane.slot_state,
+                    "action": lane.action,
+                    "next_local_index": lane.next_local_index,
+                    "slot_version": lane.slot_version,
+                    "result_id": lane.result_id,
+                    "result_sha256": lane.result_sha256,
+                    "public_projection_sha256": lane.public_projection_sha256,
+                    "predecessor_failure_code": lane.predecessor_failure_code,
+                }
+                for lane in self.lanes
+            ],
+            "receipt_sha256": self.receipt_sha256,
+        }
+        unsigned = dict(document)
+        unsigned.pop("receipt_sha256")
+        if canonical_sha256(unsigned) != self.receipt_sha256:
+            raise ParallelFrameStreamProtocolError(
+                "parallel admission receipt self-hash drifted"
+            )
+        return document
+
     def require_authority(
         self,
         *,
         command: RoomGraphCommand,
         authority: ParallelFrameStreamAuthority,
-    ) -> None:
+    ) -> ParallelFrameStreamAuthority:
         expected_frames = tuple(
             (frame.frame_type, frame.generation, frame.frame_id)
             for frame in authority.frames
-        )
-        actual_frames = tuple(
-            (lane.frame_type, lane.generation, lane.frame_id) for lane in self.lanes
         )
         if (
             self.request_hash != command.request_hash
@@ -140,17 +178,102 @@ class ParallelFrameAdmissionReceipt:
             or self.run_id != command.logical_run_id
             or self.attempt_id != command.attempt_id
             or self.authority_sha256 != parallel_frame_authority_sha256(authority)
-            or actual_frames != expected_frames
-            or any(lane.action != "RUN" or lane.next_local_index != 0 for lane in self.lanes)
+            or tuple(lane.frame_type for lane in self.lanes) != FRAME_TYPES
         ):
             raise ParallelFrameStreamProtocolError(
                 "parallel admission receipt differs from prepared authority"
             )
+        projected: list[ExpectedParallelFrame] = []
+        for prepared, lane, expected in zip(
+            authority.frames, self.lanes, expected_frames, strict=True
+        ):
+            if lane.frame_type != expected[0]:
+                raise ParallelFrameStreamProtocolError(
+                    "parallel admission receipt Frame order drifted"
+                )
+            skip = lane.action == "SKIP_SEALED"
+            retry = lane.action == "RUN_RETRY"
+            current = lane.action == "RUN_CURRENT"
+            if (
+                lane.action not in {"RUN_CURRENT", "RUN_RETRY", "SKIP_SEALED"}
+                or lane.generation < 1
+                or lane.generation > 2
+                or lane.next_local_index < 0
+                or lane.slot_version < 0
+                or (skip and lane.slot_state != "SEALED")
+                or (not skip and lane.slot_state != "ADMITTED")
+                or (
+                    skip
+                    and (
+                        lane.result_id is None
+                        or lane.result_sha256 is None
+                        or lane.public_projection_sha256 is None
+                        or lane.predecessor_failure_code is not None
+                    )
+                )
+                or (
+                    not skip
+                    and (
+                        lane.next_local_index != 0
+                        or lane.result_id is not None
+                        or lane.result_sha256 is not None
+                        or lane.public_projection_sha256 is not None
+                    )
+                )
+                or (retry != (lane.predecessor_failure_code is not None))
+                or (retry and lane.generation != 2)
+                or (
+                    current
+                    and (
+                        lane.generation != prepared.generation
+                        or lane.frame_id != prepared.frame_id
+                    )
+                )
+                or (
+                    retry
+                    and (
+                        lane.generation != prepared.generation + 1
+                        or lane.frame_id == prepared.frame_id
+                    )
+                )
+                or (
+                    skip
+                    and (
+                        lane.generation < prepared.generation
+                        or lane.generation > prepared.generation + 1
+                        or (
+                            lane.generation == prepared.generation
+                            and lane.frame_id != prepared.frame_id
+                        )
+                    )
+                )
+            ):
+                raise ParallelFrameStreamProtocolError(
+                    "parallel admission receipt lane state is invalid"
+                )
+            projected.append(
+                ExpectedParallelFrame(
+                    frame_type=prepared.frame_type,
+                    generation=lane.generation,
+                    frame_id=lane.frame_id,
+                    frame_model_input_sha256=prepared.frame_model_input_sha256,
+                    frame_prompt_sha256=prepared.frame_prompt_sha256,
+                    context_envelope_sha256=prepared.context_envelope_sha256,
+                    model_context_view_sha256=prepared.model_context_view_sha256,
+                )
+            )
+        return ParallelFrameStreamAuthority(
+            frame_set_id=authority.frame_set_id,
+            run_id=authority.run_id,
+            attempt_id=authority.attempt_id,
+            frames=tuple(projected),  # type: ignore[arg-type]
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class OpenedParallelFrameStream:
     authority: ParallelFrameStreamAuthority
+    active_frame_types: tuple[ParallelFrameType, ...]
     events: AsyncIterator[ParallelFrameTechnicalEvent]
 
 
@@ -189,10 +312,23 @@ class _FrameTransportState:
 class ParallelFrameStreamProtocolValidator:
     """Validate three independent lane state machines while permitting interleaving."""
 
-    def __init__(self, authority: ParallelFrameStreamAuthority) -> None:
+    def __init__(
+        self,
+        authority: ParallelFrameStreamAuthority,
+        active_frame_types: tuple[ParallelFrameType, ...] = FRAME_TYPES,
+    ) -> None:
         if not isinstance(authority, ParallelFrameStreamAuthority):
             raise ParallelFrameStreamProtocolError("parallel Frame authority is not typed")
+        if (
+            not active_frame_types
+            or len(set(active_frame_types)) != len(active_frame_types)
+            or any(frame_type not in FRAME_TYPES for frame_type in active_frame_types)
+        ):
+            raise ParallelFrameStreamProtocolError(
+                "parallel active Frame subset is invalid"
+            )
         self._authority = authority
+        self._active_frame_types = frozenset(active_frame_types)
         self._states = {
             frame.frame_type: _FrameTransportState(
                 expected=frame,
@@ -222,6 +358,7 @@ class ParallelFrameStreamProtocolValidator:
             event.frame_set_id != self._authority.frame_set_id
             or event.run_id != self._authority.run_id
             or event.attempt_id != self._authority.attempt_id
+            or event.frame_type not in self._active_frame_types
         ):
             raise ParallelFrameStreamProtocolError(
                 "parallel Frame event crossed stream authority"
@@ -243,7 +380,8 @@ class ParallelFrameStreamProtocolValidator:
     def finish(self) -> None:
         terminal = [
             state.sealed or state.interrupted is not None
-            for state in self._states.values()
+            for frame_type, state in self._states.items()
+            if frame_type in self._active_frame_types
         ]
         if not all(terminal):
             raise ParallelFrameStreamProtocolError(
@@ -471,8 +609,14 @@ def decode_parallel_admission_receipt_header(
             "frame_type",
             "generation",
             "frame_id",
+            "slot_state",
             "action",
             "next_local_index",
+            "slot_version",
+            "result_id",
+            "result_sha256",
+            "public_projection_sha256",
+            "predecessor_failure_code",
         }:
             raise ParallelFrameStreamProtocolError(
                 "parallel admission lane fields differ"
@@ -485,16 +629,46 @@ def decode_parallel_admission_receipt_header(
         frame_type = cast(ParallelFrameType, raw_frame_type)
         generation = value["generation"]
         next_local_index = value["next_local_index"]
+        slot_version = value["slot_version"]
         frame_id = value["frame_id"]
+        action = value["action"]
+        slot_state = value["slot_state"]
+        result_id = value["result_id"]
+        result_sha256 = value["result_sha256"]
+        public_projection_sha256 = value["public_projection_sha256"]
+        predecessor_failure_code = value["predecessor_failure_code"]
         if (
             frame_type != FRAME_TYPES[index]
             or type(generation) is not int
             or generation < 1
+            or generation > 2
             or not isinstance(frame_id, str)
             or _IDENTIFIER.fullmatch(frame_id) is None
-            or value["action"] != "RUN"
+            or action not in {"SKIP_SEALED", "RUN_CURRENT", "RUN_RETRY"}
+            or slot_state not in {"ADMITTED", "SEALED"}
             or type(next_local_index) is not int
-            or next_local_index != 0
+            or next_local_index < 0
+            or type(slot_version) is not int
+            or slot_version < 0
+            or (
+                result_id is not None
+                and (
+                    not isinstance(result_id, str)
+                    or _IDENTIFIER.fullmatch(result_id) is None
+                )
+            )
+            or any(
+                item is not None
+                and (not isinstance(item, str) or _SHA256.fullmatch(item) is None)
+                for item in (result_sha256, public_projection_sha256)
+            )
+            or (
+                predecessor_failure_code is not None
+                and (
+                    not isinstance(predecessor_failure_code, str)
+                    or _IDENTIFIER.fullmatch(predecessor_failure_code) is None
+                )
+            )
         ):
             raise ParallelFrameStreamProtocolError(
                 "parallel admission lane authority is invalid"
@@ -504,8 +678,14 @@ def decode_parallel_admission_receipt_header(
                 frame_type=frame_type,
                 generation=generation,
                 frame_id=frame_id,
-                action="RUN",
+                slot_state=slot_state,
+                action=action,
                 next_local_index=next_local_index,
+                slot_version=slot_version,
+                result_id=result_id,
+                result_sha256=result_sha256,
+                public_projection_sha256=public_projection_sha256,
+                predecessor_failure_code=predecessor_failure_code,
             )
         )
     text_fields = (
