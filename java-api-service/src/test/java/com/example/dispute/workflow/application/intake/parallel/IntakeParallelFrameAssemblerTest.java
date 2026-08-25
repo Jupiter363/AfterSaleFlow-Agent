@@ -10,6 +10,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameAssembler.SealedFrame;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameType;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -208,19 +209,19 @@ class IntakeParallelFrameAssemblerTest {
     }
 
     @Test
-    void rejectsGapBindingThatIsAbsentFromTheDossierMatrixAuthority() {
+    void rejectsGapBindingThatIsAbsentFromTheCompleteDossierMatrixAuthority() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
 
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
                         dialogue(previous, "ASK_SUBSTANTIVE"),
                         dossier(),
                         quality(Map.of(
-                                        "references", 10,
-                                        "event_story", 20,
-                                        "party_positions", 20,
-                                        "requested_resolution", 15,
-                                        "risk_and_conflicts", 15,
-                                        "next_action_clarity", 15),
+                                "references", 10,
+                                "event_story", 20,
+                                "party_positions", 20,
+                                "requested_resolution", 15,
+                                "risk_and_conflicts", 15,
+                                "next_action_clarity", 15),
                                 List.of(gap(
                                         "REFERENCES",
                                         "请补充未知事实的来源？",
@@ -230,15 +231,116 @@ class IntakeParallelFrameAssemblerTest {
     }
 
     @Test
+    void carriesEveryUnchangedFormalFactBeforeAppendingCurrentNewFacts() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode secondPrior = ((ObjectNode) previous.at("/case_fact_matrix/fact_rows/0"))
+                .deepCopy();
+        secondPrior.put("fact_id", "FACT_02");
+        secondPrior.put("fact_target", "历史物流状态");
+        ((ObjectNode) secondPrior.at("/positions/USER"))
+                .put("position_summary", "上一轮已记录物流状态")
+                .put("asserted_value", "已发货");
+        previous.with("case_fact_matrix").withArray("fact_rows").add(secondPrior);
+
+        ObjectNode dossier = dossier();
+        ObjectNode newRow = ((ObjectNode) dossier.at("/public_projection_items/0/source_row"))
+                .deepCopy();
+        newRow.put("fact_key", "NEW_" + "C".repeat(24) + "_CURRENT");
+        newRow.put("fact_target", "本轮新增物流事实");
+        newRow.put("source_scope", "CURRENT_SOURCE");
+        ObjectNode newItem = dossier.withArray("public_projection_items").addObject();
+        newItem.put("schema_version", "intake.dossier-public-fact-proposal.v2");
+        newItem.put("projection_kind", "CURRENT_FACT");
+        newItem.put("projection_path_id", "case_story.one_sentence_summary");
+        newItem.set("source_row", newRow);
+
+        var output = assembler.assemble(command(previous, frames(
+                dialogue(previous, "ASK_SUBSTANTIVE"),
+                dossier,
+                quality(Map.of(
+                                "references", 15,
+                                "event_story", 20,
+                                "party_positions", 20,
+                                "requested_resolution", 15,
+                                "risk_and_conflicts", 15,
+                                "next_action_clarity", 15),
+                        List.of()))));
+
+        JsonNode matrix = output.proposal().matrixPatch();
+        assertThat(matrix.path("fact_rows").size()).isEqualTo(3);
+        assertThat(matrix.at("/fact_rows/0/fact_key").asText()).isEqualTo("FACT_01");
+        assertThat(matrix.at("/fact_rows/1/fact_key").asText()).isEqualTo("FACT_02");
+        assertThat(matrix.at("/fact_rows/1/source_scope").asText())
+                .isEqualTo("PREVIOUS_MATRIX");
+        assertThat(matrix.at("/fact_rows/1/stance").asText()).isEqualTo("NOT_ADDRESSED");
+        assertThat(matrix.at("/fact_rows/2/fact_key").asText())
+                .isEqualTo("NEW_" + "C".repeat(24) + "_CURRENT");
+    }
+
+    @Test
+    void rejectsForeignFactNamespacesAndInitiatorAuthoredRespondentClaims() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode unknownFact = dossier();
+        ((ObjectNode) unknownFact.at("/public_projection_items/0/source_row"))
+                .put("fact_key", "FACT_UNKNOWN");
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        unknownFact,
+                        quality(Map.of(
+                                        "references", 15,
+                                        "event_story", 20,
+                                        "party_positions", 20,
+                                        "requested_resolution", 15,
+                                        "risk_and_conflicts", 15,
+                                        "next_action_clarity", 15),
+                                List.of())))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("unknown formal FACT_ key");
+
+        ObjectNode foreignNamespace = dossier();
+        ((ObjectNode) foreignNamespace.at("/public_projection_items/0/source_row"))
+                .put("fact_key", "NEW_" + "D".repeat(24) + "_FOREIGN")
+                .put("source_scope", "CURRENT_SOURCE");
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        foreignNamespace,
+                        quality(Map.of(
+                                        "references", 15,
+                                        "event_story", 20,
+                                        "party_positions", 20,
+                                        "requested_resolution", 15,
+                                        "risk_and_conflicts", 15,
+                                        "next_action_clarity", 15),
+                                List.of())))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("outside the issued namespace");
+
+        ObjectNode initiatorClaim = dossier();
+        initiatorClaim.with("dossier_delta")
+                .putObject("respondent_claim")
+                .put("attitude", "DISAGREE")
+                .put("position_summary", "不同意该诉求")
+                .putNull("alternative_proposal");
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        initiatorClaim,
+                        quality(Map.of(
+                                        "references", 15,
+                                        "event_story", 20,
+                                        "party_positions", 20,
+                                        "requested_resolution", 15,
+                                        "risk_and_conflicts", 15,
+                                        "next_action_clarity", 15),
+                                List.of())))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("Java-authorized respondent actor");
+    }
+
+    @Test
     void keepsGapBoundOnlyToAnUnaddressedPreviousMatrixRow() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode dossier = dossier();
-        ObjectNode previousRow = (ObjectNode) dossier.at("/dossier_delta/matrix_patch/fact_rows/0");
-        previousRow.put("source_scope", "PREVIOUS_MATRIX");
-        previousRow.put("stance", "NOT_ADDRESSED");
-        previousRow.putNull("asserted_value");
         dossier.withArray("public_projection_items").removeAll();
-        dossier.with("dossier_delta").withArray("public_projection_slots").removeAll();
 
         var output = assembler.assemble(command(previous, frames(
                 dialogue(previous, "ASK_SUBSTANTIVE"),
@@ -312,10 +414,8 @@ class IntakeParallelFrameAssemblerTest {
         ObjectNode dossier = dossier();
         ObjectNode overlapping = ((ObjectNode) dossier.at("/public_projection_items/0"))
                 .deepCopy();
-        overlapping.put("provider_slot_id", "DPATCH_02");
         overlapping.put("projection_path_id", "case_story.one_sentence_summary");
         ((ArrayNode) dossier.path("public_projection_items")).add(overlapping);
-        ((ArrayNode) dossier.at("/dossier_delta/public_projection_slots")).add("DPATCH_02");
 
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
                         dialogue(previous, "ASK_SUBSTANTIVE"),
@@ -329,29 +429,25 @@ class IntakeParallelFrameAssemblerTest {
                                 "next_action_clarity", 15),
                                 List.of())))))
                 .isInstanceOf(AssemblyRejectedException.class)
-                .hasMessageContaining("public facts differ");
+                .hasMessageContaining("repeat a fact key");
     }
 
     @Test
     void derivesTheExistingCaseStorySummaryFromCurrentMatrixRowsInOrder() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode dossier = dossier();
-        ObjectNode matrix = (ObjectNode) dossier.at("/dossier_delta/matrix_patch");
-        ObjectNode second = ((ObjectNode) matrix.at("/fact_rows/0")).deepCopy();
-        second.put("fact_key", "FACT_02");
+        ObjectNode second = ((ObjectNode) dossier.at("/public_projection_items/0/source_row"))
+                .deepCopy();
+        second.put("fact_key", "NEW_" + "C".repeat(24) + "_SECOND");
         second.put("fact_target", "补充事实");
         second.put("position_summary", "第二项当前事实");
         second.put("asserted_value", "第二项当前事实");
-        ((ArrayNode) matrix.path("fact_rows")).add(second);
-        ((ArrayNode) matrix.path("summary_source_fact_keys")).add("FACT_02");
+        second.put("source_scope", "CURRENT_SOURCE");
         ObjectNode secondItem = dossier.withArray("public_projection_items").addObject();
-        secondItem.put("schema_version", "intake.dossier-public-patch-proposal.v1");
-        secondItem.put("provider_slot_id", "DPATCH_02");
+        secondItem.put("schema_version", "intake.dossier-public-fact-proposal.v2");
         secondItem.put("projection_kind", "CURRENT_FACT");
         secondItem.put("projection_path_id", "case_story.one_sentence_summary");
         secondItem.set("source_row", second.deepCopy());
-        secondItem.put("candidate_value", "第二项当前事实");
-        dossier.with("dossier_delta").withArray("public_projection_slots").add("DPATCH_02");
 
         var output = assembler.assemble(command(previous, frames(
                 dialogue(previous, "ASK_SUBSTANTIVE"),
@@ -368,33 +464,18 @@ class IntakeParallelFrameAssemblerTest {
         assertThat(output.proposal().dossierPatch()
                         .at("/case_story/one_sentence_summary").asText())
                 .isEqualTo("本轮补充了核心事实；第二项当前事实");
-
-        ((ObjectNode) dossier.at("/public_projection_items/1"))
-                .put("candidate_value", "内容发生漂移");
-        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
-                        dialogue(previous, "ASK_SUBSTANTIVE"),
-                        dossier,
-                        quality(Map.of(
-                                "references", 15,
-                                "event_story", 20,
-                                "party_positions", 20,
-                                "requested_resolution", 15,
-                                "risk_and_conflicts", 15,
-                                "next_action_clarity", 15),
-                                List.of())))))
-                .isInstanceOf(AssemblyRejectedException.class)
-                .hasMessageContaining("typed source row");
+        assertThat(output.proposal().matrixPatch().path("fact_rows").size()).isEqualTo(2);
+        assertThat(output.proposal().matrixPatch()
+                        .at("/summary_source_fact_keys/1").asText())
+                .isEqualTo("NEW_" + "C".repeat(24) + "_SECOND");
     }
 
     @Test
     void preservesAuthoritativeDossierWhitespaceAcrossAssembly() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode dossier = dossier();
-        ObjectNode row = (ObjectNode) dossier.at("/dossier_delta/matrix_patch/fact_rows/0");
+        ObjectNode row = (ObjectNode) dossier.at("/public_projection_items/0/source_row");
         row.put("position_summary", "  本轮补充了核心事实  ");
-        ObjectNode item = (ObjectNode) dossier.at("/public_projection_items/0");
-        item.set("source_row", row.deepCopy());
-        item.put("candidate_value", "  本轮补充了核心事实  ");
 
         var output = assembler.assemble(command(previous, frames(
                 dialogue(previous, "ASK_SUBSTANTIVE"),
@@ -533,17 +614,13 @@ class IntakeParallelFrameAssemblerTest {
     private static ObjectNode dossier() {
         ObjectNode root = MAPPER.createObjectNode();
         ObjectNode item = root.putArray("public_projection_items").addObject();
-        item.put("schema_version", "intake.dossier-public-patch-proposal.v1");
-        item.put("provider_slot_id", "DPATCH_01");
+        item.put("schema_version", "intake.dossier-public-fact-proposal.v2");
         item.put("projection_kind", "CURRENT_FACT");
         item.put("projection_path_id", "case_story.one_sentence_summary");
-        item.put("candidate_value", "本轮补充了核心事实");
         root.put("frame_type", "DOSSIER_FRAME");
-        root.put("schema_version", "intake.dossier-frame.v1");
+        root.put("schema_version", "intake.dossier-frame.v2");
         ObjectNode delta = root.putObject("dossier_delta");
-        ObjectNode matrix = delta.putObject("matrix_patch");
-        matrix.put("schema_version", "case_fact_matrix.delta.v2");
-        ObjectNode row = matrix.putArray("fact_rows").addObject();
+        ObjectNode row = MAPPER.createObjectNode();
         row.put("fact_key", "FACT_01");
         row.put("category", "OTHER");
         row.put("fact_target", "本轮核心事实");
@@ -551,13 +628,11 @@ class IntakeParallelFrameAssemblerTest {
         row.put("stance", "CONFIRM");
         row.put("position_summary", "本轮补充了核心事实");
         row.put("asserted_value", "本轮补充了核心事实");
-        row.put("source_scope", "CURRENT_SOURCE");
+        row.put("source_scope", "PREVIOUS_AND_CURRENT_SOURCE");
         row.putNull("agreed_statement");
         row.putNull("conflict_summary");
         item.set("source_row", row.deepCopy());
-        matrix.putArray("summary_source_fact_keys").add("FACT_01");
-        matrix.putNull("respondent_claim");
-        delta.putArray("public_projection_slots").add("DPATCH_01");
+        delta.putNull("respondent_claim");
         return root;
     }
 
@@ -623,7 +698,37 @@ class IntakeParallelFrameAssemblerTest {
         state.put("schema_version", "party-intake-state.v1");
         state.set("USER", actorEntry(phase, score, ready));
         state.set("MERCHANT", actorEntry("NOT_READY", 0, false));
+        dossier.set("case_fact_matrix", formalMatrix());
         return dossier;
+    }
+
+    private static ObjectNode formalMatrix() {
+        ObjectNode matrix = MAPPER.createObjectNode();
+        matrix.put("matrix_kind", "INITIATOR_FROZEN");
+        matrix.putObject("party_map")
+                .put("initiator_role", "USER")
+                .put("respondent_role", "MERCHANT");
+        ObjectNode row = matrix.putArray("fact_rows").addObject();
+        row.put("fact_id", "FACT_01");
+        row.put("category", "OTHER");
+        row.put("fact_target", "本轮核心事实");
+        row.put("materiality", "CORE");
+        ObjectNode positions = row.putObject("positions");
+        positions.putObject("USER")
+                .put("stance", "CONFIRM")
+                .put("position_summary", "上一轮已记录核心事实")
+                .put("asserted_value", "上一轮核心事实")
+                .put("source_type", "DIRECT_PARTY_STATEMENT")
+                .putArray("source_refs")
+                .add("MESSAGE_PREVIOUS");
+        positions.putObject("MERCHANT")
+                .put("stance", "NOT_ADDRESSED")
+                .put("position_summary", "该方尚未直接陈述。")
+                .putNull("asserted_value")
+                .put("source_type", "NO_DIRECT_POSITION")
+                .putArray("source_refs");
+        row.putObject("party_alignment").put("status", "NOT_COMPUTED");
+        return matrix;
     }
 
     private static ObjectNode actorEntry(String phase, int score, boolean ready) {

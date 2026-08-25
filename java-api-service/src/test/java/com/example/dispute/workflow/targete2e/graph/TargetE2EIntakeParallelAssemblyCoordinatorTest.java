@@ -360,17 +360,13 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
     private static ObjectNode dossier() {
         ObjectNode root = MAPPER.createObjectNode();
         ObjectNode item = root.putArray("public_projection_items").addObject();
-        item.put("schema_version", "intake.dossier-public-patch-proposal.v1");
-        item.put("provider_slot_id", "DPATCH_01");
+        item.put("schema_version", "intake.dossier-public-fact-proposal.v2");
         item.put("projection_kind", "CURRENT_FACT");
         item.put("projection_path_id", "case_story.one_sentence_summary");
-        item.put("candidate_value", "本轮补充了核心事实");
         root.put("frame_type", "DOSSIER_FRAME");
-        root.put("schema_version", "intake.dossier-frame.v1");
+        root.put("schema_version", "intake.dossier-frame.v2");
         ObjectNode delta = root.putObject("dossier_delta");
-        ObjectNode matrix = delta.putObject("matrix_patch");
-        matrix.put("schema_version", "case_fact_matrix.delta.v2");
-        ObjectNode row = matrix.putArray("fact_rows").addObject();
+        ObjectNode row = MAPPER.createObjectNode();
         row.put("fact_key", "FACT_01");
         row.put("category", "OTHER");
         row.put("fact_target", "本轮核心事实");
@@ -378,13 +374,11 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
         row.put("stance", "CONFIRM");
         row.put("position_summary", "本轮补充了核心事实");
         row.put("asserted_value", "本轮补充了核心事实");
-        row.put("source_scope", "CURRENT_SOURCE");
+        row.put("source_scope", "PREVIOUS_AND_CURRENT_SOURCE");
         row.putNull("agreed_statement");
         row.putNull("conflict_summary");
         item.set("source_row", row.deepCopy());
-        matrix.putArray("summary_source_fact_keys").add("FACT_01");
-        matrix.putNull("respondent_claim");
-        delta.putArray("public_projection_slots").add("DPATCH_01");
+        delta.putNull("respondent_claim");
         return root;
     }
 
@@ -434,6 +428,31 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
         state.put("schema_version", "party-intake-state.v1");
         state.set("USER", actorEntry());
         state.set("MERCHANT", actorEntry());
+        ObjectNode matrix = dossier.putObject("case_fact_matrix");
+        matrix.put("matrix_kind", "INITIATOR_FROZEN");
+        matrix.putObject("party_map")
+                .put("initiator_role", "USER")
+                .put("respondent_role", "MERCHANT");
+        ObjectNode row = matrix.putArray("fact_rows").addObject();
+        row.put("fact_id", "FACT_01");
+        row.put("category", "OTHER");
+        row.put("fact_target", "本轮核心事实");
+        row.put("materiality", "CORE");
+        ObjectNode positions = row.putObject("positions");
+        positions.putObject("USER")
+                .put("stance", "CONFIRM")
+                .put("position_summary", "上一轮已记录核心事实")
+                .put("asserted_value", "上一轮核心事实")
+                .put("source_type", "DIRECT_PARTY_STATEMENT")
+                .putArray("source_refs")
+                .add("MESSAGE_PREVIOUS");
+        positions.putObject("MERCHANT")
+                .put("stance", "NOT_ADDRESSED")
+                .put("position_summary", "该方尚未直接陈述。")
+                .putNull("asserted_value")
+                .put("source_type", "NO_DIRECT_POSITION")
+                .putArray("source_refs");
+        row.putObject("party_alignment").put("status", "NOT_COMPUTED");
         return dossier;
     }
 

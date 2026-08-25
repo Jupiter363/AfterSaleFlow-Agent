@@ -24,6 +24,7 @@ from app.graphs.intake.parallel_contracts import (
     FRAME_TYPES,
     Identifier,
     IntakeFrameModelInputV1,
+    IntakeModelContextViewV1,
     ParallelFrameType,
     PartyRole,
     Sha256,
@@ -31,14 +32,15 @@ from app.graphs.intake.parallel_contracts import (
 from app.graphs.intake.parallel_outputs import (
     FRAME_OUTPUT_MODELS,
     DialoguePublicSegmentProposalV1,
-    DossierPublicPatchProposalV1,
-    IntakeDossierFrameV1,
+    DossierPublicFactProposalV2,
+    IntakeDossierFrameV2,
     IntakeQualityFrameV1,
     ParallelFrameOutput,
     QUALITY_DIMENSION_ORDER,
     QualityPublicGapProposalV1,
     QualityPublicMetricProposalV1,
     QualityPublicProjectionProposalV1,
+    request_bound_dossier_output_types,
     validate_parallel_frame_output,
 )
 from app.harness.context_window import PromptSection
@@ -66,7 +68,7 @@ FRAME_PUBLIC_ITEM_LIMITS: Mapping[ParallelFrameType, int] = {
 
 FRAME_PUBLIC_ITEM_MODELS: Mapping[ParallelFrameType, type[BaseModel]] = {
     "DIALOGUE_FRAME": DialoguePublicSegmentProposalV1,
-    "DOSSIER_FRAME": DossierPublicPatchProposalV1,
+    "DOSSIER_FRAME": DossierPublicFactProposalV2,
     "QUALITY_FRAME": QualityPublicProjectionProposalV1,
 }
 
@@ -655,6 +657,10 @@ async def _invoke_frame_model(
             _frame_started(request, generation=generation, frame_id=frame_id)
         )
     try:
+        output_type, public_item_type = _request_bound_frame_types(
+            frame_type,
+            request.model_input.common_model_context,
+        )
         stream = runtime.model_runner.ainvoke_structured_stream(
             node_name=FRAME_NODE_NAMES[frame_type],
             case_data={
@@ -662,7 +668,7 @@ async def _invoke_frame_model(
                 "agent_key": "DISPUTE_INTAKE_OFFICER",
                 "frame_type": frame_type,
             },
-            output_type=FRAME_OUTPUT_MODELS[frame_type],
+            output_type=output_type,
             visible_fields=(
                 VisibleFieldSpec(
                     "public_projection_items",
@@ -693,6 +699,7 @@ async def _invoke_frame_model(
             semantic_validator=_request_bound_frame_semantic_validator(
                 frame_type,
                 actor_role=request.actor_role,
+                model_context=request.model_input.common_model_context,
             ),
         )
         async for update in stream:
@@ -712,9 +719,7 @@ async def _invoke_frame_model(
                     continue
                 try:
                     provider_item = _decode_visible_item(update.delta)
-                    item_model = FRAME_PUBLIC_ITEM_MODELS[frame_type].model_validate(
-                        provider_item
-                    )
+                    item_model = public_item_type.model_validate(provider_item)
                     normalized_provider_item = item_model.model_dump(mode="json")
                     _validate_public_projection_prefix(
                         frame_type,
@@ -722,9 +727,13 @@ async def _invoke_frame_model(
                         normalized_provider_item,
                         actor_role=request.actor_role,
                     )
-                    slot_id = str(normalized_provider_item["provider_slot_id"])
+                    slot_id = _provider_item_identity(
+                        frame_type,
+                        normalized_provider_item,
+                    )
                     if slot_id in {
-                        str(item["provider_slot_id"]) for item in provider_items
+                        _provider_item_identity(frame_type, item)
+                        for item in provider_items
                     }:
                         raise IntakeGraphContractError(
                             "INTAKE_PARALLEL_FRAME_PROJECTION_SLOT_REPEATED"
@@ -1019,13 +1028,13 @@ def canonical_parallel_public_projection(
             public_text=dialogue.candidate_text,
         )
     if frame_type == "DOSSIER_FRAME":
-        dossier = DossierPublicPatchProposalV1.model_validate(item)
+        dossier = DossierPublicFactProposalV2.model_validate(item)
         return CanonicalPublicProjectionItem(
-            canonical_item_id=dossier.provider_slot_id,
+            canonical_item_id=dossier.source_row.fact_key,
             projection_kind=dossier.projection_kind,
             projection_path_id=dossier.projection_path_id,
             value_kind="JSON_VALUE",
-            canonical_value=dossier.candidate_value,
+            canonical_value=dossier.source_row.position_summary,
         )
     quality = QualityPublicProjectionProposalV1.model_validate(item).root
     if isinstance(quality, QualityPublicGapProposalV1):
@@ -1107,9 +1116,15 @@ def _validate_public_projection_prefix(
         return
     if frame_type != "DOSSIER_FRAME":
         return
+    all_items = (*previous_items, current_item)
+    fact_keys = tuple(str(item["source_row"]["fact_key"]) for item in all_items)
+    if len(fact_keys) != len(set(fact_keys)):
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_DOSSIER_FACT_KEY_REPEATED"
+        )
     candidates = tuple(
-        str(item["candidate_value"])
-        for item in (*previous_items, current_item)
+        str(item["source_row"]["position_summary"])
+        for item in all_items
     )
     if len(candidates) > FRAME_PUBLIC_ITEM_LIMITS[frame_type]:
         raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_PUBLIC_ITEM_LIMIT")
@@ -1121,6 +1136,7 @@ def _request_bound_frame_semantic_validator(
     frame_type: ParallelFrameType,
     *,
     actor_role: PartyRole,
+    model_context: IntakeModelContextViewV1,
 ) -> Callable[[Any], Any]:
     """Attach request authority without changing the provider-visible JSON Schema."""
 
@@ -1134,13 +1150,89 @@ def _request_bound_frame_semantic_validator(
                 raise ValueError(
                     "Quality gap source role differs from the authenticated actor"
                 )
-        elif isinstance(frame, IntakeDossierFrameV1):
+        elif isinstance(frame, IntakeDossierFrameV2):
             # This is an aggregate persisted-field bound and is intentionally not
             # weakened to the per-item string limit exposed in JSON Schema.
             frame.materialized_dossier_patch()
+            frame.materialized_matrix_patch()
+            _validate_dossier_frame_authority(frame, model_context)
         return value
 
     return validate
+
+
+def _request_bound_frame_types(
+    frame_type: ParallelFrameType,
+    model_context: IntakeModelContextViewV1,
+) -> tuple[type[BaseModel], type[BaseModel]]:
+    if frame_type != "DOSSIER_FRAME":
+        return FRAME_OUTPUT_MODELS[frame_type], FRAME_PUBLIC_ITEM_MODELS[frame_type]
+    output_type, item_type = request_bound_dossier_output_types(
+        existing_fact_keys=model_context.fact_key_authority.existing_fact_keys,
+        new_fact_key_prefix=model_context.fact_key_authority.new_fact_key_prefix,
+        respondent_capacity=(
+            model_context.source_capacity.litigation_capacity == "RESPONDENT"
+        ),
+    )
+    return output_type, item_type
+
+
+def _validate_dossier_frame_authority(
+    frame: IntakeDossierFrameV2,
+    model_context: IntakeModelContextViewV1,
+) -> None:
+    if (
+        frame.dossier_delta.respondent_claim is not None
+        and model_context.source_capacity.litigation_capacity != "RESPONDENT"
+    ):
+        raise ValueError("respondent_claim requires authenticated respondent capacity")
+
+    frozen_rows = model_context.frozen_case_matrix.payload.get("fact_rows")
+    if not isinstance(frozen_rows, list):
+        raise ValueError("frozen matrix fact rows are absent")
+    existing: dict[str, Mapping[str, Any]] = {}
+    for candidate in frozen_rows:
+        if not isinstance(candidate, Mapping):
+            raise ValueError("frozen matrix fact row is invalid")
+        fact_id = candidate.get("fact_id")
+        if not isinstance(fact_id, str) or fact_id in existing:
+            raise ValueError("frozen matrix fact authority is invalid")
+        existing[fact_id] = candidate
+
+    prefix = model_context.fact_key_authority.new_fact_key_prefix
+    for proposal in frame.public_projection_items:
+        row = proposal.source_row
+        if row.fact_key.startswith("FACT_"):
+            prior = existing.get(row.fact_key)
+            if prior is None:
+                raise ValueError("Dossier fact references an unknown formal FACT_ key")
+            if (
+                prior.get("category") != row.category
+                or prior.get("fact_target") != row.fact_target
+                or prior.get("materiality") != row.materiality
+            ):
+                raise ValueError("Dossier fact changes a frozen formal binding")
+            if row.source_scope != "PREVIOUS_AND_CURRENT_SOURCE":
+                raise ValueError("an existing Dossier fact must bind previous and current source")
+        elif row.fact_key.startswith(prefix):
+            if row.source_scope != "CURRENT_SOURCE":
+                raise ValueError("a new Dossier fact must bind only the current source")
+        else:
+            raise ValueError("Dossier NEW_ fact is outside the issued namespace")
+
+
+def _provider_item_identity(
+    frame_type: ParallelFrameType,
+    item: Mapping[str, Any],
+) -> str:
+    if frame_type == "DOSSIER_FRAME":
+        source_row = item.get("source_row")
+        if not isinstance(source_row, Mapping):
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_DOSSIER_SOURCE_ROW_INVALID"
+            )
+        return str(source_row.get("fact_key", ""))
+    return str(item.get("provider_slot_id", ""))
 
 
 def _provider_usage(

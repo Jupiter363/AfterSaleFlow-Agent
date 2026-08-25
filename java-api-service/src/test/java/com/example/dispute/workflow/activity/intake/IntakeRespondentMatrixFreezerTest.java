@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.util.List;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 
@@ -390,6 +391,29 @@ class IntakeRespondentMatrixFreezerTest {
                 .isEqualTo("ONE_SIDED");
         assertThat(candidate.at("/fact_rows/0/requires_resolution").asBoolean()).isTrue();
         freezer.requireCompleteForFreeze(candidate, respondentAuthority());
+    }
+
+    @Test
+    void carriesAPreviouslySubstantiveRespondentPositionAndClaimWithoutReattribution()
+            throws Exception {
+        ObjectNode parent = respondentBilateralMatrixWithDirectClaim();
+        ObjectNode delta = carryRespondentDelta(parent);
+        delta.remove("respondent_claim");
+        delta.withArray("fact_rows").forEach(row -> ((ObjectNode) row).remove(
+                List.of("agreed_statement", "conflict_summary")));
+
+        ObjectNode candidate = freezer.deriveCandidate(
+                parent, delta, nextRespondentAuthority());
+
+        assertThat(candidate.path("fact_rows")).isEqualTo(parent.path("fact_rows"));
+        assertThat(candidate.at("/claims/respondent_direct"))
+                .isEqualTo(parent.at("/claims/respondent_direct"));
+        assertThat(candidate.at("/claims/claim_conflict"))
+                .isEqualTo(parent.at("/claims/claim_conflict"));
+        assertThat(candidate.at("/fact_rows/0/positions/MERCHANT/source_refs"))
+                .noneSatisfy(source -> assertThat(source.asText())
+                        .isEqualTo("MESSAGE_RESPONDENT_3"));
+        freezer.requireCompleteForFreeze(candidate, nextRespondentAuthority());
     }
 
     @Test

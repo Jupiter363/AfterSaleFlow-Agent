@@ -333,8 +333,7 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
 {
   "public_projection_items": [
     {
-      "schema_version": "intake.dossier-public-patch-proposal.v1",
-      "provider_slot_id": "DPATCH_01",
+      "schema_version": "intake.dossier-public-fact-proposal.v2",
       "projection_kind": "CURRENT_FACT",
       "projection_path_id": "case_story.one_sentence_summary",
       "source_row": {
@@ -348,33 +347,13 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
         "source_scope": "CURRENT_SOURCE",
         "agreed_statement": null,
         "conflict_summary": null
-      },
-      "candidate_value": "当前来源事实摘要"
+      }
     }
   ],
   "frame_type": "DOSSIER_FRAME",
-  "schema_version": "intake.dossier-frame.v1",
+  "schema_version": "intake.dossier-frame.v2",
   "dossier_delta": {
-    "matrix_patch": {
-      "schema_version": "case_fact_matrix.delta.v2",
-      "fact_rows": [
-        {
-          "fact_key": "FACT_01",
-          "category": "PRODUCT_STATE",
-          "fact_target": "商品使用状态",
-          "materiality": "CORE",
-          "stance": "CONFIRM",
-          "position_summary": "当前来源事实摘要",
-          "asserted_value": "当前来源事实",
-          "source_scope": "CURRENT_SOURCE",
-          "agreed_statement": null,
-          "conflict_summary": null
-        }
-      ],
-      "summary_source_fact_keys": ["FACT_01"],
-      "respondent_claim": null
-    },
-    "public_projection_slots": ["DPATCH_01"]
+    "respondent_claim": null
   }
 }
 ```
@@ -382,13 +361,17 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
 限制：
 
 - 只写当前 actor 有权提供的本方字段；对方已有观点由服务端从上一持久矩阵承接。
-- 当前消息未表达态度时，current delta 为 `NOT_ADDRESSED`；这不允许抹掉历史 grounded attitude。
+- 当前消息未表达回应时，`respondent_claim=null`；这不允许抹掉历史 grounded attitude。
 - 不输出任何评分、缺口、ready、动作、remark 或 handoff。
 - fact key 必须逐字复制 authority 中的完整 key；新事实必须使用服务端提供的 namespace。
 - Dossier 可见面只允许 `CURRENT_FACT + case_story.one_sentence_summary`；该字段复用现有持久化结构，不引入新的卷宗成员。
-- typed `matrix_patch.fact_rows` 中每条 current-source、非 `NOT_ADDRESSED` 行都必须按原顺序形成一个可见 item；item 内完整 `source_row` 是首包阶段的 typed authority，`candidate_value` 必须与其 `position_summary` 逐字一致。前端按 item 顺序用中文分号拼接；0 条时允许 0 item。
-- Final Dossier Frame 的 matrix delta 必须与所有 accepted item 的完整 `source_row` 和 `public_projection_slots` exact reconciliation；不能遗漏、重排、重复或把 provisional item 改成另一值。claim/response 只留在 typed matrix，不能形成第二写主。
-- 初始输出预算建议不超过 4,096 tokens，后续按数据分布收敛。
+- 每条 current-source 事实只生成一次完整 `source_row`。`candidate_value`、`provider_slot_id`、`public_projection_slots`、`matrix_patch.fact_rows` 和 `summary_source_fact_keys` 都由服务端从该唯一行确定性派生，不再要求模型跨字段复制同一事实。
+- 每个 command 的 Provider-visible Dossier Schema 都由冻结矩阵和 authenticated capacity 请求级收窄：已有 key 是 exact `FACT_` 枚举，新 key 只能匹配该 event 的 `NEW_<namespace>_` 前缀；发起方 Schema 将 `respondent_claim` 固定为 `null`。Prompt 只解释同一规则，Python terminal validator 与 Java assembler 继续作为纵深拒绝边界。
+- Python 每闭合一个 item 即以 `source_row.fact_key` 作为 technical projection identity，并以 `source_row.position_summary` 流式公开；Java Assembler 按 accepted item 原顺序构造现有 `case_fact_matrix.delta.v2` 与 `case_story.one_sentence_summary`，最终 `IntakeTurnProposal` 结构不变。
+- Provider 仍只写本轮 current-source rows；Java 从 command-bound immutable previous dossier 读取 Java-owned frozen matrix，先按原 formal row 顺序补齐每个未更新父事实的 `PREVIOUS_MATRIX` carry，再追加当前 `NEW_` rows。现有 initiator/respondent freezer 仍是正式矩阵写入边界，缺父行、rebound、跨角色 claim 或 namespace 漂移全部 fail closed。
+- respondent 的纯事实后续轮若没有新 claim，Java carry 保留上一版 grounded respondent position、`respondent_direct` 与 `claim_conflict`，不得把历史陈述重新归因到当前 message，也不得用 `null` 清空历史权威。
+- Dossier v2 Provider Schema 把 source scope、substantive stance、非空文本与字段封闭规则直接暴露给模型；根级只保留 fact-key 唯一性和聚合长度纵深校验。
+- 初始输出预算建议不超过 2,048 tokens，后续按数据分布收敛。
 
 ### 7.3 Quality Frame
 
@@ -599,6 +582,8 @@ intake/{logical_run_id}/{attempt_id}/frames/QUALITY_FRAME/g{generation}
 这需要 Java 增加 attempt-scoped 的技术 staging authority（immutable Frame result、每个 Frame 的 current slot、assembly state、immutable Proposal artifact），但不增加三份业务 dossier/phase。technical staging 与 formal commit 是两个明确事务边界：T1 失败不产生正式事实，T2 formal rollback 不删除已 sealed Frame 或 READY assembly。回放时 Java 已正式提交则直接返回现有 terminal result；未提交时 Python 恢复 child checkpoint，只补交/重跑缺失 Frame，或让 Java 从 READY artifact 重新进入现有 finalization。已经落入 Java 的 sealed Frame exact replay 只返回同一 receipt，不重复 Provider 或正式业务副作用。
 
 ### 8.5 单路失败重跑状态机
+
+正常成功路径必须是三个 Frame 都在 generation 1 通过 Provider Schema、prefix validator 和 terminal validator；局部重跑只是一层故障恢复能力，不能作为掩盖高频首代失败的正常完成路径。每次 UAT 先以 `provider_call_count=1`、无 `frame_generation_reset` 作为第一道门，只有第一道门稳定通过后，才用故障注入验收下面的单路重跑状态机。
 
 Frame child 不得把 Provider/Schema 错误传播成父图整体异常。每个 child 必须捕获可预期失败，把一个 `FrameAttemptResult` 写入自己的 terminal checkpoint：
 
@@ -886,7 +871,7 @@ Parallel Profile 使用新的 `agent-stream.v4`；既有 `agent-stream.v3` 的�
 
 1. Python 取得 command-level exact-three Provider group lease 后，一次向 Java 提交三个 Frame manifest。Java 原子写 `PARALLEL_FRAME_SET_ADMITTED`、三个 provider-call lease 和三条 `public_frame_start` outbox；Python 只有收到该 durable admission ack 才可 fan-out。admission 失败时 Provider 调用数必须为零。
 2. 三个模型随后并发运行。Provider 首包只记录 `provider_first_byte_at[frame]` telemetry，不进入公开 SSE，也不被当作首个可见内容。
-3. 三个 Provider Schema 的物理首字段都是 `public_projection_items`。增量 projector 只在一个数组对象完整闭合后产生内部 item；对应 request-bound prefix validator 返回 canonical item 后，才进入 Python bounded fair merge queue。Dossier item 还必须在此边界证明其 typed current-source `source_row` 合法且 `candidate_value` 逐字等于 `position_summary`。半 JSON、arbitrary string prefix、raw proposal、reasoning 或单 item 校验失败永不公开；完整 Frame 后续与 matrix trace 不一致时整代 reset，不能沿用该代 item。
+3. 三个 Provider Schema 的物理首字段都是 `public_projection_items`。增量 projector 只在一个数组对象完整闭合后产生内部 item；对应 request-bound prefix validator 返回 canonical item 后，才进入 Python bounded fair merge queue。Dossier v2 item 必须在此边界证明唯一 typed current-source `source_row` 合法，公开值直接取其 `position_summary`，technical identity 直接取其 `fact_key`。半 JSON、arbitrary string prefix、raw proposal、reasoning 或单 item 校验失败永不公开；Dossier 不再存在另一份 matrix row、candidate 或 slot trace 可与该代前缀漂移。
 4. 唯一 multiplex ingress 交错发送三路 canonical item。每个 item 必须先由 Java 原子持久化 immutable item、per-Frame `next_local_index`/projection hash、durable stream event 和 outbox，事务提交后才能由 SSE relay。每路只依赖自己的 local index；connection-scoped `transport_sequence` 仅检查当前会话完整性。
 5. 任一 Frame 完整 Schema 校验、accepted item trace terminal reconciliation 和 child checkpoint 全部完成后，private ingress 发送 `FRAME_SEALED`、canonical Frame payload 与 checkpoint proof。Java 在同一 staging 事务中写 immutable result/current slot、public sealed event/outbox 和 opaque receipt；完整私有 payload不转发前端。
 6. exact three current slots 首次齐全后，Java technical assembly 写 READY、不可变 Proposal artifact 与 Graph FINAL/RoomGraphResult；ledger 进入 RESULT_READY 后，由现有 Target outer finalizer 在唯一正式事务中提交业务事实并写正式 terminal receipt。Python 只等待正式 terminal receipt并结束 Graph，绝不生产或补发 run-level final。

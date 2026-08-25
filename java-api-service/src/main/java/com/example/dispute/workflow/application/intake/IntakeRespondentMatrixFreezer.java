@@ -256,9 +256,6 @@ public final class IntakeRespondentMatrixFreezer {
         requireExactFields(overview, OVERVIEW_FIELDS, "bilateral overview");
         requiredText(overview, "neutral_summary", 20_000);
         String coreConflict = requiredText(overview, "core_conflict", 20_000);
-        validateBilateralClaims(
-                matrix, authority, declaredSources, latestSource, coreConflict);
-
         JsonNode rowsNode = matrix.path("fact_rows");
         if (!rowsNode.isArray() || rowsNode.isEmpty() || rowsNode.size() > 200) {
             throw rejected(
@@ -272,16 +269,24 @@ public final class IntakeRespondentMatrixFreezer {
         }
         List<String> coreIds = new ArrayList<>();
         List<String> requiresResolutionIds = new ArrayList<>();
+        Set<String> respondentPositionSources = new LinkedHashSet<>();
         for (JsonNode row : rowsNode) {
             validateBilateralRow(
                     row,
                     authority,
                     declaredSources,
+                    respondentPositionSources,
                     ids,
                     byStatus,
                     coreIds,
                     requiresResolutionIds);
         }
+        validateBilateralClaims(
+                matrix,
+                authority,
+                declaredSources,
+                respondentPositionSources,
+                coreConflict);
         validateSummaryIds(overview, ids);
         validateBilateralIndexes(matrix, byStatus, coreIds, requiresResolutionIds);
     }
@@ -319,6 +324,8 @@ public final class IntakeRespondentMatrixFreezer {
     private static ObjectNode derive(
             ObjectNode parent, ValidatedDelta delta, MatrixAuthority authority) {
         ParentIndex parentIndex = ParentIndex.from(parent);
+        boolean bilateralParent = "BILATERAL_FROZEN".equals(
+                parent.path("matrix_kind").asText());
         Map<String, String> resolvedKeys = new LinkedHashMap<>();
         Set<String> resolvedIds = new HashSet<>();
         Set<String> carriedParentIds = new HashSet<>();
@@ -375,7 +382,7 @@ public final class IntakeRespondentMatrixFreezer {
                         "respondent matrix delta resolves more than one row to the same fact");
             }
             resolvedKeys.put(item.factKey(), factId);
-            rows.add(deriveRow(prior, factId, item, authority));
+            rows.add(deriveRow(prior, factId, item, authority, bilateralParent));
         }
 
         if (!carriedParentIds.equals(parentIndex.byId().keySet())) {
@@ -435,7 +442,15 @@ public final class IntakeRespondentMatrixFreezer {
     }
 
     private static ObjectNode deriveRow(
-            ObjectNode prior, String factId, DeltaRow item, MatrixAuthority authority) {
+            ObjectNode prior,
+            String factId,
+            DeltaRow item,
+            MatrixAuthority authority,
+            boolean bilateralParent) {
+        if (bilateralParent
+                && isExactPreviousCarry(prior, item, authority.respondentRole())) {
+            return prior.deepCopy();
+        }
         ObjectNode row = JsonNodeFactory.instance.objectNode();
         row.put("fact_id", factId);
         row.put("category", item.category());
@@ -467,6 +482,23 @@ public final class IntakeRespondentMatrixFreezer {
                     prior.required("evidence_coverage_status").deepCopy());
         }
         return row;
+    }
+
+    private static boolean isExactPreviousCarry(
+            ObjectNode prior, DeltaRow item, ActorRole respondentRole) {
+        if (prior == null || !"PREVIOUS_MATRIX".equals(item.sourceScope())) {
+            return false;
+        }
+        ObjectNode priorPosition = (ObjectNode) prior.required("positions")
+                .required(respondentRole.name());
+        return item.stance().equals(priorPosition.path("stance").asText())
+                && item.positionSummary().equals(
+                        priorPosition.path("position_summary").asText())
+                && Objects.equals(
+                        item.assertedValue(),
+                        nullableText(priorPosition.get("asserted_value")))
+                && item.agreedStatement() == null
+                && item.conflictSummary() == null;
     }
 
     private static ObjectNode origin(ObjectNode prior, DeltaRow item, String currentSource) {
@@ -603,8 +635,8 @@ public final class IntakeRespondentMatrixFreezer {
                 "respondent_reported_by_initiator",
                 prior.required("respondent_reported_by_initiator").deepCopy());
         if (proposal == null) {
-            claims.putNull("respondent_direct");
-            claims.putNull("claim_conflict");
+            claims.set("respondent_direct", prior.required("respondent_direct").deepCopy());
+            claims.set("claim_conflict", prior.required("claim_conflict").deepCopy());
             return claims;
         }
         ObjectNode direct = claims.putObject("respondent_direct");
@@ -778,7 +810,7 @@ public final class IntakeRespondentMatrixFreezer {
             ObjectNode matrix,
             MatrixAuthority authority,
             Set<String> declaredSources,
-            String latestSource,
+            Set<String> respondentPositionSources,
             String coreConflict) {
         ObjectNode claims = requiredObject(matrix, "claims", "bilateral claims");
         requireExactFields(claims, CLAIM_FIELDS, "bilateral claims");
@@ -894,10 +926,11 @@ public final class IntakeRespondentMatrixFreezer {
                 "direct respondent source refs");
         requireDeclaredSources(
                 directSources, declaredSources, "direct respondent source refs");
-        if (!directSources.equals(List.of(latestSource))) {
+        if (directSources.size() != 1
+                || !respondentPositionSources.contains(directSources.getFirst())) {
             throw rejected(
                     "INTAKE_RESPONDENT_MATRIX_SOURCE_SCOPE_INVALID",
-                    "direct respondent claim must bind the latest respondent source");
+                    "direct respondent claim must bind a grounded respondent source");
         }
         if (!claimConflict.isTextual()
                 || claimConflict.asText().isBlank()
@@ -912,6 +945,7 @@ public final class IntakeRespondentMatrixFreezer {
             JsonNode candidate,
             MatrixAuthority authority,
             Set<String> declaredSources,
+            Set<String> respondentPositionSources,
             List<String> ids,
             Map<String, List<String>> byStatus,
             List<String> coreIds,
@@ -983,6 +1017,7 @@ public final class IntakeRespondentMatrixFreezer {
                 respondentPosition,
                 declaredSources,
                 "bilateral respondent position");
+        respondentPositionSources.addAll(textValues(respondentPosition.path("source_refs")));
 
         ObjectNode alignment = requiredObject(row, "party_alignment", "bilateral alignment");
         requireExactFields(alignment, ALIGNMENT_FIELDS, "bilateral alignment");

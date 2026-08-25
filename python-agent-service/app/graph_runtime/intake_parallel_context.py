@@ -240,6 +240,7 @@ def build_parallel_turn_model_material_from_command(
         capacity=capacity,
     )
     matrix_projection = _matrix_projection(matrix)
+    formal_fact_keys = _formal_fact_keys(matrix_projection)
     model_context = IntakeModelContextViewV1.seal(
         {
             "contract_version": "intake.model-context-view.v1",
@@ -265,6 +266,10 @@ def build_parallel_turn_model_material_from_command(
                 "version": _matrix_version(matrix),
                 "sha256": canonical_sha256(matrix_projection),
                 "payload": matrix_projection,
+            },
+            "fact_key_authority": {
+                "existing_fact_keys": formal_fact_keys,
+                "new_fact_key_prefix": _new_fact_key_prefix(event.event_hash),
             },
             "recent_dialogue_messages": _party_messages(
                 snapshot,
@@ -389,6 +394,35 @@ def _matrix_projection(matrix: Mapping[str, Any]) -> dict[str, Any]:
     if not required <= set(projected):
         raise GraphContractError("parallel Intake matrix projection is incomplete")
     return cast(dict[str, Any], _provider_safe(projected))
+
+
+def _formal_fact_keys(matrix: Mapping[str, Any]) -> tuple[str, ...]:
+    rows = matrix.get("fact_rows")
+    if not isinstance(rows, list) or len(rows) > 200:
+        raise GraphContractError("parallel Intake frozen fact rows are invalid")
+    keys: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise GraphContractError("parallel Intake frozen fact row is invalid")
+        fact_id = row.get("fact_id")
+        if (
+            not isinstance(fact_id, str)
+            or not fact_id.startswith("FACT_")
+            or len(fact_id) > 128
+        ):
+            raise GraphContractError("parallel Intake frozen fact id is invalid")
+        keys.append(fact_id)
+    if len(keys) != len(set(keys)):
+        raise GraphContractError("parallel Intake frozen fact ids are not unique")
+    return tuple(keys)
+
+
+def _new_fact_key_prefix(source_event_sha256: str) -> str:
+    if len(source_event_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in source_event_sha256
+    ):
+        raise GraphContractError("parallel Intake source event hash is invalid")
+    return f"NEW_{source_event_sha256[:24].upper()}_"
 
 
 def _dossier_projection(dossier: Mapping[str, Any]) -> dict[str, Any]:

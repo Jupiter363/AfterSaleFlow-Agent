@@ -34,6 +34,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -99,8 +100,16 @@ public final class IntakeParallelFrameAssembler {
 
         QualityOutcome proposedQuality = quality(
                 frames.get(FrameType.QUALITY_FRAME).document(), command.actorRole());
-        DossierOutcome dossier = dossier(frames.get(FrameType.DOSSIER_FRAME).document());
-        QualityOutcome quality = reconcileQualityGaps(proposedQuality, dossier.matrixPatch());
+        DossierOutcome dossier = dossier(
+                frames.get(FrameType.DOSSIER_FRAME).document(),
+                previous,
+                command.actorRole(),
+                command.sourceEventHash());
+        QualityOutcome quality = reconcileQualityGaps(
+                proposedQuality,
+                dossier.matrixPatch(),
+                previous,
+                command.actorRole());
         StateOutcome state = nextState(
                 previousPhase,
                 currentAction,
@@ -162,23 +171,25 @@ public final class IntakeParallelFrameAssembler {
             requireText(document, "frame_type", frameType.name());
             requireText(document, "schema_version", switch (frameType) {
                 case DIALOGUE_FRAME -> "intake.dialogue-frame.v1";
-                case DOSSIER_FRAME -> "intake.dossier-frame.v1";
+                case DOSSIER_FRAME -> "intake.dossier-frame.v2";
                 case QUALITY_FRAME -> "intake.quality-frame.v1";
             });
             ArrayNode publicItems = requireArray(document.path("public_projection_items"),
                     "public_projection_items");
-            ArrayNode slots = switch (frameType) {
-                case DIALOGUE_FRAME -> requireArray(
-                        document.path("dialogue").path("public_projection_slots"),
-                        "dialogue.public_projection_slots");
-                case DOSSIER_FRAME -> requireArray(
-                        document.path("dossier_delta").path("public_projection_slots"),
-                        "dossier_delta.public_projection_slots");
-                case QUALITY_FRAME -> requireArray(
-                        document.path("quality").path("public_projection_slots"),
-                        "quality.public_projection_slots");
-            };
-            requireProjectionSlots(publicItems, slots, frame.nextLocalIndex());
+            if (frameType == FrameType.DOSSIER_FRAME) {
+                requireDossierProjectionPrefix(publicItems, frame.nextLocalIndex());
+            } else {
+                ArrayNode slots = switch (frameType) {
+                    case DIALOGUE_FRAME -> requireArray(
+                            document.path("dialogue").path("public_projection_slots"),
+                            "dialogue.public_projection_slots");
+                    case QUALITY_FRAME -> requireArray(
+                            document.path("quality").path("public_projection_slots"),
+                            "quality.public_projection_slots");
+                    case DOSSIER_FRAME -> throw invalid("Dossier slots are server-derived");
+                };
+                requireProjectionSlots(publicItems, slots, frame.nextLocalIndex());
+            }
             parsed.put(frameType, new ParsedFrame(frame, document));
         }
         return Map.copyOf(parsed);
@@ -197,6 +208,23 @@ public final class IntakeParallelFrameAssembler {
             String finalSlot = identifier(slots.get(index).asText(null), "public_projection_slot");
             if (!itemSlot.equals(finalSlot) || !observed.add(itemSlot)) {
                 throw invalid("Frame projection slots are missing, reordered, or repeated");
+            }
+        }
+    }
+
+    private static void requireDossierProjectionPrefix(
+            ArrayNode publicItems, long nextLocalIndex) {
+        if (publicItems.size() != nextLocalIndex) {
+            throw invalid("Dossier final facts do not match the durable prefix length");
+        }
+        Set<String> factKeys = new LinkedHashSet<>();
+        for (JsonNode item : publicItems) {
+            JsonNode sourceRow = requireObject(item.path("source_row"), "source_row");
+            String factKey = identifier(
+                    sourceRow.path("fact_key").asText(null),
+                    "source_row.fact_key");
+            if (!factKeys.add(factKey)) {
+                throw invalid("Dossier current-source facts repeat a fact key");
             }
         }
     }
@@ -243,7 +271,11 @@ public final class IntakeParallelFrameAssembler {
         }
     }
 
-    private static DossierOutcome dossier(JsonNode frame) {
+    private static DossierOutcome dossier(
+            JsonNode frame,
+            ObjectNode previousDossier,
+            String actorRole,
+            String sourceEventHash) {
         requireExactFields(
                 frame,
                 Set.of("public_projection_items", "frame_type", "schema_version", "dossier_delta"),
@@ -251,55 +283,45 @@ public final class IntakeParallelFrameAssembler {
         JsonNode delta = requireObject(frame.path("dossier_delta"), "dossier_delta");
         requireExactFields(
                 delta,
-                Set.of("matrix_patch", "public_projection_slots"),
+                Set.of("respondent_claim"),
                 "dossier_delta");
-        JsonNode matrixPatch = delta.get("matrix_patch");
-        if (matrixPatch != null && !matrixPatch.isNull() && !matrixPatch.isObject()) {
-            throw invalid("matrix_patch must be an object or null");
-        }
-        ObjectNode dossierPatch = materializeDossierPatch(
-                requireArray(
-                        frame.path("public_projection_items"),
-                        "dossier public_projection_items"),
-                matrixPatch);
+        ArrayNode publicItems = requireArray(
+                frame.path("public_projection_items"),
+                "dossier public_projection_items");
+        ObjectNode dossierPatch = materializeDossierPatch(publicItems);
+        JsonNode matrixPatch = materializeMatrixPatch(
+                publicItems,
+                delta,
+                previousDossier,
+                actorRole,
+                sourceEventHash);
         return new DossierOutcome(
                 dossierPatch,
                 matrixPatch == null || matrixPatch.isNull() ? null : matrixPatch.deepCopy());
     }
 
-    private static ObjectNode materializeDossierPatch(ArrayNode items, JsonNode matrixPatch) {
-        List<JsonNode> expectedRows = currentSourceFactRows(matrixPatch);
-        if (items.size() != expectedRows.size()) {
-            throw invalid("Dossier public facts differ from the typed matrix delta");
-        }
+    private static ObjectNode materializeDossierPatch(ArrayNode items) {
         ObjectNode patch = JsonNodeFactory.instance.objectNode();
         if (items.isEmpty()) {
             return patch;
         }
         List<String> summaries = new ArrayList<>();
-        for (int index = 0; index < items.size(); index++) {
-            JsonNode item = items.get(index);
+        for (JsonNode item : items) {
             requireExactFields(
                     item,
                     Set.of(
                             "schema_version",
-                            "provider_slot_id",
                             "projection_kind",
                             "projection_path_id",
-                            "source_row",
-                            "candidate_value"),
+                            "source_row"),
                     "Dossier projection item");
             requireText(
                     item,
                     "schema_version",
-                    "intake.dossier-public-patch-proposal.v1");
-            identifier(item.path("provider_slot_id").asText(null), "provider_slot_id");
+                    "intake.dossier-public-fact-proposal.v2");
             requireText(item, "projection_kind", "CURRENT_FACT");
             requireText(item, "projection_path_id", "case_story.one_sentence_summary");
             JsonNode sourceRow = requireObject(item.path("source_row"), "source_row");
-            if (!sourceRow.equals(expectedRows.get(index))) {
-                throw invalid("Dossier public fact source row differs from the typed matrix delta");
-            }
             String sourceScope = sourceRow.path("source_scope").asText("");
             String stance = sourceRow.path("stance").asText("");
             if (!("CURRENT_SOURCE".equals(sourceScope)
@@ -311,14 +333,7 @@ public final class IntakeParallelFrameAssembler {
                     sourceRow.path("position_summary"),
                     20_000,
                     "source_row.position_summary");
-            String candidate = preservedBoundedText(
-                    item.path("candidate_value"),
-                    20_000,
-                    "candidate_value");
-            if (!candidate.equals(positionSummary)) {
-                throw invalid("Dossier public fact differs from its typed source row");
-            }
-            summaries.add(candidate);
+            summaries.add(positionSummary);
         }
         String summary = preservedBoundedText(
                 String.join("；", summaries),
@@ -328,19 +343,173 @@ public final class IntakeParallelFrameAssembler {
         return patch;
     }
 
-    private static List<JsonNode> currentSourceFactRows(JsonNode matrixPatch) {
-        if (matrixPatch == null || matrixPatch.isNull()) {
-            return List.of();
+    private static JsonNode materializeMatrixPatch(
+            ArrayNode items,
+            JsonNode delta,
+            ObjectNode previousDossier,
+            String actorRole,
+            String sourceEventHash) {
+        JsonNode respondentClaim = delta.get("respondent_claim");
+        if (respondentClaim != null
+                && !respondentClaim.isNull()
+                && !respondentClaim.isObject()) {
+            throw invalid("respondent_claim must be an object or null");
         }
-        requireText(matrixPatch, "schema_version", "case_fact_matrix.delta.v2");
-        ArrayNode rows = requireArray(matrixPatch.path("fact_rows"), "matrix_patch.fact_rows");
-        List<JsonNode> selected = new ArrayList<>();
-        for (JsonNode row : rows) {
-            if (isSubstantiveCurrentSourceRow(row)) {
-                selected.add(row);
+        if (items.isEmpty()) {
+            if (respondentClaim != null && !respondentClaim.isNull()) {
+                throw invalid("Dossier respondent claim requires one current-source fact");
+            }
+            return null;
+        }
+        MatrixInputAuthority authority = matrixInputAuthority(previousDossier, actorRole);
+        if (respondentClaim != null
+                && !respondentClaim.isNull()
+                && !actorRole.equals(authority.respondentRole())) {
+            throw invalid("respondent_claim requires the Java-authorized respondent actor");
+        }
+        String newFactPrefix = newFactKeyPrefix(sourceEventHash);
+        ObjectNode matrixPatch = JsonNodeFactory.instance.objectNode();
+        matrixPatch.put("schema_version", "case_fact_matrix.delta.v2");
+        ArrayNode rows = matrixPatch.putArray("fact_rows");
+        ArrayNode summaryKeys = matrixPatch.putArray("summary_source_fact_keys");
+        Set<String> factKeys = new LinkedHashSet<>();
+        Map<String, ObjectNode> currentExisting = new LinkedHashMap<>();
+        List<ObjectNode> currentNew = new ArrayList<>();
+        for (JsonNode item : items) {
+            ObjectNode sourceRow = requireObject(item.path("source_row"), "source_row");
+            if (!isSubstantiveCurrentSourceRow(sourceRow)) {
+                throw invalid("Dossier fact has no substantive current-source authority");
+            }
+            String factKey = identifier(
+                    sourceRow.path("fact_key").asText(null),
+                    "source_row.fact_key");
+            if (!factKeys.add(factKey)) {
+                throw invalid("Dossier current-source facts repeat a fact key");
+            }
+            summaryKeys.add(factKey);
+            if (factKey.startsWith("FACT_")) {
+                ObjectNode prior = authority.rowsByFactId().get(factKey);
+                if (prior == null) {
+                    throw invalid("Dossier fact references an unknown formal FACT_ key");
+                }
+                requireStableFactBinding(prior, sourceRow);
+                requireText(sourceRow, "source_scope", "PREVIOUS_AND_CURRENT_SOURCE");
+                currentExisting.put(factKey, sourceRow.deepCopy());
+            } else if (factKey.startsWith(newFactPrefix)) {
+                requireText(sourceRow, "source_scope", "CURRENT_SOURCE");
+                currentNew.add(sourceRow.deepCopy());
+            } else {
+                throw invalid("Dossier NEW_ fact is outside the issued namespace");
             }
         }
-        return List.copyOf(selected);
+        for (ObjectNode prior : authority.rowsInOrder()) {
+            String factId = identifier(prior.path("fact_id").asText(null), "formal fact_id");
+            ObjectNode current = currentExisting.get(factId);
+            rows.add(current == null
+                    ? previousMatrixCarry(
+                            prior,
+                            actorRole,
+                            actorRole.equals(authority.respondentRole()))
+                    : current.deepCopy());
+        }
+        currentNew.forEach(row -> rows.add(row.deepCopy()));
+        if (respondentClaim == null || respondentClaim.isNull()) {
+            matrixPatch.putNull("respondent_claim");
+        } else {
+            matrixPatch.set("respondent_claim", respondentClaim.deepCopy());
+        }
+        return matrixPatch;
+    }
+
+    private static MatrixInputAuthority matrixInputAuthority(
+            ObjectNode previousDossier, String actorRole) {
+        ObjectNode matrix = requireObject(
+                previousDossier.path("case_fact_matrix"),
+                "previousDossier.case_fact_matrix");
+        ObjectNode partyMap = requireObject(matrix.path("party_map"), "matrix party_map");
+        requireExactFields(
+                partyMap,
+                Set.of("initiator_role", "respondent_role"),
+                "matrix party_map");
+        String initiatorRole = partyMap.path("initiator_role").asText("");
+        String respondentRole = partyMap.path("respondent_role").asText("");
+        if (!ACTOR_ROLES.contains(initiatorRole)
+                || !ACTOR_ROLES.contains(respondentRole)
+                || initiatorRole.equals(respondentRole)
+                || (!actorRole.equals(initiatorRole) && !actorRole.equals(respondentRole))) {
+            throw invalid("Dossier actor has no capacity in the frozen matrix");
+        }
+        String matrixKind = matrix.path("matrix_kind").asText("");
+        if ((actorRole.equals(initiatorRole) && !"INITIATOR_FROZEN".equals(matrixKind))
+                || (actorRole.equals(respondentRole)
+                        && !Set.of("INITIATOR_FROZEN", "BILATERAL_FROZEN")
+                                .contains(matrixKind))) {
+            throw invalid("Dossier actor cannot update this frozen matrix kind");
+        }
+        ArrayNode formalRows = requireArray(matrix.path("fact_rows"), "matrix fact_rows");
+        if (formalRows.size() > 200) {
+            throw invalid("frozen matrix exceeds the formal fact limit");
+        }
+        List<ObjectNode> rowsInOrder = new ArrayList<>();
+        Map<String, ObjectNode> rowsByFactId = new LinkedHashMap<>();
+        for (JsonNode candidate : formalRows) {
+            ObjectNode row = requireObject(candidate, "formal matrix fact row");
+            String factId = identifier(row.path("fact_id").asText(null), "formal fact_id");
+            if (!factId.startsWith("FACT_") || rowsByFactId.putIfAbsent(factId, row) != null) {
+                throw invalid("frozen matrix fact authority is invalid");
+            }
+            ObjectNode positions = requireObject(row.path("positions"), "formal fact positions");
+            requireObject(positions.path(actorRole), "formal actor position");
+            rowsInOrder.add(row);
+        }
+        return new MatrixInputAuthority(
+                initiatorRole,
+                respondentRole,
+                List.copyOf(rowsInOrder),
+                Map.copyOf(rowsByFactId));
+    }
+
+    private static void requireStableFactBinding(ObjectNode prior, ObjectNode current) {
+        for (String field : List.of("category", "fact_target", "materiality")) {
+            if (!prior.path(field).equals(current.path(field))) {
+                throw invalid("Dossier fact changes a frozen formal binding");
+            }
+        }
+    }
+
+    private static ObjectNode previousMatrixCarry(
+            ObjectNode prior, String actorRole, boolean respondentCarry) {
+        ObjectNode position = requireObject(
+                prior.path("positions").path(actorRole),
+                "formal actor position");
+        ObjectNode carry = JsonNodeFactory.instance.objectNode();
+        carry.set("fact_key", prior.required("fact_id").deepCopy());
+        carry.set("category", prior.required("category").deepCopy());
+        carry.set("fact_target", prior.required("fact_target").deepCopy());
+        carry.set("materiality", prior.required("materiality").deepCopy());
+        // Initiator carries use the existing NOT_ADDRESSED sentinel understood by
+        // IntakeInitiatorMatrixDeltaFreezer. Respondent carries retain the exact
+        // previous position so the respondent freezer can preserve it byte-for-byte.
+        if (respondentCarry) {
+            carry.set("stance", position.required("stance").deepCopy());
+            carry.set("position_summary", position.required("position_summary").deepCopy());
+            JsonNode asserted = position.get("asserted_value");
+            carry.set(
+                    "asserted_value",
+                    asserted == null ? JsonNodeFactory.instance.nullNode() : asserted.deepCopy());
+        } else {
+            carry.put("stance", "NOT_ADDRESSED");
+            carry.set("position_summary", position.required("position_summary").deepCopy());
+            carry.putNull("asserted_value");
+        }
+        carry.put("source_scope", "PREVIOUS_MATRIX");
+        return carry;
+    }
+
+    private static String newFactKeyPrefix(String sourceEventHash) {
+        return "NEW_" + sha256(sourceEventHash, "sourceEventHash")
+                .substring(0, 24)
+                .toUpperCase(Locale.ROOT) + "_";
     }
 
     private static QualityOutcome quality(JsonNode frame, String actorRole) {
@@ -496,11 +665,17 @@ public final class IntakeParallelFrameAssembler {
     }
 
     private static QualityOutcome reconcileQualityGaps(
-            QualityOutcome quality, JsonNode matrixPatch) {
+            QualityOutcome quality,
+            JsonNode matrixPatch,
+            ObjectNode previousDossier,
+            String actorRole) {
         if (quality.gaps().isEmpty()) {
             return quality;
         }
         Map<String, JsonNode> matrixRows = matrixRowsByFactKey(matrixPatch);
+        Set<String> frozenFactIds = matrixInputAuthority(previousDossier, actorRole)
+                .rowsByFactId()
+                .keySet();
         List<Gap> unresolved = new ArrayList<>();
         for (Gap gap : quality.gaps()) {
             if (gap.factKeys().isEmpty()) {
@@ -511,7 +686,12 @@ public final class IntakeParallelFrameAssembler {
             for (String factKey : gap.factKeys()) {
                 JsonNode row = matrixRows.get(factKey);
                 if (row == null) {
-                    throw invalid("Quality gap references a fact outside the Dossier matrix authority");
+                    if (!frozenFactIds.contains(factKey)) {
+                        throw invalid(
+                                "Quality gap references a fact outside the Dossier matrix authority");
+                    }
+                    everyBindingCoveredByCurrentSource = false;
+                    continue;
                 }
                 if (!isSubstantiveCurrentSourceRow(row)) {
                     everyBindingCoveredByCurrentSource = false;
@@ -1137,6 +1317,12 @@ public final class IntakeParallelFrameAssembler {
     }
 
     private record ParsedFrame(SealedFrame frame, JsonNode document) {}
+
+    private record MatrixInputAuthority(
+            String initiatorRole,
+            String respondentRole,
+            List<ObjectNode> rowsInOrder,
+            Map<String, ObjectNode> rowsByFactId) {}
 
     private record DossierOutcome(ObjectNode dossierPatch, JsonNode matrixPatch) {}
 

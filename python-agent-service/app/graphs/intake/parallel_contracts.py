@@ -75,7 +75,7 @@ FRAME_PROMPT_PROFILE: Mapping[ParallelFrameType, PromptProfileId] = {
 
 FRAME_OUTPUT_SCHEMA: Mapping[ParallelFrameType, Identifier] = {
     "DIALOGUE_FRAME": "intake-dialogue-frame.v1",
-    "DOSSIER_FRAME": "intake-dossier-frame.v1",
+    "DOSSIER_FRAME": "intake-dossier-frame.v2",
     "QUALITY_FRAME": "intake-quality-frame.v1",
 }
 
@@ -314,6 +314,26 @@ class IntakeFrozenMatrixViewV1(StrictParallelModel):
         return self
 
 
+class IntakeFactKeyAuthorityV1(StrictParallelModel):
+    existing_fact_keys: tuple[Identifier, ...] = Field(max_length=200)
+    new_fact_key_prefix: Annotated[
+        str,
+        StringConstraints(
+            min_length=29,
+            max_length=29,
+            pattern=r"NEW_[A-F0-9]{24}_",
+        ),
+    ]
+
+    @model_validator(mode="after")
+    def validate_existing_keys(self) -> IntakeFactKeyAuthorityV1:
+        if len(self.existing_fact_keys) != len(set(self.existing_fact_keys)):
+            raise ValueError("existing fact-key authority must be unique")
+        if any(not key.startswith("FACT_") for key in self.existing_fact_keys):
+            raise ValueError("existing fact-key authority only accepts formal FACT_ keys")
+        return self
+
+
 class IntakeDialogueMessageViewV1(StrictParallelModel):
     sequence: int = Field(ge=0)
     speaker_role: PartyRole
@@ -354,6 +374,7 @@ class IntakeModelContextViewV1(_SelfHashedParallelModel):
         max_length=8
     )
     frozen_case_matrix: IntakeFrozenMatrixViewV1
+    fact_key_authority: IntakeFactKeyAuthorityV1
     recent_dialogue_messages: tuple[IntakeDialogueMessageViewV1, ...] = Field(
         max_length=6
     )
@@ -389,6 +410,19 @@ class IntakeModelContextViewV1(_SelfHashedParallelModel):
             for slot in self.authorized_question_slots
         ):
             raise ValueError("authorized question slot targets a foreign capacity")
+        rows = self.frozen_case_matrix.payload.get("fact_rows")
+        if not isinstance(rows, list):
+            raise ValueError("frozen matrix fact rows are absent")
+        formal_keys: list[str] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise ValueError("frozen matrix fact row is invalid")
+            fact_id = row.get("fact_id")
+            if not isinstance(fact_id, str) or not fact_id.startswith("FACT_"):
+                raise ValueError("frozen matrix fact id is invalid")
+            formal_keys.append(fact_id)
+        if tuple(formal_keys) != self.fact_key_authority.existing_fact_keys:
+            raise ValueError("fact-key authority differs from the frozen matrix")
         return self
 
 

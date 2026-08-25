@@ -6,10 +6,11 @@ from pydantic import ValidationError
 from app.graphs.intake.parallel_outputs import (
     FRAME_OUTPUT_MODELS,
     IntakeDialogueFrameV1,
-    DossierPublicPatchProposalV1,
-    IntakeDossierFrameV1,
+    DossierPublicFactProposalV2,
+    IntakeDossierFrameV2,
     IntakeQualityFrameV1,
     QualityPublicProjectionProposalV1,
+    request_bound_dossier_output_types,
     validate_parallel_frame_output,
 )
 
@@ -29,10 +30,11 @@ def test_exact_three_output_schemas_accept_java_assembler_shapes() -> None:
     )
 
     assert isinstance(dialogue, IntakeDialogueFrameV1)
-    assert isinstance(dossier, IntakeDossierFrameV1)
+    assert isinstance(dossier, IntakeDossierFrameV2)
     assert dossier.materialized_dossier_patch() == {
         "case_story": {"one_sentence_summary": "商品已使用约半小时。"}
     }
+    assert dossier.materialized_matrix_patch().model_dump(mode="json") == _matrix_patch()
     assert isinstance(quality, IntakeQualityFrameV1)
     assert sum(quality.quality.scores.model_dump().values()) == 85
     for model in FRAME_OUTPUT_MODELS.values():
@@ -52,11 +54,6 @@ def test_frame_schema_rejects_cross_lane_fields_and_independent_total_score() ->
 
 
 def test_frame_schema_rejects_projection_reordering_and_full_score_gap() -> None:
-    dossier = _dossier_frame()
-    dossier["dossier_delta"]["public_projection_slots"] = ["DPATCH_02"]
-    with pytest.raises(ValidationError, match="public projection slots"):
-        validate_parallel_frame_output("DOSSIER_FRAME", dossier)
-
     quality = _quality_frame()
     quality["quality"]["scores"]["references"] = 15
     with pytest.raises(ValidationError, match="full-score dimension"):
@@ -101,6 +98,68 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
         == 18
     )
 
+    dossier_schema = IntakeDossierFrameV2.model_json_schema()
+    dossier_item = dossier_schema["$defs"]["DossierPublicFactProposalV2"]
+    assert set(dossier_item["properties"]) == {
+        "schema_version",
+        "projection_kind",
+        "projection_path_id",
+        "source_row",
+    }
+    dossier_delta = dossier_schema["$defs"]["DossierFrameDeltaV2"]
+    assert set(dossier_delta["properties"]) == {"respondent_claim"}
+    source_row = dossier_schema["$defs"]["DossierCurrentFactRowV2"]["properties"]
+    assert set(source_row["source_scope"]["enum"]) == {
+        "CURRENT_SOURCE",
+        "PREVIOUS_AND_CURRENT_SOURCE",
+    }
+    assert "NOT_ADDRESSED" not in source_row["stance"]["enum"]
+    respondent_claim = dossier_schema["$defs"]["DossierRespondentClaimV2"]
+    assert "NOT_ADDRESSED" not in respondent_claim["properties"]["attitude"]["enum"]
+
+
+def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capacity() -> None:
+    frame_type, item_type = request_bound_dossier_output_types(
+        existing_fact_keys=("FACT_01",),
+        new_fact_key_prefix="NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
+        respondent_capacity=False,
+    )
+    payload = _dossier_frame()
+    assert item_type.model_validate(payload["public_projection_items"][0])
+    assert frame_type.model_validate(payload)
+
+    unknown = _dossier_frame()["public_projection_items"][0]
+    unknown["source_row"]["fact_key"] = "FACT_UNKNOWN"
+    with pytest.raises(ValidationError):
+        item_type.model_validate(unknown)
+
+    foreign_new = _dossier_frame()["public_projection_items"][0]
+    foreign_new["source_row"]["fact_key"] = "NEW_BBBBBBBBBBBBBBBBBBBBBBBB_FACT"
+    foreign_new["source_row"]["source_scope"] = "CURRENT_SOURCE"
+    with pytest.raises(ValidationError):
+        item_type.model_validate(foreign_new)
+
+    valid_new = _dossier_frame()["public_projection_items"][0]
+    valid_new["source_row"]["fact_key"] = "NEW_AAAAAAAAAAAAAAAAAAAAAAAA_FACT"
+    valid_new["source_row"]["source_scope"] = "CURRENT_SOURCE"
+    assert item_type.model_validate(valid_new)
+
+    initiator_claim = _dossier_frame()
+    initiator_claim["dossier_delta"]["respondent_claim"] = {
+        "attitude": "DISAGREE",
+        "position_summary": "不同意该诉求。",
+        "alternative_proposal": None,
+    }
+    with pytest.raises(ValidationError):
+        frame_type.model_validate(initiator_claim)
+
+    respondent_frame_type, _ = request_bound_dossier_output_types(
+        existing_fact_keys=("FACT_01",),
+        new_fact_key_prefix="NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
+        respondent_capacity=True,
+    )
+    assert respondent_frame_type.model_validate(initiator_claim)
+
 
 def test_quality_public_gap_is_a_root_discriminated_item_and_must_match_seal() -> None:
     quality = _quality_frame()
@@ -137,31 +196,40 @@ def test_dossier_public_items_are_the_only_registered_patch_authority() -> None:
         validate_parallel_frame_output("DOSSIER_FRAME", foreign)
 
     overlapping = _dossier_frame()
-    repeated = dict(overlapping["public_projection_items"][0])
-    repeated["provider_slot_id"] = "DPATCH_02"
+    repeated = {
+        **overlapping["public_projection_items"][0],
+        "source_row": dict(overlapping["public_projection_items"][0]["source_row"]),
+    }
     overlapping["public_projection_items"].append(repeated)
-    overlapping["dossier_delta"]["public_projection_slots"].append("DPATCH_02")
-    with pytest.raises(ValidationError, match="exactly project"):
+    with pytest.raises(ValidationError, match="unique fact keys"):
         validate_parallel_frame_output("DOSSIER_FRAME", overlapping)
 
 
 def test_dossier_public_item_requires_typed_current_source_authority_before_streaming() -> None:
     item = _dossier_frame()["public_projection_items"][0]
-    item["candidate_value"] = "与 typed source row 不一致"
-    with pytest.raises(ValidationError, match="typed source row"):
-        DossierPublicPatchProposalV1.model_validate(item)
+    item["source_row"]["source_scope"] = "PREVIOUS_MATRIX"
+    with pytest.raises(ValidationError, match="literal_error"):
+        DossierPublicFactProposalV2.model_validate(item)
 
     item = _dossier_frame()["public_projection_items"][0]
-    item["source_row"]["source_scope"] = "PREVIOUS_MATRIX"
-    with pytest.raises(ValidationError, match="current-source row"):
-        DossierPublicPatchProposalV1.model_validate(item)
+    item["source_row"]["stance"] = "NOT_ADDRESSED"
+    with pytest.raises(ValidationError, match="literal_error"):
+        DossierPublicFactProposalV2.model_validate(item)
+
+    item = _dossier_frame()["public_projection_items"][0]
+    item["source_row"]["position_summary"] = "   "
+    with pytest.raises(ValidationError, match="string_pattern_mismatch"):
+        DossierPublicFactProposalV2.model_validate(item)
 
 
-def test_dossier_summary_is_the_exact_ordered_projection_of_current_matrix_rows() -> None:
+def test_dossier_rows_are_generated_once_and_materialize_existing_contracts() -> None:
     dossier = _dossier_frame()
-    matrix = dossier["dossier_delta"]["matrix_patch"]
-    matrix["fact_rows"].append(
+    dossier["public_projection_items"].append(
         {
+            "schema_version": "intake.dossier-public-fact-proposal.v2",
+            "projection_kind": "CURRENT_FACT",
+            "projection_path_id": "case_story.one_sentence_summary",
+            "source_row": {
             "fact_key": "FACT_02",
             "category": "LOGISTICS",
             "fact_target": "商品外观状态",
@@ -172,20 +240,9 @@ def test_dossier_summary_is_the_exact_ordered_projection_of_current_matrix_rows(
             "source_scope": "CURRENT_SOURCE",
             "agreed_statement": None,
             "conflict_summary": None,
+            },
         }
     )
-    matrix["summary_source_fact_keys"].append("FACT_02")
-    dossier["public_projection_items"].append(
-        {
-            "schema_version": "intake.dossier-public-patch-proposal.v1",
-            "provider_slot_id": "DPATCH_02",
-            "projection_kind": "CURRENT_FACT",
-            "projection_path_id": "case_story.one_sentence_summary",
-            "source_row": dict(matrix["fact_rows"][1]),
-            "candidate_value": "商品外观完整。",
-        }
-    )
-    dossier["dossier_delta"]["public_projection_slots"].append("DPATCH_02")
 
     validated = validate_parallel_frame_output("DOSSIER_FRAME", dossier)
     assert validated.materialized_dossier_patch() == {
@@ -193,19 +250,17 @@ def test_dossier_summary_is_the_exact_ordered_projection_of_current_matrix_rows(
             "one_sentence_summary": "商品已使用约半小时。；商品外观完整。"
         }
     }
-
-    dossier["public_projection_items"][1]["candidate_value"] = "顺序或内容发生漂移"
-    with pytest.raises(ValidationError, match="typed source row"):
-        validate_parallel_frame_output("DOSSIER_FRAME", dossier)
+    matrix = validated.materialized_matrix_patch().model_dump(mode="json")
+    assert matrix["fact_rows"] == [
+        item["source_row"] for item in dossier["public_projection_items"]
+    ]
+    assert matrix["summary_source_fact_keys"] == ["FACT_01", "FACT_02"]
 
 
 def test_dossier_materialization_preserves_authoritative_whitespace() -> None:
     dossier = _dossier_frame()
-    row = dossier["dossier_delta"]["matrix_patch"]["fact_rows"][0]
+    row = dossier["public_projection_items"][0]["source_row"]
     row["position_summary"] = "  商品已使用约半小时。  "
-    item = dossier["public_projection_items"][0]
-    item["source_row"] = dict(row)
-    item["candidate_value"] = row["position_summary"]
 
     validated = validate_parallel_frame_output("DOSSIER_FRAME", dossier)
     assert validated.materialized_dossier_patch() == {
@@ -241,19 +296,16 @@ def _dossier_frame() -> dict[str, object]:
     return {
         "public_projection_items": [
             {
-                "schema_version": "intake.dossier-public-patch-proposal.v1",
-                "provider_slot_id": "DPATCH_01",
+                "schema_version": "intake.dossier-public-fact-proposal.v2",
                 "projection_kind": "CURRENT_FACT",
                 "projection_path_id": "case_story.one_sentence_summary",
                 "source_row": dict(matrix_patch["fact_rows"][0]),
-                "candidate_value": "商品已使用约半小时。",
             }
         ],
         "frame_type": "DOSSIER_FRAME",
-        "schema_version": "intake.dossier-frame.v1",
+        "schema_version": "intake.dossier-frame.v2",
         "dossier_delta": {
-            "matrix_patch": matrix_patch,
-            "public_projection_slots": ["DPATCH_01"],
+            "respondent_claim": None,
         },
     }
 
@@ -270,7 +322,7 @@ def _matrix_patch() -> dict[str, object]:
                 "stance": "CONFIRM",
                 "position_summary": "商品已使用约半小时。",
                 "asserted_value": "约半小时",
-                "source_scope": "CURRENT_SOURCE",
+                "source_scope": "PREVIOUS_AND_CURRENT_SOURCE",
                 "agreed_statement": None,
                 "conflict_summary": None,
             }

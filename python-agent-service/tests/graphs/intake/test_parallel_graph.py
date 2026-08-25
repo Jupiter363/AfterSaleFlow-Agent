@@ -693,8 +693,8 @@ async def test_invalid_dossier_source_row_never_emits_a_public_projection() -> N
     requests, contexts = _requests_and_contexts()
     outputs = deepcopy(_outputs())
     outputs["intake_turn_dossier_frame"]["public_projection_items"][0][
-        "candidate_value"
-    ] = "与 typed source row 不一致"
+        "source_row"
+    ]["source_scope"] = "PREVIOUS_MATRIX"
     sink = _CollectingSink()
 
     result = await orchestrator.execute(
@@ -1289,7 +1289,16 @@ def _model_context() -> IntakeModelContextViewV1:
         "quality": {"score_breakdown": {"references": 10}},
         "dossier_projection": {"event_story": "商品已经发货。"},
     }
-    matrix = {"facts": [{"fact_key": "FACT_01", "statement": "商品已经发货。"}]}
+    matrix = {
+        "fact_rows": [
+            {
+                "fact_id": "FACT_01",
+                "category": "PRODUCT_STATE",
+                "fact_target": "商品使用状态",
+                "materiality": "CORE",
+            }
+        ]
+    }
     question = "请说明签收时间。"
     previous_message = "请补充签收时间。"
     current_message = "商品于昨日签收。"
@@ -1324,6 +1333,10 @@ def _model_context() -> IntakeModelContextViewV1:
                 "version": 3,
                 "sha256": canonical_sha256(matrix),
                 "payload": matrix,
+            },
+            "fact_key_authority": {
+                "existing_fact_keys": ["FACT_01"],
+                "new_fact_key_prefix": "NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
             },
             "recent_dialogue_messages": [
                 {
@@ -1428,8 +1441,7 @@ def _outputs() -> dict[str, dict[str, Any]]:
         "intake_turn_dossier_frame": {
             "public_projection_items": [
                 {
-                    "schema_version": "intake.dossier-public-patch-proposal.v1",
-                    "provider_slot_id": "DPATCH_01",
+                    "schema_version": "intake.dossier-public-fact-proposal.v2",
                     "projection_kind": "CURRENT_FACT",
                     "projection_path_id": "case_story.one_sentence_summary",
                     "source_row": {
@@ -1440,36 +1452,16 @@ def _outputs() -> dict[str, dict[str, Any]]:
                         "stance": "CONFIRM",
                         "position_summary": "商品已使用约半小时。",
                         "asserted_value": "约半小时",
-                        "source_scope": "CURRENT_SOURCE",
+                        "source_scope": "PREVIOUS_AND_CURRENT_SOURCE",
                         "agreed_statement": None,
                         "conflict_summary": None,
                     },
-                    "candidate_value": "商品已使用约半小时。",
                 }
             ],
             "frame_type": "DOSSIER_FRAME",
-            "schema_version": "intake.dossier-frame.v1",
+            "schema_version": "intake.dossier-frame.v2",
             "dossier_delta": {
-                "matrix_patch": {
-                    "schema_version": "case_fact_matrix.delta.v2",
-                    "fact_rows": [
-                        {
-                            "fact_key": "FACT_01",
-                            "category": "PRODUCT_STATE",
-                            "fact_target": "商品使用状态",
-                            "materiality": "CORE",
-                            "stance": "CONFIRM",
-                            "position_summary": "商品已使用约半小时。",
-                            "asserted_value": "约半小时",
-                            "source_scope": "CURRENT_SOURCE",
-                            "agreed_statement": None,
-                            "conflict_summary": None,
-                        }
-                    ],
-                    "summary_source_fact_keys": ["FACT_01"],
-                    "respondent_claim": None,
-                },
-                "public_projection_slots": ["DPATCH_01"],
+                "respondent_claim": None,
             },
         },
         "intake_turn_quality_frame": _quality_output(),

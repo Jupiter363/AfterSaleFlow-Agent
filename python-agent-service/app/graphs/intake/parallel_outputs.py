@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Mapping
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias, cast
 
 from pydantic import (
     BaseModel,
@@ -9,6 +11,7 @@ from pydantic import (
     Field,
     RootModel,
     StringConstraints,
+    create_model,
     model_validator,
 )
 
@@ -19,7 +22,12 @@ from app.graphs.intake.parallel_contracts import (
     PartyRole,
     Sha256,
 )
-from app.graphs.intake.contracts import CaseFactDeltaRowV2, CaseFactMatrixDeltaV2
+from app.graphs.intake.contracts import (
+    CaseFactDeltaRowV2,
+    CaseFactMatrixDeltaV2,
+    MatrixFactKey,
+    RespondentClaimDeltaV2,
+)
 
 
 DialogueSegmentText = Annotated[
@@ -48,9 +56,21 @@ QUALITY_DIMENSION_ORDER: tuple[Dimension, ...] = (
     "RISK_AND_CONFLICTS",
     "NEXT_ACTION_CLARITY",
 )
-DossierSummary = Annotated[
+DossierLongText = Annotated[
     str,
-    StringConstraints(min_length=1, max_length=20_000),
+    StringConstraints(
+        min_length=1,
+        max_length=20_000,
+        pattern=r"[\s\S]*\S[\s\S]*",
+    ),
+]
+DossierShortText = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=2_000,
+        pattern=r"[\s\S]*\S[\s\S]*",
+    ),
 ]
 
 
@@ -105,62 +125,175 @@ class IntakeDialogueFrameV1(StrictFrameOutput):
         return self
 
 
-class DossierPublicPatchProposalV1(StrictFrameOutput):
-    schema_version: Literal["intake.dossier-public-patch-proposal.v1"]
-    provider_slot_id: Identifier
+class DossierCurrentFactRowV2(StrictFrameOutput):
+    fact_key: MatrixFactKey
+    category: Literal[
+        "ORDER",
+        "PRODUCT_PAGE",
+        "PAYMENT",
+        "FULFILLMENT",
+        "LOGISTICS",
+        "PRODUCT_STATE",
+        "COMMUNICATION",
+        "AFTER_SALES",
+        "TIME",
+        "OTHER",
+    ]
+    fact_target: DossierLongText
+    materiality: Literal["CORE", "SUPPORTING", "CONTEXT"]
+    stance: Literal["CONFIRM", "DENY", "PARTIAL", "UNKNOWN"]
+    position_summary: DossierLongText
+    asserted_value: DossierShortText | None = None
+    source_scope: Literal["CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"]
+    agreed_statement: DossierLongText | None = None
+    conflict_summary: DossierLongText | None = None
+
+    def materialized_row(self) -> CaseFactDeltaRowV2:
+        return CaseFactDeltaRowV2.model_validate(self.model_dump(mode="json"))
+
+
+class DossierRespondentClaimV2(StrictFrameOutput):
+    attitude: Literal[
+        "AGREE",
+        "PARTIALLY_AGREE",
+        "DISAGREE",
+        "ALTERNATIVE_PROPOSED",
+        "NEED_MORE_INFO",
+    ]
+    position_summary: DossierLongText
+    alternative_proposal: DossierLongText | None = None
+
+    def materialized_claim(self) -> RespondentClaimDeltaV2:
+        return RespondentClaimDeltaV2.model_validate(self.model_dump(mode="json"))
+
+
+class DossierPublicFactProposalV2(StrictFrameOutput):
+    schema_version: Literal["intake.dossier-public-fact-proposal.v2"]
     projection_kind: Literal["CURRENT_FACT"]
     projection_path_id: Literal["case_story.one_sentence_summary"]
-    source_row: CaseFactDeltaRowV2
-    candidate_value: DossierSummary
-
-    @model_validator(mode="after")
-    def validate_current_source_authority(self) -> DossierPublicPatchProposalV1:
-        if (
-            self.source_row.source_scope
-            not in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
-            or self.source_row.stance == "NOT_ADDRESSED"
-        ):
-            raise ValueError(
-                "Dossier public facts require one substantive current-source row"
-            )
-        if self.candidate_value != self.source_row.position_summary:
-            raise ValueError(
-                "Dossier public fact must be derived from its typed source row"
-            )
-        return self
+    source_row: DossierCurrentFactRowV2
 
 
-class DossierFrameDeltaV1(StrictFrameOutput):
-    matrix_patch: CaseFactMatrixDeltaV2 | None
-    public_projection_slots: tuple[Identifier, ...] = Field(max_length=32)
+class DossierFrameDeltaV2(StrictFrameOutput):
+    respondent_claim: DossierRespondentClaimV2 | None = None
 
 
-class IntakeDossierFrameV1(StrictFrameOutput):
-    public_projection_items: tuple[DossierPublicPatchProposalV1, ...] = Field(
+class IntakeDossierFrameV2(StrictFrameOutput):
+    public_projection_items: tuple[DossierPublicFactProposalV2, ...] = Field(
         max_length=32
     )
     frame_type: Literal["DOSSIER_FRAME"]
-    schema_version: Literal["intake.dossier-frame.v1"]
-    dossier_delta: DossierFrameDeltaV1
+    schema_version: Literal["intake.dossier-frame.v2"]
+    dossier_delta: DossierFrameDeltaV2
 
     @model_validator(mode="after")
-    def validate_projection_trace(self) -> IntakeDossierFrameV1:
-        _require_exact_projection_slots(
-            self.public_projection_items,
-            self.dossier_delta.public_projection_slots,
-        )
-        expected_rows = _current_fact_rows(self.dossier_delta.matrix_patch)
-        projected_rows = tuple(
-            item.source_row for item in self.public_projection_items
-        )
-        if projected_rows != expected_rows:
-            raise ValueError(
-                "Dossier public facts must exactly project the typed matrix delta"
-            )
+    def validate_fact_identity(self) -> IntakeDossierFrameV2:
+        fact_keys = tuple(item.source_row.fact_key for item in self.public_projection_items)
+        if len(fact_keys) != len(set(fact_keys)):
+            raise ValueError("Dossier current-source facts must have unique fact keys")
+        if not self.public_projection_items and self.dossier_delta.respondent_claim:
+            raise ValueError("Dossier respondent claim requires one current-source fact")
         return self
 
     def materialized_dossier_patch(self) -> dict[str, Any]:
         return _materialize_dossier_patch(self.public_projection_items)
+
+    def materialized_matrix_patch(self) -> CaseFactMatrixDeltaV2 | None:
+        if not self.public_projection_items:
+            return None
+        rows = tuple(
+            item.source_row.materialized_row()
+            for item in self.public_projection_items
+        )
+        claim = self.dossier_delta.respondent_claim
+        return CaseFactMatrixDeltaV2(
+            schema_version="case_fact_matrix.delta.v2",
+            fact_rows=rows,
+            summary_source_fact_keys=tuple(row.fact_key for row in rows),
+            respondent_claim=(claim.materialized_claim() if claim else None),
+        )
+
+
+def request_bound_dossier_output_types(
+    *,
+    existing_fact_keys: tuple[str, ...],
+    new_fact_key_prefix: str,
+    respondent_capacity: bool,
+) -> tuple[type[IntakeDossierFrameV2], type[DossierPublicFactProposalV2]]:
+    """Narrow Dossier authority in the provider-visible Schema for this exact turn."""
+
+    if len(existing_fact_keys) > 200 or len(existing_fact_keys) != len(
+        set(existing_fact_keys)
+    ):
+        raise ValueError("request-bound existing fact keys are invalid")
+    if any(
+        re.fullmatch(r"FACT_[A-Za-z0-9_:-]{1,123}", key) is None
+        for key in existing_fact_keys
+    ):
+        raise ValueError("request-bound existing fact key is invalid")
+    if re.fullmatch(r"NEW_[A-F0-9]{24}_", new_fact_key_prefix) is None:
+        raise ValueError("request-bound new fact-key prefix is invalid")
+
+    identity = hashlib.sha256(
+        ("\0".join((*existing_fact_keys, new_fact_key_prefix, str(respondent_capacity))))
+        .encode("utf-8")
+    ).hexdigest()[:12]
+    new_key_type = Annotated[
+        str,
+        StringConstraints(
+            min_length=len(new_fact_key_prefix) + 1,
+            max_length=128,
+            pattern=(
+                rf"^{re.escape(new_fact_key_prefix)}[A-Za-z0-9_]"
+                rf"{{1,{128 - len(new_fact_key_prefix)}}}$"
+            ),
+        ),
+    ]
+    new_row = create_model(
+        f"DossierCurrentNewFactRowV2_{identity}",
+        __base__=DossierCurrentFactRowV2,
+        __module__=__name__,
+        fact_key=(new_key_type, ...),
+        source_scope=(Literal["CURRENT_SOURCE"], ...),
+    )
+    row_type: Any = new_row
+    if existing_fact_keys:
+        existing_key_type = Literal.__getitem__(existing_fact_keys)
+        existing_row = create_model(
+            f"DossierCurrentExistingFactRowV2_{identity}",
+            __base__=DossierCurrentFactRowV2,
+            __module__=__name__,
+            fact_key=(existing_key_type, ...),
+            source_scope=(Literal["PREVIOUS_AND_CURRENT_SOURCE"], ...),
+        )
+        row_type = existing_row | new_row
+
+    item_type = create_model(
+        f"DossierPublicFactProposalV2_{identity}",
+        __base__=DossierPublicFactProposalV2,
+        __module__=__name__,
+        source_row=(row_type, ...),
+    )
+    delta_fields: dict[str, tuple[Any, Any]] = {}
+    if not respondent_capacity:
+        delta_fields["respondent_claim"] = (Literal[None], None)
+    delta_type = create_model(
+        f"DossierFrameDeltaV2_{identity}",
+        __base__=DossierFrameDeltaV2,
+        __module__=__name__,
+        **delta_fields,
+    )
+    frame_type = create_model(
+        f"IntakeDossierFrameV2_{identity}",
+        __base__=IntakeDossierFrameV2,
+        __module__=__name__,
+        public_projection_items=(tuple[item_type, ...], Field(max_length=32)),
+        dossier_delta=(delta_type, ...),
+    )
+    return (
+        cast(type[IntakeDossierFrameV2], frame_type),
+        cast(type[DossierPublicFactProposalV2], item_type),
+    )
 
 
 class IntakeQualityScoresV1(StrictFrameOutput):
@@ -351,12 +484,12 @@ class IntakeQualityFrameV1(StrictFrameOutput):
 
 
 ParallelFrameOutput: TypeAlias = (
-    IntakeDialogueFrameV1 | IntakeDossierFrameV1 | IntakeQualityFrameV1
+    IntakeDialogueFrameV1 | IntakeDossierFrameV2 | IntakeQualityFrameV1
 )
 
 FRAME_OUTPUT_MODELS: Mapping[ParallelFrameType, type[StrictFrameOutput]] = {
     "DIALOGUE_FRAME": IntakeDialogueFrameV1,
-    "DOSSIER_FRAME": IntakeDossierFrameV1,
+    "DOSSIER_FRAME": IntakeDossierFrameV2,
     "QUALITY_FRAME": IntakeQualityFrameV1,
 }
 
@@ -372,11 +505,11 @@ def validate_parallel_frame_output(
 
 
 def _materialize_dossier_patch(
-    items: tuple[DossierPublicPatchProposalV1, ...],
+    items: tuple[DossierPublicFactProposalV2, ...],
 ) -> dict[str, Any]:
     if not items:
         return {}
-    summary = "；".join(item.candidate_value for item in items)
+    summary = "；".join(item.source_row.position_summary for item in items)
     if len(summary) > 20_000:
         raise ValueError("Dossier current-source summary exceeds the persisted field limit")
     return {
@@ -384,19 +517,6 @@ def _materialize_dossier_patch(
             "one_sentence_summary": summary,
         }
     }
-
-
-def _current_fact_rows(
-    matrix_patch: CaseFactMatrixDeltaV2 | None,
-) -> tuple[CaseFactDeltaRowV2, ...]:
-    if matrix_patch is None:
-        return ()
-    return tuple(
-        row
-        for row in matrix_patch.fact_rows
-        if row.source_scope in {"CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE"}
-        and row.stance != "NOT_ADDRESSED"
-    )
 
 
 def _require_exact_projection_slots(
@@ -421,10 +541,11 @@ def _validate_gap_question_and_keys(
 __all__ = [
     "FRAME_OUTPUT_MODELS",
     "IntakeDialogueFrameV1",
-    "IntakeDossierFrameV1",
+    "IntakeDossierFrameV2",
     "IntakeQualityFrameV1",
     "ParallelFrameOutput",
     "QUALITY_DIMENSION_ORDER",
     "QualityPublicProjectionProposalV1",
+    "request_bound_dossier_output_types",
     "validate_parallel_frame_output",
 ]

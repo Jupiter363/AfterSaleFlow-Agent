@@ -1654,3 +1654,47 @@
 - Root cause and evidence: The Provider-visible JSON Schema constrains `candidate_text` length but does not expose the local after-validator that forbids `?` and `？`. With two authorized question slots in an `ASK_SUBSTANTIVE` turn, the Provider produced a valid acknowledgement at item `0` and two later items that each failed with item-level `value_error`. That exact location/type uniquely selects the question-mark after-validator: length, Literal, and extra-field failures have distinct Pydantic types, while projection-slot reconciliation fails at the root. The full 1,152-character Provider response was not retained, but Python logged both exact item locations and the V4 ledger proves only item `0` was published before interruption/reset.
 - Impact: The three-lane first-attempt acceptance requirement is violated independently of the Quality projection type drift. Retrying only Dialogue may provide resilience, but cannot make this UAT a first-generation success or authorize exact-three assembly for the observed turn.
 - Identifying metadata: same activation/case/run/attempt/command/Frame set as `P0-20260826-PARALLEL-QUALITY-PROJECTION-DIMENSION-MAX-DRIFT`; Dialogue first projection approximately 5.358 seconds, generation-1 interruption approximately 10.178 seconds, and generation reset approximately 10.247 seconds after browser submit; final AgentRun state `ABORTED/UNCOMMITTED` with no formal Agent reply or dossier revision.
+
+## P0-20260826-PARALLEL-DOSSIER-FIRST-GENERATION-CROSS-FIELD-DRIFT
+
+- Severity: P0
+- Status: FIXED / FOCUSED_VERIFIED / UAT_PENDING
+- Component: Intake V4 `DOSSIER_FRAME` first-generation Provider output
+- Confirmed fact: On fresh activation `p9act.v1.45e4a121551ba05ecbc8c23eec63cee9`, the only substantive USER `ROOM_MESSAGE` in fresh case `CASE_P9_6A8DEA8E_1` started all three generation-1 lanes. Dossier generation 1 durably emitted one valid `CURRENT_FACT` projection, then terminated at the complete-document boundary with `OUTPUT_SCHEMA_INVALID`, validation path `$`, and no sealed result. The runtime admitted Dossier generation 2, so the turn failed the first-generation acceptance gate and was frozen without a formal Agent reply or dossier revision.
+- Root cause and evidence: The Provider-visible Dossier schema represents the same current-source fact independently in `public_projection_items[*].source_row`, `public_projection_items[*].candidate_value`, and `dossier_delta.matrix_patch.fact_rows[*]`; it also repeats every item identity in `dossier_delta.public_projection_slots`. The Provider JSON Schema validates each field locally but cannot express the terminal root equalities enforced by `IntakeDossierFrameV1.validate_projection_trace`: exact ordered item-slot equality and exact ordered public-row-to-matrix-row equality. The accepted first item proves its item-local type and current-source checks passed, while the root-only failure proves one of those duplicated authorities drifted after preview. The rejected complete Provider document was not retained, so the two root sub-branches cannot be distinguished more narrowly from persisted evidence.
+- Impact: A Provider-schema-valid Dossier prefix can become externally visible and then fail only when independently generated copies are reconciled. The affected lane cannot seal on its first generation, preventing exact-three assembly READY, FINAL, RESULT_READY, and the single formal Intake write even when the other two lanes are independent.
+- Focused verification fact: Dossier V2 now exposes one current-source fact representation and derives its matrix/summary projections deterministically. The request-bound Python contract and semantic checks passed 58 focused tests; the downstream Java assembly/freezer selectors passed 35 focused tests with no failure, error, or skip.
+- Identifying metadata: observed 2026-08-26; candidate `3fffbd415fec9daa0c7ffa8c7c6474551125fa1d`; case `CASE_P9_6A8DEA8E_1`; run `target-intake-run:e265437a1c7f33bba39a08cd985cafa5`; attempt `target-intake-attempt:e265437a1c7f33bba39a08cd985cafa5:1`; command `intake-message:e265437a1c7f33bba39a08cd985cafa5`; Frame set `IFS_a8d74772fde47a95549ad0a3804ac17c`; Dossier start approximately 1.568 seconds, first projection approximately 7.290 seconds, and generation-1 interruption approximately 14.990 seconds after browser submit.
+
+## BUG-20260826-PARALLEL-DOSSIER-RESPONDENT-CAPACITY-UNBOUND
+
+- Severity: P1
+- Status: FIXED / FOCUSED_VERIFIED / UAT_PENDING
+- Component: Intake V4 `DOSSIER_FRAME` respondent-claim authority
+- Confirmed fact: `DossierFrameDeltaV2.respondent_claim` is currently accepted independently of the authenticated actor's initiator/respondent capacity. Python copies a non-null value into the materialized `CaseFactMatrixDeltaV2`, and the Java assembler copies the same value into the formal proposal without a capacity check.
+- Root cause and evidence: The Provider-facing schema contains only the claim payload, while the request-bound Python semantic validator is bound only to `actor_role`; the Java `dossier(...)`/`materializeMatrixPatch(...)` path receives no trusted capacity discriminator. The Prompt asks a non-respondent to emit `null`, but no machine boundary enforces that instruction.
+- Impact: A schema-valid first-generation output from the initiator can author the respondent partition and reach an otherwise valid exact-three proposal, violating current-actor-only matrix authority even when no retry or transport failure occurs.
+- Focused verification fact: The request-bound Python output type fixes `respondent_claim` to `null` for an initiator, and Java revalidates respondent capacity before formal proposal construction. Cross-role negative tests passed in the 58-test Python and 35-test Java focused selectors.
+- Identifying metadata: observed by read-only Dossier V2 pre-activation review on 2026-08-26; affected files `parallel_outputs.py`, `parallel_graph.py`, and `IntakeParallelFrameAssembler.java`; no runtime mutation.
+
+## BUG-20260826-PARALLEL-DOSSIER-FACT-KEY-AUTHORITY-UNBOUND
+
+- Severity: P1
+- Status: FIXED / FOCUSED_VERIFIED / UAT_PENDING
+- Component: Intake V4 `DOSSIER_FRAME` fact-key authority
+- Confirmed fact: Dossier V2 currently validates a Provider fact key only as a syntactically valid `FACT_`/`NEW_` key and as locally unique. Neither Python materialization nor Java assembly proves that an existing `FACT_` key belongs to the frozen matrix or that a `NEW_` key belongs to the server-issued namespace for this command.
+- Root cause and evidence: The single-source-row schema carries no request-bound allowed-key proof, the Python semantic validator does not compare rows with a trusted key authority, and the Java `AssemblyCommand`/assembler has no allowed-existing-key set or issued-new-key namespace to revalidate before constructing the formal matrix patch.
+- Impact: A schema-valid first-generation output can invent or overwrite a fact identity and still seal, assemble, and enter the formal proposal path, corrupting frozen matrix lineage and replay identity without triggering the retry mechanism.
+- Focused verification fact: The model context now carries the exact frozen `FACT_` set and a command-bound `NEW_` namespace; the Provider-visible schema narrows both key classes and Java revalidates membership, namespace, stable metadata, and source scope. Unknown-existing and foreign-new negative tests passed.
+- Identifying metadata: observed by read-only Dossier V2 pre-activation review on 2026-08-26; affected files `parallel_contracts.py`, `parallel_outputs.py`, `parallel_graph.py`, and `IntakeParallelFrameAssembler.java`; no runtime mutation.
+
+## P0-20260826-PARALLEL-DOSSIER-CURRENT-DELTA-OMITS-FORMAL-PARENT-CARRY
+
+- Severity: P0
+- Status: FIXED / FOCUSED_VERIFIED / UAT_PENDING
+- Component: Intake V4 Dossier V2 to Java formal matrix bridge
+- Confirmed fact: Dossier V2 intentionally emits only current-source rows, and the Java assembler currently derives `case_fact_matrix.delta.v2.fact_rows` only from those rows. Both `IntakeInitiatorMatrixDeltaFreezer` and `IntakeRespondentMatrixFreezer` require every prior formal fact to be carried exactly once in a successor delta.
+- Root cause and evidence: Removing Provider-owned previous rows eliminated duplicated model authority, but the deterministic Java assembler did not replace that removed responsibility. Its `materializeMatrixPatch(...)` builds rows exclusively from `public_projection_items`, while both formal freezers compare carried parent IDs with the full parent fact-ID set and reject any omission.
+- Impact: A schema-valid, first-generation exact-three turn can reach assembly READY but fail the single formal Intake transaction whenever the frozen matrix contains a prior fact not repeated as a current-source Dossier item. The failure is deterministic and cannot be repaired by retrying the model lane.
+- Focused verification fact: Java assembly now reconstructs the complete successor delta in formal parent order, deep-carries bilateral historical rows, preserves grounded historical respondent claims without rebinding them to the current message, and keeps first-respondent derivation from an initiator-frozen parent. The three Java selectors passed 35/35, and a separate read-only authority review found no blocker.
+- Identifying metadata: observed during pre-activation reverse review on 2026-08-26; affected files `IntakeParallelFrameAssembler.java`, `IntakeInitiatorMatrixDeltaFreezer.java`, and `IntakeRespondentMatrixFreezer.java`; no runtime mutation.

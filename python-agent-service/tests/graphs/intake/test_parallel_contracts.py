@@ -42,10 +42,12 @@ def _common_context(
     current_message = "商品于昨日签收。"
     previous_message = "请补充签收时间。"
     matrix_payload = {
-        "facts": [
+        "fact_rows": [
             {
-                "fact_key": "FACT_DELIVERY_001",
-                "statement": "商品已经发货。",
+                "fact_id": "FACT_DELIVERY_001",
+                "category": "FULFILLMENT",
+                "fact_target": "商品是否已经发货",
+                "materiality": "CORE",
             }
         ]
     }
@@ -97,6 +99,10 @@ def _common_context(
                 "version": 3,
                 "sha256": canonical_sha256(matrix_payload),
                 "payload": matrix_payload,
+            },
+            "fact_key_authority": {
+                "existing_fact_keys": ["FACT_DELIVERY_001"],
+                "new_fact_key_prefix": "NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
             },
             "recent_dialogue_messages": [
                 {
@@ -212,7 +218,7 @@ def test_prompt_profiles_do_not_embed_foreign_frame_rule_names() -> None:
     assert "dossier_delta" not in dialogue and "score_breakdown" not in dialogue
     assert "room_utterance" not in dossier and "score_breakdown" not in dossier
     assert "room_utterance" not in quality and "dossier_delta" not in quality
-    assert "不得生成、改写或转述问题正文" in dialogue
+    assert "不得生成、改写、转述问题正文" in dialogue
     assert "下一阶段建议" not in quality
     assert "不得输出或建议阶段" in quality
 
@@ -254,7 +260,7 @@ def test_exact_three_builder_rejects_duplicate_or_missing_frame_pack() -> None:
 def test_instruction_pack_hash_and_registry_are_both_authoritative() -> None:
     pack = _instruction_packs()[0]
     payload = pack.model_dump(mode="json")
-    payload["output_schema_id"] = "intake-dossier-frame.v1"
+    payload["output_schema_id"] = "intake-dossier-frame.v2"
 
     with pytest.raises(ValueError, match="instruction_pack_sha256|output_schema_id"):
         IntakeFrameInstructionPackV1.model_validate(payload)
