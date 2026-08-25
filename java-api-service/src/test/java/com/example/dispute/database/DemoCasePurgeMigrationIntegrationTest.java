@@ -380,6 +380,13 @@ class DemoCasePurgeMigrationIntegrationTest {
                                     "delete from intake_parallel_graph_result_artifact"))
                     .isLessThan(
                             functionDefinition.indexOf("delete from intake_parallel_frame_set"));
+            assertThat(functionDefinition)
+                    .contains(
+                            "select registration_id\n"
+                                    + "        from case_intake_graph_thread_binding")
+                    .doesNotContain(
+                            "select thread_registration_id\n"
+                                    + "        from case_intake_graph_thread_binding");
         }
     }
 
