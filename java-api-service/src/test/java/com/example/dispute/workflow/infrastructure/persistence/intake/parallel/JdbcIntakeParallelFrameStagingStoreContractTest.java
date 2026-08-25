@@ -78,6 +78,18 @@ class JdbcIntakeParallelFrameStagingStoreContractTest {
     }
 
     @Test
+    void publishesV4CatchUpOnlyThroughTheAfterCommitStreamBoundary() throws Exception {
+        String source = normalizedSource();
+
+        assertThat(source)
+                .contains("private final agentrunstreameventservice streameventservice")
+                .contains("streameventservice.wakeupaftercommit(runid, attemptid, durablehighwatermark)")
+                .contains("schedulestreamcatchup( command.runid(), command.attemptid(), eventreceipt.durablehighwatermark())")
+                .doesNotContain("wakeupPublisher.publish")
+                .doesNotContain("publish(runid)");
+    }
+
+    @Test
     void bindsRetriesAndEveryFrameMutationToCurrentV080Authority() throws Exception {
         String source = normalizedSource();
 

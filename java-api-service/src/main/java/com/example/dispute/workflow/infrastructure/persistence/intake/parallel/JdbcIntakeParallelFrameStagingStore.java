@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.infrastructure.persistence.intake.parallel;
 
+import com.example.dispute.agentstream.application.AgentRunStreamEventService;
 import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentRunV4EventWriter;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyState;
@@ -428,14 +429,18 @@ public final class JdbcIntakeParallelFrameStagingStore
     private final NamedParameterJdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final PostgresAgentRunV4EventWriter eventWriter;
+    private final AgentRunStreamEventService streamEventService;
 
     public JdbcIntakeParallelFrameStagingStore(
             NamedParameterJdbcTemplate jdbc,
             ObjectMapper objectMapper,
-            PostgresAgentRunV4EventWriter eventWriter) {
+            PostgresAgentRunV4EventWriter eventWriter,
+            AgentRunStreamEventService streamEventService) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
         this.eventWriter = Objects.requireNonNull(eventWriter, "eventWriter");
+        this.streamEventService =
+                Objects.requireNonNull(streamEventService, "streamEventService");
     }
 
     @Override
@@ -950,12 +955,15 @@ public final class JdbcIntakeParallelFrameStagingStore
         Optional<Map<String, Object>> replay = findIngressReplay(identity);
         if (replay.isPresent()) {
             requireExactIngressReplay(identity, replay.orElseThrow());
+            long durableHighWatermark =
+                    durableHighWatermark(command.runId(), command.attemptId());
+            scheduleStreamCatchUp(command.runId(), command.attemptId(), durableHighWatermark);
             return new IngressReceipt(
                     text(replay.orElseThrow(), "ingress_id"),
                     text(replay.orElseThrow(), "receipt_id"),
                     false,
                     number(replay.orElseThrow(), "global_sequence"),
-                    durableHighWatermark(command.runId(), command.attemptId()));
+                    durableHighWatermark);
         }
 
         requireCurrentFrameAuthority(
@@ -1008,6 +1016,8 @@ public final class JdbcIntakeParallelFrameStagingStore
                     "INTAKE_PARALLEL_STREAM_SEQUENCE_CAS_FAILED",
                     "attempt sequence authority changed during append");
         }
+        scheduleStreamCatchUp(
+                command.runId(), command.attemptId(), eventReceipt.durableHighWatermark());
         return new IngressReceipt(
                 ingressId,
                 receiptId,
@@ -1040,7 +1050,10 @@ public final class JdbcIntakeParallelFrameStagingStore
         requireCurrentFrameAuthority(authority, command.generation(), null);
         Optional<FrameSealReceipt> replay = exactSealReplay(command, authority);
         if (replay.isPresent()) {
-            return replay.orElseThrow();
+            FrameSealReceipt receipt = replay.orElseThrow();
+            scheduleStreamCatchUp(
+                    command.runId(), command.attemptId(), receipt.durableHighWatermark());
+            return receipt;
         }
 
         requireRunningCollecting(authority);
@@ -1207,6 +1220,8 @@ public final class JdbcIntakeParallelFrameStagingStore
                     "attempt sequence authority changed during Frame seal");
         }
         boolean exactThreeSealed = exactThreeSealed(command.frameSetId());
+        scheduleStreamCatchUp(
+                command.runId(), command.attemptId(), eventReceipt.durableHighWatermark());
         return new FrameSealReceipt(
                 command.frameSetId(),
                 command.frameType(),
@@ -1218,6 +1233,11 @@ public final class JdbcIntakeParallelFrameStagingStore
                 AssemblyState.COLLECTING,
                 globalSequence,
                 eventReceipt.durableHighWatermark());
+    }
+
+    private void scheduleStreamCatchUp(
+            String runId, String attemptId, long durableHighWatermark) {
+        streamEventService.wakeUpAfterCommit(runId, attemptId, durableHighWatermark);
     }
 
     private Map<String, Object> lockFrame(String frameSetId, FrameType frameType) {
