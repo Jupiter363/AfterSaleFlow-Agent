@@ -3,7 +3,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    StringConstraints,
+    model_validator,
+)
 
 from app.graphs.intake.parallel_contracts import (
     ConversationAction,
@@ -26,6 +33,14 @@ Dimension = Literal[
     "RISK_AND_CONFLICTS",
     "NEXT_ACTION_CLARITY",
 ]
+QUALITY_DIMENSION_ORDER: tuple[Dimension, ...] = (
+    "REFERENCES",
+    "EVENT_STORY",
+    "PARTY_POSITIONS",
+    "REQUESTED_RESOLUTION",
+    "RISK_AND_CONFLICTS",
+    "NEXT_ACTION_CLARITY",
+)
 DossierSummary = Annotated[
     str,
     StringConstraints(min_length=1, max_length=20_000),
@@ -158,10 +173,7 @@ class QualityGapProposalV1(StrictFrameOutput):
 
     @model_validator(mode="after")
     def validate_gap(self) -> QualityGapProposalV1:
-        if not self.question.endswith("？"):
-            raise ValueError("Quality gap must be one concrete Chinese question")
-        if len(self.linked_fact_keys) != len(set(self.linked_fact_keys)):
-            raise ValueError("Quality gap cannot repeat linked fact keys")
+        _validate_gap_question_and_keys(self.question, self.linked_fact_keys)
         return self
 
 
@@ -174,12 +186,43 @@ class QualityPublicMetricProposalV1(StrictFrameOutput):
     linked_fact_keys: tuple[Identifier, ...] = Field(max_length=16)
 
 
+class QualityPublicGapProposalV1(StrictFrameOutput):
+    schema_version: Literal["intake.quality-public-gap-proposal.v1"]
+    provider_slot_id: Identifier
+    projection_kind: Literal["BLOCKING_GAP"]
+    dimension: Dimension
+    question: BoundedQuestion
+    source_role: PartyRole
+    linked_fact_keys: tuple[Identifier, ...] = Field(max_length=16)
+
+    @model_validator(mode="after")
+    def validate_gap(self) -> QualityPublicGapProposalV1:
+        _validate_gap_question_and_keys(self.question, self.linked_fact_keys)
+        return self
+
+
+QualityPublicProjectionValueV1: TypeAlias = Annotated[
+    QualityPublicMetricProposalV1 | QualityPublicGapProposalV1,
+    Field(discriminator="projection_kind"),
+]
+
+
+class QualityPublicProjectionProposalV1(
+    RootModel[QualityPublicProjectionValueV1]
+):
+    model_config = ConfigDict(frozen=True)
+
+    @property
+    def provider_slot_id(self) -> Identifier:
+        return self.root.provider_slot_id
+
+
 class QualityFrameValueV1(StrictFrameOutput):
     scores: IntakeQualityScoresV1
     gap_proposals: tuple[QualityGapProposalV1, ...] = Field(max_length=6)
     assessment_reasoning: BoundedReasoning
     public_projection_slots: tuple[Identifier, ...] = Field(
-        min_length=6, max_length=6
+        min_length=6, max_length=12
     )
 
     @model_validator(mode="after")
@@ -203,8 +246,8 @@ class QualityFrameValueV1(StrictFrameOutput):
 
 
 class IntakeQualityFrameV1(StrictFrameOutput):
-    public_projection_items: tuple[QualityPublicMetricProposalV1, ...] = Field(
-        min_length=6, max_length=6
+    public_projection_items: tuple[QualityPublicProjectionProposalV1, ...] = Field(
+        min_length=6, max_length=12
     )
     frame_type: Literal["QUALITY_FRAME"]
     schema_version: Literal["intake.quality-frame.v1"]
@@ -216,7 +259,7 @@ class IntakeQualityFrameV1(StrictFrameOutput):
             self.public_projection_items,
             self.quality.public_projection_slots,
         )
-        expected = {
+        expected_scores = {
             "REFERENCES": self.quality.scores.references,
             "EVENT_STORY": self.quality.scores.event_story,
             "PARTY_POSITIONS": self.quality.scores.party_positions,
@@ -224,15 +267,38 @@ class IntakeQualityFrameV1(StrictFrameOutput):
             "RISK_AND_CONFLICTS": self.quality.scores.risk_and_conflicts,
             "NEXT_ACTION_CLARITY": self.quality.scores.next_action_clarity,
         }
-        observed: set[Dimension] = set()
-        for item in self.public_projection_items:
-            if item.dimension in observed:
-                raise ValueError("Quality public trace repeats a dimension")
-            observed.add(item.dimension)
-            if item.candidate_score != expected[item.dimension]:
+        score_items = self.public_projection_items[: len(QUALITY_DIMENSION_ORDER)]
+        for expected_dimension, wrapped in zip(
+            QUALITY_DIMENSION_ORDER,
+            score_items,
+            strict=True,
+        ):
+            item = wrapped.root
+            if not isinstance(item, QualityPublicMetricProposalV1):
+                raise ValueError("Quality public trace must emit all scores before gaps")
+            if item.dimension != expected_dimension:
+                raise ValueError("Quality public score order differs from the contract")
+            if item.candidate_score != expected_scores[expected_dimension]:
                 raise ValueError("Quality public trace differs from score authority")
-        if observed != set(expected):
-            raise ValueError("Quality public trace must contain every score dimension")
+
+        gap_items = self.public_projection_items[len(QUALITY_DIMENSION_ORDER) :]
+        if len(gap_items) != len(self.quality.gap_proposals):
+            raise ValueError("Quality public gaps must exactly trace sealed gaps")
+        for wrapped, sealed_gap in zip(
+            gap_items,
+            self.quality.gap_proposals,
+            strict=True,
+        ):
+            item = wrapped.root
+            if not isinstance(item, QualityPublicGapProposalV1):
+                raise ValueError("Quality public trace cannot emit a score after gaps")
+            if (
+                item.dimension != sealed_gap.dimension
+                or item.question != sealed_gap.question
+                or item.source_role != sealed_gap.source_role
+                or item.linked_fact_keys != sealed_gap.linked_fact_keys
+            ):
+                raise ValueError("Quality public gap differs from sealed gap authority")
         return self
 
 
@@ -294,11 +360,23 @@ def _require_exact_projection_slots(
         raise ValueError("public projection slots must match items once and in order")
 
 
+def _validate_gap_question_and_keys(
+    question: str,
+    linked_fact_keys: tuple[Identifier, ...],
+) -> None:
+    if not question.endswith("？"):
+        raise ValueError("Quality gap must be one concrete Chinese question")
+    if len(linked_fact_keys) != len(set(linked_fact_keys)):
+        raise ValueError("Quality gap cannot repeat linked fact keys")
+
+
 __all__ = [
     "FRAME_OUTPUT_MODELS",
     "IntakeDialogueFrameV1",
     "IntakeDossierFrameV1",
     "IntakeQualityFrameV1",
     "ParallelFrameOutput",
+    "QUALITY_DIMENSION_ORDER",
+    "QualityPublicProjectionProposalV1",
     "validate_parallel_frame_output",
 ]

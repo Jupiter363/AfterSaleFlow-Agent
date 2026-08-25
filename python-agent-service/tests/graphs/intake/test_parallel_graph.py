@@ -523,7 +523,7 @@ async def test_complete_checkpoint_replays_only_missing_prefix_without_provider(
     replay_items = [
         event for event in replay_sink.events if isinstance(event, FrameProjectionItem)
     ]
-    assert [event.local_index for event in replay_items] == [2, 3, 4, 5]
+    assert [event.local_index for event in replay_items] == [2, 3, 4, 5, 6]
     assert isinstance(replay_sink.events[-1], FrameSealed)
     assert replay.result_sha256 == first.result_sha256
     assert replay.child_checkpoint_ref == first.child_checkpoint_ref
@@ -653,6 +653,35 @@ async def test_invalid_dossier_source_row_never_emits_a_public_projection() -> N
     assert not any(
         isinstance(event, FrameProjectionItem)
         and event.frame_type == "DOSSIER_FRAME"
+        for event in sink.events
+    )
+
+
+@pytest.mark.asyncio
+async def test_quality_gap_cannot_stream_before_the_fixed_score_prefix() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    outputs = deepcopy(_outputs())
+    quality_items = outputs["intake_turn_quality_frame"]["public_projection_items"]
+    quality_items.insert(0, quality_items.pop())
+    outputs["intake_turn_quality_frame"]["quality"]["public_projection_slots"] = [
+        item["provider_slot_id"] for item in quality_items
+    ]
+    sink = _CollectingSink()
+
+    result = await orchestrator.execute(
+        requests,
+        agent_contexts=contexts,
+        model_runner=_StreamingRunner(outputs),
+        event_sink=sink,
+    )
+
+    assert set(result.failed) == {"QUALITY_FRAME"}
+    assert not any(
+        isinstance(event, FrameProjectionItem)
+        and event.frame_type == "QUALITY_FRAME"
         for event in sink.events
     )
 
@@ -1245,8 +1274,13 @@ def _quality_output() -> dict[str, Any]:
         ("RISK_AND_CONFLICTS", 13, "QMETRIC_05"),
         ("NEXT_ACTION_CLARITY", 12, "QMETRIC_06"),
     ]
-    return {
-        "public_projection_items": [
+    gap = {
+        "dimension": "REFERENCES",
+        "question": "请补充第三方检测报告的机构名称？",
+        "source_role": "USER",
+        "linked_fact_keys": ["FACT_01"],
+    }
+    public_items = [
             {
                 "schema_version": "intake.quality-public-metric-proposal.v1",
                 "provider_slot_id": slot,
@@ -1256,7 +1290,17 @@ def _quality_output() -> dict[str, Any]:
                 "linked_fact_keys": ["FACT_01"],
             }
             for dimension, score, slot in dimensions
-        ],
+        ]
+    public_items.append(
+        {
+            "schema_version": "intake.quality-public-gap-proposal.v1",
+            "provider_slot_id": "QGAP_01",
+            "projection_kind": "BLOCKING_GAP",
+            **gap,
+        }
+    )
+    return {
+        "public_projection_items": public_items,
         "frame_type": "QUALITY_FRAME",
         "schema_version": "intake.quality-frame.v1",
         "quality": {
@@ -1268,16 +1312,10 @@ def _quality_output() -> dict[str, Any]:
                 "risk_and_conflicts": 13,
                 "next_action_clarity": 12,
             },
-            "gap_proposals": [
-                {
-                    "dimension": "REFERENCES",
-                    "question": "请补充第三方检测报告的机构名称？",
-                    "source_role": "USER",
-                    "linked_fact_keys": ["FACT_01"],
-                }
-            ],
+            "gap_proposals": [gap],
             "assessment_reasoning": "主要事实和处理方向已较清楚，但证据来源仍需补充。",
-            "public_projection_slots": [slot for _, _, slot in dimensions],
+            "public_projection_slots": [slot for _, _, slot in dimensions]
+            + ["QGAP_01"],
         },
     }
 

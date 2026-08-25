@@ -9,6 +9,7 @@ from app.graphs.intake.parallel_outputs import (
     DossierPublicPatchProposalV1,
     IntakeDossierFrameV1,
     IntakeQualityFrameV1,
+    QualityPublicProjectionProposalV1,
     validate_parallel_frame_output,
 )
 
@@ -60,6 +61,39 @@ def test_frame_schema_rejects_projection_reordering_and_full_score_gap() -> None
     quality["quality"]["scores"]["references"] = 15
     with pytest.raises(ValidationError, match="full-score dimension"):
         validate_parallel_frame_output("QUALITY_FRAME", quality)
+
+    reordered = _quality_frame()
+    reordered["public_projection_items"][0], reordered["public_projection_items"][1] = (
+        reordered["public_projection_items"][1],
+        reordered["public_projection_items"][0],
+    )
+    reordered["quality"]["public_projection_slots"][0:2] = [
+        reordered["public_projection_items"][0]["provider_slot_id"],
+        reordered["public_projection_items"][1]["provider_slot_id"],
+    ]
+    with pytest.raises(ValidationError, match="score order"):
+        validate_parallel_frame_output("QUALITY_FRAME", reordered)
+
+
+def test_quality_public_gap_is_a_root_discriminated_item_and_must_match_seal() -> None:
+    quality = _quality_frame()
+    validated = validate_parallel_frame_output("QUALITY_FRAME", quality)
+    public_gap = validated.public_projection_items[-1]
+
+    assert isinstance(public_gap, QualityPublicProjectionProposalV1)
+    assert public_gap.model_dump(mode="json") == quality["public_projection_items"][-1]
+    assert public_gap.provider_slot_id == "QGAP_01"
+
+    missing = _quality_frame()
+    missing["public_projection_items"].pop()
+    missing["quality"]["public_projection_slots"].pop()
+    with pytest.raises(ValidationError, match="exactly trace sealed gaps"):
+        validate_parallel_frame_output("QUALITY_FRAME", missing)
+
+    drifted = _quality_frame()
+    drifted["public_projection_items"][-1]["question"] = "请补充其他信息？"
+    with pytest.raises(ValidationError, match="differs from sealed gap authority"):
+        validate_parallel_frame_output("QUALITY_FRAME", drifted)
 
 
 def test_dossier_public_items_are_the_only_registered_patch_authority() -> None:
@@ -228,8 +262,13 @@ def _quality_frame() -> dict[str, object]:
         ("RISK_AND_CONFLICTS", 13, "QMETRIC_05"),
         ("NEXT_ACTION_CLARITY", 12, "QMETRIC_06"),
     ]
-    return {
-        "public_projection_items": [
+    gap = {
+        "dimension": "REFERENCES",
+        "question": "请补充第三方检测报告的机构名称？",
+        "source_role": "USER",
+        "linked_fact_keys": ["FACT_01"],
+    }
+    public_items = [
             {
                 "schema_version": "intake.quality-public-metric-proposal.v1",
                 "provider_slot_id": slot,
@@ -239,7 +278,17 @@ def _quality_frame() -> dict[str, object]:
                 "linked_fact_keys": ["FACT_01"],
             }
             for dimension, score, slot in dimensions
-        ],
+        ]
+    public_items.append(
+        {
+            "schema_version": "intake.quality-public-gap-proposal.v1",
+            "provider_slot_id": "QGAP_01",
+            "projection_kind": "BLOCKING_GAP",
+            **gap,
+        }
+    )
+    return {
+        "public_projection_items": public_items,
         "frame_type": "QUALITY_FRAME",
         "schema_version": "intake.quality-frame.v1",
         "quality": {
@@ -251,15 +300,9 @@ def _quality_frame() -> dict[str, object]:
                 "risk_and_conflicts": 13,
                 "next_action_clarity": 12,
             },
-            "gap_proposals": [
-                {
-                    "dimension": "REFERENCES",
-                    "question": "请补充第三方检测报告的机构名称？",
-                    "source_role": "USER",
-                    "linked_fact_keys": ["FACT_01"],
-                }
-            ],
+            "gap_proposals": [gap],
             "assessment_reasoning": "主要事实和处理方向已较清楚，但证据来源仍需补充。",
-            "public_projection_slots": [slot for _, _, slot in dimensions],
+            "public_projection_slots": [slot for _, _, slot in dimensions]
+            + ["QGAP_01"],
         },
     }

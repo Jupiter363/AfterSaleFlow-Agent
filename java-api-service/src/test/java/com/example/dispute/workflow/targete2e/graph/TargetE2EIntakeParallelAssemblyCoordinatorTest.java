@@ -400,20 +400,21 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 Map.entry("requested_resolution", 15),
                 Map.entry("risk_and_conflicts", 15),
                 Map.entry("next_action_clarity", 15));
-        Map<String, String> dimensions = Map.ofEntries(
+        List<Map.Entry<String, String>> dimensions = List.of(
                 Map.entry("references", "REFERENCES"),
                 Map.entry("event_story", "EVENT_STORY"),
                 Map.entry("party_positions", "PARTY_POSITIONS"),
                 Map.entry("requested_resolution", "REQUESTED_RESOLUTION"),
                 Map.entry("risk_and_conflicts", "RISK_AND_CONFLICTS"),
                 Map.entry("next_action_clarity", "NEXT_ACTION_CLARITY"));
-        dimensions.keySet().stream().sorted().forEach(field -> {
+        dimensions.forEach(dimension -> {
+            String field = dimension.getKey();
             scores.put(field, values.get(field));
             ObjectNode item = items.addObject();
             item.put("schema_version", "intake.quality-public-metric-proposal.v1");
-            item.put("provider_slot_id", "QMETRIC_" + dimensions.get(field));
+            item.put("provider_slot_id", "QMETRIC_" + dimension.getValue());
             item.put("projection_kind", "DIMENSION_SCORE");
-            item.put("dimension", dimensions.get(field));
+            item.put("dimension", dimension.getValue());
             item.put("candidate_score", values.get(field));
             item.putArray("linked_fact_keys");
         });

@@ -2023,6 +2023,7 @@ describe("IntakeRoomView", () => {
           generation: 1,
           projectionRegistryVersion: "intake-projection-registry.v1",
           status: "STREAMING",
+          itemOrder: ["QMETRIC_1"],
           items: {
             QMETRIC_1: {
               itemSha256: "b".repeat(64),
@@ -2083,12 +2084,43 @@ describe("IntakeRoomView", () => {
       projectionPathId: "intake.quality.scores.references",
       canonicalValueJson: "12",
     }, undefined, streamRun);
+    streamRun.frames.FRAME_QUALITY_1.items.QGAP_1 = {
+      itemSha256: "d".repeat(64),
+      projectionKind: "BLOCKING_GAP",
+      projectionPathId: "intake.quality.gaps.references",
+      valueKind: "JSON_VALUE",
+      value: {
+        dimension: "REFERENCES",
+        question: "请补充第三方检测报告的机构名称？",
+        source_role: "USER",
+        linked_fact_keys: ["FACT_01"],
+      },
+    };
+    streamRun.frames.FRAME_QUALITY_1.itemOrder.push("QGAP_1");
+    applyEvent({
+      protocol: "agent-stream.v4",
+      event: "public_frame_projection_item",
+      frameId: "FRAME_QUALITY_1",
+      frameType: "QUALITY_FRAME",
+      generation: 1,
+      canonicalItemId: "QGAP_1",
+      itemSha256: "d".repeat(64),
+      projectionKind: "BLOCKING_GAP",
+      valueKind: "JSON_VALUE",
+      projectionPathId: "intake.quality.gaps.references",
+      canonicalValueJson: JSON.stringify(
+        streamRun.frames.FRAME_QUALITY_1.items.QGAP_1.value,
+      ),
+    }, undefined, streamRun);
     await wrapper.vm.$nextTick();
 
     expect(wrapper.get("[data-dispute-detail-summary]").text()).toContain(
       "三路并行生成的新事实；第二项并行事实",
     );
     expect(wrapper.get("[data-dossier-status-pill]").text()).toContain("12%");
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain(
+      "核验第三方检测报告、机构资质、检测方法和环境条件",
+    );
 
     streamRun.frames.FRAME_DOSSIER_1.status = "RESET";
     streamRun.parallelFrameIds.DOSSIER_FRAME = "FRAME_DOSSIER_2";
@@ -2108,6 +2140,9 @@ describe("IntakeRoomView", () => {
       "三路并行生成的新事实",
     );
     expect(wrapper.get("[data-dossier-status-pill]").text()).toContain("12%");
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain(
+      "核验第三方检测报告、机构资质、检测方法和环境条件",
+    );
     wrapper.unmount();
   });
 

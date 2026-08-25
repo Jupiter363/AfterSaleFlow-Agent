@@ -2631,24 +2631,48 @@ function setParallelDossierProjection(pathId, projectionKind, value) {
   };
 }
 
-function setParallelQualityProjection(pathId, value) {
-  const prefix = "intake.quality.scores.";
-  const dimension = String(pathId || "").startsWith(prefix)
-    ? String(pathId).slice(prefix.length)
-    : "";
-  const maximum = INTAKE_PARALLEL_QUALITY_DIMENSIONS[dimension];
-  if (!Number.isInteger(value) || maximum === undefined || value < 0 || value > maximum) {
-    return;
-  }
-  const previous = streamedParallelFrameSections.value.QUALITY_FRAME
-    ?.intake_quality?.score_breakdown;
+function setParallelQualityProjection(frame) {
+  const scorePrefix = "intake.quality.scores.";
+  const gapPrefix = "intake.quality.gaps.";
   const scoreBreakdown = Object.fromEntries(
     Object.keys(INTAKE_PARALLEL_QUALITY_DIMENSIONS).map((key) => [
       key,
-      Number.isInteger(previous?.[key]) ? previous[key] : 0,
+      0,
     ]),
   );
-  scoreBreakdown[dimension] = value;
+  const blockingGaps = [];
+  for (const itemId of frame?.itemOrder || []) {
+    const candidate = frame?.items?.[itemId];
+    const pathId = String(candidate?.projectionPathId || "");
+    if (candidate?.projectionKind === "DIMENSION_SCORE" && pathId.startsWith(scorePrefix)) {
+      const dimension = pathId.slice(scorePrefix.length);
+      const maximum = INTAKE_PARALLEL_QUALITY_DIMENSIONS[dimension];
+      if (
+        Number.isInteger(candidate.value) &&
+        maximum !== undefined &&
+        candidate.value >= 0 &&
+        candidate.value <= maximum
+      ) scoreBreakdown[dimension] = candidate.value;
+      continue;
+    }
+    if (candidate?.projectionKind !== "BLOCKING_GAP" || !pathId.startsWith(gapPrefix)) {
+      continue;
+    }
+    const value = candidate.value;
+    const dimension = pathId.slice(gapPrefix.length);
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      String(value.dimension || "").toLowerCase() !== dimension ||
+      typeof value.question !== "string" ||
+      !value.question.trim() ||
+      !["USER", "MERCHANT"].includes(value.source_role) ||
+      !Array.isArray(value.linked_fact_keys) ||
+      value.linked_fact_keys.some((key) => typeof key !== "string" || !key)
+    ) continue;
+    blockingGaps.push(value.question.trim());
+  }
   streamedParallelFrameSections.value = {
     ...streamedParallelFrameSections.value,
     QUALITY_FRAME: {
@@ -2658,6 +2682,11 @@ function setParallelQualityProjection(pathId, value) {
         ready_for_next_step: false,
         score_breakdown: scoreBreakdown,
         improvement_reason: "正在并行汇总本轮质量评估。",
+      },
+      missing_information: {
+        blocking_gaps: blockingGaps,
+        nice_to_have_gaps: [],
+        next_questions: [...blockingGaps],
       },
     },
   };
@@ -2716,9 +2745,9 @@ function applyParallelIntakeProjectionEvent(event, streamRun) {
     );
   } else if (
     event.frameType === "QUALITY_FRAME" &&
-    item.projectionKind === "DIMENSION_SCORE"
+    ["DIMENSION_SCORE", "BLOCKING_GAP"].includes(item.projectionKind)
   ) {
-    setParallelQualityProjection(item.projectionPathId, item.value);
+    setParallelQualityProjection(frame);
   }
 }
 

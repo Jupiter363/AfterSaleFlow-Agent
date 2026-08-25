@@ -33,7 +33,10 @@ from app.graphs.intake.parallel_outputs import (
     DialoguePublicSegmentProposalV1,
     DossierPublicPatchProposalV1,
     ParallelFrameOutput,
+    QUALITY_DIMENSION_ORDER,
+    QualityPublicGapProposalV1,
     QualityPublicMetricProposalV1,
+    QualityPublicProjectionProposalV1,
     validate_parallel_frame_output,
 )
 from app.harness.context_window import PromptSection
@@ -56,13 +59,22 @@ FRAME_NODE_NAMES: Mapping[ParallelFrameType, str] = {
 FRAME_PUBLIC_ITEM_LIMITS: Mapping[ParallelFrameType, int] = {
     "DIALOGUE_FRAME": 4,
     "DOSSIER_FRAME": 32,
-    "QUALITY_FRAME": 6,
+    "QUALITY_FRAME": 12,
 }
 
 FRAME_PUBLIC_ITEM_MODELS: Mapping[ParallelFrameType, type[BaseModel]] = {
     "DIALOGUE_FRAME": DialoguePublicSegmentProposalV1,
     "DOSSIER_FRAME": DossierPublicPatchProposalV1,
-    "QUALITY_FRAME": QualityPublicMetricProposalV1,
+    "QUALITY_FRAME": QualityPublicProjectionProposalV1,
+}
+
+QUALITY_DIMENSION_MAXIMA: Mapping[str, int] = {
+    "REFERENCES": 15,
+    "EVENT_STORY": 20,
+    "PARTY_POSITIONS": 20,
+    "REQUESTED_RESOLUTION": 15,
+    "RISK_AND_CONFLICTS": 15,
+    "NEXT_ACTION_CLARITY": 15,
 }
 
 _MODEL_CONTEXT_SECTION_NAME = "parallel_frame_model_input"
@@ -691,6 +703,7 @@ async def _invoke_frame_model(
                     frame_type,
                     provider_items,
                     normalized_provider_item,
+                    actor_role=request.actor_role,
                 )
                 slot_id = str(normalized_provider_item["provider_slot_id"])
                 if slot_id in {
@@ -991,7 +1004,21 @@ def canonical_parallel_public_projection(
             value_kind="JSON_VALUE",
             canonical_value=dossier.candidate_value,
         )
-    quality = QualityPublicMetricProposalV1.model_validate(item)
+    quality = QualityPublicProjectionProposalV1.model_validate(item).root
+    if isinstance(quality, QualityPublicGapProposalV1):
+        return CanonicalPublicProjectionItem(
+            canonical_item_id=quality.provider_slot_id,
+            projection_kind=quality.projection_kind,
+            projection_path_id=f"intake.quality.gaps.{quality.dimension.lower()}",
+            value_kind="JSON_VALUE",
+            canonical_value={
+                "dimension": quality.dimension,
+                "question": quality.question,
+                "source_role": quality.source_role,
+                "linked_fact_keys": list(quality.linked_fact_keys),
+            },
+        )
+    quality = QualityPublicMetricProposalV1.model_validate(quality)
     return CanonicalPublicProjectionItem(
         canonical_item_id=quality.provider_slot_id,
         projection_kind=quality.projection_kind,
@@ -1005,7 +1032,53 @@ def _validate_public_projection_prefix(
     frame_type: ParallelFrameType,
     previous_items: list[dict[str, Any]],
     current_item: dict[str, Any],
+    *,
+    actor_role: PartyRole,
 ) -> None:
+    if frame_type == "QUALITY_FRAME":
+        items = (*previous_items, current_item)
+        if len(items) > FRAME_PUBLIC_ITEM_LIMITS[frame_type]:
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_FRAME_PUBLIC_ITEM_LIMIT"
+            )
+        index = len(items) - 1
+        if index < len(QUALITY_DIMENSION_ORDER):
+            if (
+                current_item.get("projection_kind") != "DIMENSION_SCORE"
+                or current_item.get("dimension") != QUALITY_DIMENSION_ORDER[index]
+            ):
+                raise IntakeGraphContractError(
+                    "INTAKE_PARALLEL_QUALITY_SCORE_ORDER_INVALID"
+                )
+            return
+        if current_item.get("projection_kind") != "BLOCKING_GAP":
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_QUALITY_GAP_ORDER_INVALID"
+            )
+        if current_item.get("source_role") != actor_role:
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_QUALITY_GAP_SOURCE_INVALID"
+            )
+        dimension = str(current_item.get("dimension", ""))
+        gap_dimensions = {
+            str(item.get("dimension", ""))
+            for item in previous_items[len(QUALITY_DIMENSION_ORDER) :]
+        }
+        if dimension in gap_dimensions:
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_QUALITY_GAP_REPEATED"
+            )
+        score_by_dimension = {
+            str(item.get("dimension", "")): item.get("candidate_score")
+            for item in previous_items[: len(QUALITY_DIMENSION_ORDER)]
+        }
+        if score_by_dimension.get(dimension) == QUALITY_DIMENSION_MAXIMA.get(
+            dimension
+        ):
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_QUALITY_FULL_SCORE_GAP"
+            )
+        return
     if frame_type != "DOSSIER_FRAME":
         return
     candidates = tuple(

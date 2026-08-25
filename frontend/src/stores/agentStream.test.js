@@ -725,7 +725,52 @@ describe("agentStreamStore", () => {
         canonical_value_json: "12",
         item_sha256: hash,
       }),
-      v4SseFrame(runId, attemptId, 6, "public_frame_interrupted", {
+      ...[
+        ["event_story", 18],
+        ["party_positions", 18],
+        ["requested_resolution", 14],
+        ["risk_and_conflicts", 13],
+        ["next_action_clarity", 12],
+      ].map(([dimension, value], offset) => v4SseFrame(
+        runId,
+        attemptId,
+        6 + offset,
+        "public_frame_projection_item",
+        {
+          frame_id: qualityFrameId,
+          frame_type: "QUALITY_FRAME",
+          generation: 1,
+          delivery_class: "DURABLE_PREVIEW",
+          local_index: 1 + offset,
+          next_local_index: 2 + offset,
+          canonical_item_id: `QMETRIC_${dimension.toUpperCase()}`,
+          projection_kind: "DIMENSION_SCORE",
+          projection_path_id: `intake.quality.scores.${dimension}`,
+          value_kind: "JSON_VALUE",
+          canonical_value_json: String(value),
+          item_sha256: hash,
+        },
+      )),
+      v4SseFrame(runId, attemptId, 11, "public_frame_projection_item", {
+        frame_id: qualityFrameId,
+        frame_type: "QUALITY_FRAME",
+        generation: 1,
+        delivery_class: "DURABLE_PREVIEW",
+        local_index: 6,
+        next_local_index: 7,
+        canonical_item_id: "QGAP_REFERENCES",
+        projection_kind: "BLOCKING_GAP",
+        projection_path_id: "intake.quality.gaps.references",
+        value_kind: "JSON_VALUE",
+        canonical_value_json: JSON.stringify({
+          dimension: "REFERENCES",
+          question: "请补充第三方检测报告的机构名称？",
+          source_role: "USER",
+          linked_fact_keys: ["FACT_01"],
+        }),
+        item_sha256: hash,
+      }),
+      v4SseFrame(runId, attemptId, 12, "public_frame_interrupted", {
         frame_id: dossierFrameId,
         frame_type: "DOSSIER_FRAME",
         generation: 1,
@@ -734,7 +779,7 @@ describe("agentStreamStore", () => {
         reason_code: "OUTPUT_SCHEMA_INVALID",
         retryable: true,
       }),
-      v4SseFrame(runId, attemptId, 7, "frame_generation_reset", {
+      v4SseFrame(runId, attemptId, 13, "frame_generation_reset", {
         frame_type: "DOSSIER_FRAME",
         old_frame_id: dossierFrameId,
         new_frame_id: replacementDossierFrameId,
@@ -743,7 +788,7 @@ describe("agentStreamStore", () => {
         reason_code: "OUTPUT_SCHEMA_INVALID",
         delivery_class: "DURABLE_CONTROL",
       }),
-      v4SseFrame(runId, attemptId, 8, "public_frame_start", {
+      v4SseFrame(runId, attemptId, 14, "public_frame_start", {
         frame_id: replacementDossierFrameId,
         frame_type: "DOSSIER_FRAME",
         generation: 2,
@@ -751,7 +796,7 @@ describe("agentStreamStore", () => {
         projection_registry_version: "intake-projection-registry.v1",
         delivery_class: "DURABLE_CONTROL",
       }),
-      v4SseFrame(runId, attemptId, 9, "public_frame_projection_item", {
+      v4SseFrame(runId, attemptId, 15, "public_frame_projection_item", {
         frame_id: replacementDossierFrameId,
         frame_type: "DOSSIER_FRAME",
         generation: 2,
@@ -765,7 +810,7 @@ describe("agentStreamStore", () => {
         canonical_value_json: JSON.stringify("新事实"),
         item_sha256: hash,
       }),
-      v4SseFrame(runId, attemptId, 10, "public_frame_projection_item", {
+      v4SseFrame(runId, attemptId, 16, "public_frame_projection_item", {
         frame_id: replacementDossierFrameId,
         frame_type: "DOSSIER_FRAME",
         generation: 2,
@@ -779,7 +824,7 @@ describe("agentStreamStore", () => {
         canonical_value_json: JSON.stringify("补充事实"),
         item_sha256: hash,
       }),
-      v4SseFrame(runId, attemptId, 11, "public_frame_sealed", {
+      v4SseFrame(runId, attemptId, 17, "public_frame_sealed", {
         frame_id: dialogueFrameId,
         frame_type: "DIALOGUE_FRAME",
         generation: 1,
@@ -789,7 +834,7 @@ describe("agentStreamStore", () => {
         result_sha256: hash,
         public_projection_sha256: "b".repeat(64),
       }),
-      v4SseFrame(runId, attemptId, 12, "public_frame_sealed", {
+      v4SseFrame(runId, attemptId, 18, "public_frame_sealed", {
         frame_id: replacementDossierFrameId,
         frame_type: "DOSSIER_FRAME",
         generation: 2,
@@ -799,17 +844,17 @@ describe("agentStreamStore", () => {
         result_sha256: hash,
         public_projection_sha256: "b".repeat(64),
       }),
-      v4SseFrame(runId, attemptId, 13, "public_frame_sealed", {
+      v4SseFrame(runId, attemptId, 19, "public_frame_sealed", {
         frame_id: qualityFrameId,
         frame_type: "QUALITY_FRAME",
         generation: 1,
         delivery_class: "DURABLE_STAGING",
         frame_receipt_id: "QUALITY_RECEIPT_1",
-        next_local_index: 1,
+        next_local_index: 7,
         result_sha256: hash,
         public_projection_sha256: "b".repeat(64),
       }),
-      v4SseFrame(runId, attemptId, 14, "final", {
+      v4SseFrame(runId, attemptId, 20, "final", {
         delivery_class: "DURABLE_TERMINAL",
         final_receipt_id: "FINAL_RECEIPT_1",
         final_result_hash: "c".repeat(64),
@@ -847,8 +892,10 @@ describe("agentStreamStore", () => {
     expect(run.frames[replacementDossierFrameId].items.DPATCH_NEW.value).toBe("新事实");
     expect(run.frames[replacementDossierFrameId].items.DPATCH_NEW_2.value).toBe("补充事实");
     expect(run.frames[qualityFrameId].items.QMETRIC_01.value).toBe(12);
+    expect(run.frames[qualityFrameId].items.QGAP_REFERENCES.value.question)
+      .toBe("请补充第三方检测报告的机构名称？");
     expect(run.frames[dialogueFrameId].status).toBe("SEALED");
-    expect(run.lastEventId).toBe(`v4:${attemptId}:14`);
+    expect(run.lastEventId).toBe(`v4:${attemptId}:20`);
   });
 
   it("rejects a V4 Dossier item outside the exact current-facts projection", async () => {

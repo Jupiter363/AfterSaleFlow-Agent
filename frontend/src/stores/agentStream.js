@@ -53,10 +53,18 @@ const V4_QUALITY_DIMENSIONS = {
   risk_and_conflicts: 15,
   next_action_clarity: 15,
 };
+const V4_QUALITY_DIMENSION_ORDER = [
+  "references",
+  "event_story",
+  "party_positions",
+  "requested_resolution",
+  "risk_and_conflicts",
+  "next_action_clarity",
+];
 const V4_FRAME_ITEM_LIMITS = {
   DIALOGUE_FRAME: 4,
   DOSSIER_FRAME: 32,
-  QUALITY_FRAME: 6,
+  QUALITY_FRAME: 12,
 };
 
 function unicodeLength(value) {
@@ -467,18 +475,52 @@ function validateV4ProjectionContract(frame, event, value) {
     return;
   }
   if (frameType === "QUALITY_FRAME") {
-    const prefix = "intake.quality.scores.";
-    const dimension = String(event.projectionPathId || "").startsWith(prefix)
-      ? String(event.projectionPathId).slice(prefix.length)
+    const scorePrefix = "intake.quality.scores.";
+    const gapPrefix = "intake.quality.gaps.";
+    const pathId = String(event.projectionPathId || "");
+    if (event.localIndex < V4_QUALITY_DIMENSION_ORDER.length) {
+      const dimension = pathId.startsWith(scorePrefix)
+        ? pathId.slice(scorePrefix.length)
+        : "";
+      const maximum = V4_QUALITY_DIMENSIONS[dimension];
+      if (
+        event.valueKind !== "JSON_VALUE" ||
+        event.projectionKind !== "DIMENSION_SCORE" ||
+        dimension !== V4_QUALITY_DIMENSION_ORDER[event.localIndex] ||
+        maximum === undefined ||
+        !Number.isInteger(value) ||
+        value < 0 ||
+        value > maximum
+      ) rejectV4ProjectionContract();
+      return;
+    }
+    const dimension = pathId.startsWith(gapPrefix)
+      ? pathId.slice(gapPrefix.length)
       : "";
     const maximum = V4_QUALITY_DIMENSIONS[dimension];
+    const scoreItem = frame.itemOrder
+      .map((itemId) => frame.items[itemId])
+      .find((item) => item?.projectionPathId === `${scorePrefix}${dimension}`);
+    const repeatedGap = frame.itemOrder
+      .map((itemId) => frame.items[itemId])
+      .some((item) => item?.projectionPathId === `${gapPrefix}${dimension}`);
     if (
       event.valueKind !== "JSON_VALUE" ||
-      event.projectionKind !== "DIMENSION_SCORE" ||
+      event.projectionKind !== "BLOCKING_GAP" ||
       maximum === undefined ||
-      !Number.isInteger(value) ||
-      value < 0 ||
-      value > maximum
+      repeatedGap ||
+      scoreItem?.value === maximum ||
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      String(value.dimension || "").toLowerCase() !== dimension ||
+      typeof value.question !== "string" ||
+      !value.question.endsWith("？") ||
+      !["USER", "MERCHANT"].includes(value.source_role) ||
+      !Array.isArray(value.linked_fact_keys) ||
+      value.linked_fact_keys.length > 16 ||
+      value.linked_fact_keys.some((key) => typeof key !== "string" || !key) ||
+      new Set(value.linked_fact_keys).size !== value.linked_fact_keys.length
     ) rejectV4ProjectionContract();
     return;
   }

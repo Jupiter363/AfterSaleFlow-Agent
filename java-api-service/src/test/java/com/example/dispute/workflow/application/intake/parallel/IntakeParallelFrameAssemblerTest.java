@@ -154,6 +154,28 @@ class IntakeParallelFrameAssemblerTest {
     }
 
     @Test
+    void rejectsPublicGapThatDiffersFromTheSealedGapAuthority() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode quality = quality(Map.of(
+                        "references", 10,
+                        "event_story", 20,
+                        "party_positions", 20,
+                        "requested_resolution", 15,
+                        "risk_and_conflicts", 15,
+                        "next_action_clarity", 15),
+                List.of(gap("REFERENCES", "请补充第三方检测报告？")));
+        ((ObjectNode) quality.at("/public_projection_items/6"))
+                .put("question", "请补充另一项材料？");
+
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        dossier(),
+                        quality))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("question differs from trusted authority");
+    }
+
+    @Test
     void rejectsDossierFrameWritingAnUnregisteredPublicPath() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode dossier = dossier();
@@ -456,25 +478,37 @@ class IntakeParallelFrameAssemblerTest {
         ArrayNode items = root.putArray("public_projection_items");
         ObjectNode quality = root.putObject("quality");
         ObjectNode scoreNode = quality.putObject("scores");
-        Map<String, String> dimensions = Map.ofEntries(
+        List<Map.Entry<String, String>> dimensions = List.of(
                 Map.entry("references", "REFERENCES"),
                 Map.entry("event_story", "EVENT_STORY"),
                 Map.entry("party_positions", "PARTY_POSITIONS"),
                 Map.entry("requested_resolution", "REQUESTED_RESOLUTION"),
                 Map.entry("risk_and_conflicts", "RISK_AND_CONFLICTS"),
                 Map.entry("next_action_clarity", "NEXT_ACTION_CLARITY"));
-        dimensions.keySet().stream().sorted().forEach(field -> {
+        dimensions.forEach(dimension -> {
+            String field = dimension.getKey();
             scoreNode.put(field, scores.get(field));
             ObjectNode item = items.addObject();
             item.put("schema_version", "intake.quality-public-metric-proposal.v1");
-            item.put("provider_slot_id", "QMETRIC_" + dimensions.get(field));
+            item.put("provider_slot_id", "QMETRIC_" + dimension.getValue());
             item.put("projection_kind", "DIMENSION_SCORE");
-            item.put("dimension", dimensions.get(field));
+            item.put("dimension", dimension.getValue());
             item.put("candidate_score", scores.get(field));
             item.putArray("linked_fact_keys");
         });
         ArrayNode gapArray = quality.putArray("gap_proposals");
-        gaps.forEach(gapArray::add);
+        for (int index = 0; index < gaps.size(); index++) {
+            ObjectNode gap = gaps.get(index);
+            gapArray.add(gap.deepCopy());
+            ObjectNode publicGap = items.addObject();
+            publicGap.put("schema_version", "intake.quality-public-gap-proposal.v1");
+            publicGap.put("provider_slot_id", "QGAP_" + (index + 1));
+            publicGap.put("projection_kind", "BLOCKING_GAP");
+            publicGap.put("dimension", gap.path("dimension").asText());
+            publicGap.put("question", gap.path("question").asText());
+            publicGap.put("source_role", gap.path("source_role").asText());
+            publicGap.set("linked_fact_keys", gap.path("linked_fact_keys").deepCopy());
+        }
         quality.put("assessment_reasoning", "依据当前消息形成六项评分。");
         ArrayNode slots = quality.putArray("public_projection_slots");
         items.forEach(item -> slots.add(item.path("provider_slot_id").asText()));

@@ -566,8 +566,13 @@ def _result_payload(frame_type: ParallelFrameType) -> dict[str, Any]:
         ("RISK_AND_CONFLICTS", 13, "QMETRIC_05"),
         ("NEXT_ACTION_CLARITY", 12, "QMETRIC_06"),
     ]
-    return {
-        "public_projection_items": [
+    gap = {
+        "dimension": "REFERENCES",
+        "question": "请补充第三方检测报告的机构名称？",
+        "source_role": "USER",
+        "linked_fact_keys": ["FACT_01"],
+    }
+    public_items = [
             {
                 "schema_version": "intake.quality-public-metric-proposal.v1",
                 "provider_slot_id": slot,
@@ -577,7 +582,17 @@ def _result_payload(frame_type: ParallelFrameType) -> dict[str, Any]:
                 "linked_fact_keys": ["FACT_01"],
             }
             for dimension, score, slot in dimensions
-        ],
+        ]
+    public_items.append(
+        {
+            "schema_version": "intake.quality-public-gap-proposal.v1",
+            "provider_slot_id": "QGAP_01",
+            "projection_kind": "BLOCKING_GAP",
+            **gap,
+        }
+    )
+    return {
+        "public_projection_items": public_items,
         "frame_type": frame_type,
         "schema_version": "intake.quality-frame.v1",
         "quality": {
@@ -589,15 +604,9 @@ def _result_payload(frame_type: ParallelFrameType) -> dict[str, Any]:
                 "risk_and_conflicts": 13,
                 "next_action_clarity": 12,
             },
-            "gap_proposals": [
-                {
-                    "dimension": "REFERENCES",
-                    "question": "请补充第三方检测报告的机构名称？",
-                    "source_role": "USER",
-                    "linked_fact_keys": ["FACT_01"],
-                }
-            ],
+            "gap_proposals": [gap],
             "assessment_reasoning": "事实和处理方向较清楚，但证据来源仍需补充。",
-            "public_projection_slots": [slot for _, _, slot in dimensions],
+            "public_projection_slots": [slot for _, _, slot in dimensions]
+            + ["QGAP_01"],
         },
     }

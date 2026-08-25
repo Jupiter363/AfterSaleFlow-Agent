@@ -64,6 +64,13 @@ public final class IntakeParallelFrameAssembler {
             Map.entry("REQUESTED_RESOLUTION", "requested_resolution"),
             Map.entry("RISK_AND_CONFLICTS", "risk_and_conflicts"),
             Map.entry("NEXT_ACTION_CLARITY", "next_action_clarity"));
+    private static final List<String> QUALITY_DIMENSION_ORDER = List.of(
+            "REFERENCES",
+            "EVENT_STORY",
+            "PARTY_POSITIONS",
+            "REQUESTED_RESOLUTION",
+            "RISK_AND_CONFLICTS",
+            "NEXT_ACTION_CLARITY");
     private static final ObjectMapper MAPPER = JsonMapper.builder()
             .findAndAddModules()
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
@@ -419,17 +426,22 @@ public final class IntakeParallelFrameAssembler {
         }
         requireQualityProjectionItems(
                 requireArray(frame.path("public_projection_items"), "quality public items"),
-                normalizedScores);
+                normalizedScores,
+                normalizedGaps,
+                actorRole);
         return new QualityOutcome(Map.copyOf(normalizedScores), total, List.copyOf(normalizedGaps), reasoning);
     }
 
     private static void requireQualityProjectionItems(
-            ArrayNode items, Map<String, Integer> scores) {
-        if (items.size() != QUALITY_MAXIMA.size()) {
-            throw invalid("Quality public trace must contain exactly six dimension scores");
+            ArrayNode items,
+            Map<String, Integer> scores,
+            List<Gap> gaps,
+            String actorRole) {
+        if (items.size() != QUALITY_DIMENSION_ORDER.size() + gaps.size()) {
+            throw invalid("Quality public trace must contain six scores and every sealed gap");
         }
-        Set<String> observed = new HashSet<>();
-        for (JsonNode item : items) {
+        for (int index = 0; index < QUALITY_DIMENSION_ORDER.size(); index++) {
+            JsonNode item = items.get(index);
             requireExactFields(
                     item,
                     Set.of(
@@ -443,15 +455,46 @@ public final class IntakeParallelFrameAssembler {
             requireText(item, "schema_version", "intake.quality-public-metric-proposal.v1");
             requireText(item, "projection_kind", "DIMENSION_SCORE");
             String dimension = item.path("dimension").asText("");
+            String expectedDimension = QUALITY_DIMENSION_ORDER.get(index);
             String scoreField = DIMENSION_FIELDS.get(dimension);
-            if (scoreField == null || !observed.add(dimension)) {
-                throw invalid("Quality public trace repeats or invents a dimension");
+            if (!expectedDimension.equals(dimension) || scoreField == null) {
+                throw invalid("Quality public scores differ from the fixed dimension order");
             }
             if (!item.path("candidate_score").isIntegralNumber()
                     || item.path("candidate_score").intValue() != scores.get(scoreField)) {
                 throw invalid("Quality public trace differs from the sealed score map");
             }
             requireArray(item.path("linked_fact_keys"), "quality linked_fact_keys");
+        }
+        for (int gapIndex = 0; gapIndex < gaps.size(); gapIndex++) {
+            JsonNode item = items.get(QUALITY_DIMENSION_ORDER.size() + gapIndex);
+            Gap gap = gaps.get(gapIndex);
+            requireExactFields(
+                    item,
+                    Set.of(
+                            "schema_version",
+                            "provider_slot_id",
+                            "projection_kind",
+                            "dimension",
+                            "question",
+                            "source_role",
+                            "linked_fact_keys"),
+                    "Quality gap projection item");
+            requireText(item, "schema_version", "intake.quality-public-gap-proposal.v1");
+            requireText(item, "projection_kind", "BLOCKING_GAP");
+            requireText(item, "dimension", gap.dimension());
+            requireText(item, "question", gap.question());
+            requireText(item, "source_role", actorRole);
+            ArrayNode factKeys = requireArray(
+                    item.path("linked_fact_keys"), "quality gap linked_fact_keys");
+            if (factKeys.size() != gap.factKeys().size()) {
+                throw invalid("Quality public gap fact binding differs from sealed authority");
+            }
+            for (int factIndex = 0; factIndex < factKeys.size(); factIndex++) {
+                if (!gap.factKeys().get(factIndex).equals(factKeys.get(factIndex).asText(null))) {
+                    throw invalid("Quality public gap fact binding differs from sealed authority");
+                }
+            }
         }
     }
 
