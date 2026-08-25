@@ -184,6 +184,53 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
     }
 
     @Test
+    void retryableInterruptedLanePreservesSealedSiblingsAndRequestsOnlyLaneReplay() {
+        ExecuteAgentRunRequest request = validParallelRequest();
+        StreamFixture complete = StreamFixture.complete(request);
+        StreamFixture oneLaneFailed = complete.withLines(List.of(
+                complete.lines().get(0),
+                complete.lines().get(1),
+                complete.lines().get(2),
+                complete.lines().get(3),
+                complete.lines().get(7),
+                complete.lines().get(8),
+                complete.lines().get(9),
+                complete.lines().get(11)));
+        GraphTransportSecurityProof proof = mutualTlsProof();
+        RecordingStaging staging = new RecordingStaging(request, oneLaneFailed);
+
+        assertThatThrownBy(() -> client(
+                                request,
+                                proof,
+                                new FakeCommandTransport(proof, oneLaneFailed),
+                                staging)
+                        .executeOrResume(
+                                request,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOfSatisfying(
+                        TargetE2EGraphClientException.class,
+                        failure -> {
+                            assertThat(failure.errorCode())
+                                    .isEqualTo("INTAKE_PARALLEL_FRAME_BATCH_FAILED");
+                            assertThat(failure.recoveryAction())
+                                    .isEqualTo(
+                                            TargetE2EGraphClientException.RecoveryAction
+                                                    .RETRY_SAME_SEALED_COMMAND);
+                        });
+
+        assertThat(staging.actions)
+                .contains(
+                        "append:PUBLIC_FRAME_INTERRUPTED:DIALOGUE_FRAME",
+                        "seal:QUALITY_FRAME",
+                        "seal:DOSSIER_FRAME")
+                .doesNotContain(
+                        "find-completion",
+                        "fail:INTAKE_PARALLEL_FRAME_BATCH_FAILED",
+                        "fail:TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+    }
+
+    @Test
     void partialSealedCompletionConflictDurablyFailsTheAdmittedFrameSet() {
         ExecuteAgentRunRequest request = validParallelRequest();
         StreamFixture complete = StreamFixture.complete(request);

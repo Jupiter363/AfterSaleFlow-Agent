@@ -571,42 +571,66 @@ class ParallelIntakeFrameOrchestrator:
             )
             replayed = False
 
-        _require_status(state, "COMPLETE")
-        _require_complete_state(state, request.frame_type)
-        terminal_snapshot = await graph.aget_state(config)
-        checkpoint_ref = _checkpoint_ref(
-            terminal_snapshot.config,
-            request,
-            expected_config=config,
-        )
-        checkpoint_sha256 = canonical_sha256(
-            {
-                "checkpoint_ref": checkpoint_ref,
-                "terminal_state": state,
-            }
-        )
-        sealed = _sealed_event(
-            request,
-            state,
-            checkpoint_ref=checkpoint_ref,
-            checkpoint_sha256=checkpoint_sha256,
-        )
-        await event_sink.emit(sealed)
-        result = validate_parallel_frame_output(
-            request.frame_type,
-            cast(Mapping[str, Any], state["canonical_result"]),
-        )
-        return ParallelFrameExecutionResult(
-            frame_type=request.frame_type,
-            generation=int(state["generation"]),
-            frame_id=str(state["frame_id"]),
-            result=result,
-            result_sha256=str(state["result_sha256"]),
-            public_projection_sha256=str(state["public_projection_sha256"]),
-            child_checkpoint_ref=checkpoint_ref,
-            child_checkpoint_sha256=checkpoint_sha256,
-            replayed_from_checkpoint=replayed,
-        )
+        terminal_event_emitted = False
+        try:
+            _require_status(state, "COMPLETE")
+            _require_complete_state(state, request.frame_type)
+            result = validate_parallel_frame_output(
+                request.frame_type,
+                cast(Mapping[str, Any], state["canonical_result"]),
+            )
+            terminal_snapshot = await graph.aget_state(config)
+            checkpoint_ref = _checkpoint_ref(
+                terminal_snapshot.config,
+                request,
+                expected_config=config,
+            )
+            checkpoint_sha256 = canonical_sha256(
+                {
+                    "checkpoint_ref": checkpoint_ref,
+                    "terminal_state": state,
+                }
+            )
+            sealed = _sealed_event(
+                request,
+                state,
+                checkpoint_ref=checkpoint_ref,
+                checkpoint_sha256=checkpoint_sha256,
+            )
+            await event_sink.emit(sealed)
+            terminal_event_emitted = True
+            return ParallelFrameExecutionResult(
+                frame_type=request.frame_type,
+                generation=int(state["generation"]),
+                frame_id=str(state["frame_id"]),
+                result=result,
+                result_sha256=str(state["result_sha256"]),
+                public_projection_sha256=str(state["public_projection_sha256"]),
+                child_checkpoint_ref=checkpoint_ref,
+                child_checkpoint_sha256=checkpoint_sha256,
+                replayed_from_checkpoint=replayed,
+            )
+        except BaseException as error:
+            if (
+                not terminal_event_emitted
+                and not isinstance(error, asyncio.CancelledError)
+            ):
+                try:
+                    await event_sink.emit(
+                        FrameInterrupted(
+                            frame_set_id=request.frame_set_id,
+                            run_id=request.run_id,
+                            attempt_id=request.attempt_id,
+                            frame_type=request.frame_type,
+                            generation=int(state.get("generation", request.generation)),
+                            frame_id=str(state.get("frame_id", request.frame_id)),
+                            error_code=_public_error_code(error),
+                            retryable=_is_retryable_frame_failure(error),
+                        )
+                    )
+                except BaseException:
+                    pass
+            raise
 
 
 def _authorize_input(

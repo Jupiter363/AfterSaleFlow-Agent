@@ -10,6 +10,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.FrameExecutionReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalCommand;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalConflictException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalReceipt;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
@@ -74,6 +75,28 @@ public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunEx
         } catch (TargetE2EGraphClientException failure) {
             cancellationToken.throwIfCancellationRequested();
             throw executionFailure(failure, progress);
+        } catch (AssemblyConflictException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            throw executionFailure(
+                    TargetE2EGraphClientException.remote(
+                            failure.code(), false, "parallel Intake assembly authority was rejected"),
+                    progress);
+        } catch (TerminalConflictException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            throw executionFailure(
+                    TargetE2EGraphClientException.remote(
+                            failure.code(), false, "parallel Intake terminal authority was rejected"),
+                    progress);
+        } catch (RuntimeException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            TargetE2EGraphClientException typedFailure = progress.publicOutputEmitted
+                    ? TargetE2EGraphClientException.transport(
+                            "parallel Intake execution failed after durable public output", failure)
+                    : TargetE2EGraphClientException.remote(
+                            "INTAKE_PARALLEL_EXECUTION_UNCLASSIFIED",
+                            true,
+                            "parallel Intake execution failed before durable public output");
+            throw executionFailure(typedFailure, progress);
         }
     }
 

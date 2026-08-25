@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
+import app.graphs.intake.parallel_graph as parallel_graph_module
 from app.contracts.v1.codec import canonical_sha256
 from app.contracts.v1.models import RoomGraphCommand
 from app.graphs.intake.errors import IntakeGraphContractError
@@ -865,6 +866,51 @@ async def test_stream_adapter_divergence_without_reset_keeps_first_error() -> No
         if isinstance(event, FrameProjectionItem)
     ] == [0]
     assert not any(isinstance(event, FrameSealed) for event in sink.events)
+
+
+@pytest.mark.asyncio
+async def test_post_complete_seal_failure_emits_lane_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "QUALITY_FRAME"
+    )
+    sink = _CollectingSink()
+
+    def fail_checkpoint_proof(*_args: Any, **_kwargs: Any) -> str:
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_CHECKPOINT_PROOF_DRIFT"
+        )
+
+    monkeypatch.setattr(
+        parallel_graph_module,
+        "_checkpoint_ref",
+        fail_checkpoint_proof,
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_PARALLEL_FRAME_CHECKPOINT_PROOF_DRIFT",
+    ):
+        await orchestrator.execute_frame(
+            request,
+            agent_context=contexts["QUALITY_FRAME"],
+            model_runner=_StreamingRunner(_outputs()),
+            event_sink=sink,
+        )
+
+    assert not any(isinstance(event, FrameSealed) for event in sink.events)
+    interruption = sink.events[-1]
+    assert isinstance(interruption, FrameInterrupted)
+    assert interruption.frame_type == "QUALITY_FRAME"
+    assert interruption.generation == request.generation
+    assert interruption.frame_id == request.frame_id
+    assert interruption.error_code == "INTAKE_PARALLEL_FRAME_CHECKPOINT_PROOF_DRIFT"
+    assert not interruption.retryable
 
 
 @pytest.mark.asyncio

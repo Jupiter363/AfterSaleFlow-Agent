@@ -607,13 +607,18 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                     || executionPlan == null) {
                 throw protocol("parallel target Graph ended without execution authority", null);
             }
-            var durable = staging
-                    .findExactThreeCompletion(
-                            authority.frameSetId(),
-                            request.agentRunId(),
-                            request.attemptId())
-                    .orElseThrow(() -> protocol(
-                            "parallel exact-three completion is absent after stream EOF", null));
+            TargetE2EGraphClientException batchFailure = batchFailureAtEof();
+            if (batchFailure != null) {
+                throw batchFailure;
+            }
+            var durableProof = staging.findExactThreeCompletion(
+                    authority.frameSetId(), request.agentRunId(), request.attemptId());
+            if (frames.values().stream().anyMatch(state -> state.state != LaneState.SEALED)) {
+                throw protocol(
+                        "parallel target Graph ended with a non-terminal Frame lane", null);
+            }
+            var durable = durableProof.orElseThrow(() -> protocol(
+                    "parallel exact-three completion is absent after stream EOF", null));
             boolean durableExact = durable.frames().size() == FrameType.values().length
                     && frames.entrySet().stream().allMatch(entry -> {
                         var slot = durable.frames().get(entry.getKey());
@@ -629,6 +634,38 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                     authority.frameSetId(),
                     durable.lastSequenceNo(),
                     durable.publicOutputEmitted());
+        }
+
+        private TargetE2EGraphClientException batchFailureAtEof() {
+            boolean allTerminal = frames.values().stream()
+                    .allMatch(state -> state.state == LaneState.SEALED
+                            || state.state == LaneState.INTERRUPTED);
+            if (!allTerminal) {
+                return null;
+            }
+            List<FrameState> interrupted = java.util.Arrays.stream(FrameType.values())
+                    .map(frames::get)
+                    .filter(Objects::nonNull)
+                    .filter(state -> state.state == LaneState.INTERRUPTED)
+                    .toList();
+            if (interrupted.isEmpty()) {
+                return null;
+            }
+            boolean retryable = interrupted.stream()
+                    .allMatch(state -> state.retryable && state.generation < 2);
+            FrameState decisiveFailure = interrupted.stream()
+                    .filter(state -> !state.retryable || state.generation >= 2)
+                    .findFirst()
+                    .orElse(interrupted.getFirst());
+            String code = retryable
+                    ? "INTAKE_PARALLEL_FRAME_BATCH_FAILED"
+                    : decisiveFailure.interruptionCode;
+            return TargetE2EGraphClientException.remote(
+                    code,
+                    retryable,
+                    retryable
+                            ? "parallel Intake will retry only the interrupted Frame lanes"
+                            : "parallel Intake Frame failure exhausted its lane authority");
         }
 
         private void acceptStarted(Started event) {

@@ -140,6 +140,75 @@ class TargetE2EIntakeParallelExecutionGatewayTest {
         verify(terminal, never()).appendOrLoad(any());
     }
 
+    @Test
+    void unclassifiedFailureAfterPublicOutputRequiresReconciliationInsteadOfProviderReplay() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        IntakeParallelFrameExecutionClient frames = mock(IntakeParallelFrameExecutionClient.class);
+        TargetE2EIntakeParallelAssemblyCoordinator coordinator =
+                mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
+        AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
+        IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(reconciliation.reconcile(eq(request), any()))
+                .thenThrow(new AssemblyConflictException(
+                        "INTAKE_PARALLEL_READY_MISSING", "not ready"));
+        when(frames.executeOrResume(eq(request), any(), any())).thenAnswer(invocation -> {
+            ProgressListener listener = invocation.getArgument(1);
+            listener.onProgress(new AgentRunProgress(3L, true, false));
+            throw new IllegalStateException("unclassified V4 boundary failure");
+        });
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                () -> new TargetE2EIntakeParallelExecutionGateway(
+                                frames, coordinator, reconciliation, terminal)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()),
+                AgentRunExecutionException.class);
+
+        assertThat(failure.errorCode()).isEqualTo("TARGET_E2E_GRAPH_TRANSPORT_FAILED");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RECONCILE_TERMINAL);
+        assertThat(failure.lastSequenceNo()).isEqualTo(3L);
+        assertThat(failure.publicOutputEmitted()).isTrue();
+        verify(coordinator, never()).assembleReady(any(), any(), any());
+        verify(terminal, never()).appendOrLoad(any());
+    }
+
+    @Test
+    void unclassifiedFailureBeforePublicOutputRetainsAV4RetryCode() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        IntakeParallelFrameExecutionClient frames = mock(IntakeParallelFrameExecutionClient.class);
+        TargetE2EIntakeParallelAssemblyCoordinator coordinator =
+                mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
+        AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
+        IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(reconciliation.reconcile(eq(request), any()))
+                .thenThrow(new AssemblyConflictException(
+                        "INTAKE_PARALLEL_READY_MISSING", "not ready"));
+        when(frames.executeOrResume(eq(request), any(), any()))
+                .thenThrow(new IllegalStateException("unclassified V4 boundary failure"));
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                () -> new TargetE2EIntakeParallelExecutionGateway(
+                                frames, coordinator, reconciliation, terminal)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()),
+                AgentRunExecutionException.class);
+
+        assertThat(failure.errorCode()).isEqualTo("INTAKE_PARALLEL_EXECUTION_UNCLASSIFIED");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RETRY_SAME_COMMAND);
+        assertThat(failure.lastSequenceNo()).isEqualTo(-1L);
+        assertThat(failure.publicOutputEmitted()).isFalse();
+        verify(coordinator, never()).assembleReady(any(), any(), any());
+        verify(terminal, never()).appendOrLoad(any());
+    }
+
     private static GraphReconcileResponse response(ExecuteAgentRunRequest request) {
         RoomGraphCommand command = request.command();
         RoomGraphResult result = AgentRunPersistenceFixtures.parallelIntakeGraphResult();

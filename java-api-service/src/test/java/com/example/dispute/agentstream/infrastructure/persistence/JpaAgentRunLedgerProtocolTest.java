@@ -157,6 +157,10 @@ class JpaAgentRunLedgerProtocolTest {
         assertThat(attempt.getAttemptStatus()).isEqualTo(AgentRunAttemptStatus.FAILED);
         assertThat(attempt.getLastSequenceNo()).isZero();
         assertThat(run.getRunStatus()).isEqualTo("FAILED");
+        assertThat(run.getErrorMessage())
+                .isEqualTo(AgentRunEntity.V4_LOGICAL_FAILURE_MESSAGE);
+        assertThat(run.getStopReason())
+                .isEqualTo(AgentRunEntity.V4_LOGICAL_FAILURE_STOP_REASON);
         assertThat(run.getCompletedAt().toInstant())
                 .isEqualTo(AgentRunPersistenceFixtures.COMPLETED_AT);
         ArgumentCaptor<PostgresAgentRunV4EventWriter.EventWriteCommand> terminal =

@@ -23,6 +23,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSlotView;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameType;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressCommand;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressKind;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.SlotState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.StagingConflictException;
@@ -1067,7 +1068,10 @@ public class JdbcIntakeParallelFrameStagingStore
         }
 
         requireCurrentFrameAuthority(
-                authority, command.generation(), command.publicPayload());
+                authority,
+                command.generation(),
+                command.ingressKind(),
+                command.publicPayload());
         requireRunningCollecting(authority);
         requireSessionPosition(
                 command.frameSetId(),
@@ -1147,7 +1151,7 @@ public class JdbcIntakeParallelFrameStagingStore
                 command.runId(),
                 command.attemptId(),
                 command.frameType());
-        requireCurrentFrameAuthority(authority, command.generation(), null);
+        requireCurrentFrameAuthority(authority, command.generation(), null, null);
         Optional<FrameSealReceipt> replay = exactSealReplay(command, authority);
         if (replay.isPresent()) {
             FrameSealReceipt receipt = replay.orElseThrow();
@@ -1370,9 +1374,10 @@ public class JdbcIntakeParallelFrameStagingStore
         }
     }
 
-    private static void requireCurrentFrameAuthority(
+    static void requireCurrentFrameAuthority(
             Map<String, Object> row,
             long generation,
+            IngressKind ingressKind,
             AgentStreamEventV4.Payload payload) {
         if (generation != number(row, "current_frame_generation")) {
             throw conflict(
@@ -1380,6 +1385,17 @@ public class JdbcIntakeParallelFrameStagingStore
                     "new Frame work belongs to a non-current generation");
         }
         if (payload == null) {
+            return;
+        }
+        if (ingressKind == IngressKind.USAGE) {
+            if (payload.frameType() == null
+                    || !text(row, "frame_type").equals(payload.frameType().name())
+                    || payload.generation() == null
+                    || payload.generation().longValue() != generation) {
+                throw conflict(
+                        "INTAKE_PARALLEL_FRAME_USAGE_AUTHORITY_DRIFT",
+                        "usage payload belongs to another Frame type or generation");
+            }
             return;
         }
         String payloadFrameId = payload.frameId() != null

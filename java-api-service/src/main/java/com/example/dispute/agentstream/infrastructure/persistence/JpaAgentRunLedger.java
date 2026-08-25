@@ -893,7 +893,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             ExecuteAgentRunResult durableResult) {
         run.markFailed(
                 durableResult.errorCode(),
-                AgentRunEntity.V3_LOGICAL_FAILURE_MESSAGE,
+                AgentRunEntity.V4_LOGICAL_FAILURE_MESSAGE,
                 false,
                 null);
         run.markV4AttemptFailed(status, false, durableResult.completedAt());
@@ -948,11 +948,11 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         requireEqual(run.getErrorRetryable(), Boolean.FALSE, "v4FailureRunRetryable");
         requireEqual(
                 run.getErrorMessage(),
-                AgentRunEntity.V3_LOGICAL_FAILURE_MESSAGE,
+                AgentRunEntity.V4_LOGICAL_FAILURE_MESSAGE,
                 "v4FailureRunErrorMessage");
         requireEqual(
                 run.getStopReason(),
-                AgentRunEntity.V3_LOGICAL_FAILURE_STOP_REASON,
+                AgentRunEntity.V4_LOGICAL_FAILURE_STOP_REASON,
                 "v4FailureRunStopReason");
         requireEqual(
                 run.getCompletedAt() == null ? null : run.getCompletedAt().toInstant(),

@@ -1,10 +1,17 @@
 package com.example.dispute.workflow.infrastructure.persistence.intake.parallel;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressKind;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.StagingConflictException;
+import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Usage;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class JdbcIntakeParallelFrameStagingStoreContractTest {
@@ -133,6 +140,34 @@ class JdbcIntakeParallelFrameStagingStoreContractTest {
                 .contains("and assembly_state = 'collecting'")
                 .contains("and version = :expectedversion")
                 .contains("intake_parallel_failure_replay_conflict");
+    }
+
+    @Test
+    void bindsUsageToFrameTypeAndGenerationWithoutInventingAFrameId() {
+        Map<String, Object> authority = Map.of(
+                "current_frame_generation", 1L,
+                "frame_type", "QUALITY_FRAME",
+                "current_frame_id", "IFR_quality_1");
+        AgentStreamEventV4.Payload exactUsage = AgentStreamEventV4.Payload.usagePayload(
+                AgentStreamEventV4.FrameType.QUALITY_FRAME,
+                1,
+                new Usage(10, 5, 15));
+
+        assertThatCode(() -> JdbcIntakeParallelFrameStagingStore.requireCurrentFrameAuthority(
+                        authority, 1L, IngressKind.USAGE, exactUsage))
+                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> JdbcIntakeParallelFrameStagingStore.requireCurrentFrameAuthority(
+                        authority,
+                        1L,
+                        IngressKind.USAGE,
+                        AgentStreamEventV4.Payload.usagePayload(
+                                AgentStreamEventV4.FrameType.DIALOGUE_FRAME,
+                                1,
+                                new Usage(10, 5, 15))))
+                .isInstanceOfSatisfying(
+                        StagingConflictException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("INTAKE_PARALLEL_FRAME_USAGE_AUTHORITY_DRIFT"));
     }
 
     private static String normalizedSource() throws Exception {

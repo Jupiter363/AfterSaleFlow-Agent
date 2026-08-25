@@ -45,6 +45,9 @@ public class AgentRunEntity extends AbstractEntity {
     public static final String V3_LOGICAL_FAILURE_MESSAGE =
             "AgentRun V3 logical execution cannot continue";
     public static final String V3_LOGICAL_FAILURE_STOP_REASON = "STREAM_FAILED";
+    public static final String V4_LOGICAL_FAILURE_MESSAGE =
+            "AgentRun V4 logical execution cannot continue";
+    public static final String V4_LOGICAL_FAILURE_STOP_REASON = "STREAM_FAILED";
 
     @Column(name = "case_id", length = 64)
     private String caseId;
