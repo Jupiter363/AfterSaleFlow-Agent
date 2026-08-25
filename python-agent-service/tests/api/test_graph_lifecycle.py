@@ -91,6 +91,71 @@ def test_runtime_target_e2e_verifier_delegates_parallel_envelopes(
     ]
 
 
+@pytest.mark.asyncio
+async def test_runtime_parallel_intake_service_delegates_both_protocol_phases() -> None:
+    command = object()
+    verified_invocation = object()
+    expected_thread = object()
+    admission_receipt = object()
+    prepared = object()
+    opened = object()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class Service:
+        async def prepare(self, **kwargs: Any) -> Any:
+            calls.append(("prepare", kwargs))
+            return prepared
+
+        async def open_stream(self, **kwargs: Any) -> Any:
+            calls.append(("open_stream", kwargs))
+            return opened
+
+    class RuntimeHandle:
+        def require_runtime(self) -> Any:
+            return SimpleNamespace(parallel_intake_stream_service=Service())
+
+    runtime_service = graph_lifecycle._RuntimeParallelIntakeStreamService(
+        cast(Any, RuntimeHandle())
+    )
+
+    assert (
+        await runtime_service.prepare(
+            command=cast(Any, command),
+            verified_invocation=cast(Any, verified_invocation),
+            expected_thread=cast(Any, expected_thread),
+        )
+        is prepared
+    )
+    assert (
+        await runtime_service.open_stream(
+            command=cast(Any, command),
+            verified_invocation=cast(Any, verified_invocation),
+            expected_thread=cast(Any, expected_thread),
+            admission_receipt=cast(Any, admission_receipt),
+        )
+        is opened
+    )
+    assert calls == [
+        (
+            "prepare",
+            {
+                "command": command,
+                "verified_invocation": verified_invocation,
+                "expected_thread": expected_thread,
+            },
+        ),
+        (
+            "open_stream",
+            {
+                "command": command,
+                "verified_invocation": verified_invocation,
+                "expected_thread": expected_thread,
+                "admission_receipt": admission_receipt,
+            },
+        ),
+    ]
+
+
 def test_target_e2e_prompt_resources_are_required_before_runtime_readiness() -> None:
     graph_lifecycle._require_target_e2e_prompt_resources(
         [SimpleNamespace(prompt_version="all-rooms-prompt.target-e2e.v2")]

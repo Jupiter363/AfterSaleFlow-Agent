@@ -38,7 +38,12 @@ from app.api.graph_stream_service import (
     GraphRetainedCleanupError,
     GraphStreamAdmissionGate,
 )
-from app.api.intake_parallel_stream import ParallelIntakeFrameStreamService
+from app.api.intake_parallel_stream import (
+    OpenedParallelFrameStream,
+    ParallelFrameAdmissionReceipt,
+    ParallelFrameStreamAuthority,
+    ParallelIntakeFrameStreamService,
+)
 from app.config import Settings
 from app.contracts.v1.codec import ContractCodec
 from app.contracts.v1.models import AgentStreamEvent, GraphReconcileResponse, RoomGraphCommand
@@ -1134,13 +1139,30 @@ class _RuntimeParallelIntakeStreamService:
     def __init__(self, handle: GraphRuntimeHandle) -> None:
         self._handle = handle
 
+    async def prepare(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> ParallelFrameStreamAuthority:
+        service = self._handle.require_runtime().parallel_intake_stream_service
+        if service is None:
+            raise GraphGatewayDisabledError("INTAKE_PARALLEL_RUNTIME_UNAVAILABLE")
+        return await service.prepare(
+            command=command,
+            verified_invocation=verified_invocation,
+            expected_thread=expected_thread,
+        )
+
     async def open_stream(
         self,
         *,
         command: RoomGraphCommand,
         verified_invocation: VerifiedTargetE2EInvocation,
         expected_thread: ThreadIdentity,
-    ) -> Any:
+        admission_receipt: ParallelFrameAdmissionReceipt,
+    ) -> OpenedParallelFrameStream:
         service = self._handle.require_runtime().parallel_intake_stream_service
         if service is None:
             raise GraphGatewayDisabledError("INTAKE_PARALLEL_RUNTIME_UNAVAILABLE")
@@ -1148,6 +1170,7 @@ class _RuntimeParallelIntakeStreamService:
             command=command,
             verified_invocation=verified_invocation,
             expected_thread=expected_thread,
+            admission_receipt=admission_receipt,
         )
 
 
