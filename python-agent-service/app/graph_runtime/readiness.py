@@ -51,6 +51,7 @@ REQUIRED_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_target_e2e_activation_lifecycle",
     "agent_graph_target_e2e_synthetic_case_reservation",
     "agent_graph_target_e2e_room_authority",
+    "agent_graph_target_e2e_purge_receipt",
 )
 RUNTIME_DELETE_FORBIDDEN_RELATIONS: Final[tuple[str, ...]] = REQUIRED_RELATIONS
 RUNTIME_APPEND_ONLY_RELATIONS: Final[tuple[str, ...]] = (
@@ -63,6 +64,7 @@ RUNTIME_APPEND_ONLY_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_shadow_cleanup_receipt",
     "agent_graph_target_e2e_activation",
     "agent_graph_target_e2e_synthetic_case_reservation",
+    "agent_graph_target_e2e_purge_receipt",
 )
 
 CONSISTENCY_QUERIES: Final[tuple[tuple[str, str], ...]] = (

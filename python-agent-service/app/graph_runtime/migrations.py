@@ -1,7 +1,7 @@
 """Controlled Graph PostgreSQL migration job.
 
 Application replicas call readiness only. This module is the sole owner of checkpointer setup and
-G001-G014 DDL under a session advisory lock.
+G001-G015 DDL under a session advisory lock.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ MIGRATION_FILENAMES: Final[tuple[str, ...]] = (
     "G012_parallel_subset_technical_completion.sql",
     "G013_graph_fanout_atomic_groups.sql",
     "G014_parallel_receipt_lineage_authority.sql",
+    "G015_target_e2e_test_thread_purge.sql",
 )
 MIGRATIONS_DIRECTORY: Final[Path] = Path(__file__).resolve().parents[2] / "migrations" / "graph"
 CONTROL_KEY: Final[str] = "primary"
@@ -77,6 +78,7 @@ REQUIRED_MIGRATION_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_target_e2e_activation_lifecycle",
     "agent_graph_target_e2e_synthetic_case_reservation",
     "agent_graph_target_e2e_room_authority",
+    "agent_graph_target_e2e_purge_receipt",
 )
 PINNED_PACKAGE_VERSIONS: Final[dict[str, str]] = {
     "langgraph": "1.2.6",
@@ -638,6 +640,7 @@ class GraphMigrationRunner:
             "agent_graph_fanout_tenant_turn",
             "agent_graph_fanout_permit",
             "agent_graph_fanout_permit_owner_generation",
+            "agent_graph_target_e2e_purge_receipt",
         )
         async with connection.transaction():
             await connection.execute(
@@ -734,6 +737,11 @@ class GraphMigrationRunner:
                 )
             )
             await connection.execute(
+                sql.SQL(
+                    "grant select on {}.agent_graph_target_e2e_purge_receipt to {}"
+                ).format(schema, retention)
+            )
+            await connection.execute(
                 sql.SQL("revoke execute on all functions in schema {} from public, {}, {}").format(
                     schema, runtime, retention
                 )
@@ -784,6 +792,34 @@ class GraphMigrationRunner:
                         sql.Identifier(routine),
                         sql.SQL(", ").join(sql.SQL(item) for item in argument_types),
                         runtime,
+                    )
+                )
+            for routine, argument_types in (
+                (
+                    "graph_target_e2e_purge_context_allows",
+                    ("varchar",),
+                ),
+                (
+                    "purge_target_e2e_test_graph_thread",
+                    (
+                        "varchar",
+                        "varchar",
+                        "varchar",
+                        "bigint",
+                        "varchar",
+                        "varchar",
+                        "varchar",
+                        "varchar",
+                        "jsonb",
+                    ),
+                ),
+            ):
+                await connection.execute(
+                    sql.SQL("grant execute on function {}.{}({}) to {}").format(
+                        schema,
+                        sql.Identifier(routine),
+                        sql.SQL(", ").join(sql.SQL(item) for item in argument_types),
+                        retention,
                     )
                 )
             await connection.execute(

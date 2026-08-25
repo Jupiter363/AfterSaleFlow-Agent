@@ -99,6 +99,7 @@ class _Database:
     admin_dsn: str
     migration_dsn: str
     runtime_dsn: str
+    retention_dsn: str
 
 
 @pytest.fixture(scope="module")
@@ -115,8 +116,9 @@ def graph_database() -> _Database:
         admin_dsn = _dsn(host, port, "postgres", "postgres-test-password")
         migration_dsn = _dsn(host, port, MIGRATOR, MIGRATOR_PASSWORD)
         runtime_dsn = _dsn(host, port, RUNTIME, RUNTIME_PASSWORD)
+        retention_dsn = _dsn(host, port, RETENTION, RETENTION_PASSWORD)
         _provision_roles(admin_dsn)
-        yield _Database(admin_dsn, migration_dsn, runtime_dsn)
+        yield _Database(admin_dsn, migration_dsn, runtime_dsn, retention_dsn)
 
 
 @pytest.mark.asyncio
@@ -139,6 +141,7 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G012",
         "G013",
         "G014",
+        "G015",
     }
 
     second = await _migration_runner(graph_database).run()
@@ -158,6 +161,7 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G012",
         "G013",
         "G014",
+        "G015",
     )
 
     restore = await GraphRestoreValidationRunner(
@@ -3693,6 +3697,331 @@ async def _seed_executable_command(
                 )
     finally:
         await pool.close(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
+    graph_database: _Database,
+) -> None:
+    await _migration_runner(graph_database).run()
+    case_id = f"CASE_PURGE_{uuid4().hex[:16].upper()}"
+    thread_id = f"grt.v1.{uuid4().hex}"
+    command_id = f"purge-command-{uuid4().hex}"
+    attempt_id = f"purge-attempt-{uuid4().hex}"
+    activation_id = f"p9act.v1.{uuid4().hex}"
+    java_audit_id = f"PURGE_{uuid4().hex.upper()}"
+    purge_request_id = f"REQ_PURGE_{uuid4().hex}"
+    receipt_id = f"GRAPH_{java_audit_id}"
+    tenant = f"tenant-purge-{uuid4().hex[:8]}"
+    graph_key = f"purge-graph-{uuid4().hex[:12]}"
+    graph_version = "purge-graph.v1"
+    checkpoint_schema_version = "purge-checkpoint.v1"
+    request_hash = "1" * 64
+    result_hash = "2" * 64
+    expected_counts = {
+        "fanout_owner_generations": 0,
+        "fanout_permits": 0,
+        "parallel_receipt_cycles": 0,
+        "parallel_receipt_executions": 0,
+        "technical_completions": 0,
+        "results": 1,
+        "shadow_comparisons": 0,
+        "invocation_nonces": 1,
+        "leases": 0,
+        "attempts": 1,
+        "commands": 1,
+        "checkpoint_writes": 0,
+        "checkpoint_blobs": 0,
+        "checkpoints": 1,
+    }
+
+    with psycopg.connect(graph_database.migration_dsn, autocommit=True) as connection:
+        connection.execute(sql.SQL("set role {}").format(sql.Identifier(OWNER)))
+        connection.execute(
+            sql.SQL("set search_path to {}, pg_catalog, pg_temp").format(
+                sql.Identifier(SCHEMA)
+            )
+        )
+        with connection.transaction():
+            connection.execute(
+                """
+                insert into agent_graph_version_registry (
+                    graph_key, graph_version, checkpoint_schema_version,
+                    registry_state, state_schema_version, state_schema_hash,
+                    command_schema_version, result_schema_version,
+                    prompt_version, model_profile_id, output_schema_version,
+                    policy_version, guardrail_version, tool_policy_version,
+                    binding_hash, code_build_id, loadable, activated_at
+                ) values (
+                    %s, %s, %s,
+                    'ACTIVE_CANDIDATE', 'purge-state.v1', %s,
+                    'room-graph-command.v1', 'room-graph-result.v1',
+                    'prompt.v1', 'model.v1', 'output.v1',
+                    'policy.v1', 'guardrail.v1', 'tools.v1',
+                    %s, 'purge-integration-build', true, clock_timestamp()
+                )
+                """,
+                (
+                    graph_key,
+                    graph_version,
+                    checkpoint_schema_version,
+                    "a" * 64,
+                    "b" * 64,
+                ),
+            )
+            connection.execute(
+                """
+                insert into agent_graph_target_e2e_activation (
+                    activation_id, run_nonce, context_hash, environment_id,
+                    environment_generation, candidate_sha, tenant_surrogate,
+                    case_scope, allowed_room_types, temporal_namespace,
+                    context_json, issued_at, expires_at
+                ) values (
+                    %s, %s, %s, %s, 17, %s, %s,
+                    %s::jsonb, '["INTAKE"]'::jsonb, %s,
+                    '{}'::jsonb, clock_timestamp() - interval '1 minute',
+                    clock_timestamp() + interval '60 minutes'
+                )
+                """,
+                (
+                    activation_id,
+                    f"run-{uuid4().hex}",
+                    "3" * 64,
+                    f"env-{uuid4().hex}",
+                    "4" * 40,
+                    tenant,
+                    json.dumps({"case_ids": [case_id]}, separators=(",", ":")),
+                    f"namespace-{uuid4().hex}",
+                ),
+            )
+            connection.execute(
+                """
+                insert into agent_graph_target_e2e_room_authority (
+                    tenant_surrogate, case_id, room_type, activation_id,
+                    room_epoch, room_fencing_token
+                ) values (%s, %s, 'INTAKE', %s, 1, 1)
+                """,
+                (tenant, case_id, activation_id),
+            )
+            connection.execute(
+                """
+                insert into graph_thread_registry (
+                    thread_id, tenant_surrogate, case_id, room_type, room_epoch,
+                    actor_scope_json, actor_scope_hash, agent_session_id,
+                    graph_key, graph_version, checkpoint_schema_version,
+                    lifecycle_status, cognitive_revision,
+                    last_checkpoint_ns, last_checkpoint_id
+                ) values (
+                    %s, %s, %s, 'INTAKE', 1,
+                    '{}'::jsonb, %s, %s,
+                    %s, %s, %s,
+                    'ACTIVE', 1, 'intake', 'purge-checkpoint-1'
+                )
+                """,
+                (
+                    thread_id,
+                    tenant,
+                    case_id,
+                    "5" * 64,
+                    f"session-{uuid4().hex}",
+                    graph_key,
+                    graph_version,
+                    checkpoint_schema_version,
+                ),
+            )
+            connection.execute(
+                """
+                insert into agent_graph_command (
+                    thread_id, command_id, request_schema_version,
+                    request_json, request_hash, execution_mode,
+                    room_epoch, graph_key, graph_version, checkpoint_schema_version,
+                    prompt_version, model_profile_id, output_schema_version,
+                    policy_version, guardrail_version, tool_policy_version,
+                    deadline_at, status, attempt_count, fencing_token,
+                    committed_checkpoint_ns, committed_checkpoint_id,
+                    result_ref, result_hash, started_at, result_checkpointed_at,
+                    completed_at, activation_id, room_fencing_token,
+                    command_hash, command_envelope_hash
+                ) values (
+                    %s, %s, 'room-graph-command.v1', '{}'::jsonb, %s,
+                    'TARGET_E2E_CANDIDATE', 1,
+                    %s, %s, %s,
+                    'prompt.v1', 'model.v1', 'output.v1',
+                    'policy.v1', 'guardrail.v1', 'tools.v1',
+                    clock_timestamp() + interval '5 minutes', 'COMPLETED', 1, 1,
+                    'intake', 'purge-checkpoint-1', %s, %s,
+                    clock_timestamp(), clock_timestamp(), clock_timestamp(),
+                    %s, 1, %s, %s
+                )
+                """,
+                (
+                    thread_id,
+                    command_id,
+                    request_hash,
+                    graph_key,
+                    graph_version,
+                    checkpoint_schema_version,
+                    f"urn:target-e2e:result:intake:{result_hash}",
+                    result_hash,
+                    activation_id,
+                    "6" * 64,
+                    "7" * 64,
+                ),
+            )
+            connection.execute(
+                """
+                insert into agent_graph_command_attempt (
+                    attempt_id, thread_id, command_id, attempt_no, owner_id,
+                    fencing_token, attempt_status, provider_call_count,
+                    completed_at
+                ) values (%s, %s, %s, 1, %s, 1, 'COMPLETED', 1, clock_timestamp())
+                """,
+                (attempt_id, thread_id, command_id, f"owner-{uuid4().hex}"),
+            )
+            connection.execute(
+                """
+                insert into agent_graph_result (
+                    result_id, thread_id, command_id, request_hash,
+                    execution_mode, result_schema_version,
+                    checkpoint_ns, checkpoint_id, cognitive_revision,
+                    terminal_status, result_json, result_ref, result_hash,
+                    usage_json, activation_id, room_fencing_token,
+                    command_hash, command_envelope_hash,
+                    proposal_hash, result_envelope_hash,
+                    proposal_source_json, result_envelope_json
+                ) values (
+                    %s, %s, %s, %s,
+                    'TARGET_E2E_CANDIDATE', 'room-graph-result.v1',
+                    'intake', 'purge-checkpoint-1', 1,
+                    'COMPLETED', '{}'::jsonb, %s, %s,
+                    '{}'::jsonb, %s, 1,
+                    %s, %s, %s, %s,
+                    '{}'::jsonb, '{}'::jsonb
+                )
+                """,
+                (
+                    f"result-{uuid4().hex}",
+                    thread_id,
+                    command_id,
+                    request_hash,
+                    f"urn:target-e2e:result:intake:{result_hash}",
+                    result_hash,
+                    activation_id,
+                    "6" * 64,
+                    "7" * 64,
+                    "8" * 64,
+                    "9" * 64,
+                ),
+            )
+            connection.execute(
+                """
+                insert into agent_graph_invocation_nonce (
+                    issuer, key_id, jti, thread_id, command_id, request_hash,
+                    issued_at, token_expires_at, retained_until
+                ) values (
+                    'java-api-service', 'purge-test-key', %s, %s, %s, %s,
+                    clock_timestamp() - interval '30 seconds',
+                    clock_timestamp() + interval '20 seconds',
+                    clock_timestamp() + interval '24 hours'
+                )
+                """,
+                (f"jti-{uuid4().hex}", thread_id, command_id, request_hash),
+            )
+            connection.execute(
+                """
+                insert into checkpoints (
+                    thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+                    checkpoint, metadata
+                ) values (%s, 'intake', 'purge-checkpoint-1', null, '{}'::jsonb, '{}'::jsonb)
+                """,
+                (thread_id,),
+            )
+
+        with pytest.raises(CheckViolation, match="graph results are immutable"):
+            connection.execute(
+                "delete from agent_graph_result where thread_id = %s", (thread_id,)
+            )
+
+    call_sql = """
+        select purge_target_e2e_test_graph_thread(
+            %s, %s, %s, 17, %s, 'reviewer-local', 'PLATFORM_REVIEWER', %s, %s::jsonb
+        ) as receipt_id
+    """
+    call_args = (
+        case_id,
+        thread_id,
+        activation_id,
+        java_audit_id,
+        purge_request_id,
+        json.dumps(expected_counts, separators=(",", ":")),
+    )
+    with psycopg.connect(graph_database.runtime_dsn, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL("set search_path to {}, pg_catalog").format(sql.Identifier(SCHEMA))
+        )
+        with pytest.raises(InsufficientPrivilege):
+            connection.execute(call_sql, call_args)
+
+    with psycopg.connect(graph_database.retention_dsn, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL("set search_path to {}, pg_catalog").format(sql.Identifier(SCHEMA))
+        )
+        first = connection.execute(call_sql, call_args).fetchone()
+        assert first == (receipt_id,)
+        replay = connection.execute(call_sql, call_args).fetchone()
+        assert replay == first
+        changed_counts = dict(expected_counts)
+        changed_counts["results"] = 2
+        changed_args = (*call_args[:-1], json.dumps(changed_counts, separators=(",", ":")))
+        with pytest.raises(CheckViolation, match="replay conflicts"):
+            connection.execute(call_sql, changed_args)
+        retained = connection.execute(
+            """
+            select purge_receipt_id, case_id, thread_id, activation_id,
+                   reviewer_role, purged_row_counts
+              from agent_graph_target_e2e_purge_receipt
+             where purge_receipt_id = %s
+            """,
+            (receipt_id,),
+        ).fetchone()
+        assert retained == (
+            receipt_id,
+            case_id,
+            thread_id,
+            activation_id,
+            "PLATFORM_REVIEWER",
+            expected_counts,
+        )
+
+    with psycopg.connect(graph_database.migration_dsn, autocommit=True) as connection:
+        connection.execute(sql.SQL("set role {}").format(sql.Identifier(OWNER)))
+        connection.execute(
+            sql.SQL("set search_path to {}, pg_catalog").format(sql.Identifier(SCHEMA))
+        )
+        closure = connection.execute(
+            """
+            select
+              (select count(*) from graph_thread_registry where thread_id = %s),
+              (select count(*) from agent_graph_command where thread_id = %s),
+              (select count(*) from agent_graph_command_attempt where thread_id = %s),
+              (select count(*) from agent_graph_result where thread_id = %s),
+              (select count(*) from agent_graph_invocation_nonce where thread_id = %s),
+              (select count(*) from checkpoints where thread_id = %s),
+              (select count(*) from agent_graph_target_e2e_activation where activation_id = %s),
+              (select count(*) from agent_graph_target_e2e_room_authority where case_id = %s)
+            """,
+            (
+                thread_id,
+                thread_id,
+                thread_id,
+                thread_id,
+                thread_id,
+                thread_id,
+                activation_id,
+                case_id,
+            ),
+        ).fetchone()
+        assert closure == (0, 0, 0, 0, 0, 0, 1, 1)
 
 
 def _dsn(host: str, port: int, user: str, password: str) -> str:
