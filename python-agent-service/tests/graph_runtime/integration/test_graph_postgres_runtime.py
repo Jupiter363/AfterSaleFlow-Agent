@@ -134,6 +134,10 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G007",
         "G008",
         "G009",
+        "G010",
+        "G011",
+        "G012",
+        "G013",
     }
 
     second = await _migration_runner(graph_database).run()
@@ -148,6 +152,10 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G007",
         "G008",
         "G009",
+        "G010",
+        "G011",
+        "G012",
+        "G013",
     )
 
     restore = await GraphRestoreValidationRunner(
@@ -1075,6 +1083,113 @@ async def test_real_durable_fanout_permit_scope_renew_release_and_retry(
     finally:
         await bulkhead.close()
         await pool.close(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_real_weighted_fanout_group_reserves_capacity_atomically(
+    graph_database: _Database,
+) -> None:
+    await _migration_runner(graph_database).run()
+    identities = await _seed_fanout_identities(
+        graph_database,
+        ("tenant-weighted-group", "tenant-weighted-waiter"),
+        start_ordinal=401,
+    )
+    config = PostgresBulkheadConfig(
+        global_limit=3,
+        tenant_limit=3,
+        room_limit=3,
+        global_queue_limit=10,
+        tenant_queue_limit=5,
+        room_queue_limit=5,
+        permit_lease_seconds=20,
+        wait_timeout_seconds=10,
+        poll_interval_seconds=0.01,
+    )
+    await _set_fanout_config(graph_database, config)
+    pool = _runtime_pool(graph_database)
+    await pool.open(wait=True, timeout=10)
+    bulkhead = PostgresGraphFanoutBulkhead(pool, config)
+    await bulkhead.open()
+    group = None
+    waiter_task: asyncio.Task[Any] | None = None
+    waiter = None
+    try:
+        group = await bulkhead.acquire(
+            identities[0][0],
+            identities[0][1],
+            request_id="permit-weighted-group",
+            owner_id="permit-weighted-group-owner",
+            permit_count=3,
+        )
+        assert group.permit_count == 3
+        assert (await bulkhead.snapshot()).active_global == 3
+
+        waiter_task = asyncio.create_task(
+            bulkhead.acquire(
+                identities[1][0],
+                identities[1][1],
+                request_id="permit-weighted-waiter",
+                owner_id="permit-weighted-waiter-owner",
+            )
+        )
+        for _ in range(300):
+            snapshot = await bulkhead.snapshot()
+            if snapshot.queued_global == 1:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("weighted capacity waiter did not queue")
+
+        assert not waiter_task.done()
+        async with pool.connection(timeout=5) as connection:
+            rows = await (
+                await connection.execute(
+                    """
+                    select request_id, permit_count, status
+                      from agent_graph_fanout_permit
+                     where request_id in (
+                         'permit-weighted-group', 'permit-weighted-waiter'
+                     )
+                     order by request_id
+                    """
+                )
+            ).fetchall()
+        assert rows == [
+            {
+                "request_id": "permit-weighted-group",
+                "permit_count": 3,
+                "status": "GRANTED",
+            },
+            {
+                "request_id": "permit-weighted-waiter",
+                "permit_count": 1,
+                "status": "QUEUED",
+            },
+        ]
+
+        assert await group.release()
+        waiter = await asyncio.wait_for(waiter_task, 3)
+        assert waiter.permit_count == 1
+        assert (await bulkhead.snapshot()).active_global == 1
+        assert await waiter.release()
+        assert (await bulkhead.snapshot()).active_global == 0
+    finally:
+        if waiter_task is not None and not waiter_task.done():
+            waiter_task.cancel()
+            await asyncio.gather(waiter_task, return_exceptions=True)
+        for permit in (group, waiter):
+            if permit is not None and not permit.released:
+                try:
+                    await permit.release()
+                except GraphPermitLostError:
+                    pass
+        await bulkhead.close()
+        await pool.close(timeout=10)
+        await _set_fanout_config(
+            graph_database,
+            PostgresBulkheadConfig.signed_synthetic_defaults(),
+        )
 
 
 @pytest.mark.asyncio

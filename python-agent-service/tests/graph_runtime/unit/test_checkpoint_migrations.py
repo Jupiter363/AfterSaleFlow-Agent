@@ -45,6 +45,7 @@ def test_repository_migrations_are_exact_ordered_and_hash_bound() -> None:
         "G010",
         "G011",
         "G012",
+        "G013",
     )
     assert all(len(migration.sha256) == 64 for migration in migrations)
     assert len(graph_application_signature(migrations)) == 64
@@ -69,7 +70,7 @@ def test_application_signature_changes_when_a_migration_changes() -> None:
 
 
 def test_parallel_technical_completion_migration_is_immutable_and_attempt_bound() -> None:
-    migration = load_graph_migrations()[-2]
+    migration = next(item for item in load_graph_migrations() if item.version == "G011")
     normalized = " ".join(migration.sql_text.split()).lower()
 
     assert migration.version == "G011"
@@ -81,7 +82,7 @@ def test_parallel_technical_completion_migration_is_immutable_and_attempt_bound(
 
 
 def test_parallel_receipt_cycle_migration_is_immutable_and_fence_bound() -> None:
-    migration = load_graph_migrations()[-1]
+    migration = next(item for item in load_graph_migrations() if item.version == "G012")
     normalized = " ".join(migration.sql_text.split()).lower()
 
     assert migration.version == "G012"
@@ -105,6 +106,16 @@ def test_parallel_receipt_cycle_migration_is_immutable_and_fence_bound() -> None
     assert "parallel command fence handoff failed" not in normalized
     assert "cycle.fencing_token = old.fencing_token" in normalized
     assert "execution.fencing_token = new.fencing_token" in normalized
+
+
+def test_atomic_provider_group_migration_is_additive_and_weight_bound() -> None:
+    migration = next(item for item in load_graph_migrations() if item.version == "G013")
+    normalized = " ".join(migration.sql_text.split()).lower()
+
+    assert "add column permit_count integer not null default 1" in normalized
+    assert "create function agent_graph_acquire_fanout_permit_group" in normalized
+    assert "sum(active.permit_count)" in normalized
+    assert "existing.permit_count" in normalized
 
 
 def test_runtime_package_versions_match_the_frozen_pins() -> None:

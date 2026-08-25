@@ -28,6 +28,7 @@ from app.graph_runtime.postgres_bulkhead import (
     PostgresBulkheadPermit,
     PostgresGraphFanoutBulkhead,
     PostgresPermitRecord,
+    _default_request_id,
     _new_permit_owner_id,
 )
 
@@ -463,6 +464,113 @@ def test_default_permit_owner_is_distinct_from_graph_owner_and_each_acquire() ->
     assert len(first) <= 128
 
 
+def test_weight_one_preserves_the_legacy_default_request_identity() -> None:
+    scope = GraphBulkheadScope(
+        tenant_key="tenant-request-id",
+        room_key="case-request-id:INTAKE:1",
+        item_key="frame-set-request-id",
+    )
+    fence = GraphPermitFenceContext(
+        thread_id=f"grt.v1.{'7' * 32}",
+        command_id="command-request-id",
+        graph_lease_owner_id="graph-owner-request-id",
+        graph_lease_fencing_token=3,
+    )
+    legacy_digest = sha256(
+        "\x00".join(
+            (
+                fence.thread_id,
+                fence.command_id,
+                scope.tenant_key,
+                scope.room_key,
+                scope.item_key,
+            )
+        ).encode("ascii")
+    ).hexdigest()
+
+    assert _default_request_id(scope, fence) == f"permit:{legacy_digest}"
+    assert _default_request_id(scope, fence, permit_count=1) == f"permit:{legacy_digest}"
+    assert _default_request_id(scope, fence, permit_count=3) != f"permit:{legacy_digest}"
+
+
+@pytest.mark.asyncio
+async def test_postgres_group_permit_is_acquired_as_one_weighted_record() -> None:
+    scope = GraphBulkheadScope(
+        tenant_key="tenant-group",
+        room_key="case-group:INTAKE:1",
+        item_key="frame-set-group",
+    )
+    fence = GraphPermitFenceContext(
+        thread_id=f"grt.v1.{'8' * 32}",
+        command_id="command-group",
+        graph_lease_owner_id="graph-owner-group",
+        graph_lease_fencing_token=4,
+    )
+
+    class UnusedPool:
+        def connection(self, *, timeout: float) -> None:
+            raise AssertionError("group unit test overrides the database call")
+
+    class GroupBulkhead(PostgresGraphFanoutBulkhead):
+        def __init__(self) -> None:
+            super().__init__(UnusedPool(), PostgresBulkheadConfig.signed_synthetic_defaults())
+            self._opened = True  # noqa: SLF001 - isolate weighted acquire selection
+            self.group_calls = 0
+
+        async def _acquire_once(self, *_args: Any, **_kwargs: Any) -> PostgresPermitRecord:
+            raise AssertionError("a weighted request cannot use the single-permit routine")
+
+        async def _acquire_group_once(
+            self,
+            selected_scope: GraphBulkheadScope,
+            selected_fence: GraphPermitFenceContext,
+            *,
+            request_id: str,
+            owner_id: str,
+            timeout_seconds: float,
+            takeover: bool,
+            permit_count: int,
+        ) -> PostgresPermitRecord:
+            self.group_calls += 1
+            assert selected_scope == scope
+            assert selected_fence == fence
+            assert request_id == "permit-group"
+            assert owner_id == "permit-owner-group"
+            assert timeout_seconds == self.config.wait_timeout_seconds
+            assert takeover
+            assert permit_count == 3
+            now = datetime.now(timezone.utc)
+            return PostgresPermitRecord(
+                request_id=request_id,
+                scope=scope,
+                fence=fence,
+                permit_owner_id=owner_id,
+                permit_fencing_token=1,
+                status="GRANTED",
+                enqueued_at=now,
+                granted_at=now,
+                renewed_at=now,
+                lease_expires_at=now + timedelta(seconds=20),
+                revision=1,
+                permit_count=permit_count,
+            )
+
+    bulkhead = GroupBulkhead()
+    permit = await bulkhead.acquire(
+        scope,
+        fence,
+        request_id="permit-group",
+        owner_id="permit-owner-group",
+        takeover=True,
+        permit_count=3,
+    )
+
+    assert permit.permit_count == 3
+    assert bulkhead.group_calls == 1
+    with pytest.raises(GraphContractError, match="between 1 and 8"):
+        await bulkhead.acquire(scope, fence, permit_count=0)
+
+
 def test_durable_scope_uses_database_reconstructable_room_identity() -> None:
     scope = GraphBulkheadScope.from_graph_identity(
         tenant_surrogate="tenant-opaque",
@@ -569,6 +677,27 @@ def test_durable_migration_enforces_authoritative_scope_and_starvation_free_fifo
         assert exact_binding in cleanup
 
 
+def test_atomic_group_migration_counts_capacity_by_permit_weight() -> None:
+    migration_path = (
+        SERVICE_ROOT
+        / "migrations"
+        / "graph"
+        / "G013_graph_fanout_atomic_groups.sql"
+    )
+    migration = " ".join(migration_path.read_text(encoding="utf-8").split()).lower()
+
+    assert "add column permit_count integer not null default 1" in migration
+    assert "check (permit_count between 1 and 8)" in migration
+    assert "create function agent_graph_acquire_fanout_permit_group" in migration
+    assert "existing.permit_count" in migration
+    assert "selected_permit_count" in migration
+    assert "sum(active.permit_count)" in migration
+    assert "+ permit.permit_count <= config.global_limit" in migration
+    assert "+ permit.permit_count <= config.tenant_limit" in migration
+    assert "+ permit.permit_count <= config.room_limit" in migration
+    assert "from agent_graph_acquire_fanout_permit_group(" in migration
+
+
 def test_postgres_composite_routines_are_evaluated_once() -> None:
     source = (
         SERVICE_ROOT / "app" / "graph_runtime" / "postgres_bulkhead.py"
@@ -577,6 +706,7 @@ def test_postgres_composite_routines_are_evaluated_once() -> None:
     assert "select (agent_graph_" not in source
     for routine in (
         "agent_graph_acquire_fanout_permit",
+        "agent_graph_acquire_fanout_permit_group",
         "agent_graph_renew_fanout_permit",
         "agent_graph_finish_fanout_permit",
         "agent_graph_cancel_or_release_fanout_permit",

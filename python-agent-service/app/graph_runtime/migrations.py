@@ -41,6 +41,7 @@ MIGRATION_FILENAMES: Final[tuple[str, ...]] = (
     "G010_target_e2e_activation_month_window.sql",
     "G011_parallel_technical_completion.sql",
     "G012_parallel_subset_technical_completion.sql",
+    "G013_graph_fanout_atomic_groups.sql",
 )
 MIGRATIONS_DIRECTORY: Final[Path] = Path(__file__).resolve().parents[2] / "migrations" / "graph"
 CONTROL_KEY: Final[str] = "primary"
@@ -742,6 +743,14 @@ class GraphMigrationRunner:
                     (
                         "varchar", "varchar", "varchar", "varchar", "varchar", "varchar",
                         "varchar", "bigint", "varchar", "double precision", "boolean",
+                    ),
+                ),
+                (
+                    "agent_graph_acquire_fanout_permit_group",
+                    (
+                        "varchar", "varchar", "varchar", "varchar", "integer", "varchar",
+                        "varchar", "varchar", "bigint", "varchar", "double precision",
+                        "boolean",
                     ),
                 ),
                 (

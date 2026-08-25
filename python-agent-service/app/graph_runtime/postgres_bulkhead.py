@@ -135,6 +135,7 @@ class PostgresPermitRecord:
     renewed_at: datetime | None
     lease_expires_at: datetime | None
     revision: int
+    permit_count: int = 1
 
     def __post_init__(self) -> None:
         _identifier(self.request_id, "permit_request_id")
@@ -156,6 +157,12 @@ class PostgresPermitRecord:
             raise GraphContractError("granted permit lease is incomplete")
         if self.revision < 0:
             raise GraphContractError("permit revision is invalid")
+        if (
+            not isinstance(self.permit_count, int)
+            or isinstance(self.permit_count, bool)
+            or not 1 <= self.permit_count <= 8
+        ):
+            raise GraphContractError("permit count must be between 1 and 8")
 
 
 class PostgresBulkheadPermit:
@@ -190,6 +197,10 @@ class PostgresBulkheadPermit:
     @property
     def permit_fencing_token(self) -> int:
         return self._record.permit_fencing_token
+
+    @property
+    def permit_count(self) -> int:
+        return self._record.permit_count
 
     @property
     def lease_expires_at(self) -> datetime:
@@ -330,7 +341,7 @@ class PostgresGraphFanoutBulkhead:
                     routines = await self._fetchone(
                         connection,
                         """
-                        select count(*) = 5 as complete
+                        select count(*) = 6 as complete
                           from pg_proc procedure
                           join pg_namespace namespace on namespace.oid = procedure.pronamespace
                          where namespace.nspname = current_schema()
@@ -339,6 +350,7 @@ class PostgresGraphFanoutBulkhead:
                         (
                             [
                                 "agent_graph_acquire_fanout_permit",
+                                "agent_graph_acquire_fanout_permit_group",
                                 "agent_graph_renew_fanout_permit",
                                 "agent_graph_finish_fanout_permit",
                                 "agent_graph_cancel_or_release_fanout_permit",
@@ -413,13 +425,19 @@ class PostgresGraphFanoutBulkhead:
         owner_id: str | None = None,
         timeout_seconds: float | None = None,
         takeover: bool = False,
+        permit_count: int = 1,
     ) -> PostgresBulkheadPermit:
         self._require_accepting()
         if not isinstance(scope, GraphBulkheadScope):
             raise GraphContractError("durable bulkhead scope is required")
         if not isinstance(fence, GraphPermitFenceContext):
             raise GraphContractError("durable bulkhead Graph lease fence is required")
-        selected_request_id = request_id or _default_request_id(scope, fence)
+        selected_permit_count = _permit_count(permit_count)
+        selected_request_id = request_id or _default_request_id(
+            scope,
+            fence,
+            permit_count=selected_permit_count,
+        )
         selected_owner_id = owner_id or _new_permit_owner_id()
         _identifier(selected_request_id, "permit_request_id")
         _identifier(selected_owner_id, "permit_owner_id")
@@ -428,14 +446,25 @@ class PostgresGraphFanoutBulkhead:
         started = loop.time()
         try:
             while True:
-                record = await self._acquire_once(
-                    scope,
-                    fence,
-                    request_id=selected_request_id,
-                    owner_id=selected_owner_id,
-                    timeout_seconds=timeout,
-                    takeover=takeover,
-                )
+                if selected_permit_count == 1:
+                    record = await self._acquire_once(
+                        scope,
+                        fence,
+                        request_id=selected_request_id,
+                        owner_id=selected_owner_id,
+                        timeout_seconds=timeout,
+                        takeover=takeover,
+                    )
+                else:
+                    record = await self._acquire_group_once(
+                        scope,
+                        fence,
+                        request_id=selected_request_id,
+                        owner_id=selected_owner_id,
+                        timeout_seconds=timeout,
+                        takeover=takeover,
+                        permit_count=selected_permit_count,
+                    )
                 takeover = False
                 if record.status == "GRANTED":
                     return PostgresBulkheadPermit(
@@ -466,6 +495,7 @@ class PostgresGraphFanoutBulkhead:
         request_id: str,
         owner_id: str | None = None,
         timeout_seconds: float | None = None,
+        permit_count: int = 1,
     ) -> PostgresBulkheadPermit:
         return await self.acquire(
             scope,
@@ -474,6 +504,7 @@ class PostgresGraphFanoutBulkhead:
             owner_id=owner_id,
             timeout_seconds=timeout_seconds,
             takeover=True,
+            permit_count=permit_count,
         )
 
     @asynccontextmanager
@@ -526,9 +557,9 @@ class PostgresGraphFanoutBulkhead:
             row = await self._fetchone(
                 connection,
                 """
-                select count(*) filter (
+                select coalesce(sum(permit_count) filter (
                            where status = 'GRANTED' and lease_expires_at > clock_timestamp()
-                       ) as active_global,
+                       ), 0) as active_global,
                        count(*) filter (
                            where status = 'QUEUED' and wait_deadline_at > clock_timestamp()
                        ) as queued_global,
@@ -597,6 +628,39 @@ class PostgresGraphFanoutBulkhead:
                 scope.tenant_key,
                 scope.room_key,
                 scope.item_key,
+                fence.thread_id,
+                fence.command_id,
+                fence.graph_lease_owner_id,
+                fence.graph_lease_fencing_token,
+                owner_id,
+                timeout_seconds,
+                takeover,
+            ),
+        )
+
+    async def _acquire_group_once(
+        self,
+        scope: GraphBulkheadScope,
+        fence: GraphPermitFenceContext,
+        *,
+        request_id: str,
+        owner_id: str,
+        timeout_seconds: float,
+        takeover: bool,
+        permit_count: int,
+    ) -> PostgresPermitRecord:
+        return await self._call_record(
+            """
+            select result.* from agent_graph_acquire_fanout_permit_group(
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            ) as result
+            """,
+            (
+                request_id,
+                scope.tenant_key,
+                scope.room_key,
+                scope.item_key,
+                permit_count,
                 fence.thread_id,
                 fence.command_id,
                 fence.graph_lease_owner_id,
@@ -700,17 +764,23 @@ class PostgresGraphFanoutBulkhead:
         return await cursor.fetchone()
 
 
-def _default_request_id(scope: GraphBulkheadScope, fence: GraphPermitFenceContext) -> str:
+def _default_request_id(
+    scope: GraphBulkheadScope,
+    fence: GraphPermitFenceContext,
+    *,
+    permit_count: int = 1,
+) -> str:
+    identity = [
+        fence.thread_id,
+        fence.command_id,
+        scope.tenant_key,
+        scope.room_key,
+        scope.item_key,
+    ]
+    if permit_count != 1:
+        identity.append(str(permit_count))
     digest = sha256(
-        "\x00".join(
-            (
-                fence.thread_id,
-                fence.command_id,
-                scope.tenant_key,
-                scope.room_key,
-                scope.item_key,
-            )
-        ).encode("ascii")
+        "\x00".join(identity).encode("ascii")
     ).hexdigest()
     return f"permit:{digest}"
 
@@ -753,7 +823,18 @@ def _record_from_row(row: Mapping[str, Any]) -> PostgresPermitRecord:
         renewed_at=row["renewed_at"],
         lease_expires_at=row["lease_expires_at"],
         revision=row["revision"],
+        permit_count=row.get("permit_count", 1),
     )
+
+
+def _permit_count(value: int) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 1 <= value <= 8
+    ):
+        raise GraphContractError("permit count must be between 1 and 8")
+    return value
 
 
 def _raise_mapped_database_error(error: Exception) -> None:
