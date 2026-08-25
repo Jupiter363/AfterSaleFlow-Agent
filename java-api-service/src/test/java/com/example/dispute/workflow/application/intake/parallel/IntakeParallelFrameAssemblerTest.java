@@ -176,6 +176,95 @@ class IntakeParallelFrameAssemblerTest {
     }
 
     @Test
+    void removesGapCoveredByTheCurrentDossierRowWithoutChangingItsScore() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+
+        var output = assembler.assemble(command(previous, frames(
+                dialogue(previous, "ASK_SUBSTANTIVE"),
+                dossier(),
+                quality(Map.of(
+                                "references", 10,
+                                "event_story", 20,
+                                "party_positions", 20,
+                                "requested_resolution", 15,
+                                "risk_and_conflicts", 15,
+                                "next_action_clarity", 15),
+                        List.of(gap(
+                                "REFERENCES",
+                                "请补充本轮核心事实的来源？",
+                                "FACT_01"))))));
+
+        assertThat(output.proposal().readiness())
+                .isEqualTo(IntakeTurnProposal.Readiness.READY_TO_CONFIRM);
+        assertThat(output.proposal().missingFields()).isEmpty();
+        assertThat(output.proposal().dossierPatch()
+                        .at("/party_intake_state/USER/intake_quality/score")
+                        .asInt())
+                .isEqualTo(95);
+        assertThat(output.proposal().dossierPatch()
+                        .at("/party_intake_state/USER/intake_quality/score_breakdown/references")
+                        .asInt())
+                .isEqualTo(10);
+    }
+
+    @Test
+    void rejectsGapBindingThatIsAbsentFromTheDossierMatrixAuthority() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        dossier(),
+                        quality(Map.of(
+                                        "references", 10,
+                                        "event_story", 20,
+                                        "party_positions", 20,
+                                        "requested_resolution", 15,
+                                        "risk_and_conflicts", 15,
+                                        "next_action_clarity", 15),
+                                List.of(gap(
+                                        "REFERENCES",
+                                        "请补充未知事实的来源？",
+                                        "FACT_UNKNOWN")))))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("outside the Dossier matrix authority");
+    }
+
+    @Test
+    void keepsGapBoundOnlyToAnUnaddressedPreviousMatrixRow() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode dossier = dossier();
+        ObjectNode previousRow = (ObjectNode) dossier.at("/dossier_delta/matrix_patch/fact_rows/0");
+        previousRow.put("source_scope", "PREVIOUS_MATRIX");
+        previousRow.put("stance", "NOT_ADDRESSED");
+        previousRow.putNull("asserted_value");
+        dossier.withArray("public_projection_items").removeAll();
+        dossier.with("dossier_delta").withArray("public_projection_slots").removeAll();
+
+        var output = assembler.assemble(command(previous, frames(
+                dialogue(previous, "ASK_SUBSTANTIVE"),
+                dossier,
+                quality(Map.of(
+                                "references", 10,
+                                "event_story", 20,
+                                "party_positions", 20,
+                                "requested_resolution", 15,
+                                "risk_and_conflicts", 15,
+                                "next_action_clarity", 15),
+                        List.of(gap(
+                                "REFERENCES",
+                                "请补充此前事实的来源？",
+                                "FACT_01"))))));
+
+        assertThat(output.proposal().readiness())
+                .isEqualTo(IntakeTurnProposal.Readiness.INCOMPLETE);
+        assertThat(output.proposal().missingFields()).hasSize(1);
+        assertThat(output.proposal().dossierPatch()
+                        .at("/party_intake_state/USER/missing_information/next_questions/0")
+                        .asText())
+                .isEqualTo("请补充此前事实的来源？");
+    }
+
+    @Test
     void rejectsDossierFrameWritingAnUnregisteredPublicPath() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode dossier = dossier();
@@ -517,12 +606,13 @@ class IntakeParallelFrameAssemblerTest {
         return reorderRoot(root, "public_projection_items", "frame_type", "schema_version", "quality");
     }
 
-    private static ObjectNode gap(String dimension, String question) {
+    private static ObjectNode gap(String dimension, String question, String... factKeys) {
         ObjectNode gap = MAPPER.createObjectNode();
         gap.put("dimension", dimension);
         gap.put("question", question);
         gap.put("source_role", "USER");
-        gap.putArray("linked_fact_keys");
+        ArrayNode linked = gap.putArray("linked_fact_keys");
+        Stream.of(factKeys).forEach(linked::add);
         return gap;
     }
 

@@ -97,9 +97,10 @@ public final class IntakeParallelFrameAssembler {
                 actorEntry,
                 currentAction);
 
-        QualityOutcome quality = quality(
+        QualityOutcome proposedQuality = quality(
                 frames.get(FrameType.QUALITY_FRAME).document(), command.actorRole());
         DossierOutcome dossier = dossier(frames.get(FrameType.DOSSIER_FRAME).document());
+        QualityOutcome quality = reconcileQualityGaps(proposedQuality, dossier.matrixPatch());
         StateOutcome state = nextState(
                 previousPhase,
                 currentAction,
@@ -335,11 +336,7 @@ public final class IntakeParallelFrameAssembler {
         ArrayNode rows = requireArray(matrixPatch.path("fact_rows"), "matrix_patch.fact_rows");
         List<JsonNode> selected = new ArrayList<>();
         for (JsonNode row : rows) {
-            String sourceScope = row.path("source_scope").asText("");
-            String stance = row.path("stance").asText("");
-            if (("CURRENT_SOURCE".equals(sourceScope)
-                            || "PREVIOUS_AND_CURRENT_SOURCE".equals(sourceScope))
-                    && !"NOT_ADDRESSED".equals(stance)) {
+            if (isSubstantiveCurrentSourceRow(row)) {
                 selected.add(row);
             }
         }
@@ -496,6 +493,63 @@ public final class IntakeParallelFrameAssembler {
                 }
             }
         }
+    }
+
+    private static QualityOutcome reconcileQualityGaps(
+            QualityOutcome quality, JsonNode matrixPatch) {
+        if (quality.gaps().isEmpty()) {
+            return quality;
+        }
+        Map<String, JsonNode> matrixRows = matrixRowsByFactKey(matrixPatch);
+        List<Gap> unresolved = new ArrayList<>();
+        for (Gap gap : quality.gaps()) {
+            if (gap.factKeys().isEmpty()) {
+                unresolved.add(gap);
+                continue;
+            }
+            boolean everyBindingCoveredByCurrentSource = true;
+            for (String factKey : gap.factKeys()) {
+                JsonNode row = matrixRows.get(factKey);
+                if (row == null) {
+                    throw invalid("Quality gap references a fact outside the Dossier matrix authority");
+                }
+                if (!isSubstantiveCurrentSourceRow(row)) {
+                    everyBindingCoveredByCurrentSource = false;
+                }
+            }
+            if (!everyBindingCoveredByCurrentSource) {
+                unresolved.add(gap);
+            }
+        }
+        return new QualityOutcome(
+                quality.scores(),
+                quality.total(),
+                List.copyOf(unresolved),
+                quality.reasoning());
+    }
+
+    private static Map<String, JsonNode> matrixRowsByFactKey(JsonNode matrixPatch) {
+        if (matrixPatch == null || matrixPatch.isNull()) {
+            return Map.of();
+        }
+        requireText(matrixPatch, "schema_version", "case_fact_matrix.delta.v2");
+        ArrayNode rows = requireArray(matrixPatch.path("fact_rows"), "matrix_patch.fact_rows");
+        Map<String, JsonNode> rowsByFactKey = new LinkedHashMap<>();
+        for (JsonNode row : rows) {
+            String factKey = identifier(row.path("fact_key").asText(null), "matrix fact_key");
+            if (rowsByFactKey.putIfAbsent(factKey, row) != null) {
+                throw invalid("Dossier matrix repeats a fact key");
+            }
+        }
+        return Map.copyOf(rowsByFactKey);
+    }
+
+    private static boolean isSubstantiveCurrentSourceRow(JsonNode row) {
+        String sourceScope = row.path("source_scope").asText("");
+        String stance = row.path("stance").asText("");
+        return ("CURRENT_SOURCE".equals(sourceScope)
+                        || "PREVIOUS_AND_CURRENT_SOURCE".equals(sourceScope))
+                && !"NOT_ADDRESSED".equals(stance);
     }
 
     private static StateOutcome nextState(
