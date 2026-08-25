@@ -1415,9 +1415,9 @@
 ## P0-20260825-DEMO-PURGE-TARGET-FINALIZATION-FK-DRIFT
 
 - Severity: P0
-- Status: CONFIRMED / FIX_IN_PROGRESS
+- Status: FIXED / FOCUSED_VERIFIED / DEPLOY_PENDING
 - Component: Reviewer-authorized failed UAT case purge
 - Confirmed fact: The reviewer-authorized `DELETE /api/disputes/CASE_P9_6A8D1C10_1` request returned HTTP 500, so the second requested failed sample was not deleted and no partial cleanup was committed.
 - Root cause and evidence: `purge_simulated_dispute_case` still uses the V040 deletion order and deletes `agent_execution_manifest` before deleting post-V040 Target E2E finalization receipts. PostgreSQL rejected that statement with SQLSTATE `23503` because `target_e2e_finalization_receipt.fk_target_e2e_finalization_manifest` still references the manifest; the surrounding service transaction rolled back the entire purge.
 - Impact: Failed or obsolete simulated UAT cases created by the current Target E2E chain cannot be removed through the only reviewer-authorized purge boundary, leaving test data and failed AgentRun state in the shared environment.
-- Identifying metadata: observed 2026-08-25 13:08 CST; requested cases `CASE_P9_6A8D1C10_1` and `CASE_P9_6A8D210C_1`; failing request `REQ_PURGE_CASE_P9_6A8D1C10_1`; trace `TRACE_622911e067e75edcfbb2a83f50e960e0`; constraint `fk_target_e2e_finalization_manifest`; function statement line `97`.
+- Identifying metadata: observed 2026-08-25 13:08 CST; requested cases `CASE_P9_6A8D1C10_1` and `CASE_P9_6A8D210C_1`; failing request `REQ_PURGE_CASE_P9_6A8D1C10_1`; trace `TRACE_622911e067e75edcfbb2a83f50e960e0`; constraint `fk_target_e2e_finalization_manifest`; function statement line `97`; isolated and independent `DemoCasePurgeMigrationIntegrationTest` runs both passed 4/4 with Flyway through V086 on 2026-08-25.

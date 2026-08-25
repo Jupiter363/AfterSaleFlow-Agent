@@ -318,11 +318,19 @@ class DemoCasePurgeMigrationIntegrationTest {
                     var result =
                             statement.executeQuery(
                                     """
-                                    select table_name
-                                    from information_schema.columns
-                                    where table_schema = 'public'
-                                      and column_name = 'case_id'
-                                      and table_name <> 'demo_case_purge_audit'
+                                    select column_info.table_name
+                                    from information_schema.columns column_info
+                                    join information_schema.tables table_info
+                                      on table_info.table_schema = column_info.table_schema
+                                     and table_info.table_name = column_info.table_name
+                                    where column_info.table_schema = 'public'
+                                      and column_info.column_name = 'case_id'
+                                      and table_info.table_type = 'BASE TABLE'
+                                      and column_info.table_name not in (
+                                          'demo_case_purge_audit',
+                                          'target_e2e_case_id_claim',
+                                          'target_e2e_case_reservation'
+                                      )
                                     """)) {
                 while (result.next()) {
                     caseScopedTables.add(result.getString(1));
@@ -350,6 +358,28 @@ class DemoCasePurgeMigrationIntegrationTest {
             }
             assertThat(functionDefinition)
                     .contains("delete from fulfillment_dispute_case");
+            assertThat(functionDefinition)
+                    .doesNotContain("delete from target_e2e_case_id_claim")
+                    .doesNotContain("delete from target_e2e_case_reservation")
+                    .doesNotContain("delete from target_e2e_generated_case_tombstone");
+            assertThat(functionDefinition.indexOf("delete from intake_parallel_frame_set"))
+                    .isLessThan(
+                            functionDefinition.indexOf(
+                                    "delete from target_e2e_finalization_receipt"));
+            assertThat(
+                            functionDefinition.indexOf(
+                                    "delete from target_e2e_finalization_receipt"))
+                    .isLessThan(
+                            functionDefinition.indexOf("delete from agent_execution_manifest"));
+            assertThat(functionDefinition.indexOf("delete from target_e2e_command_completion"))
+                    .isLessThan(
+                            functionDefinition.indexOf(
+                                    "delete from target_e2e_command_admission"));
+            assertThat(
+                            functionDefinition.indexOf(
+                                    "delete from intake_parallel_graph_result_artifact"))
+                    .isLessThan(
+                            functionDefinition.indexOf("delete from intake_parallel_frame_set"));
         }
     }
 
