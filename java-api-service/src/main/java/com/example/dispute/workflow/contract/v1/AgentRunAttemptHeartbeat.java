@@ -24,8 +24,12 @@ public record AgentRunAttemptHeartbeat(
         schemaVersion = version(schemaVersion, SCHEMA_VERSION);
         required(agentRunId, "agentRunId");
         required(attemptId, "attemptId");
-        if (attemptNo < 1 || lastSequenceNo < 0) {
+        if (attemptNo < 1 || lastSequenceNo < -1) {
             throw new IllegalArgumentException("attemptNo and lastSequenceNo are invalid");
+        }
+        if (lastSequenceNo == -1 && (publicOutputEmitted || finalFrameObserved)) {
+            throw new IllegalArgumentException(
+                    "empty stream baseline cannot carry public or final progress");
         }
         required(recordedAt, "recordedAt");
     }

@@ -25,8 +25,17 @@ public final class AgentRunExecutionException extends RuntimeException {
         if (!ERROR_CODE.matcher(Objects.requireNonNull(errorCode, "errorCode")).matches()) {
             throw new IllegalArgumentException("errorCode is invalid");
         }
-        if (lastSequenceNo < 0) {
-            throw new IllegalArgumentException("lastSequenceNo must not be negative");
+        if (lastSequenceNo < -1) {
+            throw new IllegalArgumentException("lastSequenceNo is below the empty stream baseline");
+        }
+        if (lastSequenceNo == -1 && publicOutputEmitted) {
+            throw new IllegalArgumentException(
+                    "empty stream baseline cannot have public output");
+        }
+        if (lastSequenceNo == -1
+                && recoveryAction == AgentRunRecoveryAction.RECONCILE_TERMINAL) {
+            throw new IllegalArgumentException(
+                    "terminal reconciliation requires a durable stream event");
         }
         this.errorCode = errorCode;
         this.recoveryAction =

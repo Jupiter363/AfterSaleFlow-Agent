@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures;
 import com.example.dispute.workflow.activity.agent.AgentRunActivityContext;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
@@ -80,6 +81,67 @@ class ExecuteAgentRunActivityHeartbeatTest {
         assertThat(terminal.finalFrameObserved()).isTrue();
         assertThat(terminal.recordedAt()).isEqualTo(NOW);
         org.mockito.Mockito.verify(ledger, org.mockito.Mockito.times(3)).recordHeartbeat(any());
+    }
+
+    @Test
+    void v4EmptyAttemptHeartbeatsAtNegativeBaselineThenAdvancesToFirstFrame() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        List<AgentRunAttemptHeartbeat> temporalHeartbeats = new ArrayList<>();
+        AgentRunActivityContext context = new AgentRunActivityContext() {
+            @Override
+            public int temporalAttempt() {
+                return 1;
+            }
+
+            @Override
+            public void heartbeat(AgentRunAttemptHeartbeat details) {
+                temporalHeartbeats.add(details);
+            }
+        };
+        AgentRunHeartbeatMonitor monitor = new AgentRunHeartbeatMonitor(
+                request,
+                runningV4Attempt(request),
+                ledger,
+                context,
+                Clock.fixed(NOW, ZoneOffset.UTC),
+                Duration.ofHours(1),
+                new AgentRunCancellationToken(),
+                Executors.newSingleThreadScheduledExecutor());
+
+        try (monitor) {
+            monitor.start();
+            monitor.progress(new AgentRunProgress(0, true, false));
+        }
+
+        assertThat(temporalHeartbeats)
+                .extracting(AgentRunAttemptHeartbeat::lastSequenceNo)
+                .containsExactly(-1L, 0L);
+        assertThat(temporalHeartbeats.getFirst().publicOutputEmitted()).isFalse();
+        assertThat(temporalHeartbeats.getFirst().finalFrameObserved()).isFalse();
+        org.mockito.Mockito.verify(ledger, org.mockito.Mockito.times(2)).recordHeartbeat(any());
+    }
+
+    @Test
+    void emptyStreamBaselineRejectsImpossiblePublicAndTerminalStates() {
+        assertThatThrownBy(() -> new AgentRunProgress(-2, false, false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("below the empty stream baseline");
+        assertThatThrownBy(() -> new AgentRunProgress(-1, true, false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("empty stream baseline");
+        assertThatThrownBy(() -> new AgentRunProgress(-1, false, true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("empty stream baseline");
+        assertThatThrownBy(() -> AgentRunExecutionException.reconcileTerminal(
+                        "EMPTY_TERMINAL", "no terminal", -1, false, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("durable stream event");
+
+        AgentRunExecutionException retry = AgentRunExecutionException.retrySameCommand(
+                "EMPTY_RETRY", "retry before first frame", -1, false, null);
+        assertThat(retry.lastSequenceNo()).isEqualTo(-1);
+        assertThat(retry.publicOutputEmitted()).isFalse();
     }
 
     @Test
@@ -163,6 +225,30 @@ class ExecuteAgentRunActivityHeartbeatTest {
                 null);
     }
 
+    private static AgentRunLedger.Attempt runningV4Attempt(ExecuteAgentRunRequest request) {
+        return new AgentRunLedger.Attempt(
+                request.attemptId(),
+                request.agentRunId(),
+                request.attemptNo(),
+                AgentRunAttemptStatus.RUNNING,
+                false,
+                false,
+                -1,
+                null,
+                NOW,
+                null,
+                0,
+                "agent-run-attempt-lineage.v1",
+                request.command().commandId(),
+                request.command().requestHash(),
+                request.logicalInputHash(),
+                "{}",
+                request.previousAttemptId(),
+                request.resetRequired(),
+                request.publicSequenceOffset(),
+                null);
+    }
+
     private static ExecuteAgentRunRequest request() throws Exception {
         Path fixture = Path.of(
                 "..",
@@ -179,7 +265,7 @@ class ExecuteAgentRunActivityHeartbeatTest {
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
                 command.logicalRunId(),
                 1,
-                "agent-stream.v2",
+                "agent-stream.v3",
                 "b".repeat(64),
                 null,
                 false,

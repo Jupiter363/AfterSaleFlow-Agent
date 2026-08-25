@@ -7,8 +7,12 @@ public record AgentRunProgress(
         boolean finalFrameObserved) {
 
     public AgentRunProgress {
-        if (lastSequenceNo < 0) {
-            throw new IllegalArgumentException("lastSequenceNo must not be negative");
+        if (lastSequenceNo < -1) {
+            throw new IllegalArgumentException("lastSequenceNo is below the empty stream baseline");
+        }
+        if (lastSequenceNo == -1 && (publicOutputEmitted || finalFrameObserved)) {
+            throw new IllegalArgumentException(
+                    "empty stream baseline cannot carry public or final progress");
         }
     }
 }

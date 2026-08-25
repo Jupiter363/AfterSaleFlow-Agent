@@ -1401,3 +1401,23 @@
 - Root cause and evidence: `CanonicalTargetIntakeMaterializer` correctly issued the authenticated ROOM_MESSAGE as `agent-stream.v4`, but the latest persisted `enforce_target_e2e_intake_command_material()` trigger still required `run.protocol='agent-stream.v3'`. PostgreSQL therefore raised SQLSTATE `23514` with `target E2E Intake material does not bind its durable AgentRun attempt` while inserting `target_e2e_intake_command_material`; the caller-owned transaction rolled back the draft message, run, attempt, admission, and material together. The immediately preceding opening run `target-intake-run:56b642d77d0b3f2a808814da8405851b` remains `COMPLETED / COMMITTED`, the case remains `INTAKE_PENDING`, neither party has an Intake completion row, and all Evidence cardinalities remain zero.
 - Impact: The newly activated three-frame Intake path cannot accept its first substantive party turn, blocking verification of V4 frame streaming, assembly, formal commit, and every downstream UAT stage.
 - Identifying metadata: observed 2026-08-25 12:46 CST; case `CASE_P9_6A8D1C10_1`; actor `user-local/USER`; request `REQ_1d206dca31214c618133284caaa120f2`; trace `TRACE_494715dc716cf32c190b5e3d95cd41e8`; HTTP code `500`; public code `INTERNAL_ERROR`.
+
+## P0-20260825-PARALLEL-V4-NEGATIVE-BASELINE-PROGRESS
+
+- Severity: P0
+- Status: FIXED / FOCUSED_VERIFIED
+- Component: Target E2E Intake V4 AgentRun activity heartbeat boundary
+- Confirmed fact: On fresh activation `p9act.v1.a28c58896637dfaf59b801e11090d4f4`, the first substantive USER ROOM_MESSAGE in fresh case `CASE_P9_6A8D210C_1` was admitted as V4 run `target-intake-run:d3287bf357bf3281a51c323560720a99`, but its Temporal execution failed before any parallel frame-set or Provider call was created.
+- Root cause and evidence: The V4 attempt is correctly persisted with `last_sequence_no=-1` so its first public frame can own global sequence `0`. `ExecuteAgentRunActivityImpl` constructs `AgentRunHeartbeatMonitor` before execution, and that monitor constructs `AgentRunProgress` from the persisted attempt. `AgentRunProgress` still enforces the legacy V3-only invariant `lastSequenceNo >= 0` and throws `IllegalArgumentException: lastSequenceNo must not be negative`; the Temporal Activity consequently terminates before the V4 execution gateway can admit or stream any of the three lanes.
+- Impact: Every correctly initialized V4 Intake attempt is rejected at the activity heartbeat boundary before model execution, so the three-lane parallel path cannot produce preview frames, assemble a proposal, formally commit the turn, or continue downstream UAT.
+- Identifying metadata: observed 2026-08-25 13:03 CST; case `CASE_P9_6A8D210C_1`; actor `user-local/USER`; command `intake-message:d3287bf357bf3281a51c323560720a99`; logical run `target-intake-run:d3287bf357bf3281a51c323560720a99`; attempt `target-intake-attempt:d3287bf357bf3281a51c323560720a99:1`; Temporal workflow run `1a614460-cb90-4a51-8862-8f14b6f12a36`; focused and independent verification both passed `ExecuteAgentRunActivityHeartbeatTest` 5/5 on 2026-08-25.
+
+## P0-20260825-DEMO-PURGE-TARGET-FINALIZATION-FK-DRIFT
+
+- Severity: P0
+- Status: CONFIRMED / FIX_IN_PROGRESS
+- Component: Reviewer-authorized failed UAT case purge
+- Confirmed fact: The reviewer-authorized `DELETE /api/disputes/CASE_P9_6A8D1C10_1` request returned HTTP 500, so the second requested failed sample was not deleted and no partial cleanup was committed.
+- Root cause and evidence: `purge_simulated_dispute_case` still uses the V040 deletion order and deletes `agent_execution_manifest` before deleting post-V040 Target E2E finalization receipts. PostgreSQL rejected that statement with SQLSTATE `23503` because `target_e2e_finalization_receipt.fk_target_e2e_finalization_manifest` still references the manifest; the surrounding service transaction rolled back the entire purge.
+- Impact: Failed or obsolete simulated UAT cases created by the current Target E2E chain cannot be removed through the only reviewer-authorized purge boundary, leaving test data and failed AgentRun state in the shared environment.
+- Identifying metadata: observed 2026-08-25 13:08 CST; requested cases `CASE_P9_6A8D1C10_1` and `CASE_P9_6A8D210C_1`; failing request `REQ_PURGE_CASE_P9_6A8D1C10_1`; trace `TRACE_622911e067e75edcfbb2a83f50e960e0`; constraint `fk_target_e2e_finalization_manifest`; function statement line `97`.
