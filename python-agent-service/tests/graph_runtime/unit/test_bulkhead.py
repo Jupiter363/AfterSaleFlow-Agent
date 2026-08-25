@@ -587,6 +587,26 @@ def test_durable_scope_uses_database_reconstructable_room_identity() -> None:
     )
 
 
+def test_durable_scope_accepts_first_zero_based_room_epoch() -> None:
+    scope = GraphBulkheadScope.from_graph_identity(
+        tenant_surrogate="tenant-opaque",
+        case_id="case-opaque",
+        room_type="INTAKE",
+        room_epoch=0,
+        item_key="IFS_first-turn",
+    )
+
+    assert scope.room_key == "case-opaque:INTAKE:0"
+    with pytest.raises(GraphContractError, match="must not be negative"):
+        GraphBulkheadScope.from_graph_identity(
+            tenant_surrogate="tenant-opaque",
+            case_id="case-opaque",
+            room_type="INTAKE",
+            room_epoch=-1,
+            item_key="IFS_invalid",
+        )
+
+
 def test_durable_migration_enforces_authoritative_scope_and_starvation_free_fifo() -> None:
     base_path = (
         SERVICE_ROOT / "migrations" / "graph" / "G004_graph_fanout_bulkhead.sql"

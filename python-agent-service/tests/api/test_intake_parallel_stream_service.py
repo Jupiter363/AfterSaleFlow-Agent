@@ -15,6 +15,7 @@ from app.api.intake_parallel_stream import (
     ParallelFrameAdmissionLane,
     ParallelFrameAdmissionReceipt,
     ParallelFrameStreamAuthority,
+    ParallelFrameStreamProtocolError,
     parallel_frame_authority_sha256,
 )
 from app.api.intake_parallel_stream_service import (
@@ -22,6 +23,7 @@ from app.api.intake_parallel_stream_service import (
     _FairFrameMergeQueue,
     _RUNNER_TERMINAL,
     _batch_failure_is_retryable,
+    _decode_cached_completion,
 )
 from app.contracts.v1.codec import canonical_sha256
 from app.graph_runtime.gateway import AdmissionAction
@@ -71,20 +73,29 @@ async def test_fair_merge_queue_round_robins_and_isolates_lane_capacity() -> Non
     quality = _started(FRAME_TYPES[2], suffix="0")
 
     for event in dialogue:
-        queue.put_nowait(event)
-    with pytest.raises(GraphContractError, match="DIALOGUE_FRAME.*saturated"):
-        queue.put_nowait(_started(FRAME_TYPES[0], suffix="overflow"))
+        await queue.put(event)
+    blocked = asyncio.create_task(
+        queue.put(_started(FRAME_TYPES[0], suffix="overflow"))
+    )
+    await asyncio.sleep(0)
+    assert not blocked.done()
 
     # A saturated Dialogue lane cannot consume either sibling's quota.
-    queue.put_nowait(dossier)
-    queue.put_nowait(quality)
+    await queue.put(dossier)
+    await queue.put(quality)
+    first = await queue.get()
+    assert first.frame_type == FRAME_TYPES[0]
+    await asyncio.wait_for(blocked, timeout=1)
     queue.close()
 
-    drained = [await queue.get() for _ in range(5)]
+    drained = [first]
+    for _ in range(5):
+        drained.append(await queue.get())
     assert [event.frame_type for event in drained] == [
         FRAME_TYPES[0],
         FRAME_TYPES[1],
         FRAME_TYPES[2],
+        FRAME_TYPES[0],
         FRAME_TYPES[0],
         FRAME_TYPES[0],
     ]
@@ -561,6 +572,116 @@ async def test_provider_group_denial_emits_nothing_and_never_starts_models(
 
 
 @pytest.mark.asyncio
+async def test_invalid_provider_scope_finishes_execution_before_starting_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.intake_parallel_stream_service as service_module
+
+    requests = _requests()
+    bundle = SimpleNamespace(
+        frame_set_id=FRAME_SET_ID,
+        requests=requests,
+        agent_contexts={frame_type: object() for frame_type in FRAME_TYPES},
+    )
+    gateway = _Gateway()
+    gateway.execution.admission.command.room_epoch = -1
+    provider_bulkhead = _ProviderGroupBulkhead()
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    monkeypatch.setattr(
+        service_module,
+        "build_parallel_checkpoint_configs",
+        lambda _execution, _requests: {frame_type: {} for frame_type in FRAME_TYPES},
+    )
+    service = GatewayBackedParallelIntakeFrameStreamService(
+        gateway=gateway,
+        input_loader=object(),
+        prompts=object(),
+        orchestrator=_SuccessfulOrchestrator(requests),
+        model_runner=object(),
+        provider="litellm",
+        model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=provider_bulkhead,
+        owner_id="python:test",
+        admission_gate=gate,
+    )
+
+    with pytest.raises(GraphContractError, match="room epoch must not be negative"):
+        async for _event in service._execute_live(  # noqa: SLF001 - setup cleanup proof
+            execution=gateway.execution,
+            bundle=bundle,
+            authority=_authority(),
+            admission_receipt=_admission_receipt(gateway.execution.admission.command),
+            selected_requests=requests,  # type: ignore[arg-type]
+        ):
+            pass
+
+    assert gateway.finished == [(AttemptStatus.FAILED, "GRAPH_CONTRACT_REJECTED")]
+    assert provider_bulkhead.acquire_calls == []
+
+
+@pytest.mark.asyncio
+async def test_post_acquire_authority_failure_finishes_execution_and_leaves_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.intake_parallel_stream_service as service_module
+
+    requests = _requests()
+    bundle = SimpleNamespace(
+        frame_set_id=FRAME_SET_ID,
+        requests=requests,
+        agent_contexts={frame_type: object() for frame_type in FRAME_TYPES},
+    )
+    gateway = _Gateway()
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    service = GatewayBackedParallelIntakeFrameStreamService(
+        gateway=gateway,
+        input_loader=object(),
+        prompts=object(),
+        orchestrator=_SuccessfulOrchestrator(requests),
+        model_runner=object(),
+        provider="litellm",
+        model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=_ProviderGroupBulkhead(),
+        owner_id="python:test",
+        admission_gate=gate,
+    )
+
+    async def load_bundle(_execution: Any) -> Any:
+        return bundle
+
+    async def load_prepared_bundle(
+        _command: Any,
+        _expected_thread: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        return bundle
+
+    service._load_bundle = load_bundle  # type: ignore[method-assign]
+    service._load_prepared_bundle = load_prepared_bundle  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        service_module,
+        "_authority_from_bundle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            GraphContractError("live authority drift")
+        ),
+    )
+
+    receipt = _admission_receipt(gateway.execution.admission.command)
+    with pytest.raises(GraphContractError, match="live authority drift"):
+        await service.open_stream(
+            command=gateway.execution.admission.command,
+            verified_invocation=_verified(receipt),
+            expected_thread=object(),
+            admission_receipt=receipt,
+        )
+
+    assert gateway.finished == [(AttemptStatus.FAILED, "GRAPH_CONTRACT_REJECTED")]
+    assert gate.accepting is True
+
+
+@pytest.mark.asyncio
 async def test_cancel_during_group_acquire_releases_a_racing_grant_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -807,6 +928,42 @@ async def test_cached_technical_completion_replays_without_acquire_or_model(
     assert orchestrator.calls == 0
     assert gateway.completed == []
     assert provider_bulkhead.acquire_calls == []
+
+
+def test_cached_exact_three_completion_rejects_interrupted_lane() -> None:
+    requests = _requests()
+    events: list[Any] = [_started(frame_type, suffix="cached") for frame_type in FRAME_TYPES]
+    events.extend((_seal(requests[0]), _seal(requests[1])))
+    events.append(
+        FrameInterrupted(
+            frame_set_id=FRAME_SET_ID,
+            run_id=RUN_ID,
+            attempt_id=ATTEMPT_ID,
+            frame_type=requests[2].frame_type,
+            generation=requests[2].generation,
+            frame_id=requests[2].frame_id,
+            error_code="OUTPUT_SCHEMA_INVALID",
+            retryable=True,
+        )
+    )
+    completion = SimpleNamespace(
+        completion_json={
+            "schema_version": "intake-parallel-technical-completion.v1",
+            "events": [event.model_dump(mode="json") for event in events],
+        }
+    )
+    gateway = _Gateway()
+
+    with pytest.raises(
+        ParallelFrameStreamProtocolError,
+        match="cached exact-three completion is not sealed",
+    ):
+        _decode_cached_completion(
+            completion,
+            authority=_authority(),
+            admission_receipt=_admission_receipt(gateway.execution.admission.command),
+            active_frame_types=FRAME_TYPES,
+        )
 
 
 @pytest.mark.asyncio

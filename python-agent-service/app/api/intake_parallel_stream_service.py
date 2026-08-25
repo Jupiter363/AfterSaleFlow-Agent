@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from collections.abc import AsyncIterator, Mapping, Sequence
 import re
 from typing import Any, Protocol, cast
@@ -234,7 +233,7 @@ class _StreamingTechnicalEventSink:
                 raise ParallelFrameStreamProtocolError("parallel Frame seal is duplicated")
             self._seals[typed_event.frame_type] = typed_event
         self._event_log.append(typed_event)
-        self._queue.put_nowait(typed_event)
+        await self._queue.put(typed_event)
 
 
 class _FairFrameMergeQueue:
@@ -251,21 +250,22 @@ class _FairFrameMergeQueue:
             raise ValueError("parallel Intake per-Frame queue capacity is invalid")
         self._per_frame_capacity = per_frame_capacity
         self._lanes: dict[
-            ParallelFrameType, deque[ParallelFrameTechnicalEvent]
-        ] = {frame_type: deque() for frame_type in FRAME_TYPES}
+            ParallelFrameType, asyncio.Queue[ParallelFrameTechnicalEvent]
+        ] = {
+            frame_type: asyncio.Queue(maxsize=per_frame_capacity)
+            for frame_type in FRAME_TYPES
+        }
         self._available = asyncio.Event()
         self._closed = False
         self._next_lane = 0
 
-    def put_nowait(self, event: ParallelFrameTechnicalEvent) -> None:
+    async def put(self, event: ParallelFrameTechnicalEvent) -> None:
         if self._closed:
             raise GraphContractError("parallel Intake stream queue is closed")
         lane = self._lanes[event.frame_type]
-        if len(lane) >= self._per_frame_capacity:
-            raise GraphContractError(
-                f"parallel Intake {event.frame_type} stream queue is saturated"
-            )
-        lane.append(event)
+        await lane.put(event)
+        if self._closed:
+            raise GraphContractError("parallel Intake stream queue closed during publish")
         self._available.set()
 
     def close(self) -> None:
@@ -278,9 +278,9 @@ class _FairFrameMergeQueue:
                 lane_index = (self._next_lane + offset) % len(FRAME_TYPES)
                 frame_type = FRAME_TYPES[lane_index]
                 lane = self._lanes[frame_type]
-                if lane:
+                if not lane.empty():
                     self._next_lane = (lane_index + 1) % len(FRAME_TYPES)
-                    return lane.popleft()
+                    return lane.get_nowait()
             if self._closed:
                 return _RUNNER_TERMINAL
             self._available.clear()
@@ -413,18 +413,18 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 )
                 try:
                     bundle = await self._load_bundle(execution)
+                    if _authority_from_bundle(execution, bundle) != prepared_authority:
+                        raise ParallelFrameStreamProtocolError(
+                            "parallel live bundle differs from its prepared authority"
+                        )
+                    selected_requests = _select_execution_requests(
+                        bundle,
+                        admission_receipt,
+                    )
                 except BaseException as error:
                     with anyio.CancelScope(shield=True):
                         await self._finish_failed_execution(execution, error)
                     raise
-                if _authority_from_bundle(execution, bundle) != prepared_authority:
-                    raise ParallelFrameStreamProtocolError(
-                        "parallel live bundle differs from its prepared authority"
-                    )
-                selected_requests = _select_execution_requests(
-                    bundle,
-                    admission_receipt,
-                )
                 stream = self._execute_live(
                     execution=execution,
                     bundle=bundle,
@@ -614,65 +614,72 @@ class GatewayBackedParallelIntakeFrameStreamService:
         admission_receipt: ParallelFrameAdmissionReceipt,
         selected_requests: tuple[ParallelFrameExecutionRequest, ...],
     ) -> AsyncIterator[ParallelFrameTechnicalEvent]:
-        requests = tuple(
-            request.model_copy(update={"emit_start": False})
-            for request in selected_requests
-        )
-        checkpoint_configs = build_parallel_checkpoint_configs(execution, requests)
-        event_log: list[ParallelFrameTechnicalEvent] = []
-        active_frame_types = tuple(request.frame_type for request in requests)
-        validator = ParallelFrameStreamProtocolValidator(
-            authority,
-            active_frame_types,
-        )
-        queue = _FairFrameMergeQueue(
-            # This is a per-Frame quota. Total memory remains bounded by the
-            # fixed exact-three topology while one noisy lane cannot consume a
-            # sibling's capacity.
-            per_frame_capacity=self._queue_capacity
-        )
-        sink = _StreamingTechnicalEventSink(
-            validator=validator,
-            event_log=event_log,
-            queue=queue,
-        )
-        recorder = GatewayProviderCallIntentRecorder(
-            gateway=self._gateway,
-            execution=execution,
-            provider=self._provider,
-            model=self._model,
-            allowed_nodes=frozenset(FRAME_NODE_NAMES.values()),
-        )
         heartbeat_stop = asyncio.Event()
-        heartbeat = asyncio.create_task(
-            self._run_heartbeat(recorder, heartbeat_stop),
-            name="intake-parallel-lease-heartbeat",
-        )
+        heartbeat: asyncio.Task[None] | None = None
         provider_permit: _ProviderGroupPermit | None = None
         provider_permit_heartbeat: asyncio.Task[None] | None = None
-        provider_permit_acquire = asyncio.create_task(
-            self._provider_bulkhead.acquire(
-                _provider_group_scope(execution, bundle.frame_set_id),
-                _provider_group_fence(execution),
-                request_id=_provider_group_request_id(
-                    execution,
-                    authority=authority,
-                    admission_receipt=admission_receipt,
-                    requests=requests,
-                ),
-                owner_id=_provider_group_owner_id(
-                    execution,
-                    service_owner_id=self._owner_id,
-                    admission_receipt=admission_receipt,
-                ),
-                takeover=True,
-                permit_count=len(requests),
-            ),
-            name="intake-parallel-provider-group-acquire",
-        )
+        provider_permit_acquire: asyncio.Task[_ProviderGroupPermit] | None = None
         runner: asyncio.Task[ParallelFrameBatchResult] | None = None
         durable_terminal = False
         try:
+            requests = tuple(
+                request.model_copy(update={"emit_start": False})
+                for request in selected_requests
+            )
+            checkpoint_configs = build_parallel_checkpoint_configs(execution, requests)
+            event_log: list[ParallelFrameTechnicalEvent] = []
+            active_frame_types = tuple(request.frame_type for request in requests)
+            validator = ParallelFrameStreamProtocolValidator(
+                authority,
+                active_frame_types,
+            )
+            queue = _FairFrameMergeQueue(
+                # This is a per-Frame quota. Total memory remains bounded by the
+                # fixed exact-three topology while one noisy lane cannot consume a
+                # sibling's capacity. Producers wait when their own lane is full;
+                # a valid maximum-cardinality Frame is never rejected for scheduler skew.
+                per_frame_capacity=self._queue_capacity
+            )
+            sink = _StreamingTechnicalEventSink(
+                validator=validator,
+                event_log=event_log,
+                queue=queue,
+            )
+            recorder = GatewayProviderCallIntentRecorder(
+                gateway=self._gateway,
+                execution=execution,
+                provider=self._provider,
+                model=self._model,
+                allowed_nodes=frozenset(FRAME_NODE_NAMES.values()),
+            )
+            provider_scope = _provider_group_scope(execution, bundle.frame_set_id)
+            provider_fence = _provider_group_fence(execution)
+            provider_request_id = _provider_group_request_id(
+                execution,
+                authority=authority,
+                admission_receipt=admission_receipt,
+                requests=requests,
+            )
+            provider_owner_id = _provider_group_owner_id(
+                execution,
+                service_owner_id=self._owner_id,
+                admission_receipt=admission_receipt,
+            )
+            heartbeat = asyncio.create_task(
+                self._run_heartbeat(recorder, heartbeat_stop),
+                name="intake-parallel-lease-heartbeat",
+            )
+            provider_permit_acquire = asyncio.create_task(
+                self._provider_bulkhead.acquire(
+                    provider_scope,
+                    provider_fence,
+                    request_id=provider_request_id,
+                    owner_id=provider_owner_id,
+                    takeover=True,
+                    permit_count=len(requests),
+                ),
+                name="intake-parallel-provider-group-acquire",
+            )
             acquired, _ = await asyncio.wait(
                 {provider_permit_acquire, heartbeat},
                 return_when=asyncio.FIRST_COMPLETED,
@@ -829,13 +836,14 @@ class GatewayBackedParallelIntakeFrameStreamService:
             raise
         finally:
             heartbeat_stop.set()
-            if not provider_permit_acquire.done():
-                provider_permit_acquire.cancel()
-            acquire_result = (
-                await asyncio.gather(provider_permit_acquire, return_exceptions=True)
-            )[0]
-            if provider_permit is None and not isinstance(acquire_result, BaseException):
-                provider_permit = cast(_ProviderGroupPermit, acquire_result)
+            if provider_permit_acquire is not None:
+                if not provider_permit_acquire.done():
+                    provider_permit_acquire.cancel()
+                acquire_result = (
+                    await asyncio.gather(provider_permit_acquire, return_exceptions=True)
+                )[0]
+                if provider_permit is None and not isinstance(acquire_result, BaseException):
+                    provider_permit = cast(_ProviderGroupPermit, acquire_result)
             if heartbeat is not None:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
@@ -1326,6 +1334,15 @@ def _decode_cached_completion(
         if set(active_frame_types) != set(FRAME_TYPES):
             raise ParallelFrameStreamProtocolError(
                 "exact-three cached completion cannot satisfy a subset receipt"
+            )
+        seals = {
+            event.frame_type: event
+            for event in events
+            if isinstance(event, FrameSealed)
+        }
+        if set(seals) != set(FRAME_TYPES):
+            raise ParallelFrameStreamProtocolError(
+                "cached exact-three completion is not sealed"
             )
     elif schema_version == _SUBSET_TECHNICAL_COMPLETION_SCHEMA:
         expected_fields = {

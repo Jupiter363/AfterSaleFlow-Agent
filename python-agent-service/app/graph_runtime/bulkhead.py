@@ -100,9 +100,9 @@ class GraphBulkheadScope:
         if (
             not isinstance(room_epoch, int)
             or isinstance(room_epoch, bool)
-            or room_epoch < 1
+            or room_epoch < 0
         ):
-            raise GraphContractError("bulkhead room epoch must be positive")
+            raise GraphContractError("bulkhead room epoch must not be negative")
         return cls(
             tenant_key=tenant_surrogate,
             room_key=f"{case_id}:{room_type}:{room_epoch}",
