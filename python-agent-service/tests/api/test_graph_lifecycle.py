@@ -44,6 +44,53 @@ BASE_SETTINGS = {
 }
 
 
+@pytest.mark.parametrize(
+    ("phase", "admission_receipt_sha256"),
+    [("PREPARE", None), ("EXECUTE", "a" * 64)],
+)
+def test_runtime_target_e2e_verifier_delegates_parallel_envelopes(
+    phase: str,
+    admission_receipt_sha256: str | None,
+) -> None:
+    verified = object.__new__(graph_lifecycle.VerifiedTargetE2EInvocation)
+    envelope = object()
+    transport_identity = object()
+    calls: list[dict[str, Any]] = []
+
+    class Verifier:
+        def verify_parallel_envelope(self, **kwargs: Any) -> Any:
+            calls.append(kwargs)
+            return verified
+
+    class RuntimeHandle:
+        def require_runtime(self) -> Any:
+            return SimpleNamespace(target_e2e_verifier=Verifier())
+
+    runtime_verifier = graph_lifecycle._RuntimeTargetE2EVerifier(
+        cast(Any, RuntimeHandle())
+    )
+
+    assert (
+        runtime_verifier.verify_parallel_envelope(
+            token="signed-token",
+            envelope=cast(Any, envelope),
+            transport_identity=cast(Any, transport_identity),
+            phase=phase,
+            admission_receipt_sha256=admission_receipt_sha256,
+        )
+        is verified
+    )
+    assert calls == [
+        {
+            "token": "signed-token",
+            "envelope": envelope,
+            "transport_identity": transport_identity,
+            "phase": phase,
+            "admission_receipt_sha256": admission_receipt_sha256,
+        }
+    ]
+
+
 def test_target_e2e_prompt_resources_are_required_before_runtime_readiness() -> None:
     graph_lifecycle._require_target_e2e_prompt_resources(
         [SimpleNamespace(prompt_version="all-rooms-prompt.target-e2e.v2")]

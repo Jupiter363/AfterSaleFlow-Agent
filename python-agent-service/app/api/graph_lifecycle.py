@@ -1048,6 +1048,29 @@ class _RuntimeTargetE2EVerifier:
             raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
         return verified
 
+    def verify_parallel_envelope(
+        self,
+        *,
+        token: str,
+        envelope: TargetE2EGraphCommandEnvelope,
+        transport_identity: TransportIdentity,
+        phase: str,
+        admission_receipt_sha256: str | None,
+    ) -> VerifiedTargetE2EInvocation:
+        verifier = self._handle.require_runtime().target_e2e_verifier
+        if verifier is None:
+            raise InvocationEnvelopeError("TARGET_E2E_VERIFIER_NOT_CONFIGURED")
+        verified = verifier.verify_parallel_envelope(
+            token=token,
+            envelope=envelope,
+            transport_identity=transport_identity,
+            phase=phase,
+            admission_receipt_sha256=admission_receipt_sha256,
+        )
+        if not isinstance(verified, VerifiedTargetE2EInvocation):
+            raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
+        return verified
+
     def verify_envelope_for_reconciliation(
         self,
         *,
