@@ -15,10 +15,12 @@ import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.core.namedparam.SqlParameterSource;
@@ -67,7 +69,11 @@ class PostgresAgentRunV4EventWriterTest {
         assertThat(receipt.eventSha256()).matches("[0-9a-f]{64}");
         assertThat(receipt.canonicalEventJson()).contains("agent-stream.v4");
         assertThat(receipt.durableHighWatermark()).isEqualTo(4L);
-        verify(jdbc).update(anyString(), any(SqlParameterSource.class));
+        ArgumentCaptor<SqlParameterSource> sourceParameters =
+                ArgumentCaptor.forClass(SqlParameterSource.class);
+        verify(jdbc).update(anyString(), sourceParameters.capture());
+        assertThat(sourceParameters.getValue().getValue("occurredAt"))
+                .isEqualTo(Timestamp.from(Instant.parse("2026-08-24T08:00:00Z")));
     }
 
     @Test

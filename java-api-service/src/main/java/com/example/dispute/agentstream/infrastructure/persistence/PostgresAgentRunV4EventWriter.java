@@ -7,6 +7,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -127,7 +128,7 @@ public final class PostgresAgentRunV4EventWriter {
                 .addValue("sequenceNo", command.sequenceNo())
                 .addValue("eventType", command.eventType().wireValue())
                 .addValue("eventJson", canonicalEventJson)
-                .addValue("occurredAt", command.occurredAt())
+                .addValue("occurredAt", Timestamp.from(command.occurredAt()))
                 .addValue("audience", command.audience().name())
                 .addValue("eventHash", eventHash)
                 .addValue("actorId", command.actorId())
