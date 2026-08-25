@@ -79,6 +79,8 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
         "DialoguePublicSegmentProposalV1"
     ]["properties"]["candidate_text"]
     assert dialogue_text_schema["pattern"] == r"^[^?？]+$"
+    assert dialogue_text_schema["maxLength"] == 200
+    assert dialogue_schema["properties"]["public_projection_items"]["maxItems"] == 2
 
     dialogue = _dialogue_frame()
     dialogue["public_projection_items"][0]["candidate_text"] = "还需要补充吗？"
@@ -116,6 +118,12 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
     assert "NOT_ADDRESSED" not in source_row["stance"]["enum"]
     respondent_claim = dossier_schema["$defs"]["DossierRespondentClaimV2"]
     assert "NOT_ADDRESSED" not in respondent_claim["properties"]["attitude"]["enum"]
+    assert dossier_schema["properties"]["public_projection_items"]["maxItems"] == 6
+    assert source_row["position_summary"]["maxLength"] == 240
+    assert any(
+        option.get("maxLength") == 160
+        for option in source_row["asserted_value"]["anyOf"]
+    )
 
 
 def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capacity() -> None:

@@ -231,6 +231,55 @@ class IntakeParallelFrameAssemblerTest {
     }
 
     @Test
+    void rejectsParallelFramesThatExceedTheSmallOutputContract() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode dialogue = dialogue(previous, "ASK_SUBSTANTIVE");
+        for (int index = 2; index <= 3; index++) {
+            ObjectNode repeated = ((ObjectNode) dialogue.at("/public_projection_items/0"))
+                    .deepCopy();
+            repeated.put("provider_slot_id", "DSEG_0" + index);
+            dialogue.withArray("public_projection_items").add(repeated);
+            dialogue.with("dialogue").withArray("public_projection_slots").add("DSEG_0" + index);
+        }
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue,
+                        dossier(),
+                        quality(Map.of(
+                                        "references", 15,
+                                        "event_story", 20,
+                                        "party_positions", 20,
+                                        "requested_resolution", 15,
+                                        "risk_and_conflicts", 15,
+                                        "next_action_clarity", 15),
+                                List.of())))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("1..2 bounded public segments");
+
+        ObjectNode dossier = dossier();
+        for (int index = 2; index <= 7; index++) {
+            ObjectNode repeated = ((ObjectNode) dossier.at("/public_projection_items/0"))
+                    .deepCopy();
+            repeated.with("source_row")
+                    .put("fact_key", "NEW_" + "C".repeat(24) + "_FACT_" + index)
+                    .put("source_scope", "CURRENT_SOURCE");
+            dossier.withArray("public_projection_items").add(repeated);
+        }
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        dossier,
+                        quality(Map.of(
+                                        "references", 15,
+                                        "event_story", 20,
+                                        "party_positions", 20,
+                                        "requested_resolution", 15,
+                                        "risk_and_conflicts", 15,
+                                        "next_action_clarity", 15),
+                                List.of())))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("durable prefix length");
+    }
+
+    @Test
     void carriesEveryUnchangedFormalFactBeforeAppendingCurrentNewFacts() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode secondPrior = ((ObjectNode) previous.at("/case_fact_matrix/fact_rows/0"))

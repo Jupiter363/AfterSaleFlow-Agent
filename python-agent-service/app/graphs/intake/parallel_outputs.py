@@ -30,11 +30,17 @@ from app.graphs.intake.contracts import (
 )
 
 
+DIALOGUE_SEGMENT_MAX_LENGTH = 200
+DIALOGUE_SEGMENT_MAX_ITEMS = 2
+DOSSIER_TEXT_MAX_LENGTH = 240
+DOSSIER_SHORT_TEXT_MAX_LENGTH = 160
+DOSSIER_FACT_MAX_ITEMS = 6
+
 DialogueSegmentText = Annotated[
     str,
     StringConstraints(
         min_length=1,
-        max_length=500,
+        max_length=DIALOGUE_SEGMENT_MAX_LENGTH,
         pattern=r"^[^?？]+$",
     ),
 ]
@@ -60,7 +66,7 @@ DossierLongText = Annotated[
     str,
     StringConstraints(
         min_length=1,
-        max_length=20_000,
+        max_length=DOSSIER_TEXT_MAX_LENGTH,
         pattern=r"[\s\S]*\S[\s\S]*",
     ),
 ]
@@ -68,7 +74,7 @@ DossierShortText = Annotated[
     str,
     StringConstraints(
         min_length=1,
-        max_length=2_000,
+        max_length=DOSSIER_SHORT_TEXT_MAX_LENGTH,
         pattern=r"[\s\S]*\S[\s\S]*",
     ),
 ]
@@ -103,14 +109,14 @@ class DialogueActionBindingV1(StrictFrameOutput):
 class DialogueFrameValueV1(StrictFrameOutput):
     action_binding: DialogueActionBindingV1
     public_projection_slots: tuple[Identifier, ...] = Field(
-        min_length=1, max_length=4
+        min_length=1, max_length=DIALOGUE_SEGMENT_MAX_ITEMS
     )
     language: Literal["zh-CN"]
 
 
 class IntakeDialogueFrameV1(StrictFrameOutput):
     public_projection_items: tuple[DialoguePublicSegmentProposalV1, ...] = Field(
-        min_length=1, max_length=4
+        min_length=1, max_length=DIALOGUE_SEGMENT_MAX_ITEMS
     )
     frame_type: Literal["DIALOGUE_FRAME"]
     schema_version: Literal["intake.dialogue-frame.v1"]
@@ -180,7 +186,7 @@ class DossierFrameDeltaV2(StrictFrameOutput):
 
 class IntakeDossierFrameV2(StrictFrameOutput):
     public_projection_items: tuple[DossierPublicFactProposalV2, ...] = Field(
-        max_length=32
+        max_length=DOSSIER_FACT_MAX_ITEMS
     )
     frame_type: Literal["DOSSIER_FRAME"]
     schema_version: Literal["intake.dossier-frame.v2"]
@@ -287,7 +293,10 @@ def request_bound_dossier_output_types(
         f"IntakeDossierFrameV2_{identity}",
         __base__=IntakeDossierFrameV2,
         __module__=__name__,
-        public_projection_items=(tuple[item_type, ...], Field(max_length=32)),
+        public_projection_items=(
+            tuple[item_type, ...],
+            Field(max_length=DOSSIER_FACT_MAX_ITEMS),
+        ),
         dossier_delta=(delta_type, ...),
     )
     return (

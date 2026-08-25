@@ -170,6 +170,37 @@ def test_all_business_generation_requests_disable_thinking(node_name: str) -> No
     assert "thinking_budget" not in body
 
 
+@pytest.mark.parametrize(
+    ("node_name", "expected_max_tokens"),
+    [
+        ("intake_turn_dialogue_frame", 1_024),
+        ("intake_turn_dossier_frame", 4_096),
+        ("intake_turn_quality_frame", 2_048),
+    ],
+)
+def test_parallel_intake_frames_use_small_independent_generation_budgets(
+    node_name: str,
+    expected_max_tokens: int,
+) -> None:
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-max-2026-06-08",
+        "test-master-key",
+    )
+
+    body = client._completion_request_body(
+        node_name=node_name,
+        output_type=SimpleStructuredOutput,
+        system_prompt="system",
+        user_prompt="user",
+        user_content_parts=None,
+        json_mode=True,
+    )
+
+    assert body["max_tokens"] == expected_max_tokens
+    assert body["enable_thinking"] is False
+
+
 def test_business_generation_uses_enabled_thinking_configuration() -> None:
     client = LiteLlmProxyClient(
         "http://litellm:4000",
@@ -936,7 +967,6 @@ def test_generate_stream_requires_provider_finish_reason() -> None:
 @pytest.mark.parametrize(
     ("finish_reason", "message"),
     [
-        ("length", "output token limit"),
         ("content_filter", "content filter"),
         ("tool_calls", "provider finish_reason 'tool_calls'"),
     ],
@@ -974,6 +1004,41 @@ def test_generate_stream_classifies_non_successful_provider_termination(
                 output_type=SimpleStructuredOutput,
             )
         )
+
+
+def test_generate_stream_classifies_output_token_limit_as_non_retryable_output_error(
+) -> None:
+    invalid_content = '{"requires_supplemental_evidence":false'
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=_ChunkedByteStream(
+                _structured_stream_body(
+                    invalid_content,
+                    finish_reason="length",
+                )
+            ),
+        )
+
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-plus",
+        "test-master-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(AgentOutputSchemaError) as captured:
+        list(
+            client.generate_stream(
+                node_name="intake_turn_dossier_frame",
+                system_prompt="system",
+                user_prompt="user",
+                output_type=SimpleStructuredOutput,
+            )
+        )
+
+    assert captured.value.safe_code == "AGENT_OUTPUT_TOKEN_LIMIT_EXCEEDED"
 
 
 # 所属模块：Python 支撑模块 > test_llm；函数角色：回归测试用例。

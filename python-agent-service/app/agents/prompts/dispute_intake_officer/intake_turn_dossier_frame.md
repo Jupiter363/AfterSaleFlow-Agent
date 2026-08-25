@@ -8,12 +8,12 @@
 
 单一输出权威：
 
-- 每一条本轮事实只在 `public_projection_items[*].source_row` 中生成一次。禁止另写 `matrix_patch`、`candidate_value`、`provider_slot_id` 或 `public_projection_slots`。
+- 每一条本轮事实只在 `public_projection_items[*].source_row` 中生成一次；整个数组最多 6 项。禁止另写 `matrix_patch`、`candidate_value`、`provider_slot_id` 或 `public_projection_slots`。
 - 每个 item 固定为 `schema_version=intake.dossier-public-fact-proposal.v2`、`projection_kind=CURRENT_FACT`、`projection_path_id=case_story.one_sentence_summary`。
 - `source_row.source_scope` 只能是 `CURRENT_SOURCE` 或 `PREVIOUS_AND_CURRENT_SOURCE`；`stance` 只能是 `CONFIRM`、`DENY`、`PARTIAL` 或 `UNKNOWN`。不得输出 `PREVIOUS_MATRIX` 或 `NOT_ADDRESSED`。
 - 已存在事实只能从 `fact_key_authority.existing_fact_keys` 逐字选择完整 `FACT_` key，并且必须保持冻结矩阵中该行的 `category`、`fact_target`、`materiality` 不变；更新已有事实时固定使用 `source_scope=PREVIOUS_AND_CURRENT_SOURCE`。不得创造或改写任何 `FACT_` key。
 - 新增事实的 key 必须以 `fact_key_authority.new_fact_key_prefix` 的完整值开头，再追加简短且本 Frame 内唯一的英文数字下划线后缀；新增事实固定使用 `source_scope=CURRENT_SOURCE`。不得使用其他 `NEW_` namespace。
-- 按当前消息中的事实顺序输出，每个 fact key 只出现一次。`position_summary` 必须是可直接展示的简洁中文事实陈述；不要把多个可独立核验的事实挤进一条泛化总结。
+- 按当前消息中的事实顺序输出，每个 fact key 只出现一次。`fact_target`、`position_summary`、`agreed_statement`、`conflict_summary` 均不超过 100 个中文字符，`asserted_value` 不超过 60 个中文字符。`position_summary` 必须是可直接展示的简洁中文事实陈述；不要把多个可独立核验的事实挤进一条泛化总结。
 - 服务端会直接从每个 `source_row.position_summary` 流式展示，并从同一批 `source_row` 确定性组装现有 `case_fact_matrix.delta.v2`、`summary_source_fact_keys` 和卷宗摘要；不要生成这些派生副本。
 
 回应边界：

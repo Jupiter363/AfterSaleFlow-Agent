@@ -47,6 +47,12 @@ public final class IntakeParallelFrameAssembler {
     public static final String TARGET_RESULT_SCHEMA = "target-e2e-room-proposal-source.v2";
     public static final String EXECUTION_PROFILE = "PARALLEL_FRAMES_V1";
     private static final int QUALITY_THRESHOLD = 85;
+    private static final int DIALOGUE_SEGMENT_LIMIT = 2;
+    private static final int DIALOGUE_SEGMENT_MAX_LENGTH = 200;
+    private static final int DOSSIER_FACT_LIMIT = 6;
+    private static final int DOSSIER_TEXT_MAX_LENGTH = 240;
+    private static final int DOSSIER_SUMMARY_MAX_LENGTH =
+            DOSSIER_FACT_LIMIT * DOSSIER_TEXT_MAX_LENGTH + DOSSIER_FACT_LIMIT - 1;
     private static final Pattern IDENTIFIER =
             Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
     private static final Pattern SHA256 = Pattern.compile("^[0-9a-f]{64}$");
@@ -214,7 +220,7 @@ public final class IntakeParallelFrameAssembler {
 
     private static void requireDossierProjectionPrefix(
             ArrayNode publicItems, long nextLocalIndex) {
-        if (publicItems.size() != nextLocalIndex) {
+        if (publicItems.size() != nextLocalIndex || publicItems.size() > DOSSIER_FACT_LIMIT) {
             throw invalid("Dossier final facts do not match the durable prefix length");
         }
         Set<String> factKeys = new LinkedHashSet<>();
@@ -249,8 +255,8 @@ public final class IntakeParallelFrameAssembler {
 
         ArrayNode items = requireArray(dialogueFrame.path("public_projection_items"),
                 "dialogue public_projection_items");
-        if (items.isEmpty() || items.size() > 4) {
-            throw invalid("Dialogue Frame requires 1..4 bounded public segments");
+        if (items.isEmpty() || items.size() > DIALOGUE_SEGMENT_LIMIT) {
+            throw invalid("Dialogue Frame requires 1..2 bounded public segments");
         }
         for (JsonNode item : items) {
             requireExactFields(
@@ -263,7 +269,9 @@ public final class IntakeParallelFrameAssembler {
                     .contains(kind)) {
                 throw invalid("Dialogue segment kind is not allowlisted");
             }
-            String text = boundedText(item.path("candidate_text").asText(null), 500,
+            String text = boundedText(
+                    item.path("candidate_text").asText(null),
+                    DIALOGUE_SEGMENT_MAX_LENGTH,
                     "candidate_text");
             if (text.contains("?") || text.contains("？")) {
                 throw invalid("Dialogue segments cannot create questions");
@@ -331,13 +339,13 @@ public final class IntakeParallelFrameAssembler {
             }
             String positionSummary = preservedBoundedText(
                     sourceRow.path("position_summary"),
-                    20_000,
+                    DOSSIER_TEXT_MAX_LENGTH,
                     "source_row.position_summary");
             summaries.add(positionSummary);
         }
         String summary = preservedBoundedText(
                 String.join("；", summaries),
-                20_000,
+                DOSSIER_SUMMARY_MAX_LENGTH,
                 "matrix summary");
         patch.putObject("case_story").put("one_sentence_summary", summary);
         return patch;

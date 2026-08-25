@@ -82,6 +82,9 @@ _NODE_GENERATION_BUDGETS: dict[str, ModelGenerationBudget] = {
     "intake_analyze": ModelGenerationBudget(4_096),
     "intake_turn_dialogue": ModelGenerationBudget(4_096),
     "intake_turn_case_detail": ModelGenerationBudget(6_144),
+    "intake_turn_dialogue_frame": ModelGenerationBudget(1_024),
+    "intake_turn_dossier_frame": ModelGenerationBudget(4_096),
+    "intake_turn_quality_frame": ModelGenerationBudget(2_048),
     "evidence_turn": ModelGenerationBudget(8_192),
     "evaluation_analyze": ModelGenerationBudget(8_192),
     "hearing_intake_questions": ModelGenerationBudget(4_096),
@@ -1556,8 +1559,10 @@ class LiteLlmProxyClient:
                 "LiteLLM proxy stream ended without finish_reason"
             )
         if finish_reason == "length":
-            raise AgentServiceUnavailable(
-                "LiteLLM proxy stream reached the output token limit"
+            raise AgentOutputSchemaError(
+                node_name,
+                "LiteLLM proxy stream reached the output token limit",
+                safe_code="AGENT_OUTPUT_TOKEN_LIMIT_EXCEEDED",
             )
         if finish_reason == "content_filter":
             raise AgentServiceUnavailable(
@@ -2237,8 +2242,10 @@ class _AsyncStructuredStreamState:
                 "LiteLLM proxy stream ended without finish_reason"
             )
         if self.finish_reason == "length":
-            raise AgentServiceUnavailable(
-                "LiteLLM proxy stream reached the output token limit"
+            raise AgentOutputSchemaError(
+                self.node_name,
+                "LiteLLM proxy stream reached the output token limit",
+                safe_code="AGENT_OUTPUT_TOKEN_LIMIT_EXCEEDED",
             )
         if self.finish_reason == "content_filter":
             raise AgentServiceUnavailable(
