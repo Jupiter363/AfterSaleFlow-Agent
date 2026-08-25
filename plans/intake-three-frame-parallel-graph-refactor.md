@@ -3,11 +3,11 @@
 ## 状态
 
 ```text
-plan_status: RISK_REVIEWED_FINAL_DESIGN
-implementation_status: R1A_STREAM_ACCEPTED_R1B_CONTEXT_IN_PROGRESS
-runtime_change: NONE
-database_change: PLANNED_EXECUTION_FRAME_STAGING_AND_PROGRESS_ONLY
-uat_status: NOT_STARTED
+plan_status: IMPLEMENTED_FOCUSED_VERIFIED
+implementation_status: R5_PRE_ACTIVATION_GATE_PASSED
+runtime_change: SOURCE_COMPLETE_FRESH_ACTIVATION_REQUIRED
+database_change: IMPLEMENTED_JAVA_V081_TO_V088_AND_GRAPH_G011_TO_G013
+uat_status: PENDING_FRESH_ACTIVATION
 target_model: qwen3.7-max-2026-06-08
 provider_output_mode: STRICT_JSON_SCHEMA
 thinking: DISABLED
@@ -15,6 +15,10 @@ target_execution_profile: PARALLEL_FRAMES_V1
 legacy_execution_profile: MONOLITHIC_V3
 parallel_stream_protocol: agent-stream.v4
 ```
+
+截至 2026-08-25，R1–R4 的契约、三路独立 Graph/checkpoint、Java V4 staging/assembly/finalization、前端三槽 provisional projection 与局部 reset 已完成。Quality 的六项评分和缺口现按独立 typed item 流式输出；Java 会在正式状态派生前用 sealed Dossier matrix 对缺口 fact binding 做跨 Frame 对账，且不改写六项分数。
+
+最新 pre-activation 聚焦门共通过 22 项：Java profile selector、V4 execution gateway、exact-three assembly、transactional terminal store、formal assembly finalization 共 13 项；Python private parallel stream prepare/execute/retry 共 9 项。fresh activation、真实 Provider 调用和浏览器全链路 UAT 仍未执行，因此当前状态不构成运行态验收或发布结论。
 
 本文定义最终交付所需的完整实施边界、协议、切分顺序和验收门，不在规划阶段修改业务代码、数据库、运行服务或现有案件。当前单体接待官仍是生产真值。实施切片只用于控制提交和验证边界，不代表功能降级、分期协议或临时子集；`PARALLEL_FRAMES_V1` 只有在本文全部契约和验收门同时完成后才能启用。
 
