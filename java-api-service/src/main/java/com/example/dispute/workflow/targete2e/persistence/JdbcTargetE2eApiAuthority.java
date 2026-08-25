@@ -52,6 +52,35 @@ public final class JdbcTargetE2eApiAuthority
          and expires_at > clock_timestamp()
       """;
 
+  private static final String INTAKE_EPOCH_EXECUTION_PROFILE =
+      """
+      select binding.intake_room_message_execution_profile_id
+        from target_e2e_room_epoch_binding binding
+        join case_room_epoch epoch
+          on epoch.id = binding.epoch_id
+         and epoch.tenant_surrogate = binding.tenant_surrogate
+         and epoch.case_id = binding.case_id
+         and epoch.room_type = binding.room_type
+         and epoch.room_epoch = binding.room_epoch
+         and epoch.fencing_token = binding.room_fencing_token
+       where binding.activation_id = ?
+         and binding.activation_manifest_hash = ?
+         and binding.execution_lane = 'TARGET_E2E_CANDIDATE'
+         and binding.isolated_domain_db_binding_hash = ?
+         and binding.tenant_surrogate = ?
+         and binding.case_id = ?
+         and binding.room_type = 'INTAKE'
+         and binding.room_epoch = ?
+         and binding.room_fencing_token = ?
+         and epoch.process_revision = ?
+         and epoch.room_revision = ?
+         and epoch.temporal_workflow_id = ?
+         and epoch.temporal_build_id = ?
+         and epoch.writer_mode = 'TEMPORAL'
+         and epoch.lifecycle_status = 'ACTIVE'
+         and epoch.provisioning_status = 'READY'
+      """;
+
   private final DataSource dataSource;
   private final TargetE2eActivationCaseLedger caseLedger;
   private final String activationId;
@@ -97,9 +126,13 @@ public final class JdbcTargetE2eApiAuthority
   public TargetIntakeActivationGrant authorize(TargetIntakeEpochBinding binding) {
     Objects.requireNonNull(binding, "binding");
     ActivationRow activation = loadActive(binding.tenantSurrogate(), "INTAKE");
+    String roomMessageExecutionProfileId = activation == null
+        ? null
+        : loadIntakeEpochExecutionProfile(activation, binding);
     if (activation == null
         || !reservationExists(activation.activationId(), binding.tenantSurrogate(), binding.caseId())
-        || !activation.controlBuildId().equals(binding.temporalBuildId())) {
+        || !activation.controlBuildId().equals(binding.temporalBuildId())
+        || roomMessageExecutionProfileId == null) {
       return null;
     }
     return new TargetIntakeActivationGrant(
@@ -114,6 +147,7 @@ public final class JdbcTargetE2eApiAuthority
         binding.roomRevision(),
         binding.temporalWorkflowId(),
         binding.temporalBuildId(),
+        roomMessageExecutionProfileId,
         activation.expiresAt());
   }
 
@@ -123,12 +157,26 @@ public final class JdbcTargetE2eApiAuthority
     Objects.requireNonNull(grant, "grant");
     Objects.requireNonNull(expected, "expected");
     ActivationRow activation = loadActive(grant.tenantSurrogate(), "INTAKE");
+    String roomMessageExecutionProfileId = activation == null
+        ? null
+        : loadIntakeEpochExecutionProfile(
+            activation,
+            new TargetIntakeEpochBinding(
+                grant.tenantSurrogate(),
+                grant.caseId(),
+                grant.roomEpoch(),
+                grant.roomFencingToken(),
+                grant.processRevision(),
+                grant.roomRevision(),
+                grant.temporalWorkflowId(),
+                grant.temporalBuildId()));
     if (activation == null
         || !reservationExists(activation.activationId(), grant.tenantSurrogate(), grant.caseId())
         || !activation.activationId().equals(grant.activationId())
         || !activation.manifestHash().equals(grant.manifestHash())
         || !activation.expiresAt().equals(grant.expiresAt())
-        || !activation.controlBuildId().equals(grant.temporalBuildId())) {
+        || !activation.controlBuildId().equals(grant.temporalBuildId())
+        || !grant.roomMessageExecutionProfileId().equals(roomMessageExecutionProfileId)) {
       throw new IllegalStateException("target Intake activation no longer matches its epoch grant");
     }
     return expected.requireActivation(
@@ -257,6 +305,41 @@ public final class JdbcTargetE2eApiAuthority
       }
     } catch (SQLException failure) {
       throw persistenceFailure("target activation lookup failed", failure);
+    } finally {
+      DataSourceUtils.releaseConnection(connection, dataSource);
+    }
+  }
+
+  private String loadIntakeEpochExecutionProfile(
+      ActivationRow activation, TargetIntakeEpochBinding binding) {
+    Connection connection = DataSourceUtils.getConnection(dataSource);
+    try (PreparedStatement statement =
+        connection.prepareStatement(INTAKE_EPOCH_EXECUTION_PROFILE)) {
+      int index = 1;
+      statement.setString(index++, activation.activationId());
+      statement.setString(index++, activation.manifestHash());
+      statement.setString(index++, activation.isolatedDomainDbBindingHash());
+      statement.setString(index++, binding.tenantSurrogate());
+      statement.setString(index++, binding.caseId());
+      statement.setLong(index++, binding.roomEpoch());
+      statement.setLong(index++, binding.roomFencingToken());
+      statement.setLong(index++, binding.processRevision());
+      statement.setLong(index++, binding.roomRevision());
+      statement.setString(index++, binding.temporalWorkflowId());
+      statement.setString(index, binding.temporalBuildId());
+      try (ResultSet result = statement.executeQuery()) {
+        if (!result.next()) {
+          return null;
+        }
+        String profile = result.getString(1);
+        if (result.next()) {
+          throw new IllegalStateException(
+              "target Intake epoch execution profile lookup returned multiple rows");
+        }
+        return profile;
+      }
+    } catch (SQLException failure) {
+      throw persistenceFailure("target Intake epoch execution profile lookup failed", failure);
     } finally {
       DataSourceUtils.releaseConnection(connection, dataSource);
     }

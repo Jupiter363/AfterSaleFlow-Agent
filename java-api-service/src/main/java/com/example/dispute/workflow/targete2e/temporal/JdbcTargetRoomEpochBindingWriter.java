@@ -108,7 +108,8 @@ public class JdbcTargetRoomEpochBindingWriter implements TargetRoomEpochBindingW
                 case_id,
                 room_type,
                 room_epoch,
-                room_fencing_token
+                room_fencing_token,
+                intake_room_message_execution_profile_id
             ) values (
                 :epochId,
                 :activationId,
@@ -119,7 +120,8 @@ public class JdbcTargetRoomEpochBindingWriter implements TargetRoomEpochBindingW
                 :caseId,
                 :roomType,
                 :roomEpoch,
-                :roomFencingToken
+                :roomFencingToken,
+                :intakeRoomMessageExecutionProfileId
             )
             """;
 
@@ -208,7 +210,12 @@ public class JdbcTargetRoomEpochBindingWriter implements TargetRoomEpochBindingW
                         .addValue("caseId", context.caseId())
                         .addValue("roomType", context.roomType().name())
                         .addValue("roomEpoch", context.roomEpoch())
-                        .addValue("roomFencingToken", context.fencingToken()));
+                        .addValue("roomFencingToken", context.fencingToken())
+                        .addValue(
+                                "intakeRoomMessageExecutionProfileId",
+                                IntakeRoomMessageExecutionProfile
+                                        .forNewTargetEpoch(context.roomType())
+                                        .name()));
         if (inserted != 1) {
             throw new IllegalStateException(
                     "target room epoch activation binding was not persisted exactly once");

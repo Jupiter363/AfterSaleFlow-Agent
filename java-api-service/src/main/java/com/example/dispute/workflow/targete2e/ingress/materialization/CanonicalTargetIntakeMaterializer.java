@@ -273,7 +273,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 attempt.logicalInputHash(), attempt.previousAttemptId(), attempt.resetRequired(),
                 attempt.publicSequenceOffset(), graph);
         IntakeParallelTurnContext parallelTurnContext =
-                request.sourceType() == TargetIntakeMessageRequest.SourceType.ROOM_MESSAGE
+                parallelRoomMessage
                         ? frozenParallelTurnContext(
                                 request,
                                 event.sequenceNo(),
@@ -426,7 +426,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             throw new IllegalStateException(
                     "target Intake room messages require a case-party actor authority");
         }
-        return true;
+        return request.activation().usesParallelRoomMessages();
     }
 
     static AgentRunProtocol expectedProtocol(TargetIntakeMessageRequest request) {

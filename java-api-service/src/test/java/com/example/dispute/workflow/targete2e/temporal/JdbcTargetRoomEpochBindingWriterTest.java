@@ -18,6 +18,7 @@ import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.Transit
 import com.example.dispute.workflow.application.epoch.RoomEpochSelector;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelection;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelection.TargetActivationBinding;
+import com.example.dispute.workflow.application.epoch.RoomEpochBootstrapDeliveryTrigger;
 import com.example.dispute.workflow.application.epoch.TransactionalRoomEpochAllocator;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
@@ -80,6 +81,29 @@ class JdbcTargetRoomEpochBindingWriterTest {
         assertThat(parameters.getValue().getValue("roomType")).isEqualTo("HEARING");
         assertThat(parameters.getValue().getValue("roomEpoch")).isEqualTo(2L);
         assertThat(parameters.getValue().getValue("roomFencingToken")).isEqualTo(7L);
+        assertThat(parameters.getValue().getValue("intakeRoomMessageExecutionProfileId"))
+                .isEqualTo("MONOLITHIC_V3");
+    }
+
+    @Test
+    void pinsNewTargetIntakeEpochsToTheParallelRoomMessageProfile() {
+        NamedParameterJdbcTemplate jdbc = mock(NamedParameterJdbcTemplate.class);
+        when(jdbc.update(
+                        contains("insert into target_e2e_room_epoch_binding"),
+                        isA(MapSqlParameterSource.class)))
+                .thenReturn(1);
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        TransactionSynchronizationManager.setCurrentTransactionReadOnly(false);
+
+        new JdbcTargetRoomEpochBindingWriter(jdbc).persist(context(RoomType.INTAKE));
+
+        ArgumentCaptor<MapSqlParameterSource> parameters =
+                ArgumentCaptor.forClass(MapSqlParameterSource.class);
+        verify(jdbc).update(
+                contains("insert into target_e2e_room_epoch_binding"), parameters.capture());
+        assertThat(parameters.getValue().getValue("roomType")).isEqualTo("INTAKE");
+        assertThat(parameters.getValue().getValue("intakeRoomMessageExecutionProfileId"))
+                .isEqualTo("PARALLEL_FRAMES_V1");
     }
 
     @Test
@@ -180,11 +204,15 @@ class JdbcTargetRoomEpochBindingWriterTest {
     }
 
     private static BindingContext context() {
+        return context(RoomType.HEARING);
+    }
+
+    private static BindingContext context(RoomType roomType) {
         return new BindingContext(
                 "epoch-1",
                 "tenant-target",
                 "CASE_TARGET_0001",
-                RoomType.HEARING,
+                roomType,
                 2,
                 7,
                 new RoomEpochSelection(
@@ -193,7 +221,7 @@ class JdbcTargetRoomEpochBindingWriterTest {
                         "case-process-contract.v1",
                         "CaseProcessWorkflow",
                         "p9-case-build",
-                        TargetTypedRoomProtocol.workflowType(RoomType.HEARING),
+                        TargetTypedRoomProtocol.workflowType(roomType),
                         "p9-control-build",
                         "all-rooms.target-e2e.v1",
                         TargetTypedRoomProtocol.GRAPH_VERSION,
@@ -295,10 +323,15 @@ class JdbcTargetRoomEpochBindingWriterTest {
         RoomEpochSelector freshSelector = mock(RoomEpochSelector.class);
         TenantAuthority tenantAuthority = mock(TenantAuthority.class);
         RoomEpochBootstrapEnqueuer bootstrap = mock(RoomEpochBootstrapEnqueuer.class);
+        RoomEpochBootstrapDeliveryTrigger deliveryTrigger =
+                mock(RoomEpochBootstrapDeliveryTrigger.class);
         TargetRoomEpochBindingWriter bindingAuthority =
                 mock(TargetRoomEpochBindingWriter.class);
         @SuppressWarnings("unchecked")
         ObjectProvider<RoomEpochBootstrapEnqueuer> bootstrapProvider =
+                mock(ObjectProvider.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<RoomEpochBootstrapDeliveryTrigger> deliveryProvider =
                 mock(ObjectProvider.class);
         @SuppressWarnings("unchecked")
         ObjectProvider<TargetRoomEpochBindingWriter> bindingProvider =
@@ -331,6 +364,8 @@ class JdbcTargetRoomEpochBindingWriterTest {
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(tenantAuthority.tenantSurrogate()).thenReturn(tenant);
         when(bootstrapProvider.getIfAvailable()).thenReturn(bootstrap);
+        when(deliveryProvider.stream())
+                .thenAnswer(ignored -> java.util.stream.Stream.of(deliveryTrigger));
         when(bootstrap.enqueue(
                         any(CaseRoomEpochEntity.class),
                         any(CaseProcessProjectionEntity.class),
@@ -366,6 +401,7 @@ class JdbcTargetRoomEpochBindingWriterTest {
                         freshSelector,
                         tenantAuthority,
                         bootstrapProvider,
+                        deliveryProvider,
                         bindingProvider);
         TransitionRoomEpoch command =
                 new TransitionRoomEpoch(

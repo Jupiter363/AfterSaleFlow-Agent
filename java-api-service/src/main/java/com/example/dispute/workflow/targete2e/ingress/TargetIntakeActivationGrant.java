@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.targete2e.ingress;
 
+import com.example.dispute.workflow.targete2e.temporal.IntakeRoomMessageExecutionProfile;
 import java.time.Instant;
 import java.util.Objects;
 
@@ -16,9 +17,14 @@ public record TargetIntakeActivationGrant(
         long roomRevision,
         String temporalWorkflowId,
         String temporalBuildId,
+        String roomMessageExecutionProfileId,
         Instant expiresAt) {
 
     public static final String TARGET_LANE = "TARGET_E2E_CANDIDATE";
+    public static final String MONOLITHIC_V3 =
+            IntakeRoomMessageExecutionProfile.MONOLITHIC_V3.name();
+    public static final String PARALLEL_FRAMES_V1 =
+            IntakeRoomMessageExecutionProfile.PARALLEL_FRAMES_V1.name();
 
     public TargetIntakeActivationGrant {
         if (!TARGET_LANE.equals(lane)) {
@@ -34,10 +40,40 @@ public record TargetIntakeActivationGrant(
         Objects.requireNonNull(caseId, "caseId must not be null");
         Objects.requireNonNull(temporalWorkflowId, "temporalWorkflowId must not be null");
         Objects.requireNonNull(temporalBuildId, "temporalBuildId must not be null");
+        IntakeRoomMessageExecutionProfile.parse(roomMessageExecutionProfileId);
         Objects.requireNonNull(expiresAt, "expiresAt must not be null");
         if (roomEpoch < 0 || roomFencingToken < 0 || processRevision < 0 || roomRevision < 0) {
             throw new IllegalArgumentException("activation revisions must be non-negative");
         }
+    }
+
+    public TargetIntakeActivationGrant(
+            String lane,
+            String activationId,
+            String manifestHash,
+            String tenantSurrogate,
+            String caseId,
+            long roomEpoch,
+            long roomFencingToken,
+            long processRevision,
+            long roomRevision,
+            String temporalWorkflowId,
+            String temporalBuildId,
+            Instant expiresAt) {
+        this(
+                lane,
+                activationId,
+                manifestHash,
+                tenantSurrogate,
+                caseId,
+                roomEpoch,
+                roomFencingToken,
+                processRevision,
+                roomRevision,
+                temporalWorkflowId,
+                temporalBuildId,
+                PARALLEL_FRAMES_V1,
+                expiresAt);
     }
 
     public TargetIntakeActivationGrant(
@@ -46,6 +82,10 @@ public record TargetIntakeActivationGrant(
             String temporalBuildId, Instant expiresAt) {
         this(lane, activationId, manifestHash, tenantSurrogate, caseId, roomEpoch, roomFencingToken,
                 processRevision, 0, temporalWorkflowId, temporalBuildId, expiresAt);
+    }
+
+    public boolean usesParallelRoomMessages() {
+        return PARALLEL_FRAMES_V1.equals(roomMessageExecutionProfileId);
     }
 
     public void assertMatches(TargetIntakeEpochBinding binding) {

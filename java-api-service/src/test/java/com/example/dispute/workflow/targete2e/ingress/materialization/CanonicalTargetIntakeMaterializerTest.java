@@ -209,6 +209,12 @@ class CanonicalTargetIntakeMaterializerTest {
                         activation,
                         new AuthenticatedActor("merchant-local", ActorRole.MERCHANT))))
                 .isEqualTo(AgentRunProtocol.V3);
+        assertThat(CanonicalTargetIntakeMaterializer.expectedProtocol(
+                        request(monolithicActivation())))
+                .isEqualTo(AgentRunProtocol.V3);
+        assertThat(CanonicalTargetIntakeMaterializer.isParallelRoomMessage(
+                        request(monolithicActivation())))
+                .isFalse();
     }
 
     @Test
@@ -628,6 +634,24 @@ class CanonicalTargetIntakeMaterializerTest {
                 "case-process:tenant-target-activation:CASE_TARGET_001",
                 "p9-control-build",
                 Instant.parse("2026-07-30T12:00:00Z"));
+    }
+
+    private static TargetIntakeActivationGrant monolithicActivation() {
+        TargetIntakeActivationGrant activation = activation();
+        return new TargetIntakeActivationGrant(
+                activation.lane(),
+                activation.activationId(),
+                activation.manifestHash(),
+                activation.tenantSurrogate(),
+                activation.caseId(),
+                activation.roomEpoch(),
+                activation.roomFencingToken(),
+                activation.processRevision(),
+                activation.roomRevision(),
+                activation.temporalWorkflowId(),
+                activation.temporalBuildId(),
+                TargetIntakeActivationGrant.MONOLITHIC_V3,
+                activation.expiresAt());
     }
 
     private static TargetIntakeMessageRequest request(TargetIntakeActivationGrant activation) {

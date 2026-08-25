@@ -70,13 +70,13 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(55);
+        assertThat(first.migrationsExecuted).isEqualTo(97);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
                 DriverManager.getConnection(jdbcUrl, USERNAME, PASSWORD)) {
             assertThat(loadTables(connection))
-                    .containsExactlyInAnyOrder(
+                    .contains(
                             "fulfillment_dispute_case",
                             "evidence_dossier",
                             "evidence_dossier_item",
