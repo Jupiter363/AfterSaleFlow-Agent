@@ -148,7 +148,8 @@ public final class JdbcTargetE2eIntakeFinalizationStateReader
                    room_revision, projection_revision, initial_last_sequence, created_at
               from case_intake_snapshot_binding
              where thread_registration_id = :registrationId
-               and binding_type = 'INITIAL'
+               and binding_type = :snapshotBindingType
+               and initialization_marker = :snapshotInitializationMarker
                and artifact_id = :artifactId
             """;
 
@@ -229,9 +230,13 @@ public final class JdbcTargetE2eIntakeFinalizationStateReader
                         SNAPSHOT_SQL,
                         Map.of(
                                 "registrationId", facts.binding().registration().registrationId(),
+                                "snapshotBindingType", snapshotBindingType(request),
+                                "snapshotInitializationMarker",
+                                        !ExecuteAgentRunRequest.isParallelIntakeCommand(
+                                                request.command()),
                                 "artifactId", snapshotRef.artifactId()),
                         (rs, row) -> snapshot(rs)),
-                "initial snapshot");
+                "command snapshot");
         if (snapshot.isEmpty()) {
             return Optional.empty();
         }
@@ -283,6 +288,12 @@ public final class JdbcTargetE2eIntakeFinalizationStateReader
                 snapshot.orElseThrow(),
                 event,
                 output.orElseThrow()));
+    }
+
+    private static String snapshotBindingType(ExecuteAgentRunRequest request) {
+        return ExecuteAgentRunRequest.isParallelIntakeCommand(request.command())
+                ? "TURN"
+                : "INITIAL";
     }
 
     private BaseFacts base(ResultSet rs) throws SQLException {

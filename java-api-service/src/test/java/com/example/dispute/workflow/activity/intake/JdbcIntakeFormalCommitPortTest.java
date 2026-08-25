@@ -1561,16 +1561,18 @@ class JdbcIntakeFormalCommitPortTest {
 
         NamedParameterJdbcTemplate named = new NamedParameterJdbcTemplate(jdbc.getDataSource());
         JdbcIntakeGraphBindingStore bindings = new JdbcIntakeGraphBindingStore(named);
-        bindings.register(fixture.binding());
-        if (registerBinding) {
-            jdbc.update(
-                    "update case_intake_graph_thread_binding"
-                            + " set registration_status = 'REGISTERED', registered_at = created_at"
-                            + " where registration_id = ?",
-                    fixture.binding().registration().registrationId());
-        }
-        bindings.bindInitialSnapshot(fixture.snapshot());
-        bindings.bindEvent(fixture.event());
+        new TransactionTemplate(transactions).executeWithoutResult(ignored -> {
+            bindings.register(fixture.binding());
+            if (registerBinding) {
+                jdbc.update(
+                        "update case_intake_graph_thread_binding"
+                                + " set registration_status = 'REGISTERED', registered_at = created_at"
+                                + " where registration_id = ?",
+                        fixture.binding().registration().registrationId());
+            }
+            bindings.bindInitialSnapshot(fixture.snapshot());
+            bindings.bindEvent(fixture.event());
+        });
 
         String run = fixture.command().logicalRunId();
         String attempt = fixture.command().attemptId();

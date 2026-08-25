@@ -338,7 +338,12 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
             }
             responseReceived = true;
             statusCode = response.statusCode();
+            if (statusCode >= 300 && statusCode <= 399) {
+                throw protocol("parallel preparation redirect is forbidden", null);
+            }
             if (statusCode != 200) {
+                requireRemoteErrorMetadata(
+                        response, "parallel preparation error metadata is invalid");
                 return;
             }
             if (!sharedResponseMetadataIsValid(response, false)
@@ -365,14 +370,24 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
 
         @Override
         public void onLine(String line) {
+            if (!responseReceived) {
+                throw protocol("parallel preparation emitted data before response metadata", null);
+            }
             if (responseLine != null) {
                 throw protocol("parallel preparation returned multiple response lines", null);
             }
-            responseLine = line;
+            responseLine = Objects.requireNonNull(line, "line");
         }
 
         private StreamAuthority finish() {
-            if (!responseReceived || statusCode != 200 || authority == null || responseLine == null) {
+            if (!responseReceived) {
+                throw protocol("parallel preparation response metadata is missing", null);
+            }
+            if (statusCode != 200) {
+                throw parseRemoteFailure(
+                        responseLine, "Python rejected parallel Intake preparation");
+            }
+            if (authority == null || responseLine == null) {
                 throw protocol("parallel preparation did not return durable authority", null);
             }
             try {
@@ -821,39 +836,48 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
         }
 
         private void requireErrorMetadata(GraphCommandHttpTransport.ResponseHead response) {
-            if (!sharedResponseMetadataIsValid(response, true)
-                    || !endpoint.equals(response.uri())
-                    || !"application/json".equalsIgnoreCase(
-                            mediaType(singleHeader(response.headers(), "Content-Type")))) {
-                throw protocol("parallel target Graph error metadata is invalid", null);
-            }
+            requireRemoteErrorMetadata(response, "parallel target Graph error metadata is invalid");
         }
 
         private TargetE2EGraphClientException remoteFailure() {
-            if (remoteErrorLine == null) {
-                return protocol("parallel target Graph error body is missing", null);
+            return parseRemoteFailure(
+                    remoteErrorLine, "Python rejected parallel Intake execution");
+        }
+    }
+
+    private void requireRemoteErrorMetadata(
+            GraphCommandHttpTransport.ResponseHead response, String failureMessage) {
+        if (!sharedResponseMetadataIsValid(response, true)
+                || !endpoint.equals(response.uri())
+                || !"application/json".equalsIgnoreCase(
+                        mediaType(singleHeader(response.headers(), "Content-Type")))) {
+            throw protocol(failureMessage, null);
+        }
+    }
+
+    private TargetE2EGraphClientException parseRemoteFailure(
+            String responseLine, String rejectionMessage) {
+        if (responseLine == null) {
+            return protocol("parallel target Graph error body is missing", null);
+        }
+        try {
+            JsonNode root = mapper.readTree(responseLine);
+            Set<String> fields = new HashSet<>();
+            root.fieldNames().forEachRemaining(fields::add);
+            if (!root.isObject()
+                    || !fields.equals(REMOTE_ERROR_FIELDS)
+                    || !root.required("code").isTextual()
+                    || !root.required("retryable").isBoolean()) {
+                throw new IllegalArgumentException("remote error envelope is invalid");
             }
-            try {
-                JsonNode root = mapper.readTree(remoteErrorLine);
-                Set<String> fields = new HashSet<>();
-                root.fieldNames().forEachRemaining(fields::add);
-                if (!root.isObject()
-                        || !fields.equals(REMOTE_ERROR_FIELDS)
-                        || !root.required("code").isTextual()
-                        || !root.required("retryable").isBoolean()) {
-                    throw new IllegalArgumentException("remote error envelope is invalid");
-                }
-                String code = root.required("code").asText();
-                if (!ERROR_CODE.matcher(code).matches()) {
-                    throw new IllegalArgumentException("remote error code is invalid");
-                }
-                return TargetE2EGraphClientException.remote(
-                        code,
-                        root.required("retryable").asBoolean(),
-                        "Python rejected parallel Intake execution");
-            } catch (RuntimeException | com.fasterxml.jackson.core.JsonProcessingException failure) {
-                return protocol("parallel target Graph error body is invalid", failure);
+            String code = root.required("code").asText();
+            if (!ERROR_CODE.matcher(code).matches()) {
+                throw new IllegalArgumentException("remote error code is invalid");
             }
+            return TargetE2EGraphClientException.remote(
+                    code, root.required("retryable").asBoolean(), rejectionMessage);
+        } catch (RuntimeException | com.fasterxml.jackson.core.JsonProcessingException failure) {
+            return protocol("parallel target Graph error body is invalid", failure);
         }
     }
 

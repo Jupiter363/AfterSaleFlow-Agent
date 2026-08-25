@@ -18,6 +18,9 @@ import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegist
 import com.example.dispute.workflow.application.intake.IntakeTurnProposal;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.room.application.IntakeCaseSeedMetadata;
 import com.example.dispute.room.application.IntakeInitialCaseFacts;
 import com.example.dispute.room.application.IntakeLobbySeed;
@@ -553,6 +556,8 @@ public final class JdbcIntakeFormalCommitPort
     private void requirePersistedPrivateReferences(
             IntakeGraphFinalizationRequest request, boolean lockRows) {
         var snapshot = request.initialSnapshot();
+        boolean parallelSnapshot =
+                ExecuteAgentRunRequest.isParallelIntakeCommand(request.command());
         MapSqlParameterSource parameters = authorityParameters(request)
                 .addValue("snapshotBindingId", snapshot.bindingId())
                 .addValue("snapshotRegistrationId", snapshot.threadRegistrationId())
@@ -566,6 +571,8 @@ public final class JdbcIntakeFormalCommitPort
                 .addValue("snapshotRoomRevision", snapshot.roomRevision())
                 .addValue("snapshotProjectionRevision", snapshot.projectionRevision())
                 .addValue("snapshotInitialLastSequence", snapshot.initialLastSequence())
+                .addValue("snapshotBindingType", parallelSnapshot ? "TURN" : "INITIAL")
+                .addValue("snapshotInitializationMarker", !parallelSnapshot)
                 .addValue(
                         "snapshotCreatedAt",
                         snapshot.createdAt().atOffset(ZoneOffset.UTC));
@@ -584,8 +591,8 @@ public final class JdbcIntakeFormalCommitPort
                     and actor_scope_hash = :actorScopeHash
                     and agent_session_id = :agentSessionId
                     and actor_audience = :audience
-                    and binding_type = 'INITIAL'
-                    and initialization_marker
+                    and binding_type = :snapshotBindingType
+                    and initialization_marker = :snapshotInitializationMarker
                     and schema_version = :snapshotSchema
                     and artifact_id = :snapshotArtifactId
                     and object_uri = :snapshotUri
@@ -604,7 +611,7 @@ public final class JdbcIntakeFormalCommitPort
         if (initial.size() != 1) {
             throw rejected(
                     "INTAKE_SNAPSHOT_BINDING_STALE",
-                    "initial snapshot is not the current private thread binding");
+                    "command snapshot is not the current private thread binding");
         }
         if (request.event() == null) {
             return;
@@ -673,7 +680,9 @@ public final class JdbcIntakeFormalCommitPort
     private AgentRunRow requireSoleResultReadyAttempt(
             IntakeGraphFinalizationRequest request, String roomId, boolean lockRows) {
         var authority = request.authority();
-        MapSqlParameterSource parameters = authorityParameters(request).addValue("roomId", roomId);
+        MapSqlParameterSource parameters = authorityParameters(request)
+                .addValue("roomId", roomId)
+                .addValue("runProtocol", requiredRunProtocol(request.command()));
         List<AgentRunRow> rows = jdbc.query(
                 """
                 select attempt.last_sequence_no
@@ -684,7 +693,7 @@ public final class JdbcIntakeFormalCommitPort
                    and run.tenant_surrogate = :tenantSurrogate
                    and run.case_id = :caseId
                    and run.room_id = :roomId
-                   and run.protocol = 'agent-stream.v3'
+                   and run.protocol = :runProtocol
                    and run.executor_kind = 'TEMPORAL_ACTIVITY'
                    and run.room_type = 'INTAKE'
                    and run.room_epoch = :roomEpoch
@@ -745,6 +754,12 @@ public final class JdbcIntakeFormalCommitPort
                     "result attempt does not match the locked eligible attempt");
         }
         return rows.getFirst();
+    }
+
+    static String requiredRunProtocol(RoomGraphCommand command) {
+        return ExecuteAgentRunRequest.isParallelIntakeCommand(command)
+                ? AgentRunProtocol.V4.wireValue()
+                : AgentRunProtocol.V3.wireValue();
     }
 
     private DossierWrite writeDossier(

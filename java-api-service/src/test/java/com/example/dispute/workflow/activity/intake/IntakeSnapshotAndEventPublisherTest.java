@@ -14,6 +14,7 @@ import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher;
 import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.EventRequest;
 import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.SourceType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -112,6 +113,47 @@ class IntakeSnapshotAndEventPublisherTest {
                         .at("/current_dossier/handoff_notes/remark_status")
                         .asText())
                 .isEqualTo("NOT_READY");
+    }
+
+    @Test
+    void publishesAndExactlyReplaysACommandBoundCurrentDossierSnapshot() throws Exception {
+        SnapshotRequest valid = snapshotRequest();
+        var store = new IntakeTestFixtures.SingleBindingStore();
+        store.register(valid.threadBinding());
+        store.bindInitialSnapshot(IntakeTestFixtures.snapshot(valid.threadBinding()));
+        ObjectNode dossier = MAPPER.createObjectNode();
+        dossier.put("schema_version", "intake-dossier.v2");
+        dossier.putObject("party_intake_state")
+                .putObject("USER")
+                .put("ready_for_next_step", false);
+        SnapshotRequest turn = new SnapshotRequest(
+                "SNAPSHOT_P4_USER_TURN_2",
+                valid.threadBinding(),
+                valid.domainRevision() + 1,
+                valid.roomRevision() + 1,
+                valid.projectionRevision() + 1,
+                List.of("MESSAGE_P4_USER_2"),
+                valid.initialCaseFacts(),
+                valid.shareableProjection(),
+                List.of(),
+                dossier,
+                valid.createdAt().plusSeconds(1));
+        var objects = new CapturingPublisher();
+        var publisher = new IntakeDomainSnapshotPublisher(objects, store);
+
+        var created = publisher.publishTurnSnapshot(turn);
+        var replayed = publisher.publishTurnSnapshot(turn);
+
+        assertThat(created.created()).isTrue();
+        assertThat(replayed.created()).isFalse();
+        assertThat(replayed.value()).isEqualTo(created.value());
+        assertThat(objects.calls).isEqualTo(2);
+        JsonNode payload = MAPPER.readTree(objects.last.canonicalPayload());
+        assertThat(payload.at("/current_dossier/party_intake_state/USER/ready_for_next_step")
+                        .asBoolean())
+                .isFalse();
+        assertThat(payload.required("snapshot_hash").asText())
+                .isEqualTo(created.value().payloadRef().sha256());
     }
 
     @Test

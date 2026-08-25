@@ -196,6 +196,31 @@ class CanonicalTargetIntakeMaterializerTest {
     }
 
     @Test
+    void parallelRoomMessagesPublishCommandBoundSnapshotsWithoutChangingOpeningReplay() {
+        IntakeDomainSnapshotPublisher snapshots = Mockito.mock(IntakeDomainSnapshotPublisher.class);
+        IntakeDomainSnapshotPublisher.SnapshotRequest snapshotRequest =
+                Mockito.mock(IntakeDomainSnapshotPublisher.SnapshotRequest.class);
+        @SuppressWarnings("unchecked")
+        IntakeGraphBindingStore.WriteReceipt<IntakeSnapshotReference> turnReceipt =
+                Mockito.mock(IntakeGraphBindingStore.WriteReceipt.class);
+        @SuppressWarnings("unchecked")
+        IntakeGraphBindingStore.WriteReceipt<IntakeSnapshotReference> openingReceipt =
+                Mockito.mock(IntakeGraphBindingStore.WriteReceipt.class);
+        when(snapshots.publishTurnSnapshot(snapshotRequest)).thenReturn(turnReceipt);
+        when(snapshots.publishOrLoad(snapshotRequest)).thenReturn(openingReceipt);
+
+        assertThat(CanonicalTargetIntakeMaterializer.publishCommandSnapshot(
+                        snapshots, snapshotRequest, true))
+                .isSameAs(turnReceipt);
+        assertThat(CanonicalTargetIntakeMaterializer.publishCommandSnapshot(
+                        snapshots, snapshotRequest, false))
+                .isSameAs(openingReceipt);
+
+        verify(snapshots).publishTurnSnapshot(snapshotRequest);
+        verify(snapshots).publishOrLoad(snapshotRequest);
+    }
+
+    @Test
     void routesOnlyAuthenticatedRoomMessagesToTheParallelV4ExecutionProfile() {
         TargetIntakeActivationGrant activation = activation();
 

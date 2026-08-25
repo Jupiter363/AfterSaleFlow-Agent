@@ -1428,7 +1428,7 @@
 ## P1-20260825-INTAKE-EPOCH-EXECUTION-PROFILE-UNPINNED
 
 - Severity: P1
-- Status: FIXED / FOCUSED_VERIFIED / DEPLOY_PENDING
+- Status: RESOLVED / DEPLOYED / UAT_VERIFIED
 - Component: Target Intake ROOM_MESSAGE execution-profile authority
 - Confirmed fact: Authenticated USER/MERCHANT `ROOM_MESSAGE` requests are currently assigned the parallel V4 profile solely from their source type at materialization time, while opening requests remain V3. The persisted active Intake room epoch and its immutable Target activation binding do not record whether that epoch was issued for `MONOLITHIC_V3` or `PARALLEL_FRAMES_V1` ROOM_MESSAGE execution.
 - Root cause and evidence: `CanonicalTargetIntakeMaterializer.isParallelRoomMessage` treats every case-party ROOM_MESSAGE as parallel, and materialization then replaces the activation-wide agent profile with `dispute-intake-officer.parallel-frames.v1`. Neither `case_room_epoch` nor `target_e2e_room_epoch_binding` currently carries an epoch-scoped Intake execution-profile discriminator, so replay validates only the behavior selected by the currently deployed code rather than the profile frozen when the epoch was created.
@@ -1475,5 +1475,36 @@
 - Confirmed fact: On the fresh activation containing the parallel envelope-verifier repair, the first authenticated USER ROOM_MESSAGE again produced only V4 `ERROR` sequence `0`; DIALOGUE, DOSSIER, and QUALITY each produced zero starts, deltas, seals, checkpoints, or results, and no Provider call occurred.
 - Root cause and evidence: `stream_target_e2e_command` invokes `parallel_service.prepare(...)` for the PREPARE phase at `app.api.graph_commands:566`, but the production-injected `_RuntimeParallelIntakeStreamService` implements only a stale `open_stream(...)` proxy. All three Temporal Activity attempts therefore reached Python and failed with `AttributeError` at that exact call site before frame-set admission. The same proxy also omits the required `admission_receipt` argument declared by `ParallelIntakeFrameStreamService` and supplied by the EXECUTE endpoint, confirming that its runtime boundary does not implement the current two-phase protocol. The run remained `FAILED / UNCOMMITTED`, with no proposal, `RoomGraphResult`, artifact, FINAL, RESULT_READY, matrix write, dossier update, Agent reply, or formal Intake commit.
 - Verification evidence: The focused two-phase proxy regression proves exact PREPARE forwarding and exact EXECUTE forwarding including the admission receipt; the test passes and `git diff --check` is clean. Missing runtime or missing parallel service remains fail closed.
+- UAT evidence: Fresh activation `p9act.v1.0acd30a32ee24f39586829aebe9722ec` reached the concrete parallel service and returned a domain HTTP 409 instead of raising the missing-method `AttributeError`, proving that both runtime proxy methods were deployed. The 409 is tracked as a distinct downstream blocker.
 - Impact: The parallel Intake execution path cannot create any of its three lanes, expose a substantive first packet, assemble the existing output contracts, or advance the case. The already-persisted USER message cannot be safely resubmitted.
 - Identifying metadata: observed 2026-08-25; activation `p9act.v1.91be7f340eb00262b50bb152464efef9`; candidate `5d705fd5a136a5d20ec409039242e97e6f2ccf0e`; case `CASE_P9_6A8D8C6A_1`; message `MESSAGE_0c52305f92784ee5b8d9daf44e06424d`; command `intake-message:ab85e66c5d4a3bb6933d10393a7191e3`; run `target-intake-run:ab85e66c5d4a3bb6933d10393a7191e3`; attempt `target-intake-attempt:ab85e66c5d4a3bb6933d10393a7191e3:1`.
+
+## P0-20260825-PARALLEL-V4-PREPARE-CONFLICT-CAUSE-LOST
+
+- Severity: P0
+- Status: FIXED / FOCUSED_VERIFIED / DEPLOY_PENDING
+- Component: Target Intake parallel V4 PREPARE admission and Java Activity error propagation
+- Confirmed fact: After both lifecycle proxies were deployed, the first USER ROOM_MESSAGE invoked the Python target-E2E stream endpoint three times and received HTTP 409 on every Activity attempt. The run still produced only V4 `ERROR` sequence `0`; no frame set, lane event, Provider call, proposal, result, matrix write, dossier update, Agent reply, or formal commit was created.
+- Root cause and evidence: The signed V4 command reused the thread's immutable INITIAL_FORM domain snapshot, whose `current_dossier` is `{}` and contains no `party_intake_state`, even though Java separately froze the latest persisted dossier in `parallelTurnContext`. Python PREPARE is bound to the command's signed snapshot/event authority and does not read that Java-private context, so all three identical attempts passed snapshot/event authority checks and then failed while validating `PartyIntakeState` from `None`. Python returned non-retryable HTTP 409 `GRAPH_CONTRACT_REJECTED` with `GraphContractError("parallel Intake party state is invalid")` before Provider or frame admission. Java's PREPARE response session discarded that structured body and rethrew a generic infrastructure failure; the later `TARGET_INTAKE_TERMINAL_NO_COMMIT_RUN_INVALID` is a consequence of the already failed run, not the first error.
+- Impact: The new Intake path remains unable to start any of its three nodes, measure a substantive first packet, assemble the existing output schemas, or progress the case. The already-persisted USER turn has no proven safe user-level replay entry.
+- Identifying metadata: observed 2026-08-25; activation `p9act.v1.0acd30a32ee24f39586829aebe9722ec`; candidate `3b0b96dd02878b5307bf24d8052eb6e550ab90d5`; case `CASE_P9_6A8D92F2_1`; room `ROOM_89a68620b9b4471890e61aea2c300caa`; message `MESSAGE_6ad3f68ae6844e7ca0a6889591ac986c`; command `intake-message:4614901179393bf886e5ede42c0ee0f3`; run `target-intake-run:4614901179393bf886e5ede42c0ee0f3`; attempt `target-intake-attempt:4614901179393bf886e5ede42c0ee0f3:1`; focused verification on 2026-08-25: `IntakeSnapshotAndEventPublisherTest` 7/7, `CanonicalTargetIntakeMaterializerTest` 18/18, `HttpTargetE2EIntakeParallelFrameExecutionClientTest` 4/4.
+
+## P0-20260825-PARALLEL-V4-FORMAL-COMMIT-PROTOCOL-PINNED-V3
+
+- Severity: P0
+- Status: FIXED / FOCUSED_VERIFIED / DEPLOY_PENDING
+- Component: Intake formal commit AgentRun authority
+- Confirmed fact: The parallel ROOM_MESSAGE materializer and AgentRun ledger issue the exact V4 profile with protocol `agent-stream.v4`, but the formal Intake commit authority query cannot select any such run even after a valid FINAL and RESULT_READY transition.
+- Root cause and evidence: `JdbcIntakeFormalCommitPort` locks and validates the authoritative AgentRun/attempt using an otherwise exact identity query, but that query hard-codes `run.protocol = 'agent-stream.v3'`. The predicate is independent of the signed command's explicit parallel discriminator and therefore deterministically excludes every legitimate V4 run before domain writes.
+- Impact: A parallel turn can complete all three frames and technical assembly yet can never atomically commit its dossier, matrix, Agent reply, manifest, receipt, or command completion.
+- Identifying metadata: observed 2026-08-25 during pre-deployment reverse review; candidate worktree based on `3b0b96dd02878b5307bf24d8052eb6e550ab90d5`; source boundary `JdbcIntakeFormalCommitPort.java:684-700`; focused verification on 2026-08-25: `JdbcIntakeFormalCommitPortProtocolTest` 1/1; no Provider or runtime mutation was used to confirm the defect.
+
+## BUG-20260825-JDBC-INTAKE-FORMAL-FIXTURE-BYPASSES-BINDING-TRANSACTION
+
+- Severity: P2 (test infrastructure)
+- Status: FIXED / FOCUSED_VERIFIED
+- Component: `JdbcIntakeFormalCommitPortTest` PostgreSQL fixture
+- Confirmed fact: The isolated formal-commit integration node migrated a clean PostgreSQL database through V089, but fixture setup failed while binding its Intake event before it could execute the formal commit/replay assertion.
+- Root cause and evidence: The fixture directly constructs `JdbcIntakeGraphBindingStore`, so its method-level Spring `@Transactional` annotations are not proxied. Registration, initial snapshot, event history, and current event-slot authority therefore run as separate auto-commit statements. V080's deferred history constraint is evaluated when the event-history insert commits and correctly rejects it because the matching current slot authority has not yet been written.
+- Impact: The integration test cannot exercise formal commit or prove V3 adjacency even though production uses the proxied transactional store; this is a false-negative test boundary, not evidence of a production event-binding failure.
+- Identifying metadata: observed 2026-08-25 in isolated PostgreSQL 16.14; Flyway applied 98 migrations through V089; first error `require_intake_event_history_current_authority()` from `JdbcIntakeFormalCommitPortTest.insertFixture -> JdbcIntakeGraphBindingStore.bindEvent`; after the fixture used one real transaction, the same isolated node passed 1/1 through formal commit and lost-completion exact receipt replay; no shared database or runtime mutation occurred.

@@ -12,8 +12,9 @@ import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 
-/** Builds and publishes the one actor-filtered Intake initialization snapshot. */
+/** Builds and publishes actor-filtered Intake initialization and command-bound turn snapshots. */
 public final class IntakeDomainSnapshotPublisher {
 
     private static final String SCHEMA_VERSION = "intake-domain-snapshot.v2";
@@ -30,7 +31,36 @@ public final class IntakeDomainSnapshotPublisher {
 
     public IntakeGraphBindingStore.WriteReceipt<IntakeSnapshotReference> publish(
             SnapshotRequest request) {
+        return publish(request, bindingStore::bindInitialSnapshot);
+    }
+
+    /**
+     * Publishes one command-bound immutable snapshot after proving that the private thread already
+     * owns its initialization snapshot. Exact command replay returns the existing turn binding.
+     */
+    public IntakeGraphBindingStore.WriteReceipt<IntakeSnapshotReference> publishTurnSnapshot(
+            SnapshotRequest request) {
         Objects.requireNonNull(request, "request");
+        var state = bindingStore.lockThreadSnapshotState(
+                request.threadBinding().registration().registrationId());
+        if (!state.thread().equals(request.threadBinding())) {
+            throw new IntakeGraphBindingConflictException(
+                    "locked private thread differs from the requested turn snapshot scope");
+        }
+        if (state.initialSnapshot().isEmpty()) {
+            throw new IntakeGraphBindingConflictException(
+                    "turn snapshot cannot precede the private thread initialization snapshot");
+        }
+        return publish(request, bindingStore::bindTurnSnapshot);
+    }
+
+    private IntakeGraphBindingStore.WriteReceipt<IntakeSnapshotReference> publish(
+            SnapshotRequest request,
+            Function<
+                    IntakeSnapshotReference,
+                    IntakeGraphBindingStore.WriteReceipt<IntakeSnapshotReference>> binder) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(binder, "binder");
         IntakeGraphThreadBinding binding = request.threadBinding();
         IntakePrivateThreadRegistration registration = binding.registration();
         registration.requireCanonicalHash();
@@ -81,11 +111,10 @@ public final class IntakeDomainSnapshotPublisher {
                         request.projectionRevision(),
                         initialLastSequence,
                         request.createdAt());
-        var receipt = Objects.requireNonNull(
-                bindingStore.bindInitialSnapshot(reference), "snapshot binding receipt");
+        var receipt = Objects.requireNonNull(binder.apply(reference), "snapshot binding receipt");
         if (!reference.equals(receipt.value())) {
             throw new IntakeGraphBindingConflictException(
-                    "persisted initial snapshot differs from the published reference");
+                    "persisted snapshot differs from the published reference");
         }
         return receipt;
     }

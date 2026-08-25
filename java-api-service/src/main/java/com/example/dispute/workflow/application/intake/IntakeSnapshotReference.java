@@ -4,7 +4,7 @@ import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import java.time.Instant;
 import java.util.Objects;
 
-/** Immutable metadata for the single actor-filtered initialization snapshot. */
+/** Immutable metadata for an actor-filtered initialization or command-bound turn snapshot. */
 public record IntakeSnapshotReference(
         String bindingId,
         String threadRegistrationId,
@@ -37,7 +37,7 @@ public record IntakeSnapshotReference(
         payloadRef = Objects.requireNonNull(payloadRef, "payloadRef must not be null");
         if (!"intake-domain-snapshot.v2".equals(payloadRef.schemaVersion())) {
             throw new IllegalArgumentException(
-                    "initial payload schema must be intake-domain-snapshot.v2");
+                    "snapshot payload schema must be intake-domain-snapshot.v2");
         }
         IntakeContractSupport.identifier(payloadRef.artifactId(), "artifactId");
         IntakeContractSupport.immutableUri(payloadRef.uri());

@@ -293,6 +293,47 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
 
     @Override
     @Transactional
+    public WriteReceipt<IntakeSnapshotReference> bindTurnSnapshot(
+            IntakeSnapshotReference reference) {
+        IntakeGraphThreadBinding thread = lockThread(reference.threadRegistrationId());
+        requireReferenceScope(thread, reference);
+        requireInitialSnapshot(reference.threadRegistrationId());
+        MapSqlParameterSource parameters = snapshotParameters(reference)
+                .addValue("actorAudience", thread.registration().actorScope().audience().name());
+        int inserted = jdbc.update(
+                """
+                insert into case_intake_snapshot_binding (
+                    binding_id, thread_registration_id, tenant_surrogate, case_id, room_type,
+                    room_epoch, fencing_token, thread_id, actor_scope_hash, agent_session_id,
+                    actor_audience, binding_type, schema_version, artifact_id, object_uri,
+                    object_version, content_sha256, size_bytes, visibility, domain_revision,
+                    room_revision, projection_revision, initial_last_sequence,
+                    initialization_marker, created_at, event_source_type,
+                    binding_generation, supersedes_binding_id
+                ) values (
+                    :bindingId, :threadRegistrationId, :tenantSurrogate, :caseId, 'INTAKE',
+                    :roomEpoch, :fencingToken, :threadId, :actorScopeHash, :agentSessionId,
+                    :actorAudience, 'TURN', :schemaVersion, :artifactId, :objectUri,
+                    :objectVersion, :contentSha256, :sizeBytes, 'PRIVATE', :domainRevision,
+                    :roomRevision, :projectionRevision, :initialLastSequence,
+                    false, :createdAt, null, 1, null
+                )
+                on conflict do nothing
+                """,
+                parameters);
+        if (inserted == 1) {
+            return WriteReceipt.created(reference);
+        }
+        IntakeSnapshotReference existing = findExactTurnSnapshot(reference)
+                .orElseThrow(() -> conflict("turn snapshot identity or immutable artifact"));
+        if (!existing.equals(reference)) {
+            throw conflict("turn snapshot replay differs from its command-bound reference");
+        }
+        return WriteReceipt.replayed(existing);
+    }
+
+    @Override
+    @Transactional
     public WriteReceipt<IntakeEventReference> bindEvent(IntakeEventReference reference) {
         IntakeGraphThreadBinding thread = lockThread(reference.threadRegistrationId());
         requireReferenceScope(thread, reference);
@@ -473,6 +514,25 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                 JdbcIntakeGraphBindingStore::mapSnapshot);
         if (rows.size() > 1) {
             throw conflict("multiple initial snapshots exist for one private thread");
+        }
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.getFirst());
+    }
+
+    private Optional<IntakeSnapshotReference> findExactTurnSnapshot(
+            IntakeSnapshotReference candidate) {
+        List<IntakeSnapshotReference> rows = jdbc.query(
+                """
+                select %s
+                  from case_intake_snapshot_binding
+                 where binding_type = 'TURN'
+                   and (binding_id = :bindingId
+                        or (tenant_surrogate = :tenantSurrogate
+                            and artifact_id = :artifactId))
+                """.formatted(SNAPSHOT_COLUMNS),
+                snapshotParameters(candidate),
+                JdbcIntakeGraphBindingStore::mapSnapshot);
+        if (rows.size() > 1) {
+            throw conflict("turn snapshot identity resolves to multiple immutable bindings");
         }
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.getFirst());
     }

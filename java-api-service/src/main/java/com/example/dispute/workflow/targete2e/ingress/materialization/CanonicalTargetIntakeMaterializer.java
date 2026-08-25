@@ -21,6 +21,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.AgentConversat
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.workflow.application.intake.IntakeDomainSnapshotPublisher;
+import com.example.dispute.workflow.application.intake.IntakeGraphBindingStore;
 import com.example.dispute.workflow.application.intake.IntakeGraphCommandFactory;
 import com.example.dispute.workflow.application.intake.IntakeGraphThreadBinding;
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistrar;
@@ -207,13 +208,18 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                         WriterMode.TEMPORAL, request.createdAt())).value();
         long threadRegisteredAt = System.nanoTime();
 
+        boolean parallelRoomMessage = isParallelRoomMessage(request);
         JsonNode frozenPreviousDossier = currentDossier(request.caseId());
-        IntakeSnapshotReference snapshot = snapshots.publishOrLoad(new IntakeDomainSnapshotPublisher.SnapshotRequest(
-                snapshotBindingId(registrationId, messageIdentity, request), thread,
-                activation.processRevision(), activation.processRevision(), activation.processRevision(),
-                List.of(request.messageId()), initialCaseFacts(dispute),
-                shareableProjection(dispute), List.of(), frozenPreviousDossier,
-                request.createdAt())).value();
+        IntakeDomainSnapshotPublisher.SnapshotRequest snapshotRequest =
+                new IntakeDomainSnapshotPublisher.SnapshotRequest(
+                        snapshotBindingId(registrationId, messageIdentity, request), thread,
+                        activation.processRevision(), activation.processRevision(), activation.processRevision(),
+                        List.of(request.messageId()), initialCaseFacts(dispute),
+                        shareableProjection(dispute), List.of(), frozenPreviousDossier,
+                        request.createdAt());
+        IntakeSnapshotReference snapshot = publishCommandSnapshot(
+                        snapshots, snapshotRequest, parallelRoomMessage)
+                .value();
         long snapshotPublishedAt = System.nanoTime();
         String eventId = "target-intake-event:" + messageIdentity;
         var allocation = events.allocate(thread, eventId, request.messageId());
@@ -229,7 +235,6 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                         List.of(request.messageId()), request.createdAt(), now)).value());
         long eventPublishedAt = System.nanoTime();
 
-        boolean parallelRoomMessage = isParallelRoomMessage(request);
         AgentRunProtocol runProtocol =
                 parallelRoomMessage ? AgentRunProtocol.V4 : AgentRunProtocol.V3;
         String executionAgentProfileId = parallelRoomMessage
@@ -431,6 +436,18 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
 
     static AgentRunProtocol expectedProtocol(TargetIntakeMessageRequest request) {
         return isParallelRoomMessage(request) ? AgentRunProtocol.V4 : AgentRunProtocol.V3;
+    }
+
+    static IntakeGraphBindingStore.WriteReceipt<IntakeSnapshotReference>
+            publishCommandSnapshot(
+                    IntakeDomainSnapshotPublisher snapshots,
+                    IntakeDomainSnapshotPublisher.SnapshotRequest request,
+                    boolean parallelRoomMessage) {
+        Objects.requireNonNull(snapshots, "snapshots");
+        Objects.requireNonNull(request, "request");
+        return parallelRoomMessage
+                ? snapshots.publishTurnSnapshot(request)
+                : snapshots.publishOrLoad(request);
     }
 
     static String requireEpochAuthority(

@@ -28,6 +28,13 @@ public interface IntakeGraphBindingStore {
 
     WriteReceipt<IntakeSnapshotReference> bindInitialSnapshot(IntakeSnapshotReference reference);
 
+    /**
+     * Binds one command-scoped snapshot for an authenticated parallel ROOM_MESSAGE. Unlike the
+     * single initialization snapshot, these references are message-bound and may advance while
+     * the private thread identity remains unchanged.
+     */
+    WriteReceipt<IntakeSnapshotReference> bindTurnSnapshot(IntakeSnapshotReference reference);
+
     WriteReceipt<IntakeEventReference> bindEvent(IntakeEventReference reference);
 
     record WriteReceipt<T>(T value, boolean created) {

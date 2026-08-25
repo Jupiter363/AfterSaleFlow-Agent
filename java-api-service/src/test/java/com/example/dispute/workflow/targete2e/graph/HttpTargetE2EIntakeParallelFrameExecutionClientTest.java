@@ -179,6 +179,54 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         assertThat(staging.nextSequence).isEqualTo(1L);
     }
 
+    @Test
+    void preparePreservesStrictNonRetryableRemoteErrorEnvelope() {
+        ExecuteAgentRunRequest request = validParallelRequest();
+        StreamFixture fixture = StreamFixture.complete(request);
+        GraphTransportSecurityProof proof = mutualTlsProof();
+        RecordingStaging staging = new RecordingStaging(request, fixture);
+
+        assertThatThrownBy(() -> client(
+                                request,
+                                proof,
+                                new PrepareErrorTransport(
+                                        proof,
+                                        "{\"code\":\"GRAPH_CONTRACT_REJECTED\",\"retryable\":false}"),
+                                staging)
+                        .executeOrResume(
+                                request,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOfSatisfying(
+                        TargetE2EGraphClientException.class,
+                        failure -> {
+                            assertThat(failure.errorCode())
+                                    .isEqualTo("GRAPH_CONTRACT_REJECTED");
+                            assertThat(failure.recoveryAction())
+                                    .isEqualTo(
+                                            TargetE2EGraphClientException.RecoveryAction
+                                                    .FAIL_LOGICAL_RUN);
+                        });
+        assertThat(staging.actions).isEmpty();
+
+        assertThatThrownBy(() -> client(
+                                request,
+                                proof,
+                                new PrepareErrorTransport(
+                                        proof,
+                                        "{\"code\":\"GRAPH_CONTRACT_REJECTED\","
+                                                + "\"retryable\":false,\"detail\":\"forbidden\"}"),
+                                new RecordingStaging(request, fixture))
+                        .executeOrResume(
+                                request,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOfSatisfying(
+                        TargetE2EGraphClientException.class,
+                        failure -> assertThat(failure.errorCode())
+                                .isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED"));
+    }
+
     private static HttpTargetE2EIntakeParallelFrameExecutionClient client(
             ExecuteAgentRunRequest request,
             GraphTransportSecurityProof proof,
@@ -361,6 +409,40 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
             } else {
                 fixture.lines().forEach(listener::onLine);
             }
+        }
+    }
+
+    private static final class PrepareErrorTransport implements GraphCommandHttpTransport {
+
+        private final GraphTransportSecurityProof proof;
+        private final String body;
+
+        private PrepareErrorTransport(GraphTransportSecurityProof proof, String body) {
+            this.proof = proof;
+            this.body = body;
+        }
+
+        @Override
+        public GraphTransportSecurityProof transportProof() {
+            return proof;
+        }
+
+        @Override
+        public void stream(
+                Request request,
+                AgentRunCancellationToken cancellationToken,
+                Listener listener) {
+            assertThat(request.headers())
+                    .containsEntry(
+                            HttpTargetE2EIntakeParallelFrameExecutionClient.PHASE_HEADER,
+                            "PREPARE");
+            listener.onResponse(new ResponseHead(
+                    409,
+                    request.uri(),
+                    Map.of(
+                            "Content-Type", List.of("application/json; charset=utf-8"),
+                            "Cache-Control", List.of("no-store, no-transform"))));
+            listener.onLine(body);
         }
     }
 

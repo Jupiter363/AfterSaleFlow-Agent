@@ -14,7 +14,9 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 final class IntakeTestFixtures {
@@ -115,7 +117,17 @@ final class IntakeTestFixtures {
     static final class SingleBindingStore implements IntakeGraphBindingStore {
         private IntakeGraphThreadBinding registration;
         private IntakeSnapshotReference snapshot;
+        private final Map<String, IntakeSnapshotReference> turnSnapshots = new LinkedHashMap<>();
         private IntakeEventReference event;
+
+        @Override
+        public ThreadSnapshotState lockThreadSnapshotState(String registrationId) {
+            if (registration == null
+                    || !registration.registration().registrationId().equals(registrationId)) {
+                throw new IntakeGraphBindingConflictException("registration missing");
+            }
+            return new ThreadSnapshotState(registration, Optional.ofNullable(snapshot));
+        }
 
         @Override
         public Optional<IntakeGraphThreadBinding> findRegistration(String registrationId) {
@@ -149,6 +161,22 @@ final class IntakeTestFixtures {
                 throw new IntakeGraphBindingConflictException("snapshot conflict");
             }
             return WriteReceipt.replayed(snapshot);
+        }
+
+        @Override
+        public WriteReceipt<IntakeSnapshotReference> bindTurnSnapshot(
+                IntakeSnapshotReference value) {
+            if (snapshot == null) {
+                throw new IntakeGraphBindingConflictException("turn snapshot before initialization");
+            }
+            IntakeSnapshotReference existing = turnSnapshots.putIfAbsent(value.bindingId(), value);
+            if (existing == null) {
+                return WriteReceipt.created(value);
+            }
+            if (!existing.equals(value)) {
+                throw new IntakeGraphBindingConflictException("turn snapshot conflict");
+            }
+            return WriteReceipt.replayed(existing);
         }
 
         @Override
