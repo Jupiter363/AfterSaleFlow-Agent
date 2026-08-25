@@ -121,8 +121,13 @@ def wait_run(ctx: Any, stage: str, run_id: str) -> dict[str, Any]:
         status = v(run, "status")
         if status == "COMPLETED":
             return run
-        if status not in {"PENDING", "RUNNING"}:
+        if status in {"FAILED", "ABORTED"}:
             raise RuntimeError(f"{stage} failed: {json.dumps(run, ensure_ascii=False)}")
+        if status not in {"PENDING", "RUNNING", "RESULT_READY"}:
+            raise RuntimeError(
+                f"{stage} returned unexpected status: "
+                f"{json.dumps(run, ensure_ascii=False)}"
+            )
         ctx.deadline.pause(stage, 0.25)
 
 

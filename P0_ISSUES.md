@@ -1289,10 +1289,10 @@
 - Severity: P1
 - Status: FIXED_FOCUSED_VERIFIED / UAT_PENDING
 - Component: Resumable backend full-chain UAT AgentRun polling
-- Confirmed fact: Direct MERCHANT follow-up run `target-intake-run:6a578b37f8fd376cafbc5f3de6e8418e` in `CASE_P9_6A8BF9E2_7` became terminal `ABORTED / AGENT_OUTPUT_SCHEMA_INVALID` at `2026-08-24T10:57:02Z`, but the UAT command continued polling without returning or reporting the diagnostic until it was manually interrupted.
-- Root cause and evidence: `.local-dev/resume-case-to-outcome.py:112-126` returns only for `COMPLETED` and raises only for `FAILED`; every other status is treated as in progress. The public AgentRun contract also uses terminal `ABORTED`, so a genuine model or finalization failure is misreported as an indefinitely slow run.
-- Impact: Full-chain UAT can hang for its full global deadline after an already-final error, hiding the real failure reason and preventing safe checkpoint diagnosis.
-- Identifying metadata: observed 2026-08-24; case `CASE_P9_6A8BF9E2_7`; actor `merchant-local/MERCHANT`; run `target-intake-run:6a578b37f8fd376cafbc5f3de6e8418e`; terminal diagnostic `AGENT_OUTPUT_SCHEMA_INVALID`.
+- Confirmed fact: Direct MERCHANT follow-up run `target-intake-run:6a578b37f8fd376cafbc5f3de6e8418e` in `CASE_P9_6A8BF9E2_7` became terminal `ABORTED / AGENT_OUTPUT_SCHEMA_INVALID` at `2026-08-24T10:57:02Z`, but the UAT command continued polling without returning or reporting the diagnostic until it was manually interrupted. On 2026-08-25 the fresh USER opening run `target-intake-run:56b642d77d0b3f2a808814da8405851b` in `CASE_P9_6A8D1C10_1` was observed at legitimate intermediate status `RESULT_READY`; the same poller immediately raised a failure even though the run subsequently reached `COMPLETED / COMMITTED` with the same result-ready and committed attempt.
+- Root cause and evidence: `.local-dev/resume-case-to-outcome.py:112-126` returns only for `COMPLETED` and treats every status outside `PENDING/RUNNING` as failure. This collapses the legitimate `RESULT_READY` transition into an error while also requiring terminal `FAILED/ABORTED` to be distinguished from nonterminal statuses.
+- Impact: Full-chain UAT can either abort during a healthy formal-commit race or fail to expose a genuine terminal error correctly, preventing safe checkpoint continuation and obscuring the product state.
+- Identifying metadata: observed 2026-08-24 and reopened 2026-08-25; original case `CASE_P9_6A8BF9E2_7`, actor `merchant-local/MERCHANT`, run `target-intake-run:6a578b37f8fd376cafbc5f3de6e8418e`, terminal diagnostic `AGENT_OUTPUT_SCHEMA_INVALID`; reopened case `CASE_P9_6A8D1C10_1`, actor `user-local/USER`, opening run `target-intake-run:56b642d77d0b3f2a808814da8405851b`.
 
 ## P1-20260824-DEV-LOCAL-RESTART-TARGET-TOPOLOGY-CONFLICT
 
@@ -1381,3 +1381,23 @@
 - Additional confirmed fact: After making the assembly store proxyable, the next application-context preflight failed on the same mechanism in final transactional bean `JdbcIntakeParallelFrameAdmissionAuthorityResolver`; the first focused fix therefore repaired only the first bean encountered by eager initialization and did not cover the complete affected component set.
 - Impact: The migrated candidate schema cannot start the Java application context, so no API, worker, Python, frontend, or integrated UAT stage can be activated.
 - Identifying metadata: observed 2026-08-25 12:11 CST; latest migrated version observed `084`; bean `jdbcIntakeParallelAssemblyStore`; exception `AopConfigException` caused by `IllegalArgumentException: Cannot subclass final class`.
+
+## P0-20260825-PARALLEL-RECEIPT-PROVISIONING-TRUNCATE-CONFLICT
+
+- Severity: P0
+- Status: FIXED_ACTIVATION_VERIFIED / UAT_PENDING
+- Component: Local target activation Graph-state provisioning
+- Confirmed fact: A subsequent fresh activation stopped the owned source topology, then failed before activation issuance while `provision-local-target.py` reset the isolated Graph candidate state.
+- Root cause and evidence: The provisioner executes `TRUNCATE TABLE ... CASCADE` across candidate Graph runtime tables. The newly introduced parallel receipt authority tables install a mutation-rejection trigger that also rejects `TRUNCATE`, raising `parallel receipt authority rows are immutable`; the environment-reset authority and the runtime append-only authority therefore have no explicit separation.
+- Impact: Once parallel receipt rows exist, no later local target activation can be provisioned, and the launcher leaves the owned application topology stopped after its fail-closed rollback boundary, blocking UAT and future candidate rotations.
+- Identifying metadata: observed 2026-08-25 after activation `p9act.v1.6508acd2ce6cfe67b29e6edf0ba3f897`; candidate HEAD `f0244861`; failing function `reset_local_graph_candidate_state`; PostgreSQL trigger function `graph_runtime.reject_agent_graph_parallel_receipt_mutation()`.
+
+## P0-20260825-PARALLEL-ROOM-MESSAGE-INTERNAL-ERROR
+
+- Severity: P0
+- Status: FIXED_FOCUSED_VERIFIED / ACTIVATION_UAT_PENDING
+- Component: Target E2E Intake parallel ROOM_MESSAGE admission
+- Confirmed fact: On healthy activation `p9act.v1.f752ba169b0f1eb32803313a016418c9`, the first authenticated USER ROOM_MESSAGE after a successfully committed V3 opening in fresh case `CASE_P9_6A8D1C10_1` returned HTTP 500 `INTERNAL_ERROR` before the UAT harness received an AgentRun identifier.
+- Root cause and evidence: `CanonicalTargetIntakeMaterializer` correctly issued the authenticated ROOM_MESSAGE as `agent-stream.v4`, but the latest persisted `enforce_target_e2e_intake_command_material()` trigger still required `run.protocol='agent-stream.v3'`. PostgreSQL therefore raised SQLSTATE `23514` with `target E2E Intake material does not bind its durable AgentRun attempt` while inserting `target_e2e_intake_command_material`; the caller-owned transaction rolled back the draft message, run, attempt, admission, and material together. The immediately preceding opening run `target-intake-run:56b642d77d0b3f2a808814da8405851b` remains `COMPLETED / COMMITTED`, the case remains `INTAKE_PENDING`, neither party has an Intake completion row, and all Evidence cardinalities remain zero.
+- Impact: The newly activated three-frame Intake path cannot accept its first substantive party turn, blocking verification of V4 frame streaming, assembly, formal commit, and every downstream UAT stage.
+- Identifying metadata: observed 2026-08-25 12:46 CST; case `CASE_P9_6A8D1C10_1`; actor `user-local/USER`; request `REQ_1d206dca31214c618133284caaa120f2`; trace `TRACE_494715dc716cf32c190b5e3d95cd41e8`; HTTP code `500`; public code `INTERNAL_ERROR`.
