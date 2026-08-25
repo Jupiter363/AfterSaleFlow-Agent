@@ -1966,6 +1966,151 @@ describe("IntakeRoomView", () => {
     wrapper.unmount();
   });
 
+  it("projects V4 dossier and quality lanes independently and resets only one lane", async () => {
+    const persistedSummary = "已持久化的案情摘要";
+    agentStreamStore.runs.AGENT_RUN_INTAKE_V4_PROJECTION = {
+      runId: "AGENT_RUN_INTAKE_V4_PROJECTION",
+      caseId: "CASE_INTAKE_1",
+      roomType: "INTAKE",
+      actorId: "user-local",
+      actorRole: "USER",
+      status: "STREAMING",
+      content: "",
+      startedAt: Date.now(),
+    };
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        ...readyTurnMemory,
+        case_intake_dossier: {
+          ...readyTurnMemory.case_intake_dossier,
+          dossier: {
+            ...readyTurnMemory.case_intake_dossier.dossier,
+            case_story: {
+              ...readyTurnMemory.case_intake_dossier.dossier.case_story,
+              one_sentence_summary: persistedSummary,
+            },
+          },
+        },
+      },
+      eventStreamer: vi.fn(async () => {}),
+    });
+    const applyEvent = wrapper.vm.$.setupState.applyStreamedCaseDetailEvent;
+    const streamRun = {
+      protocol: "agent-stream.v4",
+      parallelFrameIds: {
+        DOSSIER_FRAME: "FRAME_DOSSIER_1",
+        QUALITY_FRAME: "FRAME_QUALITY_1",
+      },
+      frames: {
+        FRAME_DOSSIER_1: {
+          frameType: "DOSSIER_FRAME",
+          generation: 1,
+          projectionRegistryVersion: "intake-projection-registry.v1",
+          status: "STREAMING",
+          itemOrder: ["DPATCH_1"],
+          items: {
+            DPATCH_1: {
+              itemSha256: "a".repeat(64),
+              projectionKind: "CURRENT_FACT",
+              projectionPathId: "case_story.one_sentence_summary",
+              valueKind: "JSON_VALUE",
+              value: "三路并行生成的新事实",
+            },
+          },
+        },
+        FRAME_QUALITY_1: {
+          frameType: "QUALITY_FRAME",
+          generation: 1,
+          projectionRegistryVersion: "intake-projection-registry.v1",
+          status: "STREAMING",
+          items: {
+            QMETRIC_1: {
+              itemSha256: "b".repeat(64),
+              projectionKind: "DIMENSION_SCORE",
+              projectionPathId: "intake.quality.scores.references",
+              valueKind: "JSON_VALUE",
+              value: 12,
+            },
+          },
+        },
+      },
+    };
+
+    applyEvent({
+      protocol: "agent-stream.v4",
+      event: "public_frame_projection_item",
+      frameId: "FRAME_DOSSIER_1",
+      frameType: "DOSSIER_FRAME",
+      generation: 1,
+      canonicalItemId: "DPATCH_1",
+      itemSha256: "a".repeat(64),
+      projectionKind: "CURRENT_FACT",
+      valueKind: "JSON_VALUE",
+      projectionPathId: "case_story.one_sentence_summary",
+      canonicalValueJson: JSON.stringify("三路并行生成的新事实"),
+    }, undefined, streamRun);
+    streamRun.frames.FRAME_DOSSIER_1.items.DPATCH_2 = {
+      itemSha256: "c".repeat(64),
+      projectionKind: "CURRENT_FACT",
+      projectionPathId: "case_story.one_sentence_summary",
+      valueKind: "JSON_VALUE",
+      value: "第二项并行事实",
+    };
+    streamRun.frames.FRAME_DOSSIER_1.itemOrder.push("DPATCH_2");
+    applyEvent({
+      protocol: "agent-stream.v4",
+      event: "public_frame_projection_item",
+      frameId: "FRAME_DOSSIER_1",
+      frameType: "DOSSIER_FRAME",
+      generation: 1,
+      canonicalItemId: "DPATCH_2",
+      itemSha256: "c".repeat(64),
+      projectionKind: "CURRENT_FACT",
+      valueKind: "JSON_VALUE",
+      projectionPathId: "case_story.one_sentence_summary",
+      canonicalValueJson: JSON.stringify("第二项并行事实"),
+    }, undefined, streamRun);
+    applyEvent({
+      protocol: "agent-stream.v4",
+      event: "public_frame_projection_item",
+      frameId: "FRAME_QUALITY_1",
+      frameType: "QUALITY_FRAME",
+      generation: 1,
+      canonicalItemId: "QMETRIC_1",
+      itemSha256: "b".repeat(64),
+      projectionKind: "DIMENSION_SCORE",
+      valueKind: "JSON_VALUE",
+      projectionPathId: "intake.quality.scores.references",
+      canonicalValueJson: "12",
+    }, undefined, streamRun);
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).toContain(
+      "三路并行生成的新事实；第二项并行事实",
+    );
+    expect(wrapper.get("[data-dossier-status-pill]").text()).toContain("12%");
+
+    streamRun.frames.FRAME_DOSSIER_1.status = "RESET";
+    streamRun.parallelFrameIds.DOSSIER_FRAME = "FRAME_DOSSIER_2";
+    applyEvent({
+      protocol: "agent-stream.v4",
+      event: "frame_generation_reset",
+      frameType: "DOSSIER_FRAME",
+      oldFrameId: "FRAME_DOSSIER_1",
+      newFrameId: "FRAME_DOSSIER_2",
+    }, undefined, streamRun);
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).toContain(
+      persistedSummary,
+    );
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).not.toContain(
+      "三路并行生成的新事实",
+    );
+    expect(wrapper.get("[data-dossier-status-pill]").text()).toContain("12%");
+    wrapper.unmount();
+  });
+
   it("replaces the streamed right-side board after a V2 attempt reset", async () => {
     const runId = "run-v2-attempt-reset-board";
     const streamUrl = `/api/private-agent-streams/${runId}/events`;

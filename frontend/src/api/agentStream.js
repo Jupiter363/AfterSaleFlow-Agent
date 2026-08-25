@@ -7,28 +7,73 @@ import { consumeSse } from "./sse";
 export const AGENT_STREAM_SCHEMA_VERSION = "agent_stream.v1";
 export const AGENT_STREAM_V2_SCHEMA_VERSION = "agent-stream.v2";
 export const AGENT_STREAM_V3_SCHEMA_VERSION = "agent-stream.v3";
+export const AGENT_STREAM_V4_SCHEMA_VERSION = "agent-stream.v4";
 const SUPPORTED_PROTOCOLS = new Set([
   AGENT_STREAM_SCHEMA_VERSION,
   AGENT_STREAM_V2_SCHEMA_VERSION,
   AGENT_STREAM_V3_SCHEMA_VERSION,
+  AGENT_STREAM_V4_SCHEMA_VERSION,
 ]);
 const TERMINAL_EVENTS = new Set(["final", "error"]);
-const AGENT_STREAM_EVENTS = new Set([
-  "start",
-  "attempt_started",
-  "visible_delta",
-  "generation_reset",
-  "public_frame_start",
-  "public_text_delta",
-  "active_frame_snapshot",
-  "public_frame_committed",
-  "public_frame_interrupted",
-  "usage",
-  "attempt_aborted",
-  "attempt_reset",
-  "final",
-  "error",
-]);
+const EVENTS_BY_PROTOCOL = {
+  [AGENT_STREAM_SCHEMA_VERSION]: new Set([
+    "start",
+    "visible_delta",
+    "generation_reset",
+    "usage",
+    "final",
+    "error",
+  ]),
+  [AGENT_STREAM_V2_SCHEMA_VERSION]: new Set([
+    "attempt_started",
+    "visible_delta",
+    "usage",
+    "attempt_aborted",
+    "attempt_reset",
+    "final",
+    "error",
+  ]),
+  [AGENT_STREAM_V3_SCHEMA_VERSION]: new Set([
+    "attempt_started",
+    "visible_delta",
+    "generation_reset",
+    "public_frame_start",
+    "public_text_delta",
+    "active_frame_snapshot",
+    "public_frame_committed",
+    "public_frame_interrupted",
+    "usage",
+    "attempt_aborted",
+    "attempt_reset",
+    "final",
+    "error",
+  ]),
+  [AGENT_STREAM_V4_SCHEMA_VERSION]: new Set([
+    "public_frame_start",
+    "public_frame_projection_item",
+    "active_frame_snapshot",
+    "frame_generation_reset",
+    "public_frame_sealed",
+    "public_frame_interrupted",
+    "usage",
+    "final",
+    "error",
+  ]),
+};
+const AGENT_STREAM_EVENTS = new Set(
+  Object.values(EVENTS_BY_PROTOCOL).flatMap((events) => [...events]),
+);
+const V4_DELIVERY_CLASS_BY_EVENT = {
+  public_frame_start: "DURABLE_CONTROL",
+  public_frame_projection_item: "DURABLE_PREVIEW",
+  active_frame_snapshot: "DURABLE_PREVIEW",
+  frame_generation_reset: "DURABLE_CONTROL",
+  public_frame_sealed: "DURABLE_STAGING",
+  public_frame_interrupted: "DURABLE_CONTROL",
+  usage: "DURABLE_STAGING",
+  final: "DURABLE_TERMINAL",
+  error: "DURABLE_TERMINAL",
+};
 const AGENT_STREAM_V2_AUDIENCES = new Set([
   "USER",
   "MERCHANT",
@@ -133,12 +178,23 @@ function validateCursor(protocol, cursor, attemptId, sequence) {
     return;
   }
 
-  const prefix = protocol === AGENT_STREAM_V3_SCHEMA_VERSION ? "v3:" : "v2:";
+  const prefix = {
+    [AGENT_STREAM_V2_SCHEMA_VERSION]: "v2:",
+    [AGENT_STREAM_V3_SCHEMA_VERSION]: "v3:",
+    [AGENT_STREAM_V4_SCHEMA_VERSION]: "v4:",
+  }[protocol];
+  if (!prefix) {
+    throw protocolError("AGENT_STREAM_CURSOR_INVALID", "数字人事件协议没有游标前缀");
+  }
   const separator = cursor.lastIndexOf(":");
-  if (!cursor.startsWith(prefix) || separator <= 2 || separator === cursor.length - 1) {
+  if (
+    !cursor.startsWith(prefix) ||
+    separator <= prefix.length ||
+    separator === cursor.length - 1
+  ) {
     throw protocolError("AGENT_STREAM_CURSOR_INVALID", "数字人事件游标无效");
   }
-  const cursorAttemptId = cursor.slice(3, separator);
+  const cursorAttemptId = cursor.slice(prefix.length, separator);
   const cursorSequence = cursor.slice(separator + 1);
   if (cursorAttemptId !== attemptId || cursorSequence !== canonicalSequence) {
     throw protocolError(
@@ -299,9 +355,16 @@ export function normalizeAgentStreamEvent(
       `不支持的数字人流协议：${schemaVersion}`,
     );
   }
+  if (!EVENTS_BY_PROTOCOL[schemaVersion].has(event)) {
+    throw protocolError(
+      "AGENT_STREAM_EVENT_PROTOCOL_MISMATCH",
+      `数字人流协议 ${schemaVersion} 不支持事件 ${event}`,
+    );
+  }
   const isV2 = schemaVersion === AGENT_STREAM_V2_SCHEMA_VERSION;
   const isV3 = schemaVersion === AGENT_STREAM_V3_SCHEMA_VERSION;
-  const attemptScoped = isV2 || isV3;
+  const isV4 = schemaVersion === AGENT_STREAM_V4_SCHEMA_VERSION;
+  const attemptScoped = isV2 || isV3 || isV4;
 
   const runId = resolveStringDeclaration([
     envelope.run_id,
@@ -368,6 +431,68 @@ export function normalizeAgentStreamEvent(
     : envelope.error && typeof envelope.error === "object"
       ? envelope.error
       : payload;
+  const deliveryClass = String(firstDefined(
+    payload.delivery_class,
+    payload.deliveryClass,
+    "",
+  ));
+  if (isV4 && deliveryClass !== V4_DELIVERY_CLASS_BY_EVENT[event]) {
+    throw protocolError(
+      "AGENT_STREAM_V4_DELIVERY_CLASS_INVALID",
+      "并行接待流事件的投递类型与事件不匹配",
+    );
+  }
+  const finalReceiptId = resolveStringDeclaration([
+    payload.final_receipt_id,
+    payload.finalReceiptId,
+  ], {
+    code: "AGENT_STREAM_V4_FINAL_INVALID",
+    label: "并行接待终态回执",
+    defaultValue: "",
+    required: isV4 && event === "final",
+    nonEmpty: true,
+  });
+  const finalResultHash = resolveStringDeclaration([
+    payload.final_result_hash,
+    payload.finalResultHash,
+  ], {
+    code: "AGENT_STREAM_V4_FINAL_INVALID",
+    label: "并行接待终态结果哈希",
+    defaultValue: "",
+    required: isV4 && event === "final",
+    nonEmpty: true,
+  });
+  if (
+    isV4 &&
+    event === "final" &&
+    !/^[0-9a-f]{64}$/.test(finalResultHash)
+  ) {
+    throw protocolError(
+      "AGENT_STREAM_V4_FINAL_INVALID",
+      "并行接待终态结果哈希无效",
+    );
+  }
+  const v4ErrorCode = resolveStringDeclaration([
+    payload.error_code,
+    payload.errorCode,
+  ], {
+    code: "AGENT_STREAM_V4_ERROR_INVALID",
+    label: "并行接待错误码",
+    defaultValue: "",
+    required: isV4 && event === "error",
+    nonEmpty: true,
+  });
+  const retryableDeclaration = firstDefined(payload.retryable, null);
+  if (
+    isV4 &&
+    event === "error" &&
+    typeof retryableDeclaration !== "boolean"
+  ) {
+    throw protocolError(
+      "AGENT_STREAM_V4_ERROR_INVALID",
+      "并行接待错误的重试标识无效",
+    );
+  }
 
   return {
     schemaVersion,
@@ -408,9 +533,71 @@ export function normalizeAgentStreamEvent(
     frameId,
     frameSequence: firstDefined(payload.frame_sequence, payload.frameSequence, null),
     frameType: String(firstDefined(payload.frame_type, payload.frameType, "")),
+    generation: firstDefined(payload.generation, null),
+    frameSetReceiptId: String(firstDefined(
+      payload.frame_set_receipt_id,
+      payload.frameSetReceiptId,
+      "",
+    )),
+    projectionRegistryVersion: String(firstDefined(
+      payload.projection_registry_version,
+      payload.projectionRegistryVersion,
+      "",
+    )),
+    deliveryClass,
+    localIndex: firstDefined(payload.local_index, payload.localIndex, null),
+    nextLocalIndex: firstDefined(payload.next_local_index, payload.nextLocalIndex, null),
+    canonicalItemId: String(firstDefined(
+      payload.canonical_item_id,
+      payload.canonicalItemId,
+      "",
+    )),
+    projectionKind: String(firstDefined(
+      payload.projection_kind,
+      payload.projectionKind,
+      "",
+    )),
+    projectionPathId: String(firstDefined(
+      payload.projection_path_id,
+      payload.projectionPathId,
+      "",
+    )),
+    valueKind: String(firstDefined(payload.value_kind, payload.valueKind, "")),
+    canonicalValueJson: String(firstDefined(
+      payload.canonical_value_json,
+      payload.canonicalValueJson,
+      "",
+    )),
     publicHeader: firstDefined(payload.public_header, payload.publicHeader, null),
     deltaIndex,
     publicText: String(firstDefined(payload.public_text, payload.publicText, "")),
+    itemSha256: String(firstDefined(payload.item_sha256, payload.itemSha256, "")),
+    frameRevision: firstDefined(payload.frame_revision, payload.frameRevision, null),
+    projectionSha256: String(firstDefined(
+      payload.projection_sha256,
+      payload.projectionSha256,
+      "",
+    )),
+    oldFrameId: String(firstDefined(payload.old_frame_id, payload.oldFrameId, "")),
+    newFrameId: String(firstDefined(payload.new_frame_id, payload.newFrameId, "")),
+    oldGeneration: firstDefined(payload.old_generation, payload.oldGeneration, null),
+    newGeneration: firstDefined(payload.new_generation, payload.newGeneration, null),
+    reasonCode: String(firstDefined(payload.reason_code, payload.reasonCode, "")),
+    frameReceiptId: String(firstDefined(
+      payload.frame_receipt_id,
+      payload.frameReceiptId,
+      "",
+    )),
+    resultSha256: String(firstDefined(payload.result_sha256, payload.resultSha256, "")),
+    publicProjectionSha256: String(firstDefined(
+      payload.public_projection_sha256,
+      payload.publicProjectionSha256,
+      "",
+    )),
+    finalReceiptId,
+    finalResultHash,
+    errorCode: v4ErrorCode,
+    retryable: Boolean(firstDefined(payload.retryable, false)),
     durableCursor: String(firstDefined(
       payload.durable_cursor,
       payload.durableCursor,
@@ -441,6 +628,7 @@ export function normalizeAgentStreamEvent(
     error: event === "error"
       ? {
           code: String(firstDefined(
+            v4ErrorCode || undefined,
             errorPayload.code,
             errorPayload.error_code,
             errorPayload.errorCode,

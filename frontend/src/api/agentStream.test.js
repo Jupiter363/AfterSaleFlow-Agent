@@ -53,6 +53,39 @@ function v2Event(options = {}) {
   };
 }
 
+function v4ProjectionEvent(options = {}) {
+  const { data = {} } = options;
+  const id = Object.hasOwn(options, "id") ? options.id : "v4:ATTEMPT_V4:3";
+  return {
+    id,
+    event: "public_frame_projection_item",
+    data: {
+      protocol: "agent-stream.v4",
+      schemaVersion: "agent-stream.v4",
+      runId: "AGENT_RUN_V4",
+      attemptId: "ATTEMPT_V4",
+      sequence: 3,
+      cursor: "v4:ATTEMPT_V4:3",
+      audience: "USER",
+      payload: {
+        frame_id: "FRAME_QUALITY_1",
+        frame_type: "QUALITY_FRAME",
+        generation: 1,
+        delivery_class: "DURABLE_PREVIEW",
+        local_index: 0,
+        next_local_index: 1,
+        canonical_item_id: "QMETRIC_01",
+        projection_kind: "DIMENSION_SCORE",
+        projection_path_id: "intake.quality.scores.references",
+        value_kind: "JSON_VALUE",
+        canonical_value_json: "12",
+        item_sha256: "a".repeat(64),
+      },
+      ...data,
+    },
+  };
+}
+
 function captureFailure(callback) {
   try {
     callback();
@@ -207,6 +240,34 @@ describe("agent stream protocol", () => {
     });
   });
 
+  it("normalizes a durable V4 lane projection with its independent frame authority", () => {
+    expect(normalizeAgentStreamEvent(
+      v4ProjectionEvent(),
+      "AGENT_RUN_V4",
+      "USER",
+    )).toMatchObject({
+      protocol: "agent-stream.v4",
+      runId: "AGENT_RUN_V4",
+      attemptId: "ATTEMPT_V4",
+      event: "public_frame_projection_item",
+      sequence: 3,
+      cursor: "v4:ATTEMPT_V4:3",
+      durable: true,
+      frameId: "FRAME_QUALITY_1",
+      frameType: "QUALITY_FRAME",
+      generation: 1,
+      localIndex: 0,
+      nextLocalIndex: 1,
+      canonicalItemId: "QMETRIC_01",
+      projectionKind: "DIMENSION_SCORE",
+      projectionPathId: "intake.quality.scores.references",
+      valueKind: "JSON_VALUE",
+      canonicalValueJson: "12",
+      itemSha256: "a".repeat(64),
+      terminal: false,
+    });
+  });
+
   it.each([
     ["missing", undefined],
     ["string", "2"],
@@ -239,6 +300,14 @@ describe("agent stream protocol", () => {
     [
       "noncanonical V2 sequence",
       v2Event({ id: "v2:ATTEMPT:2:01", data: { cursor: "v2:ATTEMPT:2:01" } }),
+      "AGENT_STREAM_CURSOR_MISMATCH",
+    ],
+    [
+      "wrong V4 attempt",
+      v4ProjectionEvent({
+        id: "v4:OTHER_ATTEMPT:3",
+        data: { cursor: "v4:OTHER_ATTEMPT:3" },
+      }),
       "AGENT_STREAM_CURSOR_MISMATCH",
     ],
   ])("rejects %s", (_label, event, errorCode) => {
@@ -321,6 +390,77 @@ describe("agent stream protocol", () => {
       "AGENT_RUN_V2",
       "ADMIN",
     ).audience).toBe("MERCHANT");
+  });
+
+  it("enforces the consuming audience for V4 projections", () => {
+    expect(captureFailure(() => normalizeAgentStreamEvent(
+      v4ProjectionEvent({ data: { audience: "MERCHANT" } }),
+      "AGENT_RUN_V4",
+      "USER",
+    )).code).toBe("AGENT_STREAM_AUDIENCE_MISMATCH");
+  });
+
+  it("rejects legacy event kinds and non-terminal delivery classes in V4", () => {
+    expect(captureFailure(() => normalizeAgentStreamEvent(
+      { ...v4ProjectionEvent(), event: "visible_delta" },
+      "AGENT_RUN_V4",
+      "USER",
+    )).code).toBe("AGENT_STREAM_EVENT_PROTOCOL_MISMATCH");
+
+    expect(captureFailure(() => normalizeAgentStreamEvent({
+      id: "v4:ATTEMPT_V4:4",
+      event: "final",
+      data: {
+        protocol: "agent-stream.v4",
+        schemaVersion: "agent-stream.v4",
+        runId: "AGENT_RUN_V4",
+        attemptId: "ATTEMPT_V4",
+        sequence: 4,
+        cursor: "v4:ATTEMPT_V4:4",
+        audience: "USER",
+        payload: {
+          delivery_class: "DURABLE_PREVIEW",
+          final_receipt_id: "FINAL_RECEIPT_V4",
+          final_result_hash: "c".repeat(64),
+        },
+      },
+    }, "AGENT_RUN_V4", "USER")).code).toBe(
+      "AGENT_STREAM_V4_DELIVERY_CLASS_INVALID",
+    );
+
+    expect(captureFailure(() => normalizeAgentStreamEvent({
+      id: "v4:ATTEMPT_V4:5",
+      event: "final",
+      data: {
+        protocol: "agent-stream.v4",
+        schemaVersion: "agent-stream.v4",
+        runId: "AGENT_RUN_V4",
+        attemptId: "ATTEMPT_V4",
+        sequence: 5,
+        cursor: "v4:ATTEMPT_V4:5",
+        audience: "USER",
+        payload: { delivery_class: "DURABLE_TERMINAL" },
+      },
+    }, "AGENT_RUN_V4", "USER")).code).toBe("AGENT_STREAM_V4_FINAL_INVALID");
+
+    expect(captureFailure(() => normalizeAgentStreamEvent({
+      id: "v4:ATTEMPT_V4:6",
+      event: "error",
+      data: {
+        protocol: "agent-stream.v4",
+        schemaVersion: "agent-stream.v4",
+        runId: "AGENT_RUN_V4",
+        attemptId: "ATTEMPT_V4",
+        sequence: 6,
+        cursor: "v4:ATTEMPT_V4:6",
+        audience: "USER",
+        payload: {
+          delivery_class: "DURABLE_TERMINAL",
+          error_code: "INTAKE_PARALLEL_FRAME_FAILED",
+          retryable: "false",
+        },
+      },
+    }, "AGENT_RUN_V4", "USER")).code).toBe("AGENT_STREAM_V4_ERROR_INVALID");
   });
 
   it("passes the consuming actor role into V2 audience validation", async () => {

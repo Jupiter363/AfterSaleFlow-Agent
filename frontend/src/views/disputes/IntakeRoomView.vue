@@ -364,6 +364,10 @@ const analysis = ref(props.initialAnalysis);
 const turnMemory = ref(props.initialTurnMemory);
 const intakeStatus = ref(props.initialIntakeStatus);
 const streamedCaseDetailSections = ref({});
+const streamedParallelFrameSections = ref({
+  DOSSIER_FRAME: {},
+  QUALITY_FRAME: {},
+});
 const streamedOrderedSectionSequence = ref(0);
 const pendingOriginalStatement = ref("");
 const messages = ref([...(props.initialMessages || [])]);
@@ -954,6 +958,15 @@ function mergeStreamedCaseDetail(base, sections) {
     schema_version: base?.schema_version || "intake_case_detail.v1",
   }, sections);
 }
+const provisionalCaseDetailSections = computed(() =>
+  deepMergeCaseDetail(
+    streamedCaseDetailSections.value,
+    deepMergeCaseDetail(
+      streamedParallelFrameSections.value.DOSSIER_FRAME,
+      streamedParallelFrameSections.value.QUALITY_FRAME,
+    ),
+  ),
+);
 const caseDetailDossier = computed(() => {
   const current = currentCaseDossier.value?.dossier;
   const persisted = isSupportedCaseDetailDossier(current)
@@ -961,7 +974,7 @@ const caseDetailDossier = computed(() => {
     : isSupportedCaseDetailDossier(scrollSnapshot.value)
       ? scrollSnapshot.value
       : null;
-  return mergeStreamedCaseDetail(persisted, streamedCaseDetailSections.value);
+  return mergeStreamedCaseDetail(persisted, provisionalCaseDetailSections.value);
 });
 const isCaseDetailDossier = computed(() => Boolean(caseDetailDossier.value));
 const initialAgentReady = computed(() => Boolean(caseDetailDossier.value));
@@ -989,7 +1002,7 @@ const intakeDossierSubmissionDisabled = computed(() =>
   !currentActorMatrixReady.value,
 );
 const caseDetailQuality = computed(() => {
-  const streamedQuality = streamedCaseDetailSections.value?.intake_quality;
+  const streamedQuality = provisionalCaseDetailSections.value?.intake_quality;
   if (
     intakeStreamingRuns.value.length > 0 &&
     validPartyIntakeQuality(streamedQuality)
@@ -2377,9 +2390,9 @@ async function consumeIntakeAgentRun(descriptor, snapshot = currentWorkspaceSnap
     // answer the user is still reading.
     replyThenBoard: true,
     signal: eventAbortController.signal,
-    onEvent: (event) => {
+    onEvent: (event, streamRun) => {
       if (isCurrentIntakeRunContext(context, snapshot)) {
-        applyStreamedCaseDetailEvent(event, snapshot);
+        applyStreamedCaseDetailEvent(event, snapshot, streamRun);
       }
     },
     onError: (failure) => discardProvisionalIntakeRun(context, snapshot, failure),
@@ -2574,7 +2587,139 @@ async function verifyEvidenceReady(snapshot = currentWorkspaceSnapshot()) {
 
 function resetStreamedCaseDetail() {
   streamedCaseDetailSections.value = {};
+  streamedParallelFrameSections.value = {
+    DOSSIER_FRAME: {},
+    QUALITY_FRAME: {},
+  };
   streamedOrderedSectionSequence.value = 0;
+}
+
+const INTAKE_PARALLEL_DOSSIER_PROJECTION_PATH = "case_story.one_sentence_summary";
+const INTAKE_PARALLEL_PROJECTION_REGISTRY_VERSION = "intake-projection-registry.v1";
+const INTAKE_PARALLEL_QUALITY_DIMENSIONS = {
+  references: 15,
+  event_story: 20,
+  party_positions: 20,
+  requested_resolution: 15,
+  risk_and_conflicts: 15,
+  next_action_clarity: 15,
+};
+
+function resetParallelFrameProjection(frameType) {
+  if (!["DOSSIER_FRAME", "QUALITY_FRAME"].includes(frameType)) return;
+  streamedParallelFrameSections.value = {
+    ...streamedParallelFrameSections.value,
+    [frameType]: {},
+  };
+}
+
+function setParallelDossierProjection(pathId, projectionKind, value) {
+  if (
+    pathId !== INTAKE_PARALLEL_DOSSIER_PROJECTION_PATH ||
+    projectionKind !== "CURRENT_FACT" ||
+    typeof value !== "string" ||
+    value.trim().length < 1 ||
+    Array.from(value).length > 20_000
+  ) return;
+  streamedParallelFrameSections.value = {
+    ...streamedParallelFrameSections.value,
+    DOSSIER_FRAME: {
+      case_story: {
+        one_sentence_summary: value,
+      },
+    },
+  };
+}
+
+function setParallelQualityProjection(pathId, value) {
+  const prefix = "intake.quality.scores.";
+  const dimension = String(pathId || "").startsWith(prefix)
+    ? String(pathId).slice(prefix.length)
+    : "";
+  const maximum = INTAKE_PARALLEL_QUALITY_DIMENSIONS[dimension];
+  if (!Number.isInteger(value) || maximum === undefined || value < 0 || value > maximum) {
+    return;
+  }
+  const previous = streamedParallelFrameSections.value.QUALITY_FRAME
+    ?.intake_quality?.score_breakdown;
+  const scoreBreakdown = Object.fromEntries(
+    Object.keys(INTAKE_PARALLEL_QUALITY_DIMENSIONS).map((key) => [
+      key,
+      Number.isInteger(previous?.[key]) ? previous[key] : 0,
+    ]),
+  );
+  scoreBreakdown[dimension] = value;
+  streamedParallelFrameSections.value = {
+    ...streamedParallelFrameSections.value,
+    QUALITY_FRAME: {
+      intake_quality: {
+        score: Object.values(scoreBreakdown).reduce((sum, score) => sum + score, 0),
+        threshold: 85,
+        ready_for_next_step: false,
+        score_breakdown: scoreBreakdown,
+        improvement_reason: "正在并行汇总本轮质量评估。",
+      },
+    },
+  };
+}
+
+function authorizedParallelFrame(streamRun, event) {
+  if (!streamRun || streamRun.protocol !== "agent-stream.v4") return null;
+  const frameId = streamRun.parallelFrameIds?.[event.frameType];
+  const frame = frameId ? streamRun.frames?.[frameId] : null;
+  if (
+    frameId !== event.frameId ||
+    !frame ||
+    frame.frameType !== event.frameType ||
+    frame.generation !== event.generation ||
+    frame.projectionRegistryVersion !== INTAKE_PARALLEL_PROJECTION_REGISTRY_VERSION
+  ) return null;
+  return frame;
+}
+
+function applyParallelIntakeProjectionEvent(event, streamRun) {
+  if (event.event === "frame_generation_reset") {
+    const previous = streamRun?.frames?.[event.oldFrameId];
+    if (
+      streamRun?.protocol !== "agent-stream.v4" ||
+      streamRun?.parallelFrameIds?.[event.frameType] !== event.newFrameId ||
+      previous?.status !== "RESET" ||
+      previous?.projectionRegistryVersion !== INTAKE_PARALLEL_PROJECTION_REGISTRY_VERSION
+    ) return;
+    resetParallelFrameProjection(event.frameType);
+    return;
+  }
+  if (event.event !== "public_frame_projection_item") return;
+  const frame = authorizedParallelFrame(streamRun, event);
+  const item = frame?.items?.[event.canonicalItemId];
+  if (
+    !item ||
+    item.itemSha256 !== event.itemSha256 ||
+    item.valueKind !== "JSON_VALUE" ||
+    item.projectionKind !== event.projectionKind ||
+    item.projectionPathId !== event.projectionPathId
+  ) return;
+  if (event.frameType === "DOSSIER_FRAME") {
+    const summary = frame.itemOrder
+      .map((itemId) => frame.items?.[itemId])
+      .filter((candidate) =>
+        candidate?.projectionKind === "CURRENT_FACT" &&
+        candidate?.projectionPathId === INTAKE_PARALLEL_DOSSIER_PROJECTION_PATH &&
+        typeof candidate?.value === "string"
+      )
+      .map((candidate) => candidate.value)
+      .join("；");
+    setParallelDossierProjection(
+      item.projectionPathId,
+      item.projectionKind,
+      summary,
+    );
+  } else if (
+    event.frameType === "QUALITY_FRAME" &&
+    item.projectionKind === "DIMENSION_SCORE"
+  ) {
+    setParallelQualityProjection(item.projectionPathId, item.value);
+  }
 }
 
 const INTAKE_ORDERED_SECTION_KINDS = [
@@ -2677,8 +2822,16 @@ function applyOrderedIntakeSection(delta) {
   );
 }
 
-function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot()) {
+function applyStreamedCaseDetailEvent(
+  event,
+  snapshot = currentWorkspaceSnapshot(),
+  streamRun = null,
+) {
   if (!isCurrentWorkspace(snapshot)) return;
+  if (event?.protocol === "agent-stream.v4") {
+    applyParallelIntakeProjectionEvent(event, streamRun);
+    return;
+  }
   // A V2 abort and its replacement reset are delivered as separate durable
   // events. Clear the provisional overlay at the abort boundary so a lost or
   // delayed reset cannot leave facts from the failed attempt on screen. This
@@ -2875,9 +3028,9 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
     senderRole: "INTAKE_OFFICER",
     replyThenBoard: true,
     signal: eventAbortController.signal,
-    onEvent: (event) => {
+    onEvent: (event, streamRun) => {
       if (isCurrentIntakeRunContext(context, snapshot)) {
-        applyStreamedCaseDetailEvent(event, snapshot);
+        applyStreamedCaseDetailEvent(event, snapshot, streamRun);
       }
     },
     onError: (failure) => discardProvisionalIntakeRun(context, snapshot, failure),
@@ -3081,9 +3234,9 @@ async function postMessage(command) {
         senderRole: "INTAKE_OFFICER",
         replyThenBoard: true,
         signal: eventAbortController.signal,
-        onEvent: (event) => {
+        onEvent: (event, streamRun) => {
           if (isCurrentIntakeRunContext(finalizationContext, snapshot)) {
-            applyStreamedCaseDetailEvent(event, snapshot);
+            applyStreamedCaseDetailEvent(event, snapshot, streamRun);
           }
         },
         onError: (failure) =>

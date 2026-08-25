@@ -21,6 +21,20 @@ function streamResponse(frames) {
   }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
+function v4SseFrame(runId, attemptId, sequence, event, payload) {
+  const cursor = `v4:${attemptId}:${sequence}`;
+  return `id: ${cursor}\nevent: ${event}\ndata: ${JSON.stringify({
+    schemaVersion: "agent-stream.v4",
+    protocol: "agent-stream.v4",
+    runId,
+    attemptId,
+    sequence,
+    cursor,
+    audience: "USER",
+    payload,
+  })}\n\n`;
+}
+
 async function flushMicrotasks(turns = 24) {
   for (let turn = 0; turn < turns; turn += 1) {
     await Promise.resolve();
@@ -634,6 +648,296 @@ describe("agentStreamStore", () => {
       durableCursor: `v3:${attemptId}:FRAME:1`,
     });
     expect(run.lastEventId).toBe(`v3:${attemptId}:4`);
+  });
+
+  it("reduces interleaved V4 Intake lanes and resets only the failed lane", async () => {
+    const runId = "AGENT_RUN_INTAKE_V4";
+    const attemptId = "ATTEMPT_INTAKE_V4";
+    const dialogueFrameId = "FRAME_DIALOGUE_1";
+    const dossierFrameId = "FRAME_DOSSIER_1";
+    const replacementDossierFrameId = "FRAME_DOSSIER_2";
+    const qualityFrameId = "FRAME_QUALITY_1";
+    const hash = "a".repeat(64);
+    const frames = [
+      v4SseFrame(runId, attemptId, 0, "public_frame_start", {
+        frame_id: dialogueFrameId,
+        frame_type: "DIALOGUE_FRAME",
+        generation: 1,
+        frame_set_receipt_id: "FRAME_SET_RECEIPT_1",
+        projection_registry_version: "intake-projection-registry.v1",
+        delivery_class: "DURABLE_CONTROL",
+      }),
+      v4SseFrame(runId, attemptId, 1, "public_frame_start", {
+        frame_id: dossierFrameId,
+        frame_type: "DOSSIER_FRAME",
+        generation: 1,
+        frame_set_receipt_id: "FRAME_SET_RECEIPT_1",
+        projection_registry_version: "intake-projection-registry.v1",
+        delivery_class: "DURABLE_CONTROL",
+      }),
+      v4SseFrame(runId, attemptId, 2, "public_frame_start", {
+        frame_id: qualityFrameId,
+        frame_type: "QUALITY_FRAME",
+        generation: 1,
+        frame_set_receipt_id: "FRAME_SET_RECEIPT_1",
+        projection_registry_version: "intake-projection-registry.v1",
+        delivery_class: "DURABLE_CONTROL",
+      }),
+      v4SseFrame(runId, attemptId, 3, "public_frame_projection_item", {
+        frame_id: dialogueFrameId,
+        frame_type: "DIALOGUE_FRAME",
+        generation: 1,
+        delivery_class: "DURABLE_PREVIEW",
+        local_index: 0,
+        next_local_index: 1,
+        canonical_item_id: "DSEG_01",
+        projection_kind: "ACKNOWLEDGEMENT",
+        projection_path_id: "intake.dialogue.public_segments",
+        value_kind: "TEXT",
+        public_text: "已记录本轮补充。",
+        item_sha256: hash,
+      }),
+      v4SseFrame(runId, attemptId, 4, "public_frame_projection_item", {
+        frame_id: dossierFrameId,
+        frame_type: "DOSSIER_FRAME",
+        generation: 1,
+        delivery_class: "DURABLE_PREVIEW",
+        local_index: 0,
+        next_local_index: 1,
+        canonical_item_id: "DPATCH_OLD",
+        projection_kind: "CURRENT_FACT",
+        projection_path_id: "case_story.one_sentence_summary",
+        value_kind: "JSON_VALUE",
+        canonical_value_json: JSON.stringify("旧事实"),
+        item_sha256: hash,
+      }),
+      v4SseFrame(runId, attemptId, 5, "public_frame_projection_item", {
+        frame_id: qualityFrameId,
+        frame_type: "QUALITY_FRAME",
+        generation: 1,
+        delivery_class: "DURABLE_PREVIEW",
+        local_index: 0,
+        next_local_index: 1,
+        canonical_item_id: "QMETRIC_01",
+        projection_kind: "DIMENSION_SCORE",
+        projection_path_id: "intake.quality.scores.references",
+        value_kind: "JSON_VALUE",
+        canonical_value_json: "12",
+        item_sha256: hash,
+      }),
+      v4SseFrame(runId, attemptId, 6, "public_frame_interrupted", {
+        frame_id: dossierFrameId,
+        frame_type: "DOSSIER_FRAME",
+        generation: 1,
+        delivery_class: "DURABLE_CONTROL",
+        next_local_index: 1,
+        reason_code: "OUTPUT_SCHEMA_INVALID",
+        retryable: true,
+      }),
+      v4SseFrame(runId, attemptId, 7, "frame_generation_reset", {
+        frame_type: "DOSSIER_FRAME",
+        old_frame_id: dossierFrameId,
+        new_frame_id: replacementDossierFrameId,
+        old_generation: 1,
+        new_generation: 2,
+        reason_code: "OUTPUT_SCHEMA_INVALID",
+        delivery_class: "DURABLE_CONTROL",
+      }),
+      v4SseFrame(runId, attemptId, 8, "public_frame_start", {
+        frame_id: replacementDossierFrameId,
+        frame_type: "DOSSIER_FRAME",
+        generation: 2,
+        frame_set_receipt_id: "FRAME_SET_RECEIPT_1",
+        projection_registry_version: "intake-projection-registry.v1",
+        delivery_class: "DURABLE_CONTROL",
+      }),
+      v4SseFrame(runId, attemptId, 9, "public_frame_projection_item", {
+        frame_id: replacementDossierFrameId,
+        frame_type: "DOSSIER_FRAME",
+        generation: 2,
+        delivery_class: "DURABLE_PREVIEW",
+        local_index: 0,
+        next_local_index: 1,
+        canonical_item_id: "DPATCH_NEW",
+        projection_kind: "CURRENT_FACT",
+        projection_path_id: "case_story.one_sentence_summary",
+        value_kind: "JSON_VALUE",
+        canonical_value_json: JSON.stringify("新事实"),
+        item_sha256: hash,
+      }),
+      v4SseFrame(runId, attemptId, 10, "public_frame_projection_item", {
+        frame_id: replacementDossierFrameId,
+        frame_type: "DOSSIER_FRAME",
+        generation: 2,
+        delivery_class: "DURABLE_PREVIEW",
+        local_index: 1,
+        next_local_index: 2,
+        canonical_item_id: "DPATCH_NEW_2",
+        projection_kind: "CURRENT_FACT",
+        projection_path_id: "case_story.one_sentence_summary",
+        value_kind: "JSON_VALUE",
+        canonical_value_json: JSON.stringify("补充事实"),
+        item_sha256: hash,
+      }),
+      v4SseFrame(runId, attemptId, 11, "public_frame_sealed", {
+        frame_id: dialogueFrameId,
+        frame_type: "DIALOGUE_FRAME",
+        generation: 1,
+        delivery_class: "DURABLE_STAGING",
+        frame_receipt_id: "DIALOGUE_RECEIPT_1",
+        next_local_index: 1,
+        result_sha256: hash,
+        public_projection_sha256: "b".repeat(64),
+      }),
+      v4SseFrame(runId, attemptId, 12, "public_frame_sealed", {
+        frame_id: replacementDossierFrameId,
+        frame_type: "DOSSIER_FRAME",
+        generation: 2,
+        delivery_class: "DURABLE_STAGING",
+        frame_receipt_id: "DOSSIER_RECEIPT_2",
+        next_local_index: 2,
+        result_sha256: hash,
+        public_projection_sha256: "b".repeat(64),
+      }),
+      v4SseFrame(runId, attemptId, 13, "public_frame_sealed", {
+        frame_id: qualityFrameId,
+        frame_type: "QUALITY_FRAME",
+        generation: 1,
+        delivery_class: "DURABLE_STAGING",
+        frame_receipt_id: "QUALITY_RECEIPT_1",
+        next_local_index: 1,
+        result_sha256: hash,
+        public_projection_sha256: "b".repeat(64),
+      }),
+      v4SseFrame(runId, attemptId, 14, "final", {
+        delivery_class: "DURABLE_TERMINAL",
+        final_receipt_id: "FINAL_RECEIPT_1",
+        final_result_hash: "c".repeat(64),
+      }),
+    ];
+    const observed = [];
+
+    await consumeAgentRun({
+      actor,
+      caseId: "CASE_INTAKE_V4",
+      roomType: "INTAKE",
+      descriptor: { runId, streamUrl: `/api/agent-runs/${runId}/events` },
+      fetchImpl: vi.fn().mockResolvedValue(streamResponse(frames)),
+      onEvent: (event, run) => observed.push({
+        event: event.event,
+        frameType: event.frameType,
+        content: run.content,
+      }),
+    });
+
+    const run = getAgentStreamRun(runId);
+    expect(observed).toContainEqual(expect.objectContaining({
+      event: "public_frame_projection_item",
+      frameType: "DIALOGUE_FRAME",
+      content: "已记录本轮补充。",
+    }));
+    expect(run.content).toBe("已记录本轮补充。");
+    expect(run.currentAttemptId).toBe(attemptId);
+    expect(run.parallelFrameIds).toMatchObject({
+      DIALOGUE_FRAME: dialogueFrameId,
+      DOSSIER_FRAME: replacementDossierFrameId,
+      QUALITY_FRAME: qualityFrameId,
+    });
+    expect(run.frames[dossierFrameId].status).toBe("RESET");
+    expect(run.frames[replacementDossierFrameId].items.DPATCH_NEW.value).toBe("新事实");
+    expect(run.frames[replacementDossierFrameId].items.DPATCH_NEW_2.value).toBe("补充事实");
+    expect(run.frames[qualityFrameId].items.QMETRIC_01.value).toBe(12);
+    expect(run.frames[dialogueFrameId].status).toBe("SEALED");
+    expect(run.lastEventId).toBe(`v4:${attemptId}:14`);
+  });
+
+  it("rejects a V4 Dossier item outside the exact current-facts projection", async () => {
+    const runId = "AGENT_RUN_INTAKE_V4_FOREIGN_DOSSIER_PATH";
+    const attemptId = "ATTEMPT_INTAKE_V4_FOREIGN_DOSSIER_PATH";
+    const frames = [
+      v4SseFrame(runId, attemptId, 0, "public_frame_start", {
+        frame_id: "FRAME_DOSSIER_FOREIGN_PATH",
+        frame_type: "DOSSIER_FRAME",
+        generation: 1,
+        frame_set_receipt_id: "FRAME_SET_FOREIGN_PATH",
+        projection_registry_version: "intake-projection-registry.v1",
+        delivery_class: "DURABLE_CONTROL",
+      }),
+      v4SseFrame(runId, attemptId, 1, "public_frame_projection_item", {
+        frame_id: "FRAME_DOSSIER_FOREIGN_PATH",
+        frame_type: "DOSSIER_FRAME",
+        generation: 1,
+        delivery_class: "DURABLE_PREVIEW",
+        local_index: 0,
+        next_local_index: 1,
+        canonical_item_id: "DPATCH_FOREIGN_PATH",
+        projection_kind: "CURRENT_FACT",
+        projection_path_id: "case_story.current_facts",
+        value_kind: "JSON_VALUE",
+        canonical_value_json: JSON.stringify(["越权事实数组"]),
+        item_sha256: "a".repeat(64),
+      }),
+    ];
+
+    await expect(consumeAgentRun({
+      actor,
+      caseId: "CASE_INTAKE_V4_FOREIGN_DOSSIER_PATH",
+      roomType: "INTAKE",
+      descriptor: { runId, streamUrl: `/api/agent-runs/${runId}/events` },
+      fetchImpl: vi.fn().mockResolvedValue(streamResponse(frames)),
+      reconnectAttempts: 0,
+    })).rejects.toMatchObject({ code: "AGENT_STREAM_V4_PROJECTION_CONTRACT_INVALID" });
+  });
+
+  it("rejects a V4 final before all three current lanes are sealed", async () => {
+    const runId = "AGENT_RUN_INTAKE_V4_EARLY_FINAL";
+    const attemptId = "ATTEMPT_INTAKE_V4_EARLY_FINAL";
+    const frames = [
+      v4SseFrame(runId, attemptId, 0, "public_frame_start", {
+        frame_id: "FRAME_DIALOGUE_EARLY",
+        frame_type: "DIALOGUE_FRAME",
+        generation: 1,
+        frame_set_receipt_id: "FRAME_SET_EARLY",
+        projection_registry_version: "intake-projection-registry.v1",
+        delivery_class: "DURABLE_CONTROL",
+      }),
+      v4SseFrame(runId, attemptId, 1, "final", {
+        delivery_class: "DURABLE_TERMINAL",
+        final_receipt_id: "FINAL_RECEIPT_EARLY",
+        final_result_hash: "c".repeat(64),
+      }),
+    ];
+
+    await expect(consumeAgentRun({
+      actor,
+      caseId: "CASE_INTAKE_V4_EARLY_FINAL",
+      roomType: "INTAKE",
+      descriptor: { runId, streamUrl: `/api/agent-runs/${runId}/events` },
+      fetchImpl: vi.fn().mockResolvedValue(streamResponse(frames)),
+      reconnectAttempts: 0,
+    })).rejects.toMatchObject({ code: "AGENT_STREAM_V4_FINAL_BEFORE_EXACT_THREE" });
+  });
+
+  it("rejects a V4 lane that is not bound to the registered Intake projection contract", async () => {
+    const runId = "AGENT_RUN_INTAKE_V4_FOREIGN_REGISTRY";
+    const attemptId = "ATTEMPT_INTAKE_V4_FOREIGN_REGISTRY";
+    const frames = [v4SseFrame(runId, attemptId, 0, "public_frame_start", {
+      frame_id: "FRAME_DIALOGUE_FOREIGN",
+      frame_type: "DIALOGUE_FRAME",
+      generation: 1,
+      frame_set_receipt_id: "FRAME_SET_RECEIPT_FOREIGN",
+      projection_registry_version: "foreign-projection-registry.v1",
+      delivery_class: "DURABLE_CONTROL",
+    })];
+
+    await expect(consumeAgentRun({
+      actor,
+      caseId: "CASE_INTAKE_V4_FOREIGN_REGISTRY",
+      roomType: "INTAKE",
+      descriptor: { runId, streamUrl: `/api/agent-runs/${runId}/events` },
+      fetchImpl: vi.fn().mockResolvedValue(streamResponse(frames)),
+      reconnectAttempts: 0,
+    })).rejects.toMatchObject({ code: "AGENT_STREAM_V4_FRAME_START_INVALID" });
   });
 
   it("keeps the stable server diagnostic code in the visible error status", async () => {

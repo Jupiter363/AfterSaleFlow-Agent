@@ -25,6 +25,52 @@ const FORBIDDEN_VISIBLE_FIELDS = [
   "internal_context",
   "private_a2a",
 ];
+const V4_FRAME_TYPES = new Set([
+  "DIALOGUE_FRAME",
+  "DOSSIER_FRAME",
+  "QUALITY_FRAME",
+]);
+const V4_FRAME_EVENTS = new Set([
+  "public_frame_start",
+  "public_frame_projection_item",
+  "active_frame_snapshot",
+  "frame_generation_reset",
+  "public_frame_sealed",
+  "public_frame_interrupted",
+  "usage",
+]);
+const INTAKE_V4_PROJECTION_REGISTRY_VERSION = "intake-projection-registry.v1";
+const V4_DIALOGUE_PROJECTION_KINDS = new Set([
+  "ACKNOWLEDGEMENT",
+  "TRANSITION",
+  "REMARK_ACKNOWLEDGEMENT",
+]);
+const V4_QUALITY_DIMENSIONS = {
+  references: 15,
+  event_story: 20,
+  party_positions: 20,
+  requested_resolution: 15,
+  risk_and_conflicts: 15,
+  next_action_clarity: 15,
+};
+const V4_FRAME_ITEM_LIMITS = {
+  DIALOGUE_FRAME: 4,
+  DOSSIER_FRAME: 32,
+  QUALITY_FRAME: 6,
+};
+
+function unicodeLength(value) {
+  return Array.from(value).length;
+}
+const V4_DELIVERY_CLASS_BY_EVENT = {
+  public_frame_start: "DURABLE_CONTROL",
+  public_frame_projection_item: "DURABLE_PREVIEW",
+  active_frame_snapshot: "DURABLE_PREVIEW",
+  frame_generation_reset: "DURABLE_CONTROL",
+  public_frame_sealed: "DURABLE_STAGING",
+  public_frame_interrupted: "DURABLE_CONTROL",
+  usage: "DURABLE_STAGING",
+};
 
 export const agentStreamStore = reactive({
   runs: {},
@@ -275,6 +321,347 @@ function applyV3FrameEvent(run, event) {
   }
 }
 
+function v4FrameFieldKey(item) {
+  return `parallel:${item.canonicalItemId}`;
+}
+
+function ensureV4Frame(run, event) {
+  if (
+    !event.frameId ||
+    !V4_FRAME_TYPES.has(event.frameType) ||
+    !Number.isSafeInteger(event.generation) ||
+    event.generation < 1
+  ) {
+    const error = new Error("并行接待流帧缺少有效身份");
+    error.code = "AGENT_STREAM_V4_FRAME_INVALID";
+    throw error;
+  }
+  const existing = run.frames[event.frameId];
+  if (existing) {
+    if (
+      existing.frameType !== event.frameType ||
+      existing.generation !== event.generation
+    ) {
+      const error = new Error("并行接待流帧身份发生冲突");
+      error.code = "AGENT_STREAM_V4_FRAME_CONFLICT";
+      throw error;
+    }
+    if (event.event === "public_frame_start") {
+      const error = new Error("并行接待流重复启动同一帧");
+      error.code = "AGENT_STREAM_V4_FRAME_START_REPEATED";
+      throw error;
+    }
+    return existing;
+  }
+  if (event.event !== "public_frame_start") {
+    const error = new Error("并行接待流帧在 start 前到达");
+    error.code = "AGENT_STREAM_V4_FRAME_START_MISSING";
+    throw error;
+  }
+  const selectedFrameId = run.parallelFrameIds[event.frameType];
+  if (selectedFrameId && selectedFrameId !== event.frameId) {
+    const error = new Error("并行接待流帧未经过 generation reset 即被替换");
+    error.code = "AGENT_STREAM_V4_FRAME_REPLACEMENT_INVALID";
+    throw error;
+  }
+  if (
+    !event.frameSetReceiptId ||
+    event.projectionRegistryVersion !== INTAKE_V4_PROJECTION_REGISTRY_VERSION
+  ) {
+    const error = new Error("并行接待流帧缺少冻结的投影注册信息");
+    error.code = "AGENT_STREAM_V4_FRAME_START_INVALID";
+    throw error;
+  }
+  if (
+    (run.parallelFrameSetReceiptId &&
+      run.parallelFrameSetReceiptId !== event.frameSetReceiptId) ||
+    (run.parallelProjectionRegistryVersion &&
+      run.parallelProjectionRegistryVersion !== event.projectionRegistryVersion)
+  ) {
+    const error = new Error("并行接待流三路不属于同一冻结输入");
+    error.code = "AGENT_STREAM_V4_FRAME_SET_CONFLICT";
+    throw error;
+  }
+  run.parallelFrameSetReceiptId ||= event.frameSetReceiptId;
+  run.parallelProjectionRegistryVersion ||= event.projectionRegistryVersion;
+  const frame = reactive({
+    frameId: event.frameId,
+    frameType: event.frameType,
+    generation: event.generation,
+    frameSetReceiptId: event.frameSetReceiptId,
+    projectionRegistryVersion: event.projectionRegistryVersion,
+    nextLocalIndex: 0,
+    itemOrder: [],
+    items: {},
+    status: "STREAMING",
+    frameRevision: 0,
+    projectionSha256: "",
+    frameReceiptId: "",
+    resultSha256: "",
+    publicProjectionSha256: "",
+  });
+  run.frames[event.frameId] = frame;
+  run.frameOrder.push(event.frameId);
+  run.parallelFrameIds[event.frameType] = event.frameId;
+  return frame;
+}
+
+function rebuildV4DialogueProjection(run) {
+  const frameId = run.parallelFrameIds.DIALOGUE_FRAME;
+  const frame = frameId ? run.frames[frameId] : null;
+  const card = run.cards.default || ensureStreamCard(run, {});
+  const items = frame
+    ? frame.itemOrder.map((itemId) => frame.items[itemId]).filter(Boolean)
+    : [];
+  card.fieldOrder = items.map(v4FrameFieldKey);
+  card.fieldText = Object.fromEntries(
+    items.map((item) => [v4FrameFieldKey(item), item.publicText]),
+  );
+  rebuildCardContent(card);
+  run.fieldOrder = [...card.fieldOrder];
+  run.fieldText = { ...card.fieldText };
+  run.receivedFieldOrder = [...card.fieldOrder];
+  run.receivedFieldText = { ...card.fieldText };
+  run.content = card.content;
+  run.receivedContent = card.content;
+  run.activeCardKey = card.key;
+}
+
+function rejectV4ProjectionContract() {
+  const error = new Error("并行接待流投影项不符合冻结注册表");
+  error.code = "AGENT_STREAM_V4_PROJECTION_CONTRACT_INVALID";
+  throw error;
+}
+
+function validateV4ProjectionContract(frame, event, value) {
+  const frameType = frame.frameType;
+  if (frameType === "DIALOGUE_FRAME") {
+    if (
+      event.valueKind !== "TEXT" ||
+      event.projectionPathId !== "intake.dialogue.public_segments" ||
+      !V4_DIALOGUE_PROJECTION_KINDS.has(event.projectionKind) ||
+      typeof value !== "string" ||
+      unicodeLength(value) < 1 ||
+      unicodeLength(value) > 500 ||
+      value.includes("?") ||
+      value.includes("？")
+    ) rejectV4ProjectionContract();
+    return;
+  }
+  if (frameType === "DOSSIER_FRAME") {
+    const projectedSummary = [
+      ...frame.itemOrder
+        .map((itemId) => frame.items[itemId]?.value)
+        .filter((candidate) => typeof candidate === "string"),
+      value,
+    ].join("；");
+    if (
+      event.valueKind !== "JSON_VALUE" ||
+      event.projectionKind !== "CURRENT_FACT" ||
+      event.projectionPathId !== "case_story.one_sentence_summary" ||
+      typeof value !== "string" ||
+      value.trim().length < 1 ||
+      unicodeLength(value) > 20_000 ||
+      unicodeLength(projectedSummary) > 20_000
+    ) rejectV4ProjectionContract();
+    return;
+  }
+  if (frameType === "QUALITY_FRAME") {
+    const prefix = "intake.quality.scores.";
+    const dimension = String(event.projectionPathId || "").startsWith(prefix)
+      ? String(event.projectionPathId).slice(prefix.length)
+      : "";
+    const maximum = V4_QUALITY_DIMENSIONS[dimension];
+    if (
+      event.valueKind !== "JSON_VALUE" ||
+      event.projectionKind !== "DIMENSION_SCORE" ||
+      maximum === undefined ||
+      !Number.isInteger(value) ||
+      value < 0 ||
+      value > maximum
+    ) rejectV4ProjectionContract();
+    return;
+  }
+  rejectV4ProjectionContract();
+}
+
+function resetV4Frame(run, event) {
+  if (
+    !V4_FRAME_TYPES.has(event.frameType) ||
+    !event.oldFrameId ||
+    !event.newFrameId ||
+    !Number.isSafeInteger(event.oldGeneration) ||
+    !Number.isSafeInteger(event.newGeneration) ||
+    event.newGeneration !== event.oldGeneration + 1
+  ) {
+    const error = new Error("并行接待流 generation reset 无效");
+    error.code = "AGENT_STREAM_V4_GENERATION_RESET_INVALID";
+    throw error;
+  }
+  const currentFrameId = run.parallelFrameIds[event.frameType];
+  const current = currentFrameId ? run.frames[currentFrameId] : null;
+  if (
+    currentFrameId !== event.oldFrameId ||
+    !current ||
+    current.generation !== event.oldGeneration ||
+    current.status !== "INTERRUPTED" ||
+    run.frames[event.newFrameId]
+  ) {
+    const error = new Error("并行接待流 generation reset 与当前 lane 不匹配");
+    error.code = "AGENT_STREAM_V4_GENERATION_RESET_MISMATCH";
+    throw error;
+  }
+  current.status = "RESET";
+  run.parallelFrameIds[event.frameType] = event.newFrameId;
+  if (event.frameType === "DIALOGUE_FRAME") {
+    rebuildV4DialogueProjection(run);
+  }
+}
+
+function applyV4FrameEvent(run, event) {
+  if (V4_DELIVERY_CLASS_BY_EVENT[event.event] !== event.deliveryClass) {
+    const error = new Error("并行接待流事件的投递类型不匹配");
+    error.code = "AGENT_STREAM_V4_DELIVERY_CLASS_INVALID";
+    throw error;
+  }
+  if (event.event === "frame_generation_reset") {
+    resetV4Frame(run, event);
+    return;
+  }
+  if (event.event === "usage") {
+    const selectedFrameId = run.parallelFrameIds[event.frameType];
+    const selectedFrame = selectedFrameId ? run.frames[selectedFrameId] : null;
+    if (
+      !V4_FRAME_TYPES.has(event.frameType) ||
+      !Number.isSafeInteger(event.generation) ||
+      !event.usage ||
+      !selectedFrame ||
+      selectedFrame.generation !== event.generation ||
+      selectedFrame.status !== "SEALED"
+    ) {
+      const error = new Error("并行接待流 usage 无效");
+      error.code = "AGENT_STREAM_V4_USAGE_INVALID";
+      throw error;
+    }
+    run.usageByFrame[event.frameType] = event.usage;
+    run.usage = Object.values(run.usageByFrame).reduce((total, usage) => ({
+      inputTokens: Number(total.inputTokens || 0) + Number(usage.inputTokens || usage.input_tokens || 0),
+      outputTokens: Number(total.outputTokens || 0) + Number(usage.outputTokens || usage.output_tokens || 0),
+      totalTokens: Number(total.totalTokens || 0) + Number(usage.totalTokens || usage.total_tokens || 0),
+    }), { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+    return;
+  }
+
+  const frame = ensureV4Frame(run, event);
+  if (event.event === "public_frame_start") return;
+  if (event.event === "public_frame_projection_item") {
+    if (
+      frame.status !== "STREAMING" ||
+      !Number.isSafeInteger(event.localIndex) ||
+      event.localIndex !== frame.nextLocalIndex ||
+      event.localIndex >= V4_FRAME_ITEM_LIMITS[frame.frameType] ||
+      event.nextLocalIndex !== event.localIndex + 1 ||
+      !event.canonicalItemId ||
+      frame.items[event.canonicalItemId] ||
+      !event.projectionKind ||
+      !event.projectionPathId ||
+      !event.itemSha256 ||
+      !["TEXT", "JSON_VALUE"].includes(event.valueKind) ||
+      (event.valueKind === "TEXT" && !event.publicText) ||
+      (event.valueKind === "JSON_VALUE" && !event.canonicalValueJson)
+    ) {
+      const error = new Error("并行接待流投影项无效或乱序");
+      error.code = "AGENT_STREAM_V4_PROJECTION_ITEM_INVALID";
+      throw error;
+    }
+    let value = event.publicText;
+    if (event.valueKind === "JSON_VALUE") {
+      try {
+        value = JSON.parse(event.canonicalValueJson);
+      } catch (_failure) {
+        const error = new Error("并行接待流 JSON 投影项无效");
+        error.code = "AGENT_STREAM_V4_PROJECTION_JSON_INVALID";
+        throw error;
+      }
+    }
+    validateV4ProjectionContract(frame, event, value);
+    frame.items[event.canonicalItemId] = reactive({
+      canonicalItemId: event.canonicalItemId,
+      projectionKind: event.projectionKind,
+      projectionPathId: event.projectionPathId,
+      valueKind: event.valueKind,
+      value,
+      publicText: event.publicText,
+      itemSha256: event.itemSha256,
+      localIndex: event.localIndex,
+    });
+    frame.itemOrder.push(event.canonicalItemId);
+    frame.nextLocalIndex = event.nextLocalIndex;
+    frame.status = "STREAMING";
+    if (frame.frameType === "DIALOGUE_FRAME") rebuildV4DialogueProjection(run);
+    return;
+  }
+  if (event.event === "active_frame_snapshot") {
+    if (
+      frame.status !== "STREAMING" ||
+      event.nextLocalIndex !== frame.nextLocalIndex ||
+      !Number.isSafeInteger(event.frameRevision) ||
+      event.frameRevision < frame.frameRevision ||
+      !event.projectionSha256
+    ) {
+      const error = new Error("并行接待流快照发生回退");
+      error.code = "AGENT_STREAM_V4_SNAPSHOT_INVALID";
+      throw error;
+    }
+    frame.frameRevision = event.frameRevision;
+    frame.projectionSha256 = event.projectionSha256;
+    return;
+  }
+  if (event.event === "public_frame_sealed") {
+    if (
+      frame.status !== "STREAMING" ||
+      event.nextLocalIndex !== frame.nextLocalIndex ||
+      !event.frameReceiptId ||
+      !event.resultSha256 ||
+      !event.publicProjectionSha256
+    ) {
+      const error = new Error("并行接待流 sealed 证明无效");
+      error.code = "AGENT_STREAM_V4_FRAME_SEALED_INVALID";
+      throw error;
+    }
+    frame.status = "SEALED";
+    frame.frameReceiptId = event.frameReceiptId;
+    frame.resultSha256 = event.resultSha256;
+    frame.publicProjectionSha256 = event.publicProjectionSha256;
+    return;
+  }
+  if (event.event === "public_frame_interrupted") {
+    if (
+      frame.status !== "STREAMING" ||
+      event.nextLocalIndex !== frame.nextLocalIndex ||
+      !event.reasonCode
+    ) {
+      const error = new Error("并行接待流 interrupted 证明无效");
+      error.code = "AGENT_STREAM_V4_FRAME_INTERRUPTED_INVALID";
+      throw error;
+    }
+    frame.status = "INTERRUPTED";
+    frame.retryable = Boolean(event.retryable);
+  }
+}
+
+function requireV4ExactThreeSealed(run) {
+  const complete = [...V4_FRAME_TYPES].every((frameType) => {
+    const frameId = run.parallelFrameIds[frameType];
+    return frameId && run.frames[frameId]?.status === "SEALED";
+  });
+  if (!complete) {
+    const error = new Error("并行接待终态早于三路 sealed 证明");
+    error.code = "AGENT_STREAM_V4_FINAL_BEFORE_EXACT_THREE";
+    throw error;
+  }
+}
+
 function installDisplayPacer(run) {
   run.displayPacer = markRaw(createStreamTextPacer({
     onReveal: (pacedFieldKey, fragment) => {
@@ -336,6 +723,10 @@ function resetAttemptProjection(run, resetAttemptId, nextAttemptId) {
   run.pacedFieldMeta = {};
   run.frames = {};
   run.frameOrder = [];
+  run.parallelFrameIds = {};
+  run.parallelFrameSetReceiptId = "";
+  run.parallelProjectionRegistryVersion = "";
+  run.usageByFrame = {};
   run.replyThenBoardPending = isReplyThenBoardBarrierEnabled(run);
   run.currentAttemptId = nextAttemptId;
   run.pendingAttemptId = "";
@@ -541,6 +932,10 @@ export async function consumeAgentRun({
     cardOrder: [],
     frames: {},
     frameOrder: [],
+    parallelFrameIds: {},
+    parallelFrameSetReceiptId: "",
+    parallelProjectionRegistryVersion: "",
+    usageByFrame: {},
     activeCardKey: "default",
     pacedFieldMeta: {},
     // This presentation policy is intentionally opt-in. Intake enables it so
@@ -592,7 +987,19 @@ export async function consumeAgentRun({
               }
               run.protocol ||= event.protocol;
 
-              const attemptScoped = ["agent-stream.v2", "agent-stream.v3"].includes(event.protocol);
+              const attemptScoped = [
+                "agent-stream.v2",
+                "agent-stream.v3",
+                "agent-stream.v4",
+              ].includes(event.protocol);
+              if (event.protocol === "agent-stream.v4") {
+                run.attempts[event.attemptId] ||= {
+                  startedAt: Date.now(),
+                  hasVisibleOutput: false,
+                };
+                run.attempts[event.attemptId].status = "STREAMING";
+                if (!run.currentAttemptId) run.currentAttemptId = event.attemptId;
+              }
               if (attemptScoped && event.event === "attempt_started") {
                 run.attempts[event.attemptId] ||= {
                   startedAt: Date.now(),
@@ -667,6 +1074,18 @@ export async function consumeAgentRun({
                 run.status = event.event === "public_frame_interrupted"
                   ? "ERROR"
                   : "STREAMING";
+              } else if (
+                event.protocol === "agent-stream.v4" &&
+                V4_FRAME_EVENTS.has(event.event)
+              ) {
+                applyV4FrameEvent(run, event);
+                if (
+                  event.event === "public_frame_projection_item" &&
+                  run.attempts[event.attemptId]
+                ) {
+                  run.attempts[event.attemptId].hasVisibleOutput = true;
+                }
+                run.status = "STREAMING";
               } else if (event.event === "visible_delta") {
                 if (!isVisibleField(event.fieldPath) || !event.delta) {
                   run.seenEventSequences.add(identity);
@@ -747,6 +1166,9 @@ export async function consumeAgentRun({
               } else if (event.event === "generation_reset") {
                 run.status = "STREAMING";
               } else if (event.event === "final") {
+                if (event.protocol === "agent-stream.v4") {
+                  requireV4ExactThreeSealed(run);
+                }
                 terminal = true;
                 await run.displayPacer.drain();
                 if (controller.signal.aborted) {
