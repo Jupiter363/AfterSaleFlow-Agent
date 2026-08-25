@@ -22,6 +22,8 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealReceipt;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetFailureCommand;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetFailureReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSlotView;
@@ -175,7 +177,8 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                         "admit",
                         "plan",
                         "append:PUBLIC_FRAME_START:DIALOGUE_FRAME",
-                        "find-completion");
+                        "find-completion",
+                        "fail:TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
         assertThat(staging.nextSequence).isEqualTo(1L);
     }
 
@@ -225,6 +228,38 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                         TargetE2EGraphClientException.class,
                         failure -> assertThat(failure.errorCode())
                                 .isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED"));
+    }
+
+    @Test
+    void executeNonRetryableFailureTerminalizesItsAdmittedFrameSet() {
+        ExecuteAgentRunRequest request = validParallelRequest();
+        StreamFixture fixture = StreamFixture.complete(request);
+        GraphTransportSecurityProof proof = mutualTlsProof();
+        RecordingStaging staging = new RecordingStaging(request, fixture);
+
+        assertThatThrownBy(() -> client(
+                                request,
+                                proof,
+                                new ExecuteErrorTransport(
+                                        proof,
+                                        fixture,
+                                        "{\"code\":\"GRAPH_BULKHEAD_SCOPE_INVALID\","
+                                                + "\"retryable\":false}"),
+                                staging)
+                        .executeOrResume(
+                                request,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOfSatisfying(
+                        TargetE2EGraphClientException.class,
+                        failure -> assertThat(failure.errorCode())
+                                .isEqualTo("GRAPH_BULKHEAD_SCOPE_INVALID"));
+
+        assertThat(staging.actions)
+                .containsExactly(
+                        "admit",
+                        "plan",
+                        "fail:GRAPH_BULKHEAD_SCOPE_INVALID");
     }
 
     private static HttpTargetE2EIntakeParallelFrameExecutionClient client(
@@ -446,6 +481,44 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         }
     }
 
+    private static final class ExecuteErrorTransport implements GraphCommandHttpTransport {
+
+        private final GraphTransportSecurityProof proof;
+        private final FakeCommandTransport prepared;
+        private final String body;
+
+        private ExecuteErrorTransport(
+                GraphTransportSecurityProof proof, StreamFixture fixture, String body) {
+            this.proof = proof;
+            this.prepared = new FakeCommandTransport(proof, fixture);
+            this.body = body;
+        }
+
+        @Override
+        public GraphTransportSecurityProof transportProof() {
+            return proof;
+        }
+
+        @Override
+        public void stream(
+                Request request,
+                AgentRunCancellationToken cancellationToken,
+                Listener listener) {
+            if ("PREPARE".equals(request.headers().get(
+                    HttpTargetE2EIntakeParallelFrameExecutionClient.PHASE_HEADER))) {
+                prepared.stream(request, cancellationToken, listener);
+                return;
+            }
+            listener.onResponse(new ResponseHead(
+                    409,
+                    request.uri(),
+                    Map.of(
+                            "Content-Type", List.of("application/json; charset=utf-8"),
+                            "Cache-Control", List.of("no-store, no-transform"))));
+            listener.onLine(body);
+        }
+    }
+
     private static final class RecordingStaging implements IntakeParallelFrameStagingPort {
 
         private final ExecuteAgentRunRequest request;
@@ -459,6 +532,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         private FrameSetAdmission admission;
         private long nextSequence;
         private int sealed;
+        private long frameSetVersion;
 
         private RecordingStaging(ExecuteAgentRunRequest request, StreamFixture fixture) {
             this.request = request;
@@ -494,6 +568,18 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                     "FRAME_SET_RECEIPT_V4_1",
                     AssemblyState.COLLECTING,
                     selected);
+        }
+
+        @Override
+        public FrameSetFailureReceipt failUncommitted(FrameSetFailureCommand command) {
+            actions.add("fail:" + command.failureCode());
+            frameSetVersion++;
+            return new FrameSetFailureReceipt(
+                    command.frameSetId(),
+                    "FRAME_SET_FAILURE_RECEIPT_V4_1",
+                    command.failureCode(),
+                    true,
+                    frameSetVersion);
         }
 
         @Override

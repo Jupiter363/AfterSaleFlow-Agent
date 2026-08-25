@@ -26,6 +26,8 @@ public interface IntakeParallelFrameStagingPort {
 
     FrameSetReceipt admit(FrameSetAdmission admission);
 
+    FrameSetFailureReceipt failUncommitted(FrameSetFailureCommand command);
+
     IngressReceipt append(IngressCommand command);
 
     FrameSealReceipt seal(FrameSealCommand command);
@@ -264,6 +266,39 @@ public interface IntakeParallelFrameStagingPort {
             }
             selectedGenerations.values().forEach(
                     value -> positive(Objects.requireNonNull(value, "generation"), "generation"));
+        }
+    }
+
+    record FrameSetFailureCommand(
+            String frameSetId,
+            String runId,
+            String attemptId,
+            String commandId,
+            String commandRequestSha256,
+            String failureCode) {
+
+        public FrameSetFailureCommand {
+            frameSetId = identifier(frameSetId, "frameSetId");
+            runId = identifier(runId, "runId");
+            attemptId = identifier(attemptId, "attemptId");
+            commandId = identifier(commandId, "commandId");
+            commandRequestSha256 = sha256(commandRequestSha256, "commandRequestSha256");
+            failureCode = identifier(failureCode, "failureCode");
+        }
+    }
+
+    record FrameSetFailureReceipt(
+            String frameSetId,
+            String receiptId,
+            String failureCode,
+            boolean inserted,
+            long frameSetVersion) {
+
+        public FrameSetFailureReceipt {
+            frameSetId = identifier(frameSetId, "frameSetId");
+            receiptId = identifier(receiptId, "receiptId");
+            failureCode = identifier(failureCode, "failureCode");
+            nonNegative(frameSetVersion, "frameSetVersion");
         }
     }
 

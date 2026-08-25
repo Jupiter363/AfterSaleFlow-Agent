@@ -118,6 +118,23 @@ class JdbcIntakeParallelFrameStagingStoreContractTest {
                 .doesNotContain("admission.roomid().equals(text(row, \"room_epoch_id\"))");
     }
 
+    @Test
+    void terminalizesOnlyTheExactUncommittedParallelAttemptAndReplaysItsFailure()
+            throws Exception {
+        String source = normalizedSource();
+
+        assertThat(source)
+                .contains("public framesetfailurereceipt failuncommitted")
+                .contains("for update of frame_set, attempt")
+                .contains("command.commandrequestsha256()")
+                .contains("\"agent-stream.v4\".equals(text(row, \"protocol\"))")
+                .contains("\"uncommitted\".equals(text(row, \"finalization_status\"))")
+                .contains("assembly_state = 'failed_uncommitted'")
+                .contains("and assembly_state = 'collecting'")
+                .contains("and version = :expectedversion")
+                .contains("intake_parallel_failure_replay_conflict");
+    }
+
     private static String normalizedSource() throws Exception {
         return Files.readString(SOURCE)
                 .replace("\r\n", "\n")

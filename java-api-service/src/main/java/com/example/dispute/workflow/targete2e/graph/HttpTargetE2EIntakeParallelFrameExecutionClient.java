@@ -11,6 +11,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameManifest;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealCommand;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetFailureCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameType;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionAction;
@@ -142,63 +143,96 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                 roomFencingToken,
                 registryBinding,
                 cancellationToken);
-        if (prepared.executionPlan().allSealed()) {
-            var completion = staging
-                    .findExactThreeCompletion(
-                            prepared.executionPlan().frameSetId(),
-                            request.agentRunId(),
-                            request.attemptId())
-                    .orElseThrow(() -> TargetE2EGraphClientException.protocol(
-                            "parallel all-sealed completion is absent", null));
-            return new FrameExecutionReceipt(
-                    completion.frameSetId(),
-                    completion.lastSequenceNo(),
-                    completion.publicOutputEmitted());
-        }
-        TargetE2ESealedGraphCommand sealed = envelopeCodec.sealParallelCommand(
-                activationId,
-                roomFencingToken,
-                command,
-                registryBinding,
-                signer,
-                TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.execute(
-                        prepared.encodedReceipt().receiptSha256()));
-        StreamSession session = new StreamSession(
-                request,
-                sealed.envelope(),
-                progressListener,
-                cancellationToken,
-                prepared.executionAuthority(),
-                prepared.frameSetReceipt(),
-                prepared.executionPlan(),
-                prepared.encodedReceipt().receiptSha256());
-        GraphCommandHttpTransport.Request transportRequest = new GraphCommandHttpTransport.Request(
-                endpoint,
-                requestHeaders(sealed, "EXECUTE", prepared.encodedReceipt().headerValue()),
-                sealed.body(),
-                timeout,
-                GraphCommandHttpTransport.MAXIMUM_PARALLEL_LINE_BYTES,
-                GraphCommandHttpTransport.MAXIMUM_RESPONSE_BYTES);
         try {
-            transport.stream(transportRequest, cancellationToken, session);
-            cancellationToken.throwIfCancellationRequested();
-            return session.finish();
-        } catch (TargetE2EGraphClientException failure) {
-            throw failure;
-        } catch (GraphCommandTransportException failure) {
-            cancellationToken.throwIfCancellationRequested();
-            if (failure.protocolViolation()) {
-                throw TargetE2EGraphClientException.protocol(
-                        "parallel target Graph transport violated the protocol", failure);
+            if (prepared.executionPlan().allSealed()) {
+                var completion = staging
+                        .findExactThreeCompletion(
+                                prepared.executionPlan().frameSetId(),
+                                request.agentRunId(),
+                                request.attemptId())
+                        .orElseThrow(() -> TargetE2EGraphClientException.protocol(
+                                "parallel all-sealed completion is absent", null));
+                return new FrameExecutionReceipt(
+                        completion.frameSetId(),
+                        completion.lastSequenceNo(),
+                        completion.publicOutputEmitted());
             }
-            throw TargetE2EGraphClientException.transport(
-                    "parallel target Graph transport failed", failure);
-        } catch (IllegalArgumentException failure) {
-            throw TargetE2EGraphClientException.protocol(
-                    "parallel target Graph stream is invalid", failure);
-        } catch (RuntimeException failure) {
-            cancellationToken.throwIfCancellationRequested();
+            TargetE2ESealedGraphCommand sealed = envelopeCodec.sealParallelCommand(
+                    activationId,
+                    roomFencingToken,
+                    command,
+                    registryBinding,
+                    signer,
+                    TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.execute(
+                            prepared.encodedReceipt().receiptSha256()));
+            StreamSession session = new StreamSession(
+                    request,
+                    sealed.envelope(),
+                    progressListener,
+                    cancellationToken,
+                    prepared.executionAuthority(),
+                    prepared.frameSetReceipt(),
+                    prepared.executionPlan(),
+                    prepared.encodedReceipt().receiptSha256());
+            GraphCommandHttpTransport.Request transportRequest =
+                    new GraphCommandHttpTransport.Request(
+                            endpoint,
+                            requestHeaders(
+                                    sealed,
+                                    "EXECUTE",
+                                    prepared.encodedReceipt().headerValue()),
+                            sealed.body(),
+                            timeout,
+                            GraphCommandHttpTransport.MAXIMUM_PARALLEL_LINE_BYTES,
+                            GraphCommandHttpTransport.MAXIMUM_RESPONSE_BYTES);
+            try {
+                transport.stream(transportRequest, cancellationToken, session);
+                cancellationToken.throwIfCancellationRequested();
+                return session.finish();
+            } catch (GraphCommandTransportException failure) {
+                cancellationToken.throwIfCancellationRequested();
+                if (failure.protocolViolation()) {
+                    throw TargetE2EGraphClientException.protocol(
+                            "parallel target Graph transport violated the protocol", failure);
+                }
+                throw TargetE2EGraphClientException.transport(
+                        "parallel target Graph transport failed", failure);
+            } catch (IllegalArgumentException failure) {
+                throw TargetE2EGraphClientException.protocol(
+                        "parallel target Graph stream is invalid", failure);
+            } catch (RuntimeException failure) {
+                cancellationToken.throwIfCancellationRequested();
+                throw failure;
+            }
+        } catch (TargetE2EGraphClientException failure) {
+            if (failure.recoveryAction()
+                    == TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN) {
+                terminalizeUncommittedFailure(request, prepared, failure);
+            }
             throw failure;
+        }
+    }
+
+    private void terminalizeUncommittedFailure(
+            ExecuteAgentRunRequest request,
+            PreparedAdmission prepared,
+            TargetE2EGraphClientException failure) {
+        try {
+            staging.failUncommitted(new FrameSetFailureCommand(
+                    prepared.executionPlan().frameSetId(),
+                    request.agentRunId(),
+                    request.attemptId(),
+                    request.command().commandId(),
+                    request.command().requestHash(),
+                    failure.errorCode()));
+        } catch (RuntimeException stagingFailure) {
+            TargetE2EGraphClientException retry = TargetE2EGraphClientException.remote(
+                    "INTAKE_PARALLEL_FAILURE_FINALIZATION_RETRY_REQUIRED",
+                    true,
+                    "parallel technical failure could not be durably finalized");
+            retry.addSuppressed(failure);
+            retry.addSuppressed(stagingFailure);
+            throw retry;
         }
     }
 

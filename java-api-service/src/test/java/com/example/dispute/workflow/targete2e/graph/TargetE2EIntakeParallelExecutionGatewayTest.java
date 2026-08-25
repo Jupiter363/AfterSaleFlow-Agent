@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.targete2e.graph;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -12,6 +13,8 @@ import static org.mockito.Mockito.when;
 import com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures;
 import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClient;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ProgressListener;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ExecutionMode;
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.AssemblyConflictException;
@@ -20,6 +23,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalReceipt;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
@@ -96,6 +100,44 @@ class TargetE2EIntakeParallelExecutionGatewayTest {
         verify(frames, never()).executeOrResume(any(), any(), any());
         verify(coordinator, never()).assembleReady(any(), any(), any());
         verify(reconciliation).reconcile(eq(request), any());
+    }
+
+    @Test
+    void preservesRemoteFailureAuthorityAndDurableParallelProgress() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        IntakeParallelFrameExecutionClient frames = mock(IntakeParallelFrameExecutionClient.class);
+        TargetE2EIntakeParallelAssemblyCoordinator coordinator =
+                mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
+        AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
+        IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(reconciliation.reconcile(eq(request), any()))
+                .thenThrow(new AssemblyConflictException(
+                        "INTAKE_PARALLEL_READY_MISSING", "not ready"));
+        when(frames.executeOrResume(eq(request), any(), any())).thenAnswer(invocation -> {
+            ProgressListener listener = invocation.getArgument(1);
+            listener.onProgress(new AgentRunProgress(2L, true, false));
+            throw TargetE2EGraphClientException.remote(
+                    "GRAPH_BULKHEAD_SCOPE_INVALID", false, "rejected");
+        });
+        List<AgentRunProgress> progress = new ArrayList<>();
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                () -> new TargetE2EIntakeParallelExecutionGateway(
+                                frames, coordinator, reconciliation, terminal)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                progress::add,
+                                new AgentRunCancellationToken()),
+                AgentRunExecutionException.class);
+
+        assertThat(failure.errorCode()).isEqualTo("GRAPH_BULKHEAD_SCOPE_INVALID");
+        assertThat(failure.recoveryAction()).isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+        assertThat(failure.lastSequenceNo()).isEqualTo(2L);
+        assertThat(failure.publicOutputEmitted()).isTrue();
+        assertThat(progress).hasSize(1);
+        verify(coordinator, never()).assembleReady(any(), any(), any());
+        verify(terminal, never()).appendOrLoad(any());
     }
 
     private static GraphReconcileResponse response(ExecuteAgentRunRequest request) {

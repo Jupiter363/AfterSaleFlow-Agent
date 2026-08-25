@@ -2,6 +2,7 @@ package com.example.dispute.workflow.targete2e.graph;
 
 import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClient;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.AssemblyConflictException;
@@ -50,25 +51,30 @@ public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunEx
         Objects.requireNonNull(cancellationToken, "cancellationToken")
                 .throwIfCancellationRequested();
 
-        GraphReconcileResponse reconciliation;
-        if (executionMode == ExecutionMode.RECONCILE_ONLY) {
-            reconciliation = reconciliationClient.reconcile(request, cancellationToken);
-        } else {
-            reconciliation = readyOrExecute(
-                    request, progressListener, cancellationToken);
+        ProgressTracker progress = new ProgressTracker(progressListener);
+        try {
+            GraphReconcileResponse reconciliation;
+            if (executionMode == ExecutionMode.RECONCILE_ONLY) {
+                reconciliation = reconciliationClient.reconcile(request, cancellationToken);
+            } else {
+                reconciliation = readyOrExecute(request, progress, cancellationToken);
+            }
+            cancellationToken.throwIfCancellationRequested();
+            TerminalReceipt terminal = terminalStore.appendOrLoad(
+                    new TerminalCommand(request, reconciliation));
+            progress.onProgress(new AgentRunProgress(
+                    terminal.result().lastSequenceNo(),
+                    terminal.result().publicOutputEmitted(),
+                    true));
+            return new Completion(
+                    terminal.result().graphResult(),
+                    terminal.result().lastSequenceNo(),
+                    terminal.result().publicOutputEmitted(),
+                    terminal.result());
+        } catch (TargetE2EGraphClientException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            throw executionFailure(failure, progress);
         }
-        cancellationToken.throwIfCancellationRequested();
-        TerminalReceipt terminal = terminalStore.appendOrLoad(
-                new TerminalCommand(request, reconciliation));
-        progressListener.onProgress(new AgentRunProgress(
-                terminal.result().lastSequenceNo(),
-                terminal.result().publicOutputEmitted(),
-                true));
-        return new Completion(
-                terminal.result().graphResult(),
-                terminal.result().lastSequenceNo(),
-                terminal.result().publicOutputEmitted(),
-                terminal.result());
     }
 
     private GraphReconcileResponse readyOrExecute(
@@ -98,6 +104,54 @@ public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunEx
                 || !"agent-stream.v4".equals(request.streamProtocol())) {
             throw new IllegalArgumentException(
                     "parallel Intake gateway requires the explicit V4 profile");
+        }
+    }
+
+    private static AgentRunExecutionException executionFailure(
+            TargetE2EGraphClientException failure, ProgressTracker progress) {
+        return switch (failure.recoveryAction()) {
+            case RETRY_SAME_SEALED_COMMAND -> AgentRunExecutionException.retrySameCommand(
+                    failure.errorCode(),
+                    "target Graph requested replay of the same parallel command",
+                    progress.lastSequenceNo,
+                    progress.publicOutputEmitted,
+                    failure);
+            case CREATE_NEXT_ATTEMPT -> AgentRunExecutionException.createNextAttempt(
+                    failure.errorCode(),
+                    "target Graph durably aborted the current parallel attempt",
+                    progress.lastSequenceNo,
+                    progress.publicOutputEmitted,
+                    failure);
+            case RECONCILE_SEALED_COMMAND -> AgentRunExecutionException.reconcileTerminal(
+                    failure.errorCode(),
+                    "target Graph requires parallel terminal reconciliation",
+                    progress.lastSequenceNo,
+                    progress.publicOutputEmitted,
+                    failure);
+            case FAIL_LOGICAL_RUN -> AgentRunExecutionException.failLogicalRun(
+                    failure.errorCode(),
+                    "target Graph rejected the immutable parallel command",
+                    progress.lastSequenceNo,
+                    progress.publicOutputEmitted,
+                    failure);
+        };
+    }
+
+    private static final class ProgressTracker implements ProgressListener {
+        private final ProgressListener delegate;
+        private long lastSequenceNo = -1;
+        private boolean publicOutputEmitted;
+
+        private ProgressTracker(ProgressListener delegate) {
+            this.delegate = Objects.requireNonNull(delegate, "delegate");
+        }
+
+        @Override
+        public void onProgress(AgentRunProgress progress) {
+            AgentRunProgress required = Objects.requireNonNull(progress, "progress");
+            lastSequenceNo = Math.max(lastSequenceNo, required.lastSequenceNo());
+            publicOutputEmitted |= required.publicOutputEmitted();
+            delegate.onProgress(required);
         }
     }
 }

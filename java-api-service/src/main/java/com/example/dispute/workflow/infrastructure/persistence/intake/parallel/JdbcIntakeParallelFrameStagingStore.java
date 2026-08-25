@@ -16,6 +16,8 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealReceipt;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetFailureCommand;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetFailureReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSlotView;
@@ -162,6 +164,38 @@ public class JdbcIntakeParallelFrameStagingStore
              where frame_set_id = :frameSetId
                and frame_generation = 1
              order by frame_type, frame_generation
+            """;
+
+    private static final String LOCK_FRAME_SET_FAILURE_SQL =
+            """
+            select frame_set.frame_set_id, frame_set.agent_run_id,
+                   frame_set.agent_run_attempt_id, frame_set.command_id,
+                   frame_set.command_request_sha256, frame_set.assembly_state,
+                   frame_set.failure_code, frame_set.version,
+                   attempt.command_id as attempt_command_id,
+                   attempt.command_request_hash as attempt_command_request_hash,
+                   run.protocol, run.finalization_status
+              from intake_parallel_frame_set frame_set
+              join agent_run_attempt attempt
+                on attempt.id = frame_set.agent_run_attempt_id
+               and attempt.agent_run_id = frame_set.agent_run_id
+              join agent_run run on run.id = frame_set.agent_run_id
+             where frame_set.frame_set_id = :frameSetId
+             for update of frame_set, attempt
+            """;
+
+    private static final String FAIL_FRAME_SET_SQL =
+            """
+            update intake_parallel_frame_set
+               set assembly_state = 'FAILED_UNCOMMITTED',
+                   failure_code = :failureCode,
+                   failed_at = clock_timestamp(),
+                   updated_at = clock_timestamp(),
+                   version = version + 1
+             where frame_set_id = :frameSetId
+               and assembly_state = 'COLLECTING'
+               and version = :expectedVersion
+            returning version
             """;
 
     private static final String LOAD_SLOTS_SQL =
@@ -482,6 +516,72 @@ public class JdbcIntakeParallelFrameStagingStore
                 deterministicId("IPFSR", admission.frameSetId()),
                 AssemblyState.COLLECTING,
                 selected);
+    }
+
+    @Override
+    @Transactional(
+            propagation = Propagation.REQUIRES_NEW,
+            isolation = Isolation.READ_COMMITTED)
+    public FrameSetFailureReceipt failUncommitted(FrameSetFailureCommand command) {
+        Objects.requireNonNull(command, "command");
+        MapSqlParameterSource parameters = new MapSqlParameterSource()
+                .addValue("frameSetId", command.frameSetId())
+                .addValue("failureCode", command.failureCode());
+        List<Map<String, Object>> matches = jdbc.queryForList(
+                LOCK_FRAME_SET_FAILURE_SQL, parameters);
+        if (matches.size() != 1) {
+            throw conflict(
+                    "INTAKE_PARALLEL_FAILURE_FRAME_SET_MISSING",
+                    "parallel failure does not bind exactly one Frame set");
+        }
+        Map<String, Object> row = matches.getFirst();
+        boolean exactIdentity = command.frameSetId().equals(text(row, "frame_set_id"))
+                && command.runId().equals(text(row, "agent_run_id"))
+                && command.attemptId().equals(text(row, "agent_run_attempt_id"))
+                && command.commandId().equals(text(row, "command_id"))
+                && command.commandRequestSha256()
+                        .equals(text(row, "command_request_sha256"))
+                && command.commandId().equals(text(row, "attempt_command_id"))
+                && command.commandRequestSha256()
+                        .equals(text(row, "attempt_command_request_hash"))
+                && "agent-stream.v4".equals(text(row, "protocol"))
+                && "UNCOMMITTED".equals(text(row, "finalization_status"));
+        if (!exactIdentity) {
+            throw conflict(
+                    "INTAKE_PARALLEL_FAILURE_AUTHORITY_DRIFT",
+                    "parallel failure differs from its immutable attempt authority");
+        }
+        long version = number(row, "version");
+        String receiptId = deterministicId(
+                "IPFFR", command.frameSetId() + "|" + command.failureCode());
+        String state = text(row, "assembly_state");
+        if ("FAILED_UNCOMMITTED".equals(state)) {
+            if (!command.failureCode().equals(nullableText(row, "failure_code"))) {
+                throw conflict(
+                        "INTAKE_PARALLEL_FAILURE_REPLAY_CONFLICT",
+                        "parallel failure replay changed its terminal code");
+            }
+            return new FrameSetFailureReceipt(
+                    command.frameSetId(), receiptId, command.failureCode(), false, version);
+        }
+        if (!"COLLECTING".equals(state) || nullableText(row, "failure_code") != null) {
+            throw conflict(
+                    "INTAKE_PARALLEL_FAILURE_STATE_CONFLICT",
+                    "only a collecting Frame set may fail uncommitted");
+        }
+        parameters.addValue("expectedVersion", version);
+        List<Map<String, Object>> updated = jdbc.queryForList(FAIL_FRAME_SET_SQL, parameters);
+        if (updated.size() != 1) {
+            throw conflict(
+                    "INTAKE_PARALLEL_FAILURE_CAS_REJECTED",
+                    "parallel failure did not atomically terminalize its Frame set");
+        }
+        return new FrameSetFailureReceipt(
+                command.frameSetId(),
+                receiptId,
+                command.failureCode(),
+                true,
+                number(updated.getFirst(), "version"));
     }
 
     @Override
