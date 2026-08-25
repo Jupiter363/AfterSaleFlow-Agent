@@ -653,7 +653,7 @@ class GraphCommandGateway:
                 or attempt != execution.attempt
                 or attempt is None
                 or attempt.status is not AttemptStatus.EXECUTING
-                or attempt.fencing_token != 1
+                or attempt.fencing_token != execution.fence.fencing_token
                 or attempt.provider_call_count != 0
                 or lease is None
                 or not lease.active
@@ -816,7 +816,6 @@ class GraphCommandGateway:
                     if (
                         prior_cycle is not None
                         or receipt_cycle is not None
-                        or candidate.fencing_token != 1
                         or attempt.provider_call_count != 0
                     ):
                         raise GraphNewAgentAttemptRequiredError(

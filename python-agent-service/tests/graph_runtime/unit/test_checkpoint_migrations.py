@@ -46,6 +46,7 @@ def test_repository_migrations_are_exact_ordered_and_hash_bound() -> None:
         "G011",
         "G012",
         "G013",
+        "G014",
     )
     assert all(len(migration.sha256) == 64 for migration in migrations)
     assert len(graph_application_signature(migrations)) == 64

@@ -138,6 +138,7 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G011",
         "G012",
         "G013",
+        "G014",
     }
 
     second = await _migration_runner(graph_database).run()
@@ -156,6 +157,7 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G011",
         "G012",
         "G013",
+        "G014",
     )
 
     restore = await GraphRestoreValidationRunner(

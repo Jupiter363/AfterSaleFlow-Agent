@@ -2288,6 +2288,85 @@ class _ParallelTakeoverLedger:
         return self.command, self.attempt
 
 
+class _InitialParallelReceiptLedger:
+    def __init__(self, execution: GatewayExecution) -> None:
+        self.command = execution.admission.record
+        self.attempt = execution.attempt
+        self.stored: ParallelReceiptExecutionRecord | None = None
+
+    async def load(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        return self.command
+
+    @staticmethod
+    def require_same_binding(actual: CommandBinding, expected: CommandBinding) -> None:
+        assert actual == expected
+
+    async def latest_attempt(self, connection: Any, **kwargs: Any) -> AttemptRecord:
+        return self.attempt
+
+    async def store_parallel_receipt_execution(
+        self,
+        connection: Any,
+        *,
+        execution_attempt: AttemptRecord,
+        receipt_execution: ParallelReceiptExecutionRecord,
+    ) -> ParallelReceiptExecutionRecord:
+        assert execution_attempt == self.attempt
+        self.stored = receipt_execution
+        return receipt_execution
+
+
+class _InitialParallelReceiptLeases:
+    def __init__(self, execution: GatewayExecution) -> None:
+        self.execution = execution
+
+    async def lock_for_recovery(self, connection: Any, **kwargs: Any) -> LeaseInspection:
+        assert kwargs["thread_id"] == self.execution.fence.thread_id
+        return LeaseInspection(
+            lease=self.execution.lease,
+            database_now=self.execution.lease.renewed_at + timedelta(seconds=1),
+        )
+
+
+@pytest.mark.asyncio
+async def test_initial_parallel_receipt_accepts_thread_scoped_nonfirst_fence() -> None:
+    initial = _parallel_execution(provider_call_count=0)
+    execution = GatewayExecution(
+        replace(
+            initial.admission,
+            record=replace(initial.admission.record, fencing_token=2),
+        ),
+        replace(initial.attempt, fencing_token=2),
+        replace(initial.lease, fencing_token=2, revision=1),
+        replace(initial.fence, fencing_token=2),
+        initial.thread_record,
+    )
+    pool = _Pool()
+    ledger = _InitialParallelReceiptLedger(execution)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=_InitialParallelReceiptLeases(execution),  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+    receipt = _parallel_receipt(execution)
+
+    bound = await gateway.bind_parallel_receipt_execution(
+        execution,
+        frame_set_id=receipt["frame_set_id"],
+        receipt_sha256=receipt["receipt_sha256"],
+        authority_sha256=receipt["authority_sha256"],
+    )
+
+    assert bound == execution
+    assert ledger.stored is not None
+    assert ledger.stored.fencing_token == 2
+    assert ledger.stored.owner_id == execution.fence.owner_id
+    assert "transaction:commit" in pool.events
+
+
 class _ParallelTakeoverLeases:
     def __init__(self, execution: GatewayExecution) -> None:
         self.old = execution.lease

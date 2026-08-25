@@ -400,19 +400,12 @@ class ParallelReceiptExecutionRecord:
             or self.provider_call_count_at_admission < 0
         ):
             raise GraphContractError("parallel receipt execution fence is invalid")
-        if self.fencing_token == 1:
-            if (
-                self.predecessor_cycle_id is not None
-                or self.predecessor_execution_id is not None
-            ):
-                raise GraphTerminalBindingError(
-                    "initial parallel receipt execution cannot have a predecessor"
-                )
-        elif (self.predecessor_cycle_id is None) == (
-            self.predecessor_execution_id is None
+        if (
+            self.predecessor_cycle_id is not None
+            and self.predecessor_execution_id is not None
         ):
             raise GraphTerminalBindingError(
-                "parallel receipt execution requires one exact predecessor"
+                "parallel receipt execution cannot have two predecessors"
             )
         if self.execution_id != self.execution_id_for_receipt(
             self.receipt_sha256,

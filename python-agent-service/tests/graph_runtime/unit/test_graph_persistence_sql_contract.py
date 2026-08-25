@@ -144,6 +144,27 @@ def test_lease_insert_starts_at_one_and_updates_keep_the_fence_monotonic() -> No
     assert "lease_expires_at <= renewed_at + interval '60 seconds'" in lease_upgrade
 
 
+def test_parallel_receipt_lineage_is_independent_of_the_thread_fence_origin() -> None:
+    sql_text = _compact(
+        _sql("G014_parallel_receipt_lineage_authority.sql")
+    )
+
+    assert "drop constraint ck_agent_graph_parallel_execution_fence" in sql_text
+    assert "add constraint ck_agent_graph_parallel_execution_fence" in sql_text
+    assert re.search(
+        r"not\s*\(\s*predecessor_cycle_id is not null and "
+        r"predecessor_execution_id is not null\s*\)",
+        sql_text,
+    )
+    assert "new.fencing_token = 1" not in sql_text
+    assert (
+        "new.predecessor_cycle_id is null and "
+        "new.predecessor_execution_id is null and "
+        "attempt.fencing_token = new.fencing_token"
+    ) in sql_text
+    assert "prior.attempt_id = new.attempt_id" in sql_text
+
+
 def test_cancelled_released_and_expired_leases_allow_exactly_one_fenced_takeover() -> None:
     sql_text = _sql("G001_graph_runtime.sql")
     guard = _function(sql_text, "guard_agent_graph_lease_update()")

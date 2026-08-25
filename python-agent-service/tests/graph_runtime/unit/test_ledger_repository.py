@@ -1187,6 +1187,42 @@ def test_parallel_receipt_execution_and_successor_are_deterministic() -> None:
     )
     assert execution.execution_id == cycle.execution_id
 
+    initial_at_thread_fence_two = ParallelReceiptExecutionRecord.create(
+        thread_id=THREAD,
+        command_id="command-1",
+        request_hash="a" * 64,
+        attempt_id="attempt-1",
+        frame_set_id="IPFS_123",
+        receipt_sha256="f" * 64,
+        authority_sha256="c" * 64,
+        predecessor_cycle_id=None,
+        provider_call_count_at_admission=0,
+        owner_id="python:initial-fence-two",
+        fencing_token=2,
+    )
+    assert initial_at_thread_fence_two.predecessor_cycle_id is None
+    assert initial_at_thread_fence_two.predecessor_execution_id is None
+    assert initial_at_thread_fence_two.fencing_token == 2
+
+    with pytest.raises(
+        GraphTerminalBindingError,
+        match="cannot have two predecessors",
+    ):
+        ParallelReceiptExecutionRecord.create(
+            thread_id=THREAD,
+            command_id="command-1",
+            request_hash="a" * 64,
+            attempt_id="attempt-1",
+            frame_set_id="IPFS_123",
+            receipt_sha256="0" * 64,
+            authority_sha256="c" * 64,
+            predecessor_cycle_id="parallel-receipt-cycle.prior",
+            predecessor_execution_id=execution.execution_id,
+            provider_call_count_at_admission=0,
+            owner_id="python:invalid-lineage",
+            fencing_token=3,
+        )
+
     adopted = ParallelReceiptExecutionRecord.create(
         thread_id=THREAD,
         command_id="command-1",
