@@ -188,6 +188,48 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
     }
 
     @Test
+    void explicitBoundStreamFailurePreservesPrefixAndReturnsItsTypedCode() {
+        ExecuteAgentRunRequest request = validParallelRequest();
+        StreamFixture complete = StreamFixture.complete(request);
+        StreamFixture failed = complete.withLines(List.of(
+                complete.lines().getFirst(),
+                streamFailure(
+                        request,
+                        complete,
+                        "INTAKE_PARALLEL_STREAM_FAILED",
+                        false)));
+        GraphTransportSecurityProof proof = mutualTlsProof();
+        RecordingStaging staging = new RecordingStaging(request, failed);
+
+        assertThatThrownBy(() -> client(
+                                request,
+                                proof,
+                                new FakeCommandTransport(proof, failed),
+                                staging)
+                        .executeOrResume(
+                                request,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOfSatisfying(
+                        TargetE2EGraphClientException.class,
+                        failure -> {
+                            assertThat(failure.errorCode())
+                                    .isEqualTo("INTAKE_PARALLEL_STREAM_FAILED");
+                            assertThat(failure.recoveryAction())
+                                    .isEqualTo(
+                                            TargetE2EGraphClientException.RecoveryAction
+                                                    .FAIL_LOGICAL_RUN);
+                        });
+
+        assertThat(staging.actions)
+                .containsExactly(
+                        "admit",
+                        "plan",
+                        "append:PUBLIC_FRAME_START:DIALOGUE_FRAME")
+                .doesNotContain("find-completion");
+    }
+
+    @Test
     void retryableInterruptedLanePreservesSealedSiblingsAndRequestsOnlyLaneReplay() {
         ExecuteAgentRunRequest request = validParallelRequest();
         StreamFixture complete = StreamFixture.complete(request);
@@ -1561,6 +1603,27 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         root.put("old_frame_id", previous.frameId());
         root.put("new_frame_id", replacement.frameId());
         root.put("reason_code", "OUTPUT_SCHEMA_INVALID");
+        return ContractJson.canonicalString(root);
+    }
+
+    private static String streamFailure(
+            ExecuteAgentRunRequest request,
+            StreamFixture fixture,
+            String errorCode,
+            boolean retryable) {
+        var codec = new TargetE2EIntakeParallelTransportCodec(
+                TargetE2EGraphTestFixtures.MAPPER);
+        String authorityHash = codec.decodeAuthority(fixture.authorityHeader())
+                .authoritySha256();
+        ObjectNode root = TargetE2EGraphTestFixtures.MAPPER.createObjectNode();
+        root.put("schema_version", TargetE2EIntakeParallelTransportCodec.FAILURE_SCHEMA);
+        root.put("event_kind", "PARALLEL_STREAM_FAILED");
+        root.put("frame_set_id", fixture.frameSetId());
+        root.put("run_id", request.agentRunId());
+        root.put("attempt_id", request.attemptId());
+        root.put("authority_sha256", authorityHash);
+        root.put("error_code", errorCode);
+        root.put("retryable", retryable);
         return ContractJson.canonicalString(root);
     }
 

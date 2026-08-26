@@ -28,6 +28,7 @@ from app.graphs.intake.parallel_graph import (
 )
 from app.graphs.intake.parallel_outputs import validate_parallel_frame_output
 from app.graph_runtime.identity import ThreadIdentity
+from app.graph_runtime.errors import GraphRuntimeError
 from app.graph_runtime.target_e2e import VerifiedTargetE2EInvocation
 from app.contracts.v1.models import RoomGraphCommand
 
@@ -663,6 +664,40 @@ def encode_parallel_frame_event(
     return canonicalize(event.model_dump(mode="json", exclude_none=True)) + b"\n"
 
 
+def encode_parallel_stream_failure(
+    validator: ParallelFrameStreamProtocolValidator,
+    error: BaseException,
+) -> bytes:
+    """Encode a bound public-safe failure after the HTTP success metadata was sent."""
+
+    authority = validator.authority
+    if isinstance(error, GraphRuntimeError):
+        error_code = error.code
+        retryable = bool(error.retryable)
+    elif isinstance(error, ParallelFrameStreamProtocolError):
+        error_code = "GRAPH_STREAM_PROTOCOL_REJECTED"
+        retryable = False
+    else:
+        error_code = "GRAPH_STREAM_INTERNAL_ERROR"
+        retryable = False
+    if not isinstance(error_code, str) or re.fullmatch(
+        r"[A-Z][A-Z0-9_]{2,127}", error_code
+    ) is None:
+        error_code = "GRAPH_STREAM_INTERNAL_ERROR"
+        retryable = False
+    document: dict[str, object] = {
+        "schema_version": "intake.parallel-stream-failure.v1",
+        "event_kind": "PARALLEL_STREAM_FAILED",
+        "frame_set_id": authority.frame_set_id,
+        "run_id": authority.run_id,
+        "attempt_id": authority.attempt_id,
+        "authority_sha256": parallel_frame_authority_sha256(authority),
+        "error_code": error_code,
+        "retryable": retryable,
+    }
+    return canonicalize(document) + b"\n"
+
+
 def encode_parallel_frame_authority_header(
     authority: ParallelFrameStreamAuthority,
 ) -> str:
@@ -873,9 +908,15 @@ async def stream_parallel_frame_ndjson(
 ) -> AsyncIterator[bytes]:
     try:
         yield first_line
-        async for event in iterator:
-            yield encode_parallel_frame_event(validator, event)
-        validator.finish()
+        try:
+            async for event in iterator:
+                yield encode_parallel_frame_event(validator, event)
+            validator.finish()
+        except Exception as error:
+            # HTTP status and the first technical event are already visible.  Emit one
+            # strict authority-bound failure record so Java cannot mistake the end for
+            # a clean 200 EOF.  This record never represents a Frame seal/completion.
+            yield encode_parallel_stream_failure(validator, error)
     finally:
         await _close_iterator_safely(iterator)
 
@@ -919,6 +960,7 @@ __all__ = [
     "decode_parallel_admission_receipt_header",
     "encode_parallel_frame_authority_header",
     "encode_parallel_frame_event",
+    "encode_parallel_stream_failure",
     "parallel_frame_authority_sha256",
     "stream_parallel_frame_ndjson",
 ]

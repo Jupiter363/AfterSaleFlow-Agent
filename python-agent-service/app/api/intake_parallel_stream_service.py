@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
 import re
 from typing import Any, Protocol, cast
 
@@ -77,7 +78,22 @@ _EVENT_ADAPTER = TypeAdapter(ParallelFrameTechnicalEvent)
 _SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _QUEUE_CAPACITY = 32
 _RUNNER_TERMINAL = object()
+_OWNED_STREAM_TERMINAL = object()
+_SESSION_CLOSE_GRACE_SECONDS = 1.0
+# The exact protocol can emit at most 35 events: three starts, 20 bounded public
+# projection items, three seals, and at most one interruption/reset/replacement-start
+# triplet per lane. Keep deliberate headroom while retaining an enforcing boundary.
+_SESSION_EVENT_CAPACITY = 64
+_SESSION_BYTE_CAPACITY = 8 * 1024 * 1024
 _SUBSET_TECHNICAL_COMPLETION_SCHEMA = "intake-parallel-technical-completion.v2"
+
+
+class _ParallelFrameBatchStreamError(GraphContractError):
+    code = "INTAKE_PARALLEL_FRAME_BATCH_FAILED"
+
+    def __init__(self, *, retryable: bool) -> None:
+        self.retryable = retryable
+        super().__init__(self.code)
 
 
 class _ParallelGateway(Protocol):
@@ -318,6 +334,149 @@ class _FairFrameMergeQueue:
             await self._available.wait()
 
 
+@dataclass(frozen=True, slots=True)
+class _QueuedParallelEvent:
+    event: ParallelFrameTechnicalEvent
+    encoded_size: int
+
+
+class _ServiceOwnedParallelStream:
+    """Run a live parallel stream independently from its HTTP response iterator.
+
+    The underlying exact-three execution owns leases, provider permits, child Graph
+    checkpoints, and durable technical completion.  None of those authorities may be
+    abandoned merely because an ASGI response iterator stops being polled after a
+    generation reset.  A service-owned task therefore drains the source into an
+    in-memory replay queue while the response iterator is only a consumer.
+
+    The source already retains its complete event log for the durable completion, so
+    this queue does not introduce a new unbounded provider surface: every accepted
+    event belongs to the fixed exact-three, schema-bounded Frame protocol.
+    """
+
+    def __init__(
+        self,
+        *,
+        gate: GraphStreamAdmissionGate,
+        source: AsyncIterator[ParallelFrameTechnicalEvent],
+        task_name: str,
+    ) -> None:
+        self._gate = gate
+        self._source = source
+        self._queue: asyncio.Queue[
+            _QueuedParallelEvent | BaseException | object
+        ] = asyncio.Queue(maxsize=_SESSION_EVENT_CAPACITY + 2)
+        self._queued_event_count = 0
+        self._queued_bytes = 0
+        self._ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._retained_cleanup = False
+        self._task = asyncio.create_task(self._run(), name=task_name)
+        self._task.add_done_callback(_observe_owned_stream_completion)
+
+    async def start(self) -> None:
+        """Wait until the background task owns an admission token."""
+
+        try:
+            await self._ready
+        except BaseException:
+            await asyncio.gather(self._task, return_exceptions=True)
+            raise
+
+    def events(self) -> AsyncIterator[ParallelFrameTechnicalEvent]:
+        return self._consume()
+
+    async def close(self) -> None:
+        """Request bounded teardown without discarding lifecycle ownership."""
+
+        if self._task.done():
+            await asyncio.gather(self._task, return_exceptions=True)
+            return
+        self._task.cancel()
+        with anyio.CancelScope(shield=True):
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._task),
+                    timeout=_SESSION_CLOSE_GRACE_SECONDS,
+                )
+            except TimeoutError:
+                # The ordinary admission token remains owned by the task.  A retained
+                # token additionally closes readiness/admission until exact-fence
+                # cleanup eventually quiesces, and lifecycle drain will wait for it.
+                if not self._retained_cleanup:
+                    await self._gate.retain_cleanup(self._task)
+                    self._retained_cleanup = True
+
+    async def _run(self) -> None:
+        token: Any | None = None
+        failure: BaseException | None = None
+        cleanup_failure: BaseException | None = None
+        try:
+            token = await self._gate.enter()
+            self._ready.set_result(None)
+            async for event in self._source:
+                encoded_size = len(_EVENT_ADAPTER.dump_json(event))
+                if (
+                    self._queued_event_count >= _SESSION_EVENT_CAPACITY
+                    or self._queued_bytes + encoded_size > _SESSION_BYTE_CAPACITY
+                ):
+                    raise GraphContractError(
+                        "INTAKE_PARALLEL_RESPONSE_BACKLOG_EXCEEDED"
+                    )
+                self._queue.put_nowait(_QueuedParallelEvent(event, encoded_size))
+                self._queued_event_count += 1
+                self._queued_bytes += encoded_size
+        except BaseException as error:
+            failure = error
+            if not self._ready.done():
+                self._ready.set_exception(error)
+        try:
+            with anyio.CancelScope(shield=True):
+                await _close_iterator(self._source)
+        except BaseException as close_error:
+            cleanup_failure = close_error
+        finally:
+            if token is not None:
+                with anyio.CancelScope(shield=True):
+                    await self._gate.leave(token)
+        if not self._ready.done():
+            self._ready.set_exception(
+                GraphContractError("parallel Intake session failed before admission")
+            )
+        reported_failure = cleanup_failure or failure
+        if reported_failure is not None:
+            self._queue.put_nowait(reported_failure)
+        self._queue.put_nowait(_OWNED_STREAM_TERMINAL)
+        if reported_failure is not None:
+            raise reported_failure
+
+    async def _consume(self) -> AsyncIterator[ParallelFrameTechnicalEvent]:
+        terminal_seen = False
+        try:
+            while True:
+                item = await self._queue.get()
+                if item is _OWNED_STREAM_TERMINAL:
+                    terminal_seen = True
+                    return
+                if isinstance(item, BaseException):
+                    raise item
+                queued = cast(_QueuedParallelEvent, item)
+                self._queued_event_count -= 1
+                self._queued_bytes -= queued.encoded_size
+                yield queued.event
+        finally:
+            if not terminal_seen:
+                await self.close()
+
+
+def _observe_owned_stream_completion(task: asyncio.Task[Any]) -> None:
+    """Consume task exceptions without changing retained-cleanup observability."""
+
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        return
+
+
 class GatewayBackedParallelIntakeFrameStreamService:
     """Run the three physical Frame graphs without creating a business Graph result.
 
@@ -382,6 +541,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 "parallel Intake receipt differs from its verified invocation"
             )
         token = await self._gate.enter()
+        owned_stream: _ServiceOwnedParallelStream | None = None
         try:
             prepared_bundle = await self._load_prepared_bundle(
                 command,
@@ -463,13 +623,26 @@ class GatewayBackedParallelIntakeFrameStreamService:
                     admission_receipt=admission_receipt,
                     selected_requests=selected_requests,
                 )
+            owned_stream = _ServiceOwnedParallelStream(
+                gate=self._gate,
+                source=stream,
+                task_name=f"intake-parallel-session-{command.attempt_id}",
+            )
+            # Do not release request admission until the service-owned task has its
+            # own lifecycle token.  This closes the drain race between returning the
+            # HTTP iterator and starting the exact-three execution owner.
+            await owned_stream.start()
         except BaseException:
+            if owned_stream is not None:
+                await owned_stream.close()
             await self._gate.leave(token)
             raise
+        await self._gate.leave(token)
+        assert owned_stream is not None
         return OpenedParallelFrameStream(
             authority=authority,
             active_frame_types=active_frame_types,
-            events=self._guarded(stream, token),
+            events=owned_stream.events(),
         )
 
     async def prepare(
@@ -932,11 +1105,12 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 )
                 durable_terminal = True
             else:
-                if _batch_failure_is_retryable(
+                batch_retryable = _batch_failure_is_retryable(
                     batch_result,
                     event_log,
                     active_frame_types=active_frame_types,
-                ):
+                )
+                if batch_retryable:
                     validator.finish()
                     cycle = ParallelReceiptCycleRecord.create(
                         thread_id=recorder.execution.fence.thread_id,
@@ -972,7 +1146,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
                         error_classification="TECHNICAL_FRAME_FAILURE",
                     )
                 durable_terminal = True
-                raise GraphContractError("INTAKE_PARALLEL_FRAME_BATCH_FAILED")
+                raise _ParallelFrameBatchStreamError(retryable=batch_retryable)
         except BaseException as error:
             if runner is not None and not runner.done():
                 runner.cancel()
@@ -1083,22 +1257,6 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 else "TECHNICAL_EXECUTION_FAILED"
             ),
         )
-
-    async def _guarded(
-        self,
-        stream: AsyncIterator[ParallelFrameTechnicalEvent],
-        token: Any,
-    ) -> AsyncIterator[ParallelFrameTechnicalEvent]:
-        try:
-            async for event in stream:
-                yield event
-        finally:
-            with anyio.CancelScope(shield=True):
-                try:
-                    await _close_iterator(stream)
-                finally:
-                    await self._gate.leave(token)
-
 
 def _authority_from_bundle(
     execution: GatewayExecution,
@@ -1603,6 +1761,8 @@ async def _replay_failed_receipt_cycle(
 ) -> AsyncIterator[ParallelFrameTechnicalEvent]:
     for event in events:
         yield event
+    if error_code == _ParallelFrameBatchStreamError.code:
+        raise _ParallelFrameBatchStreamError(retryable=True)
     raise GraphContractError(error_code)
 
 

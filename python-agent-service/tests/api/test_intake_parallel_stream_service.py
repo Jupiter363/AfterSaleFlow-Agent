@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 import app.llm as llm_module
-from app.api.graph_stream_service import GraphStreamAdmissionGate
+from app.api.graph_stream_service import GraphRetainedCleanupError, GraphStreamAdmissionGate
 from app.api.intake_parallel_stream import (
     ExpectedParallelFrame,
     ParallelFrameAdmissionLane,
@@ -22,6 +22,7 @@ from app.api.intake_parallel_stream_service import (
     GatewayBackedParallelIntakeFrameStreamService,
     _FairFrameMergeQueue,
     _RUNNER_TERMINAL,
+    _ServiceOwnedParallelStream,
     _batch_failure_is_retryable,
     _decode_cached_completion,
 )
@@ -33,6 +34,7 @@ from app.graph_runtime.recovery import RecoveryAction
 from app.graphs.intake.parallel_contracts import FRAME_TYPES, ParallelFrameType
 from app.graphs.intake.parallel_graph import (
     FRAME_NODE_NAMES,
+    FrameGenerationReset,
     FrameProviderUsage,
     FrameInterrupted,
     FrameSealed,
@@ -102,6 +104,80 @@ async def test_fair_merge_queue_round_robins_and_isolates_lane_capacity() -> Non
     assert await queue.get() is _RUNNER_TERMINAL
 
 
+@pytest.mark.asyncio
+async def test_service_owned_stream_fails_closed_at_its_retention_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.intake_parallel_stream_service as service_module
+
+    monkeypatch.setattr(service_module, "_SESSION_EVENT_CAPACITY", 1)
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+
+    async def source() -> Any:
+        yield _started(FRAME_TYPES[0], suffix="bounded-0")
+        yield _started(FRAME_TYPES[1], suffix="bounded-1")
+
+    owned = _ServiceOwnedParallelStream(
+        gate=gate,
+        source=source(),
+        task_name="test-parallel-bounded-owner",
+    )
+    await owned.start()
+    iterator = owned.events()
+
+    assert isinstance(await anext(iterator), FrameStarted)
+    with pytest.raises(
+        GraphContractError,
+        match="INTAKE_PARALLEL_RESPONSE_BACKLOG_EXCEEDED",
+    ):
+        await anext(iterator)
+    assert gate.accepting is True
+
+
+@pytest.mark.asyncio
+async def test_retained_service_cleanup_failure_is_visible_to_gate_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.intake_parallel_stream_service as service_module
+
+    monkeypatch.setattr(service_module, "_SESSION_CLOSE_GRACE_SECONDS", 0.01)
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+
+    class CloseFailingSource:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release_close = asyncio.Event()
+
+        def __aiter__(self) -> CloseFailingSource:
+            return self
+
+        async def __anext__(self) -> Any:
+            self.started.set()
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            await self.release_close.wait()
+            raise RuntimeError("retained cleanup failed")
+
+    source = CloseFailingSource()
+    owned = _ServiceOwnedParallelStream(
+        gate=gate,
+        source=source,
+        task_name="test-parallel-retained-cleanup",
+    )
+    await owned.start()
+    await asyncio.wait_for(source.started.wait(), timeout=1)
+
+    await owned.close()
+    source.release_close.set()
+
+    with pytest.raises(GraphRetainedCleanupError, match="retained Graph cleanup failed"):
+        await asyncio.wait_for(gate.drain(0.1), timeout=1)
+
+
 @dataclass(frozen=True)
 class _FakeModelContext:
     model_context_view_sha256: str = MODEL_CONTEXT_HASH
@@ -162,6 +238,7 @@ class _Gateway:
         self.receipt_cycle: Any | None = None
         self.completed_cycles: list[Any] = []
         self.terminalize_calls: list[dict[str, Any]] = []
+        self.technical_completed = asyncio.Event()
 
     async def admit(self, **_kwargs: Any) -> Any:
         return SimpleNamespace(
@@ -238,6 +315,7 @@ class _Gateway:
         completion: Any,
     ) -> Any:
         self.completed.append(completion)
+        self.technical_completed.set()
         return execution
 
     async def finish_execution_attempt(
@@ -412,6 +490,76 @@ class _RetryableFailureOrchestrator:
         )
 
 
+class _ResetThenSuccessfulOrchestrator:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.reset_emitted = asyncio.Event()
+        self.continue_replacement = asyncio.Event()
+
+    async def execute(self, requests: Any, *, event_sink: Any, **_kwargs: Any) -> Any:
+        self.calls += 1
+        first, *siblings = tuple(requests)
+        replacement = first.model_copy(
+            update={
+                "generation": first.generation + 1,
+                "frame_id": first.frame_id + ".retry",
+                "emit_start": True,
+            }
+        )
+        await event_sink.emit(
+            FrameInterrupted(
+                frame_set_id=first.frame_set_id,
+                run_id=first.run_id,
+                attempt_id=first.attempt_id,
+                frame_type=first.frame_type,
+                generation=first.generation,
+                frame_id=first.frame_id,
+                error_code="OUTPUT_SCHEMA_INVALID",
+                retryable=True,
+            )
+        )
+        await event_sink.emit(
+            FrameGenerationReset(
+                frame_set_id=first.frame_set_id,
+                run_id=first.run_id,
+                attempt_id=first.attempt_id,
+                frame_type=first.frame_type,
+                old_generation=first.generation,
+                new_generation=replacement.generation,
+                old_frame_id=first.frame_id,
+                new_frame_id=replacement.frame_id,
+                reason_code="OUTPUT_SCHEMA_INVALID",
+            )
+        )
+        self.reset_emitted.set()
+        await self.continue_replacement.wait()
+        await event_sink.emit(
+            FrameStarted(
+                frame_set_id=replacement.frame_set_id,
+                run_id=replacement.run_id,
+                attempt_id=replacement.attempt_id,
+                frame_type=replacement.frame_type,
+                generation=replacement.generation,
+                frame_id=replacement.frame_id,
+                frame_model_input_sha256=(
+                    replacement.model_input.frame_model_input_sha256
+                ),
+                frame_prompt_sha256=(
+                    replacement.model_input.instruction_pack.frame_prompt_sha256
+                ),
+                context_envelope_sha256=replacement.context_envelope_sha256,
+                model_context_view_sha256=(
+                    replacement.model_input.common_model_context.model_context_view_sha256
+                ),
+            )
+        )
+        completed: dict[ParallelFrameType, Any] = {}
+        for request in (replacement, *siblings):
+            await event_sink.emit(_seal(request))
+            completed[request.frame_type] = SimpleNamespace(frame_type=request.frame_type)
+        return ParallelFrameBatchResult(completed=completed, failed={})
+
+
 def test_generation_two_failure_cannot_authorize_another_lane_retry() -> None:
     interrupted = FrameInterrupted(
         frame_set_id=FRAME_SET_ID,
@@ -441,7 +589,7 @@ def test_generation_two_failure_cannot_authorize_another_lane_retry() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for_siblings(
+async def test_live_stream_queues_three_starts_then_each_seal_without_waiting_for_siblings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import app.api.intake_parallel_stream_service as service_module
@@ -458,7 +606,11 @@ async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for
     await gate.start()
     orchestrator = _SuccessfulOrchestrator(requests)
     completion = object()
-    monkeypatch.setattr(service_module, "ParallelFrameStreamProtocolValidator", _FakeValidator)
+    monkeypatch.setattr(
+        service_module,
+        "ParallelFrameStreamProtocolValidator",
+        _FakeValidator,
+    )
     monkeypatch.setattr(
         service_module,
         "build_parallel_checkpoint_configs",
@@ -516,7 +668,6 @@ async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for
     starts.extend([await anext(iterator) for _ in FRAME_TYPES[1:]])
     assert [event.frame_type for event in starts] == list(FRAME_TYPES)
     assert all(isinstance(event, FrameStarted) for event in starts)
-    assert orchestrator.calls == 0
     assert gateway.completed == []
 
     first_seal_task = asyncio.create_task(anext(iterator))
@@ -540,6 +691,103 @@ async def test_live_stream_emits_three_starts_then_each_seal_without_waiting_for
     assert len(provider_bulkhead.acquire_calls) == 1
     assert provider_bulkhead.acquire_calls[0]["permit_count"] == 3
     assert provider_bulkhead.permit.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_abandoned_parallel_response_keeps_replacement_and_siblings_service_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.intake_parallel_stream_service as service_module
+
+    requests = _requests()
+    bundle = SimpleNamespace(
+        frame_set_id=FRAME_SET_ID,
+        requests=requests,
+        agent_contexts={frame_type: object() for frame_type in FRAME_TYPES},
+    )
+    gateway = _Gateway()
+    provider_bulkhead = _ProviderGroupBulkhead()
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    orchestrator = _ResetThenSuccessfulOrchestrator()
+    completion = object()
+    monkeypatch.setattr(service_module, "ParallelFrameStreamProtocolValidator", _FakeValidator)
+    monkeypatch.setattr(
+        service_module,
+        "build_parallel_checkpoint_configs",
+        lambda _execution, _requests: {frame_type: {} for frame_type in FRAME_TYPES},
+    )
+    monkeypatch.setattr(
+        service_module,
+        "build_parallel_technical_completion",
+        lambda *_args, **_kwargs: completion,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_select_execution_requests",
+        lambda candidate, _receipt: candidate.requests,
+    )
+    service = GatewayBackedParallelIntakeFrameStreamService(
+        gateway=gateway,
+        input_loader=object(),
+        prompts=object(),
+        orchestrator=orchestrator,
+        model_runner=object(),
+        provider="litellm",
+        model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=provider_bulkhead,
+        owner_id="python:test",
+        admission_gate=gate,
+    )
+
+    async def load_bundle(_execution: Any) -> Any:
+        return bundle
+
+    async def load_prepared_bundle(
+        _command: Any,
+        _expected_thread: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        return bundle
+
+    service._load_bundle = load_bundle  # type: ignore[method-assign]
+    service._load_prepared_bundle = load_prepared_bundle  # type: ignore[method-assign]
+    receipt = _admission_receipt(gateway.execution.admission.command)
+    opened = await service.open_stream(
+        command=gateway.execution.admission.command,
+        verified_invocation=_verified(receipt),
+        expected_thread=object(),
+        admission_receipt=receipt,
+    )
+    iterator = opened.events
+
+    observed: list[Any] = []
+    while not orchestrator.reset_emitted.is_set():
+        observed.append(await asyncio.wait_for(anext(iterator), timeout=1))
+    while not any(isinstance(event, FrameGenerationReset) for event in observed):
+        observed.append(await asyncio.wait_for(anext(iterator), timeout=1))
+
+    # Simulate the HTTP response no longer polling after the reset.  The replacement
+    # and both siblings must continue under the service task rather than being owned
+    # by this iterator's next anext() call.
+    orchestrator.continue_replacement.set()
+    await asyncio.wait_for(gateway.technical_completed.wait(), timeout=1)
+
+    assert gateway.completed == [completion]
+    assert gateway.finished == []
+    assert provider_bulkhead.permit.release_calls == 1
+    assert gate.accepting is True
+
+    remaining = [event async for event in iterator]
+    replacement_starts = [
+        event
+        for event in remaining
+        if isinstance(event, FrameStarted) and event.generation == 2
+    ]
+    assert len(replacement_starts) == 1
+    assert {
+        event.frame_type for event in remaining if isinstance(event, FrameSealed)
+    } == set(FRAME_TYPES)
 
 
 @pytest.mark.asyncio

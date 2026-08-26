@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from dataclasses import replace
 from datetime import datetime, timezone
+import json
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from app.api.intake_parallel_stream import (
     stream_parallel_frame_ndjson,
 )
 from app.contracts.v1.codec import canonical_sha256, canonicalize
+from app.graph_runtime.errors import GraphContractError
 from app.graphs.intake.parallel_contracts import FRAME_TYPES, ParallelFrameType
 from app.graphs.intake.parallel_graph import (
     FrameGenerationReset,
@@ -68,6 +70,34 @@ async def test_ndjson_close_propagates_to_live_parallel_iterator() -> None:
     await stream.aclose()
 
     assert retained.closed is True
+
+
+@pytest.mark.asyncio
+async def test_ndjson_post_prefix_failure_emits_one_bound_failure_record() -> None:
+    async def failed_iterator() -> Any:
+        raise GraphContractError("private details are never serialized")
+        yield  # pragma: no cover - preserve async-generator shape
+
+    authority = _authority()
+    stream = stream_parallel_frame_ndjson(
+        iterator=failed_iterator(),
+        validator=ParallelFrameStreamProtocolValidator(authority),
+        first_line=b'{"first":true}\n',
+    )
+
+    lines = [line async for line in stream]
+    assert lines[0] == b'{"first":true}\n'
+    failure = json.loads(lines[1])
+    assert failure == {
+        "schema_version": "intake.parallel-stream-failure.v1",
+        "event_kind": "PARALLEL_STREAM_FAILED",
+        "frame_set_id": FRAME_SET_ID,
+        "run_id": RUN_ID,
+        "attempt_id": ATTEMPT_ID,
+        "authority_sha256": parallel_frame_authority_sha256(authority),
+        "error_code": "GRAPH_CONTRACT_REJECTED",
+        "retryable": False,
+    }
 
 
 def test_admission_receipt_decodes_exact_three_literal_frame_types() -> None:

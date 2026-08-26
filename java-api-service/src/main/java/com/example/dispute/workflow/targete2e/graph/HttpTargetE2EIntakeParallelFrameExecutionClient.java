@@ -43,6 +43,7 @@ import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTrans
 import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTransportCodec.Sealed;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTransportCodec.Started;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTransportCodec.StreamAuthority;
+import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTransportCodec.StreamFailure;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelTransportCodec.TechnicalEvent;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -1149,6 +1150,19 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                 }
                 remoteErrorLine = Objects.requireNonNull(line, "line");
                 return;
+            }
+            StreamFailure failure = technicalCodec.decodeStreamFailure(line);
+            if (failure != null) {
+                if (!failure.frameSetId().equals(authority.frameSetId())
+                        || !failure.runId().equals(request.agentRunId())
+                        || !failure.attemptId().equals(request.attemptId())
+                        || !failure.authoritySha256().equals(authority.authoritySha256())) {
+                    throw protocol("parallel stream failure crossed execution authority", null);
+                }
+                throw TargetE2EGraphClientException.remote(
+                        failure.errorCode(),
+                        failure.retryable(),
+                        "parallel Intake stream ended with an explicit bound failure");
             }
             TechnicalEvent event = technicalCodec.decodeEvent(line);
             requireCommonAuthority(event);

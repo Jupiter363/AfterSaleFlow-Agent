@@ -29,12 +29,14 @@ final class TargetE2EIntakeParallelTransportCodec {
 
     static final String AUTHORITY_SCHEMA = "intake.parallel-frame-stream-authority.v1";
     static final String EVENT_SCHEMA = "intake.parallel-frame-technical-event.v1";
+    static final String FAILURE_SCHEMA = "intake.parallel-stream-failure.v1";
     private static final int MAXIMUM_AUTHORITY_HEADER_BYTES = 8 * 1024;
     private static final int MAXIMUM_EVENT_LINE_BYTES =
             GraphCommandHttpTransport.MAXIMUM_PARALLEL_LINE_BYTES;
     private static final Pattern IDENTIFIER =
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
+    private static final Pattern SAFE_CODE = Pattern.compile("[A-Z][A-Z0-9_]{2,127}");
 
     private static final Set<String> AUTHORITY_FIELDS = Set.of(
             "schema_version", "frame_set_id", "run_id", "attempt_id", "frames",
@@ -240,6 +242,47 @@ final class TargetE2EIntakeParallelTransportCodec {
             case "FRAME_SEALED" -> sealed(common, root);
             default -> throw new IllegalStateException("unreachable parallel Frame event kind");
         };
+    }
+
+    StreamFailure decodeStreamFailure(String line) {
+        if (line == null || line.isBlank()
+                || line.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_EVENT_LINE_BYTES) {
+            throw invalid("parallel stream failure line is absent or oversized");
+        }
+        JsonNode root = read(line.getBytes(StandardCharsets.UTF_8), "parallel stream failure");
+        String schema = text(root, "schema_version");
+        String kind = text(root, "event_kind");
+        boolean failureSchema = FAILURE_SCHEMA.equals(schema);
+        boolean failureKind = "PARALLEL_STREAM_FAILED".equals(kind);
+        if (!failureSchema && !failureKind) {
+            return null;
+        }
+        if (!failureSchema || !failureKind) {
+            throw invalid("parallel stream failure discriminator is invalid");
+        }
+        requireObjectFields(
+                root,
+                Set.of(
+                        "schema_version",
+                        "event_kind",
+                        "frame_set_id",
+                        "run_id",
+                        "attempt_id",
+                        "authority_sha256",
+                        "error_code",
+                        "retryable"),
+                "parallel stream failure");
+        String errorCode = identifier(root, "error_code");
+        if (!SAFE_CODE.matcher(errorCode).matches()) {
+            throw invalid("parallel stream failure code is invalid");
+        }
+        return new StreamFailure(
+                identifier(root, "frame_set_id"),
+                identifier(root, "run_id"),
+                identifier(root, "attempt_id"),
+                sha256(root, "authority_sha256"),
+                errorCode,
+                bool(root, "retryable"));
     }
 
     private ProjectionItem projection(Common common, JsonNode root) {
@@ -484,6 +527,14 @@ final class TargetE2EIntakeParallelTransportCodec {
             Objects.requireNonNull(receiptSha256, "receiptSha256");
         }
     }
+
+    record StreamFailure(
+            String frameSetId,
+            String runId,
+            String attemptId,
+            String authoritySha256,
+            String errorCode,
+            boolean retryable) {}
 
     sealed interface TechnicalEvent
             permits Started, ProjectionItem, GenerationReset, Interrupted, Sealed {
