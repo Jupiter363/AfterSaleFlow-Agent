@@ -786,6 +786,49 @@ async def test_quality_cross_item_violation_uses_bounded_native_regeneration() -
 
 
 @pytest.mark.asyncio
+async def test_dialogue_two_visible_items_seal_without_terminal_slot_echo() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "DIALOGUE_FRAME"
+    )
+    outputs = deepcopy(_outputs())
+    output = outputs["intake_turn_dialogue_frame"]
+    output["public_projection_items"].append(
+        {
+            "schema_version": "intake.dialogue-public-segment-proposal.v1",
+            "provider_slot_id": "DSEG_02",
+            "segment_kind": "TRANSITION",
+            "candidate_text": "下面将按已有核验重点继续处理。",
+        }
+    )
+    sink = _CollectingSink()
+
+    result = await orchestrator.execute_frame(
+        request,
+        agent_context=contexts["DIALOGUE_FRAME"],
+        model_runner=_StreamingRunner(outputs),
+        event_sink=sink,
+    )
+
+    projections = [
+        event for event in sink.events if isinstance(event, FrameProjectionItem)
+    ]
+    assert [(event.generation, event.local_index) for event in projections] == [
+        (1, 0),
+        (1, 1),
+    ]
+    assert result.generation == 1
+    assert result.result.model_dump(mode="json")["dialogue"] == {
+        "remark_disposition": None
+    }
+    assert isinstance(sink.events[-1], FrameSealed)
+    assert sink.events[-1].usage.provider_call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_dialogue_duplicate_slot_uses_bounded_native_regeneration() -> None:
     orchestrator = ParallelIntakeFrameOrchestrator(
         compile_parallel_frame_graphs(checkpointer=InMemorySaver())
@@ -1472,16 +1515,9 @@ def _outputs() -> dict[str, dict[str, Any]]:
                 }
             ],
             "frame_type": "DIALOGUE_FRAME",
-            "schema_version": "intake.dialogue-frame.v1",
+            "schema_version": "intake.dialogue-frame.v2",
             "dialogue": {
-                "action_binding": {
-                    "action": "ASK_SUBSTANTIVE",
-                    "phase_source_sha256": canonical_sha256(
-                        _model_context().previous_state.model_dump(mode="json")
-                    ),
-                },
-                "public_projection_slots": ["DSEG_01"],
-                "language": "zh-CN",
+                "remark_disposition": None,
             },
         },
         "intake_turn_dossier_frame": {

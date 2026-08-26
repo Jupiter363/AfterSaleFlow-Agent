@@ -500,14 +500,9 @@ def _result_payload(frame_type: ParallelFrameType) -> dict[str, Any]:
                 }
             ],
             "frame_type": frame_type,
-            "schema_version": "intake.dialogue-frame.v1",
+            "schema_version": "intake.dialogue-frame.v2",
             "dialogue": {
-                "action_binding": {
-                    "action": "ASK_SUBSTANTIVE",
-                    "phase_source_sha256": "d" * 64,
-                },
-                "public_projection_slots": ["DSEG_01"],
-                "language": "zh-CN",
+                "remark_disposition": None,
             },
         }
     if frame_type == "DOSSIER_FRAME":

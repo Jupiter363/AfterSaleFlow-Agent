@@ -345,15 +345,9 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
         item.put("segment_kind", "ACKNOWLEDGEMENT");
         item.put("candidate_text", "已记录您本轮补充的信息。");
         root.put("frame_type", "DIALOGUE_FRAME");
-        root.put("schema_version", "intake.dialogue-frame.v1");
+        root.put("schema_version", "intake.dialogue-frame.v2");
         ObjectNode dialogue = root.putObject("dialogue");
-        ObjectNode binding = dialogue.putObject("action_binding");
-        binding.put("action", "ASK_SUBSTANTIVE");
-        binding.put(
-                "phase_source_sha256",
-                ContractJson.sha256Hex(previous.at("/party_intake_state/USER")));
-        dialogue.putArray("public_projection_slots").add("DSEG_01");
-        dialogue.put("language", "zh-CN");
+        dialogue.putNull("remark_disposition");
         return root;
     }
 

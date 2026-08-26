@@ -100,9 +100,7 @@ public final class IntakeParallelFrameAssembler {
                 previousPhase,
                 frames.get(FrameType.DIALOGUE_FRAME).document().path("dialogue"));
         requireDialogueAuthority(
-                frames.get(FrameType.DIALOGUE_FRAME).document(),
-                actorEntry,
-                currentAction);
+                frames.get(FrameType.DIALOGUE_FRAME).document());
 
         QualityOutcome proposedQuality = quality(
                 frames.get(FrameType.QUALITY_FRAME).document(), command.actorRole());
@@ -176,7 +174,7 @@ public final class IntakeParallelFrameAssembler {
             JsonNode document = parseCanonical(frame.canonicalResultJson(), frame.resultSha256());
             requireText(document, "frame_type", frameType.name());
             requireText(document, "schema_version", switch (frameType) {
-                case DIALOGUE_FRAME -> "intake.dialogue-frame.v1";
+                case DIALOGUE_FRAME -> "intake.dialogue-frame.v2";
                 case DOSSIER_FRAME -> "intake.dossier-frame.v2";
                 case QUALITY_FRAME -> "intake.quality-frame.v1";
             });
@@ -184,16 +182,12 @@ public final class IntakeParallelFrameAssembler {
                     "public_projection_items");
             if (frameType == FrameType.DOSSIER_FRAME) {
                 requireDossierProjectionPrefix(publicItems, frame.nextLocalIndex());
+            } else if (frameType == FrameType.DIALOGUE_FRAME) {
+                requireProviderProjectionItems(publicItems, frame.nextLocalIndex());
             } else {
-                ArrayNode slots = switch (frameType) {
-                    case DIALOGUE_FRAME -> requireArray(
-                            document.path("dialogue").path("public_projection_slots"),
-                            "dialogue.public_projection_slots");
-                    case QUALITY_FRAME -> requireArray(
-                            document.path("quality").path("public_projection_slots"),
-                            "quality.public_projection_slots");
-                    case DOSSIER_FRAME -> throw invalid("Dossier slots are server-derived");
-                };
+                ArrayNode slots = requireArray(
+                        document.path("quality").path("public_projection_slots"),
+                        "quality.public_projection_slots");
                 requireProjectionSlots(publicItems, slots, frame.nextLocalIndex());
             }
             parsed.put(frameType, new ParsedFrame(frame, document));
@@ -218,6 +212,22 @@ public final class IntakeParallelFrameAssembler {
         }
     }
 
+    private static void requireProviderProjectionItems(
+            ArrayNode publicItems, long nextLocalIndex) {
+        if (publicItems.size() != nextLocalIndex) {
+            throw invalid("Dialogue final projection items do not match the durable prefix length");
+        }
+        Set<String> observed = new LinkedHashSet<>();
+        for (JsonNode item : publicItems) {
+            String itemSlot = identifier(
+                    item.path("provider_slot_id").asText(null),
+                    "provider_slot_id");
+            if (!observed.add(itemSlot)) {
+                throw invalid("Dialogue projection items repeat a provider slot");
+            }
+        }
+    }
+
     private static void requireDossierProjectionPrefix(
             ArrayNode publicItems, long nextLocalIndex) {
         if (publicItems.size() != nextLocalIndex || publicItems.size() > DOSSIER_FACT_LIMIT) {
@@ -235,8 +245,7 @@ public final class IntakeParallelFrameAssembler {
         }
     }
 
-    private static void requireDialogueAuthority(
-            JsonNode dialogueFrame, ObjectNode previousActorEntry, ConversationAction action) {
+    private static void requireDialogueAuthority(JsonNode dialogueFrame) {
         requireExactFields(
                 dialogueFrame,
                 Set.of("public_projection_items", "frame_type", "schema_version", "dialogue"),
@@ -244,14 +253,8 @@ public final class IntakeParallelFrameAssembler {
         JsonNode dialogue = requireObject(dialogueFrame.path("dialogue"), "dialogue");
         requireExactFields(
                 dialogue,
-                Set.of("action_binding", "public_projection_slots", "language"),
+                Set.of("remark_disposition"),
                 "dialogue");
-        requireText(dialogue, "language", "zh-CN");
-        JsonNode binding = requireObject(dialogue.path("action_binding"), "action_binding");
-        requireExactFields(binding, Set.of("action", "phase_source_sha256"), "action_binding");
-        requireText(binding, "action", action.name());
-        String expectedPhaseHash = ContractJson.sha256Hex(previousActorEntry);
-        requireText(binding, "phase_source_sha256", expectedPhaseHash);
 
         ArrayNode items = requireArray(dialogueFrame.path("public_projection_items"),
                 "dialogue public_projection_items");
@@ -833,15 +836,30 @@ public final class IntakeParallelFrameAssembler {
     }
 
     private static ConversationAction currentAction(String phase, JsonNode dialogue) {
-        String proposed = dialogue.path("action_binding").path("action").asText("");
+        JsonNode dispositionNode = dialogue.get("remark_disposition");
+        String disposition = dispositionNode == null || dispositionNode.isNull()
+                ? ""
+                : dispositionNode.asText("");
         return switch (phase) {
-            case "NOT_READY" -> ConversationAction.ASK_SUBSTANTIVE;
-            case "READY_PENDING_REMARK_INVITE" -> ConversationAction.INVITE_OPTIONAL_REMARK;
-            case "WAITING_FOR_REMARK" -> {
-                if (!"ACK_REMARK".equals(proposed) && !"ACK_NO_REMARK".equals(proposed)) {
-                    throw invalid("WAITING_FOR_REMARK requires one bounded acknowledgement action");
+            case "NOT_READY" -> {
+                if (!disposition.isEmpty()) {
+                    throw invalid("NOT_READY cannot carry a remark disposition");
                 }
-                yield ConversationAction.valueOf(proposed);
+                yield ConversationAction.ASK_SUBSTANTIVE;
+            }
+            case "READY_PENDING_REMARK_INVITE" -> {
+                if (!disposition.isEmpty()) {
+                    throw invalid("remark invitation cannot carry a remark disposition");
+                }
+                yield ConversationAction.INVITE_OPTIONAL_REMARK;
+            }
+            case "WAITING_FOR_REMARK" -> {
+                if (!"REMARK".equals(disposition) && !"NO_REMARK".equals(disposition)) {
+                    throw invalid("WAITING_FOR_REMARK requires one bounded remark disposition");
+                }
+                yield "REMARK".equals(disposition)
+                        ? ConversationAction.ACK_REMARK
+                        : ConversationAction.ACK_NO_REMARK;
             }
             default -> throw invalid("persisted Intake phase cannot produce a ROOM_MESSAGE action");
         };

@@ -239,7 +239,6 @@ class IntakeParallelFrameAssemblerTest {
                     .deepCopy();
             repeated.put("provider_slot_id", "DSEG_0" + index);
             dialogue.withArray("public_projection_items").add(repeated);
-            dialogue.with("dialogue").withArray("public_projection_slots").add("DSEG_0" + index);
         }
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
                         dialogue,
@@ -544,10 +543,10 @@ class IntakeParallelFrameAssemblerTest {
     }
 
     @Test
-    void rejectsDialogueActionThatDoesNotMatchThePersistedPhase() {
+    void rejectsRemarkDispositionOutsideTheWaitingPhase() {
         ObjectNode previous = previousDossier("READY_PENDING_REMARK_INVITE", 90, true);
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
-                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        dialogue(previous, "ACK_REMARK"),
                         dossier(),
                         quality(Map.of(
                                 "references", 15,
@@ -558,7 +557,47 @@ class IntakeParallelFrameAssemblerTest {
                                 "next_action_clarity", 15),
                                 List.of())))))
                 .isInstanceOf(AssemblyRejectedException.class)
-                .hasMessageContaining("action differs from trusted authority");
+                .hasMessageContaining("remark invitation cannot carry a remark disposition");
+    }
+
+    @Test
+    void waitingRemarkDispositionSelectsTheExistingAcknowledgementActions() {
+        ObjectNode previous = previousDossier("WAITING_FOR_REMARK", 90, true);
+        var withRemark = assembler.assemble(command(previous, frames(
+                dialogue(previous, "ACK_REMARK"),
+                dossier(),
+                quality(Map.of(
+                        "references", 15,
+                        "event_story", 20,
+                        "party_positions", 20,
+                        "requested_resolution", 15,
+                        "risk_and_conflicts", 15,
+                        "next_action_clarity", 15),
+                        List.of()))));
+        var withoutRemark = assembler.assemble(command(previous, frames(
+                dialogue(previous, "ACK_NO_REMARK"),
+                dossier(),
+                quality(Map.of(
+                        "references", 15,
+                        "event_story", 20,
+                        "party_positions", 20,
+                        "requested_resolution", 15,
+                        "risk_and_conflicts", 15,
+                        "next_action_clarity", 15),
+                        List.of()))));
+
+        assertThat(withRemark.proposal().conversationAction())
+                .isEqualTo(IntakeTurnProposal.ConversationAction.ACK_REMARK);
+        assertThat(withRemark.proposal().dossierPatch()
+                        .at("/party_intake_state/USER/handoff_notes/remark_status")
+                        .asText())
+                .isEqualTo("HAS_REMARKS");
+        assertThat(withoutRemark.proposal().conversationAction())
+                .isEqualTo(IntakeTurnProposal.ConversationAction.ACK_NO_REMARK);
+        assertThat(withoutRemark.proposal().dossierPatch()
+                        .at("/party_intake_state/USER/handoff_notes/remark_status")
+                        .asText())
+                .isEqualTo("NO_EXTRA_REMARKS");
     }
 
     private static AssemblyCommand command(
@@ -648,15 +687,15 @@ class IntakeParallelFrameAssemblerTest {
         item.put("segment_kind", "ACKNOWLEDGEMENT");
         item.put("candidate_text", "已记录您本轮补充的信息。");
         root.put("frame_type", "DIALOGUE_FRAME");
-        root.put("schema_version", "intake.dialogue-frame.v1");
+        root.put("schema_version", "intake.dialogue-frame.v2");
         ObjectNode dialogue = root.putObject("dialogue");
-        ObjectNode binding = dialogue.putObject("action_binding");
-        binding.put("action", action);
-        binding.put(
-                "phase_source_sha256",
-                ContractJson.sha256Hex(previous.at("/party_intake_state/USER")));
-        dialogue.putArray("public_projection_slots").add("DSEG_01");
-        dialogue.put("language", "zh-CN");
+        if ("ACK_REMARK".equals(action)) {
+            dialogue.put("remark_disposition", "REMARK");
+        } else if ("ACK_NO_REMARK".equals(action)) {
+            dialogue.put("remark_disposition", "NO_REMARK");
+        } else {
+            dialogue.putNull("remark_disposition");
+        }
         return root;
     }
 

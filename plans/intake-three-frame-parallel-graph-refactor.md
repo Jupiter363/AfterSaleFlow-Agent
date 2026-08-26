@@ -31,7 +31,7 @@ parallel_stream_protocol: agent-stream.v4
 
 接待官由一个“大上下文、大 Schema、大输出”的模型节点，重构为同一 Graph command 内的三个并行模型节点：
 
-1. `DIALOGUE_FRAME`：生成可独立校验的公开语义 segment proposal，并回显服务端 action/question bindings；最终公开回复由服务端组合。
+1. `DIALOGUE_FRAME`：生成可独立校验的公开语义 segment proposal；仅在备注等待态输出最小 `remark_disposition`，最终动作、slot trace、问题与公开回复由服务端组合。
 2. `DOSSIER_FRAME`：生成可独立校验的案情 typed patch proposal 与最终结构化增量。
 3. `QUALITY_FRAME`：生成可独立校验的评分/gap typed metric proposal 与最终六项评分和受约束缺口候选。
 
@@ -289,7 +289,7 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
 
 ### 7.1 Dialogue Frame
 
-职责：生成本轮公开回复，逐字遵循服务端派生的 `current_action_binding` 和最多两个 `authorized_question_slots`。
+职责：生成本轮公开回复，遵循服务端派生的 `current_action_binding` 和最多两个 `authorized_question_slots`，但不重复输出这些服务端权威。
 
 ```json
 {
@@ -302,26 +302,23 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
     }
   ],
   "frame_type": "DIALOGUE_FRAME",
-  "schema_version": "intake.dialogue-frame.v1",
-  "action_binding": {
-    "action": "ASK_SUBSTANTIVE",
-    "phase_source_sha256": "..."
-  },
-  "public_projection_slots": ["DSEG_01"],
-  "question_binding_ids": ["Q_..."],
-  "language": "zh-CN"
+  "schema_version": "intake.dialogue-frame.v2",
+  "dialogue": {
+    "remark_disposition": null
+  }
 }
 ```
 
 限制：
 
 - 不输出分数、总分、ready、phase、remark、handoff、矩阵或累计卡片。
-- `action_binding` 必须逐字回显服务端派生绑定；Java Assembler 校验它与 previous phase 一致。
-- 不自行创建下一问题；需要追问时，只能引用输入中的 `authorized_question_slots`，且 `question_binding_ids` 必须是其子集。
+- 不输出 `action_binding`、phase hash、language、`public_projection_slots` 或 `question_binding_ids`；Java 从 previous phase、accepted item trace 和授权问题槽派生这些值。
+- 不自行创建下一问题；需要追问时，问题正文仍只来自输入中的 `authorized_question_slots`，Provider 不输出问题 id 或文本。
 - `public_projection_items` 必须是 Provider JSON 物理首字段；增量投影器只在一个完整 item object 闭合后交给 request-bound prefix validator，不输出字符串 prefix 或半对象。
 - 每个 `DialoguePublicSegmentProposalV1` 限长、禁止 `?`/`？`，只能是封闭 `segment_kind` 对应的完整句。validator 校验 actor/action/question authority、重复/顺序、禁用承诺/新请求/未知动作和累计预算，返回 canonical `PublicFrameProjectionItemV1` 后才可公开。
 - Provider 不输出最终 `room_utterance`，也不输出问题文本。服务端 `DialogueComposer` 以已接受 canonical segment 的 `public_text + authorized_question_slots.canonical_text` 确定性构造最终公开回复，并记录 segment/action/question binding hash。
-- Final Dialogue Frame 只引用 `public_projection_slots`；terminal reconciliation 必须证明每个 Provider slot 被 exact-once 引用且与 canonical segment trace 同序。不得再用一个独立 `acknowledgement_text` 重写已公开内容。
+- `remark_disposition` 在非 `WAITING_FOR_REMARK` 阶段必须为 `null`；该阶段只能为 `REMARK` 或 `NO_REMARK`，Java 据此映射 `ACK_REMARK`/`ACK_NO_REMARK`。它不拥有最终 action。
+- Final Dialogue Frame 不再重复输出 slot 列表；Java 以 durable accepted item trace 与 `next_local_index` 证明每个 Provider slot exact-once、同序。不得再用一个独立 `acknowledgement_text` 重写已公开内容。
 - 当 current action 为邀请备注或确认无备注时，不得回退到实质追问。
 - 初始输出预算建议不超过 1,024 tokens，最终以基线测量校准。
 
@@ -453,7 +450,7 @@ authority_binding_sha256
 
 只有 validator return 可送往 Java；raw Provider item、半 JSON、reasoning、未知 path 和 Provider 自带 canonical id/hash/revision 永不公开。validator 每次重验 prior prefix，执行 source order、duplicate、count/byte/item budget 和 authority lineage；任一 candidate 失败时整个 Frame generation interrupted，不发布该 candidate。
 
-完整 Frame Schema 通过后执行 terminal reconciliation：Provider `public_projection_slots`、accepted canonical item trace 与最终 Frame fields 必须一一对应、同序、同值、同 authority。reconciliation 不得丢弃已公开 item，也不得在 terminal 静默添加未流式声明的模型语义；服务端确定性 action/question/notice 除外，并由单独 canonical composer 追加。
+完整 Frame Schema 通过后执行 terminal reconciliation：Dialogue/Dossier 直接以 accepted canonical item trace 为唯一 slot/source-row authority；Quality 的 Provider `public_projection_slots` 仍须与 accepted trace 和最终 scores/gaps 一一对应、同序、同值。reconciliation 不得丢弃已公开 item，也不得在 terminal 静默添加未流式声明的模型语义；服务端确定性 action/question/notice 除外，并由单独 canonical composer 追加。
 
 ## 8. 目标 Graph 结构
 
@@ -1244,7 +1241,7 @@ protocol_conflict_count
 - 一个 Frame Schema invalid 后只重试该 Frame。
 - Quality 输出六项 94、无合法 gap：本轮 action 不变，next state 达标。
 - previous phase 为 `READY_PENDING_REMARK_INVITE`：即使 current message 重复旧答案，Dialogue 仍邀请备注。
-- Dialogue 只能生成完整 typed public segment 并回显 server-derived action/question bindings；未知 question id、canonical text hash 漂移、segment 中越权承诺/未知问题或 Provider 试图自带问题文本时拒绝，最终问题段只来自 `DialogueComposer`。
+- Dialogue 只能生成完整 typed public segment；非备注等待态的 `remark_disposition` 固定为 `null`，备注等待态只允许 `REMARK/NO_REMARK`。Provider 试图自带 action、slot trace、question id/文本或其他服务端 authority 时拒绝，最终问题段只来自 `DialogueComposer`。
 - current fact-only message + prior respondent attitude：Dossier current delta 为 `NOT_ADDRESSED`，累计展示保留 grounded prior attitude。
 - arbitrary/重复/已覆盖 gap proposal 不得成为 blocking gap。
 - Java Frame slots 不完整、foreign authority、错误 initiator、过期 fence、旧 generation 全部 fail closed，不生成现有 proposal。

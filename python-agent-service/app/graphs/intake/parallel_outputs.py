@@ -16,11 +16,9 @@ from pydantic import (
 )
 
 from app.graphs.intake.parallel_contracts import (
-    ConversationAction,
     Identifier,
     ParallelFrameType,
     PartyRole,
-    Sha256,
 )
 from app.graphs.intake.contracts import (
     CaseFactDeltaRowV2,
@@ -101,34 +99,61 @@ class DialoguePublicSegmentProposalV1(StrictFrameOutput):
         return self
 
 
-class DialogueActionBindingV1(StrictFrameOutput):
-    action: ConversationAction
-    phase_source_sha256: Sha256
+DialogueRemarkDisposition = Literal["REMARK", "NO_REMARK"]
 
 
-class DialogueFrameValueV1(StrictFrameOutput):
-    action_binding: DialogueActionBindingV1
-    public_projection_slots: tuple[Identifier, ...] = Field(
-        min_length=1, max_length=DIALOGUE_SEGMENT_MAX_ITEMS
-    )
-    language: Literal["zh-CN"]
+class DialogueFrameValueV2(StrictFrameOutput):
+    # The persisted phase remains Java authority for the visible action.  The
+    # Provider owns only the one semantic distinction that the phase cannot
+    # determine on its own: whether a WAITING_FOR_REMARK message contains a
+    # remark or explicitly declines one.  Request-bound Schema narrows this to
+    # null for every other phase.
+    remark_disposition: DialogueRemarkDisposition | None
 
 
-class IntakeDialogueFrameV1(StrictFrameOutput):
+class IntakeDialogueFrameV2(StrictFrameOutput):
     public_projection_items: tuple[DialoguePublicSegmentProposalV1, ...] = Field(
         min_length=1, max_length=DIALOGUE_SEGMENT_MAX_ITEMS
     )
     frame_type: Literal["DIALOGUE_FRAME"]
-    schema_version: Literal["intake.dialogue-frame.v1"]
-    dialogue: DialogueFrameValueV1
+    schema_version: Literal["intake.dialogue-frame.v2"]
+    dialogue: DialogueFrameValueV2
 
-    @model_validator(mode="after")
-    def validate_projection_trace(self) -> IntakeDialogueFrameV1:
-        _require_exact_projection_slots(
-            self.public_projection_items,
-            self.dialogue.public_projection_slots,
-        )
-        return self
+
+def request_bound_dialogue_output_types(
+    *,
+    persisted_phase: str,
+) -> tuple[type[IntakeDialogueFrameV2], type[DialoguePublicSegmentProposalV1]]:
+    """Expose only the remark distinction that this exact turn may author."""
+
+    if persisted_phase not in {
+        "NOT_READY",
+        "READY_PENDING_REMARK_INVITE",
+        "WAITING_FOR_REMARK",
+    }:
+        raise ValueError("request-bound Dialogue phase cannot accept a ROOM_MESSAGE")
+    identity = hashlib.sha256(persisted_phase.encode("utf-8")).hexdigest()[:12]
+    disposition_type: Any = (
+        DialogueRemarkDisposition
+        if persisted_phase == "WAITING_FOR_REMARK"
+        else Literal[None]
+    )
+    dialogue_type = create_model(
+        f"DialogueFrameValueV2_{identity}",
+        __base__=DialogueFrameValueV2,
+        __module__=__name__,
+        remark_disposition=(disposition_type, ...),
+    )
+    frame_type = create_model(
+        f"IntakeDialogueFrameV2_{identity}",
+        __base__=IntakeDialogueFrameV2,
+        __module__=__name__,
+        dialogue=(dialogue_type, ...),
+    )
+    return (
+        cast(type[IntakeDialogueFrameV2], frame_type),
+        DialoguePublicSegmentProposalV1,
+    )
 
 
 class DossierCurrentFactRowV2(StrictFrameOutput):
@@ -493,11 +518,11 @@ class IntakeQualityFrameV1(StrictFrameOutput):
 
 
 ParallelFrameOutput: TypeAlias = (
-    IntakeDialogueFrameV1 | IntakeDossierFrameV2 | IntakeQualityFrameV1
+    IntakeDialogueFrameV2 | IntakeDossierFrameV2 | IntakeQualityFrameV1
 )
 
 FRAME_OUTPUT_MODELS: Mapping[ParallelFrameType, type[StrictFrameOutput]] = {
-    "DIALOGUE_FRAME": IntakeDialogueFrameV1,
+    "DIALOGUE_FRAME": IntakeDialogueFrameV2,
     "DOSSIER_FRAME": IntakeDossierFrameV2,
     "QUALITY_FRAME": IntakeQualityFrameV1,
 }
@@ -549,12 +574,13 @@ def _validate_gap_question_and_keys(
 
 __all__ = [
     "FRAME_OUTPUT_MODELS",
-    "IntakeDialogueFrameV1",
+    "IntakeDialogueFrameV2",
     "IntakeDossierFrameV2",
     "IntakeQualityFrameV1",
     "ParallelFrameOutput",
     "QUALITY_DIMENSION_ORDER",
     "QualityPublicProjectionProposalV1",
+    "request_bound_dialogue_output_types",
     "request_bound_dossier_output_types",
     "validate_parallel_frame_output",
 ]

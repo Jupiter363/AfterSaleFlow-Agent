@@ -5,11 +5,12 @@ from pydantic import ValidationError
 
 from app.graphs.intake.parallel_outputs import (
     FRAME_OUTPUT_MODELS,
-    IntakeDialogueFrameV1,
     DossierPublicFactProposalV2,
+    IntakeDialogueFrameV2,
     IntakeDossierFrameV2,
     IntakeQualityFrameV1,
     QualityPublicProjectionProposalV1,
+    request_bound_dialogue_output_types,
     request_bound_dossier_output_types,
     validate_parallel_frame_output,
 )
@@ -29,7 +30,7 @@ def test_exact_three_output_schemas_accept_java_assembler_shapes() -> None:
         _quality_frame(),
     )
 
-    assert isinstance(dialogue, IntakeDialogueFrameV1)
+    assert isinstance(dialogue, IntakeDialogueFrameV2)
     assert isinstance(dossier, IntakeDossierFrameV2)
     assert dossier.materialized_dossier_patch() == {
         "case_story": {"one_sentence_summary": "商品已使用约半小时。"}
@@ -74,13 +75,16 @@ def test_frame_schema_rejects_projection_reordering_and_full_score_gap() -> None
 
 def test_provider_visible_schema_rejects_question_segments_and_dimension_score_overflow(
 ) -> None:
-    dialogue_schema = IntakeDialogueFrameV1.model_json_schema()
+    dialogue_schema = IntakeDialogueFrameV2.model_json_schema()
     dialogue_text_schema = dialogue_schema["$defs"][
         "DialoguePublicSegmentProposalV1"
     ]["properties"]["candidate_text"]
     assert dialogue_text_schema["pattern"] == r"^[^?？]+$"
     assert dialogue_text_schema["maxLength"] == 200
     assert dialogue_schema["properties"]["public_projection_items"]["maxItems"] == 2
+    assert set(dialogue_schema["$defs"]["DialogueFrameValueV2"]["properties"]) == {
+        "remark_disposition"
+    }
 
     dialogue = _dialogue_frame()
     dialogue["public_projection_items"][0]["candidate_text"] = "还需要补充吗？"
@@ -99,6 +103,22 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
         .root.candidate_score
         == 18
     )
+
+    not_ready_type, _ = request_bound_dialogue_output_types(
+        persisted_phase="NOT_READY"
+    )
+    assert not_ready_type.model_validate(_dialogue_frame()).dialogue.remark_disposition is None
+    invalid_not_ready = _dialogue_frame()
+    invalid_not_ready["dialogue"]["remark_disposition"] = "REMARK"
+    with pytest.raises(ValidationError, match="literal_error"):
+        not_ready_type.model_validate(invalid_not_ready)
+
+    waiting_type, _ = request_bound_dialogue_output_types(
+        persisted_phase="WAITING_FOR_REMARK"
+    )
+    waiting = _dialogue_frame()
+    waiting["dialogue"]["remark_disposition"] = "NO_REMARK"
+    assert waiting_type.model_validate(waiting).dialogue.remark_disposition == "NO_REMARK"
 
     dossier_schema = IntakeDossierFrameV2.model_json_schema()
     dossier_item = dossier_schema["$defs"]["DossierPublicFactProposalV2"]
@@ -287,14 +307,9 @@ def _dialogue_frame() -> dict[str, object]:
             }
         ],
         "frame_type": "DIALOGUE_FRAME",
-        "schema_version": "intake.dialogue-frame.v1",
+        "schema_version": "intake.dialogue-frame.v2",
         "dialogue": {
-            "action_binding": {
-                "action": "ASK_SUBSTANTIVE",
-                "phase_source_sha256": "a" * 64,
-            },
-            "public_projection_slots": ["DSEG_01"],
-            "language": "zh-CN",
+            "remark_disposition": None,
         },
     }
 

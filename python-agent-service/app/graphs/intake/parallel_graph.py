@@ -33,6 +33,7 @@ from app.graphs.intake.parallel_outputs import (
     FRAME_OUTPUT_MODELS,
     DialoguePublicSegmentProposalV1,
     DossierPublicFactProposalV2,
+    IntakeDialogueFrameV2,
     IntakeDossierFrameV2,
     IntakeQualityFrameV1,
     ParallelFrameOutput,
@@ -40,6 +41,7 @@ from app.graphs.intake.parallel_outputs import (
     QualityPublicGapProposalV1,
     QualityPublicMetricProposalV1,
     QualityPublicProjectionProposalV1,
+    request_bound_dialogue_output_types,
     request_bound_dossier_output_types,
     validate_parallel_frame_output,
 )
@@ -1166,7 +1168,14 @@ def _request_bound_frame_semantic_validator(
 
     def validate(value: Any) -> Any:
         frame = validate_parallel_frame_output(frame_type, value)
-        if isinstance(frame, IntakeQualityFrameV1):
+        if isinstance(frame, IntakeDialogueFrameV2):
+            phase = model_context.previous_state.persisted_phase
+            disposition = frame.dialogue.remark_disposition
+            if (phase == "WAITING_FOR_REMARK") != (disposition is not None):
+                raise ValueError(
+                    "Dialogue remark disposition does not match the persisted phase"
+                )
+        elif isinstance(frame, IntakeQualityFrameV1):
             if any(
                 gap.source_role != actor_role
                 for gap in frame.quality.gap_proposals
@@ -1189,6 +1198,10 @@ def _request_bound_frame_types(
     frame_type: ParallelFrameType,
     model_context: IntakeModelContextViewV1,
 ) -> tuple[type[BaseModel], type[BaseModel]]:
+    if frame_type == "DIALOGUE_FRAME":
+        return request_bound_dialogue_output_types(
+            persisted_phase=model_context.previous_state.persisted_phase,
+        )
     if frame_type != "DOSSIER_FRAME":
         return FRAME_OUTPUT_MODELS[frame_type], FRAME_PUBLIC_ITEM_MODELS[frame_type]
     output_type, item_type = request_bound_dossier_output_types(
