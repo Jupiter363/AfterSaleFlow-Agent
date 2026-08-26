@@ -433,7 +433,8 @@ public interface IntakeParallelFrameStagingPort {
             publicPayload = Objects.requireNonNull(publicPayload, "publicPayload");
             canonicalPayloadSha256 =
                     sha256(canonicalPayloadSha256, "canonicalPayloadSha256");
-            occurredAt = Objects.requireNonNull(occurredAt, "occurredAt");
+            occurredAt = Objects.requireNonNull(occurredAt, "occurredAt")
+                    .truncatedTo(ChronoUnit.MICROS);
             if (ingressKind.requiresLocalIndex() && localIndex == null) {
                 throw new IllegalArgumentException(
                         ingressKind + " requires a localIndex");
@@ -557,7 +558,8 @@ public interface IntakeParallelFrameStagingPort {
             nonNegative(nextLocalIndex, "nextLocalIndex");
             wireInteger(nextLocalIndex, "nextLocalIndex");
             usage = Objects.requireNonNull(usage, "usage");
-            completedAt = Objects.requireNonNull(completedAt, "completedAt");
+            completedAt = Objects.requireNonNull(completedAt, "completedAt")
+                    .truncatedTo(ChronoUnit.MICROS);
         }
     }
 

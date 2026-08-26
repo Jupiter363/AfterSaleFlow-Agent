@@ -13,7 +13,10 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSlotView;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameType;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressCommand;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressKind;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.SlotState;
+import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import java.time.Instant;
 import java.util.EnumMap;
@@ -167,6 +170,58 @@ class IntakeParallelFrameStagingPortTest {
                         admittedAt))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("advance exactly once");
+    }
+
+    @Test
+    void publicIngressAndSealTimesUsePostgresqlMicrosecondPrecision() {
+        Instant sourceTime = Instant.parse("2026-08-24T01:00:00.123456789Z");
+        AgentStreamEventV4.Payload start = AgentStreamEventV4.Payload.frameStartPayload(
+                "FRAME_DIALOGUE_1",
+                AgentStreamEventV4.FrameType.DIALOGUE_FRAME,
+                1,
+                "FRAME_SET_RECEIPT_1",
+                "intake-projection-registry.v1");
+        IngressCommand ingress = new IngressCommand(
+                "FRAME_SET_1",
+                "RUN_1",
+                "ATTEMPT_1",
+                "STREAM_1",
+                0,
+                "start:dialogue:1",
+                FrameType.DIALOGUE_FRAME,
+                1,
+                IngressKind.PUBLIC_FRAME_START,
+                null,
+                Audience.USER,
+                start,
+                hash('a'),
+                sourceTime);
+        FrameSealCommand seal = new FrameSealCommand(
+                "FRAME_SET_1",
+                "RUN_1",
+                "ATTEMPT_1",
+                "STREAM_1",
+                1,
+                "seal:dialogue:1",
+                Audience.USER,
+                FrameType.DIALOGUE_FRAME,
+                1,
+                "FRAME_DIALOGUE_1",
+                "checkpoint://dialogue/1",
+                hash('a'),
+                hash('b'),
+                hash('c'),
+                "{}",
+                hash('d'),
+                hash('e'),
+                1,
+                new IntakeParallelFrameStagingPort.ProviderUsage(1, 1, 2, 1, 1),
+                sourceTime);
+
+        assertThat(ingress.occurredAt())
+                .isEqualTo(Instant.parse("2026-08-24T01:00:00.123456Z"));
+        assertThat(seal.completedAt())
+                .isEqualTo(Instant.parse("2026-08-24T01:00:00.123456Z"));
     }
 
     @Test

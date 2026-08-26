@@ -230,6 +230,8 @@ public class JdbcIntakeParallelFrameStagingStore
                    slot.current_generation as current_frame_generation,
                    slot.current_frame_id, slot.slot_state,
                    generation.failure_code, generation.failure_retryable,
+                   generation.created_at as generation_created_at,
+                   generation.terminal_at as generation_terminal_at,
                    authority.current_binding_id,
                    authority.current_generation as current_binding_generation,
                    authority.authority_version as current_authority_version
@@ -572,22 +574,28 @@ public class JdbcIntakeParallelFrameStagingStore
 
     private static final String FIND_INGRESS_REPLAY_SQL =
             """
-            select ingress_id, frame_set_id, agent_run_id, agent_run_attempt_id,
-                   frame_type, frame_generation, ingress_identity,
-                   stream_session_id, transport_sequence, event_kind,
-                   local_index, canonical_payload_sha256, global_sequence,
-                   public_event_id, receipt_id
-              from intake_parallel_frame_ingress
-             where agent_run_id = :runId and agent_run_attempt_id = :attemptId
+            select ingress.ingress_id, ingress.frame_set_id, ingress.agent_run_id,
+                   ingress.agent_run_attempt_id, ingress.frame_type,
+                   ingress.frame_generation, ingress.ingress_identity,
+                   ingress.stream_session_id, ingress.transport_sequence,
+                   ingress.event_kind, ingress.local_index,
+                   ingress.canonical_payload_sha256, ingress.global_sequence,
+                   ingress.public_event_id, ingress.receipt_id,
+                   public_event.created_at as public_event_occurred_at
+              from intake_parallel_frame_ingress ingress
+              join agent_run_stream_event public_event
+                on public_event.id = ingress.public_event_id
+             where ingress.agent_run_id = :runId
+               and ingress.agent_run_attempt_id = :attemptId
                and (
-                    ingress_identity = :ingressIdentity
+                    ingress.ingress_identity = :ingressIdentity
                     or (
-                        frame_set_id = :frameSetId
-                        and stream_session_id = :streamSessionId
-                        and transport_sequence = :transportSequence
+                        ingress.frame_set_id = :frameSetId
+                        and ingress.stream_session_id = :streamSessionId
+                        and ingress.transport_sequence = :transportSequence
                     )
                )
-             order by ingress_id
+             order by ingress.ingress_id
             """;
 
     private static final String INSERT_INGRESS_SQL =
@@ -697,6 +705,7 @@ public class JdbcIntakeParallelFrameStagingStore
         String currentState = text(row, "slot_state");
         if (currentGeneration == replacement.generation()
                 && replacement.frameId().equals(text(row, "current_frame_id"))) {
+            requireRetryAdmissionTime(admission, row);
             requireRetryPredecessor(admission);
             requireStoredManifest(admission.frameSetId(), replacement, admission.repairCode(), admission.validationPath());
             return new FrameRetryReceipt(
@@ -726,6 +735,11 @@ public class JdbcIntakeParallelFrameStagingStore
         }
         if (!replacement.modelProfileId().equals(text(row, "model_profile_id"))) {
             throw conflict("INTAKE_PARALLEL_RETRY_MODEL_DRIFT", "retry changed model profile");
+        }
+        if (admission.admittedAt().isBefore(instant(row, "generation_terminal_at"))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_RETRY_TIME_DRIFT",
+                    "replacement admission predates its terminal predecessor");
         }
         MapSqlParameterSource replacementParameters = manifestParameters(
                 admission.frameSetId(),
@@ -1419,7 +1433,8 @@ public class JdbcIntakeParallelFrameStagingStore
                 command.generation(),
                 command.ingressKind().publicEventType().wireValue(),
                 command.localIndex(),
-                canonicalPayloadSha256);
+                canonicalPayloadSha256,
+                command.occurredAt());
         Map<String, Object> authority = lockFrame(
                 command.frameSetId(), command.frameType());
         requireFrameSetAuthority(
@@ -1588,7 +1603,8 @@ public class JdbcIntakeParallelFrameStagingStore
                 command.generation(),
                 AgentStreamEventV4.EventType.PUBLIC_FRAME_SEALED.wireValue(),
                 null,
-                canonicalPayloadSha256);
+                canonicalPayloadSha256,
+                command.completedAt());
         var eventReceipt = eventWriter.appendInCurrentTransaction(
                 new PostgresAgentRunV4EventWriter.EventWriteCommand(
                         publicEventId,
@@ -1793,7 +1809,7 @@ public class JdbcIntakeParallelFrameStagingStore
         return rows.stream().findFirst();
     }
 
-    private static void requireExactIngressReplay(
+    static void requireExactIngressReplay(
             MapSqlParameterSource expected, Map<String, Object> stored) {
         Long expectedLocal = (Long) expected.getValue("localIndex");
         Long storedLocal = nullableNumber(stored, "local_index");
@@ -1813,7 +1829,10 @@ public class JdbcIntakeParallelFrameStagingStore
                 && Objects.equals(expectedLocal, storedLocal)
                 && Objects.equals(
                         expected.getValue("canonicalPayloadSha256"),
-                        stored.get("canonical_payload_sha256"));
+                        stored.get("canonical_payload_sha256"))
+                && ((Timestamp) expected.getValue("occurredAt"))
+                        .toInstant()
+                        .equals(instant(stored, "public_event_occurred_at"));
         if (!exact) {
             throw conflict(
                     "INTAKE_PARALLEL_INGRESS_REPLAY_CONFLICT",
@@ -2143,7 +2162,8 @@ public class JdbcIntakeParallelFrameStagingStore
                        ingress.canonical_payload_json::text,
                        ingress.canonical_payload_sha256, ingress.global_sequence,
                        ingress.public_event_id, ingress.receipt_id,
-                       public_event.event_type, public_event.audience
+                       public_event.event_type, public_event.audience,
+                       public_event.created_at as public_event_occurred_at
                   from intake_parallel_frame_ingress ingress
                   join agent_run_stream_event public_event
                     on public_event.id = ingress.public_event_id
@@ -2193,6 +2213,7 @@ public class JdbcIntakeParallelFrameStagingStore
                 && AgentStreamEventV4.EventType.PUBLIC_FRAME_SEALED.wireValue()
                         .equals(text(ingress, "event_type"))
                 && command.audience().name().equals(text(ingress, "audience"))
+                && command.completedAt().equals(instant(ingress, "public_event_occurred_at"))
                 && nullableNumber(ingress, "local_index") == null;
         if (!exactIngress) {
             throw conflict(
@@ -2208,7 +2229,7 @@ public class JdbcIntakeParallelFrameStagingStore
                        canonical_result_json::text, result_sha256,
                        public_projection_sha256, next_local_index,
                        provider_call_count, input_tokens, output_tokens,
-                       total_tokens, latency_ms
+                       total_tokens, latency_ms, sealed_at
                   from intake_parallel_frame_result
                  where result_id = :resultId
                    and frame_set_id = :frameSetId
@@ -2242,7 +2263,8 @@ public class JdbcIntakeParallelFrameStagingStore
                 && command.usage().inputTokens() == number(result, "input_tokens")
                 && command.usage().outputTokens() == number(result, "output_tokens")
                 && command.usage().totalTokens() == number(result, "total_tokens")
-                && command.usage().latencyMs() == number(result, "latency_ms");
+                && command.usage().latencyMs() == number(result, "latency_ms")
+                && command.completedAt().equals(instant(result, "sealed_at"));
         if (!exactResult) {
             throw conflict(
                     "INTAKE_PARALLEL_FRAME_SEAL_REPLAY_CONFLICT",
@@ -2392,7 +2414,8 @@ public class JdbcIntakeParallelFrameStagingStore
             long frameGeneration,
             String eventKind,
             Long localIndex,
-            String canonicalPayloadSha256) {
+            String canonicalPayloadSha256,
+            Instant occurredAt) {
         return new MapSqlParameterSource()
                 .addValue("frameSetId", frameSetId)
                 .addValue("runId", runId)
@@ -2404,7 +2427,17 @@ public class JdbcIntakeParallelFrameStagingStore
                 .addValue("frameGeneration", frameGeneration)
                 .addValue("eventKind", eventKind)
                 .addValue("localIndex", localIndex)
-                .addValue("canonicalPayloadSha256", canonicalPayloadSha256);
+                .addValue("canonicalPayloadSha256", canonicalPayloadSha256)
+                .addValue("occurredAt", Timestamp.from(occurredAt));
+    }
+
+    static void requireRetryAdmissionTime(
+            FrameRetryAdmission admission, Map<String, Object> stored) {
+        if (!admission.admittedAt().equals(instant(stored, "generation_created_at"))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_RETRY_REPLAY_CONFLICT",
+                    "replacement generation replay changed its admission time");
+        }
     }
 
     private static MapSqlParameterSource copy(MapSqlParameterSource source) {

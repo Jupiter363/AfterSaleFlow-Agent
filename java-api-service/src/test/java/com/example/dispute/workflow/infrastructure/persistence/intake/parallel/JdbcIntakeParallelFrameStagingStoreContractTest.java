@@ -5,13 +5,21 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressKind;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameManifest;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryAdmission;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameType;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.SlotState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.StagingConflictException;
 import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Usage;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.junit.jupiter.api.Test;
 
 class JdbcIntakeParallelFrameStagingStoreContractTest {
@@ -137,6 +145,84 @@ class JdbcIntakeParallelFrameStagingStoreContractTest {
         assertThat(source.substring(startFrame))
                 .contains("started_at = :occurredat")
                 .contains("updated_at = greatest(updated_at, :occurredat)");
+        assertThat(source)
+                .contains("public_event.created_at as public_event_occurred_at")
+                .contains("command.completedat().equals(instant(ingress, \"public_event_occurred_at\"))")
+                .contains("command.completedat().equals(instant(result, \"sealed_at\"))");
+    }
+
+    @Test
+    void rejectsRetryAndIngressReplayWhenTheSourceEventTimeDrifts() {
+        Instant admittedAt = Instant.parse("2026-08-24T01:00:00.123456Z");
+        FrameRetryAdmission retry = new FrameRetryAdmission(
+                "FRAME_SET_1",
+                new FrameManifest(
+                        FrameType.DIALOGUE_FRAME,
+                        2,
+                        "FRAME_DIALOGUE_2",
+                        FrameType.DIALOGUE_FRAME.promptProfileId(),
+                        FrameType.DIALOGUE_FRAME.outputSchemaId(),
+                        "qwen3.7-max-no-thinking-strict",
+                        "a".repeat(64),
+                        "b".repeat(64)),
+                1,
+                SlotState.FAILED,
+                "OUTPUT_SCHEMA_INVALID",
+                "$",
+                admittedAt);
+        Map<String, Object> storedRetry = Map.of(
+                "generation_created_at", Timestamp.from(admittedAt));
+        assertThatCode(() -> JdbcIntakeParallelFrameStagingStore
+                        .requireRetryAdmissionTime(retry, storedRetry))
+                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> JdbcIntakeParallelFrameStagingStore
+                        .requireRetryAdmissionTime(
+                                retry,
+                                Map.of(
+                                        "generation_created_at",
+                                        Timestamp.from(admittedAt.plusNanos(1_000)))))
+                .isInstanceOfSatisfying(
+                        StagingConflictException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("INTAKE_PARALLEL_RETRY_REPLAY_CONFLICT"));
+
+        MapSqlParameterSource expected = new MapSqlParameterSource()
+                .addValue("frameSetId", "FRAME_SET_1")
+                .addValue("runId", "RUN_1")
+                .addValue("attemptId", "ATTEMPT_1")
+                .addValue("frameType", "DIALOGUE_FRAME")
+                .addValue("frameGeneration", 2L)
+                .addValue("ingressIdentity", "reset:dialogue:2")
+                .addValue("streamSessionId", "STREAM_1")
+                .addValue("transportSequence", 3L)
+                .addValue("eventKind", "frame_generation_reset")
+                .addValue("localIndex", null)
+                .addValue("canonicalPayloadSha256", "c".repeat(64))
+                .addValue("occurredAt", Timestamp.from(admittedAt));
+        Map<String, Object> storedIngress = new HashMap<>();
+        storedIngress.put("frame_set_id", "FRAME_SET_1");
+        storedIngress.put("agent_run_id", "RUN_1");
+        storedIngress.put("agent_run_attempt_id", "ATTEMPT_1");
+        storedIngress.put("frame_type", "DIALOGUE_FRAME");
+        storedIngress.put("frame_generation", 2L);
+        storedIngress.put("ingress_identity", "reset:dialogue:2");
+        storedIngress.put("stream_session_id", "STREAM_1");
+        storedIngress.put("transport_sequence", 3L);
+        storedIngress.put("event_kind", "frame_generation_reset");
+        storedIngress.put("local_index", null);
+        storedIngress.put("canonical_payload_sha256", "c".repeat(64));
+        storedIngress.put("public_event_occurred_at", Timestamp.from(admittedAt));
+        assertThatCode(() -> JdbcIntakeParallelFrameStagingStore
+                        .requireExactIngressReplay(expected, storedIngress))
+                .doesNotThrowAnyException();
+        storedIngress.put(
+                "public_event_occurred_at", Timestamp.from(admittedAt.plusNanos(1_000)));
+        assertThatThrownBy(() -> JdbcIntakeParallelFrameStagingStore
+                        .requireExactIngressReplay(expected, storedIngress))
+                .isInstanceOfSatisfying(
+                        StagingConflictException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("INTAKE_PARALLEL_INGRESS_REPLAY_CONFLICT"));
     }
 
     @Test
