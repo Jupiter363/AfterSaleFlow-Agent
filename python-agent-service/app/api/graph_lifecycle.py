@@ -41,6 +41,7 @@ from app.api.graph_stream_service import (
 from app.api.intake_parallel_stream import (
     OpenedParallelFrameStream,
     ParallelFrameAdmissionReceipt,
+    ParallelFrameFailureTerminationReceipt,
     ParallelFrameStreamAuthority,
     ParallelIntakeFrameStreamService,
 )
@@ -1061,6 +1062,7 @@ class _RuntimeTargetE2EVerifier:
         transport_identity: TransportIdentity,
         phase: str,
         admission_receipt_sha256: str | None,
+        failure_code: str | None = None,
     ) -> VerifiedTargetE2EInvocation:
         verifier = self._handle.require_runtime().target_e2e_verifier
         if verifier is None:
@@ -1071,6 +1073,7 @@ class _RuntimeTargetE2EVerifier:
             transport_identity=transport_identity,
             phase=phase,
             admission_receipt_sha256=admission_receipt_sha256,
+            failure_code=failure_code,
         )
         if not isinstance(verified, VerifiedTargetE2EInvocation):
             raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
@@ -1171,6 +1174,26 @@ class _RuntimeParallelIntakeStreamService:
             verified_invocation=verified_invocation,
             expected_thread=expected_thread,
             admission_receipt=admission_receipt,
+        )
+
+    async def terminate_uncommitted_failure(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+        admission_receipt: ParallelFrameAdmissionReceipt,
+        failure_code: str,
+    ) -> ParallelFrameFailureTerminationReceipt:
+        service = self._handle.require_runtime().parallel_intake_stream_service
+        if service is None:
+            raise GraphGatewayDisabledError("INTAKE_PARALLEL_RUNTIME_UNAVAILABLE")
+        return await service.terminate_uncommitted_failure(
+            command=command,
+            verified_invocation=verified_invocation,
+            expected_thread=expected_thread,
+            admission_receipt=admission_receipt,
+            failure_code=failure_code,
         )
 
 

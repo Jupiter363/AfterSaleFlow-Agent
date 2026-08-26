@@ -15,6 +15,7 @@ from app.api.intake_parallel_stream import (
     ExpectedParallelFrame,
     OpenedParallelFrameStream,
     ParallelFrameAdmissionReceipt,
+    ParallelFrameFailureTerminationReceipt,
     ParallelFrameStreamAuthority,
     ParallelFrameStreamProtocolError,
     ParallelFrameStreamProtocolValidator,
@@ -32,6 +33,7 @@ from app.graph_runtime.gateway import (
     AdmissionAction,
     GatewayAdmission,
     GatewayExecution,
+    ParallelUncommittedFailureTerminal,
 )
 from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.intake_binding import decode_authorized_intake_ingress
@@ -161,6 +163,16 @@ class _ParallelGateway(Protocol):
         error_classification: str,
     ) -> GatewayExecution: ...
 
+    async def terminalize_parallel_uncommitted_failure(
+        self,
+        admission: GatewayAdmission,
+        *,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+        failure_code: str,
+    ) -> ParallelUncommittedFailureTerminal: ...
+
     def cleanup_execution_lease(self, execution: GatewayExecution) -> None: ...
 
 
@@ -204,6 +216,14 @@ class _ProviderGroupBulkhead(Protocol):
         takeover: bool,
         permit_count: int,
     ) -> _ProviderGroupPermit: ...
+
+    async def terminalize_command_permits(
+        self,
+        *,
+        thread_id: str,
+        command_id: str,
+        frame_set_id: str,
+    ) -> tuple[Any, ...]: ...
 
 
 class _StreamingTechnicalEventSink:
@@ -458,6 +478,76 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 room_fencing_token=verified_invocation.room_fencing_token,
             )
             return _authority_from_command_bundle(command, bundle)
+        finally:
+            await self._gate.leave(token)
+
+    async def terminate_uncommitted_failure(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+        admission_receipt: ParallelFrameAdmissionReceipt,
+        failure_code: str,
+    ) -> ParallelFrameFailureTerminationReceipt:
+        if (
+            verified_invocation.claims.parallel_phase != "TERMINATE"
+            or verified_invocation.claims.parallel_admission_receipt_sha256
+            != admission_receipt.receipt_sha256
+            or verified_invocation.claims.parallel_failure_code != failure_code
+            or _SAFE_CODE.fullmatch(failure_code) is None
+        ):
+            raise GraphContractError(
+                "parallel failure termination differs from its verified invocation"
+            )
+        token = await self._gate.enter()
+        try:
+            prepared_bundle = await self._load_prepared_bundle(
+                command,
+                expected_thread,
+                room_fencing_token=verified_invocation.room_fencing_token,
+            )
+            authority = admission_receipt.require_authority(
+                command=command,
+                authority=_authority_from_command_bundle(command, prepared_bundle),
+            )
+            admission = await self._gateway.admit(
+                command=command,
+                verified_invocation=verified_invocation,
+                expected_thread=expected_thread,
+            )
+            terminal = await self._gateway.terminalize_parallel_uncommitted_failure(
+                admission,
+                frame_set_id=authority.frame_set_id,
+                receipt_sha256=admission_receipt.receipt_sha256,
+                authority_sha256=admission_receipt.authority_sha256,
+                failure_code=failure_code,
+            )
+            permits = await self._provider_bulkhead.terminalize_command_permits(
+                thread_id=command.thread_id,
+                command_id=command.command_id,
+                frame_set_id=authority.frame_set_id,
+            )
+            permit_statuses = tuple(sorted(str(permit.status) for permit in permits))
+            return ParallelFrameFailureTerminationReceipt.create(
+                request_hash=command.request_hash,
+                frame_set_id=authority.frame_set_id,
+                run_id=command.logical_run_id,
+                attempt_id=command.attempt_id,
+                command_id=command.command_id,
+                admission_receipt_sha256=admission_receipt.receipt_sha256,
+                requested_failure_code=failure_code,
+                graph_command_status=cast(Any, terminal.command_status.value),
+                graph_attempt_status=cast(
+                    Any,
+                    "ABSENT"
+                    if terminal.attempt_status is None
+                    else terminal.attempt_status.value,
+                ),
+                graph_error_code=terminal.error_code,
+                graph_error_classification=terminal.error_classification,
+                provider_permit_statuses=permit_statuses,
+            )
         finally:
             await self._gate.leave(token)
 

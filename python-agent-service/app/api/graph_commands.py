@@ -91,8 +91,10 @@ TARGET_E2E_RECONCILE_PATH = "/internal/graphs/target-e2e/commands/reconcile"
 TARGET_E2E_PROPOSAL_SOURCE_PATH = "/internal/graphs/target-e2e/commands/proposal-source"
 _PARALLEL_PHASE_HEADER = "x-intake-parallel-phase"
 _PARALLEL_ADMISSION_HEADER = "x-intake-parallel-admission"
+_PARALLEL_FAILURE_HEADER = "x-intake-parallel-failure-code"
 _TERMINAL_EVENTS = frozenset({"attempt_aborted", "final", "error"})
 _STABLE_INTAKE_ERROR_CODE_PATTERN = re.compile(r"^INTAKE_[A-Z0-9_]{1,120}$")
+_SAFE_PARALLEL_FAILURE_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _SAFE_ERROR_SITE_MODULE_PATTERN = re.compile(
     r"^(?:app|asyncio|concurrent\.futures|langchain_core|langgraph|pydantic|pydantic_core)"
     r"(?:\.[A-Za-z_][A-Za-z0-9_]*)*$"
@@ -193,6 +195,7 @@ class TargetE2EInvocationEnvelopeVerifierPort(Protocol):
         transport_identity: TransportIdentity,
         phase: str,
         admission_receipt_sha256: str | None,
+        failure_code: str | None = None,
     ) -> VerifiedTargetE2EInvocation: ...
 
 
@@ -481,17 +484,23 @@ def create_graph_commands_router(
 
         parallel_phase: str | None = None
         parallel_receipt: ParallelFrameAdmissionReceipt | None = None
+        parallel_failure_code: str | None = None
         try:
             if envelope.command.is_parallel_intake_command:
                 phase_values = request.headers.getlist(_PARALLEL_PHASE_HEADER)
                 admission_values = request.headers.getlist(_PARALLEL_ADMISSION_HEADER)
-                if len(phase_values) != 1 or phase_values[0] not in {"PREPARE", "EXECUTE"}:
+                failure_values = request.headers.getlist(_PARALLEL_FAILURE_HEADER)
+                if len(phase_values) != 1 or phase_values[0] not in {
+                    "PREPARE",
+                    "EXECUTE",
+                    "TERMINATE",
+                }:
                     raise InvocationEnvelopeError(
                         "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
                     )
                 parallel_phase = phase_values[0]
                 if parallel_phase == "PREPARE":
-                    if admission_values:
+                    if admission_values or failure_values:
                         raise InvocationEnvelopeError(
                             "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
                         )
@@ -503,21 +512,41 @@ def create_graph_commands_router(
                     parallel_receipt = decode_parallel_admission_receipt_header(
                         admission_values[0]
                     )
-                verified = verifier.verify_parallel_envelope(
-                    token=token,
-                    envelope=envelope,
-                    transport_identity=transport_identity,
-                    phase=parallel_phase,
-                    admission_receipt_sha256=(
+                    if parallel_phase == "EXECUTE":
+                        if failure_values:
+                            raise InvocationEnvelopeError(
+                                "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                            )
+                    else:
+                        if (
+                            len(failure_values) != 1
+                            or _SAFE_PARALLEL_FAILURE_CODE_PATTERN.fullmatch(
+                                failure_values[0]
+                            )
+                            is None
+                        ):
+                            raise InvocationEnvelopeError(
+                                "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                            )
+                        parallel_failure_code = failure_values[0]
+                verification_arguments: dict[str, Any] = {
+                    "token": token,
+                    "envelope": envelope,
+                    "transport_identity": transport_identity,
+                    "phase": parallel_phase,
+                    "admission_receipt_sha256": (
                         parallel_receipt.receipt_sha256
                         if parallel_receipt is not None
                         else None
                     ),
-                )
+                }
+                if parallel_phase == "TERMINATE":
+                    verification_arguments["failure_code"] = parallel_failure_code
+                verified = verifier.verify_parallel_envelope(**verification_arguments)
             else:
                 if request.headers.getlist(_PARALLEL_PHASE_HEADER) or request.headers.getlist(
                     _PARALLEL_ADMISSION_HEADER
-                ):
+                ) or request.headers.getlist(_PARALLEL_FAILURE_HEADER):
                     raise InvocationEnvelopeError(
                         "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
                     )
@@ -579,6 +608,31 @@ def create_graph_commands_router(
                             "X-Intake-Parallel-Authority": (
                                 encode_parallel_frame_authority_header(authority)
                             ),
+                            "X-Graph-Execution-Lane": envelope.execution_lane,
+                            "X-Graph-Activation-Id": envelope.activation_id,
+                        },
+                    )
+                if parallel_phase == "TERMINATE":
+                    if parallel_receipt is None or parallel_failure_code is None:
+                        raise ParallelFrameStreamProtocolError(
+                            "parallel failure termination authority is absent"
+                        )
+                    receipt = await parallel_service.terminate_uncommitted_failure(
+                        command=command,
+                        verified_invocation=verified,
+                        expected_thread=expected_thread,
+                        admission_receipt=parallel_receipt,
+                        failure_code=parallel_failure_code,
+                    )
+                    return JSONResponse(
+                        status_code=200,
+                        content=receipt.canonical_document(),
+                        headers={
+                            **_NO_STORE_HEADERS,
+                            "X-Agent-Run-Id": command.logical_run_id,
+                            "X-Agent-Stream-Protocol": "agent-stream.v4",
+                            "X-Intake-Frame-Set-Id": receipt.frame_set_id,
+                            "X-Intake-Parallel-Terminal-Receipt": receipt.receipt_sha256,
                             "X-Graph-Execution-Lane": envelope.execution_lane,
                             "X-Graph-Activation-Id": envelope.activation_id,
                         },

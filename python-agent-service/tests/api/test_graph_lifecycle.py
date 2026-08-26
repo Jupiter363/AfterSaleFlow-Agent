@@ -45,12 +45,17 @@ BASE_SETTINGS = {
 
 
 @pytest.mark.parametrize(
-    ("phase", "admission_receipt_sha256"),
-    [("PREPARE", None), ("EXECUTE", "a" * 64)],
+    ("phase", "admission_receipt_sha256", "failure_code"),
+    [
+        ("PREPARE", None, None),
+        ("EXECUTE", "a" * 64, None),
+        ("TERMINATE", "a" * 64, "ACTIVITY_RETRY_EXHAUSTED"),
+    ],
 )
 def test_runtime_target_e2e_verifier_delegates_parallel_envelopes(
     phase: str,
     admission_receipt_sha256: str | None,
+    failure_code: str | None,
 ) -> None:
     verified = object.__new__(graph_lifecycle.VerifiedTargetE2EInvocation)
     envelope = object()
@@ -77,6 +82,7 @@ def test_runtime_target_e2e_verifier_delegates_parallel_envelopes(
             transport_identity=cast(Any, transport_identity),
             phase=phase,
             admission_receipt_sha256=admission_receipt_sha256,
+            failure_code=failure_code,
         )
         is verified
     )
@@ -87,18 +93,20 @@ def test_runtime_target_e2e_verifier_delegates_parallel_envelopes(
             "transport_identity": transport_identity,
             "phase": phase,
             "admission_receipt_sha256": admission_receipt_sha256,
+            "failure_code": failure_code,
         }
     ]
 
 
 @pytest.mark.asyncio
-async def test_runtime_parallel_intake_service_delegates_both_protocol_phases() -> None:
+async def test_runtime_parallel_intake_service_delegates_all_protocol_phases() -> None:
     command = object()
     verified_invocation = object()
     expected_thread = object()
     admission_receipt = object()
     prepared = object()
     opened = object()
+    terminated = object()
     calls: list[tuple[str, dict[str, Any]]] = []
 
     class Service:
@@ -109,6 +117,10 @@ async def test_runtime_parallel_intake_service_delegates_both_protocol_phases() 
         async def open_stream(self, **kwargs: Any) -> Any:
             calls.append(("open_stream", kwargs))
             return opened
+
+        async def terminate_uncommitted_failure(self, **kwargs: Any) -> Any:
+            calls.append(("terminate_uncommitted_failure", kwargs))
+            return terminated
 
     class RuntimeHandle:
         def require_runtime(self) -> Any:
@@ -135,6 +147,16 @@ async def test_runtime_parallel_intake_service_delegates_both_protocol_phases() 
         )
         is opened
     )
+    assert (
+        await runtime_service.terminate_uncommitted_failure(
+            command=cast(Any, command),
+            verified_invocation=cast(Any, verified_invocation),
+            expected_thread=cast(Any, expected_thread),
+            admission_receipt=cast(Any, admission_receipt),
+            failure_code="ACTIVITY_RETRY_EXHAUSTED",
+        )
+        is terminated
+    )
     assert calls == [
         (
             "prepare",
@@ -151,6 +173,16 @@ async def test_runtime_parallel_intake_service_delegates_both_protocol_phases() 
                 "verified_invocation": verified_invocation,
                 "expected_thread": expected_thread,
                 "admission_receipt": admission_receipt,
+            },
+        ),
+        (
+            "terminate_uncommitted_failure",
+            {
+                "command": command,
+                "verified_invocation": verified_invocation,
+                "expected_thread": expected_thread,
+                "admission_receipt": admission_receipt,
+                "failure_code": "ACTIVITY_RETRY_EXHAUSTED",
             },
         ),
     ]

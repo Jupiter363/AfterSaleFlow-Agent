@@ -233,6 +233,9 @@ public final class Es256TargetE2EGraphEnvelopeSigner implements TargetE2EGraphEn
             "parallel_admission_receipt_sha256",
             deliveryBinding.admissionReceiptSha256());
       }
+      if (deliveryBinding.failureCode() != null) {
+        claims.put("parallel_failure_code", deliveryBinding.failureCode());
+      }
     }
     return claims;
   }

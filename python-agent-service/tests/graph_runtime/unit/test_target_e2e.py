@@ -285,7 +285,7 @@ def test_runtime_projection_and_command_credential_are_distinct() -> None:
     assert verified.room_fencing_token == 11
 
 
-def test_parallel_prepare_and_execute_claims_are_strictly_discriminated() -> None:
+def test_parallel_prepare_execute_and_terminate_claims_are_strictly_discriminated() -> None:
     key = ec.generate_private_key(ec.SECP256R1())
     command = _parallel_command()
     envelope = _command_envelope(command)
@@ -317,9 +317,26 @@ def test_parallel_prepare_and_execute_claims_are_strictly_discriminated() -> Non
         phase="EXECUTE",
         admission_receipt_sha256=receipt_hash,
     )
+    terminated = verifier.verify_parallel_envelope(
+        token=_command_token(
+            key,
+            command,
+            jti="candidate-command-jti-terminate",
+            parallel_phase="TERMINATE",
+            parallel_admission_receipt_sha256=receipt_hash,
+            parallel_failure_code="ACTIVITY_RETRY_EXHAUSTED",
+        ),
+        envelope=envelope,
+        transport_identity=transport,
+        phase="TERMINATE",
+        admission_receipt_sha256=receipt_hash,
+        failure_code="ACTIVITY_RETRY_EXHAUSTED",
+    )
 
     assert prepared.claims.parallel_phase == "PREPARE"
     assert executed.claims.parallel_admission_receipt_sha256 == receipt_hash
+    assert terminated.claims.parallel_phase == "TERMINATE"
+    assert terminated.claims.parallel_failure_code == "ACTIVITY_RETRY_EXHAUSTED"
     with pytest.raises(InvocationEnvelopeError, match="DELIVERY_BINDING_MISMATCH"):
         verifier.verify_envelope(
             token=_command_token(key, command, parallel_phase="PREPARE"),
@@ -354,6 +371,23 @@ def test_parallel_prepare_and_execute_claims_are_strictly_discriminated() -> Non
             None,
         ),
         ({"parallel_phase": "EXECUTE"}, "EXECUTE", "9" * 64),
+        (
+            {
+                "parallel_phase": "TERMINATE",
+                "parallel_admission_receipt_sha256": "9" * 64,
+            },
+            "TERMINATE",
+            "9" * 64,
+        ),
+        (
+            {
+                "parallel_phase": "TERMINATE",
+                "parallel_admission_receipt_sha256": "9" * 64,
+                "parallel_failure_code": "bad-code",
+            },
+            "TERMINATE",
+            "9" * 64,
+        ),
     ],
 )
 def test_parallel_phase_and_receipt_hash_must_form_an_exact_pair(

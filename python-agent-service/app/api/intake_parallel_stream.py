@@ -38,6 +38,7 @@ class ParallelFrameStreamProtocolError(RuntimeError):
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _STREAM_CLOSE_TIMEOUT_SECONDS = 5.0
 
 
@@ -274,6 +275,139 @@ class ParallelFrameAdmissionReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class ParallelFrameFailureTerminationReceipt:
+    receipt_id: str
+    request_hash: str
+    frame_set_id: str
+    run_id: str
+    attempt_id: str
+    command_id: str
+    admission_receipt_sha256: str
+    requested_failure_code: str
+    graph_command_status: Literal["ABORTED", "CANCELLED"]
+    graph_attempt_status: Literal["FAILED", "LEASE_LOST", "CANCELLED", "ABSENT"]
+    graph_error_code: str
+    graph_error_classification: str
+    provider_permit_statuses: tuple[str, ...]
+    receipt_sha256: str
+
+    def __post_init__(self) -> None:
+        identifiers = (
+            self.receipt_id,
+            self.frame_set_id,
+            self.run_id,
+            self.attempt_id,
+            self.command_id,
+            self.requested_failure_code,
+            self.graph_error_code,
+            self.graph_error_classification,
+        )
+        terminal_permit_statuses = {
+            "RELEASED",
+            "CANCELLED",
+            "EXPIRED",
+            "TIMED_OUT",
+            "ORPHANED",
+        }
+        if (
+            any(_IDENTIFIER.fullmatch(value) is None for value in identifiers)
+            or any(
+                _SAFE_CODE.fullmatch(value) is None
+                for value in (
+                    self.requested_failure_code,
+                    self.graph_error_code,
+                    self.graph_error_classification,
+                )
+            )
+            or _SHA256.fullmatch(self.request_hash) is None
+            or _SHA256.fullmatch(self.admission_receipt_sha256) is None
+            or _SHA256.fullmatch(self.receipt_sha256) is None
+            or any(status not in terminal_permit_statuses for status in self.provider_permit_statuses)
+            or tuple(sorted(self.provider_permit_statuses)) != self.provider_permit_statuses
+        ):
+            raise ParallelFrameStreamProtocolError(
+                "parallel failure termination receipt is invalid"
+            )
+        self.canonical_document()
+
+    def canonical_document(self) -> dict[str, object]:
+        document: dict[str, object] = {
+            "schema_version": "intake.parallel-failure-termination.v1",
+            "receipt_id": self.receipt_id,
+            "request_hash": self.request_hash,
+            "frame_set_id": self.frame_set_id,
+            "run_id": self.run_id,
+            "attempt_id": self.attempt_id,
+            "command_id": self.command_id,
+            "admission_receipt_sha256": self.admission_receipt_sha256,
+            "requested_failure_code": self.requested_failure_code,
+            "graph_command_status": self.graph_command_status,
+            "graph_attempt_status": self.graph_attempt_status,
+            "graph_error_code": self.graph_error_code,
+            "graph_error_classification": self.graph_error_classification,
+            "provider_permit_statuses": list(self.provider_permit_statuses),
+            "receipt_sha256": self.receipt_sha256,
+        }
+        unsigned = dict(document)
+        unsigned.pop("receipt_sha256")
+        if canonical_sha256(unsigned) != self.receipt_sha256:
+            raise ParallelFrameStreamProtocolError(
+                "parallel failure termination receipt self-hash drifted"
+            )
+        return document
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        request_hash: str,
+        frame_set_id: str,
+        run_id: str,
+        attempt_id: str,
+        command_id: str,
+        admission_receipt_sha256: str,
+        requested_failure_code: str,
+        graph_command_status: Literal["ABORTED", "CANCELLED"],
+        graph_attempt_status: Literal["FAILED", "LEASE_LOST", "CANCELLED", "ABSENT"],
+        graph_error_code: str,
+        graph_error_classification: str,
+        provider_permit_statuses: tuple[str, ...],
+    ) -> ParallelFrameFailureTerminationReceipt:
+        values: dict[str, object] = {
+            "schema_version": "intake.parallel-failure-termination.v1",
+            "receipt_id": f"parallel-failure-terminal.{admission_receipt_sha256[:24]}",
+            "request_hash": request_hash,
+            "frame_set_id": frame_set_id,
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "command_id": command_id,
+            "admission_receipt_sha256": admission_receipt_sha256,
+            "requested_failure_code": requested_failure_code,
+            "graph_command_status": graph_command_status,
+            "graph_attempt_status": graph_attempt_status,
+            "graph_error_code": graph_error_code,
+            "graph_error_classification": graph_error_classification,
+            "provider_permit_statuses": list(provider_permit_statuses),
+        }
+        return cls(
+            receipt_id=cast(str, values["receipt_id"]),
+            request_hash=request_hash,
+            frame_set_id=frame_set_id,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            admission_receipt_sha256=admission_receipt_sha256,
+            requested_failure_code=requested_failure_code,
+            graph_command_status=graph_command_status,
+            graph_attempt_status=graph_attempt_status,
+            graph_error_code=graph_error_code,
+            graph_error_classification=graph_error_classification,
+            provider_permit_statuses=provider_permit_statuses,
+            receipt_sha256=canonical_sha256(values),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class OpenedParallelFrameStream:
     authority: ParallelFrameStreamAuthority
     active_frame_types: tuple[ParallelFrameType, ...]
@@ -297,6 +431,16 @@ class ParallelIntakeFrameStreamService(Protocol):
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> OpenedParallelFrameStream: ...
+
+    async def terminate_uncommitted_failure(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+        admission_receipt: ParallelFrameAdmissionReceipt,
+        failure_code: str,
+    ) -> ParallelFrameFailureTerminationReceipt: ...
 
 
 @dataclass(slots=True)

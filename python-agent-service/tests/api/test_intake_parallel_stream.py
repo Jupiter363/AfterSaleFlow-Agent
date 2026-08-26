@@ -12,6 +12,7 @@ from app.api.intake_parallel_stream import (
     ExpectedParallelFrame,
     ParallelFrameAdmissionLane,
     ParallelFrameAdmissionReceipt,
+    ParallelFrameFailureTerminationReceipt,
     parallel_frame_authority_sha256,
     ParallelFrameStreamAuthority,
     ParallelFrameStreamProtocolError,
@@ -173,6 +174,58 @@ def test_admission_receipt_rejects_duplicate_json_members() -> None:
         decode_parallel_admission_receipt_header(
             base64.urlsafe_b64encode(duplicated).decode("ascii").rstrip("=")
         )
+
+
+def test_failure_termination_receipt_is_deterministic_and_self_hashed() -> None:
+    values = {
+        "request_hash": "f" * 64,
+        "frame_set_id": FRAME_SET_ID,
+        "run_id": RUN_ID,
+        "attempt_id": ATTEMPT_ID,
+        "command_id": "command.test",
+        "admission_receipt_sha256": "1" * 64,
+        "requested_failure_code": "ACTIVITY_RETRY_EXHAUSTED",
+        "graph_command_status": "ABORTED",
+        "graph_attempt_status": "FAILED",
+        "graph_error_code": "ACTIVITY_RETRY_EXHAUSTED",
+        "graph_error_classification": "JAVA_FINAL_RETRY_EXHAUSTED",
+        "provider_permit_statuses": ("CANCELLED", "RELEASED"),
+    }
+
+    first = ParallelFrameFailureTerminationReceipt.create(**values)  # type: ignore[arg-type]
+    second = ParallelFrameFailureTerminationReceipt.create(**values)  # type: ignore[arg-type]
+
+    assert first == second
+    assert first.receipt_id == f"parallel-failure-terminal.{'1' * 24}"
+    assert canonical_sha256(
+        {
+            key: value
+            for key, value in first.canonical_document().items()
+            if key != "receipt_sha256"
+        }
+    ) == first.receipt_sha256
+
+
+def test_failure_termination_receipt_rejects_nonterminal_or_noncanonical_permits() -> None:
+    base = ParallelFrameFailureTerminationReceipt.create(
+        request_hash="f" * 64,
+        frame_set_id=FRAME_SET_ID,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        command_id="command.test",
+        admission_receipt_sha256="1" * 64,
+        requested_failure_code="ACTIVITY_RETRY_EXHAUSTED",
+        graph_command_status="ABORTED",
+        graph_attempt_status="FAILED",
+        graph_error_code="ACTIVITY_RETRY_EXHAUSTED",
+        graph_error_classification="JAVA_FINAL_RETRY_EXHAUSTED",
+        provider_permit_statuses=("CANCELLED", "RELEASED"),
+    )
+
+    with pytest.raises(ParallelFrameStreamProtocolError):
+        replace(base, provider_permit_statuses=("GRANTED",))
+    with pytest.raises(ParallelFrameStreamProtocolError):
+        replace(base, provider_permit_statuses=("RELEASED", "CANCELLED"))
 
 
 def test_interleaved_exact_three_lanes_seal_against_their_public_results() -> None:

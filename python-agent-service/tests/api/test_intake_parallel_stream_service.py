@@ -26,9 +26,9 @@ from app.api.intake_parallel_stream_service import (
     _decode_cached_completion,
 )
 from app.contracts.v1.codec import canonical_sha256
-from app.graph_runtime.gateway import AdmissionAction
+from app.graph_runtime.gateway import AdmissionAction, ParallelUncommittedFailureTerminal
 from app.graph_runtime.errors import GraphContractError
-from app.graph_runtime.ledger import AttemptStatus
+from app.graph_runtime.ledger import AttemptStatus, CommandStatus
 from app.graph_runtime.recovery import RecoveryAction
 from app.graphs.intake.parallel_contracts import FRAME_TYPES, ParallelFrameType
 from app.graphs.intake.parallel_graph import (
@@ -161,6 +161,7 @@ class _Gateway:
         self.load_calls = 0
         self.receipt_cycle: Any | None = None
         self.completed_cycles: list[Any] = []
+        self.terminalize_calls: list[dict[str, Any]] = []
 
     async def admit(self, **_kwargs: Any) -> Any:
         return SimpleNamespace(
@@ -255,6 +256,22 @@ class _Gateway:
         self.load_calls += 1
         return SimpleNamespace(completion_json={"cached": True})
 
+    async def terminalize_parallel_uncommitted_failure(
+        self,
+        _admission: Any,
+        **kwargs: Any,
+    ) -> ParallelUncommittedFailureTerminal:
+        self.terminalize_calls.append(kwargs)
+        return ParallelUncommittedFailureTerminal(
+            command_status=CommandStatus.ABORTED,
+            attempt_status=AttemptStatus.FAILED,
+            error_code=kwargs["failure_code"],
+            error_classification="JAVA_FINAL_RETRY_EXHAUSTED",
+            owner_id="python:test",
+            fencing_token=17,
+            provider_call_count=1,
+        )
+
     def cleanup_execution_lease(self, _execution: Any) -> None:
         return None
 
@@ -305,6 +322,7 @@ class _ProviderGroupBulkhead:
         self.permit = permit or _ProviderGroupPermit()
         self.acquire_error = acquire_error
         self.return_permit_on_cancel = return_permit_on_cancel
+        self.terminalize_calls: list[dict[str, Any]] = []
 
     async def acquire(self, scope: Any, fence: Any, **kwargs: Any) -> Any:
         self.acquire_calls.append({"scope": scope, "fence": fence, **kwargs})
@@ -318,6 +336,13 @@ class _ProviderGroupBulkhead:
         if self.acquire_error is not None:
             raise self.acquire_error
         return self.permit
+
+    async def terminalize_command_permits(self, **kwargs: Any) -> tuple[Any, ...]:
+        self.terminalize_calls.append(kwargs)
+        return (
+            SimpleNamespace(status="RELEASED"),
+            SimpleNamespace(status="CANCELLED"),
+        )
 
 
 class _SuccessfulOrchestrator:
@@ -1052,10 +1077,80 @@ async def test_retryable_failed_receipt_is_durable_and_same_receipt_replays_with
     assert provider_bulkhead.permit.release_calls == 1
 
 
+@pytest.mark.asyncio
+async def test_final_retry_exhaustion_returns_a_bound_graph_terminal_receipt() -> None:
+    gateway = _Gateway()
+    provider_bulkhead = _ProviderGroupBulkhead()
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    service = GatewayBackedParallelIntakeFrameStreamService(
+        gateway=gateway,
+        input_loader=object(),
+        prompts=object(),
+        orchestrator=object(),
+        model_runner=object(),
+        provider="litellm",
+        model="qwen3.7-max-2026-06-08",
+        provider_bulkhead=provider_bulkhead,
+        owner_id="python:test",
+        admission_gate=gate,
+    )
+    bundle = SimpleNamespace(
+        frame_set_id=FRAME_SET_ID,
+        requests=_requests(),
+        agent_contexts={frame_type: object() for frame_type in FRAME_TYPES},
+    )
+
+    async def load_prepared_bundle(
+        _command: Any,
+        _expected_thread: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        return bundle
+
+    service._load_prepared_bundle = load_prepared_bundle  # type: ignore[method-assign]
+    command = gateway.execution.admission.command
+    admission_receipt = _admission_receipt(command)
+
+    receipt = await service.terminate_uncommitted_failure(
+        command=command,
+        verified_invocation=_verified(
+            admission_receipt,
+            phase="TERMINATE",
+            failure_code="ACTIVITY_RETRY_EXHAUSTED",
+        ),
+        expected_thread=object(),
+        admission_receipt=admission_receipt,
+        failure_code="ACTIVITY_RETRY_EXHAUSTED",
+    )
+
+    assert receipt.frame_set_id == FRAME_SET_ID
+    assert receipt.graph_command_status == "ABORTED"
+    assert receipt.graph_attempt_status == "FAILED"
+    assert receipt.provider_permit_statuses == ("CANCELLED", "RELEASED")
+    assert gateway.terminalize_calls == [
+        {
+            "frame_set_id": FRAME_SET_ID,
+            "receipt_sha256": admission_receipt.receipt_sha256,
+            "authority_sha256": admission_receipt.authority_sha256,
+            "failure_code": "ACTIVITY_RETRY_EXHAUSTED",
+        }
+    ]
+    assert provider_bulkhead.terminalize_calls == [
+        {
+            "thread_id": command.thread_id,
+            "command_id": command.command_id,
+            "frame_set_id": FRAME_SET_ID,
+        }
+    ]
+
+
 def _execution() -> Any:
     command = SimpleNamespace(
         logical_run_id=RUN_ID,
         attempt_id=ATTEMPT_ID,
+        command_id="command_test",
+        thread_id="grt.v1." + "1" * 32,
         request_hash="f" * 64,
         traceparent=None,
         tenant_surrogate="tenant-test",
@@ -1168,12 +1263,18 @@ def _admission_receipt(command: Any) -> ParallelFrameAdmissionReceipt:
     )
 
 
-def _verified(receipt: ParallelFrameAdmissionReceipt) -> Any:
+def _verified(
+    receipt: ParallelFrameAdmissionReceipt,
+    *,
+    phase: str = "EXECUTE",
+    failure_code: str | None = None,
+) -> Any:
     return SimpleNamespace(
         room_fencing_token=17,
         claims=SimpleNamespace(
-            parallel_phase="EXECUTE",
+            parallel_phase=phase,
             parallel_admission_receipt_sha256=receipt.receipt_sha256,
+            parallel_failure_code=failure_code,
         )
     )
 

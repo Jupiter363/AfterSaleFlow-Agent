@@ -26,6 +26,7 @@ from app.graph_runtime.errors import (
     GraphContractError,
     GraphGatewayDisabledError,
     GraphLeaseLostError,
+    GraphLeaseUnavailableError,
     GraphNewAgentAttemptRequiredError,
     GraphNonceReplayError,
     GraphResultNotCommittedError,
@@ -1479,6 +1480,159 @@ def _parallel_receipt(execution: GatewayExecution) -> dict[str, Any]:
     }
     document["receipt_sha256"] = canonical_sha256(document)
     return document
+
+
+class _ParallelFailureLedger:
+    def __init__(self, execution: GatewayExecution, receipt: dict[str, Any]) -> None:
+        self.command = execution.admission.record
+        self.attempt = execution.attempt
+        self.events: list[str] = []
+        self.receipt_execution = ParallelReceiptExecutionRecord.create(
+            thread_id=execution.fence.thread_id,
+            command_id=execution.fence.command_id,
+            request_hash=execution.fence.request_hash,
+            attempt_id=execution.attempt.attempt_id,
+            frame_set_id=receipt["frame_set_id"],
+            receipt_sha256=receipt["receipt_sha256"],
+            authority_sha256=receipt["authority_sha256"],
+            predecessor_cycle_id=None,
+            provider_call_count_at_admission=0,
+            owner_id=execution.fence.owner_id,
+            fencing_token=execution.fence.fencing_token,
+        )
+
+    async def load(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        self.events.append("command_locked")
+        return self.command
+
+    @staticmethod
+    def require_same_binding(actual: CommandBinding, expected: CommandBinding) -> None:
+        assert actual == expected
+
+    async def latest_attempt(self, connection: Any, **kwargs: Any) -> AttemptRecord:
+        return self.attempt
+
+    async def load_parallel_receipt_execution(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> ParallelReceiptExecutionRecord:
+        assert kwargs["receipt_sha256"] == self.receipt_execution.receipt_sha256
+        return self.receipt_execution
+
+    async def terminate(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        self.events.append("command_terminated")
+        self.command = replace(
+            self.command,
+            status=kwargs["status"],
+            error_code=kwargs["error_code"],
+            error_classification=kwargs["error_classification"],
+        )
+        return self.command
+
+    async def finish_attempt(
+        self,
+        connection: Any,
+        attempt: AttemptRecord,
+        **kwargs: Any,
+    ) -> AttemptRecord:
+        self.events.append("attempt_finished")
+        self.attempt = replace(
+            attempt,
+            status=kwargs["status"],
+            error_code=kwargs["error_code"],
+            error_classification=kwargs["error_classification"],
+        )
+        return self.attempt
+
+
+class _ParallelFailureLeases:
+    def __init__(self, execution: GatewayExecution, *, active: bool = False) -> None:
+        self.execution = execution
+        self.active = active
+        self.cancelled = False
+
+    async def lock_for_recovery(self, connection: Any, **kwargs: Any) -> LeaseInspection:
+        return LeaseInspection(
+            lease=self.execution.lease,
+            database_now=(
+                self.execution.lease.lease_expires_at - timedelta(seconds=1)
+                if self.active
+                else self.execution.lease.lease_expires_at + timedelta(seconds=1)
+            ),
+        )
+
+    async def cancel(self, connection: Any, **kwargs: Any) -> LeaseRecord:
+        self.cancelled = True
+        return replace(
+            self.execution.lease,
+            fencing_token=self.execution.lease.fencing_token + 1,
+            cancelled_at=NOW,
+            cancelled_by_command_id=kwargs["cancellation_command_id"],
+            revision=self.execution.lease.revision + 1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_parallel_final_retry_terminalizes_only_after_the_exact_lease_expires() -> None:
+    execution = _parallel_execution(provider_call_count=1)
+    receipt = _parallel_receipt(execution)
+    pool = _Pool()
+    ledger = _ParallelFailureLedger(execution, receipt)
+    leases = _ParallelFailureLeases(execution)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=leases,  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    terminal = await gateway.terminalize_parallel_uncommitted_failure(
+        execution.admission,
+        frame_set_id=receipt["frame_set_id"],
+        receipt_sha256=receipt["receipt_sha256"],
+        authority_sha256=receipt["authority_sha256"],
+        failure_code="ACTIVITY_RETRY_EXHAUSTED",
+    )
+
+    assert terminal.command_status is CommandStatus.ABORTED
+    assert terminal.attempt_status is AttemptStatus.FAILED
+    assert terminal.provider_call_count == 1
+    assert leases.cancelled is True
+    assert ledger.events == ["command_locked", "command_terminated", "attempt_finished"]
+    assert "transaction:commit" in pool.events
+
+
+@pytest.mark.asyncio
+async def test_parallel_final_retry_refuses_to_terminate_an_active_execution() -> None:
+    execution = _parallel_execution(provider_call_count=1)
+    receipt = _parallel_receipt(execution)
+    pool = _Pool()
+    ledger = _ParallelFailureLedger(execution, receipt)
+    leases = _ParallelFailureLeases(execution, active=True)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=leases,  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    with pytest.raises(GraphLeaseUnavailableError):
+        await gateway.terminalize_parallel_uncommitted_failure(
+            execution.admission,
+            frame_set_id=receipt["frame_set_id"],
+            receipt_sha256=receipt["receipt_sha256"],
+            authority_sha256=receipt["authority_sha256"],
+            failure_code="ACTIVITY_RETRY_EXHAUSTED",
+        )
+
+    assert leases.cancelled is False
+    assert ledger.events == ["command_locked"]
+    assert "transaction:rollback" in pool.events
 
 
 class _Executor:

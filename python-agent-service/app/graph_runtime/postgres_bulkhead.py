@@ -24,7 +24,7 @@ from app.graph_runtime.errors import (
     GraphPermitLostError,
     GraphPermitUnavailableError,
 )
-from app.graph_runtime.identity import _identifier
+from app.graph_runtime.identity import THREAD_ID_PATTERN, _identifier
 from app.graph_runtime.transaction_boundary import run_postgres_transaction
 
 
@@ -593,6 +593,93 @@ class PostgresGraphFanoutBulkhead:
             oldest_wait_seconds=float(row["oldest_wait_seconds"]),
             status_counts=counts,
         )
+
+    async def terminalize_command_permits(
+        self,
+        *,
+        thread_id: str,
+        command_id: str,
+        frame_set_id: str,
+    ) -> tuple[PostgresPermitRecord, ...]:
+        """Release every exact provider-group permit before issuing a terminal receipt."""
+
+        self._require_open()
+        if THREAD_ID_PATTERN.fullmatch(thread_id) is None:
+            raise GraphContractError("thread_id must be an opaque grt.v1 ID")
+        _identifier(command_id, "command_id")
+        _identifier(frame_set_id, "frame_set_id")
+        terminal_statuses = {"RELEASED", "CANCELLED", "EXPIRED", "TIMED_OUT", "ORPHANED"}
+
+        async def terminalize_transaction(
+            connection: Any,
+        ) -> tuple[PostgresPermitRecord, ...]:
+            # Match every normal acquire/release path's lock order: global fanout advisory
+            # lock first, then permit rows.  Reversing that order here would deadlock with
+            # agent_graph_cancel_or_release_fanout_permit(), which takes the same advisory
+            # lock before updating its row.
+            await connection.execute(
+                "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                ("agent-graph-fanout-admission",),
+            )
+            cursor = await connection.execute(
+                """
+                select *
+                  from agent_graph_fanout_permit
+                 where thread_id = %s
+                   and command_id = %s
+                   and item_key = %s
+                 order by request_id
+                 for update
+                """,
+                (thread_id, command_id, frame_set_id),
+            )
+            rows = await cursor.fetchall()
+            if len(rows) > 32:
+                raise GraphPermitBindingError(
+                    "parallel command retained too many provider permits"
+                )
+            terminal: list[PostgresPermitRecord] = []
+            for row in rows:
+                current = _record_from_row(row)
+                if current.status in {"QUEUED", "GRANTED"}:
+                    updated = await (
+                        await connection.execute(
+                            """
+                            select result.*
+                              from agent_graph_cancel_or_release_fanout_permit(
+                                  %s, %s, %s, %s, %s, %s
+                              ) as result
+                            """,
+                            (
+                                current.request_id,
+                                current.fence.thread_id,
+                                current.fence.command_id,
+                                current.fence.graph_lease_owner_id,
+                                current.fence.graph_lease_fencing_token,
+                                current.permit_owner_id,
+                            ),
+                        )
+                    ).fetchone()
+                    if updated is None:
+                        raise GraphPermitLostError()
+                    current = _record_from_row(updated)
+                if current.status not in terminal_statuses:
+                    raise GraphPermitBindingError(
+                        "parallel command provider permit is not terminal"
+                    )
+                terminal.append(current)
+            return tuple(terminal)
+
+        try:
+            return await run_postgres_transaction(
+                self._pool,
+                timeout=self._config.acquire_timeout_seconds,
+                operation=terminalize_transaction,
+                operation_name="terminalize command permits",
+            )
+        except Exception as error:
+            _raise_mapped_database_error(error)
+            raise AssertionError("unreachable")
 
     async def drain(self) -> None:
         async with self._operation_lock:

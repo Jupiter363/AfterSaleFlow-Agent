@@ -152,7 +152,7 @@ class TargetE2EGraphEnvelopeSignerTest {
   }
 
   @Test
-  void signsFreshPrepareAndReceiptBoundExecuteCredentialsWithoutWideningGenericClaims()
+  void signsFreshPrepareExecuteAndFailureBoundTerminateCredentialsWithoutWideningGenericClaims()
       throws Exception {
     var codec = TargetE2EGraphTestFixtures.codec();
     var command = codec.wrapCommand(ACTIVATION_ID, 7L, TargetE2EGraphTestFixtures.command());
@@ -174,16 +174,29 @@ class TargetE2EGraphEnvelopeSignerTest {
         command,
         REGISTRY_BINDING,
         TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.execute(receiptHash));
+    var terminated = signer.signParallel(
+        command,
+        REGISTRY_BINDING,
+        TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.terminate(
+            receiptHash, "ACTIVITY_RETRY_EXHAUSTED"));
     ObjectNode prepareClaims = decode(prepared.compactJws().split("\\.", -1)[1]);
     ObjectNode executeClaims = decode(executed.compactJws().split("\\.", -1)[1]);
+    ObjectNode terminateClaims = decode(terminated.compactJws().split("\\.", -1)[1]);
 
     assertThat(prepareClaims.path("parallel_phase").asText()).isEqualTo("PREPARE");
     assertThat(prepareClaims.has("parallel_admission_receipt_sha256")).isFalse();
     assertThat(executeClaims.path("parallel_phase").asText()).isEqualTo("EXECUTE");
     assertThat(executeClaims.path("parallel_admission_receipt_sha256").asText())
         .isEqualTo(receiptHash);
+    assertThat(terminateClaims.path("parallel_phase").asText()).isEqualTo("TERMINATE");
+    assertThat(terminateClaims.path("parallel_admission_receipt_sha256").asText())
+        .isEqualTo(receiptHash);
+    assertThat(terminateClaims.path("parallel_failure_code").asText())
+        .isEqualTo("ACTIVITY_RETRY_EXHAUSTED");
     assertThat(prepareClaims.path("jti").asText())
         .isNotEqualTo(executeClaims.path("jti").asText());
+    assertThat(executeClaims.path("jti").asText())
+        .isNotEqualTo(terminateClaims.path("jti").asText());
   }
 
   private static Es256TargetE2EGraphEnvelopeSigner signer(String keyId) {

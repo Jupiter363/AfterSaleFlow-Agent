@@ -31,6 +31,7 @@ from app.api.intake_parallel_stream import (
     ExpectedParallelFrame,
     OpenedParallelFrameStream,
     ParallelFrameAdmissionReceipt,
+    ParallelFrameFailureTerminationReceipt,
     ParallelFrameStreamAuthority,
     parallel_frame_authority_sha256,
 )
@@ -142,6 +143,7 @@ class FakeParallelStreamService:
             tuple[RoomGraphCommand, VerifiedTargetE2EInvocation, ThreadIdentity]
         ] = []
         self.calls: list[tuple[RoomGraphCommand, VerifiedInvocation, ThreadIdentity]] = []
+        self.termination_calls: list[tuple[str, str]] = []
         self.closed = False
         frames = tuple(
             ExpectedParallelFrame(
@@ -212,7 +214,34 @@ class FakeParallelStreamService:
             finally:
                 self.closed = True
 
-        return OpenedParallelFrameStream(self.authority, emit())
+        return OpenedParallelFrameStream(self.authority, FRAME_TYPES, emit())
+
+    async def terminate_uncommitted_failure(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+        admission_receipt: ParallelFrameAdmissionReceipt,
+        failure_code: str,
+    ) -> ParallelFrameFailureTerminationReceipt:
+        del verified_invocation, expected_thread
+        admission_receipt.require_authority(command=command, authority=self.authority)
+        self.termination_calls.append((admission_receipt.receipt_sha256, failure_code))
+        return ParallelFrameFailureTerminationReceipt.create(
+            request_hash=command.request_hash,
+            frame_set_id=self.authority.frame_set_id,
+            run_id=command.logical_run_id,
+            attempt_id=command.attempt_id,
+            command_id=command.command_id,
+            admission_receipt_sha256=admission_receipt.receipt_sha256,
+            requested_failure_code=failure_code,
+            graph_command_status="ABORTED",
+            graph_attempt_status="FAILED",
+            graph_error_code=failure_code,
+            graph_error_classification="JAVA_FINAL_RETRY_EXHAUSTED",
+            provider_permit_statuses=("RELEASED",),
+        )
 
 
 async def _collect_validated_ndjson(
@@ -281,10 +310,14 @@ class TargetVerifier:
         assert kwargs["envelope"] == self.envelope
         if kwargs["phase"] == "PREPARE":
             assert kwargs["admission_receipt_sha256"] is None
-        else:
-            assert kwargs["phase"] == "EXECUTE"
+        elif kwargs["phase"] == "EXECUTE":
             assert isinstance(kwargs["admission_receipt_sha256"], str)
             assert len(kwargs["admission_receipt_sha256"]) == 64
+        else:
+            assert kwargs["phase"] == "TERMINATE"
+            assert isinstance(kwargs["admission_receipt_sha256"], str)
+            assert len(kwargs["admission_receipt_sha256"]) == 64
+            assert kwargs["failure_code"] == "ACTIVITY_RETRY_EXHAUSTED"
         return self.verified
 
 
@@ -783,8 +816,14 @@ def _parallel_admission_header(
                 "frame_type": frame.frame_type,
                 "generation": frame.generation,
                 "frame_id": frame.frame_id,
-                "action": "RUN",
+                "slot_state": "ADMITTED",
+                "action": "RUN_CURRENT",
                 "next_local_index": 0,
+                "slot_version": 0,
+                "result_id": None,
+                "result_sha256": None,
+                "public_projection_sha256": None,
+                "predecessor_failure_code": None,
             }
             for frame in authority.frames
         ],
@@ -848,6 +887,41 @@ def test_target_exact_parallel_command_uses_only_parallel_technical_stream() -> 
     assert legacy.calls == []
     assert len(parallel.calls) == 1
     assert parallel.closed
+
+
+def test_target_exact_parallel_terminate_returns_bound_failure_receipt() -> None:
+    command = _parallel_command()
+    envelope = _target_envelope(command)
+    parallel = FakeParallelStreamService(command)
+    client = _target_client(
+        envelope=envelope,
+        service=FakeStreamService(()),
+        parallel_service=parallel,
+    )
+    admission_header = _parallel_admission_header(command, parallel.authority)
+
+    response = client.post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+            "X-Intake-Parallel-Phase": "TERMINATE",
+            "X-Intake-Parallel-Admission": admission_header,
+            "X-Intake-Parallel-Failure-Code": "ACTIVITY_RETRY_EXHAUSTED",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["schema_version"] == "intake.parallel-failure-termination.v1"
+    assert response.json()["graph_command_status"] == "ABORTED"
+    assert response.headers["x-agent-stream-protocol"] == "agent-stream.v4"
+    assert response.headers["x-intake-frame-set-id"] == parallel.authority.frame_set_id
+    assert response.headers["x-intake-parallel-terminal-receipt"] == response.json()[
+        "receipt_sha256"
+    ]
+    assert len(parallel.termination_calls) == 1
+    assert parallel.termination_calls[0][1] == "ACTIVITY_RETRY_EXHAUSTED"
 
 
 def test_target_exact_parallel_command_fails_closed_without_parallel_runtime() -> None:

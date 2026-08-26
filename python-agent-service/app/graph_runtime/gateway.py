@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 import hmac
 import logging
+import re
 import time
 from typing import Any, Final, Protocol, TypeVar
 
@@ -28,6 +29,7 @@ from app.graph_runtime.errors import (
     GraphCommandStateError,
     GraphContractError,
     GraphGatewayDisabledError,
+    GraphLeaseUnavailableError,
     GraphNewAgentAttemptRequiredError,
     GraphResultNotCommittedError,
     GraphRuntimeError,
@@ -187,6 +189,42 @@ class GatewayExecution:
     lease: LeaseRecord
     fence: GraphFenceContext
     thread_record: ThreadRecord | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelUncommittedFailureTerminal:
+    command_status: CommandStatus
+    attempt_status: AttemptStatus | None
+    error_code: str
+    error_classification: str
+    owner_id: str | None
+    fencing_token: int | None
+    provider_call_count: int
+
+    def __post_init__(self) -> None:
+        if self.command_status not in {CommandStatus.ABORTED, CommandStatus.CANCELLED}:
+            raise GraphTerminalBindingError(
+                "parallel uncommitted failure did not terminate its Graph command"
+            )
+        if self.attempt_status not in {
+            None,
+            AttemptStatus.FAILED,
+            AttemptStatus.LEASE_LOST,
+            AttemptStatus.CANCELLED,
+        }:
+            raise GraphTerminalBindingError(
+                "parallel uncommitted failure retained a nonterminal attempt"
+            )
+        if (
+            not self.error_code
+            or not self.error_classification
+            or isinstance(self.provider_call_count, bool)
+            or self.provider_call_count < 0
+            or ((self.owner_id is None) != (self.fencing_token is None))
+        ):
+            raise GraphTerminalBindingError(
+                "parallel uncommitted failure terminal authority is incomplete"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2375,6 +2413,204 @@ class GraphCommandGateway:
             operation=inspect_transaction,
             operation_name="inspect recovery",
         )
+
+    async def terminalize_parallel_uncommitted_failure(
+        self,
+        admission: GatewayAdmission,
+        *,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+        failure_code: str,
+    ) -> ParallelUncommittedFailureTerminal:
+        """Terminate only the exact parallel attempt after Java exhausted its final retry.
+
+        A still-active lease proves that another worker may still be producing lane output, so this
+        boundary fails retryably instead of killing it.  Once the lease is expired (or the command
+        is already terminal), the Graph command and attempt converge in one Graph transaction.
+        """
+
+        self._require_shadow()
+        self._require_parallel_technical_admission(admission)
+        if not frame_set_id or len(frame_set_id) > 128:
+            raise GraphContractError("frame_set_id is invalid")
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{2,127}", failure_code) is None:
+            raise GraphContractError("failure_code is invalid")
+        for value, name in (
+            (receipt_sha256, "receipt_sha256"),
+            (authority_sha256, "authority_sha256"),
+        ):
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise GraphContractError(f"{name} is invalid")
+
+        async def terminate_transaction(
+            connection: Any,
+        ) -> ParallelUncommittedFailureTerminal:
+            lease_inspection = await self._leases.lock_for_recovery(
+                connection,
+                thread_id=admission.binding.thread_id,
+            )
+            command = await self._ledger.load(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            self._ledger.require_same_binding(command.binding, admission.binding)
+            attempt = await self._ledger.latest_attempt(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            receipt_execution = (
+                None
+                if attempt is None
+                else await self._ledger.load_parallel_receipt_execution(
+                    connection,
+                    thread_id=admission.binding.thread_id,
+                    command_id=admission.binding.command_id,
+                    attempt_id=attempt.attempt_id,
+                    receipt_sha256=receipt_sha256,
+                )
+            )
+            if receipt_execution is not None and (
+                receipt_execution.request_hash != admission.binding.request_hash
+                or receipt_execution.attempt_id != admission.command.attempt_id
+                or receipt_execution.frame_set_id != frame_set_id
+                or not hmac.compare_digest(
+                    receipt_execution.authority_sha256,
+                    authority_sha256,
+                )
+            ):
+                raise GraphTerminalBindingError(
+                    "parallel failure receipt differs from its execution authority"
+                )
+            if (
+                attempt is not None
+                and receipt_execution is None
+                and attempt.provider_call_count != 0
+            ):
+                raise GraphTerminalBindingError(
+                    "parallel Provider execution has no bound admission receipt"
+                )
+
+            if command.status in {
+                CommandStatus.RESULT_CHECKPOINTED,
+                CommandStatus.COMPLETED,
+                CommandStatus.TECHNICAL_COMPLETED,
+            }:
+                raise GraphTerminalBindingError(
+                    "parallel uncommitted failure cannot replace a completed Graph command"
+                )
+
+            if command.status in {CommandStatus.ABORTED, CommandStatus.CANCELLED}:
+                if command.error_code is None or command.error_classification is None:
+                    raise GraphTerminalBindingError(
+                        "parallel terminal command has no error authority"
+                    )
+                if attempt is None:
+                    if command.attempt_count != 0:
+                        raise GraphTerminalBindingError(
+                            "parallel terminal command lost its attempt"
+                        )
+                elif (
+                    attempt.attempt_id != admission.command.attempt_id
+                    or attempt.status
+                    not in {
+                        AttemptStatus.FAILED,
+                        AttemptStatus.LEASE_LOST,
+                        AttemptStatus.CANCELLED,
+                    }
+                    or attempt.error_code != command.error_code
+                    or attempt.error_classification != command.error_classification
+                ):
+                    raise GraphTerminalBindingError(
+                        "parallel terminal attempt differs from its command"
+                    )
+            elif command.status is CommandStatus.REGISTERED:
+                if attempt is not None or command.attempt_count != 0:
+                    raise GraphCommandStateError(
+                        "registered parallel failure has unexpected attempt authority"
+                    )
+                command = await self._ledger.terminate(
+                    connection,
+                    binding=admission.binding,
+                    status=CommandStatus.ABORTED,
+                    error_code=failure_code,
+                    error_classification="JAVA_FINAL_RETRY_EXHAUSTED",
+                )
+            elif command.status is CommandStatus.EXECUTING:
+                if (
+                    attempt is None
+                    or attempt.attempt_id != admission.command.attempt_id
+                    or attempt.status is not AttemptStatus.EXECUTING
+                    or command.fencing_token != attempt.fencing_token
+                    or lease_inspection is None
+                    or lease_inspection.lease.command_id != admission.binding.command_id
+                    or lease_inspection.lease.owner_id != attempt.owner_id
+                    or lease_inspection.lease.fencing_token != attempt.fencing_token
+                ):
+                    raise GraphCommandStateError(
+                        "parallel executing failure lost its exact lease and attempt"
+                    )
+                if lease_inspection.active:
+                    raise GraphLeaseUnavailableError(
+                        "parallel execution is still active during terminal adoption"
+                    )
+                if (
+                    lease_inspection.lease.released_at is None
+                    and lease_inspection.lease.cancelled_at is None
+                ):
+                    await self._leases.cancel(
+                        connection,
+                        thread_id=admission.binding.thread_id,
+                        active_command_id=admission.binding.command_id,
+                        expected_fencing_token=attempt.fencing_token,
+                        cancellation_command_id=admission.binding.command_id,
+                    )
+                command = await self._ledger.terminate(
+                    connection,
+                    binding=admission.binding,
+                    status=CommandStatus.ABORTED,
+                    error_code=failure_code,
+                    error_classification="JAVA_FINAL_RETRY_EXHAUSTED",
+                )
+                attempt = await self._ledger.finish_attempt(
+                    connection,
+                    attempt,
+                    status=AttemptStatus.FAILED,
+                    error_code=failure_code,
+                    error_classification="JAVA_FINAL_RETRY_EXHAUSTED",
+                )
+            else:
+                raise GraphCommandStateError(
+                    "parallel uncommitted failure has an unsupported command state"
+                )
+
+            assert command.error_code is not None
+            assert command.error_classification is not None
+            return ParallelUncommittedFailureTerminal(
+                command_status=command.status,
+                attempt_status=None if attempt is None else attempt.status,
+                error_code=command.error_code,
+                error_classification=command.error_classification,
+                owner_id=None if attempt is None else attempt.owner_id,
+                fencing_token=None if attempt is None else attempt.fencing_token,
+                provider_call_count=(0 if attempt is None else attempt.provider_call_count),
+            )
+
+        terminal = await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=terminate_transaction,
+            operation_name="terminalize parallel uncommitted failure",
+        )
+        await self._emit(
+            admission,
+            event_type="graph.command.parallel_failure_terminalized",
+            code=terminal.error_code,
+            fencing_token=terminal.fencing_token,
+        )
+        return terminal
 
     async def reconcile_terminal(
         self,

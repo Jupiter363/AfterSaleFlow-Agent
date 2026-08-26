@@ -21,16 +21,28 @@ public interface TargetE2EGraphEnvelopeSigner {
     throw new UnsupportedOperationException("parallel target Graph credential signing is unavailable");
   }
 
-  record ParallelDeliveryBinding(String phase, String admissionReceiptSha256) {
+  record ParallelDeliveryBinding(
+      String phase, String admissionReceiptSha256, String failureCode) {
 
-    private static final Set<String> PHASES = Set.of("PREPARE", "EXECUTE");
+    private static final Set<String> PHASES = Set.of("PREPARE", "EXECUTE", "TERMINATE");
+
+    public ParallelDeliveryBinding(String phase, String admissionReceiptSha256) {
+      this(phase, admissionReceiptSha256, null);
+    }
 
     public ParallelDeliveryBinding {
       if (!PHASES.contains(phase)
-          || ("PREPARE".equals(phase) && admissionReceiptSha256 != null)
+          || ("PREPARE".equals(phase)
+              && (admissionReceiptSha256 != null || failureCode != null))
           || ("EXECUTE".equals(phase)
               && (admissionReceiptSha256 == null
-                  || !admissionReceiptSha256.matches("[0-9a-f]{64}")))) {
+                  || !admissionReceiptSha256.matches("[0-9a-f]{64}")
+                  || failureCode != null))
+          || ("TERMINATE".equals(phase)
+              && (admissionReceiptSha256 == null
+                  || !admissionReceiptSha256.matches("[0-9a-f]{64}")
+                  || failureCode == null
+                  || !failureCode.matches("[A-Z][A-Z0-9_]{2,127}")))) {
         throw new IllegalArgumentException("parallel delivery binding is invalid");
       }
     }
@@ -40,7 +52,12 @@ public interface TargetE2EGraphEnvelopeSigner {
     }
 
     public static ParallelDeliveryBinding execute(String admissionReceiptSha256) {
-      return new ParallelDeliveryBinding("EXECUTE", admissionReceiptSha256);
+      return new ParallelDeliveryBinding("EXECUTE", admissionReceiptSha256, null);
+    }
+
+    public static ParallelDeliveryBinding terminate(
+        String admissionReceiptSha256, String failureCode) {
+      return new ParallelDeliveryBinding("TERMINATE", admissionReceiptSha256, failureCode);
     }
   }
 
