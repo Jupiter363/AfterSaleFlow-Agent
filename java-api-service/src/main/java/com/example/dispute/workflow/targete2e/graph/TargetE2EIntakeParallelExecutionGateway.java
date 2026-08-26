@@ -7,6 +7,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.AssemblyConflictException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.LocalReconciliationException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.FrameExecutionReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.DurableProgress;
@@ -16,6 +17,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRu
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
 import java.util.Objects;
+import java.util.Optional;
 
 /** Java-owned execution gateway for the exact Intake parallel V4 profile. */
 public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunExecutionGateway {
@@ -81,17 +83,30 @@ public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunEx
         } catch (AssemblyConflictException failure) {
             cancellationToken.throwIfCancellationRequested();
             refreshProgress(request, progress, failure);
-            throw executionFailure(
-                    TargetE2EGraphClientException.remote(
-                            failure.code(), false, "parallel Intake assembly authority was rejected"),
-                    progress);
+            throw AgentRunExecutionException.reconcileLocalAuthority(
+                    failure.code(),
+                    "parallel Intake assembly authority requires local reconciliation",
+                    progress.lastSequenceNo,
+                    progress.publicOutputEmitted,
+                    failure);
+        } catch (LocalReconciliationException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            refreshProgress(request, progress, failure);
+            throw AgentRunExecutionException.retryLocalAuthority(
+                    failure.code(),
+                    "parallel Intake technical authority requires local reconciliation",
+                    progress.lastSequenceNo,
+                    progress.publicOutputEmitted,
+                    failure);
         } catch (TerminalConflictException failure) {
             cancellationToken.throwIfCancellationRequested();
             refreshProgress(request, progress, failure);
-            throw executionFailure(
-                    TargetE2EGraphClientException.remote(
-                            failure.code(), false, "parallel Intake terminal authority was rejected"),
-                    progress);
+            throw AgentRunExecutionException.reconcileLocalAuthority(
+                    failure.code(),
+                    "parallel Intake terminal authority requires local reconciliation",
+                    progress.lastSequenceNo,
+                    progress.publicOutputEmitted,
+                    failure);
         } catch (RuntimeException failure) {
             cancellationToken.throwIfCancellationRequested();
             refreshProgress(request, progress, failure);
@@ -104,6 +119,19 @@ public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunEx
                             "parallel Intake execution failed before durable public output");
             throw executionFailure(typedFailure, progress);
         }
+    }
+
+    @Override
+    public Optional<FailureTerminationReceipt> terminateUncommittedFailure(
+            ExecuteAgentRunRequest request,
+            String failureCode,
+            AgentRunCancellationToken cancellationToken) {
+        requireParallel(request);
+        Objects.requireNonNull(failureCode, "failureCode");
+        Objects.requireNonNull(cancellationToken, "cancellationToken")
+                .throwIfCancellationRequested();
+        return Optional.of(frameExecutionClient.terminateUncommittedFailure(
+                request, failureCode, cancellationToken));
     }
 
     private void refreshProgress(
@@ -158,9 +186,9 @@ public final class TargetE2EIntakeParallelExecutionGateway implements AgentRunEx
                     progress.lastSequenceNo,
                     progress.publicOutputEmitted,
                     failure);
-            case CREATE_NEXT_ATTEMPT -> AgentRunExecutionException.createNextAttempt(
+            case CREATE_NEXT_ATTEMPT -> AgentRunExecutionException.retrySameCommand(
                     failure.errorCode(),
-                    "target Graph durably aborted the current parallel attempt",
+                    "target Graph requested same-attempt parallel lane recovery",
                     progress.lastSequenceNo,
                     progress.publicOutputEmitted,
                     failure);

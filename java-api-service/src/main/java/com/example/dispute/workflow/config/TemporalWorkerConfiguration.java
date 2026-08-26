@@ -10,6 +10,7 @@ import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.activity.agent.AgentRunFinalizationFailureRecorder;
+import com.example.dispute.workflow.activity.agent.AgentRunTerminalFailureCommitter;
 import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
 import com.example.dispute.workflow.activity.agent.FinalizeAgentRunActivityImpl;
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
@@ -125,6 +126,7 @@ public class TemporalWorkerConfiguration {
             ObjectProvider<IntakeSyntheticWorkerRegistration> syntheticRegistrationProvider,
             ObjectProvider<AgentRunLedger> ledgerProvider,
             ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
+            ObjectProvider<AgentRunTerminalFailureCommitter> terminalFailureCommitterProvider,
             ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider,
             ObjectProvider<AgentRunFinalizationFailureRecorder> failureRecorderProvider,
             ObjectProvider<TargetE2eAgentDeploymentBinding> targetBindingProvider,
@@ -149,6 +151,7 @@ public class TemporalWorkerConfiguration {
                                 syntheticRegistrationProvider,
                                 ledgerProvider,
                                 executionGatewayProvider,
+                                terminalFailureCommitterProvider,
                                 finalizationGatewayProvider,
                                 failureRecorderProvider,
                                 graphTransportBundle),
@@ -188,6 +191,7 @@ public class TemporalWorkerConfiguration {
                                 syntheticRegistrationProvider,
                                 ledgerProvider,
                                 executionGatewayProvider,
+                                null,
                                 finalizationGatewayProvider,
                                 failureRecorderProvider,
                                 null),
@@ -292,6 +296,7 @@ public class TemporalWorkerConfiguration {
             ObjectProvider<IntakeSyntheticWorkerRegistration> syntheticRegistrationProvider,
             ObjectProvider<AgentRunLedger> ledgerProvider,
             ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
+            ObjectProvider<AgentRunTerminalFailureCommitter> terminalFailureCommitterProvider,
             ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider,
             ObjectProvider<AgentRunFinalizationFailureRecorder> failureRecorderProvider,
             GraphTransportBundle graphTransportBundle) {
@@ -308,6 +313,12 @@ public class TemporalWorkerConfiguration {
             AgentRunLedger ledger = requireUnique(ledgerProvider, "AgentRunLedger");
             AgentRunExecutionGateway executionGateway =
                     requireUnique(executionGatewayProvider, "AgentRunExecutionGateway");
+            AgentRunTerminalFailureCommitter terminalFailureCommitter =
+                    terminalFailureCommitterProvider == null
+                            ? AgentRunTerminalFailureCommitter.ledgerOnly(ledger)
+                            : requireUnique(
+                                    terminalFailureCommitterProvider,
+                                    "AgentRunTerminalFailureCommitter");
             AgentRunFinalizationGateway finalizationGateway =
                     requireUnique(finalizationGatewayProvider, "AgentRunFinalizationGateway");
             AgentRunFinalizationFailureRecorder failureRecorder =
@@ -319,7 +330,8 @@ public class TemporalWorkerConfiguration {
             if (graphTransportBundle != null) {
                 workflowTypes.add(IntakeInfrastructurePreparationWorkflowImpl.class);
             }
-            activityImplementations.add(new ExecuteAgentRunActivityImpl(ledger, executionGateway));
+            activityImplementations.add(new ExecuteAgentRunActivityImpl(
+                    ledger, executionGateway, terminalFailureCommitter));
             activityImplementations.add(
                     new FinalizeAgentRunActivityImpl(finalizationGateway, failureRecorder));
             activityImplementations.add(

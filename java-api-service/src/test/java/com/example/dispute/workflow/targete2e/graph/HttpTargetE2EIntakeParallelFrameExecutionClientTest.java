@@ -5,13 +5,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.FailureTerminationReceipt;
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameAdmissionAuthorityResolver;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.FrameExecutionReceipt;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.LocalReconciliationException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyView;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptLookup;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptPublication;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.EventAuthority;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExactThreeCompletion;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExactThreeFrame;
@@ -22,14 +26,13 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealReceipt;
-import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetFailureCommand;
-import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetFailureReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSlotView;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameType;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressReceipt;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.PublishedAdmissionReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.SlotState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.StagingConflictException;
 import com.example.dispute.workflow.contract.v1.ContractJson;
@@ -178,8 +181,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                         "admit",
                         "plan",
                         "append:PUBLIC_FRAME_START:DIALOGUE_FRAME",
-                        "find-completion",
-                        "fail:TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+                        "find-completion");
         assertThat(staging.nextSequence).isEqualTo(1L);
     }
 
@@ -231,7 +233,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
     }
 
     @Test
-    void partialSealedCompletionConflictDurablyFailsTheAdmittedFrameSet() {
+    void partialSealedCompletionConflictRetainsLocalReconciliationAuthority() {
         ExecuteAgentRunRequest request = validParallelRequest();
         StreamFixture complete = StreamFixture.complete(request);
         StreamFixture partial = complete.withLines(complete.lines().subList(0, 10));
@@ -249,25 +251,18 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                                 ignored -> {},
                                 new AgentRunCancellationToken()))
                 .isInstanceOfSatisfying(
-                        TargetE2EGraphClientException.class,
-                        failure -> {
-                            assertThat(failure.errorCode())
-                                    .isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
-                            assertThat(failure.recoveryAction())
-                                    .isEqualTo(
-                                            TargetE2EGraphClientException.RecoveryAction
-                                                    .FAIL_LOGICAL_RUN);
-                        });
+                        LocalReconciliationException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("INTAKE_PARALLEL_COMPLETION_INCOMPLETE"));
 
         assertThat(staging.actions)
                 .endsWith(
                         "seal:QUALITY_FRAME",
-                        "find-completion",
-                        "fail:TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+                        "find-completion");
     }
 
     @Test
-    void planningConflictAfterAdmissionDurablyFailsTheAdmittedFrameSet() {
+    void planningConflictAfterAdmissionRetainsLocalReconciliationAuthority() {
         ExecuteAgentRunRequest request = validParallelRequest();
         StreamFixture fixture = StreamFixture.complete(request);
         GraphTransportSecurityProof proof = mutualTlsProof();
@@ -284,15 +279,14 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                                 ignored -> {},
                                 new AgentRunCancellationToken()))
                 .isInstanceOfSatisfying(
-                        TargetE2EGraphClientException.class,
-                        failure -> assertThat(failure.errorCode())
-                                .isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED"));
+                        LocalReconciliationException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("INTAKE_PARALLEL_RETRY_AUTHORITY_INVALID"));
 
         assertThat(staging.actions)
                 .containsExactly(
                         "admit",
-                        "plan",
-                        "fail:TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+                        "plan");
     }
 
     @Test
@@ -371,8 +365,49 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         assertThat(staging.actions)
                 .containsExactly(
                         "admit",
-                        "plan",
-                        "fail:GRAPH_BULKHEAD_SCOPE_INVALID");
+                        "plan");
+    }
+
+    @Test
+    void finalRetryTerminationReturnsAnExactSelfHashedGraphReceipt() {
+        ExecuteAgentRunRequest request = validParallelRequest();
+        StreamFixture fixture = StreamFixture.complete(request);
+        GraphTransportSecurityProof proof = mutualTlsProof();
+        RecordingStaging staging = new RecordingStaging(request, fixture);
+        StreamFixture partial = fixture.withLines(List.of(fixture.lines().getFirst()));
+        assertThatThrownBy(() -> client(
+                                request,
+                                proof,
+                                new FakeCommandTransport(proof, partial),
+                                staging)
+                        .executeOrResume(
+                                request,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOf(TargetE2EGraphClientException.class);
+        staging.withPlanningConflict();
+        TerminationTransport transport = new TerminationTransport(proof, fixture);
+
+        FailureTerminationReceipt receipt = client(request, proof, transport, staging)
+                .terminateUncommittedFailure(
+                        request,
+                        "INTAKE_PARALLEL_FRAME_BATCH_FAILED",
+                        new AgentRunCancellationToken());
+
+        assertThat(receipt.schemaVersion())
+                .isEqualTo("intake.parallel-failure-termination.v1");
+        assertThat(receipt.receiptId())
+                .isEqualTo("parallel-failure-terminal."
+                        + transport.admissionReceiptSha256.substring(0, 24));
+        assertThat(receipt.receiptHash()).isEqualTo(transport.receiptSha256);
+        assertThat(transport.phases).containsExactly("TERMINATE");
+        assertThat(transport.failureCode)
+                .isEqualTo("INTAKE_PARALLEL_FRAME_BATCH_FAILED");
+        assertThat(staging.deliveryBindings)
+                .extracting(TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding::phase)
+                .containsExactly("PREPARE", "EXECUTE", "TERMINATE");
+        assertThat(staging.deliveryBindings.getLast().failureCode())
+                .isEqualTo("INTAKE_PARALLEL_FRAME_BATCH_FAILED");
     }
 
     private static HttpTargetE2EIntakeParallelFrameExecutionClient client(
@@ -632,6 +667,84 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         }
     }
 
+    private static final class TerminationTransport implements GraphCommandHttpTransport {
+
+        private final GraphTransportSecurityProof proof;
+        private final StreamFixture fixture;
+        private final FakeCommandTransport prepared;
+        private final List<String> phases = new ArrayList<>();
+        private String admissionReceiptSha256;
+        private String failureCode;
+        private String receiptSha256;
+
+        private TerminationTransport(
+                GraphTransportSecurityProof proof, StreamFixture fixture) {
+            this.proof = proof;
+            this.fixture = fixture;
+            this.prepared = new FakeCommandTransport(proof, fixture);
+        }
+
+        @Override
+        public GraphTransportSecurityProof transportProof() {
+            return proof;
+        }
+
+        @Override
+        public void stream(
+                Request request,
+                AgentRunCancellationToken cancellationToken,
+                Listener listener) {
+            String phase = request.headers().get(
+                    HttpTargetE2EIntakeParallelFrameExecutionClient.PHASE_HEADER);
+            phases.add(phase);
+            if ("PREPARE".equals(phase)) {
+                prepared.stream(request, cancellationToken, listener);
+                return;
+            }
+            assertThat(phase).isEqualTo("TERMINATE");
+            assertThat(request.headers().get("Accept")).isEqualTo("application/json");
+            admissionReceiptSha256 = receiptHash(request);
+            failureCode = request.headers().get(
+                    HttpTargetE2EIntakeParallelFrameExecutionClient.FAILURE_CODE_HEADER);
+            TargetE2EGraphCommandEnvelope envelope =
+                    TargetE2EGraphTestFixtures.codec().decodeCommand(request.body());
+            ObjectNode receipt = TargetE2EGraphTestFixtures.MAPPER.createObjectNode();
+            receipt.put("schema_version", "intake.parallel-failure-termination.v1");
+            receipt.put(
+                    "receipt_id",
+                    "parallel-failure-terminal."
+                            + admissionReceiptSha256.substring(0, 24));
+            receipt.put("request_hash", envelope.command().requestHash());
+            receipt.put("frame_set_id", fixture.frameSetId());
+            receipt.put("run_id", envelope.command().logicalRunId());
+            receipt.put("attempt_id", envelope.command().attemptId());
+            receipt.put("command_id", envelope.command().commandId());
+            receipt.put("admission_receipt_sha256", admissionReceiptSha256);
+            receipt.put("requested_failure_code", failureCode);
+            receipt.put("graph_command_status", "ABORTED");
+            receipt.put("graph_attempt_status", "FAILED");
+            receipt.put("graph_error_code", failureCode);
+            receipt.put("graph_error_classification", "FAIL_LOGICAL_RUN");
+            receipt.putArray("provider_permit_statuses").add("RELEASED");
+            receiptSha256 = ContractJson.sha256Hex(receipt);
+            receipt.put("receipt_sha256", receiptSha256);
+            listener.onResponse(new ResponseHead(
+                    200,
+                    request.uri(),
+                    Map.of(
+                            "Content-Type", List.of("application/json; charset=utf-8"),
+                            "Cache-Control", List.of("no-store, no-transform"),
+                            "X-Agent-Run-Id", List.of(envelope.command().logicalRunId()),
+                            "X-Agent-Stream-Protocol", List.of("agent-stream.v4"),
+                            "X-Graph-Execution-Lane", List.of(envelope.executionLane()),
+                            "X-Graph-Activation-Id", List.of(envelope.activationId()),
+                            "X-Intake-Frame-Set-Id", List.of(fixture.frameSetId()),
+                            "X-Intake-Parallel-Terminal-Receipt",
+                                    List.of(receiptSha256))));
+            listener.onLine(receipt.toString());
+        }
+    }
+
     private static final class RecordingStaging implements IntakeParallelFrameStagingPort {
 
         private final ExecuteAgentRunRequest request;
@@ -645,9 +758,9 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         private FrameSetAdmission admission;
         private long nextSequence;
         private int sealed;
-        private long frameSetVersion;
         private boolean incompleteCompletionConflict;
         private boolean planningConflict;
+        private PublishedAdmissionReceipt currentAdmissionReceipt;
 
         private RecordingStaging(ExecuteAgentRunRequest request, StreamFixture fixture) {
             this.request = request;
@@ -675,9 +788,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         public FrameSetReceipt admit(FrameSetAdmission value) {
             actions.add("admit");
             admission = value;
-            EnumMap<FrameType, Long> selected = new EnumMap<>(FrameType.class);
             value.manifests().forEach(manifest -> {
-                selected.put(manifest.frameType(), manifest.generation());
                 slots.put(
                         manifest.frameType(),
                         new FrameSlotView(
@@ -691,20 +802,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                     value.frameSetId(),
                     true,
                     "FRAME_SET_RECEIPT_V4_1",
-                    AssemblyState.COLLECTING,
-                    selected);
-        }
-
-        @Override
-        public FrameSetFailureReceipt failUncommitted(FrameSetFailureCommand command) {
-            actions.add("fail:" + command.failureCode());
-            frameSetVersion++;
-            return new FrameSetFailureReceipt(
-                    command.frameSetId(),
-                    "FRAME_SET_FAILURE_RECEIPT_V4_1",
-                    command.failureCode(),
-                    true,
-                    frameSetVersion);
+                    AssemblyState.COLLECTING);
         }
 
         @Override
@@ -758,6 +856,40 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                             null)));
             return new ExecutionPlan(
                     value.frameSetId(), value.runId(), value.attemptId(), lanes);
+        }
+
+        @Override
+        public PublishedAdmissionReceipt publishAdmissionReceipt(
+                AdmissionReceiptPublication publication) {
+            if (currentAdmissionReceipt != null
+                    && currentAdmissionReceipt.receiptSha256()
+                            .equals(publication.receiptSha256())) {
+                return currentAdmissionReceipt;
+            }
+            long generation = currentAdmissionReceipt == null
+                    ? 1L
+                    : currentAdmissionReceipt.receiptGeneration() + 1L;
+            currentAdmissionReceipt = new PublishedAdmissionReceipt(
+                    publication.admission().frameSetId(),
+                    publication.admission().runId(),
+                    publication.admission().attemptId(),
+                    publication.admission().commandId(),
+                    publication.admission().eventAuthority().commandRequestSha256(),
+                    generation,
+                    publication.encodedReceipt(),
+                    publication.receiptSha256());
+            return currentAdmissionReceipt;
+        }
+
+        @Override
+        public Optional<PublishedAdmissionReceipt> findCurrentAdmissionReceipt(
+                AdmissionReceiptLookup lookup) {
+            return Optional.ofNullable(currentAdmissionReceipt)
+                    .filter(receipt -> receipt.runId().equals(lookup.runId())
+                            && receipt.attemptId().equals(lookup.attemptId())
+                            && receipt.commandId().equals(lookup.commandId())
+                            && receipt.commandRequestSha256()
+                                    .equals(lookup.commandRequestSha256()));
         }
 
         @Override

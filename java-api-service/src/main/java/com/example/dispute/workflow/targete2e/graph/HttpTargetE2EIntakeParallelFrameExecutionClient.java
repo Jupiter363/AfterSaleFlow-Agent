@@ -1,19 +1,23 @@
 package com.example.dispute.workflow.targete2e.graph;
 
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.FailureTerminationReceipt;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ProgressListener;
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameAdmissionAuthorityResolver;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.LocalReconciliationException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptLookup;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptPublication;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameManifest;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealCommand;
-import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetFailureCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameType;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.PublishedAdmissionReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionAction;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionLane;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExecutionPlan;
@@ -46,6 +50,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.net.URI;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -65,10 +70,32 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
     static final String AUTHORITY_HEADER = "X-Intake-Parallel-Authority";
     static final String ADMISSION_HEADER = "X-Intake-Parallel-Admission";
     static final String PHASE_HEADER = "X-Intake-Parallel-Phase";
+    static final String FAILURE_CODE_HEADER = "X-Intake-Parallel-Failure-Code";
+    static final String TERMINAL_RECEIPT_HEADER = "X-Intake-Parallel-Terminal-Receipt";
     private static final String FRAME_SET_HEADER = "X-Intake-Frame-Set-Id";
     private static final String PROJECTION_REGISTRY_VERSION = "intake-projection-registry.v1";
     private static final Set<String> REMOTE_ERROR_FIELDS = Set.of("code", "retryable");
+    private static final Set<String> FAILURE_TERMINATION_FIELDS = Set.of(
+            "schema_version",
+            "receipt_id",
+            "request_hash",
+            "frame_set_id",
+            "run_id",
+            "attempt_id",
+            "command_id",
+            "admission_receipt_sha256",
+            "requested_failure_code",
+            "graph_command_status",
+            "graph_attempt_status",
+            "graph_error_code",
+            "graph_error_classification",
+            "provider_permit_statuses",
+            "receipt_sha256");
+    private static final Set<String> TERMINAL_PERMIT_STATUSES = Set.of(
+            "RELEASED", "CANCELLED", "EXPIRED", "TIMED_OUT", "ORPHANED");
     private static final Pattern ERROR_CODE = Pattern.compile("[A-Za-z0-9_.-]{1,128}");
+    private static final Pattern SAFE_FAILURE_CODE =
+            Pattern.compile("^[A-Z][A-Z0-9_]{2,127}$");
 
     private final String activationId;
     private final GraphCommandHttpTransport transport;
@@ -165,7 +192,7 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                     registryBinding,
                     signer,
                     TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.execute(
-                            prepared.encodedReceipt().receiptSha256()));
+                            prepared.publishedReceipt().receiptSha256()));
             StreamSession session = new StreamSession(
                     request,
                     sealed.envelope(),
@@ -174,14 +201,14 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                     prepared.executionAuthority(),
                     prepared.frameSetReceipt(),
                     prepared.executionPlan(),
-                    prepared.encodedReceipt().receiptSha256());
+                    prepared.publishedReceipt().receiptSha256());
             GraphCommandHttpTransport.Request transportRequest =
                     new GraphCommandHttpTransport.Request(
                             endpoint,
                             requestHeaders(
                                     sealed,
                                     "EXECUTE",
-                                    prepared.encodedReceipt().headerValue()),
+                                    prepared.publishedReceipt().encodedReceipt()),
                             sealed.body(),
                             timeout,
                             GraphCommandHttpTransport.MAXIMUM_PARALLEL_LINE_BYTES,
@@ -206,48 +233,86 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                 throw failure;
             }
         } catch (StagingConflictException failure) {
-            TargetE2EGraphClientException typedFailure =
-                    TargetE2EGraphClientException.protocol(
-                            "parallel technical staging rejected execution", failure);
-            terminalizeUncommittedFailure(request, prepared, typedFailure);
-            throw typedFailure;
+            throw new LocalReconciliationException(
+                    failure.code(),
+                    "parallel technical staging requires local reconciliation",
+                    failure);
         } catch (TargetE2EGraphClientException failure) {
-            if (failure.recoveryAction()
-                    == TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN) {
-                terminalizeUncommittedFailure(request, prepared, failure);
-            }
             throw failure;
         }
     }
 
-    private void terminalizeUncommittedFailure(
+    @Override
+    public FailureTerminationReceipt terminateUncommittedFailure(
             ExecuteAgentRunRequest request,
-            PreparedAdmission prepared,
-            TargetE2EGraphClientException failure) {
-        terminalizeUncommittedFailure(
-                request, prepared.executionPlan().frameSetId(), failure);
-    }
-
-    private void terminalizeUncommittedFailure(
-            ExecuteAgentRunRequest request,
-            String frameSetId,
-            TargetE2EGraphClientException failure) {
+            String failureCode,
+            AgentRunCancellationToken cancellationToken) {
+        requireParallel(request);
+        if (failureCode == null || !SAFE_FAILURE_CODE.matcher(failureCode).matches()) {
+            throw new IllegalArgumentException("parallel failureCode is invalid");
+        }
+        Objects.requireNonNull(cancellationToken, "cancellationToken")
+                .throwIfCancellationRequested();
+        long roomFencingToken = Objects.requireNonNull(
+                        identityResolver.resolve(request),
+                        "durable AgentRun identity resolver returned no identity")
+                .requireExact(request);
+        GraphRegistryBindingPolicy.ExpectedBinding registryBinding =
+                GraphRegistryBindingPolicy.requireExpected(
+                        registryBindingPolicy,
+                        GraphStreamVisibilityPolicy.Binding.from(request.command()));
+        PublishedAdmissionReceipt published = staging
+                .findCurrentAdmissionReceipt(new AdmissionReceiptLookup(
+                        request.agentRunId(),
+                        request.attemptId(),
+                        request.command().commandId(),
+                        request.command().requestHash()))
+                .orElseThrow(() -> TargetE2EGraphClientException.protocol(
+                        "parallel failure termination lacks a published admission receipt",
+                        null));
+        TargetE2ESealedGraphCommand sealed = envelopeCodec.sealParallelCommand(
+                activationId,
+                roomFencingToken,
+                request.command(),
+                registryBinding,
+                signer,
+                TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.terminate(
+                        published.receiptSha256(), failureCode));
+        FailureTerminationSession session = new FailureTerminationSession(
+                request,
+                sealed.envelope(),
+                published.frameSetId(),
+                published.receiptSha256(),
+                failureCode,
+                cancellationToken);
+        GraphCommandHttpTransport.Request transportRequest =
+                new GraphCommandHttpTransport.Request(
+                        endpoint,
+                        requestHeaders(
+                                sealed,
+                                "TERMINATE",
+                                published.encodedReceipt(),
+                                failureCode),
+                        sealed.body(),
+                        timeout,
+                        GraphCommandHttpTransport.MAXIMUM_LINE_BYTES,
+                        GraphCommandHttpTransport.MAXIMUM_RESPONSE_BYTES);
         try {
-            staging.failUncommitted(new FrameSetFailureCommand(
-                    frameSetId,
-                    request.agentRunId(),
-                    request.attemptId(),
-                    request.command().commandId(),
-                    request.command().requestHash(),
-                    failure.errorCode()));
-        } catch (RuntimeException stagingFailure) {
-            TargetE2EGraphClientException retry = TargetE2EGraphClientException.remote(
-                    "INTAKE_PARALLEL_FAILURE_FINALIZATION_RETRY_REQUIRED",
-                    true,
-                    "parallel technical failure could not be durably finalized");
-            retry.addSuppressed(failure);
-            retry.addSuppressed(stagingFailure);
-            throw retry;
+            transport.stream(transportRequest, cancellationToken, session);
+            cancellationToken.throwIfCancellationRequested();
+            return session.finish();
+        } catch (GraphCommandTransportException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            if (failure.protocolViolation()) {
+                throw TargetE2EGraphClientException.protocol(
+                        "parallel target Graph failure termination violated the protocol",
+                        failure);
+            }
+            throw TargetE2EGraphClientException.transport(
+                    "parallel target Graph failure termination transport failed", failure);
+        } catch (IllegalArgumentException failure) {
+            throw TargetE2EGraphClientException.protocol(
+                    "parallel target Graph failure termination is invalid", failure);
         }
     }
 
@@ -255,9 +320,19 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
             TargetE2ESealedGraphCommand sealed,
             String phase,
             String admissionReceipt) {
+        return requestHeaders(sealed, phase, admissionReceipt, null);
+    }
+
+    private Map<String, String> requestHeaders(
+            TargetE2ESealedGraphCommand sealed,
+            String phase,
+            String admissionReceipt,
+            String failureCode) {
         LinkedHashMap<String, String> headers = new LinkedHashMap<>();
         headers.put("Authorization", "Bearer " + sealed.credential().compactJws());
-        headers.put("Accept", "PREPARE".equals(phase) ? "application/json" : "application/x-ndjson");
+        headers.put(
+                "Accept",
+                "EXECUTE".equals(phase) ? "application/x-ndjson" : "application/json");
         headers.put("Content-Type", "application/json; charset=utf-8");
         headers.put("Content-Encoding", "identity");
         headers.put("Cache-Control", "no-store");
@@ -267,6 +342,9 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
         if (admissionReceipt != null) {
             headers.put(ADMISSION_HEADER, admissionReceipt);
         }
+        if (failureCode != null) {
+            headers.put(FAILURE_CODE_HEADER, failureCode);
+        }
         return Map.copyOf(headers);
     }
 
@@ -275,7 +353,6 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
             long roomFencingToken,
             GraphRegistryBindingPolicy.ExpectedBinding registryBinding,
             AgentRunCancellationToken cancellationToken) {
-        String admittedFrameSetId = null;
         TargetE2ESealedGraphCommand sealed = envelopeCodec.sealParallelCommand(
                 activationId,
                 roomFencingToken,
@@ -299,7 +376,6 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
             FrameSetAdmission admission = preparedAdmission(request, authority);
             IntakeParallelFrameStagingPort.FrameSetReceipt frameSetReceipt =
                     staging.admit(admission);
-            admittedFrameSetId = admission.frameSetId();
             ExecutionPlan executionPlan = staging.planExecution(admission);
             StreamAuthority executionAuthority = executionAuthority(authority, executionPlan);
             EncodedAdmissionReceipt encodedReceipt = technicalCodec.encodeAdmissionReceipt(
@@ -307,26 +383,25 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                     frameSetReceipt.receiptId(),
                     authority,
                     executionPlan);
+            PublishedAdmissionReceipt publishedReceipt = staging.publishAdmissionReceipt(
+                    new AdmissionReceiptPublication(
+                            admission,
+                            frameSetReceipt,
+                            executionPlan,
+                            encodedReceipt.headerValue(),
+                            encodedReceipt.receiptSha256()));
             return new PreparedAdmission(
                     authority,
                     executionAuthority,
                     frameSetReceipt,
                     executionPlan,
-                    encodedReceipt);
+                    publishedReceipt);
         } catch (StagingConflictException failure) {
-            TargetE2EGraphClientException typedFailure =
-                    TargetE2EGraphClientException.protocol(
-                            "parallel technical preparation was rejected", failure);
-            if (admittedFrameSetId != null) {
-                terminalizeUncommittedFailure(request, admittedFrameSetId, typedFailure);
-            }
-            throw typedFailure;
+            throw new LocalReconciliationException(
+                    failure.code(),
+                    "parallel technical preparation requires local reconciliation",
+                    failure);
         } catch (TargetE2EGraphClientException failure) {
-            if (admittedFrameSetId != null
-                    && failure.recoveryAction()
-                            == TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN) {
-                terminalizeUncommittedFailure(request, admittedFrameSetId, failure);
-            }
             throw failure;
         } catch (GraphCommandTransportException failure) {
             cancellationToken.throwIfCancellationRequested();
@@ -337,13 +412,8 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
             throw TargetE2EGraphClientException.transport(
                     "parallel target Graph preparation failed", failure);
         } catch (IllegalArgumentException failure) {
-            TargetE2EGraphClientException typedFailure =
-                    TargetE2EGraphClientException.protocol(
+            throw TargetE2EGraphClientException.protocol(
                     "parallel target Graph preparation is invalid", failure);
-            if (admittedFrameSetId != null) {
-                terminalizeUncommittedFailure(request, admittedFrameSetId, typedFailure);
-            }
-            throw typedFailure;
         }
     }
 
@@ -477,12 +547,205 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
         }
     }
 
+    private final class FailureTerminationSession implements GraphCommandHttpTransport.Listener {
+
+        private final ExecuteAgentRunRequest request;
+        private final TargetE2EGraphCommandEnvelope envelope;
+        private final String frameSetId;
+        private final String admissionReceiptSha256;
+        private final String requestedFailureCode;
+        private final AgentRunCancellationToken cancellationToken;
+        private boolean responseReceived;
+        private int statusCode;
+        private String responseLine;
+        private String receiptHeader;
+
+        private FailureTerminationSession(
+                ExecuteAgentRunRequest request,
+                TargetE2EGraphCommandEnvelope envelope,
+                String frameSetId,
+                String admissionReceiptSha256,
+                String requestedFailureCode,
+                AgentRunCancellationToken cancellationToken) {
+            this.request = request;
+            this.envelope = envelope;
+            this.frameSetId = frameSetId;
+            this.admissionReceiptSha256 = admissionReceiptSha256;
+            this.requestedFailureCode = requestedFailureCode;
+            this.cancellationToken = cancellationToken;
+        }
+
+        @Override
+        public void onResponse(GraphCommandHttpTransport.ResponseHead response) {
+            cancellationToken.throwIfCancellationRequested();
+            if (responseReceived) {
+                throw protocol(
+                        "parallel failure termination returned duplicate response metadata",
+                        null);
+            }
+            responseReceived = true;
+            statusCode = response.statusCode();
+            if (statusCode >= 300 && statusCode <= 399) {
+                throw protocol("parallel failure termination redirect is forbidden", null);
+            }
+            if (statusCode != 200) {
+                requireRemoteErrorMetadata(
+                        response,
+                        "parallel failure termination error metadata is invalid");
+                return;
+            }
+            if (!sharedResponseMetadataIsValid(response, false)
+                    || !endpoint.equals(response.uri())
+                    || !"application/json".equalsIgnoreCase(
+                            mediaType(singleHeader(response.headers(), "Content-Type")))
+                    || !request.agentRunId().equals(
+                            singleHeader(response.headers(), "X-Agent-Run-Id"))
+                    || !"agent-stream.v4".equals(
+                            singleHeader(response.headers(), "X-Agent-Stream-Protocol"))
+                    || !envelope.executionLane().equals(
+                            singleHeader(response.headers(), "X-Graph-Execution-Lane"))
+                    || !activationId.equals(
+                            singleHeader(response.headers(), "X-Graph-Activation-Id"))
+                    || !frameSetId.equals(
+                            singleHeader(response.headers(), FRAME_SET_HEADER))) {
+                throw protocol("parallel failure termination metadata drifted", null);
+            }
+            receiptHeader = singleHeader(response.headers(), TERMINAL_RECEIPT_HEADER);
+            if (!receiptHeader.matches("[0-9a-f]{64}")) {
+                throw protocol("parallel failure termination receipt header is invalid", null);
+            }
+        }
+
+        @Override
+        public void onLine(String line) {
+            cancellationToken.throwIfCancellationRequested();
+            if (!responseReceived) {
+                throw protocol(
+                        "parallel failure termination emitted data before metadata",
+                        null);
+            }
+            if (responseLine != null) {
+                throw protocol("parallel failure termination returned multiple bodies", null);
+            }
+            responseLine = Objects.requireNonNull(line, "line");
+        }
+
+        private FailureTerminationReceipt finish() {
+            if (!responseReceived) {
+                throw protocol("parallel failure termination response is absent", null);
+            }
+            if (statusCode != 200) {
+                throw parseRemoteFailure(
+                        responseLine,
+                        "Python rejected parallel Intake failure termination");
+            }
+            if (responseLine == null || receiptHeader == null) {
+                throw protocol("parallel failure termination receipt is absent", null);
+            }
+            try {
+                JsonNode decoded = mapper.readTree(responseLine);
+                if (!(decoded instanceof ObjectNode root)) {
+                    throw new IllegalArgumentException(
+                            "parallel failure termination receipt must be an object");
+                }
+                Set<String> fields = new HashSet<>();
+                root.fieldNames().forEachRemaining(fields::add);
+                if (!fields.equals(FAILURE_TERMINATION_FIELDS)) {
+                    throw new IllegalArgumentException(
+                            "parallel failure termination receipt fields drifted");
+                }
+                String schemaVersion = receiptText(root, "schema_version");
+                String receiptId = receiptText(root, "receipt_id");
+                String requestHash = receiptText(root, "request_hash");
+                String actualFrameSetId = receiptText(root, "frame_set_id");
+                String runId = receiptText(root, "run_id");
+                String attemptId = receiptText(root, "attempt_id");
+                String commandId = receiptText(root, "command_id");
+                String actualAdmissionHash =
+                        receiptText(root, "admission_receipt_sha256");
+                String actualFailureCode =
+                        receiptText(root, "requested_failure_code");
+                String graphCommandStatus =
+                        receiptText(root, "graph_command_status");
+                String graphAttemptStatus =
+                        receiptText(root, "graph_attempt_status");
+                String graphErrorCode = receiptText(root, "graph_error_code");
+                String graphErrorClassification =
+                        receiptText(root, "graph_error_classification");
+                String receiptSha256 = receiptText(root, "receipt_sha256");
+                if (!"intake.parallel-failure-termination.v1".equals(schemaVersion)
+                        || !request.command().requestHash().equals(requestHash)
+                        || !frameSetId.equals(actualFrameSetId)
+                        || !request.agentRunId().equals(runId)
+                        || !request.attemptId().equals(attemptId)
+                        || !request.command().commandId().equals(commandId)
+                        || !admissionReceiptSha256.equals(actualAdmissionHash)
+                        || !requestedFailureCode.equals(actualFailureCode)
+                        || !Set.of("ABORTED", "CANCELLED").contains(graphCommandStatus)
+                        || !Set.of("FAILED", "LEASE_LOST", "CANCELLED", "ABSENT")
+                                .contains(graphAttemptStatus)
+                        || !SAFE_FAILURE_CODE.matcher(actualFailureCode).matches()
+                        || !SAFE_FAILURE_CODE.matcher(graphErrorCode).matches()
+                        || !SAFE_FAILURE_CODE.matcher(graphErrorClassification).matches()
+                        || !receiptHeader.equals(receiptSha256)
+                        || !receiptId.equals(
+                                "parallel-failure-terminal."
+                                        + admissionReceiptSha256.substring(0, 24))) {
+                    throw new IllegalArgumentException(
+                            "parallel failure termination receipt authority drifted");
+                }
+                JsonNode permitNode = root.required("provider_permit_statuses");
+                if (!permitNode.isArray()) {
+                    throw new IllegalArgumentException(
+                            "parallel failure termination permits are invalid");
+                }
+                List<String> permitStatuses = new ArrayList<>();
+                permitNode.forEach(value -> {
+                    if (!value.isTextual()) {
+                        throw new IllegalArgumentException(
+                                "parallel failure termination permit is invalid");
+                    }
+                    permitStatuses.add(value.asText());
+                });
+                List<String> sortedStatuses = permitStatuses.stream().sorted().toList();
+                if (!permitStatuses.equals(sortedStatuses)
+                        || permitStatuses.stream()
+                                .anyMatch(status -> !TERMINAL_PERMIT_STATUSES.contains(status))) {
+                    throw new IllegalArgumentException(
+                            "parallel failure termination permits are not terminal");
+                }
+                ObjectNode unsigned = root.deepCopy();
+                unsigned.remove("receipt_sha256");
+                if (!receiptSha256.matches("[0-9a-f]{64}")
+                        || !receiptSha256.equals(ContractJson.sha256Hex(unsigned))) {
+                    throw new IllegalArgumentException(
+                            "parallel failure termination self-hash drifted");
+                }
+                byte[] canonicalBytes = ContractJson.canonicalize(root);
+                return new FailureTerminationReceipt(
+                        schemaVersion, receiptId, receiptSha256, canonicalBytes);
+            } catch (RuntimeException
+                    | com.fasterxml.jackson.core.JsonProcessingException failure) {
+                throw protocol("parallel failure termination receipt is invalid", failure);
+            }
+        }
+    }
+
+    private static String receiptText(ObjectNode receipt, String field) {
+        JsonNode value = receipt.required(field);
+        if (!value.isTextual() || value.asText().isBlank()) {
+            throw new IllegalArgumentException(
+                    "parallel failure termination receipt field is invalid: " + field);
+        }
+        return value.asText();
+    }
+
     private record PreparedAdmission(
             StreamAuthority preparedAuthority,
             StreamAuthority executionAuthority,
             IntakeParallelFrameStagingPort.FrameSetReceipt frameSetReceipt,
             ExecutionPlan executionPlan,
-            EncodedAdmissionReceipt encodedReceipt) {}
+            PublishedAdmissionReceipt publishedReceipt) {}
 
     private final class StreamSession implements GraphCommandHttpTransport.Listener {
 

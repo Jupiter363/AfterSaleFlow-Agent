@@ -7,12 +7,19 @@ import java.util.regex.Pattern;
 /** Sanitized failure raised by the Python execution adapter. */
 public final class AgentRunExecutionException extends RuntimeException {
 
+    public enum FailureAuthority {
+        EXECUTION,
+        LOCAL_RECONCILIATION
+    }
+
     private static final Pattern ERROR_CODE = Pattern.compile("[A-Za-z0-9_.-]{1,128}");
 
     private final String errorCode;
     private final AgentRunRecoveryAction recoveryAction;
     private final long lastSequenceNo;
     private final boolean publicOutputEmitted;
+    private final FailureAuthority failureAuthority;
+    private final boolean terminalAuthorityObserved;
 
     public AgentRunExecutionException(
             String errorCode,
@@ -20,6 +27,26 @@ public final class AgentRunExecutionException extends RuntimeException {
             AgentRunRecoveryAction recoveryAction,
             long lastSequenceNo,
             boolean publicOutputEmitted,
+            Throwable cause) {
+        this(
+                errorCode,
+                internalMessage,
+                recoveryAction,
+                lastSequenceNo,
+                publicOutputEmitted,
+                FailureAuthority.EXECUTION,
+                false,
+                cause);
+    }
+
+    private AgentRunExecutionException(
+            String errorCode,
+            String internalMessage,
+            AgentRunRecoveryAction recoveryAction,
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            FailureAuthority failureAuthority,
+            boolean terminalAuthorityObserved,
             Throwable cause) {
         super(internalMessage == null ? "agent run execution failed" : internalMessage, cause);
         if (!ERROR_CODE.matcher(Objects.requireNonNull(errorCode, "errorCode")).matches()) {
@@ -42,6 +69,8 @@ public final class AgentRunExecutionException extends RuntimeException {
                 Objects.requireNonNull(recoveryAction, "recoveryAction must not be null");
         this.lastSequenceNo = lastSequenceNo;
         this.publicOutputEmitted = publicOutputEmitted;
+        this.failureAuthority = Objects.requireNonNull(failureAuthority, "failureAuthority");
+        this.terminalAuthorityObserved = terminalAuthorityObserved;
     }
 
     public static AgentRunExecutionException retrySameCommand(
@@ -104,6 +133,40 @@ public final class AgentRunExecutionException extends RuntimeException {
                 cause);
     }
 
+    public static AgentRunExecutionException reconcileLocalAuthority(
+            String errorCode,
+            String internalMessage,
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            Throwable cause) {
+        return new AgentRunExecutionException(
+                errorCode,
+                internalMessage,
+                AgentRunRecoveryAction.RECONCILE_TERMINAL,
+                lastSequenceNo,
+                publicOutputEmitted,
+                FailureAuthority.LOCAL_RECONCILIATION,
+                true,
+                cause);
+    }
+
+    public static AgentRunExecutionException retryLocalAuthority(
+            String errorCode,
+            String internalMessage,
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            Throwable cause) {
+        return new AgentRunExecutionException(
+                errorCode,
+                internalMessage,
+                AgentRunRecoveryAction.RETRY_SAME_COMMAND,
+                lastSequenceNo,
+                publicOutputEmitted,
+                FailureAuthority.LOCAL_RECONCILIATION,
+                false,
+                cause);
+    }
+
     public String errorCode() {
         return errorCode;
     }
@@ -129,5 +192,13 @@ public final class AgentRunExecutionException extends RuntimeException {
 
     public boolean publicOutputEmitted() {
         return publicOutputEmitted;
+    }
+
+    public FailureAuthority failureAuthority() {
+        return failureAuthority;
+    }
+
+    public boolean terminalAuthorityObserved() {
+        return terminalAuthorityObserved;
     }
 }

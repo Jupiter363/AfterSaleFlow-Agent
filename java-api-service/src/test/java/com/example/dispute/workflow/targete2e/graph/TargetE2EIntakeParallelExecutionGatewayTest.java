@@ -8,18 +8,22 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures;
 import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClient;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionException.FailureAuthority;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ProgressListener;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ExecutionMode;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.FailureTerminationReceipt;
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.AssemblyConflictException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.FrameExecutionReceipt;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.LocalReconciliationException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.DurableProgress;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalReceipt;
@@ -31,9 +35,46 @@ import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EIntakeParallelAssemblyCoordinator.AssemblyResult;
 import java.util.ArrayList;
 import java.util.List;
+import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 
 class TargetE2EIntakeParallelExecutionGatewayTest {
+
+    @Test
+    void localStagingConflictRetainsLocalAuthorityWithoutInventingACompletion() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        IntakeParallelFrameExecutionClient frames = mock(IntakeParallelFrameExecutionClient.class);
+        TargetE2EIntakeParallelAssemblyCoordinator coordinator =
+                mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
+        AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
+        IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(terminal.loadProgress(request)).thenReturn(emptyProgress());
+        when(reconciliation.reconcile(eq(request), any()))
+                .thenThrow(new AssemblyConflictException(
+                        "INTAKE_PARALLEL_READY_MISSING", "not ready"));
+        when(frames.executeOrResume(eq(request), any(), any()))
+                .thenThrow(new LocalReconciliationException(
+                        "INTAKE_PARALLEL_RETRY_AUTHORITY_INVALID",
+                        "technical staging requires local reconciliation",
+                        null));
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                () -> new TargetE2EIntakeParallelExecutionGateway(
+                                frames, coordinator, reconciliation, terminal)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()),
+                AgentRunExecutionException.class);
+
+        assertThat(failure.failureAuthority()).isEqualTo(FailureAuthority.LOCAL_RECONCILIATION);
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RETRY_SAME_COMMAND);
+        assertThat(failure.terminalAuthorityObserved()).isFalse();
+        assertThat(failure.lastSequenceNo()).isEqualTo(-1L);
+        verifyNoInteractions(coordinator);
+    }
 
     @Test
     void resumesOnlyMissingFramesThenPublishesOneAtomicDurableCompletion() {
@@ -142,6 +183,101 @@ class TargetE2EIntakeParallelExecutionGatewayTest {
         assertThat(progress).hasSize(1);
         verify(coordinator, never()).assembleReady(any(), any(), any());
         verify(terminal, never()).appendOrLoad(any());
+    }
+
+    @Test
+    void normalizesRemoteCreateNextAttemptToSameAttemptLaneRecovery() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        IntakeParallelFrameExecutionClient frames = mock(IntakeParallelFrameExecutionClient.class);
+        TargetE2EIntakeParallelAssemblyCoordinator coordinator =
+                mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
+        AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
+        IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(terminal.loadProgress(request)).thenReturn(emptyProgress());
+        when(reconciliation.reconcile(eq(request), any()))
+                .thenThrow(new AssemblyConflictException(
+                        "INTAKE_PARALLEL_READY_MISSING", "not ready"));
+        when(frames.executeOrResume(eq(request), any(), any()))
+                .thenThrow(TargetE2EGraphClientException.attemptAborted("GRAPH_LEASE_LOST"));
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                () -> new TargetE2EIntakeParallelExecutionGateway(
+                                frames, coordinator, reconciliation, terminal)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()),
+                AgentRunExecutionException.class);
+
+        assertThat(failure.errorCode()).isEqualTo("GRAPH_LEASE_LOST");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RETRY_SAME_COMMAND);
+        assertThat(failure.failureAuthority()).isEqualTo(FailureAuthority.EXECUTION);
+        verify(coordinator, never()).assembleReady(any(), any(), any());
+    }
+
+    @Test
+    void keepsPostSealAssemblyConflictAsJavaLocalReconciliationAuthority() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        IntakeParallelFrameExecutionClient frames = mock(IntakeParallelFrameExecutionClient.class);
+        TargetE2EIntakeParallelAssemblyCoordinator coordinator =
+                mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
+        AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
+        IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        when(terminal.loadProgress(request)).thenReturn(emptyProgress());
+        when(reconciliation.reconcile(eq(request), any()))
+                .thenThrow(new AssemblyConflictException(
+                        "INTAKE_PARALLEL_READY_MISSING", "not ready"));
+        when(frames.executeOrResume(eq(request), any(), any()))
+                .thenReturn(new FrameExecutionReceipt("IPFS_TEST", 4L, true));
+        when(coordinator.assembleReady(eq(request), eq("IPFS_TEST"), any()))
+                .thenThrow(new AssemblyConflictException(
+                        "INTAKE_PARALLEL_ASSEMBLY_HASH_DRIFT", "hash drift"));
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                () -> new TargetE2EIntakeParallelExecutionGateway(
+                                frames, coordinator, reconciliation, terminal)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()),
+                AgentRunExecutionException.class);
+
+        assertThat(failure.errorCode()).isEqualTo("INTAKE_PARALLEL_ASSEMBLY_HASH_DRIFT");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RECONCILE_TERMINAL);
+        assertThat(failure.failureAuthority()).isEqualTo(FailureAuthority.LOCAL_RECONCILIATION);
+        verify(terminal, never()).appendOrLoad(any());
+    }
+
+    @Test
+    void delegatesFailureTerminationWithoutTouchingAssemblyOrTerminalState() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        IntakeParallelFrameExecutionClient frames = mock(IntakeParallelFrameExecutionClient.class);
+        TargetE2EIntakeParallelAssemblyCoordinator coordinator =
+                mock(TargetE2EIntakeParallelAssemblyCoordinator.class);
+        AgentGraphReconciliationClient reconciliation = mock(AgentGraphReconciliationClient.class);
+        IntakeParallelRunTerminalStore terminal = mock(IntakeParallelRunTerminalStore.class);
+        FailureTerminationReceipt receipt = new FailureTerminationReceipt(
+                "intake.parallel-failure-termination.v1",
+                "parallel-failure-terminal.test",
+                "e".repeat(64),
+                "{}".getBytes(StandardCharsets.UTF_8));
+        when(frames.terminateUncommittedFailure(eq(request), any(), any()))
+                .thenReturn(receipt);
+
+        var actual = new TargetE2EIntakeParallelExecutionGateway(
+                        frames, coordinator, reconciliation, terminal)
+                .terminateUncommittedFailure(
+                        request,
+                        "INTAKE_PARALLEL_FRAME_BATCH_FAILED",
+                        new AgentRunCancellationToken());
+
+        assertThat(actual).containsSame(receipt);
+        verify(frames).terminateUncommittedFailure(eq(request), any(), any());
+        verifyNoInteractions(coordinator, reconciliation, terminal);
     }
 
     @Test

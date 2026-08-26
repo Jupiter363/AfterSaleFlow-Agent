@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -19,7 +20,9 @@ import com.example.dispute.workflow.activity.agent.AgentRunActivityContextProvid
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ExecutionMode;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.FailureTerminationReceipt;
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
+import com.example.dispute.workflow.activity.agent.AgentRunTerminalFailureCommitter;
 import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
@@ -32,6 +35,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import io.temporal.failure.ApplicationFailure;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
@@ -39,6 +43,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
@@ -216,6 +221,13 @@ class ExecuteAgentRunActivityTest {
         ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        AgentRunTerminalFailureCommitter committer =
+                mock(AgentRunTerminalFailureCommitter.class);
+        FailureTerminationReceipt receipt = new FailureTerminationReceipt(
+                "intake.parallel-failure-termination.v1",
+                "parallel-failure-terminal.test",
+                "e".repeat(64),
+                "{}".getBytes(StandardCharsets.UTF_8));
         when(ledger.requireAllocatedAttempt(request))
                 .thenReturn(parallelRunningAttempt(request, -1, false));
         when(gateway.execute(
@@ -229,23 +241,156 @@ class ExecuteAgentRunActivityTest {
                         -1,
                         false,
                         null));
-        when(ledger.recordAttemptFailureResult(
-                        eq(AgentRunAttemptStatus.FAILED), any()))
+        when(gateway.terminateUncommittedFailure(
+                        eq(request), eq("INTAKE_PARALLEL_ADMISSION_FAILED"), any()))
+                .thenReturn(Optional.of(receipt));
+        when(committer.commit(
+                        eq(request),
+                        eq(AgentRunAttemptStatus.FAILED),
+                        any(),
+                        eq(Optional.of(receipt))))
                 .thenAnswer(invocation -> {
-                    ExecuteAgentRunResult source = invocation.getArgument(1);
+                    ExecuteAgentRunResult source = invocation.getArgument(2);
                     return withLastSequence(source, 0);
                 });
 
         ExecuteAgentRunResult result =
-                activity(ledger, gateway, () -> context(1)).execute(request);
+                activity(ledger, gateway, committer, () -> context(1)).execute(request);
 
         assertThat(result.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.FAILED);
         assertThat(result.lastSequenceNo()).isZero();
         assertThat(result.publicOutputEmitted()).isFalse();
         assertThat(result.recoveryAction())
                 .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
-        verify(ledger).recordAttemptFailureResult(
-                AgentRunAttemptStatus.FAILED, withLastSequence(result, -1));
+        var ordered = inOrder(gateway, committer);
+        ordered.verify(gateway).terminateUncommittedFailure(
+                eq(request), eq("INTAKE_PARALLEL_ADMISSION_FAILED"), any());
+        ordered.verify(committer).commit(
+                request,
+                AgentRunAttemptStatus.FAILED,
+                withLastSequence(result, -1),
+                Optional.of(receipt));
+        verify(ledger, never()).recordAttemptFailureResult(any(), any());
+    }
+
+    @Test
+    void parallelGraphTerminationFailureLeavesTheJavaRunUncommitted() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        AgentRunTerminalFailureCommitter committer =
+                mock(AgentRunTerminalFailureCommitter.class);
+        when(ledger.requireAllocatedAttempt(request))
+                .thenReturn(parallelRunningAttempt(request, 3, true));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.RECONCILE_ONLY),
+                        any(),
+                        any()))
+                .thenThrow(AgentRunExecutionException.failLogicalRun(
+                        "INTAKE_PARALLEL_FRAME_BATCH_FAILED",
+                        "all legal lane generations were exhausted",
+                        3,
+                        true,
+                        null));
+        when(gateway.terminateUncommittedFailure(
+                        eq(request), eq("INTAKE_PARALLEL_FRAME_BATCH_FAILED"), any()))
+                .thenThrow(new IllegalStateException("Graph termination unavailable"));
+
+        assertThatThrownBy(() ->
+                        activity(ledger, gateway, committer, () -> context(3))
+                                .execute(request))
+                .isInstanceOfSatisfying(
+                        ApplicationFailure.class,
+                        failure -> assertThat(failure.getType())
+                                .isEqualTo(ExecuteAgentRunActivityImpl.RETRYABLE_FAILURE_TYPE));
+
+        verify(gateway).terminateUncommittedFailure(
+                eq(request), eq("INTAKE_PARALLEL_FRAME_BATCH_FAILED"), any());
+        verifyNoInteractions(committer);
+        verify(ledger, never()).recordAttemptFailureResult(any(), any());
+    }
+
+    @Test
+    void parallelLocalReconciliationConflictPreservesSealedGraphAuthority() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        AgentRunTerminalFailureCommitter committer =
+                mock(AgentRunTerminalFailureCommitter.class);
+        when(ledger.requireAllocatedAttempt(request))
+                .thenReturn(parallelRunningAttempt(request, 8, true));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                        any(),
+                        any()))
+                .thenThrow(AgentRunExecutionException.reconcileLocalAuthority(
+                        "INTAKE_PARALLEL_ASSEMBLY_CONFLICT",
+                        "sealed frame authority requires local reconciliation",
+                        8,
+                        true,
+                        null));
+
+        assertThatThrownBy(() ->
+                        activity(ledger, gateway, committer, () -> context(1))
+                                .execute(request))
+                .isInstanceOfSatisfying(
+                        ApplicationFailure.class,
+                        failure -> {
+                            assertThat(failure.getType())
+                                    .isEqualTo(
+                                            ExecuteAgentRunActivityImpl
+                                                    .NON_RETRYABLE_FAILURE_TYPE);
+                            assertThat(failure.getOriginalMessage())
+                                    .isEqualTo(
+                                            "completed agent run result could not be reconciled");
+                        });
+
+        verify(gateway, never()).terminateUncommittedFailure(any(), any(), any());
+        verifyNoInteractions(committer);
+        verify(ledger, never()).recordAttemptFailureResult(any(), any());
+    }
+
+    @Test
+    void parallelLocalStagingConflictNeverTerminatesGraphBeforeAnyPublicEvent() {
+        ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        AgentRunTerminalFailureCommitter committer =
+                mock(AgentRunTerminalFailureCommitter.class);
+        when(ledger.requireAllocatedAttempt(request))
+                .thenReturn(parallelRunningAttempt(request, -1, false));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                        any(),
+                        any()))
+                .thenThrow(AgentRunExecutionException.retryLocalAuthority(
+                        "INTAKE_PARALLEL_RETRY_AUTHORITY_INVALID",
+                        "technical staging requires local reconciliation",
+                        -1,
+                        false,
+                        null));
+
+        assertThatThrownBy(() ->
+                        activity(ledger, gateway, committer, () -> context(1))
+                                .execute(request))
+                .isInstanceOfSatisfying(
+                        ApplicationFailure.class,
+                        failure -> {
+                            assertThat(failure.getType())
+                                    .isEqualTo(
+                                            ExecuteAgentRunActivityImpl
+                                                    .NON_RETRYABLE_FAILURE_TYPE);
+                            assertThat(failure.getOriginalMessage())
+                                    .isEqualTo(
+                                            "local agent run authority could not be reconciled");
+                        });
+
+        verify(gateway, never()).terminateUncommittedFailure(any(), any(), any());
+        verifyNoInteractions(committer);
+        verify(ledger, never()).recordAttemptFailureResult(any(), any());
     }
 
     @Test
@@ -793,6 +938,21 @@ class ExecuteAgentRunActivityTest {
                 gateway,
                 contexts,
                 clock,
+                Duration.ofHours(1),
+                Executors::newSingleThreadScheduledExecutor);
+    }
+
+    private static ExecuteAgentRunActivityImpl activity(
+            AgentRunLedger ledger,
+            AgentRunExecutionGateway gateway,
+            AgentRunTerminalFailureCommitter terminalFailureCommitter,
+            AgentRunActivityContextProvider contexts) {
+        return new ExecuteAgentRunActivityImpl(
+                ledger,
+                gateway,
+                terminalFailureCommitter,
+                contexts,
+                Clock.fixed(NOW, ZoneOffset.UTC),
                 Duration.ofHours(1),
                 Executors::newSingleThreadScheduledExecutor);
     }

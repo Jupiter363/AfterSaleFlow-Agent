@@ -5,6 +5,8 @@ import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentR
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyView;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptLookup;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptPublication;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.EventAuthority;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExactThreeCompletion;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.ExactThreeFrame;
@@ -16,8 +18,6 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameRetryReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSealReceipt;
-import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetFailureCommand;
-import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetFailureReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetAdmission;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSetReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameSlotView;
@@ -25,6 +25,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressCommand;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressKind;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.IngressReceipt;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.PublishedAdmissionReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.SlotState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.StagingConflictException;
 import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
@@ -39,11 +40,15 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -165,38 +170,6 @@ public class JdbcIntakeParallelFrameStagingStore
              where frame_set_id = :frameSetId
                and frame_generation = 1
              order by frame_type, frame_generation
-            """;
-
-    private static final String LOCK_FRAME_SET_FAILURE_SQL =
-            """
-            select frame_set.frame_set_id, frame_set.agent_run_id,
-                   frame_set.agent_run_attempt_id, frame_set.command_id,
-                   frame_set.command_request_sha256, frame_set.assembly_state,
-                   frame_set.failure_code, frame_set.version,
-                   attempt.command_id as attempt_command_id,
-                   attempt.command_request_hash as attempt_command_request_hash,
-                   run.protocol, run.finalization_status
-              from intake_parallel_frame_set frame_set
-              join agent_run_attempt attempt
-                on attempt.id = frame_set.agent_run_attempt_id
-               and attempt.agent_run_id = frame_set.agent_run_id
-              join agent_run run on run.id = frame_set.agent_run_id
-             where frame_set.frame_set_id = :frameSetId
-             for update of frame_set, attempt
-            """;
-
-    private static final String FAIL_FRAME_SET_SQL =
-            """
-            update intake_parallel_frame_set
-               set assembly_state = 'FAILED_UNCOMMITTED',
-                   failure_code = :failureCode,
-                   failed_at = clock_timestamp(),
-                   updated_at = clock_timestamp(),
-                   version = version + 1
-             where frame_set_id = :frameSetId
-               and assembly_state = 'COLLECTING'
-               and version = :expectedVersion
-            returning version
             """;
 
     private static final String LOAD_SLOTS_SQL =
@@ -363,6 +336,82 @@ public class JdbcIntakeParallelFrameStagingStore
             for update of frame_set, attempt, slot, generation, authority
             """;
 
+    private static final String LOCK_ADMISSION_RECEIPT_AUTHORITY_SQL =
+            """
+            select current_receipt_generation, current_receipt_sha256, version
+              from intake_parallel_admission_receipt_authority
+             where frame_set_id = :frameSetId
+               for update
+            """;
+
+    private static final String LOAD_ADMISSION_RECEIPT_BY_HASH_SQL =
+            """
+            select frame_set_id, receipt_generation, receipt_sha256,
+                   agent_run_id, agent_run_attempt_id, command_id,
+                   command_request_sha256, java_receipt_id, authority_sha256,
+                   canonical_receipt_bytes, receipt_size_bytes
+              from intake_parallel_admission_receipt_history
+             where frame_set_id = :frameSetId
+               and receipt_sha256 = :receiptSha256
+            """;
+
+    private static final String LOAD_CURRENT_ADMISSION_RECEIPT_SQL =
+            """
+            select history.frame_set_id, history.receipt_generation,
+                   history.receipt_sha256, history.agent_run_id,
+                   history.agent_run_attempt_id, history.command_id,
+                   history.command_request_sha256, history.java_receipt_id,
+                   history.authority_sha256, history.canonical_receipt_bytes,
+                   history.receipt_size_bytes
+              from intake_parallel_admission_receipt_authority authority
+              join intake_parallel_admission_receipt_history history
+                on history.frame_set_id = authority.frame_set_id
+               and history.receipt_generation = authority.current_receipt_generation
+               and history.receipt_sha256 = authority.current_receipt_sha256
+             where history.agent_run_id = :runId
+               and history.agent_run_attempt_id = :attemptId
+               and history.command_id = :commandId
+               and history.command_request_sha256 = :commandRequestSha256
+            """;
+
+    private static final String INSERT_ADMISSION_RECEIPT_HISTORY_SQL =
+            """
+            insert into intake_parallel_admission_receipt_history(
+                frame_set_id, receipt_generation, receipt_sha256,
+                agent_run_id, agent_run_attempt_id, command_id,
+                command_request_sha256, java_receipt_id, authority_sha256,
+                canonical_receipt_bytes, receipt_size_bytes
+            ) values (
+                :frameSetId, :receiptGeneration, :receiptSha256,
+                :runId, :attemptId, :commandId,
+                :commandRequestSha256, :javaReceiptId, :authoritySha256,
+                :canonicalReceiptBytes, :receiptSizeBytes
+            )
+            """;
+
+    private static final String INSERT_ADMISSION_RECEIPT_AUTHORITY_SQL =
+            """
+            insert into intake_parallel_admission_receipt_authority(
+                frame_set_id, current_receipt_generation,
+                current_receipt_sha256, version
+            ) values (
+                :frameSetId, :receiptGeneration, :receiptSha256, 0
+            )
+            """;
+
+    private static final String ADVANCE_ADMISSION_RECEIPT_AUTHORITY_SQL =
+            """
+            update intake_parallel_admission_receipt_authority
+               set current_receipt_generation = :receiptGeneration,
+                   current_receipt_sha256 = :receiptSha256,
+                   version = version + 1,
+                   updated_at = clock_timestamp()
+             where frame_set_id = :frameSetId
+               and current_receipt_generation = :expectedReceiptGeneration
+               and current_receipt_sha256 = :expectedReceiptSha256
+               and version = :expectedVersion
+            """;
+
     private static final String LOAD_EXACT_THREE_COMPLETION_SQL =
             """
             select frame_set.frame_set_id, frame_set.agent_run_id,
@@ -508,82 +557,11 @@ public class JdbcIntakeParallelFrameStagingStore
         } else {
             requireExactAdmissionReplay(admission);
         }
-        EnumMap<FrameType, Long> selected = new EnumMap<>(FrameType.class);
-        for (FrameType frameType : FrameType.values()) {
-            selected.put(frameType, 1L);
-        }
         return new FrameSetReceipt(
                 admission.frameSetId(),
                 inserted == 1,
                 deterministicId("IPFSR", admission.frameSetId()),
-                AssemblyState.COLLECTING,
-                selected);
-    }
-
-    @Override
-    @Transactional(
-            propagation = Propagation.REQUIRES_NEW,
-            isolation = Isolation.READ_COMMITTED)
-    public FrameSetFailureReceipt failUncommitted(FrameSetFailureCommand command) {
-        Objects.requireNonNull(command, "command");
-        MapSqlParameterSource parameters = new MapSqlParameterSource()
-                .addValue("frameSetId", command.frameSetId())
-                .addValue("failureCode", command.failureCode());
-        List<Map<String, Object>> matches = jdbc.queryForList(
-                LOCK_FRAME_SET_FAILURE_SQL, parameters);
-        if (matches.size() != 1) {
-            throw conflict(
-                    "INTAKE_PARALLEL_FAILURE_FRAME_SET_MISSING",
-                    "parallel failure does not bind exactly one Frame set");
-        }
-        Map<String, Object> row = matches.getFirst();
-        boolean exactIdentity = command.frameSetId().equals(text(row, "frame_set_id"))
-                && command.runId().equals(text(row, "agent_run_id"))
-                && command.attemptId().equals(text(row, "agent_run_attempt_id"))
-                && command.commandId().equals(text(row, "command_id"))
-                && command.commandRequestSha256()
-                        .equals(text(row, "command_request_sha256"))
-                && command.commandId().equals(text(row, "attempt_command_id"))
-                && command.commandRequestSha256()
-                        .equals(text(row, "attempt_command_request_hash"))
-                && "agent-stream.v4".equals(text(row, "protocol"))
-                && "UNCOMMITTED".equals(text(row, "finalization_status"));
-        if (!exactIdentity) {
-            throw conflict(
-                    "INTAKE_PARALLEL_FAILURE_AUTHORITY_DRIFT",
-                    "parallel failure differs from its immutable attempt authority");
-        }
-        long version = number(row, "version");
-        String receiptId = deterministicId(
-                "IPFFR", command.frameSetId() + "|" + command.failureCode());
-        String state = text(row, "assembly_state");
-        if ("FAILED_UNCOMMITTED".equals(state)) {
-            if (!command.failureCode().equals(nullableText(row, "failure_code"))) {
-                throw conflict(
-                        "INTAKE_PARALLEL_FAILURE_REPLAY_CONFLICT",
-                        "parallel failure replay changed its terminal code");
-            }
-            return new FrameSetFailureReceipt(
-                    command.frameSetId(), receiptId, command.failureCode(), false, version);
-        }
-        if (!"COLLECTING".equals(state) || nullableText(row, "failure_code") != null) {
-            throw conflict(
-                    "INTAKE_PARALLEL_FAILURE_STATE_CONFLICT",
-                    "only a collecting Frame set may fail uncommitted");
-        }
-        parameters.addValue("expectedVersion", version);
-        List<Map<String, Object>> updated = jdbc.queryForList(FAIL_FRAME_SET_SQL, parameters);
-        if (updated.size() != 1) {
-            throw conflict(
-                    "INTAKE_PARALLEL_FAILURE_CAS_REJECTED",
-                    "parallel failure did not atomically terminalize its Frame set");
-        }
-        return new FrameSetFailureReceipt(
-                command.frameSetId(),
-                receiptId,
-                command.failureCode(),
-                true,
-                number(updated.getFirst(), "version"));
+                AssemblyState.COLLECTING);
     }
 
     @Override
@@ -885,6 +863,160 @@ public class JdbcIntakeParallelFrameStagingStore
         }
         return new ExecutionPlan(
                 admission.frameSetId(), admission.runId(), admission.attemptId(), lanes);
+    }
+
+    @Override
+    @Transactional(
+            propagation = Propagation.REQUIRES_NEW,
+            isolation = Isolation.READ_COMMITTED)
+    public PublishedAdmissionReceipt publishAdmissionReceipt(
+            AdmissionReceiptPublication publication) {
+        Objects.requireNonNull(publication, "publication");
+        FrameSetAdmission admission = publication.admission();
+        byte[] canonicalReceipt = decodeAndValidateAdmissionReceipt(publication);
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                LOCK_EXECUTION_PLAN_SQL,
+                Map.of("frameSetId", admission.frameSetId()));
+        if (rows.size() != FrameType.values().length) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_INCOMPLETE",
+                    "admission receipt publication requires exactly three current slots");
+        }
+        requireExactAdmissionReplay(admission);
+        requirePublishedPlanMatchesCurrent(publication, rows);
+
+        MapSqlParameterSource identity = new MapSqlParameterSource()
+                .addValue("frameSetId", admission.frameSetId())
+                .addValue("runId", admission.runId())
+                .addValue("attemptId", admission.attemptId())
+                .addValue("commandId", admission.commandId())
+                .addValue(
+                        "commandRequestSha256",
+                        admission.eventAuthority().commandRequestSha256())
+                .addValue("receiptSha256", publication.receiptSha256())
+                .addValue("javaReceiptId", publication.frameSetReceipt().receiptId())
+                .addValue(
+                        "authoritySha256",
+                        receiptText(
+                                readJson(
+                                        new String(canonicalReceipt, StandardCharsets.UTF_8),
+                                        "parallel admission receipt"),
+                                "authority_sha256"))
+                .addValue("canonicalReceiptBytes", canonicalReceipt)
+                .addValue("receiptSizeBytes", canonicalReceipt.length);
+        List<Map<String, Object>> current = jdbc.queryForList(
+                LOCK_ADMISSION_RECEIPT_AUTHORITY_SQL,
+                Map.of("frameSetId", admission.frameSetId()));
+        if (current.size() > 1) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_AUTHORITY_AMBIGUOUS",
+                    "admission receipt authority is not unique");
+        }
+        List<Map<String, Object>> existing = jdbc.queryForList(
+                LOAD_ADMISSION_RECEIPT_BY_HASH_SQL,
+                Map.of(
+                        "frameSetId", admission.frameSetId(),
+                        "receiptSha256", publication.receiptSha256()));
+        if (existing.size() > 1) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_HISTORY_AMBIGUOUS",
+                    "admission receipt history is not unique");
+        }
+        if (!existing.isEmpty()) {
+            Map<String, Object> row = existing.getFirst();
+            requireStoredAdmissionReceipt(
+                    row,
+                    admission.runId(),
+                    admission.attemptId(),
+                    admission.commandId(),
+                    admission.eventAuthority().commandRequestSha256(),
+                    publication.receiptSha256(),
+                    canonicalReceipt);
+            if (current.size() != 1
+                    || number(current.getFirst(), "current_receipt_generation")
+                            != number(row, "receipt_generation")
+                    || !publication.receiptSha256().equals(
+                            text(current.getFirst(), "current_receipt_sha256"))) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_REPLAY_STALE",
+                        "a superseded admission receipt cannot become current again");
+            }
+            return publishedAdmissionReceipt(row);
+        }
+
+        long receiptGeneration = current.isEmpty()
+                ? 1L
+                : Math.addExact(
+                        number(current.getFirst(), "current_receipt_generation"), 1L);
+        identity.addValue("receiptGeneration", receiptGeneration);
+        if (jdbc.update(INSERT_ADMISSION_RECEIPT_HISTORY_SQL, identity) != 1) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_INSERT_FAILED",
+                    "admission receipt history was not inserted");
+        }
+        if (current.isEmpty()) {
+            if (jdbc.update(INSERT_ADMISSION_RECEIPT_AUTHORITY_SQL, identity) != 1) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_AUTHORITY_INSERT_FAILED",
+                        "admission receipt authority was not inserted");
+            }
+        } else {
+            Map<String, Object> previous = current.getFirst();
+            identity.addValue(
+                            "expectedReceiptGeneration",
+                            number(previous, "current_receipt_generation"))
+                    .addValue(
+                            "expectedReceiptSha256",
+                            text(previous, "current_receipt_sha256"))
+                    .addValue("expectedVersion", number(previous, "version"));
+            if (jdbc.update(ADVANCE_ADMISSION_RECEIPT_AUTHORITY_SQL, identity) != 1) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_AUTHORITY_CAS_FAILED",
+                        "admission receipt authority did not advance atomically");
+            }
+        }
+        return new PublishedAdmissionReceipt(
+                admission.frameSetId(),
+                admission.runId(),
+                admission.attemptId(),
+                admission.commandId(),
+                admission.eventAuthority().commandRequestSha256(),
+                receiptGeneration,
+                Base64.getUrlEncoder().withoutPadding().encodeToString(canonicalReceipt),
+                publication.receiptSha256());
+    }
+
+    @Override
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
+    public Optional<PublishedAdmissionReceipt> findCurrentAdmissionReceipt(
+            AdmissionReceiptLookup lookup) {
+        Objects.requireNonNull(lookup, "lookup");
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                LOAD_CURRENT_ADMISSION_RECEIPT_SQL,
+                new MapSqlParameterSource()
+                        .addValue("runId", lookup.runId())
+                        .addValue("attemptId", lookup.attemptId())
+                        .addValue("commandId", lookup.commandId())
+                        .addValue("commandRequestSha256", lookup.commandRequestSha256()));
+        if (rows.isEmpty()) {
+            return Optional.empty();
+        }
+        if (rows.size() != 1) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_CURRENT_AMBIGUOUS",
+                    "current admission receipt lookup is not unique");
+        }
+        Map<String, Object> row = rows.getFirst();
+        byte[] canonical = bytes(row, "canonical_receipt_bytes");
+        requireStoredAdmissionReceipt(
+                row,
+                lookup.runId(),
+                lookup.attemptId(),
+                lookup.commandId(),
+                lookup.commandRequestSha256(),
+                text(row, "receipt_sha256"),
+                canonical);
+        return Optional.of(publishedAdmissionReceipt(row));
     }
 
     @Override
@@ -2134,6 +2266,318 @@ public class JdbcIntakeParallelFrameStagingStore
         binding.put("canonical_item_id", payload.canonicalItemId());
         binding.put("item_sha256", payload.itemSha256());
         return ContractJson.sha256Hex(binding);
+    }
+
+    private void requirePublishedPlanMatchesCurrent(
+            AdmissionReceiptPublication publication,
+            List<Map<String, Object>> rows) {
+        FrameSetAdmission admission = publication.admission();
+        Map<FrameType, ExecutionLane> lanes = publication.executionPlan().lanes();
+        if (!lanes.keySet().equals(Set.of(FrameType.values()))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_INCOMPLETE",
+                    "admission receipt plan does not bind exactly three lanes");
+        }
+        Set<FrameType> observed = new HashSet<>();
+        for (Map<String, Object> row : rows) {
+            if (!sameAdmission(admission, row)) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_AUTHORITY_DRIFT",
+                        "admission receipt differs from its durable frame set");
+            }
+            requireCurrentEventAuthority(row);
+            FrameType type = FrameType.valueOf(text(row, "frame_type"));
+            ExecutionLane lane = lanes.get(type);
+            if (!observed.add(type)
+                    || lane == null
+                    || lane.generation() != number(row, "current_generation")
+                    || !lane.frameId().equals(text(row, "current_frame_id"))
+                    || lane.slotVersion() != number(row, "slot_version")) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_DRIFT",
+                        "admission receipt lane identity differs from current authority");
+            }
+            SlotState currentState = SlotState.valueOf(text(row, "slot_state"));
+            if (lane.slotState() != currentState) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_DRIFT",
+                        "admission receipt lane state differs from current authority");
+            }
+            if (currentState == SlotState.SEALED) {
+                requireSealedPlanningResult(row);
+                if (lane.action() != ExecutionAction.SKIP_SEALED
+                        || lane.nextLocalIndex() != number(row, "result_next_local_index")
+                        || !Objects.equals(lane.resultId(), nullableText(row, "current_result_id"))
+                        || !Objects.equals(lane.resultSha256(), nullableText(row, "result_sha256"))
+                        || !Objects.equals(
+                                lane.publicProjectionSha256(),
+                                nullableText(row, "public_projection_sha256"))
+                        || lane.predecessorFailureCode() != null) {
+                    throw conflict(
+                            "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_DRIFT",
+                            "sealed admission receipt lane differs from its result");
+                }
+                continue;
+            }
+            if (currentState != SlotState.ADMITTED
+                    || !"ADMITTED".equals(text(row, "staging_state"))
+                    || !"ADMITTED".equals(text(row, "provider_call_lease_state"))
+                    || lane.nextLocalIndex() != 0
+                    || lane.resultId() != null
+                    || lane.resultSha256() != null
+                    || lane.publicProjectionSha256() != null) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_DRIFT",
+                        "runnable admission receipt lane is not freshly admitted");
+            }
+            long generation = number(row, "current_generation");
+            String repairCode = nullableText(row, "repair_code");
+            ExecutionAction expectedAction;
+            if (generation == 1L && repairCode == null) {
+                expectedAction = ExecutionAction.RUN_CURRENT;
+            } else if (generation == 2L
+                    && repairCode != null
+                    && IntakeParallelFrameStagingPort.RETRY_VALIDATION_PATH.equals(
+                            nullableText(row, "validation_path"))) {
+                expectedAction = ExecutionAction.RUN_RETRY;
+            } else {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_LINEAGE_DRIFT",
+                        "admission receipt lane has no executable lineage");
+            }
+            if (lane.action() != expectedAction
+                    || !Objects.equals(lane.predecessorFailureCode(), repairCode)) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_DRIFT",
+                        "admission receipt lane action differs from current lineage");
+            }
+        }
+        if (!observed.equals(Set.of(FrameType.values()))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_INCOMPLETE",
+                    "admission receipt publication is missing a current lane");
+        }
+    }
+
+    private byte[] decodeAndValidateAdmissionReceipt(
+            AdmissionReceiptPublication publication) {
+        byte[] canonical;
+        try {
+            canonical = Base64.getUrlDecoder().decode(publication.encodedReceipt());
+        } catch (IllegalArgumentException failure) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_ENCODING_INVALID",
+                    "admission receipt is not canonical base64url");
+        }
+        if (canonical.length < 2
+                || canonical.length > 12 * 1024
+                || !publication.encodedReceipt().equals(
+                        Base64.getUrlEncoder().withoutPadding().encodeToString(canonical))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_ENCODING_INVALID",
+                    "admission receipt encoding or size is invalid");
+        }
+        JsonNode parsed = readJson(
+                new String(canonical, StandardCharsets.UTF_8),
+                "parallel admission receipt");
+        if (!(parsed instanceof ObjectNode root)
+                || !Arrays.equals(canonical, ContractJson.canonicalize(root))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_CANONICAL_INVALID",
+                    "admission receipt bytes are not canonical JSON");
+        }
+        Set<String> expectedFields = Set.of(
+                "schema_version",
+                "request_hash",
+                "frame_set_id",
+                "run_id",
+                "attempt_id",
+                "java_receipt_id",
+                "authority_sha256",
+                "lanes",
+                "receipt_sha256");
+        Set<String> observedFields = new HashSet<>();
+        root.fieldNames().forEachRemaining(observedFields::add);
+        FrameSetAdmission admission = publication.admission();
+        if (!observedFields.equals(expectedFields)
+                || !"intake.parallel-admission-receipt.v1"
+                        .equals(receiptText(root, "schema_version"))
+                || !admission.eventAuthority().commandRequestSha256()
+                        .equals(receiptText(root, "request_hash"))
+                || !admission.frameSetId().equals(receiptText(root, "frame_set_id"))
+                || !admission.runId().equals(receiptText(root, "run_id"))
+                || !admission.attemptId().equals(receiptText(root, "attempt_id"))
+                || !publication.frameSetReceipt().receiptId()
+                        .equals(receiptText(root, "java_receipt_id"))
+                || !publication.receiptSha256().equals(receiptText(root, "receipt_sha256"))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_AUTHORITY_DRIFT",
+                    "admission receipt document differs from its publication authority");
+        }
+        ObjectNode unsigned = root.deepCopy();
+        unsigned.remove("receipt_sha256");
+        if (!publication.receiptSha256().equals(ContractJson.sha256Hex(unsigned))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_HASH_INVALID",
+                    "admission receipt self-hash drifted");
+        }
+        JsonNode rawLanes = root.required("lanes");
+        if (!(rawLanes instanceof ArrayNode lanes)
+                || lanes.size() != FrameType.values().length) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_INCOMPLETE",
+                    "admission receipt document does not contain exactly three lanes");
+        }
+        Set<String> laneFields = Set.of(
+                "frame_type",
+                "generation",
+                "frame_id",
+                "slot_state",
+                "action",
+                "next_local_index",
+                "slot_version",
+                "result_id",
+                "result_sha256",
+                "public_projection_sha256",
+                "predecessor_failure_code");
+        for (int index = 0; index < lanes.size(); index++) {
+            JsonNode rawLane = lanes.get(index);
+            if (!(rawLane instanceof ObjectNode lane)) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_INVALID",
+                        "admission receipt lane is not an object");
+            }
+            Set<String> observedLaneFields = new HashSet<>();
+            lane.fieldNames().forEachRemaining(observedLaneFields::add);
+            FrameType type = FrameType.values()[index];
+            ExecutionLane expected = publication.executionPlan().lanes().get(type);
+            if (!observedLaneFields.equals(laneFields)
+                    || expected == null
+                    || !type.name().equals(receiptText(lane, "frame_type"))
+                    || expected.generation() != receiptLong(lane, "generation")
+                    || !expected.frameId().equals(receiptText(lane, "frame_id"))
+                    || !expected.slotState().name().equals(receiptText(lane, "slot_state"))
+                    || !expected.action().name().equals(receiptText(lane, "action"))
+                    || expected.nextLocalIndex() != receiptLong(lane, "next_local_index")
+                    || expected.slotVersion() != receiptLong(lane, "slot_version")
+                    || !receiptNullableText(lane, "result_id").equals(
+                            Optional.ofNullable(expected.resultId()))
+                    || !receiptNullableText(lane, "result_sha256").equals(
+                            Optional.ofNullable(expected.resultSha256()))
+                    || !receiptNullableText(lane, "public_projection_sha256").equals(
+                            Optional.ofNullable(expected.publicProjectionSha256()))
+                    || !receiptNullableText(lane, "predecessor_failure_code").equals(
+                            Optional.ofNullable(expected.predecessorFailureCode()))) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ADMISSION_RECEIPT_PLAN_DRIFT",
+                        "admission receipt lane differs from the published plan");
+            }
+        }
+        return canonical;
+    }
+
+    private void requireStoredAdmissionReceipt(
+            Map<String, Object> row,
+            String runId,
+            String attemptId,
+            String commandId,
+            String commandRequestSha256,
+            String receiptSha256,
+            byte[] canonical) {
+        if (!runId.equals(text(row, "agent_run_id"))
+                || !attemptId.equals(text(row, "agent_run_attempt_id"))
+                || !commandId.equals(text(row, "command_id"))
+                || !commandRequestSha256.equals(text(row, "command_request_sha256"))
+                || !receiptSha256.equals(text(row, "receipt_sha256"))
+                || canonical.length != number(row, "receipt_size_bytes")
+                || !Arrays.equals(canonical, bytes(row, "canonical_receipt_bytes"))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_REPLAY_CONFLICT",
+                    "stored admission receipt differs from its exact authority");
+        }
+        JsonNode parsed = readJson(
+                new String(canonical, StandardCharsets.UTF_8),
+                "stored parallel admission receipt");
+        if (!(parsed instanceof ObjectNode root)
+                || !Arrays.equals(canonical, ContractJson.canonicalize(root))
+                || !"intake.parallel-admission-receipt.v1"
+                        .equals(receiptText(root, "schema_version"))
+                || !runId.equals(receiptText(root, "run_id"))
+                || !attemptId.equals(receiptText(root, "attempt_id"))
+                || !commandRequestSha256.equals(receiptText(root, "request_hash"))
+                || !text(row, "frame_set_id").equals(receiptText(root, "frame_set_id"))
+                || !text(row, "java_receipt_id").equals(receiptText(root, "java_receipt_id"))
+                || !text(row, "authority_sha256").equals(
+                        receiptText(root, "authority_sha256"))
+                || !receiptSha256.equals(receiptText(root, "receipt_sha256"))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_REPLAY_CONFLICT",
+                    "stored admission receipt document crossed authority");
+        }
+        ObjectNode unsigned = root.deepCopy();
+        unsigned.remove("receipt_sha256");
+        if (!receiptSha256.equals(ContractJson.sha256Hex(unsigned))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_HASH_INVALID",
+                    "stored admission receipt self-hash drifted");
+        }
+    }
+
+    private static PublishedAdmissionReceipt publishedAdmissionReceipt(
+            Map<String, Object> row) {
+        byte[] canonical = bytes(row, "canonical_receipt_bytes");
+        return new PublishedAdmissionReceipt(
+                text(row, "frame_set_id"),
+                text(row, "agent_run_id"),
+                text(row, "agent_run_attempt_id"),
+                text(row, "command_id"),
+                text(row, "command_request_sha256"),
+                number(row, "receipt_generation"),
+                Base64.getUrlEncoder().withoutPadding().encodeToString(canonical),
+                text(row, "receipt_sha256"));
+    }
+
+    private static String receiptText(JsonNode document, String field) {
+        JsonNode value = document.required(field);
+        if (!value.isTextual() || value.asText().isBlank()) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_FIELD_INVALID",
+                    "admission receipt field is not textual: " + field);
+        }
+        return value.asText();
+    }
+
+    private static long receiptLong(JsonNode document, String field) {
+        JsonNode value = document.required(field);
+        if (!value.isIntegralNumber() || !value.canConvertToLong()) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_FIELD_INVALID",
+                    "admission receipt field is not integral: " + field);
+        }
+        return value.longValue();
+    }
+
+    private static Optional<String> receiptNullableText(JsonNode document, String field) {
+        JsonNode value = document.required(field);
+        if (value.isNull()) {
+            return Optional.empty();
+        }
+        if (!value.isTextual() || value.asText().isBlank()) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ADMISSION_RECEIPT_FIELD_INVALID",
+                    "admission receipt nullable field is invalid: " + field);
+        }
+        return Optional.of(value.asText());
+    }
+
+    private static byte[] bytes(Map<String, Object> row, String name) {
+        Object value = row.get(name);
+        if (!(value instanceof byte[] bytes) || bytes.length == 0) {
+            throw conflict(
+                    "INTAKE_PARALLEL_CORRUPT_AUTHORITY",
+                    name + " is not a non-empty byte array");
+        }
+        return bytes.clone();
     }
 
     private JsonNode readJson(String value, String description) {

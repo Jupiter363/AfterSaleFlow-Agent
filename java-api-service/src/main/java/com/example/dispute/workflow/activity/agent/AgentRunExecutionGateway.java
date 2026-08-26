@@ -3,6 +3,8 @@ package com.example.dispute.workflow.activity.agent;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
+import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * Versioned Python execution port used by the Temporal Activity.
@@ -24,6 +26,21 @@ public interface AgentRunExecutionGateway {
             ExecutionMode executionMode,
             ProgressListener progressListener,
             AgentRunCancellationToken cancellationToken);
+
+    /**
+     * Closes only the external technical execution after the Activity has exhausted every legal
+     * same-command retry.
+     *
+     * <p>The default legacy lane has no separate external terminal authority. The parallel Intake
+     * implementation must first obtain its immutable Graph receipt and must not write local
+     * AgentRun or business state from this method.
+     */
+    default Optional<FailureTerminationReceipt> terminateUncommittedFailure(
+            ExecuteAgentRunRequest request,
+            String failureCode,
+            AgentRunCancellationToken cancellationToken) {
+        return Optional.empty();
+    }
 
     /** Controls whether a command-ledger miss may start or resume graph execution. */
     enum ExecutionMode {
@@ -80,6 +97,37 @@ public interface AgentRunExecutionGateway {
                 throw new IllegalArgumentException(
                         "durableResult must match the terminal completion");
             }
+        }
+    }
+
+    /** Immutable, self-hashed receipt returned by an external technical execution owner. */
+    record FailureTerminationReceipt(
+            String schemaVersion,
+            String receiptId,
+            String receiptHash,
+            byte[] canonicalReceiptBytes) {
+
+        private static final Pattern IDENTIFIER =
+                Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
+        private static final Pattern SHA256 = Pattern.compile("^[0-9a-f]{64}$");
+
+        public FailureTerminationReceipt {
+            if (!"intake.parallel-failure-termination.v1".equals(schemaVersion)
+                    || receiptId == null
+                    || !IDENTIFIER.matcher(receiptId).matches()
+                    || receiptHash == null
+                    || !SHA256.matcher(receiptHash).matches()
+                    || canonicalReceiptBytes == null
+                    || canonicalReceiptBytes.length < 2
+                    || canonicalReceiptBytes.length > 65_536) {
+                throw new IllegalArgumentException("failure termination receipt is invalid");
+            }
+            canonicalReceiptBytes = canonicalReceiptBytes.clone();
+        }
+
+        @Override
+        public byte[] canonicalReceiptBytes() {
+            return canonicalReceiptBytes.clone();
         }
     }
 }

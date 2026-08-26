@@ -126,20 +126,21 @@ class JdbcIntakeParallelFrameStagingStoreContractTest {
     }
 
     @Test
-    void terminalizesOnlyTheExactUncommittedParallelAttemptAndReplaysItsFailure()
+    void publishesVersionedAdmissionReceiptAuthorityBeforeHttpExecution()
             throws Exception {
         String source = normalizedSource();
 
         assertThat(source)
-                .contains("public framesetfailurereceipt failuncommitted")
-                .contains("for update of frame_set, attempt")
-                .contains("command.commandrequestsha256()")
-                .contains("\"agent-stream.v4\".equals(text(row, \"protocol\"))")
-                .contains("\"uncommitted\".equals(text(row, \"finalization_status\"))")
-                .contains("assembly_state = 'failed_uncommitted'")
-                .contains("and assembly_state = 'collecting'")
-                .contains("and version = :expectedversion")
-                .contains("intake_parallel_failure_replay_conflict");
+                .contains("public publishedadmissionreceipt publishadmissionreceipt")
+                .contains("decodeandvalidateadmissionreceipt(publication)")
+                .contains("lock_admission_receipt_authority_sql")
+                .contains("insert into intake_parallel_admission_receipt_history")
+                .contains("update intake_parallel_admission_receipt_authority")
+                .contains("current_receipt_generation = :expectedreceiptgeneration")
+                .contains("public optional<publishedadmissionreceipt> findcurrentadmissionreceipt")
+                .contains("load_current_admission_receipt_sql")
+                .doesNotContain("selectedgenerations")
+                .doesNotContain("public framesetfailurereceipt failuncommitted");
     }
 
     @Test

@@ -26,8 +26,6 @@ public interface IntakeParallelFrameStagingPort {
 
     FrameSetReceipt admit(FrameSetAdmission admission);
 
-    FrameSetFailureReceipt failUncommitted(FrameSetFailureCommand command);
-
     IngressReceipt append(IngressCommand command);
 
     FrameSealReceipt seal(FrameSealCommand command);
@@ -35,6 +33,12 @@ public interface IntakeParallelFrameStagingPort {
     FrameRetryReceipt admitRetry(FrameRetryAdmission admission);
 
     ExecutionPlan planExecution(FrameSetAdmission admission);
+
+    PublishedAdmissionReceipt publishAdmissionReceipt(
+            AdmissionReceiptPublication publication);
+
+    Optional<PublishedAdmissionReceipt> findCurrentAdmissionReceipt(
+            AdmissionReceiptLookup lookup);
 
     Optional<AssemblyView> findAssembly(String frameSetId);
 
@@ -251,54 +255,71 @@ public interface IntakeParallelFrameStagingPort {
             String frameSetId,
             boolean inserted,
             String receiptId,
-            AssemblyState assemblyState,
-            Map<FrameType, Long> selectedGenerations) {
+            AssemblyState assemblyState) {
 
         public FrameSetReceipt {
             frameSetId = identifier(frameSetId, "frameSetId");
             receiptId = identifier(receiptId, "receiptId");
             assemblyState = Objects.requireNonNull(assemblyState, "assemblyState");
-            selectedGenerations = Map.copyOf(
-                    Objects.requireNonNull(selectedGenerations, "selectedGenerations"));
-            if (!selectedGenerations.keySet().equals(Set.of(FrameType.values()))) {
-                throw new IllegalArgumentException(
-                        "Frame-set receipt must select exactly three Frame generations");
-            }
-            selectedGenerations.values().forEach(
-                    value -> positive(Objects.requireNonNull(value, "generation"), "generation"));
         }
     }
 
-    record FrameSetFailureCommand(
+    record AdmissionReceiptPublication(
+            FrameSetAdmission admission,
+            FrameSetReceipt frameSetReceipt,
+            ExecutionPlan executionPlan,
+            String encodedReceipt,
+            String receiptSha256) {
+
+        public AdmissionReceiptPublication {
+            admission = Objects.requireNonNull(admission, "admission");
+            frameSetReceipt = Objects.requireNonNull(frameSetReceipt, "frameSetReceipt");
+            executionPlan = Objects.requireNonNull(executionPlan, "executionPlan");
+            encodedReceipt = bounded(encodedReceipt, "encodedReceipt", 16 * 1024);
+            receiptSha256 = sha256(receiptSha256, "receiptSha256");
+            if (!admission.frameSetId().equals(frameSetReceipt.frameSetId())
+                    || !admission.frameSetId().equals(executionPlan.frameSetId())
+                    || !admission.runId().equals(executionPlan.runId())
+                    || !admission.attemptId().equals(executionPlan.attemptId())) {
+                throw new IllegalArgumentException(
+                        "parallel admission receipt publication crossed execution authority");
+            }
+        }
+    }
+
+    record AdmissionReceiptLookup(
+            String runId,
+            String attemptId,
+            String commandId,
+            String commandRequestSha256) {
+
+        public AdmissionReceiptLookup {
+            runId = identifier(runId, "runId");
+            attemptId = identifier(attemptId, "attemptId");
+            commandId = identifier(commandId, "commandId");
+            commandRequestSha256 = sha256(commandRequestSha256, "commandRequestSha256");
+        }
+    }
+
+    record PublishedAdmissionReceipt(
             String frameSetId,
             String runId,
             String attemptId,
             String commandId,
             String commandRequestSha256,
-            String failureCode) {
+            long receiptGeneration,
+            String encodedReceipt,
+            String receiptSha256) {
 
-        public FrameSetFailureCommand {
+        public PublishedAdmissionReceipt {
             frameSetId = identifier(frameSetId, "frameSetId");
             runId = identifier(runId, "runId");
             attemptId = identifier(attemptId, "attemptId");
             commandId = identifier(commandId, "commandId");
             commandRequestSha256 = sha256(commandRequestSha256, "commandRequestSha256");
-            failureCode = identifier(failureCode, "failureCode");
-        }
-    }
-
-    record FrameSetFailureReceipt(
-            String frameSetId,
-            String receiptId,
-            String failureCode,
-            boolean inserted,
-            long frameSetVersion) {
-
-        public FrameSetFailureReceipt {
-            frameSetId = identifier(frameSetId, "frameSetId");
-            receiptId = identifier(receiptId, "receiptId");
-            failureCode = identifier(failureCode, "failureCode");
-            nonNegative(frameSetVersion, "frameSetVersion");
+            positive(receiptGeneration, "receiptGeneration");
+            encodedReceipt = bounded(encodedReceipt, "encodedReceipt", 16 * 1024);
+            receiptSha256 = sha256(receiptSha256, "receiptSha256");
         }
     }
 

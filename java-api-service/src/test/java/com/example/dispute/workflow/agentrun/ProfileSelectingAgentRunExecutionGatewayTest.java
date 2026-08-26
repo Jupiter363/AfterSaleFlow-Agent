@@ -12,12 +12,15 @@ import com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ExecutionMode;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.FailureTerminationReceipt;
 import com.example.dispute.workflow.activity.agent.ProfileSelectingAgentRunExecutionGateway;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class ProfileSelectingAgentRunExecutionGatewayTest {
@@ -62,6 +65,30 @@ class ProfileSelectingAgentRunExecutionGatewayTest {
         assertThat(actual).isSameAs(expected);
         verify(legacy).execute(any(), any(), any(), any());
         verify(parallel, never()).execute(any(), any(), any(), any());
+    }
+
+    @Test
+    void routesParallelFailureTerminationThroughTheSameAuthoritativeDelegate() {
+        AgentRunExecutionGateway legacy = mock(AgentRunExecutionGateway.class);
+        AgentRunExecutionGateway parallel = mock(AgentRunExecutionGateway.class);
+        var request = AgentRunPersistenceFixtures.parallelIntakeRequest();
+        var receipt = new FailureTerminationReceipt(
+                "intake.parallel-failure-termination.v1",
+                "parallel-failure-terminal.test",
+                "e".repeat(64),
+                "{}".getBytes(StandardCharsets.UTF_8));
+        when(parallel.terminateUncommittedFailure(any(), any(), any()))
+                .thenReturn(Optional.of(receipt));
+
+        var actual = new ProfileSelectingAgentRunExecutionGateway(legacy, parallel)
+                .terminateUncommittedFailure(
+                        request,
+                        "INTAKE_PARALLEL_FRAME_BATCH_FAILED",
+                        new AgentRunCancellationToken());
+
+        assertThat(actual).containsSame(receipt);
+        verify(parallel).terminateUncommittedFailure(any(), any(), any());
+        verify(legacy, never()).terminateUncommittedFailure(any(), any(), any());
     }
 
     @Test

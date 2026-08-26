@@ -2,6 +2,7 @@ package com.example.dispute.workflow.activity.agent;
 
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Routes the explicit Intake parallel profile without changing the legacy V3 execution lane.
@@ -35,6 +36,23 @@ public final class ProfileSelectingAgentRunExecutionGateway implements AgentRunE
         Objects.requireNonNull(executionMode, "executionMode");
         Objects.requireNonNull(progressListener, "progressListener");
         Objects.requireNonNull(cancellationToken, "cancellationToken");
+        return select(request).execute(
+                request, executionMode, progressListener, cancellationToken);
+    }
+
+    @Override
+    public Optional<FailureTerminationReceipt> terminateUncommittedFailure(
+            ExecuteAgentRunRequest request,
+            String failureCode,
+            AgentRunCancellationToken cancellationToken) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(failureCode, "failureCode");
+        Objects.requireNonNull(cancellationToken, "cancellationToken");
+        return select(request).terminateUncommittedFailure(
+                request, failureCode, cancellationToken);
+    }
+
+    private AgentRunExecutionGateway select(ExecuteAgentRunRequest request) {
         boolean parallel = ExecuteAgentRunRequest.isParallelIntakeCommand(request.command());
         var invocation = request.command().invocationContext();
         boolean reservedParallelMarker = invocation != null
@@ -51,7 +69,6 @@ public final class ProfileSelectingAgentRunExecutionGateway implements AgentRunE
             throw new IllegalArgumentException(
                     "stream protocol differs from the authoritative execution profile");
         }
-        AgentRunExecutionGateway selected = parallel ? parallelIntakeGateway : legacyGateway;
-        return selected.execute(request, executionMode, progressListener, cancellationToken);
+        return parallel ? parallelIntakeGateway : legacyGateway;
     }
 }

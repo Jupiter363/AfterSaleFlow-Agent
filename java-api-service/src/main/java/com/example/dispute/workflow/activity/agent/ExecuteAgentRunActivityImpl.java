@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
@@ -38,6 +39,7 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
 
     private final AgentRunLedger ledger;
     private final AgentRunExecutionGateway gateway;
+    private final AgentRunTerminalFailureCommitter terminalFailureCommitter;
     private final AgentRunActivityContextProvider contextProvider;
     private final Clock clock;
     private final Duration heartbeatInterval;
@@ -49,6 +51,21 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
         this(
                 ledger,
                 gateway,
+                AgentRunTerminalFailureCommitter.ledgerOnly(ledger),
+                new TemporalAgentRunActivityContextProvider(),
+                Clock.systemUTC(),
+                AgentRunTemporalPolicy.PROGRESS_HEARTBEAT_INTERVAL,
+                ExecuteAgentRunActivityImpl::newHeartbeatScheduler);
+    }
+
+    public ExecuteAgentRunActivityImpl(
+            AgentRunLedger ledger,
+            AgentRunExecutionGateway gateway,
+            AgentRunTerminalFailureCommitter terminalFailureCommitter) {
+        this(
+                ledger,
+                gateway,
+                terminalFailureCommitter,
                 new TemporalAgentRunActivityContextProvider(),
                 Clock.systemUTC(),
                 AgentRunTemporalPolicy.PROGRESS_HEARTBEAT_INTERVAL,
@@ -62,8 +79,28 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
             Clock clock,
             Duration heartbeatInterval,
             Supplier<ScheduledExecutorService> schedulerFactory) {
+        this(
+                ledger,
+                gateway,
+                AgentRunTerminalFailureCommitter.ledgerOnly(ledger),
+                contextProvider,
+                clock,
+                heartbeatInterval,
+                schedulerFactory);
+    }
+
+    public ExecuteAgentRunActivityImpl(
+            AgentRunLedger ledger,
+            AgentRunExecutionGateway gateway,
+            AgentRunTerminalFailureCommitter terminalFailureCommitter,
+            AgentRunActivityContextProvider contextProvider,
+            Clock clock,
+            Duration heartbeatInterval,
+            Supplier<ScheduledExecutorService> schedulerFactory) {
         this.ledger = Objects.requireNonNull(ledger, "ledger");
         this.gateway = Objects.requireNonNull(gateway, "gateway");
+        this.terminalFailureCommitter =
+                Objects.requireNonNull(terminalFailureCommitter, "terminalFailureCommitter");
         this.contextProvider = Objects.requireNonNull(contextProvider, "contextProvider");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.heartbeatInterval = Objects.requireNonNull(heartbeatInterval, "heartbeatInterval");
@@ -277,7 +314,11 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                 heartbeat.publicOutputEmitted() || executionFailure.publicOutputEmitted();
         boolean completionObserved =
                 attempt.status() == AgentRunAttemptStatus.RESULT_READY
-                        || heartbeat.finalFrameObserved();
+                        || heartbeat.finalFrameObserved()
+                        || executionFailure.terminalAuthorityObserved();
+        boolean localReconciliation =
+                executionFailure.failureAuthority()
+                        == AgentRunExecutionException.FailureAuthority.LOCAL_RECONCILIATION;
         boolean withinRecoveryWindow =
                 completionObserved || clock.instant().isBefore(request.command().deadlineAt());
         int retryLimit = Math.max(1, allowedActivityAttempts(request.command()));
@@ -298,11 +339,13 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                     recoveryAction);
         }
 
-        if (completionObserved) {
+        if (completionObserved || localReconciliation) {
             // RESULT_READY/final-observed is forward-only. Keep it recoverable for a later
-            // workflow or operator instead of corrupting it into a terminal failure.
+            // workflow or operator instead of corrupting Graph authority into a terminal failure.
             throw ApplicationFailure.newNonRetryableFailure(
-                    "completed agent run result could not be reconciled",
+                    completionObserved
+                            ? "completed agent run result could not be reconciled"
+                            : "local agent run authority could not be reconciled",
                     NON_RETRYABLE_FAILURE_TYPE,
                     request.agentRunId(),
                     request.attemptId(),
@@ -318,21 +361,70 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                         && withinRecoveryWindow
                         && request.attemptNo() < request.attemptLimit();
         Instant completedAt = durableTimestamp();
+        AgentRunRecoveryAction terminalRecoveryAction = nextAttemptAllowed
+                ? AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
+                : AgentRunRecoveryAction.FAIL_LOGICAL_RUN;
         ExecuteAgentRunResult result =
                 failedResult(
                         request,
                         executionFailure.errorCode(),
                         lastSequenceNo,
                         publicOutputEmitted,
-                        nextAttemptAllowed
-                                ? AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
-                                : AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
+                        terminalRecoveryAction,
                         completedAt);
+        Optional<AgentRunExecutionGateway.FailureTerminationReceipt> externalTermination =
+                terminalRecoveryAction == AgentRunRecoveryAction.FAIL_LOGICAL_RUN
+                        ? terminalizeExternalFailure(
+                                request, executionFailure.errorCode())
+                        : Optional.empty();
         return persistTerminalFailureResult(
                 request,
                 status,
                 result,
-                executionFailure.errorCode());
+                executionFailure.errorCode(),
+                externalTermination);
+    }
+
+    private Optional<AgentRunExecutionGateway.FailureTerminationReceipt>
+            terminalizeExternalFailure(
+                    ExecuteAgentRunRequest request,
+                    String executionErrorCode) {
+        try {
+            Optional<AgentRunExecutionGateway.FailureTerminationReceipt> receipt =
+                    Objects.requireNonNull(
+                            gateway.terminateUncommittedFailure(
+                                    request,
+                                    executionErrorCode,
+                                    new AgentRunCancellationToken()),
+                            "failureTerminationReceipt");
+            boolean parallel = ExecuteAgentRunRequest.isParallelIntakeCommand(request.command());
+            if (parallel != receipt.isPresent()) {
+                throw new IllegalStateException(
+                        "failure termination receipt differs from the execution profile");
+            }
+            return receipt;
+        } catch (ActivityCompletionException completionFailure) {
+            throw completionFailure;
+        } catch (RuntimeException terminationFailure) {
+            LOG.error(
+                    "agent_run_external_failure_terminalization_failed logical_run_id={} "
+                            + "attempt_id={} error_code={} failure_type={}",
+                    request.agentRunId(),
+                    request.attemptId(),
+                    executionErrorCode,
+                    terminationFailure.getClass().getName(),
+                    terminationFailure);
+            ApplicationFailure pending = ApplicationFailure.newFailureWithCause(
+                    "agent run external failure terminalization is pending",
+                    RETRYABLE_FAILURE_TYPE,
+                    sanitizedTerminalPersistenceCause(terminationFailure),
+                    request.agentRunId(),
+                    request.attemptId(),
+                    executionErrorCode,
+                    AgentRunRecoveryAction.RETRY_SAME_COMMAND.name());
+            pending.setNextRetryDelay(Duration.ofSeconds(1));
+            throw pending;
+        }
     }
 
     /**
@@ -348,9 +440,12 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
             ExecuteAgentRunRequest request,
             AgentRunAttemptStatus status,
             ExecuteAgentRunResult result,
-            String executionErrorCode) {
+            String executionErrorCode,
+            Optional<AgentRunExecutionGateway.FailureTerminationReceipt>
+                    externalTermination) {
         try {
-            return ledger.recordAttemptFailureResult(status, result);
+            return terminalFailureCommitter.commit(
+                    request, status, result, externalTermination);
         } catch (RuntimeException firstFailure) {
             if (isRetryableTerminalPersistenceFailure(firstFailure)) {
                 LOG.warn(
@@ -363,7 +458,8 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                         terminalPersistenceSqlState(firstFailure),
                         firstFailure);
                 try {
-                    return ledger.recordAttemptFailureResult(status, result);
+                    return terminalFailureCommitter.commit(
+                            request, status, result, externalTermination);
                 } catch (RuntimeException replayFailure) {
                     replayFailure.addSuppressed(firstFailure);
                     throw terminalPersistenceFailure(
