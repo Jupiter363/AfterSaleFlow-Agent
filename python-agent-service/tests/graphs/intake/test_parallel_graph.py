@@ -9,8 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from psycopg import AsyncConnection
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from testcontainers.postgres import PostgresContainer
 
 import app.graphs.intake.parallel_graph as parallel_graph_module
 from app.contracts.v1.codec import canonical_sha256
@@ -89,6 +92,27 @@ PROMPT_ROOT = (
     / "prompts"
     / "dispute_intake_officer"
 )
+POSTGRES_IMAGE = (
+    "public.ecr.aws/docker/library/postgres:16-alpine@"
+    "sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb"
+)
+
+
+@pytest.fixture(scope="module")
+def parallel_graph_postgres_dsn() -> str:
+    with PostgresContainer(
+        POSTGRES_IMAGE,
+        username="postgres",
+        password="parallel-checkpoint-password",
+        dbname="parallel_checkpoint",
+        driver=None,
+    ) as container:
+        host = container.get_container_host_ip()
+        port = int(container.get_exposed_port(5432))
+        yield (
+            "postgresql://postgres:parallel-checkpoint-password@"
+            f"{host}:{port}/parallel_checkpoint"
+        )
 
 
 class _CollectingSink:
@@ -100,6 +124,46 @@ class _CollectingSink:
         self.events.append(event)
         if isinstance(event, FrameProjectionItem):
             self.first_projection.set()
+
+
+class _FailOnceOnReplacementStartSink(_CollectingSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def emit(self, event: Any) -> None:
+        await super().emit(event)
+        if (
+            not self.failed
+            and isinstance(event, FrameStarted)
+            and event.generation == 2
+        ):
+            self.failed = True
+            raise ConnectionError("simulated client disconnect after reset")
+
+
+class _FailOnceAfterGenerationResetSink(_CollectingSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def emit(self, event: Any) -> None:
+        await super().emit(event)
+        if not self.failed and isinstance(event, FrameGenerationReset):
+            self.failed = True
+            raise ConnectionError("simulated disconnect after reset acknowledgement")
+
+
+class _StaticCheckpointGraph:
+    def __init__(self, state: dict[str, Any], config: dict[str, Any]) -> None:
+        self._snapshot = SimpleNamespace(values=state, config=config, next=())
+
+    async def aget_state(self, config: dict[str, Any]) -> Any:
+        del config
+        return self._snapshot
+
+    async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError((args, kwargs))
 
 
 class _StreamingRunner:
@@ -116,6 +180,7 @@ class _StreamingRunner:
         self.reset_node = reset_node
         self.fail_node = fail_node
         self.calls: list[dict[str, Any]] = []
+        self._reset_emitted: set[str] = set()
 
     async def ainvoke_structured_stream(self, **kwargs: Any):
         self.calls.append(kwargs)
@@ -124,7 +189,8 @@ class _StreamingRunner:
             raise RuntimeError("private provider failure")
         value = self.outputs[node_name]
         items = value["public_projection_items"]
-        if node_name == self.reset_node:
+        if node_name == self.reset_node and node_name not in self._reset_emitted:
+            self._reset_emitted.add(node_name)
             yield HarnessStreamDelta(
                 kind="visible_delta",
                 field="public_projection_items",
@@ -134,7 +200,11 @@ class _StreamingRunner:
                 kind="generation_reset",
                 generation=2,
                 reason_code="OUTPUT_SCHEMA_INVALID",
+                failed_model="qwen3.7-max-2026-06-08",
+                failed_latency_ms=11,
+                failed_token_usage={"input": 10, "output": 5, "total": 15},
             )
+            return
         if self.release is not None:
             if node_name == "intake_turn_dialogue_frame":
                 yield HarnessStreamDelta(
@@ -180,23 +250,37 @@ class _CrossItemRepairRunner:
         self.first_generation_items = first_generation_items
         self.reset = reset
         self.calls: list[dict[str, Any]] = []
+        self._reset_emitted = False
 
     async def ainvoke_structured_stream(self, **kwargs: Any):
         self.calls.append(kwargs)
         assert kwargs["node_name"] == self.node_name
         value = self.outputs[self.node_name]
-        for item in self.first_generation_items:
-            yield HarnessStreamDelta(
-                kind="visible_delta",
-                field="public_projection_items",
-                delta=_json(item),
-            )
-        if self.reset:
+        if self.reset and not self._reset_emitted:
+            self._reset_emitted = True
+            for item in self.first_generation_items:
+                yield HarnessStreamDelta(
+                    kind="visible_delta",
+                    field="public_projection_items",
+                    delta=_json(item),
+                )
             yield HarnessStreamReset(
                 kind="generation_reset",
                 generation=2,
                 reason_code="OUTPUT_SCHEMA_INVALID",
+                failed_model="qwen3.7-max-2026-06-08",
+                failed_latency_ms=11,
+                failed_token_usage={"input": 10, "output": 5, "total": 15},
             )
+            return
+        if not self.reset:
+            for item in self.first_generation_items:
+                yield HarnessStreamDelta(
+                    kind="visible_delta",
+                    field="public_projection_items",
+                    delta=_json(item),
+                )
+        else:
             for item in value["public_projection_items"]:
                 yield HarnessStreamDelta(
                     kind="visible_delta",
@@ -541,6 +625,419 @@ async def test_one_lane_reset_does_not_change_sibling_generation() -> None:
         and event.frame_type == "DIALOGUE_FRAME"
     ]
     assert [event.local_index for event in dialogue_items] == [0, 0]
+
+
+@pytest.mark.asyncio
+async def test_replacement_generation_resumes_from_checkpoint_after_reset_disconnect() -> None:
+    saver = InMemorySaver()
+    graphs = compile_parallel_frame_graphs(checkpointer=saver)
+    orchestrator = ParallelIntakeFrameOrchestrator(graphs)
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "DIALOGUE_FRAME"
+    )
+    runner = _StreamingRunner(
+        _outputs(),
+        reset_node="intake_turn_dialogue_frame",
+    )
+    checkpoint_config = {
+        "configurable": {"thread_id": "parallel-reset-checkpoint-resume"}
+    }
+    first_sink = _FailOnceOnReplacementStartSink()
+
+    with pytest.raises(
+        ConnectionError,
+        match="simulated client disconnect after reset",
+    ):
+        await orchestrator.execute_frame(
+            request,
+            agent_context=contexts["DIALOGUE_FRAME"],
+            model_runner=runner,
+            event_sink=first_sink,
+            checkpoint_config=checkpoint_config,
+        )
+
+    reset = next(
+        event
+        for event in first_sink.events
+        if isinstance(event, FrameGenerationReset)
+    )
+    snapshot = await graphs["DIALOGUE_FRAME"].aget_state(checkpoint_config)
+    assert snapshot.values["status"] == "RETRY_AUTHORIZED"
+    assert tuple(snapshot.next) == ("invoke_replacement_model",)
+    replacement_request = ParallelFrameExecutionRequest.model_validate(
+        {
+            **request.model_dump(mode="python"),
+            "generation": reset.new_generation,
+            "frame_id": reset.new_frame_id,
+            "allow_generation_reset": False,
+        }
+    )
+    second_sink = _CollectingSink()
+
+    result = await orchestrator.execute_frame(
+        replacement_request,
+        agent_context=contexts["DIALOGUE_FRAME"],
+        model_runner=runner,
+        event_sink=second_sink,
+        checkpoint_config=checkpoint_config,
+    )
+
+    assert result.generation == 2
+    assert result.frame_id == reset.new_frame_id
+    assert len(runner.calls) == 2
+    replacement_context = runner.calls[1]["agent_context"]
+    assert replacement_context.retry_budget.provider_attempts_remaining == 1
+    sealed = next(event for event in second_sink.events if isinstance(event, FrameSealed))
+    assert sealed.usage.provider_call_count == 2
+    assert sealed.usage.total_tokens == 30
+    assert [
+        event.generation
+        for event in second_sink.events
+        if isinstance(event, FrameStarted)
+    ] == [2]
+
+
+@pytest.mark.asyncio
+async def test_legacy_v1_reset_complete_checkpoint_replays_without_provider() -> None:
+    saver = InMemorySaver()
+    graphs = compile_parallel_frame_graphs(checkpointer=saver)
+    orchestrator = ParallelIntakeFrameOrchestrator(graphs)
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "DIALOGUE_FRAME"
+    )
+    runner = _StreamingRunner(
+        _outputs(),
+        reset_node="intake_turn_dialogue_frame",
+    )
+    source_config = {
+        "configurable": {"thread_id": "parallel-reset-v1-source"}
+    }
+
+    original = await orchestrator.execute_frame(
+        request,
+        agent_context=contexts["DIALOGUE_FRAME"],
+        model_runner=runner,
+        event_sink=_CollectingSink(),
+        checkpoint_config=source_config,
+    )
+    source_snapshot = await graphs["DIALOGUE_FRAME"].aget_state(source_config)
+    legacy_state = deepcopy(dict(source_snapshot.values))
+    legacy_state["checkpoint_schema_version"] = (
+        "intake.parallel-frame-checkpoint.v1"
+    )
+    legacy_state.pop("reset_provider_usage")
+    legacy_config = {
+        "configurable": {
+            "thread_id": "parallel-reset-v1-replay",
+            "checkpoint_ns": "",
+            "checkpoint_id": "legacy-reset-complete-checkpoint",
+        }
+    }
+    legacy_graph = _StaticCheckpointGraph(legacy_state, legacy_config)
+    legacy_orchestrator = ParallelIntakeFrameOrchestrator(
+        {frame_type: legacy_graph for frame_type in FRAME_TYPES}
+    )
+    calls_before_replay = len(runner.calls)
+    replay_sink = _CollectingSink()
+
+    replay = await legacy_orchestrator.execute_frame(
+        request,
+        agent_context=contexts["DIALOGUE_FRAME"],
+        model_runner=runner,
+        event_sink=replay_sink,
+        checkpoint_config=legacy_config,
+    )
+
+    assert replay.replayed_from_checkpoint
+    assert replay.result_sha256 == original.result_sha256
+    assert len(runner.calls) == calls_before_replay
+    assert isinstance(replay_sink.events[-1], FrameSealed)
+    assert replay_sink.events[-1].usage.provider_call_count == 2
+
+    legacy_incomplete = deepcopy(legacy_state)
+    legacy_incomplete["status"] = "RETRY_AUTHORIZED"
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_PARALLEL_FRAME_CHECKPOINT_INCOMPLETE",
+    ):
+        parallel_graph_module._require_checkpoint_authority(
+            legacy_incomplete,
+            request,
+        )
+
+
+@pytest.mark.asyncio
+async def test_v2_reset_complete_checkpoint_requires_split_usage_proof() -> None:
+    saver = InMemorySaver()
+    graphs = compile_parallel_frame_graphs(checkpointer=saver)
+    orchestrator = ParallelIntakeFrameOrchestrator(graphs)
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "DIALOGUE_FRAME"
+    )
+    config = {"configurable": {"thread_id": "parallel-reset-v2-proof"}}
+
+    await orchestrator.execute_frame(
+        request,
+        agent_context=contexts["DIALOGUE_FRAME"],
+        model_runner=_StreamingRunner(
+            _outputs(),
+            reset_node="intake_turn_dialogue_frame",
+        ),
+        event_sink=_CollectingSink(),
+        checkpoint_config=config,
+    )
+    snapshot = await graphs["DIALOGUE_FRAME"].aget_state(config)
+    invalid_state = deepcopy(dict(snapshot.values))
+    invalid_state.pop("reset_provider_usage")
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_PARALLEL_FRAME_CHECKPOINT_TERMINAL_INVALID",
+    ):
+        parallel_graph_module._require_complete_state(
+            invalid_state,
+            "DIALOGUE_FRAME",
+        )
+
+    transition = next(
+        event
+        for event in invalid_state["generation_transition_events"]
+        if event["event_kind"] == "FRAME_GENERATION_RESET"
+    )
+    wrong_successor = request.model_copy(
+        update={
+            "generation": transition["new_generation"],
+            "frame_id": f"{transition['new_frame_id']}.drift",
+            "allow_generation_reset": False,
+        }
+    )
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_PARALLEL_FRAME_CHECKPOINT_AUTHORITY_DRIFT",
+    ):
+        parallel_graph_module._require_checkpoint_authority(
+            snapshot.values,
+            wrong_successor,
+        )
+
+
+@pytest.mark.graph_postgres
+@pytest.mark.asyncio
+async def test_replacement_generation_survives_real_postgres_saver_restart(
+    parallel_graph_postgres_dsn: str,
+) -> None:
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "DIALOGUE_FRAME"
+    )
+    runner = _StreamingRunner(
+        _outputs(),
+        reset_node="intake_turn_dialogue_frame",
+    )
+    checkpoint_config = {
+        "configurable": {"thread_id": "parallel-reset-postgres-restart"}
+    }
+    first_sink = _FailOnceOnReplacementStartSink()
+
+    async with await AsyncConnection.connect(
+        parallel_graph_postgres_dsn,
+        autocommit=True,
+        prepare_threshold=0,
+    ) as first_connection:
+        first_saver = AsyncPostgresSaver(first_connection)
+        await first_saver.setup()
+        first_graphs = compile_parallel_frame_graphs(checkpointer=first_saver)
+        first_orchestrator = ParallelIntakeFrameOrchestrator(first_graphs)
+        with pytest.raises(
+            ConnectionError,
+            match="simulated client disconnect after reset",
+        ):
+            await first_orchestrator.execute_frame(
+                request,
+                agent_context=contexts["DIALOGUE_FRAME"],
+                model_runner=runner,
+                event_sink=first_sink,
+                checkpoint_config=checkpoint_config,
+            )
+        first_snapshot = await first_graphs["DIALOGUE_FRAME"].aget_state(
+            checkpoint_config
+        )
+        assert first_snapshot.values["status"] == "RETRY_AUTHORIZED"
+        assert tuple(first_snapshot.next) == ("invoke_replacement_model",)
+
+    reset = next(
+        event
+        for event in first_sink.events
+        if isinstance(event, FrameGenerationReset)
+    )
+    replacement_request = ParallelFrameExecutionRequest.model_validate(
+        {
+            **request.model_dump(mode="python"),
+            "generation": reset.new_generation,
+            "frame_id": reset.new_frame_id,
+            "allow_generation_reset": False,
+        }
+    )
+
+    async with await AsyncConnection.connect(
+        parallel_graph_postgres_dsn,
+        autocommit=True,
+        prepare_threshold=0,
+    ) as replacement_connection:
+        replacement_saver = AsyncPostgresSaver(replacement_connection)
+        replacement_graphs = compile_parallel_frame_graphs(
+            checkpointer=replacement_saver
+        )
+        replacement_orchestrator = ParallelIntakeFrameOrchestrator(
+            replacement_graphs
+        )
+        replacement_sink = _CollectingSink()
+        result = await replacement_orchestrator.execute_frame(
+            replacement_request,
+            agent_context=contexts["DIALOGUE_FRAME"],
+            model_runner=runner,
+            event_sink=replacement_sink,
+            checkpoint_config=checkpoint_config,
+        )
+
+        assert result.generation == 2
+        assert len(runner.calls) == 2
+        sealed = next(
+            event
+            for event in replacement_sink.events
+            if isinstance(event, FrameSealed)
+        )
+        assert sealed.usage.provider_call_count == 2
+        assert sealed.usage.total_tokens == 30
+
+        replay_request = replacement_request.model_copy(
+            update={
+                "emit_start": False,
+                "resume_local_index": len(result.result.public_projection_items),
+            }
+        )
+        replay_sink = _CollectingSink()
+        replay = await replacement_orchestrator.execute_frame(
+            replay_request,
+            agent_context=contexts["DIALOGUE_FRAME"],
+            model_runner=runner,
+            event_sink=replay_sink,
+            checkpoint_config=checkpoint_config,
+        )
+
+        assert replay.replayed_from_checkpoint
+        assert replay.result_sha256 == result.result_sha256
+        assert replay.child_checkpoint_sha256 == result.child_checkpoint_sha256
+        assert len(runner.calls) == 2
+        assert [type(event) for event in replay_sink.events] == [FrameSealed]
+
+
+@pytest.mark.graph_postgres
+@pytest.mark.asyncio
+async def test_reset_transition_ack_crash_replays_with_real_postgres_saver(
+    parallel_graph_postgres_dsn: str,
+) -> None:
+    requests, contexts = _requests_and_contexts()
+    request = next(
+        item for item in requests if item.frame_type == "DIALOGUE_FRAME"
+    )
+    runner = _StreamingRunner(
+        _outputs(),
+        reset_node="intake_turn_dialogue_frame",
+    )
+    checkpoint_config = {
+        "configurable": {"thread_id": "parallel-reset-transition-ack-crash"}
+    }
+    first_sink = _FailOnceAfterGenerationResetSink()
+
+    async with await AsyncConnection.connect(
+        parallel_graph_postgres_dsn,
+        autocommit=True,
+        prepare_threshold=0,
+    ) as first_connection:
+        first_saver = AsyncPostgresSaver(first_connection)
+        await first_saver.setup()
+        first_graphs = compile_parallel_frame_graphs(checkpointer=first_saver)
+        first_orchestrator = ParallelIntakeFrameOrchestrator(first_graphs)
+        with pytest.raises(
+            ConnectionError,
+            match="simulated disconnect after reset acknowledgement",
+        ):
+            await first_orchestrator.execute_frame(
+                request,
+                agent_context=contexts["DIALOGUE_FRAME"],
+                model_runner=runner,
+                event_sink=first_sink,
+                checkpoint_config=checkpoint_config,
+            )
+        first_snapshot = await first_graphs["DIALOGUE_FRAME"].aget_state(
+            checkpoint_config
+        )
+        assert first_snapshot.values["status"] == "RESET_DETECTED"
+        assert tuple(first_snapshot.next) == ("emit_generation_transition",)
+        assert len(runner.calls) == 1
+
+    reset = next(
+        event
+        for event in first_sink.events
+        if isinstance(event, FrameGenerationReset)
+    )
+    first_transition = [
+        event.model_dump(mode="json")
+        for event in first_sink.events
+        if isinstance(event, (FrameInterrupted, FrameGenerationReset))
+    ]
+    replacement_request = ParallelFrameExecutionRequest.model_validate(
+        {
+            **request.model_dump(mode="python"),
+            "generation": reset.new_generation,
+            "frame_id": reset.new_frame_id,
+            "allow_generation_reset": False,
+        }
+    )
+
+    async with await AsyncConnection.connect(
+        parallel_graph_postgres_dsn,
+        autocommit=True,
+        prepare_threshold=0,
+    ) as replacement_connection:
+        replacement_saver = AsyncPostgresSaver(replacement_connection)
+        replacement_graphs = compile_parallel_frame_graphs(
+            checkpointer=replacement_saver
+        )
+        replacement_orchestrator = ParallelIntakeFrameOrchestrator(
+            replacement_graphs
+        )
+        replacement_sink = _CollectingSink()
+        result = await replacement_orchestrator.execute_frame(
+            replacement_request,
+            agent_context=contexts["DIALOGUE_FRAME"],
+            model_runner=runner,
+            event_sink=replacement_sink,
+            checkpoint_config=checkpoint_config,
+        )
+
+        replayed_transition = [
+            event.model_dump(mode="json")
+            for event in replacement_sink.events
+            if isinstance(event, (FrameInterrupted, FrameGenerationReset))
+        ]
+        assert replayed_transition == first_transition
+        assert result.generation == 2
+        assert len(runner.calls) == 2
+        sealed = next(
+            event
+            for event in replacement_sink.events
+            if isinstance(event, FrameSealed)
+        )
+        assert sealed.usage.provider_call_count == 2
+        terminal_snapshot = await replacement_graphs["DIALOGUE_FRAME"].aget_state(
+            checkpoint_config
+        )
+        assert terminal_snapshot.values["status"] == "COMPLETE"
 
 
 @pytest.mark.asyncio
@@ -987,7 +1484,7 @@ async def test_quality_semantic_validator_binds_gap_role_to_authenticated_actor(
 
 
 @pytest.mark.asyncio
-async def test_same_generation_incomplete_checkpoint_fails_closed() -> None:
+async def test_same_generation_authorized_checkpoint_resumes_once() -> None:
     saver = InMemorySaver()
     graphs = dict(compile_parallel_frame_graphs(checkpointer=saver))
     graphs["DIALOGUE_FRAME"] = build_parallel_frame_graph(
@@ -1011,17 +1508,16 @@ async def test_same_generation_incomplete_checkpoint_fails_closed() -> None:
             model_runner=runner,
             event_sink=sink,
         )
-    with pytest.raises(
-        IntakeGraphContractError,
-        match="INTAKE_PARALLEL_FRAME_CHECKPOINT_INCOMPLETE",
-    ):
-        await orchestrator.execute_frame(
-            request,
-            agent_context=contexts["DIALOGUE_FRAME"],
-            model_runner=runner,
-            event_sink=sink,
-        )
-    assert runner.calls == []
+    result = await orchestrator.execute_frame(
+        request,
+        agent_context=contexts["DIALOGUE_FRAME"],
+        model_runner=runner,
+        event_sink=sink,
+    )
+
+    assert result.generation == request.generation
+    assert len(runner.calls) == 1
+    assert sum(isinstance(event, FrameSealed) for event in sink.events) == 1
 
 
 def _requests_and_contexts() -> tuple[
@@ -1078,6 +1574,11 @@ def _requests_and_contexts() -> tuple[
                 "output_schema_version": FRAME_OUTPUT_SCHEMA[frame_type],
                 "policy_version": "INTAKE_PARALLEL_V1",
                 "guardrail_version": "INTAKE_PARALLEL_V1",
+                "retry_budget": {
+                    "provider_attempts_remaining": 2,
+                    "activity_attempts_remaining": 0,
+                    "repairs_remaining": 1,
+                },
             }
         )
         for frame_type in FRAME_TYPES

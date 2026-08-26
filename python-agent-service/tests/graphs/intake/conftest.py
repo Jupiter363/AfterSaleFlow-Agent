@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable, Mapping
 import copy
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -12,6 +15,16 @@ from app.graph_runtime.state import VersionPinsState
 
 ROOT = Path(__file__).resolve().parents[4]
 FIXTURES = ROOT / "contracts" / "agent-platform" / "intake" / "v2" / "fixtures" / "valid"
+
+
+def pytest_asyncio_loop_factories(
+    config: pytest.Config,
+    item: pytest.Item,
+) -> Mapping[str, Callable[[], asyncio.AbstractEventLoop]]:
+    del config, item
+    if sys.platform == "win32":
+        return {"selector": asyncio.SelectorEventLoop}
+    return {"default": asyncio.new_event_loop}
 
 
 def _fixture(name: str) -> dict:

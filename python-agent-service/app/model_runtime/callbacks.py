@@ -12,6 +12,7 @@ from langchain_core.outputs import ChatGenerationChunk, LLMResult
 
 
 GOVERNED_EVENTS_KEY = "governed_events"
+GOVERNED_RESET_USAGE_KEY = "governed_generation_reset_usage"
 
 GovernedVisibleDeltaSink = Callable[[str, str, str], None]
 GovernedGenerationResetSink = Callable[[str, int, str], None]
@@ -96,6 +97,49 @@ def generation_reset_event(
         "generation": generation,
         "reason_code": reason_code,
     }
+
+
+def generation_reset_usage(
+    *, model: str, latency_ms: int, token_usage: dict[str, int]
+) -> dict[str, Any]:
+    if not model or latency_ms < 0:
+        raise ValueError("governed generation reset usage is invalid")
+    normalized: dict[str, int] = {}
+    for key in ("input", "output", "total"):
+        value = token_usage.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("governed generation reset token usage is invalid")
+        normalized[key] = value
+    if normalized["total"] != normalized["input"] + normalized["output"]:
+        raise ValueError("governed generation reset token usage drifted")
+    return {
+        "model": model,
+        "latency_ms": latency_ms,
+        "token_usage": normalized,
+    }
+
+
+def governed_reset_usage_from_chunk(chunk: AIMessageChunk) -> dict[str, Any] | None:
+    raw = chunk.additional_kwargs.get(GOVERNED_RESET_USAGE_KEY)
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("governed generation reset usage payload is invalid")
+    model = raw.get("model")
+    latency_ms = raw.get("latency_ms")
+    token_usage = raw.get("token_usage")
+    if (
+        not isinstance(model, str)
+        or not isinstance(latency_ms, int)
+        or isinstance(latency_ms, bool)
+        or not isinstance(token_usage, dict)
+    ):
+        raise ValueError("governed generation reset usage payload is invalid")
+    return generation_reset_usage(
+        model=model,
+        latency_ms=latency_ms,
+        token_usage=token_usage,
+    )
 
 
 def governed_events_from_chunk(chunk: AIMessageChunk) -> tuple[dict[str, Any], ...]:

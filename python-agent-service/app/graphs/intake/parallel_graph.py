@@ -84,7 +84,8 @@ QUALITY_DIMENSION_MAXIMA: Mapping[str, int] = {
 }
 
 _MODEL_CONTEXT_SECTION_NAME = "parallel_frame_model_input"
-_CHECKPOINT_SCHEMA_VERSION = "intake.parallel-frame-checkpoint.v1"
+_CHECKPOINT_SCHEMA_VERSION = "intake.parallel-frame-checkpoint.v2"
+_LEGACY_CHECKPOINT_SCHEMA_VERSION = "intake.parallel-frame-checkpoint.v1"
 _EVENT_SCHEMA_VERSION = "intake.parallel-frame-technical-event.v1"
 
 
@@ -321,6 +322,7 @@ class ParallelFrameGraphState(TypedDict, total=False):
     generation: int
     frame_id: str
     generation_transition_events: list[dict[str, Any]]
+    reset_provider_usage: dict[str, Any]
     provider_projection_items: list[dict[str, Any]]
     canonical_projection_items: list[dict[str, Any]]
     canonical_result: dict[str, Any]
@@ -398,7 +400,41 @@ def build_parallel_frame_graph(frame_type: ParallelFrameType) -> StateGraph:
         state: ParallelFrameGraphState,
         runtime: Runtime[ParallelFrameGraphRuntime],
     ) -> dict[str, Any]:
-        return await _invoke_frame_model(state, runtime.context, frame_type)
+        return await _invoke_frame_model(
+            state,
+            runtime.context,
+            frame_type,
+            replacement=False,
+        )
+
+    async def emit_generation_transition(
+        state: ParallelFrameGraphState,
+        runtime: Runtime[ParallelFrameGraphRuntime],
+    ) -> dict[str, Any]:
+        return await _emit_frame_generation_transition(
+            state,
+            runtime.context,
+            frame_type,
+        )
+
+    async def invoke_replacement_model(
+        state: ParallelFrameGraphState,
+        runtime: Runtime[ParallelFrameGraphRuntime],
+    ) -> dict[str, Any]:
+        return await _invoke_frame_model(
+            state,
+            runtime.context,
+            frame_type,
+            replacement=True,
+        )
+
+    def route_after_model(state: ParallelFrameGraphState) -> str:
+        status = state.get("status")
+        if status not in {"RESET_DETECTED", "MODEL_COMPLETED"}:
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_FRAME_MODEL_CHECKPOINT_INVALID"
+            )
+        return status
 
     async def checkpoint_terminal(
         state: ParallelFrameGraphState,
@@ -415,10 +451,21 @@ def build_parallel_frame_graph(frame_type: ParallelFrameType) -> StateGraph:
     )
     builder.add_node("authorize_input", authorize_input)
     builder.add_node("invoke_model", invoke_model)
+    builder.add_node("emit_generation_transition", emit_generation_transition)
+    builder.add_node("invoke_replacement_model", invoke_replacement_model)
     builder.add_node("checkpoint_terminal", checkpoint_terminal)
     builder.add_edge(START, "authorize_input")
     builder.add_edge("authorize_input", "invoke_model")
-    builder.add_edge("invoke_model", "checkpoint_terminal")
+    builder.add_conditional_edges(
+        "invoke_model",
+        route_after_model,
+        {
+            "RESET_DETECTED": "emit_generation_transition",
+            "MODEL_COMPLETED": "checkpoint_terminal",
+        },
+    )
+    builder.add_edge("emit_generation_transition", "invoke_replacement_model")
+    builder.add_edge("invoke_replacement_model", "checkpoint_terminal")
     builder.add_edge("checkpoint_terminal", END)
     return builder
 
@@ -545,16 +592,33 @@ class ParallelIntakeFrameOrchestrator:
         config = _validated_graph_config(request, checkpoint_config)
         snapshot = await graph.aget_state(config)
         existing = cast(Mapping[str, Any], snapshot.values or {})
+        _require_invocation_authority(request, agent_context)
         if existing:
-            if existing.get("status") != "COMPLETE":
-                raise IntakeGraphContractError(
-                    "INTAKE_PARALLEL_FRAME_CHECKPOINT_INCOMPLETE"
+            replacement_request = _require_checkpoint_authority(existing, request)
+            if existing.get("status") == "COMPLETE":
+                _require_complete_state(existing, request.frame_type)
+                state = dict(existing)
+                replayed = True
+                await _replay_checkpoint_prefix(
+                    request,
+                    state,
+                    event_sink,
+                    replacement_request=replacement_request,
                 )
-            _require_checkpoint_authority(existing, request)
-            _require_complete_state(existing, request.frame_type)
-            state = dict(existing)
-            replayed = True
-            await _replay_checkpoint_prefix(request, state, event_sink)
+            else:
+                _require_resumable_checkpoint(snapshot, existing, request)
+                runtime = ParallelFrameGraphRuntime(
+                    request=request,
+                    agent_context=agent_context,
+                    model_runner=model_runner,
+                    event_sink=event_sink,
+                )
+                state = await graph.ainvoke(
+                    None,
+                    config=config,
+                    context=runtime,
+                )
+                replayed = False
         else:
             if request.resume_local_index != 0:
                 raise IntakeGraphContractError(
@@ -645,20 +709,7 @@ def _authorize_input(
     if request.frame_type != expected_frame_type:
         raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_GRAPH_TYPE_MISMATCH")
     _require_checkpoint_authority(state, request)
-    context = runtime.agent_context
-    instruction = request.model_input.instruction_pack
-    if (
-        context.room_type != "INTAKE"
-        or context.case_id != request.case_id
-        or context.actor_id != request.actor_id
-        or context.actor_role != request.actor_role
-        or context.actor_role not in {"USER", "MERCHANT"}
-        or context.prompt_profile_id != FRAME_PROMPT_PROFILE[request.frame_type]
-        or context.prompt_profile_id != instruction.prompt_profile_id
-        or context.output_schema_version != FRAME_OUTPUT_SCHEMA[request.frame_type]
-        or context.output_schema_version != instruction.output_schema_id
-    ):
-        raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_INVOCATION_UNAUTHORIZED")
+    _require_invocation_authority(request, runtime.agent_context)
     return {"status": "AUTHORIZED"}
 
 
@@ -666,8 +717,10 @@ async def _invoke_frame_model(
     state: ParallelFrameGraphState,
     runtime: ParallelFrameGraphRuntime,
     expected_frame_type: ParallelFrameType,
+    *,
+    replacement: bool,
 ) -> dict[str, Any]:
-    _require_status(state, "AUTHORIZED")
+    _require_status(state, "RETRY_AUTHORIZED" if replacement else "AUTHORIZED")
     request = runtime.request
     frame_type = expected_frame_type
     generation = int(state["generation"])
@@ -675,8 +728,12 @@ async def _invoke_frame_model(
     provider_items: list[dict[str, Any]] = []
     canonical_items: list[dict[str, Any]] = []
     pending_projection_error: BaseException | None = None
-    reset_count = 0
-    generation_transition_events: list[dict[str, Any]] = []
+    generation_transition_events = list(state.get("generation_transition_events") or [])
+    prior_usage = (
+        FrameProviderUsage.model_validate(state.get("reset_provider_usage"))
+        if replacement
+        else None
+    )
     completed: HarnessStreamCompleted[Any] | None = None
     if request.emit_start:
         await runtime.event_sink.emit(
@@ -686,6 +743,11 @@ async def _invoke_frame_model(
         output_type, public_item_type = _request_bound_frame_types(
             frame_type,
             request.model_input.common_model_context,
+        )
+        invocation_context = (
+            _single_attempt_context(runtime.agent_context)
+            if replacement
+            else runtime.agent_context
         )
         stream = runtime.model_runner.ainvoke_structured_stream(
             node_name=FRAME_NODE_NAMES[frame_type],
@@ -720,7 +782,7 @@ async def _invoke_frame_model(
                 )
             ],
             max_input_tokens=20_000,
-            agent_context=runtime.agent_context,
+            agent_context=invocation_context,
             prompt_profile_id=request.model_input.instruction_pack.prompt_profile_id,
             semantic_validator=_request_bound_frame_semantic_validator(
                 frame_type,
@@ -728,132 +790,128 @@ async def _invoke_frame_model(
                 model_context=request.model_input.common_model_context,
             ),
         )
-        async for update in stream:
-            if isinstance(update, HarnessStreamDelta):
-                if update.field != "public_projection_items":
-                    raise IntakeGraphContractError(
-                        "INTAKE_PARALLEL_FRAME_FOREIGN_VISIBLE_FIELD"
-                    )
-                # Cross-item rules are not representable in the provider's item-local
-                # JSON Schema.  Keep the first violation sticky for this generation,
-                # suppress the offending suffix, and allow the governed structured
-                # stream to finish validating the complete document.  A final Schema
-                # failure then produces the already-authorized bounded generation reset.
-                # If the final document is valid, the mismatch came from the stream
-                # adapter rather than the model document and is rejected at completion.
-                if pending_projection_error is not None:
-                    continue
-                try:
-                    provider_item = _decode_visible_item(update.delta)
-                    item_model = public_item_type.model_validate(provider_item)
-                    normalized_provider_item = item_model.model_dump(mode="json")
-                    _validate_public_projection_prefix(
-                        frame_type,
-                        provider_items,
-                        normalized_provider_item,
-                        actor_role=request.actor_role,
-                    )
-                    slot_id = _provider_item_identity(
-                        frame_type,
-                        normalized_provider_item,
-                    )
-                    if slot_id in {
-                        _provider_item_identity(frame_type, item)
-                        for item in provider_items
-                    }:
+        try:
+            async for update in stream:
+                if isinstance(update, HarnessStreamDelta):
+                    if update.field != "public_projection_items":
                         raise IntakeGraphContractError(
-                            "INTAKE_PARALLEL_FRAME_PROJECTION_SLOT_REPEATED"
+                            "INTAKE_PARALLEL_FRAME_FOREIGN_VISIBLE_FIELD"
                         )
-                    canonical_item = canonical_parallel_public_projection(
-                        frame_type,
-                        item_model,
+                    # Cross-item rules are not representable in the provider's item-local
+                    # JSON Schema. Keep the first violation sticky for this generation.
+                    if pending_projection_error is not None:
+                        continue
+                    try:
+                        provider_item = _decode_visible_item(update.delta)
+                        item_model = public_item_type.model_validate(provider_item)
+                        normalized_provider_item = item_model.model_dump(mode="json")
+                        _validate_public_projection_prefix(
+                            frame_type,
+                            provider_items,
+                            normalized_provider_item,
+                            actor_role=request.actor_role,
+                        )
+                        slot_id = _provider_item_identity(
+                            frame_type,
+                            normalized_provider_item,
+                        )
+                        if slot_id in {
+                            _provider_item_identity(frame_type, item)
+                            for item in provider_items
+                        }:
+                            raise IntakeGraphContractError(
+                                "INTAKE_PARALLEL_FRAME_PROJECTION_SLOT_REPEATED"
+                            )
+                        canonical_item = canonical_parallel_public_projection(
+                            frame_type,
+                            item_model,
+                        )
+                    except (IntakeGraphContractError, TypeError, ValueError) as error:
+                        pending_projection_error = error
+                        continue
+                    local_index = len(provider_items)
+                    provider_items.append(normalized_provider_item)
+                    canonical_items.append(
+                        canonical_item.model_dump(mode="json", exclude_none=True)
                     )
-                except (IntakeGraphContractError, TypeError, ValueError) as error:
-                    pending_projection_error = error
+                    await runtime.event_sink.emit(
+                        _projection_event(
+                            request,
+                            generation=generation,
+                            frame_id=frame_id,
+                            local_index=local_index,
+                            item=canonical_item,
+                        )
+                    )
                     continue
-                local_index = len(provider_items)
-                provider_items.append(normalized_provider_item)
-                canonical_items.append(
-                    canonical_item.model_dump(mode="json", exclude_none=True)
-                )
-                await runtime.event_sink.emit(
-                    _projection_event(
+                if isinstance(update, HarnessStreamReset):
+                    if replacement or not request.allow_generation_reset:
+                        raise IntakeGraphContractError(
+                            "INTAKE_PARALLEL_FRAME_RETRY_EXHAUSTED"
+                        )
+                    if update.generation != generation + 1:
+                        raise IntakeGraphContractError(
+                            "INTAKE_PARALLEL_FRAME_GENERATION_RESET_INVALID"
+                        )
+                    old_generation = generation
+                    old_frame_id = frame_id
+                    generation = update.generation
+                    frame_id = _replacement_frame_id(
                         request,
+                        old_frame_id=old_frame_id,
                         generation=generation,
-                        frame_id=frame_id,
-                        local_index=local_index,
-                        item=canonical_item,
                     )
-                )
-                continue
-            if isinstance(update, HarnessStreamReset):
-                if not request.allow_generation_reset:
-                    raise IntakeGraphContractError(
-                        "INTAKE_PARALLEL_FRAME_RETRY_EXHAUSTED"
+                    interrupted = FrameInterrupted(
+                        frame_set_id=request.frame_set_id,
+                        run_id=request.run_id,
+                        attempt_id=request.attempt_id,
+                        frame_type=frame_type,
+                        generation=old_generation,
+                        frame_id=old_frame_id,
+                        error_code=update.reason_code,
+                        retryable=True,
                     )
-                if reset_count != 0 or update.generation != 2:
-                    raise IntakeGraphContractError(
-                        "INTAKE_PARALLEL_FRAME_GENERATION_RESET_INVALID"
+                    generation_reset = FrameGenerationReset(
+                        frame_set_id=request.frame_set_id,
+                        run_id=request.run_id,
+                        attempt_id=request.attempt_id,
+                        frame_type=frame_type,
+                        old_generation=old_generation,
+                        new_generation=generation,
+                        old_frame_id=old_frame_id,
+                        new_frame_id=frame_id,
+                        reason_code=update.reason_code,
                     )
-                old_generation = generation
-                old_frame_id = frame_id
-                # Java owns replacement-generation admission.  Its slot CAS accepts a
-                # retry only after the current generation has durably entered FAILED or
-                # AMBIGUOUS, so make the superseded provider generation explicit before
-                # announcing the reset and replacement Frame identity.
-                interrupted = FrameInterrupted(
-                    frame_set_id=request.frame_set_id,
-                    run_id=request.run_id,
-                    attempt_id=request.attempt_id,
-                    frame_type=frame_type,
-                    generation=old_generation,
-                    frame_id=old_frame_id,
-                    error_code=update.reason_code,
-                    retryable=True,
+                    return {
+                        "status": "RESET_DETECTED",
+                        "generation": generation,
+                        "frame_id": frame_id,
+                        "generation_transition_events": [
+                            interrupted.model_dump(mode="json"),
+                            generation_reset.model_dump(mode="json"),
+                        ],
+                        "reset_provider_usage": _reset_provider_usage(update).model_dump(
+                            mode="json"
+                        ),
+                        "provider_projection_items": [],
+                        "canonical_projection_items": [],
+                    }
+                if isinstance(update, HarnessStreamCompleted):
+                    if completed is not None:
+                        raise IntakeGraphContractError(
+                            "INTAKE_PARALLEL_FRAME_MULTIPLE_COMPLETIONS"
+                        )
+                    if pending_projection_error is not None:
+                        raise pending_projection_error
+                    completed = update
+                    continue
+                raise IntakeGraphContractError(
+                    "INTAKE_PARALLEL_FRAME_STREAM_EVENT_INVALID"
                 )
-                await runtime.event_sink.emit(interrupted)
-                generation += 1
-                frame_id = _replacement_frame_id(
-                    request,
-                    old_frame_id=old_frame_id,
-                    generation=generation,
-                )
-                reset_count = 1
-                provider_items.clear()
-                canonical_items.clear()
-                pending_projection_error = None
-                generation_reset = FrameGenerationReset(
-                    frame_set_id=request.frame_set_id,
-                    run_id=request.run_id,
-                    attempt_id=request.attempt_id,
-                    frame_type=frame_type,
-                    old_generation=old_generation,
-                    new_generation=generation,
-                    old_frame_id=old_frame_id,
-                    new_frame_id=frame_id,
-                    reason_code=update.reason_code,
-                )
-                await runtime.event_sink.emit(generation_reset)
-                generation_transition_events.extend(
-                    (
-                        interrupted.model_dump(mode="json"),
-                        generation_reset.model_dump(mode="json"),
-                    )
-                )
-                await runtime.event_sink.emit(
-                    _frame_started(request, generation=generation, frame_id=frame_id)
-                )
-                continue
-            if isinstance(update, HarnessStreamCompleted):
-                if completed is not None:
-                    raise IntakeGraphContractError(
-                        "INTAKE_PARALLEL_FRAME_MULTIPLE_COMPLETIONS"
-                    )
-                if pending_projection_error is not None:
-                    raise pending_projection_error
-                completed = update
-                continue
-            raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_STREAM_EVENT_INVALID")
+        finally:
+            close = getattr(stream, "aclose", None)
+            if callable(close):
+                await close()
         if completed is None:
             raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_COMPLETION_MISSING")
         final = validate_parallel_frame_output(
@@ -868,10 +926,7 @@ async def _invoke_frame_model(
         canonical_result_json = canonicalize(final_payload).decode("utf-8")
         result_sha256 = canonical_sha256(final_payload)
         public_projection_sha256 = canonical_sha256(canonical_items)
-        usage = _provider_usage(
-            completed,
-            provider_call_count=1 + reset_count,
-        )
+        usage = _provider_usage(completed, prior_usage=prior_usage)
         completed_at = datetime.now(timezone.utc).isoformat()
         return {
             "status": "MODEL_COMPLETED",
@@ -907,19 +962,52 @@ async def _invoke_frame_model(
         raise
 
 
+async def _emit_frame_generation_transition(
+    state: ParallelFrameGraphState,
+    runtime: ParallelFrameGraphRuntime,
+    expected_frame_type: ParallelFrameType,
+) -> dict[str, Any]:
+    _require_status(state, "RESET_DETECTED")
+    if runtime.request.frame_type != expected_frame_type:
+        raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_GRAPH_TYPE_MISMATCH")
+    _require_checkpoint_authority(state, runtime.request)
+    transitions = _validated_generation_transition_events(state, expected_frame_type)
+    if len(transitions) != 2:
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_GENERATION_RESET_INVALID"
+        )
+    FrameProviderUsage.model_validate(state.get("reset_provider_usage"))
+    for event in transitions:
+        await runtime.event_sink.emit(event)
+    return {"status": "RETRY_AUTHORIZED"}
+
+
 async def _replay_checkpoint_prefix(
     request: ParallelFrameExecutionRequest,
     state: Mapping[str, Any],
     event_sink: ParallelFrameTechnicalEventSink,
+    *,
+    replacement_request: bool,
 ) -> None:
     canonical_items = list(state["canonical_projection_items"])
     generation = int(state["generation"])
     frame_id = str(state["frame_id"])
     transitions = _validated_generation_transition_events(state, request.frame_type)
     resume_generation, resume_frame_id = request.resume_position()
-    initial_position = (request.generation, request.frame_id)
+    authority = cast(Mapping[str, Any], state["authority"])
+    initial_position = (int(authority["generation"]), str(authority["frame_id"]))
     terminal_position = (generation, frame_id)
-    if (resume_generation, resume_frame_id) == initial_position:
+    if replacement_request:
+        if (resume_generation, resume_frame_id) != terminal_position or not transitions:
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_FRAME_RESUME_GENERATION_OUT_OF_RANGE"
+            )
+        if request.emit_start:
+            await event_sink.emit(
+                _frame_started(request, generation=generation, frame_id=frame_id)
+            )
+        resume_local_index = request.resume_local_index
+    elif (resume_generation, resume_frame_id) == initial_position:
         if request.emit_start:
             await event_sink.emit(
                 _frame_started(
@@ -1275,7 +1363,7 @@ def _provider_item_identity(
 def _provider_usage(
     completed: HarnessStreamCompleted[Any],
     *,
-    provider_call_count: int,
+    prior_usage: FrameProviderUsage | None,
 ) -> FrameProviderUsage:
     raw = completed.generation.token_usage
     try:
@@ -1286,13 +1374,68 @@ def _provider_usage(
         raise IntakeGraphContractError(
             "INTAKE_PARALLEL_FRAME_USAGE_INVALID"
         ) from error
-    return FrameProviderUsage(
+    current = FrameProviderUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         latency_ms=int(completed.generation.latency_ms),
-        provider_call_count=provider_call_count,
+        provider_call_count=1,
         model=completed.generation.model,
+    )
+    if prior_usage is None:
+        return current
+    if prior_usage.provider_call_count != 1 or prior_usage.model != current.model:
+        raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_USAGE_INVALID")
+    return FrameProviderUsage(
+        input_tokens=prior_usage.input_tokens + current.input_tokens,
+        output_tokens=prior_usage.output_tokens + current.output_tokens,
+        total_tokens=prior_usage.total_tokens + current.total_tokens,
+        latency_ms=prior_usage.latency_ms + current.latency_ms,
+        provider_call_count=2,
+        model=current.model,
+    )
+
+
+def _reset_provider_usage(update: HarnessStreamReset) -> FrameProviderUsage:
+    raw = update.failed_token_usage
+    try:
+        input_tokens = int(raw["input"])
+        output_tokens = int(raw["output"])
+        total_tokens = int(raw["total"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_RESET_USAGE_INVALID"
+        ) from error
+    try:
+        usage = FrameProviderUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            latency_ms=int(update.failed_latency_ms),
+            provider_call_count=1,
+            model=update.failed_model,
+        )
+    except (TypeError, ValueError) as error:
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_RESET_USAGE_INVALID"
+        ) from error
+    if usage.total_tokens != usage.input_tokens + usage.output_tokens:
+        raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_RESET_USAGE_INVALID")
+    return usage
+
+
+def _single_attempt_context(context: AgentInvocationContext) -> AgentInvocationContext:
+    budget = context.retry_budget
+    if budget is None or budget.provider_attempts_remaining < 1:
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_REPLACEMENT_BUDGET_MISSING"
+        )
+    return context.model_copy(
+        update={
+            "retry_budget": budget.model_copy(
+                update={"provider_attempts_remaining": 1}
+            )
+        }
     )
 
 
@@ -1428,11 +1571,18 @@ def _checkpoint_ref(
 def _require_checkpoint_authority(
     state: Mapping[str, Any],
     request: ParallelFrameExecutionRequest,
-) -> None:
-    if state.get("checkpoint_schema_version") != _CHECKPOINT_SCHEMA_VERSION:
+) -> bool:
+    checkpoint_schema_version = state.get("checkpoint_schema_version")
+    if checkpoint_schema_version not in {
+        _CHECKPOINT_SCHEMA_VERSION,
+        _LEGACY_CHECKPOINT_SCHEMA_VERSION,
+    }:
         raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_CHECKPOINT_SCHEMA_INVALID")
-    if state.get("authority") != request.checkpoint_identity():
-        raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_CHECKPOINT_AUTHORITY_DRIFT")
+    if (
+        checkpoint_schema_version == _LEGACY_CHECKPOINT_SCHEMA_VERSION
+        and state.get("status") != "COMPLETE"
+    ):
+        raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_CHECKPOINT_INCOMPLETE")
     raw_model_input = state.get("model_input")
     try:
         persisted_model_input = IntakeFrameModelInputV1.model_validate(raw_model_input)
@@ -1444,6 +1594,105 @@ def _require_checkpoint_authority(
         raise IntakeGraphContractError(
             "INTAKE_PARALLEL_FRAME_CHECKPOINT_MODEL_INPUT_DRIFT"
         )
+    raw_authority = state.get("authority")
+    if not isinstance(raw_authority, Mapping):
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_CHECKPOINT_AUTHORITY_DRIFT"
+        )
+    authority = dict(raw_authority)
+    request_authority = request.checkpoint_identity()
+    if authority == request_authority:
+        return False
+    try:
+        transitions = _validated_generation_transition_events(state, request.frame_type)
+    except Exception as error:
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_CHECKPOINT_AUTHORITY_DRIFT"
+        ) from error
+    if len(transitions) != 2:
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_CHECKPOINT_AUTHORITY_DRIFT"
+        )
+    generation_reset = transitions[1]
+    expected_successor = dict(authority)
+    expected_successor.update(
+        {
+            "generation": generation_reset.new_generation,
+            "frame_id": generation_reset.new_frame_id,
+            "allow_generation_reset": False,
+        }
+    )
+    if (
+        request_authority != expected_successor
+        or request.generation != generation_reset.new_generation
+        or request.frame_id != generation_reset.new_frame_id
+        or request.allow_generation_reset
+    ):
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_CHECKPOINT_AUTHORITY_DRIFT"
+        )
+    return True
+
+
+def _require_invocation_authority(
+    request: ParallelFrameExecutionRequest,
+    context: AgentInvocationContext,
+) -> None:
+    instruction = request.model_input.instruction_pack
+    if (
+        context.room_type != "INTAKE"
+        or context.case_id != request.case_id
+        or context.actor_id != request.actor_id
+        or context.actor_role != request.actor_role
+        or context.actor_role not in {"USER", "MERCHANT"}
+        or context.prompt_profile_id != FRAME_PROMPT_PROFILE[request.frame_type]
+        or context.prompt_profile_id != instruction.prompt_profile_id
+        or context.output_schema_version != FRAME_OUTPUT_SCHEMA[request.frame_type]
+        or context.output_schema_version != instruction.output_schema_id
+    ):
+        raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_INVOCATION_UNAUTHORIZED")
+
+
+def _require_resumable_checkpoint(
+    snapshot: Any,
+    state: Mapping[str, Any],
+    request: ParallelFrameExecutionRequest,
+) -> None:
+    status = state.get("status")
+    expected_next = {
+        "PENDING": ("authorize_input",),
+        "AUTHORIZED": ("invoke_model",),
+        "RESET_DETECTED": ("emit_generation_transition",),
+        "RETRY_AUTHORIZED": ("invoke_replacement_model",),
+        "MODEL_COMPLETED": ("checkpoint_terminal",),
+    }.get(status)
+    actual_next = tuple(getattr(snapshot, "next", ()) or ())
+    if (
+        expected_next is None
+        or actual_next != expected_next
+        or request.resume_local_index != 0
+    ):
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_CHECKPOINT_INCOMPLETE"
+        )
+    if status in {"RESET_DETECTED", "RETRY_AUTHORIZED"}:
+        try:
+            transitions = _validated_generation_transition_events(
+                state, request.frame_type
+            )
+            reset_usage = FrameProviderUsage.model_validate(
+                state.get("reset_provider_usage")
+            )
+        except Exception as error:
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_FRAME_CHECKPOINT_INCOMPLETE"
+            ) from error
+        if len(transitions) != 2 or reset_usage.provider_call_count != 1:
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_FRAME_CHECKPOINT_INCOMPLETE"
+            )
+    elif status == "MODEL_COMPLETED":
+        _require_complete_state(state, request.frame_type)
 
 
 def _require_complete_state(
@@ -1451,6 +1700,12 @@ def _require_complete_state(
     frame_type: ParallelFrameType,
 ) -> None:
     try:
+        checkpoint_schema_version = state.get("checkpoint_schema_version")
+        if checkpoint_schema_version == _LEGACY_CHECKPOINT_SCHEMA_VERSION:
+            if state.get("status") != "COMPLETE":
+                raise ValueError("legacy checkpoint is not terminal")
+        elif checkpoint_schema_version != _CHECKPOINT_SCHEMA_VERSION:
+            raise ValueError("checkpoint schema is invalid")
         result = validate_parallel_frame_output(
             frame_type,
             cast(Mapping[str, Any], state["canonical_result"]),
@@ -1468,9 +1723,26 @@ def _require_complete_state(
             raise ValueError("public projection hash drift")
         if len(canonical_items) != len(canonical_result["public_projection_items"]):
             raise ValueError("projection cardinality drift")
-        FrameProviderUsage.model_validate(state["usage"])
+        usage = FrameProviderUsage.model_validate(state["usage"])
         datetime.fromisoformat(str(state["completed_at"]))
-        _validated_generation_transition_events(state, frame_type)
+        transitions = _validated_generation_transition_events(state, frame_type)
+        if bool(transitions) != (usage.provider_call_count == 2):
+            raise ValueError("provider usage disagrees with generation lineage")
+        if transitions:
+            if checkpoint_schema_version == _LEGACY_CHECKPOINT_SCHEMA_VERSION:
+                if state.get("reset_provider_usage") is not None:
+                    raise ValueError("legacy checkpoint carries a v2 usage split")
+            else:
+                reset_usage = FrameProviderUsage.model_validate(
+                    state.get("reset_provider_usage")
+                )
+                if (
+                    reset_usage.provider_call_count != 1
+                    or reset_usage.model != usage.model
+                ):
+                    raise ValueError("reset provider usage drifted")
+        elif state.get("reset_provider_usage") is not None:
+            raise ValueError("reset provider usage exists without a reset")
     except Exception as error:
         raise IntakeGraphContractError(
             "INTAKE_PARALLEL_FRAME_CHECKPOINT_TERMINAL_INVALID"

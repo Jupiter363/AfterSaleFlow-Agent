@@ -24,6 +24,7 @@ from app.llm import StructuredLlmClient
 from app.model_runtime.callbacks import (
     InvocationMetadataCapture,
     governed_events_from_chunk,
+    governed_reset_usage_from_chunk,
 )
 from app.model_runtime.profiles import (
     ModelInvocationPolicy,
@@ -75,6 +76,9 @@ class HarnessStreamReset:
     kind: Literal["generation_reset"]
     generation: int
     reason_code: Literal["OUTPUT_SCHEMA_INVALID"]
+    failed_model: str
+    failed_latency_ms: int
+    failed_token_usage: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -439,10 +443,16 @@ class HarnessModelRunner:
         ):
             for event in governed_events_from_chunk(chunk):
                 if event["event_type"] == "generation_reset":
+                    reset_usage = governed_reset_usage_from_chunk(chunk)
+                    if reset_usage is None:
+                        raise RuntimeError("governed generation reset omitted usage")
                     yield HarnessStreamReset(
                         kind="generation_reset",
                         generation=event["generation"],
                         reason_code=event["reason_code"],
+                        failed_model=reset_usage["model"],
+                        failed_latency_ms=reset_usage["latency_ms"],
+                        failed_token_usage=dict(reset_usage["token_usage"]),
                     )
                 else:
                     yield HarnessStreamDelta(
@@ -528,10 +538,16 @@ class HarnessModelRunner:
         ):
             for event in governed_events_from_chunk(chunk):
                 if event["event_type"] == "generation_reset":
+                    reset_usage = governed_reset_usage_from_chunk(chunk)
+                    if reset_usage is None:
+                        raise RuntimeError("governed generation reset omitted usage")
                     yield HarnessStreamReset(
                         kind="generation_reset",
                         generation=event["generation"],
                         reason_code=event["reason_code"],
+                        failed_model=reset_usage["model"],
+                        failed_latency_ms=reset_usage["latency_ms"],
+                        failed_token_usage=dict(reset_usage["token_usage"]),
                     )
                 else:
                     yield HarnessStreamDelta(

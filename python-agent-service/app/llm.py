@@ -352,6 +352,9 @@ class StructuredStreamReset:
 
     kind: Literal["generation_reset"]
     generation: int
+    failed_model: str
+    failed_latency_ms: int
+    failed_token_usage: dict[str, int]
     reason_code: Literal["OUTPUT_SCHEMA_INVALID"] = "OUTPUT_SCHEMA_INVALID"
 
 
@@ -1190,6 +1193,9 @@ class LiteLlmProxyClient:
                 yield StructuredStreamReset(
                     kind="generation_reset",
                     generation=generation_number + 1,
+                    failed_model=failure.model,
+                    failed_latency_ms=failure.latency_ms,
+                    failed_token_usage=dict(failure.token_usage),
                 )
         raise AssertionError("bounded async structured regeneration loop did not terminate")
 
@@ -1355,6 +1361,9 @@ class LiteLlmProxyClient:
                 yield StructuredStreamReset(
                     kind="generation_reset",
                     generation=generation_number + 1,
+                    failed_model=failure.model,
+                    failed_latency_ms=failure.latency_ms,
+                    failed_token_usage=dict(failure.token_usage),
                 )
         raise AssertionError("bounded structured regeneration loop did not terminate")
 

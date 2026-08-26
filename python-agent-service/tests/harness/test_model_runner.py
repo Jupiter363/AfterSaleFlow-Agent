@@ -560,6 +560,9 @@ def test_model_runner_preserves_generation_reset_between_stream_generations() ->
             yield StructuredStreamReset(
                 kind="generation_reset",
                 generation=2,
+                failed_model="qwen3.7-max-2026-06-08",
+                failed_latency_ms=8,
+                failed_token_usage={"input": 4, "output": 2, "total": 6},
             )
             yield StructuredStreamDelta(
                 kind="visible_delta",
@@ -598,6 +601,9 @@ def test_model_runner_preserves_generation_reset_between_stream_generations() ->
     assert isinstance(updates[1], HarnessStreamReset)
     assert updates[1].generation == 2
     assert updates[1].reason_code == "OUTPUT_SCHEMA_INVALID"
+    assert updates[1].failed_model == "qwen3.7-max-2026-06-08"
+    assert updates[1].failed_latency_ms == 8
+    assert updates[1].failed_token_usage == {"input": 4, "output": 2, "total": 6}
     assert isinstance(updates[-1], HarnessStreamCompleted)
     assert updates[-1].generation.value.answer == "第二代"
 
@@ -621,7 +627,13 @@ async def test_async_stream_preserves_semantic_validator_and_generation_reset() 
             yield StructuredStreamDelta(
                 kind="visible_delta", field="answer", delta="第一代"
             )
-            yield StructuredStreamReset(kind="generation_reset", generation=2)
+            yield StructuredStreamReset(
+                kind="generation_reset",
+                generation=2,
+                failed_model="qwen3.7-max-2026-06-08",
+                failed_latency_ms=8,
+                failed_token_usage={"input": 4, "output": 2, "total": 6},
+            )
             yield StructuredStreamDelta(
                 kind="visible_delta", field="answer", delta="第二代"
             )
@@ -662,6 +674,11 @@ async def test_async_stream_preserves_semantic_validator_and_generation_reset() 
         "visible_delta",
         "completed",
     ]
+    reset = updates[1]
+    assert isinstance(reset, HarnessStreamReset)
+    assert reset.failed_model == "qwen3.7-max-2026-06-08"
+    assert reset.failed_latency_ms == 8
+    assert reset.failed_token_usage == {"input": 4, "output": 2, "total": 6}
     assert updates[-1].generation.value.answer == "第二代"
 
 

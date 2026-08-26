@@ -28,7 +28,9 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from app.llm import GovernedProviderRequest
 from app.model_runtime.callbacks import (
     GOVERNED_EVENTS_KEY,
+    GOVERNED_RESET_USAGE_KEY,
     generation_reset_event,
+    generation_reset_usage,
     publish_governed_generation_reset,
     publish_governed_visible_delta,
     visible_delta_event,
@@ -323,7 +325,7 @@ class GovernedChatModel(BaseChatModel):
                                 generation=update.generation,
                                 reason_code=update.reason_code,
                             )
-                            yield self._generation_reset_chunk(update)
+                        yield self._generation_reset_chunk(update)
                         visible = False
                         continue
                     if not isinstance(update, ModelTransportCompleted):
@@ -408,7 +410,7 @@ class GovernedChatModel(BaseChatModel):
                                     generation=update.generation,
                                     reason_code=update.reason_code,
                                 )
-                                yield self._generation_reset_chunk(update)
+                            yield self._generation_reset_chunk(update)
                             visible = False
                             continue
                         if not isinstance(update, ModelTransportCompleted):
@@ -678,6 +680,16 @@ class GovernedChatModel(BaseChatModel):
             or update.reason_code != "OUTPUT_SCHEMA_INVALID"
         ):
             raise ModelPolicyViolation("model transport emitted an invalid generation reset")
+        try:
+            generation_reset_usage(
+                model=update.failed_model,
+                latency_ms=update.failed_latency_ms,
+                token_usage=update.failed_token_usage,
+            )
+        except ValueError as error:
+            raise ModelPolicyViolation(
+                "model transport emitted invalid generation reset usage"
+            ) from error
 
     def _message(
         self,
@@ -714,10 +726,18 @@ class GovernedChatModel(BaseChatModel):
             generation=update.generation,
             reason_code=update.reason_code,
         )
+        reset_usage = generation_reset_usage(
+            model=update.failed_model,
+            latency_ms=update.failed_latency_ms,
+            token_usage=update.failed_token_usage,
+        )
         return ChatGenerationChunk(
             message=AIMessageChunk(
                 content="",
-                additional_kwargs={GOVERNED_EVENTS_KEY: [event]},
+                additional_kwargs={
+                    GOVERNED_EVENTS_KEY: [event],
+                    GOVERNED_RESET_USAGE_KEY: reset_usage,
+                },
             ),
             generation_info={"governed_event": "generation_reset"},
         )

@@ -9,7 +9,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.outputs import ChatGenerationChunk
 
-from app.model_runtime.callbacks import GOVERNED_EVENTS_KEY, governed_events_from_chunk
+from app.model_runtime.callbacks import (
+    GOVERNED_EVENTS_KEY,
+    governed_events_from_chunk,
+    governed_reset_usage_from_chunk,
+)
 from app.model_runtime.governed_chat_model import (
     GovernedChatModel,
     ModelDeadlineExceeded,
@@ -130,6 +134,9 @@ def test_stream_relays_one_generation_reset_between_provisional_outputs() -> Non
         ModelTransportGenerationReset(
             generation=2,
             reason_code="OUTPUT_SCHEMA_INVALID",
+            failed_model="qwen3.7-max-2026-06-08",
+            failed_latency_ms=9,
+            failed_token_usage={"input": 4, "output": 3, "total": 7},
         ),
         ModelTransportVisibleDelta(field="answer", delta="accepted"),
         ModelTransportCompleted(
@@ -151,6 +158,19 @@ def test_stream_relays_one_generation_reset_between_provisional_outputs() -> Non
     ]
     assert events[1]["generation"] == 2
     assert events[1]["reason_code"] == "OUTPUT_SCHEMA_INVALID"
+    reset_chunk = next(
+        chunk
+        for chunk in chunks
+        if any(
+            event["event_type"] == "generation_reset"
+            for event in governed_events_from_chunk(chunk)
+        )
+    )
+    assert governed_reset_usage_from_chunk(reset_chunk) == {
+        "model": "qwen3.7-max-2026-06-08",
+        "latency_ms": 9,
+        "token_usage": {"input": 4, "output": 3, "total": 7},
+    }
     assert [chunk.content for chunk in chunks if chunk.content] == [
         Answer(answer="accepted").model_dump_json()
     ]

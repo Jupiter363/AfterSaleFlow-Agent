@@ -78,6 +78,9 @@ class ModelTransportVisibleDelta:
 class ModelTransportGenerationReset:
     generation: int
     reason_code: str
+    failed_model: str
+    failed_latency_ms: int
+    failed_token_usage: dict[str, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +230,9 @@ class StructuredClientTransport:
                     yield ModelTransportGenerationReset(
                         generation=update.generation,
                         reason_code=update.reason_code,
+                        failed_model=update.failed_model,
+                        failed_latency_ms=update.failed_latency_ms,
+                        failed_token_usage=dict(update.failed_token_usage),
                     )
                     continue
                 if not isinstance(update, StructuredStreamCompleted):
@@ -284,6 +290,9 @@ class StructuredClientTransport:
                     yield ModelTransportGenerationReset(
                         generation=update.generation,
                         reason_code=update.reason_code,
+                        failed_model=update.failed_model,
+                        failed_latency_ms=update.failed_latency_ms,
+                        failed_token_usage=dict(update.failed_token_usage),
                     )
                     continue
                 if not isinstance(update, StructuredStreamCompleted):
