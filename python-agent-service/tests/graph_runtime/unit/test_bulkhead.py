@@ -735,18 +735,20 @@ def test_postgres_composite_routines_are_evaluated_once() -> None:
         assert f"select result.* from {routine}(" in source
 
 
-def test_parallel_failure_terminalizer_preserves_fanout_lock_order() -> None:
+def test_parallel_failure_terminalizer_uses_function_owned_fanout_authority() -> None:
     source = (
         SERVICE_ROOT / "app" / "graph_runtime" / "postgres_bulkhead.py"
     ).read_text(encoding="utf-8")
-    terminalizer = source[source.index("async def terminalize_command_permits") :]
+    terminalizer = source[
+        source.index("async def terminalize_command_permits") : source.index(
+            "async def drain", source.index("async def terminalize_command_permits")
+        )
+    ]
 
-    advisory = terminalizer.index("pg_advisory_xact_lock")
-    row_lock = terminalizer.index("for update")
-    release_routine = terminalizer.index(
-        "from agent_graph_cancel_or_release_fanout_permit("
-    )
-    assert advisory < row_lock < release_routine
+    assert "from agent_graph_terminalize_command_fanout_permits(" in terminalizer
+    assert "for update" not in terminalizer
+    assert "pg_advisory_xact_lock" not in terminalizer
+    assert "from agent_graph_cancel_or_release_fanout_permit(" not in terminalizer
 
 
 @pytest.mark.asyncio

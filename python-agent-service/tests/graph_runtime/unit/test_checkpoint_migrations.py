@@ -49,6 +49,7 @@ def test_repository_migrations_are_exact_ordered_and_hash_bound() -> None:
         "G014",
         "G015",
         "G016",
+        "G017",
     )
     assert all(len(migration.sha256) == 64 for migration in migrations)
     assert len(graph_application_signature(migrations)) == 64
@@ -129,6 +130,23 @@ def test_parallel_receipt_abandonment_migration_is_append_only_and_exactly_bound
     assert "parallel_receipt_abandonments" in normalized
     migration_source = inspect.getsource(GraphMigrationRunner._apply_runtime_grants)
     assert "agent_graph_parallel_receipt_abandonment" in migration_source
+
+
+def test_command_terminalization_migration_keeps_fanout_mutation_function_owned() -> None:
+    migration = next(item for item in load_graph_migrations() if item.version == "G017")
+    normalized = " ".join(migration.sql_text.split()).lower()
+
+    assert migration.version == "G017"
+    assert "create function agent_graph_terminalize_command_fanout_permits" in normalized
+    assert "security definer" in normalized
+    assert normalized.index("pg_advisory_xact_lock") < normalized.index("for update")
+    assert normalized.index("for update") < normalized.index(
+        "update agent_graph_fanout_permit"
+    )
+    assert "selected_count > 32" in normalized
+    assert "agent_graph_dispatch_fanout_permits()" in normalized
+    grant_source = inspect.getsource(GraphMigrationRunner._apply_runtime_grants)
+    assert "agent_graph_terminalize_command_fanout_permits" in grant_source
 
 
 def test_atomic_provider_group_migration_is_additive_and_weight_bound() -> None:

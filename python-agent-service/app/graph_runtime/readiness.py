@@ -561,9 +561,10 @@ class GraphPersistenceReadinessProbe:
                     "agent_graph_renew_fanout_permit",
                     "agent_graph_finish_fanout_permit",
                     "agent_graph_cancel_or_release_fanout_permit",
+                    "agent_graph_terminalize_command_fanout_permits",
                     "agent_graph_validate_fanout_recovery",
                 ],
-                [11, 7, 8, 6, 7],
+                [11, 7, 8, 6, 3, 7],
                 self._config.schema,
             ),
         )

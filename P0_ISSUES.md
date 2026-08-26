@@ -1612,6 +1612,17 @@
 - Second recurrence metadata: run `target-intake-run:835b18a9008639e7a673fefd540c37d1`; attempt `target-intake-attempt:835b18a9008639e7a673fefd540c37d1:1`; command `intake-message:835b18a9008639e7a673fefd540c37d1`; frame set `IFS_585e2b2f1e469084987257b451510ef4`; thread `grt.v1.01a03d8bbbb27842ac30e67a9abdb24b`.
 - Second-loss focused verification fact: The service-owned stream regression consumed only through a Dialogue generation reset, then stopped polling while the replacement generation and both sibling lanes reached technical completion; generation 2 emitted its own start and seal, and the admission permit was released. The bounded event/byte backlog, retained cleanup-failure visibility, and post-prefix authority-bound failure record regressions passed. The focused Python selection completed `37 passed`, and the Java HTTP transport selection completed `11 passed` with no failures.
 
+## P0-20260826-PARALLEL-FAILURE-TERMINALIZATION-DB-PRIVILEGE
+
+- Severity: P0
+- Status: FIXED / FOCUSED_VERIFIED / UAT_PENDING
+- Component: Python Graph bulkhead transaction terminalization and Java V4 external-failure convergence
+- Confirmed fact: Fresh activation `p9act.v1.3792230b03de8e4e0108bfd1784f8d00` at candidate `68e6221232e16069c40686af6e80d6babe32c264` reached the first USER V4 turn in `CASE_P9_6A8ECC8A_1`. Dialogue generation 1 emitted projections and reset to generation 2; the Java slot advanced to generation 2 `ADMITTED`, while Dossier and Quality remained generation 1 `STARTED`.
+- Failure evidence: The Python service logged `target-E2E graph stream startup failed` with `error_type=InsufficientPrivilege` at `app.graph_runtime.postgres_bulkhead:terminalize_transaction:624`. The affected HTTP stream retry returned 500. Java then attempted external failure terminalization on three Activity attempts; each was rejected as a sanitized `TargetE2EGraphClientException`, leaving the AgentRun `RUNNING / UNCOMMITTED` and the frame set `COLLECTING` with no proposal or graph-result artifact.
+- Root cause and evidence: `graph_runtime` intentionally had only `SELECT` on `agent_graph_fanout_permit`, while `terminalize_command_permits` issued a direct `SELECT ... FOR UPDATE` before calling the existing owner function. PostgreSQL requires table `UPDATE` privilege for that row lock, so the least-privilege grant contract and the Python transaction were incompatible. The focused PostgreSQL test now proves the runtime role still lacks table `UPDATE` while exact command permit terminalization and replay both succeed.
+- Impact: The first substantive Intake turn cannot converge to either a committed proposal or a durable failed terminal state, so the new parallel Intake lane and full-chain UAT are blocked before Intake completion.
+- Metadata: case `CASE_P9_6A8ECC8A_1`; run `target-intake-run:da9d2f78fbf43043a8585139cce0cb1c`; frame set `IFS_a62f92a6bebadb47cf11520f5a348a6e`; activation generation `1787743370`; unit verification `30 passed`; isolated PostgreSQL integration verification `1 passed`.
+
 ## P1-20260826-GRAPH-PARALLEL-PURGE-CYCLE-LINEAGE-INVALID
 
 - Severity: P1

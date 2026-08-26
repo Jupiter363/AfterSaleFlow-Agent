@@ -278,6 +278,9 @@ async def test_shadow_readiness_uses_only_bounded_read_only_queries() -> None:
     assert "agent_graph_cancel_or_release_fanout_permit" in repr(
         connection.fanout_privilege_params
     )
+    assert "agent_graph_terminalize_command_fanout_permits" in repr(
+        connection.fanout_privilege_params
+    )
     assert "agent_graph_cancel_queued_fanout_permit" not in repr(
         connection.fanout_privilege_params
     )

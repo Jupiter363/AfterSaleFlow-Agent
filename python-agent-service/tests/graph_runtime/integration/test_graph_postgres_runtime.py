@@ -143,6 +143,7 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G014",
         "G015",
         "G016",
+        "G017",
     }
 
     second = await _migration_runner(graph_database).run()
@@ -164,6 +165,7 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G014",
         "G015",
         "G016",
+        "G017",
     )
 
     restore = await GraphRestoreValidationRunner(
@@ -233,6 +235,8 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
             connection.execute(
                 "insert into agent_graph_fanout_permit (request_id) values ('forbidden')"
             )
+        with pytest.raises(InsufficientPrivilege):
+            connection.execute("select * from agent_graph_fanout_permit for update")
 
 
 @pytest.mark.asyncio
@@ -1095,6 +1099,73 @@ async def test_real_durable_fanout_permit_scope_renew_release_and_retry(
         snapshot = await bulkhead.snapshot()
         assert snapshot.active_global == 0
         assert snapshot.status_counts["RELEASED"] >= 1
+    finally:
+        await bulkhead.close()
+        await pool.close(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_runtime_terminalizes_exact_command_permits_without_table_update_privilege(
+    graph_database: _Database,
+) -> None:
+    await _migration_runner(graph_database).run()
+    (scope, fence), = await _seed_fanout_identities(
+        graph_database,
+        ("tenant-terminalize-command",),
+        start_ordinal=1701,
+    )
+    pool = _runtime_pool(graph_database)
+    await pool.open(wait=True, timeout=10)
+    bulkhead = PostgresGraphFanoutBulkhead(
+        pool, PostgresBulkheadConfig.signed_synthetic_defaults()
+    )
+    await bulkhead.open()
+    try:
+        first = await bulkhead.acquire(
+            scope,
+            fence,
+            request_id="permit-terminalize-command-1",
+            owner_id="permit-terminalize-owner-1",
+        )
+        assert first._record.status == "GRANTED"  # noqa: SLF001 - DB transition proof
+        assert await first.release()
+        second = await bulkhead.acquire(
+            scope,
+            fence,
+            request_id="permit-terminalize-command-2",
+            owner_id="permit-terminalize-owner-2",
+        )
+        assert second._record.status == "GRANTED"  # noqa: SLF001 - DB transition proof
+
+        terminal = await bulkhead.terminalize_command_permits(
+            thread_id=fence.thread_id,
+            command_id=fence.command_id,
+            frame_set_id=scope.item_key,
+        )
+        assert [record.request_id for record in terminal] == [
+            "permit-terminalize-command-1",
+            "permit-terminalize-command-2",
+        ]
+        assert {record.status for record in terminal} == {"RELEASED"}
+
+        replay = await bulkhead.terminalize_command_permits(
+            thread_id=fence.thread_id,
+            command_id=fence.command_id,
+            frame_set_id=scope.item_key,
+        )
+        assert replay == terminal
+
+        async with pool.connection(timeout=5) as connection:
+            privilege = await (
+                await connection.execute(
+                    """
+                    select has_table_privilege(
+                        current_user, 'agent_graph_fanout_permit', 'UPDATE'
+                    ) as can_update
+                    """
+                )
+            ).fetchone()
+        assert privilege == {"can_update": False}
     finally:
         await bulkhead.close()
         await pool.close(timeout=10)

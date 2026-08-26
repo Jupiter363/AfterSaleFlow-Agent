@@ -613,23 +613,15 @@ class PostgresGraphFanoutBulkhead:
         async def terminalize_transaction(
             connection: Any,
         ) -> tuple[PostgresPermitRecord, ...]:
-            # Match every normal acquire/release path's lock order: global fanout advisory
-            # lock first, then permit rows.  Reversing that order here would deadlock with
-            # agent_graph_cancel_or_release_fanout_permit(), which takes the same advisory
-            # lock before updating its row.
-            await connection.execute(
-                "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                ("agent-graph-fanout-admission",),
-            )
+            # The runtime role is intentionally SELECT-only on fanout tables.  The owner
+            # function takes the global advisory lock, locks exact rows in request order,
+            # and terminalizes the complete set in this transaction.
             cursor = await connection.execute(
                 """
-                select *
-                  from agent_graph_fanout_permit
-                 where thread_id = %s
-                   and command_id = %s
-                   and item_key = %s
-                 order by request_id
-                 for update
+                select result.*
+                  from agent_graph_terminalize_command_fanout_permits(
+                      %s, %s, %s
+                  ) as result
                 """,
                 (thread_id, command_id, frame_set_id),
             )
@@ -641,28 +633,6 @@ class PostgresGraphFanoutBulkhead:
             terminal: list[PostgresPermitRecord] = []
             for row in rows:
                 current = _record_from_row(row)
-                if current.status in {"QUEUED", "GRANTED"}:
-                    updated = await (
-                        await connection.execute(
-                            """
-                            select result.*
-                              from agent_graph_cancel_or_release_fanout_permit(
-                                  %s, %s, %s, %s, %s, %s
-                              ) as result
-                            """,
-                            (
-                                current.request_id,
-                                current.fence.thread_id,
-                                current.fence.command_id,
-                                current.fence.graph_lease_owner_id,
-                                current.fence.graph_lease_fencing_token,
-                                current.permit_owner_id,
-                            ),
-                        )
-                    ).fetchone()
-                    if updated is None:
-                        raise GraphPermitLostError()
-                    current = _record_from_row(updated)
                 if current.status not in terminal_statuses:
                     raise GraphPermitBindingError(
                         "parallel command provider permit is not terminal"
