@@ -165,7 +165,11 @@ class TransactionalIntakeParallelRunTerminalStoreTest {
                 });
         TransactionalIntakeParallelRunTerminalStore store =
                 new TransactionalIntakeParallelRunTerminalStore(
-                        runRepository, attemptRepository, assemblyStore, writer, MAPPER);
+                        runRepository,
+                        attemptRepository,
+                        assemblyStore,
+                        writer,
+                        mapperWithDefaultNullInclusion());
 
         var first = store.appendOrLoad(new TerminalCommand(request, reconciliation));
         var replay = store.appendOrLoad(new TerminalCommand(request, reconciliation));
@@ -247,5 +251,12 @@ class TransactionalIntakeParallelRunTerminalStoreTest {
 
     private static String canonicalJson(Object value) {
         return ContractJson.canonicalString(MAPPER.valueToTree(value));
+    }
+
+    private static ObjectMapper mapperWithDefaultNullInclusion() {
+        return JsonMapper.builder()
+                .findAndAddModules()
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .build();
     }
 }

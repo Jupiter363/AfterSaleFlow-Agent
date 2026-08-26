@@ -26,6 +26,7 @@ import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -34,13 +35,13 @@ import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
-import org.springframework.stereotype.Repository;
+import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /** PostgreSQL/JPA owner of the atomic V4 FINAL + RESULT_READY technical transaction. */
-@Repository
+@Component
 public class TransactionalIntakeParallelRunTerminalStore
         implements IntakeParallelRunTerminalStore {
 
@@ -64,6 +65,7 @@ public class TransactionalIntakeParallelRunTerminalStore
         this.assemblyStore = Objects.requireNonNull(assemblyStore, "assemblyStore");
         this.eventWriter = Objects.requireNonNull(eventWriter, "eventWriter");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
+        this.objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
     }
 
     @Override
