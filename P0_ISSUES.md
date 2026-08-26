@@ -1890,3 +1890,14 @@
 - Impact: The Dossier and Quality lanes cannot seal, exact-three assembly cannot reach READY, and no durable FINAL, RESULT_READY, `intake-turn-proposal.v2`, frozen case matrix, dossier revision, or formal Agent reply can be produced for the substantive Intake turn. The backend UAT stopped at `initiator_stream_2` without entering Evidence or any downstream room.
 - Verification evidence: the focused Provider draft/materialization, three-node Graph, Prompt boundary, API stream and parallel contract set passed 84/84 on 2026-08-27. Runtime Provider UAT and formal matrix-write verification remain pending.
 - Identifying metadata: observed 2026-08-27; case `CASE_P9_6A8F0C80_1`; run `target-intake-run:043e4de2eba1363b8cccccdc05d0c2b8`; attempt `target-intake-attempt:043e4de2eba1363b8cccccdc05d0c2b8:1`; command `intake-message:043e4de2eba1363b8cccccdc05d0c2b8`; public diagnostic family `OUTPUT_SCHEMA_INVALID` / `parallel_terminal`.
+
+## P0-20260827-PARALLEL-FIRST-TURN-GRAPH-TRANSPORT-FAILED
+
+- Severity: P0
+- Status: FIXED_IN_SOURCE / FOCUSED_REGRESSION_GREEN / RUNTIME_UAT_PENDING
+- Component: Intake V4 three-node execution and Java durable ingress/terminalization
+- Confirmed fact: Fresh activation `p9act.v1.e588641f2dad6469a8640cfc28f4d836`, bound to candidate `3315476bc3dfb94a214552178b97dd8704a7f9a6`, imported USER-initiated case `CASE_P9_6A8F1593_1`. The V3 opening completed, but the first concise USER substantive answer aborted its V4 run with public code `TARGET_E2E_GRAPH_TRANSPORT_FAILED`, `retryable=false`.
+- Root-cause evidence: Dialogue and Dossier generation 1 sealed, while Quality generation 1 and its isolated generation 2 retry both failed before any Provider usage or preview. Bailian/qwen3.7 returned HTTP 400 `invalid_parameter_error` because the strict `response_format.json_schema.schema` contained unsupported array keywords including `uniqueItems`. The Provider request rejection was mapped to `GRAPH_PROVIDER_STREAM_INTERRUPTED`, then the exact-three batch terminated as `TARGET_E2E_GRAPH_TRANSPORT_FAILED`.
+- Impact: USER Intake cannot persist its first substantive parallel turn. MERCHANT Intake, Evidence, Hearing, Review and Outcome were not started for this case.
+- Verification evidence: the request-bound Quality Schema no longer contains `uniqueItems`, `contains`, `minContains`, or `maxContains`; Provider draft and stable Frame materialization focused tests passed 43/43 on 2026-08-27. A fresh activation and runtime retry remain pending.
+- Identifying metadata: observed 2026-08-27; case `CASE_P9_6A8F1593_1`; run `target-intake-run:e6906d7b8e253d6a93cbff20c752c70b`; outer code `TARGET_E2E_GRAPH_TRANSPORT_FAILED`.

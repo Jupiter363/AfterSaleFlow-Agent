@@ -412,6 +412,9 @@ def test_quality_provider_draft_materializes_fixed_scores_and_filters_full_score
     score_schema = schema["properties"]["public_projection_items"]
     assert score_schema["minItems"] == score_schema["maxItems"] == 6
     assert len(score_schema["prefixItems"]) == 6
+    schema_text = json.dumps(schema, sort_keys=True)
+    for unsupported in ("uniqueItems", "contains", "minContains", "maxContains"):
+        assert unsupported not in schema_text
 
 
 def test_quality_gap_materialization_is_independent_of_provider_candidate_order() -> None:

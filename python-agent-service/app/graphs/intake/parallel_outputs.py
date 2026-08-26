@@ -479,10 +479,7 @@ class QualityScoreProjectionDraftV3(RootModel[QualityScoreProjectionValueV3]):
 class QualityGapCandidateDraftV3(StrictFrameOutput):
     dimension: Dimension
     question: QualityCandidateQuestion
-    linked_fact_keys: tuple[Identifier, ...] = Field(
-        max_length=16,
-        json_schema_extra={"uniqueItems": True},
-    )
+    linked_fact_keys: tuple[Identifier, ...] = Field(max_length=16)
 
 
 class IntakeQualityGenerationV3(StrictFrameOutput):
@@ -564,10 +561,7 @@ def request_bound_quality_output_types(
         __module__=__name__,
         linked_fact_keys=(
             linked_keys_type,
-            Field(
-                max_length=linked_keys_limit,
-                json_schema_extra={"uniqueItems": True},
-            ),
+            Field(max_length=linked_keys_limit),
         ),
     )
     output_type = create_model(
