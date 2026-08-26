@@ -16,6 +16,11 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from testcontainers.postgres import PostgresContainer
 
 import app.graphs.intake.parallel_graph as parallel_graph_module
+from app.api.intake_parallel_stream import (
+    ExpectedParallelFrame,
+    ParallelFrameStreamAuthority,
+    ParallelFrameStreamProtocolValidator,
+)
 from app.contracts.v1.codec import canonical_sha256
 from app.contracts.v1.models import RoomGraphCommand
 from app.graphs.intake.errors import IntakeGraphContractError
@@ -124,6 +129,16 @@ class _CollectingSink:
         self.events.append(event)
         if isinstance(event, FrameProjectionItem):
             self.first_projection.set()
+
+
+class _ProtocolValidatingSink(_CollectingSink):
+    def __init__(self, validator: ParallelFrameStreamProtocolValidator) -> None:
+        super().__init__()
+        self.validator = validator
+
+    async def emit(self, event: Any) -> None:
+        self.validator.accept(event)
+        await super().emit(event)
 
 
 class _FailOnceOnReplacementStartSink(_CollectingSink):
@@ -625,6 +640,85 @@ async def test_one_lane_reset_does_not_change_sibling_generation() -> None:
         and event.frame_type == "DIALOGUE_FRAME"
     ]
     assert [event.local_index for event in dialogue_items] == [0, 0]
+
+
+@pytest.mark.asyncio
+async def test_prestarted_generation_reset_emits_replacement_start_before_projection() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    initial_request = next(
+        request for request in requests if request.frame_type == "DIALOGUE_FRAME"
+    )
+    request = initial_request.model_copy(update={"emit_start": False})
+    authority = ParallelFrameStreamAuthority(
+        frame_set_id=request.frame_set_id,
+        run_id=request.run_id,
+        attempt_id=request.attempt_id,
+        frames=tuple(
+            ExpectedParallelFrame(
+                frame_type=item.frame_type,
+                generation=item.generation,
+                frame_id=item.frame_id,
+                frame_model_input_sha256=item.model_input.frame_model_input_sha256,
+                frame_prompt_sha256=(
+                    item.model_input.instruction_pack.frame_prompt_sha256
+                ),
+                context_envelope_sha256=item.context_envelope_sha256,
+                model_context_view_sha256=(
+                    item.model_input.common_model_context.model_context_view_sha256
+                ),
+            )
+            for item in requests
+        ),
+    )
+    validator = ParallelFrameStreamProtocolValidator(
+        authority,
+        active_frame_types=(request.frame_type,),
+    )
+    sink = _ProtocolValidatingSink(validator)
+    initial_start = FrameStarted(
+        frame_set_id=request.frame_set_id,
+        run_id=request.run_id,
+        attempt_id=request.attempt_id,
+        frame_type=request.frame_type,
+        generation=request.generation,
+        frame_id=request.frame_id,
+        frame_model_input_sha256=request.model_input.frame_model_input_sha256,
+        frame_prompt_sha256=request.model_input.instruction_pack.frame_prompt_sha256,
+        context_envelope_sha256=request.context_envelope_sha256,
+        model_context_view_sha256=(
+            request.model_input.common_model_context.model_context_view_sha256
+        ),
+    )
+    validator.accept(initial_start)
+    sink.events.append(initial_start)
+
+    result = await orchestrator.execute_frame(
+        request,
+        agent_context=contexts[request.frame_type],
+        model_runner=_StreamingRunner(
+            _outputs(),
+            reset_node="intake_turn_dialogue_frame",
+        ),
+        event_sink=sink,
+    )
+    validator.finish()
+
+    assert result.generation == 2
+    replacement_start_indexes = [
+        index
+        for index, event in enumerate(sink.events)
+        if isinstance(event, FrameStarted) and event.generation == 2
+    ]
+    assert len(replacement_start_indexes) == 1
+    replacement_projection_index = next(
+        index
+        for index, event in enumerate(sink.events)
+        if isinstance(event, FrameProjectionItem) and event.generation == 2
+    )
+    assert replacement_start_indexes[0] < replacement_projection_index
 
 
 @pytest.mark.asyncio

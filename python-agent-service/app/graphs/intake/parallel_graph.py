@@ -735,7 +735,11 @@ async def _invoke_frame_model(
         else None
     )
     completed: HarnessStreamCompleted[Any] | None = None
-    if request.emit_start:
+    # The transport service pre-emits only the request generation so that all
+    # three initial starts are visible before any provider call.  A lane-local
+    # replacement is a new generation and therefore owns a new start even when
+    # the initial request start was suppressed inside the child graph.
+    if request.emit_start or (replacement and generation != request.generation):
         await runtime.event_sink.emit(
             _frame_started(request, generation=generation, frame_id=frame_id)
         )
