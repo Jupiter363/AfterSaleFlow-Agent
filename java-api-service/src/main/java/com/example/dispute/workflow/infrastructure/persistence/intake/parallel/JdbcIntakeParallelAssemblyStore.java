@@ -680,21 +680,23 @@ public class JdbcIntakeParallelAssemblyStore implements IntakeParallelAssemblySt
                     "INTAKE_PARALLEL_RESULT_ENVELOPE_HASH_INVALID",
                     "result envelope columns or bytes differ from canonical authority");
         }
+        JsonNode graphResultDocument =
+                parseBytes(artifact.canonicalGraphResultBytes(), "Graph result artifact");
+        requireCanonical(
+                artifact.canonicalGraphResultBytes(),
+                graphResultDocument,
+                "Graph result artifact");
         RoomGraphResult graphResult;
         try {
             graphResult = contractCodec.decode(
                     GRAPH_RESULT_SCHEMA,
-                    parseBytes(artifact.canonicalGraphResultBytes(), "Graph result artifact"),
+                    graphResultDocument,
                     RoomGraphResult.class);
         } catch (RuntimeException failure) {
             throw new AssemblyConflictException(
                     "INTAKE_PARALLEL_GRAPH_RESULT_INVALID",
                     "Graph result artifact cannot be decoded");
         }
-        requireCanonical(
-                artifact.canonicalGraphResultBytes(),
-                objectMapper.valueToTree(graphResult),
-                "Graph result artifact");
         if (!artifact.graphResultSha256().equals(graphResult.outputHash())
                 || !artifact.graphResultSha256().equals(IntakeContractHashes.graphResultHash(graphResult))
                 || !objectMapper.valueToTree(graphResult)

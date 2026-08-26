@@ -32,6 +32,43 @@ class IntakeParallelFrameAssemblerTest {
     private final IntakeParallelFrameAssembler assembler = new IntakeParallelFrameAssembler();
 
     @Test
+    void assemblesAFirstUserTurnWithTwoCurrentFactsAndTwoUnboundGaps() throws Exception {
+        String sourceEventHash = "8".repeat(64);
+        ObjectNode previous = previousDossier("NOT_READY", 80, false);
+        ObjectNode dialogue = (ObjectNode) MAPPER.readTree("""
+                {"dialogue":{"remark_disposition":null},"public_projection_items":[{"segment_kind":"ACKNOWLEDGEMENT","candidate_text":"已收到您关于商品净化性能低于宣传值的反馈"}]}
+                """);
+        ObjectNode dossier = (ObjectNode) MAPPER.readTree("""
+                {"dossier_delta":{"respondent_claim":null},"public_projection_items":[{"source_row":{"stance":"CONFIRM","category":"PRODUCT_STATE","fact_key":"NEW_888888888888888888888888_1","fact_target":"用户称收货时间及首次使用发现性能问题","materiality":"CORE","asserted_value":"2026年8月12日收货，首次开机约半小时发现性能不符","position_summary":"用户称于2026年8月12日收到商品，首次开机使用约半小时后发现净化性能明显低于页面宣传参数"}},{"source_row":{"stance":"CONFIRM","category":"PRODUCT_STATE","fact_key":"NEW_888888888888888888888888_2","fact_target":"用户称第三方检测及实际使用表现低于宣传","materiality":"CORE","asserted_value":"第三方检测及实际使用表现均明显低于宣传值","position_summary":"用户称第三方检测和实际使用表现均明显低于宣传值，商品表现与购买时宣传不符"}}]}
+                """);
+        ObjectNode quality = quality(
+                Map.of(
+                        "references", 15,
+                        "event_story", 14,
+                        "party_positions", 15,
+                        "requested_resolution", 15,
+                        "risk_and_conflicts", 12,
+                        "next_action_clarity", 13),
+                List.of(
+                        gap("EVENT_STORY", "用户称首次开机半小时后发现性能低于宣传值，请问具体是通过何种方式或数据对比得出该结论的？"),
+                        gap("RISK_AND_CONFLICTS", "用户提及第三方检测和实际使用表现均低于宣传值，请问是否已保留相关检测报告或使用记录作为核验依据？")));
+        quality.with("quality").put(
+                "assessment_reasoning",
+                "当前质量评估显示，用户已明确收货时间、问题发现节点及退货退款诉求，但核心性能差异的验证路径尚未闭合。");
+
+        var output = assembler.assemble(command(
+                previous,
+                frames(dialogue, dossier, quality),
+                sourceEventHash));
+
+        assertThat(output.proposal().readiness()).isEqualTo(IntakeTurnProposal.Readiness.INCOMPLETE);
+        assertThat(output.proposal().conversationAction())
+                .isEqualTo(IntakeTurnProposal.ConversationAction.ASK_SUBSTANTIVE);
+        assertThat(output.proposal().matrixPatch().path("fact_rows")).hasSize(3);
+        assertThat(output.proposal().proposalHash()).hasSize(64);
+    }
+
+    @Test
     void assemblesTheSameProposalForAllSixFrameArrivalOrders() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         List<List<FrameType>> orders = List.of(
@@ -630,6 +667,13 @@ class IntakeParallelFrameAssemblerTest {
 
     private static AssemblyCommand command(
             ObjectNode previous, Map<FrameType, SealedFrame> frames) {
+        return command(previous, frames, SHA_C);
+    }
+
+    private static AssemblyCommand command(
+            ObjectNode previous,
+            Map<FrameType, SealedFrame> frames,
+            String sourceEventHash) {
         return new AssemblyCommand(
                 "COMMAND_1",
                 "RUN_1",
@@ -642,7 +686,7 @@ class IntakeParallelFrameAssemblerTest {
                 "SESSION_1",
                 2,
                 SHA_B,
-                SHA_C,
+                sourceEventHash,
                 SOURCE_MESSAGE,
                 "本轮补充了核心事实。",
                 "BINDING_1",

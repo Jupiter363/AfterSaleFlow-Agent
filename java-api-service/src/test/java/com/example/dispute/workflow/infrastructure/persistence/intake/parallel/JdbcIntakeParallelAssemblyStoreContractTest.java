@@ -88,6 +88,18 @@ class JdbcIntakeParallelAssemblyStoreContractTest {
     }
 
     @Test
+    void validatesGraphResultCanonicalBytesFromTheirParsedDocument() throws Exception {
+        String source = normalizedSource();
+
+        assertThat(source)
+                .contains("jsonnode graphresultdocument = parsebytes(")
+                .contains("artifact.canonicalgraphresultbytes(), \"graph result artifact\")")
+                .contains("requirecanonical( artifact.canonicalgraphresultbytes(), graphresultdocument")
+                .contains("contractcodec.decode( graph_result_schema, graphresultdocument")
+                .doesNotContain("artifact.canonicalgraphresultbytes(), objectmapper.valuetotree(graphresult), \"graph result artifact\"");
+    }
+
+    @Test
     void terminalReaderJoinsTheCallerTransactionAndLocksExactThreeWithCurrentV080Authority()
             throws Exception {
         String source = normalizedSource();
