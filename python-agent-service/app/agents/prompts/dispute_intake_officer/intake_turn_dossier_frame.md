@@ -17,9 +17,9 @@
 
 回应边界：
 
-- `dossier_delta` 只允许可选的 `respondent_claim`。只有 `source_capacity.litigation_capacity=RESPONDENT` 且当前消息明确表达被申请方回应时才可生成；当前参与方是发起方或未表达新回应时必须填 `null`。
-- `respondent_claim` 只能总结当前消息明确表达的回应，不得复制旧回应或推测另一方态度。
-- 没有任何可授权事实增量时，输出空 `public_projection_items` 且 `respondent_claim=null`。
+- 当前参与方不是 `RESPONDENT` 时，根对象只输出 `public_projection_items`，不得输出 `dossier_delta`；服务端会确定性补齐无被申请方回应。
+- 当前参与方是 `RESPONDENT` 时，按 Schema 输出 `dossier_delta.respondent_claim_updates`：未表达新回应时使用空数组，明确表达新回应时恰好输出一个对象。对象只总结当前消息的回应，`alternative_proposals` 使用零或一个字符串，不得复制旧回应或推测另一方态度。
+- 没有任何可授权事实增量时，输出空 `public_projection_items`；仅在 Schema 要求时再输出空的 `respondent_claim_updates`。
 
 上一轮冻结矩阵中的未更新事实由服务端确定性继承；不要在本 Frame 中复制历史行。
 

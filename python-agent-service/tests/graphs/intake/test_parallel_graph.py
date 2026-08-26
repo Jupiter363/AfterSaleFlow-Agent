@@ -366,6 +366,12 @@ async def test_three_physical_graphs_stream_independently_before_fan_in() -> Non
 
     assert result.all_succeeded
     assert set(result.completed) == set(FRAME_TYPES)
+    assert result.completed["DIALOGUE_FRAME"].result.model_dump(mode="json")[
+        "dialogue"
+    ] == {"remark_disposition": None}
+    assert result.completed["DOSSIER_FRAME"].result.model_dump(mode="json")[
+        "dossier_delta"
+    ] == {"respondent_claim": None}
     assert len(runner.calls) == 3
     assert {call["node_name"] for call in runner.calls} == {
         "intake_turn_dialogue_frame",
@@ -2128,9 +2134,6 @@ def _outputs() -> dict[str, dict[str, Any]]:
                     "candidate_text": "已记录您本轮补充的事实与处理意见。",
                 }
             ],
-            "dialogue": {
-                "remark_disposition": None,
-            },
         },
         "intake_turn_dossier_frame": {
             "public_projection_items": [
@@ -2146,9 +2149,6 @@ def _outputs() -> dict[str, dict[str, Any]]:
                     },
                 }
             ],
-            "dossier_delta": {
-                "respondent_claim": None,
-            },
         },
         "intake_turn_quality_frame": _quality_output(),
     }

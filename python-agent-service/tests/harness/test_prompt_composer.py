@@ -87,6 +87,24 @@ def test_parallel_intake_frame_prompt_profile_cannot_authorize_another_frame() -
     }
 
 
+def test_parallel_dialogue_and_dossier_prompts_omit_server_determined_nulls() -> None:
+    repository = PromptRepository()
+    dialogue = repository.render_system_prompt(
+        "intake_turn_dialogue_frame",
+        prompt_profile_id="intake_turn_dialogue_frame",
+    )
+    dossier = repository.render_system_prompt(
+        "intake_turn_dossier_frame",
+        prompt_profile_id="intake_turn_dossier_frame",
+    )
+
+    assert "根对象只输出 public_projection_items，不得输出 dialogue" in dialogue
+    assert "dialogue.remark_disposition=REMARK 或 NO_REMARK" in dialogue
+    assert "根对象只输出 public_projection_items，不得输出 dossier_delta" in dossier
+    assert "dossier_delta.respondent_claim_updates" in dossier
+    assert "未表达新回应时使用空数组" in dossier
+
+
 def test_target_e2e_v2_prompt_bundle_resolves_evidence_contract() -> None:
     repository = PromptRepository()
 

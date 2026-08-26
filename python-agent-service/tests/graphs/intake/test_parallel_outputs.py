@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -11,6 +13,7 @@ from app.graphs.intake.parallel_outputs import (
     IntakeDossierFrameV3,
     IntakeQualityFrameV2,
     QualityPublicProjectionDraftV2,
+    materialize_request_bound_frame_output,
     request_bound_dialogue_output_types,
     request_bound_dossier_output_types,
     request_bound_quality_output_types,
@@ -107,18 +110,54 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
     not_ready_type, _ = request_bound_dialogue_output_types(
         persisted_phase="NOT_READY"
     )
-    assert not_ready_type.model_validate(_dialogue_frame()).dialogue.remark_disposition is None
-    invalid_not_ready = _dialogue_frame()
-    invalid_not_ready["dialogue"]["remark_disposition"] = "REMARK"
-    with pytest.raises(ValidationError, match="literal_error"):
+    not_ready_schema = not_ready_type.model_json_schema()
+    assert set(not_ready_schema["properties"]) == {"public_projection_items"}
+    assert '"const": null' not in json.dumps(not_ready_schema, sort_keys=True)
+    assert '"type": "null"' not in json.dumps(not_ready_schema, sort_keys=True)
+    assert not_ready_type.model_validate(_dialogue_provider_frame())
+
+    invalid_not_ready = _dialogue_provider_frame()
+    invalid_not_ready["dialogue"] = {"remark_disposition": None}
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         not_ready_type.model_validate(invalid_not_ready)
+    assert materialize_request_bound_frame_output(
+        "DIALOGUE_FRAME",
+        _dialogue_provider_frame(),
+        persisted_phase="NOT_READY",
+        respondent_capacity=False,
+    ).model_dump(mode="json") == _dialogue_frame()
 
     waiting_type, _ = request_bound_dialogue_output_types(
         persisted_phase="WAITING_FOR_REMARK"
     )
-    waiting = _dialogue_frame()
-    waiting["dialogue"]["remark_disposition"] = "NO_REMARK"
-    assert waiting_type.model_validate(waiting).dialogue.remark_disposition == "NO_REMARK"
+    waiting_schema = waiting_type.model_json_schema()
+    assert set(waiting_schema["properties"]) == {
+        "public_projection_items",
+        "dialogue",
+    }
+    disposition_schema = waiting_schema["$defs"]["DialogueRemarkUpdateDraftV4"]
+    assert disposition_schema["properties"]["remark_disposition"] == {
+        "enum": ["REMARK", "NO_REMARK"],
+        "title": "Remark Disposition",
+        "type": "string",
+    }
+    assert '"const": null' not in json.dumps(disposition_schema, sort_keys=True)
+    assert '"type": "null"' not in json.dumps(disposition_schema, sort_keys=True)
+    for disposition in ("REMARK", "NO_REMARK"):
+        waiting = _dialogue_remark_provider_frame(disposition)
+        assert (
+            waiting_type.model_validate(waiting).dialogue.remark_disposition
+            == disposition
+        )
+        assert (
+            materialize_request_bound_frame_output(
+                "DIALOGUE_FRAME",
+                waiting,
+                persisted_phase="WAITING_FOR_REMARK",
+                respondent_capacity=False,
+            ).dialogue.remark_disposition
+            == disposition
+        )
 
     dossier_schema = IntakeDossierFrameV3.model_json_schema()
     dossier_item = dossier_schema["$defs"]["DossierPublicFactDraftV3"]
@@ -153,39 +192,84 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
         new_fact_key_prefix="NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
         respondent_capacity=False,
     )
-    payload = _dossier_frame()
+    payload = _dossier_provider_frame()
     assert item_type.model_validate(payload["public_projection_items"][0])
     assert frame_type.model_validate(payload)
+    initiator_schema = frame_type.model_json_schema()
+    assert set(initiator_schema["properties"]) == {"public_projection_items"}
 
-    unknown = _dossier_frame()["public_projection_items"][0]
+    unknown = _dossier_provider_frame()["public_projection_items"][0]
     unknown["source_row"]["fact_key"] = "FACT_UNKNOWN"
     with pytest.raises(ValidationError):
         item_type.model_validate(unknown)
 
-    foreign_new = _dossier_frame()["public_projection_items"][0]
+    foreign_new = _dossier_provider_frame()["public_projection_items"][0]
     foreign_new["source_row"]["fact_key"] = "NEW_BBBBBBBBBBBBBBBBBBBBBBBB_FACT"
     with pytest.raises(ValidationError):
         item_type.model_validate(foreign_new)
 
-    valid_new = _dossier_frame()["public_projection_items"][0]
+    valid_new = _dossier_provider_frame()["public_projection_items"][0]
     valid_new["source_row"]["fact_key"] = "NEW_AAAAAAAAAAAAAAAAAAAAAAAA_FACT"
     assert item_type.model_validate(valid_new)
 
-    initiator_claim = _dossier_frame()
-    initiator_claim["dossier_delta"]["respondent_claim"] = {
-        "attitude": "DISAGREE",
-        "position_summary": "不同意该诉求。",
-        "alternative_proposal": None,
-    }
-    with pytest.raises(ValidationError):
-        frame_type.model_validate(initiator_claim)
+    initiator_tail = _dossier_provider_frame()
+    initiator_tail["dossier_delta"] = {"respondent_claim_updates": []}
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        frame_type.model_validate(initiator_tail)
+    assert materialize_request_bound_frame_output(
+        "DOSSIER_FRAME",
+        _dossier_provider_frame(),
+        persisted_phase="NOT_READY",
+        respondent_capacity=False,
+    ).model_dump(mode="json") == _dossier_frame()
 
     respondent_frame_type, _ = request_bound_dossier_output_types(
         existing_fact_keys=("FACT_01",),
         new_fact_key_prefix="NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
         respondent_capacity=True,
     )
-    assert respondent_frame_type.model_validate(initiator_claim)
+    respondent_schema = respondent_frame_type.model_json_schema()
+    assert set(respondent_schema["properties"]) == {
+        "public_projection_items",
+        "dossier_delta",
+    }
+    respondent_tail_schema = {
+        name: respondent_schema["$defs"][name]
+        for name in ("DossierFrameDeltaDraftV4", "DossierRespondentClaimDraftV4")
+    }
+    assert '"const": null' not in json.dumps(respondent_tail_schema, sort_keys=True)
+    assert '"type": "null"' not in json.dumps(respondent_tail_schema, sort_keys=True)
+
+    empty_updates = _respondent_dossier_provider_frame([])
+    assert respondent_frame_type.model_validate(empty_updates)
+    assert (
+        materialize_request_bound_frame_output(
+            "DOSSIER_FRAME",
+            empty_updates,
+            persisted_phase="NOT_READY",
+            respondent_capacity=True,
+        ).dossier_delta.respondent_claim
+        is None
+    )
+
+    claim_update = {
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position_summary": "同意按约定条件复测。",
+        "alternative_proposals": ["复测不达标后办理退货退款。"],
+    }
+    respondent_claim = _respondent_dossier_provider_frame([claim_update])
+    assert respondent_frame_type.model_validate(respondent_claim)
+    materialized = materialize_request_bound_frame_output(
+        "DOSSIER_FRAME",
+        respondent_claim,
+        persisted_phase="NOT_READY",
+        respondent_capacity=True,
+    )
+    assert materialized.dossier_delta.respondent_claim.model_dump(mode="json") == {
+        "attitude": "ALTERNATIVE_PROPOSED",
+        "position_summary": "同意按约定条件复测。",
+        "alternative_proposal": "复测不达标后办理退货退款。",
+    }
 
 
 def test_dossier_schema_accepts_five_facts_and_rejects_the_sixth() -> None:
@@ -388,6 +472,19 @@ def _dialogue_frame() -> dict[str, object]:
     }
 
 
+def _dialogue_provider_frame() -> dict[str, object]:
+    return {
+        "public_projection_items": _dialogue_frame()["public_projection_items"],
+    }
+
+
+def _dialogue_remark_provider_frame(disposition: str) -> dict[str, object]:
+    return {
+        **_dialogue_provider_frame(),
+        "dialogue": {"remark_disposition": disposition},
+    }
+
+
 def _dossier_frame() -> dict[str, object]:
     return {
         "public_projection_items": [
@@ -398,6 +495,21 @@ def _dossier_frame() -> dict[str, object]:
         "dossier_delta": {
             "respondent_claim": None,
         },
+    }
+
+
+def _dossier_provider_frame() -> dict[str, object]:
+    return {
+        "public_projection_items": _dossier_frame()["public_projection_items"],
+    }
+
+
+def _respondent_dossier_provider_frame(
+    updates: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        **_dossier_provider_frame(),
+        "dossier_delta": {"respondent_claim_updates": updates},
     }
 
 

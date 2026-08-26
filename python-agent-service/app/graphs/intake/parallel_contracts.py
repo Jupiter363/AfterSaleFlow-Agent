@@ -74,8 +74,8 @@ FRAME_PROMPT_PROFILE: Mapping[ParallelFrameType, PromptProfileId] = {
 }
 
 FRAME_OUTPUT_SCHEMA: Mapping[ParallelFrameType, Identifier] = {
-    "DIALOGUE_FRAME": "intake-dialogue-frame.v3",
-    "DOSSIER_FRAME": "intake-dossier-frame.v3",
+    "DIALOGUE_FRAME": "intake-dialogue-frame.v4",
+    "DOSSIER_FRAME": "intake-dossier-frame.v4",
     "QUALITY_FRAME": "intake-quality-frame.v2",
 }
 

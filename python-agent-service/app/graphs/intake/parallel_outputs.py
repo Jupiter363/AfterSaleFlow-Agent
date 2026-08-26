@@ -111,10 +111,26 @@ class IntakeDialogueFrameV3(StrictFrameOutput):
     dialogue: DialogueFrameValueV2
 
 
+class DialogueRemarkUpdateDraftV4(StrictFrameOutput):
+    remark_disposition: DialogueRemarkDisposition
+
+
+class IntakeDialogueGenerationV4(StrictFrameOutput):
+    """Provider draft for non-remark phases; Java-known nulls are absent."""
+
+    public_projection_items: tuple[DialoguePublicSegmentDraftV3, ...] = Field(
+        min_length=1, max_length=DIALOGUE_SEGMENT_MAX_ITEMS
+    )
+
+
+class IntakeDialogueRemarkGenerationV4(IntakeDialogueGenerationV4):
+    dialogue: DialogueRemarkUpdateDraftV4
+
+
 def request_bound_dialogue_output_types(
     *,
     persisted_phase: str,
-) -> tuple[type[IntakeDialogueFrameV3], type[DialoguePublicSegmentDraftV3]]:
+) -> tuple[type[BaseModel], type[DialoguePublicSegmentDraftV3]]:
     """Expose only the remark distinction that this exact turn may author."""
 
     if persisted_phase not in {
@@ -123,26 +139,13 @@ def request_bound_dialogue_output_types(
         "WAITING_FOR_REMARK",
     }:
         raise ValueError("request-bound Dialogue phase cannot accept a ROOM_MESSAGE")
-    identity = hashlib.sha256(persisted_phase.encode("utf-8")).hexdigest()[:12]
-    disposition_type: Any = (
-        DialogueRemarkDisposition
+    frame_type: type[BaseModel] = (
+        IntakeDialogueRemarkGenerationV4
         if persisted_phase == "WAITING_FOR_REMARK"
-        else Literal[None]
-    )
-    dialogue_type = create_model(
-        f"DialogueFrameValueV2_{identity}",
-        __base__=DialogueFrameValueV2,
-        __module__=__name__,
-        remark_disposition=(disposition_type, ...),
-    )
-    frame_type = create_model(
-        f"IntakeDialogueFrameV3_{identity}",
-        __base__=IntakeDialogueFrameV3,
-        __module__=__name__,
-        dialogue=(dialogue_type, ...),
+        else IntakeDialogueGenerationV4
     )
     return (
-        cast(type[IntakeDialogueFrameV3], frame_type),
+        frame_type,
         DialoguePublicSegmentDraftV3,
     )
 
@@ -187,6 +190,24 @@ class DossierFrameDeltaV2(StrictFrameOutput):
     respondent_claim: DossierRespondentClaimV2 | None = None
 
 
+class DossierRespondentClaimDraftV4(StrictFrameOutput):
+    attitude: Literal[
+        "AGREE",
+        "PARTIALLY_AGREE",
+        "DISAGREE",
+        "ALTERNATIVE_PROPOSED",
+        "NEED_MORE_INFO",
+    ]
+    position_summary: DossierLongText
+    alternative_proposals: tuple[DossierLongText, ...] = Field(max_length=1)
+
+
+class DossierFrameDeltaDraftV4(StrictFrameOutput):
+    respondent_claim_updates: tuple[DossierRespondentClaimDraftV4, ...] = Field(
+        max_length=1
+    )
+
+
 class IntakeDossierFrameV3(StrictFrameOutput):
     public_projection_items: tuple[DossierPublicFactDraftV3, ...] = Field(
         max_length=DOSSIER_FACT_MAX_ITEMS
@@ -205,12 +226,31 @@ class IntakeDossierFrameV3(StrictFrameOutput):
     def materialized_dossier_patch(self) -> dict[str, Any]:
         return _materialize_dossier_patch(self.public_projection_items)
 
+
+class IntakeDossierGenerationV4(StrictFrameOutput):
+    """Provider draft containing only current-source facts for an initiator."""
+
+    public_projection_items: tuple[DossierPublicFactDraftV3, ...] = Field(
+        max_length=DOSSIER_FACT_MAX_ITEMS
+    )
+
+    @model_validator(mode="after")
+    def validate_fact_identity(self) -> IntakeDossierGenerationV4:
+        fact_keys = tuple(item.source_row.fact_key for item in self.public_projection_items)
+        if len(fact_keys) != len(set(fact_keys)):
+            raise ValueError("Dossier current-source facts must have unique fact keys")
+        return self
+
+
+class IntakeRespondentDossierGenerationV4(IntakeDossierGenerationV4):
+    dossier_delta: DossierFrameDeltaDraftV4
+
 def request_bound_dossier_output_types(
     *,
     existing_fact_keys: tuple[str, ...],
     new_fact_key_prefix: str,
     respondent_capacity: bool,
-) -> tuple[type[IntakeDossierFrameV3], type[DossierPublicFactDraftV3]]:
+) -> tuple[type[BaseModel], type[DossierPublicFactDraftV3]]:
     """Narrow Dossier authority in the provider-visible Schema for this exact turn."""
 
     if len(existing_fact_keys) > 200 or len(existing_fact_keys) != len(
@@ -260,27 +300,22 @@ def request_bound_dossier_output_types(
         __module__=__name__,
         source_row=(row_type, ...),
     )
-    delta_fields: dict[str, tuple[Any, Any]] = {}
-    if not respondent_capacity:
-        delta_fields["respondent_claim"] = (Literal[None], None)
-    delta_type = create_model(
-        f"DossierFrameDeltaV2_{identity}",
-        __base__=DossierFrameDeltaV2,
-        __module__=__name__,
-        **delta_fields,
+    frame_base: type[BaseModel] = (
+        IntakeRespondentDossierGenerationV4
+        if respondent_capacity
+        else IntakeDossierGenerationV4
     )
     frame_type = create_model(
-        f"IntakeDossierFrameV3_{identity}",
-        __base__=IntakeDossierFrameV3,
+        f"IntakeDossierGenerationV4_{identity}",
+        __base__=frame_base,
         __module__=__name__,
         public_projection_items=(
             tuple[item_type, ...],
             Field(max_length=DOSSIER_FACT_MAX_ITEMS),
         ),
-        dossier_delta=(delta_type, ...),
     )
     return (
-        cast(type[IntakeDossierFrameV3], frame_type),
+        frame_type,
         cast(type[DossierPublicFactDraftV3], item_type),
     )
 
@@ -469,6 +504,67 @@ FRAME_OUTPUT_MODELS: Mapping[ParallelFrameType, type[StrictFrameOutput]] = {
 }
 
 
+def materialize_request_bound_frame_output(
+    frame_type: ParallelFrameType,
+    value: Mapping[str, Any] | BaseModel,
+    *,
+    persisted_phase: str,
+    respondent_capacity: bool,
+) -> ParallelFrameOutput:
+    """Convert a bounded Provider draft into the stable sealed Frame contract."""
+
+    payload = value.model_dump(mode="json") if isinstance(value, BaseModel) else dict(value)
+    if frame_type == "DIALOGUE_FRAME":
+        items = payload.get("public_projection_items")
+        if persisted_phase == "WAITING_FOR_REMARK":
+            draft = IntakeDialogueRemarkGenerationV4.model_validate(payload)
+            disposition: DialogueRemarkDisposition | None = (
+                draft.dialogue.remark_disposition
+            )
+            items = draft.public_projection_items
+        else:
+            draft = IntakeDialogueGenerationV4.model_validate(payload)
+            disposition = None
+            items = draft.public_projection_items
+        return IntakeDialogueFrameV3.model_validate(
+            {
+                "public_projection_items": [
+                    item.model_dump(mode="json") for item in items
+                ],
+                "dialogue": {"remark_disposition": disposition},
+            }
+        )
+    if frame_type == "DOSSIER_FRAME":
+        if respondent_capacity:
+            draft = IntakeRespondentDossierGenerationV4.model_validate(payload)
+            updates = draft.dossier_delta.respondent_claim_updates
+        else:
+            draft = IntakeDossierGenerationV4.model_validate(payload)
+            updates = ()
+        respondent_claim: dict[str, Any] | None = None
+        if updates:
+            update = updates[0]
+            respondent_claim = {
+                "attitude": update.attitude,
+                "position_summary": update.position_summary,
+                "alternative_proposal": (
+                    update.alternative_proposals[0]
+                    if update.alternative_proposals
+                    else None
+                ),
+            }
+        return IntakeDossierFrameV3.model_validate(
+            {
+                "public_projection_items": [
+                    item.model_dump(mode="json")
+                    for item in draft.public_projection_items
+                ],
+                "dossier_delta": {"respondent_claim": respondent_claim},
+            }
+        )
+    return validate_parallel_frame_output(frame_type, payload)
+
+
 def validate_parallel_frame_output(
     frame_type: ParallelFrameType,
     value: Mapping[str, Any] | BaseModel,
@@ -514,6 +610,7 @@ __all__ = [
     "ParallelFrameOutput",
     "QUALITY_DIMENSION_ORDER",
     "QualityPublicProjectionDraftV2",
+    "materialize_request_bound_frame_output",
     "request_bound_dialogue_output_types",
     "request_bound_dossier_output_types",
     "request_bound_quality_output_types",

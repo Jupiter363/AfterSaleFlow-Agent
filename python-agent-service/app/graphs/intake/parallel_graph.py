@@ -41,6 +41,7 @@ from app.graphs.intake.parallel_outputs import (
     QualityPublicGapDraftV2,
     QualityPublicMetricDraftV2,
     QualityPublicProjectionDraftV2,
+    materialize_request_bound_frame_output,
     request_bound_dialogue_output_types,
     request_bound_dossier_output_types,
     request_bound_quality_output_types,
@@ -920,9 +921,16 @@ async def _invoke_frame_model(
                 await close()
         if completed is None:
             raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_COMPLETION_MISSING")
-        final = validate_parallel_frame_output(
+        final = materialize_request_bound_frame_output(
             frame_type,
             completed.generation.value,
+            persisted_phase=(
+                request.model_input.common_model_context.previous_state.persisted_phase
+            ),
+            respondent_capacity=(
+                request.model_input.common_model_context.source_capacity.litigation_capacity
+                == "RESPONDENT"
+            ),
         )
         final_payload = final.model_dump(mode="json")
         if final_payload["public_projection_items"] != provider_items:
@@ -1265,7 +1273,14 @@ def _request_bound_frame_semantic_validator(
     """Attach request authority without changing the provider-visible JSON Schema."""
 
     def validate(value: Any) -> Any:
-        frame = validate_parallel_frame_output(frame_type, value)
+        frame = materialize_request_bound_frame_output(
+            frame_type,
+            value,
+            persisted_phase=model_context.previous_state.persisted_phase,
+            respondent_capacity=(
+                model_context.source_capacity.litigation_capacity == "RESPONDENT"
+            ),
+        )
         if isinstance(frame, IntakeDialogueFrameV3):
             phase = model_context.previous_state.persisted_phase
             disposition = frame.dialogue.remark_disposition

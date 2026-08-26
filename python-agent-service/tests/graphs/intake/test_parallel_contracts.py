@@ -6,6 +6,7 @@ import pytest
 
 from app.contracts.v1.codec import canonical_sha256
 from app.graphs.intake.parallel_contracts import (
+    FRAME_OUTPUT_SCHEMA,
     FRAME_TYPES,
     IntakeAuthorityRefV1,
     IntakeCaseRefV1,
@@ -311,6 +312,14 @@ def test_instruction_packs_have_disjoint_frame_owned_outputs() -> None:
             for field in other_pack.allowed_output_fields[1:]
         }
         assert set(pack.forbidden_output_fields) == foreign_owned_fields
+
+
+def test_frame_output_schema_pins_dialogue_and_dossier_v4_without_changing_quality() -> None:
+    assert dict(FRAME_OUTPUT_SCHEMA) == {
+        "DIALOGUE_FRAME": "intake-dialogue-frame.v4",
+        "DOSSIER_FRAME": "intake-dossier-frame.v4",
+        "QUALITY_FRAME": "intake-quality-frame.v2",
+    }
 
 
 def test_prompt_profiles_do_not_embed_foreign_frame_rule_names() -> None:

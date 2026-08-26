@@ -48,8 +48,8 @@ public interface IntakeParallelFrameStagingPort {
             String frameSetId, String runId, String attemptId);
 
     enum FrameType {
-        DIALOGUE_FRAME("intake_turn_dialogue_frame", "intake-dialogue-frame.v3"),
-        DOSSIER_FRAME("intake_turn_dossier_frame", "intake-dossier-frame.v3"),
+        DIALOGUE_FRAME("intake_turn_dialogue_frame", "intake-dialogue-frame.v4"),
+        DOSSIER_FRAME("intake_turn_dossier_frame", "intake-dossier-frame.v4"),
         QUALITY_FRAME("intake_turn_quality_frame", "intake-quality-frame.v2");
 
         private final String promptProfileId;

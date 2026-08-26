@@ -27,6 +27,16 @@ import org.junit.jupiter.api.Test;
 class IntakeParallelFrameStagingPortTest {
 
     @Test
+    void frameSchemaPinsUpgradeDialogueAndDossierWithoutChangingQuality() {
+        assertThat(FrameType.DIALOGUE_FRAME.outputSchemaId())
+                .isEqualTo("intake-dialogue-frame.v4");
+        assertThat(FrameType.DOSSIER_FRAME.outputSchemaId())
+                .isEqualTo("intake-dossier-frame.v4");
+        assertThat(FrameType.QUALITY_FRAME.outputSchemaId())
+                .isEqualTo("intake-quality-frame.v2");
+    }
+
+    @Test
     void admitsExactlyThreeGenerationOneManifestsWithOneFrozenModelView() {
         FrameSetAdmission admission = admissionWithDeadline(
                 manifests(1), Instant.parse("2026-08-24T01:01:00.123456789Z"));
