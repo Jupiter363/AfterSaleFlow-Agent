@@ -165,6 +165,25 @@ def test_parallel_receipt_lineage_is_independent_of_the_thread_fence_origin() ->
     assert "prior.attempt_id = new.attempt_id" in sql_text
 
 
+def test_parallel_abandonment_is_a_distinct_expired_lease_lineage_authority() -> None:
+    sql_text = _compact(
+        _sql("G016_parallel_receipt_abandonment_authority.sql")
+    )
+
+    assert "create table agent_graph_parallel_receipt_abandonment" in sql_text
+    assert "predecessor_abandonment_id varchar(128)" in sql_text
+    assert (
+        "num_nonnulls( predecessor_cycle_id, predecessor_execution_id, "
+        "predecessor_abandonment_id ) <= 1"
+    ) in sql_text
+    assert "lease.lease_expires_at <= clock_timestamp()" in sql_text
+    assert "lease.lease_expires_at > clock_timestamp()" in sql_text
+    assert "provider_call_count_after > provider_call_count_before" in sql_text
+    assert "abandoned.abandonment_id = new.predecessor_abandonment_id" in sql_text
+    assert "cycle.execution_id = execution.execution_id" in sql_text
+    assert "successor.predecessor_abandonment_id = abandonment.abandonment_id" in sql_text
+
+
 def test_cancelled_released_and_expired_leases_allow_exactly_one_fenced_takeover() -> None:
     sql_text = _sql("G001_graph_runtime.sql")
     guard = _function(sql_text, "guard_agent_graph_lease_update()")

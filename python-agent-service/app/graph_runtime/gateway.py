@@ -59,6 +59,7 @@ from app.graph_runtime.ledger import (
     CommandRegistration,
     CommandStatus,
     InvocationNonce,
+    ParallelReceiptAbandonmentRecord,
     ParallelReceiptCycleRecord,
     ParallelReceiptExecutionRecord,
     PostgresCommandLedger,
@@ -720,6 +721,155 @@ class GraphCommandGateway:
         )
         return execution
 
+    async def abandon_parallel_receipt_execution(
+        self,
+        admission: GatewayAdmission,
+        *,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+        admission_receipt: Mapping[str, Any],
+    ) -> ParallelReceiptAbandonmentRecord:
+        """Freeze an expired, Provider-started receipt before Java lane recovery."""
+
+        self._require_shadow()
+        self._require_parallel_technical_admission(admission)
+        if (
+            admission.command.attempt_id is None
+            or admission_receipt.get("receipt_sha256") != receipt_sha256
+            or admission_receipt.get("frame_set_id") != frame_set_id
+            or admission_receipt.get("authority_sha256") != authority_sha256
+        ):
+            raise GraphContractError(
+                "parallel receipt abandonment differs from the command"
+            )
+        stored_abandonment: ParallelReceiptAbandonmentRecord | None = None
+
+        async def abandon_transaction(connection: Any) -> None:
+            nonlocal stored_abandonment
+            lease_inspection = await self._leases.lock_for_recovery(
+                connection,
+                thread_id=admission.binding.thread_id,
+            )
+            current = await self._ledger.load(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            self._ledger.require_same_binding(current.binding, admission.binding)
+            attempt = await self._ledger.latest_attempt(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+            )
+            if attempt is None or attempt.attempt_id != admission.command.attempt_id:
+                raise GraphNewAgentAttemptRequiredError(
+                    "parallel receipt abandonment lost its exact attempt"
+                )
+            existing = await self._ledger.load_parallel_receipt_abandonment(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+                attempt_id=attempt.attempt_id,
+                receipt_sha256=receipt_sha256,
+            )
+            if existing is not None:
+                if (
+                    existing.request_hash != admission.binding.request_hash
+                    or existing.frame_set_id != frame_set_id
+                    or existing.authority_sha256 != authority_sha256
+                    or existing.admission_receipt != dict(admission_receipt)
+                ):
+                    raise GraphTerminalBindingError(
+                        "parallel receipt abandonment replay drifted"
+                    )
+                stored_abandonment = existing
+                return
+            receipt_execution = await self._ledger.load_parallel_receipt_execution(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+                attempt_id=attempt.attempt_id,
+                receipt_sha256=receipt_sha256,
+            )
+            cycle = await self._ledger.load_parallel_receipt_cycle(
+                connection,
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+                attempt_id=attempt.attempt_id,
+                receipt_sha256=receipt_sha256,
+            )
+            if cycle is not None:
+                raise GraphTerminalBindingError(
+                    "parallel receipt cycle already completed before abandonment"
+                )
+            if lease_inspection is not None and lease_inspection.active:
+                raise GraphLeaseUnavailableError(
+                    "parallel receipt execution lease is still active"
+                )
+            if (
+                current.status is not CommandStatus.EXECUTING
+                or attempt.status is not AttemptStatus.EXECUTING
+                or receipt_execution is None
+                or lease_inspection is None
+                or current.fencing_token != attempt.fencing_token
+                or receipt_execution.thread_id != admission.binding.thread_id
+                or receipt_execution.command_id != admission.binding.command_id
+                or receipt_execution.request_hash != admission.binding.request_hash
+                or receipt_execution.attempt_id != attempt.attempt_id
+                or receipt_execution.frame_set_id != frame_set_id
+                or receipt_execution.receipt_sha256 != receipt_sha256
+                or receipt_execution.authority_sha256 != authority_sha256
+                or receipt_execution.owner_id != attempt.owner_id
+                or receipt_execution.fencing_token != attempt.fencing_token
+                or lease_inspection.lease.command_id != admission.binding.command_id
+                or lease_inspection.lease.owner_id != attempt.owner_id
+                or lease_inspection.lease.fencing_token != attempt.fencing_token
+                or attempt.provider_call_count
+                <= receipt_execution.provider_call_count_at_admission
+            ):
+                raise GraphNewAgentAttemptRequiredError(
+                    "parallel receipt abandonment lacks exact expired execution authority"
+                )
+            abandonment = ParallelReceiptAbandonmentRecord.create(
+                thread_id=admission.binding.thread_id,
+                command_id=admission.binding.command_id,
+                request_hash=admission.binding.request_hash,
+                attempt_id=attempt.attempt_id,
+                frame_set_id=frame_set_id,
+                receipt_sha256=receipt_sha256,
+                authority_sha256=authority_sha256,
+                admission_receipt=admission_receipt,
+                provider_call_count_before=(
+                    receipt_execution.provider_call_count_at_admission
+                ),
+                provider_call_count_after=attempt.provider_call_count,
+                owner_id=attempt.owner_id,
+                fencing_token=attempt.fencing_token,
+                abandoned_at=lease_inspection.database_now,
+            )
+            stored_abandonment = await self._ledger.store_parallel_receipt_abandonment(
+                connection,
+                execution_attempt=attempt,
+                abandonment=abandonment,
+            )
+            if stored_abandonment != abandonment:
+                raise GraphTerminalBindingError(
+                    "parallel receipt abandonment persistence drifted"
+                )
+
+        await run_postgres_transaction(
+            self._pool,
+            timeout=self._acquire_timeout_seconds,
+            operation=abandon_transaction,
+            operation_name="abandon expired parallel receipt execution",
+        )
+        if stored_abandonment is None:
+            raise GraphContractError(
+                "parallel receipt abandonment returned no durable record"
+            )
+        return stored_abandonment
+
     async def resume_parallel_technical_execution(
         self,
         admission: GatewayAdmission,
@@ -780,6 +930,16 @@ class GraphCommandGateway:
                     attempt_id=attempt.attempt_id,
                 )
             )
+            prior_abandonment = (
+                None
+                if attempt is None
+                else await self._ledger.load_latest_parallel_receipt_abandonment(
+                    connection,
+                    thread_id=admission.binding.thread_id,
+                    command_id=admission.binding.command_id,
+                    attempt_id=attempt.attempt_id,
+                )
+            )
             existing_execution = (
                 None
                 if attempt is None
@@ -821,6 +981,11 @@ class GraphCommandGateway:
                     if existing_execution is None
                     else existing_execution.predecessor_execution_id
                 )
+                predecessor_abandonment_id = (
+                    None
+                    if existing_execution is None
+                    else existing_execution.predecessor_abandonment_id
+                )
                 provider_call_count_at_admission = (
                     attempt.provider_call_count
                     if existing_execution is None
@@ -836,6 +1001,7 @@ class GraphCommandGateway:
                     authority_sha256=authority_sha256,
                     predecessor_cycle_id=predecessor_cycle_id,
                     predecessor_execution_id=predecessor_execution_id,
+                    predecessor_abandonment_id=predecessor_abandonment_id,
                     provider_call_count_at_admission=(
                         provider_call_count_at_admission
                     ),
@@ -853,6 +1019,7 @@ class GraphCommandGateway:
                 if existing_execution is None:
                     if (
                         prior_cycle is not None
+                        or prior_abandonment is not None
                         or receipt_cycle is not None
                         or attempt.provider_call_count != 0
                     ):
@@ -912,46 +1079,132 @@ class GraphCommandGateway:
                     )
                     rebind_prior_cycle = None
                     rebind_prior_execution = existing_execution
+                    rebind_prior_abandonment = None
                 else:
-                    if (
-                        prior_cycle is None
-                        or prior_cycle.frame_set_id != frame_set_id
-                        or prior_cycle.provider_call_count_after
-                        != attempt.provider_call_count
-                        or not hmac.compare_digest(
-                            prior_cycle.authority_sha256,
-                            authority_sha256,
-                        )
-                        or hmac.compare_digest(
-                            prior_cycle.receipt_sha256,
-                            receipt_sha256,
-                        )
-                    ):
-                        raise GraphNewAgentAttemptRequiredError(
-                            "parallel technical resume lost its completed receipt"
-                        )
-                    prior_cycle.require_successor_receipt(admission_receipt)
-                    receipt_execution = ParallelReceiptExecutionRecord.create(
-                        thread_id=admission.binding.thread_id,
-                        command_id=admission.binding.command_id,
-                        request_hash=admission.binding.request_hash,
-                        attempt_id=attempt.attempt_id,
-                        frame_set_id=frame_set_id,
-                        receipt_sha256=receipt_sha256,
-                        authority_sha256=authority_sha256,
-                        predecessor_cycle_id=prior_cycle.cycle_id,
-                        provider_call_count_at_admission=attempt.provider_call_count,
-                        owner_id=owner_id,
-                        fencing_token=candidate.fencing_token,
+                    current_cycle = (
+                        prior_cycle
+                        if prior_cycle is not None
+                        and prior_cycle.fencing_token == attempt.fencing_token
+                        else None
                     )
-                    rebind_prior_cycle = prior_cycle
-                    rebind_prior_execution = None
+                    current_abandonment = (
+                        prior_abandonment
+                        if prior_abandonment is not None
+                        and prior_abandonment.fencing_token
+                        == attempt.fencing_token
+                        else None
+                    )
+                    if current_cycle is not None and current_abandonment is not None:
+                        raise GraphTerminalBindingError(
+                            "parallel receipt has both cycle and abandonment authority"
+                        )
+                    if current_cycle is not None:
+                        if (
+                            current_cycle.frame_set_id != frame_set_id
+                            or current_cycle.provider_call_count_after
+                            != attempt.provider_call_count
+                            or not hmac.compare_digest(
+                                current_cycle.authority_sha256,
+                                authority_sha256,
+                            )
+                            or hmac.compare_digest(
+                                current_cycle.receipt_sha256,
+                                receipt_sha256,
+                            )
+                        ):
+                            raise GraphNewAgentAttemptRequiredError(
+                                "parallel technical resume lost its completed receipt"
+                            )
+                        current_cycle.require_successor_receipt(admission_receipt)
+                        receipt_execution = ParallelReceiptExecutionRecord.create(
+                            thread_id=admission.binding.thread_id,
+                            command_id=admission.binding.command_id,
+                            request_hash=admission.binding.request_hash,
+                            attempt_id=attempt.attempt_id,
+                            frame_set_id=frame_set_id,
+                            receipt_sha256=receipt_sha256,
+                            authority_sha256=authority_sha256,
+                            predecessor_cycle_id=current_cycle.cycle_id,
+                            provider_call_count_at_admission=(
+                                attempt.provider_call_count
+                            ),
+                            owner_id=owner_id,
+                            fencing_token=candidate.fencing_token,
+                        )
+                        rebind_prior_cycle = current_cycle
+                        rebind_prior_execution = None
+                        rebind_prior_abandonment = None
+                    elif current_abandonment is not None:
+                        if (
+                            current_abandonment.frame_set_id != frame_set_id
+                            or current_abandonment.provider_call_count_after
+                            != attempt.provider_call_count
+                            or not hmac.compare_digest(
+                                current_abandonment.authority_sha256,
+                                authority_sha256,
+                            )
+                            or hmac.compare_digest(
+                                current_abandonment.receipt_sha256,
+                                receipt_sha256,
+                            )
+                        ):
+                            raise GraphNewAgentAttemptRequiredError(
+                                "parallel technical resume lost its abandoned receipt"
+                            )
+                        current_abandonment.require_successor_receipt(
+                            admission_receipt
+                        )
+                        abandoned_execution = (
+                            await self._ledger.load_parallel_receipt_execution(
+                                connection,
+                                thread_id=admission.binding.thread_id,
+                                command_id=admission.binding.command_id,
+                                attempt_id=attempt.attempt_id,
+                                receipt_sha256=(
+                                    current_abandonment.receipt_sha256
+                                ),
+                            )
+                        )
+                        if (
+                            abandoned_execution is None
+                            or abandoned_execution.execution_id
+                            != current_abandonment.execution_id
+                        ):
+                            raise GraphTerminalBindingError(
+                                "parallel abandonment lost its execution"
+                            )
+                        receipt_execution = ParallelReceiptExecutionRecord.create(
+                            thread_id=admission.binding.thread_id,
+                            command_id=admission.binding.command_id,
+                            request_hash=admission.binding.request_hash,
+                            attempt_id=attempt.attempt_id,
+                            frame_set_id=frame_set_id,
+                            receipt_sha256=receipt_sha256,
+                            authority_sha256=authority_sha256,
+                            predecessor_cycle_id=None,
+                            predecessor_abandonment_id=(
+                                current_abandonment.abandonment_id
+                            ),
+                            provider_call_count_at_admission=(
+                                attempt.provider_call_count
+                            ),
+                            owner_id=owner_id,
+                            fencing_token=candidate.fencing_token,
+                        )
+                        rebind_prior_cycle = None
+                        rebind_prior_execution = abandoned_execution
+                        rebind_prior_abandonment = current_abandonment
+                    else:
+                        raise GraphNewAgentAttemptRequiredError(
+                            "parallel technical resume lost its predecessor receipt"
+                        )
                 current, attempt = await self._ledger.rebind_parallel_attempt(
                     connection,
                     binding=admission.binding,
                     attempt=attempt,
                     prior_cycle=rebind_prior_cycle,
                     prior_execution=rebind_prior_execution,
+                    prior_abandonment=rebind_prior_abandonment,
                     receipt_execution=receipt_execution,
                     next_owner_id=owner_id,
                     next_fencing_token=candidate.fencing_token,

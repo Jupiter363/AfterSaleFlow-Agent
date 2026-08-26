@@ -493,6 +493,7 @@ def create_graph_commands_router(
                 if len(phase_values) != 1 or phase_values[0] not in {
                     "PREPARE",
                     "EXECUTE",
+                    "ABANDON",
                     "TERMINATE",
                 }:
                     raise InvocationEnvelopeError(
@@ -512,7 +513,7 @@ def create_graph_commands_router(
                     parallel_receipt = decode_parallel_admission_receipt_header(
                         admission_values[0]
                     )
-                    if parallel_phase == "EXECUTE":
+                    if parallel_phase in {"EXECUTE", "ABANDON"}:
                         if failure_values:
                             raise InvocationEnvelopeError(
                                 "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
@@ -607,6 +608,32 @@ def create_graph_commands_router(
                             "X-Intake-Frame-Set-Id": authority.frame_set_id,
                             "X-Intake-Parallel-Authority": (
                                 encode_parallel_frame_authority_header(authority)
+                            ),
+                            "X-Graph-Execution-Lane": envelope.execution_lane,
+                            "X-Graph-Activation-Id": envelope.activation_id,
+                        },
+                    )
+                if parallel_phase == "ABANDON":
+                    if parallel_receipt is None:
+                        raise ParallelFrameStreamProtocolError(
+                            "parallel abandonment admission receipt is absent"
+                        )
+                    abandonment = await parallel_service.abandon_stale_execution(
+                        command=command,
+                        verified_invocation=verified,
+                        expected_thread=expected_thread,
+                        admission_receipt=parallel_receipt,
+                    )
+                    return JSONResponse(
+                        status_code=200,
+                        content=abandonment.canonical_document(),
+                        headers={
+                            **_NO_STORE_HEADERS,
+                            "X-Agent-Run-Id": command.logical_run_id,
+                            "X-Agent-Stream-Protocol": "agent-stream.v4",
+                            "X-Intake-Frame-Set-Id": abandonment.frame_set_id,
+                            "X-Intake-Parallel-Abandonment-Receipt": (
+                                abandonment.abandonment_sha256
                             ),
                             "X-Graph-Execution-Lane": envelope.execution_lane,
                             "X-Graph-Activation-Id": envelope.activation_id,

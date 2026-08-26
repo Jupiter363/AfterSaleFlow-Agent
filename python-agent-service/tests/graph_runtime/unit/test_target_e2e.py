@@ -412,6 +412,9 @@ def test_parallel_phase_and_receipt_hash_must_form_an_exact_pair(
             ),
             phase=phase,  # type: ignore[arg-type]
             admission_receipt_sha256=request_receipt_hash,
+            failure_code=(
+                "ACTIVITY_RETRY_EXHAUSTED" if phase == "TERMINATE" else None
+            ),
         )
     with pytest.raises(InvocationEnvelopeError, match="HEADER_REJECTED"):
         InvocationEnvelopeVerifier(

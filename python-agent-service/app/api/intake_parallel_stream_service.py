@@ -50,6 +50,7 @@ from app.graph_runtime.intake_parallel_runtime import (
 from app.graph_runtime.lease import LEASE_DURATION_SECONDS
 from app.graph_runtime.ledger import (
     AttemptStatus,
+    ParallelReceiptAbandonmentRecord,
     ParallelReceiptCycleRecord,
     TechnicalCompletionRecord,
 )
@@ -118,6 +119,16 @@ class _ParallelGateway(Protocol):
         receipt_sha256: str,
         authority_sha256: str,
     ) -> GatewayExecution: ...
+
+    async def abandon_parallel_receipt_execution(
+        self,
+        admission: GatewayAdmission,
+        *,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+        admission_receipt: Mapping[str, Any],
+    ) -> ParallelReceiptAbandonmentRecord: ...
 
     async def load_parallel_receipt_cycle(
         self,
@@ -478,6 +489,52 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 room_fencing_token=verified_invocation.room_fencing_token,
             )
             return _authority_from_command_bundle(command, bundle)
+        finally:
+            await self._gate.leave(token)
+
+    async def abandon_stale_execution(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+        admission_receipt: ParallelFrameAdmissionReceipt,
+    ) -> ParallelReceiptAbandonmentRecord:
+        if (
+            verified_invocation.claims.parallel_phase != "ABANDON"
+            or verified_invocation.claims.parallel_admission_receipt_sha256
+            != admission_receipt.receipt_sha256
+            or verified_invocation.claims.parallel_failure_code is not None
+        ):
+            raise GraphContractError(
+                "parallel receipt abandonment differs from its verified invocation"
+            )
+        token = await self._gate.enter()
+        try:
+            prepared_bundle = await self._load_prepared_bundle(
+                command,
+                expected_thread,
+                room_fencing_token=verified_invocation.room_fencing_token,
+            )
+            authority = admission_receipt.require_authority(
+                command=command,
+                authority=_authority_from_command_bundle(
+                    command,
+                    prepared_bundle,
+                ),
+            )
+            admission = await self._gateway.admit(
+                command=command,
+                verified_invocation=verified_invocation,
+                expected_thread=expected_thread,
+            )
+            return await self._gateway.abandon_parallel_receipt_execution(
+                admission,
+                frame_set_id=authority.frame_set_id,
+                receipt_sha256=admission_receipt.receipt_sha256,
+                authority_sha256=admission_receipt.authority_sha256,
+                admission_receipt=admission_receipt.canonical_document(),
+            )
         finally:
             await self._gate.leave(token)
 

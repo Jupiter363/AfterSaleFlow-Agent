@@ -48,6 +48,7 @@ def test_repository_migrations_are_exact_ordered_and_hash_bound() -> None:
         "G013",
         "G014",
         "G015",
+        "G016",
     )
     assert all(len(migration.sha256) == 64 for migration in migrations)
     assert len(graph_application_signature(migrations)) == 64
@@ -108,6 +109,26 @@ def test_parallel_receipt_cycle_migration_is_immutable_and_fence_bound() -> None
     assert "parallel command fence handoff failed" not in normalized
     assert "cycle.fencing_token = old.fencing_token" in normalized
     assert "execution.fencing_token = new.fencing_token" in normalized
+
+
+def test_parallel_receipt_abandonment_migration_is_append_only_and_exactly_bound() -> None:
+    migration = next(item for item in load_graph_migrations() if item.version == "G016")
+    normalized = " ".join(migration.sql_text.split()).lower()
+
+    assert migration.version == "G016"
+    assert "create table agent_graph_parallel_receipt_abandonment" in normalized
+    assert "predecessor_abandonment_id varchar(128)" in normalized
+    assert (
+        "provider_call_count_after > provider_call_count_before" in normalized
+    )
+    assert "lease.lease_expires_at <= clock_timestamp()" in normalized
+    assert "trg_reject_agent_graph_parallel_abandonment_update" in normalized
+    assert "trg_reject_agent_graph_parallel_abandonment_truncate" in normalized
+    assert "reject_agent_graph_parallel_receipt_mutation()" in normalized
+    assert "successor.predecessor_abandonment_id = abandonment.abandonment_id" in normalized
+    assert "parallel_receipt_abandonments" in normalized
+    migration_source = inspect.getsource(GraphMigrationRunner._apply_runtime_grants)
+    assert "agent_graph_parallel_receipt_abandonment" in migration_source
 
 
 def test_atomic_provider_group_migration_is_additive_and_weight_bound() -> None:

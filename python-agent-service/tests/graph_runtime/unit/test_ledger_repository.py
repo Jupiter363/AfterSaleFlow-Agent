@@ -21,6 +21,7 @@ from app.graph_runtime.ledger import (
     CommandBinding,
     CommandStatus,
     InvocationNonce,
+    ParallelReceiptAbandonmentRecord,
     ParallelReceiptCycleRecord,
     ParallelReceiptExecutionRecord,
     PostgresCommandLedger,
@@ -1206,7 +1207,7 @@ def test_parallel_receipt_execution_and_successor_are_deterministic() -> None:
 
     with pytest.raises(
         GraphTerminalBindingError,
-        match="cannot have two predecessors",
+        match="cannot have multiple predecessors",
     ):
         ParallelReceiptExecutionRecord.create(
             thread_id=THREAD,
@@ -1278,3 +1279,82 @@ def test_parallel_receipt_execution_and_successor_are_deterministic() -> None:
         match="did not advance a retryable failed lane",
     ):
         cycle.require_successor_receipt(stale)
+
+
+def test_parallel_receipt_abandonment_requires_one_exact_ambiguous_lane_retry() -> None:
+    lanes = [
+        {
+            "frame_type": frame_type,
+            "generation": 1,
+            "frame_id": f"frame.{frame_type.lower()}.1",
+            "slot_state": "ADMITTED",
+            "action": "RUN_CURRENT",
+            "next_local_index": 0,
+            "slot_version": 0,
+            "result_id": None,
+            "result_sha256": None,
+            "public_projection_sha256": None,
+            "predecessor_failure_code": None,
+        }
+        for frame_type in ("DIALOGUE_FRAME", "DOSSIER_FRAME", "QUALITY_FRAME")
+    ]
+    receipt: dict[str, Any] = {
+        "schema_version": "intake.parallel-admission-receipt.v1",
+        "request_hash": "a" * 64,
+        "frame_set_id": "IPFS_123",
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "java_receipt_id": "FRAME_SET_RECEIPT_V4_1",
+        "authority_sha256": "c" * 64,
+        "lanes": lanes,
+    }
+    receipt["receipt_sha256"] = canonical_sha256(receipt)
+    abandonment = ParallelReceiptAbandonmentRecord.create(
+        thread_id=THREAD,
+        command_id="command-1",
+        request_hash="a" * 64,
+        attempt_id="attempt-1",
+        frame_set_id="IPFS_123",
+        receipt_sha256=receipt["receipt_sha256"],
+        authority_sha256="c" * 64,
+        admission_receipt=receipt,
+        provider_call_count_before=0,
+        provider_call_count_after=1,
+        owner_id="python:test",
+        fencing_token=4,
+        abandoned_at=NOW,
+    )
+
+    assert abandonment.abandonment_id.endswith(".4")
+    assert abandonment.execution_id.endswith(".4")
+    assert abandonment.canonical_document()["abandonment_sha256"] == (
+        abandonment.abandonment_sha256
+    )
+
+    successor_lanes = [dict(lane) for lane in lanes]
+    successor_lanes[0].update(
+        generation=2,
+        frame_id="frame.dialogue_frame.2",
+        action="RUN_RETRY",
+        slot_version=1,
+        predecessor_failure_code="CALL_STATE_AMBIGUOUS",
+    )
+    successor: dict[str, Any] = {
+        **{key: value for key, value in receipt.items() if key not in {"receipt_sha256", "lanes"}},
+        "java_receipt_id": "FRAME_SET_RECEIPT_V4_2",
+        "lanes": successor_lanes,
+    }
+    successor["receipt_sha256"] = canonical_sha256(successor)
+
+    assert abandonment.require_successor_receipt(successor) == successor
+
+    unchanged: dict[str, Any] = {
+        **{key: value for key, value in receipt.items() if key not in {"receipt_sha256"}},
+        "java_receipt_id": "FRAME_SET_RECEIPT_V4_UNCHANGED",
+    }
+    unchanged["receipt_sha256"] = canonical_sha256(unchanged)
+    with pytest.raises(
+        GraphTerminalBindingError,
+        match="did not retry an ambiguous lane",
+    ):
+        abandonment.require_successor_receipt(unchanged)

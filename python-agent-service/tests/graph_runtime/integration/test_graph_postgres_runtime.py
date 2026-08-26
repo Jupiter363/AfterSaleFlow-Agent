@@ -142,6 +142,7 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G013",
         "G014",
         "G015",
+        "G016",
     }
 
     second = await _migration_runner(graph_database).run()
@@ -162,6 +163,7 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G013",
         "G014",
         "G015",
+        "G016",
     )
 
     restore = await GraphRestoreValidationRunner(
@@ -3721,6 +3723,7 @@ async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
     expected_counts = {
         "fanout_owner_generations": 0,
         "fanout_permits": 0,
+        "parallel_receipt_abandonments": 0,
         "parallel_receipt_cycles": 0,
         "parallel_receipt_executions": 0,
         "technical_completions": 0,

@@ -59,6 +59,7 @@ from app.graph_runtime.ledger import (
     CommandRecord,
     CommandRegistration,
     CommandStatus,
+    ParallelReceiptAbandonmentRecord,
     ParallelReceiptExecutionRecord,
     ResultRecord,
     TechnicalCompletionRecord,
@@ -2406,6 +2407,13 @@ class _ParallelTakeoverLedger:
     async def load_latest_parallel_receipt_cycle(self, connection: Any, **kwargs: Any) -> None:
         return None
 
+    async def load_latest_parallel_receipt_abandonment(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> None:
+        return None
+
     async def load_parallel_receipt_cycle(self, connection: Any, **kwargs: Any) -> None:
         return None
 
@@ -2423,12 +2431,146 @@ class _ParallelTakeoverLedger:
         **kwargs: Any,
     ) -> tuple[CommandRecord, AttemptRecord]:
         assert kwargs["prior_cycle"] is None
+        assert kwargs["prior_abandonment"] is None
         prior_execution = kwargs["prior_execution"]
         assert prior_execution == self.receipt_execution
         receipt_execution = kwargs["receipt_execution"]
         assert receipt_execution.predecessor_execution_id == prior_execution.execution_id
         assert receipt_execution.provider_call_count_at_admission == 0
         self.rebind_predecessor = prior_execution
+        self.command = replace(
+            self.command,
+            fencing_token=kwargs["next_fencing_token"],
+            revision=self.command.revision + 1,
+        )
+        self.attempt = replace(
+            self.attempt,
+            owner_id=kwargs["next_owner_id"],
+            fencing_token=kwargs["next_fencing_token"],
+        )
+        return self.command, self.attempt
+
+
+class _ParallelAbandonmentLedger:
+    def __init__(self, execution: GatewayExecution) -> None:
+        self.command = execution.admission.record
+        self.attempt = execution.attempt
+        self.receipt = _parallel_receipt(execution)
+        self.receipt_execution = ParallelReceiptExecutionRecord.create(
+            thread_id=execution.fence.thread_id,
+            command_id=execution.fence.command_id,
+            request_hash=execution.fence.request_hash,
+            attempt_id=execution.attempt.attempt_id,
+            frame_set_id=self.receipt["frame_set_id"],
+            receipt_sha256=self.receipt["receipt_sha256"],
+            authority_sha256=self.receipt["authority_sha256"],
+            predecessor_cycle_id=None,
+            provider_call_count_at_admission=0,
+            owner_id=execution.fence.owner_id,
+            fencing_token=execution.fence.fencing_token,
+        )
+        self.abandonment: ParallelReceiptAbandonmentRecord | None = None
+
+    async def load(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        return self.command
+
+    @staticmethod
+    def require_same_binding(actual: CommandBinding, expected: CommandBinding) -> None:
+        assert actual == expected
+
+    async def latest_attempt(self, connection: Any, **kwargs: Any) -> AttemptRecord:
+        return self.attempt
+
+    async def load_parallel_receipt_abandonment(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> ParallelReceiptAbandonmentRecord | None:
+        return self.abandonment
+
+    async def load_parallel_receipt_execution(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> ParallelReceiptExecutionRecord | None:
+        if kwargs["receipt_sha256"] == self.receipt_execution.receipt_sha256:
+            return self.receipt_execution
+        return None
+
+    async def load_parallel_receipt_cycle(self, connection: Any, **kwargs: Any) -> None:
+        return None
+
+    async def store_parallel_receipt_abandonment(
+        self,
+        connection: Any,
+        *,
+        execution_attempt: AttemptRecord,
+        abandonment: ParallelReceiptAbandonmentRecord,
+    ) -> ParallelReceiptAbandonmentRecord:
+        assert execution_attempt == self.attempt
+        self.abandonment = abandonment
+        return abandonment
+
+
+class _ExpiredParallelReceiptLeases:
+    def __init__(self, execution: GatewayExecution) -> None:
+        self.execution = execution
+
+    async def lock_for_recovery(self, connection: Any, **kwargs: Any) -> LeaseInspection:
+        assert kwargs["thread_id"] == self.execution.fence.thread_id
+        return LeaseInspection(
+            lease=self.execution.lease,
+            database_now=self.execution.lease.lease_expires_at + timedelta(seconds=1),
+        )
+
+
+class _ParallelAbandonmentTakeoverLedger(_ParallelAbandonmentLedger):
+    def __init__(self, execution: GatewayExecution) -> None:
+        super().__init__(execution)
+        self.abandonment = ParallelReceiptAbandonmentRecord.create(
+            thread_id=execution.fence.thread_id,
+            command_id=execution.fence.command_id,
+            request_hash=execution.fence.request_hash,
+            attempt_id=execution.attempt.attempt_id,
+            frame_set_id=self.receipt["frame_set_id"],
+            receipt_sha256=self.receipt["receipt_sha256"],
+            authority_sha256=self.receipt["authority_sha256"],
+            admission_receipt=self.receipt,
+            provider_call_count_before=0,
+            provider_call_count_after=execution.attempt.provider_call_count,
+            owner_id=execution.fence.owner_id,
+            fencing_token=execution.fence.fencing_token,
+            abandoned_at=execution.lease.lease_expires_at + timedelta(seconds=1),
+        )
+        self.successor_execution: ParallelReceiptExecutionRecord | None = None
+
+    async def load_latest_parallel_receipt_cycle(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> None:
+        return None
+
+    async def load_latest_parallel_receipt_abandonment(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> ParallelReceiptAbandonmentRecord:
+        assert self.abandonment is not None
+        return self.abandonment
+
+    async def rebind_parallel_attempt(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> tuple[CommandRecord, AttemptRecord]:
+        assert kwargs["prior_cycle"] is None
+        assert kwargs["prior_execution"] == self.receipt_execution
+        assert kwargs["prior_abandonment"] == self.abandonment
+        successor = kwargs["receipt_execution"]
+        assert successor.predecessor_execution_id is None
+        assert successor.predecessor_abandonment_id == self.abandonment.abandonment_id
+        self.successor_execution = successor
         self.command = replace(
             self.command,
             fencing_token=kwargs["next_fencing_token"],
@@ -2612,6 +2754,123 @@ async def test_parallel_same_receipt_takeover_rejects_started_provider_call() ->
 
     assert ledger.rebind_predecessor is None
     assert "transaction:rollback" in pool.events
+
+
+@pytest.mark.asyncio
+async def test_expired_started_parallel_receipt_gets_one_immutable_abandonment() -> None:
+    original = _parallel_execution(provider_call_count=1)
+    pool = _Pool()
+    ledger = _ParallelAbandonmentLedger(original)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=_ExpiredParallelReceiptLeases(original),  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    abandonment = await gateway.abandon_parallel_receipt_execution(
+        original.admission,
+        frame_set_id=ledger.receipt["frame_set_id"],
+        receipt_sha256=ledger.receipt["receipt_sha256"],
+        authority_sha256=ledger.receipt["authority_sha256"],
+        admission_receipt=ledger.receipt,
+    )
+    replay = await gateway.abandon_parallel_receipt_execution(
+        original.admission,
+        frame_set_id=ledger.receipt["frame_set_id"],
+        receipt_sha256=ledger.receipt["receipt_sha256"],
+        authority_sha256=ledger.receipt["authority_sha256"],
+        admission_receipt=ledger.receipt,
+    )
+
+    assert replay == abandonment == ledger.abandonment
+    assert abandonment.provider_call_count_before == 0
+    assert abandonment.provider_call_count_after == 1
+    assert abandonment.fencing_token == 1
+    assert "transaction:commit" in pool.events
+
+
+@pytest.mark.asyncio
+async def test_active_started_parallel_receipt_cannot_be_abandoned() -> None:
+    original = _parallel_execution(provider_call_count=1)
+    pool = _Pool()
+    ledger = _ParallelAbandonmentLedger(original)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=_InitialParallelReceiptLeases(original),  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    with pytest.raises(
+        GraphLeaseUnavailableError,
+        match="lease is still active",
+    ):
+        await gateway.abandon_parallel_receipt_execution(
+            original.admission,
+            frame_set_id=ledger.receipt["frame_set_id"],
+            receipt_sha256=ledger.receipt["receipt_sha256"],
+            authority_sha256=ledger.receipt["authority_sha256"],
+            admission_receipt=ledger.receipt,
+        )
+
+    assert ledger.abandonment is None
+    assert "transaction:rollback" in pool.events
+
+
+@pytest.mark.asyncio
+async def test_abandoned_receipt_takeover_retries_only_the_ambiguous_lane() -> None:
+    original = _parallel_execution(provider_call_count=1)
+    pool = _Pool()
+    ledger = _ParallelAbandonmentTakeoverLedger(original)
+    successor_lanes = [dict(lane) for lane in ledger.receipt["lanes"]]
+    successor_lanes[0].update(
+        generation=2,
+        frame_id="frame.dialogue_frame.2",
+        action="RUN_RETRY",
+        slot_version=1,
+        predecessor_failure_code="CALL_STATE_AMBIGUOUS",
+    )
+    successor = {
+        **{
+            key: value
+            for key, value in ledger.receipt.items()
+            if key not in {"receipt_sha256", "lanes"}
+        },
+        "java_receipt_id": "FRAME_SET_RECEIPT_V4_2",
+        "lanes": successor_lanes,
+    }
+    successor["receipt_sha256"] = canonical_sha256(successor)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=_ParallelTakeoverLeases(original),  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    resumed = await gateway.resume_parallel_technical_execution(
+        original.admission,
+        owner_id="worker-2",
+        attempt_id=original.attempt.attempt_id,
+        frame_set_id=successor["frame_set_id"],
+        receipt_sha256=successor["receipt_sha256"],
+        authority_sha256=successor["authority_sha256"],
+        admission_receipt=successor,
+    )
+
+    assert resumed.fence.owner_id == "worker-2"
+    assert resumed.fence.fencing_token == 2
+    assert ledger.successor_execution is not None
+    assert ledger.successor_execution.receipt_sha256 == successor["receipt_sha256"]
+    assert ledger.successor_execution.predecessor_abandonment_id == (
+        ledger.abandonment.abandonment_id
+    )
 
 
 class _ParallelCompletionLedger:

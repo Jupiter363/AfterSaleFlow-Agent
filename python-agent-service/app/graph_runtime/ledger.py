@@ -375,6 +375,7 @@ class ParallelReceiptExecutionRecord:
     provider_call_count_at_admission: int
     owner_id: str
     fencing_token: int
+    predecessor_abandonment_id: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -389,6 +390,11 @@ class ParallelReceiptExecutionRecord:
             _identifier(self.predecessor_cycle_id, "predecessor_cycle_id")
         if self.predecessor_execution_id is not None:
             _identifier(self.predecessor_execution_id, "predecessor_execution_id")
+        if self.predecessor_abandonment_id is not None:
+            _identifier(
+                self.predecessor_abandonment_id,
+                "predecessor_abandonment_id",
+            )
         if THREAD_ID_PATTERN.fullmatch(self.thread_id) is None:
             raise GraphContractError("parallel receipt execution thread_id is invalid")
         for field_name in ("request_hash", "receipt_sha256", "authority_sha256"):
@@ -400,12 +406,16 @@ class ParallelReceiptExecutionRecord:
             or self.provider_call_count_at_admission < 0
         ):
             raise GraphContractError("parallel receipt execution fence is invalid")
-        if (
-            self.predecessor_cycle_id is not None
-            and self.predecessor_execution_id is not None
-        ):
+        if sum(
+            predecessor is not None
+            for predecessor in (
+                self.predecessor_cycle_id,
+                self.predecessor_execution_id,
+                self.predecessor_abandonment_id,
+            )
+        ) > 1:
             raise GraphTerminalBindingError(
-                "parallel receipt execution cannot have two predecessors"
+                "parallel receipt execution cannot have multiple predecessors"
             )
         if self.execution_id != self.execution_id_for_receipt(
             self.receipt_sha256,
@@ -435,6 +445,7 @@ class ParallelReceiptExecutionRecord:
         authority_sha256: str,
         predecessor_cycle_id: str | None,
         predecessor_execution_id: str | None = None,
+        predecessor_abandonment_id: str | None = None,
         provider_call_count_at_admission: int,
         owner_id: str,
         fencing_token: int,
@@ -453,6 +464,7 @@ class ParallelReceiptExecutionRecord:
             provider_call_count_at_admission=provider_call_count_at_admission,
             owner_id=owner_id,
             fencing_token=fencing_token,
+            predecessor_abandonment_id=predecessor_abandonment_id,
         )
 
 
@@ -597,6 +609,309 @@ def _validated_parallel_receipt_document(
             "parallel admission receipt self-hash is invalid"
         )
     return json.loads(canonicalize(document))
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelReceiptAbandonmentRecord:
+    """Immutable proof that an expired receipt execution may be replaced.
+
+    The record does not guess which Frame called the Provider.  It proves only
+    that the exact receipt owned an execution whose durable Provider intent
+    advanced before its lease expired and before any receipt cycle completed.
+    Java combines this proof with its current STARTED slots and publishes the
+    exact successor receipt.
+    """
+
+    abandonment_id: str
+    execution_id: str
+    thread_id: str
+    command_id: str
+    request_hash: str
+    attempt_id: str
+    frame_set_id: str
+    receipt_sha256: str
+    authority_sha256: str
+    admission_receipt: Mapping[str, Any]
+    provider_call_count_before: int
+    provider_call_count_after: int
+    owner_id: str
+    fencing_token: int
+    abandoned_at: datetime
+    abandonment_sha256: str
+
+    SCHEMA_VERSION: ClassVar[str] = "intake.parallel-receipt-abandonment.v1"
+    AMBIGUOUS_FAILURE_CODE: ClassVar[str] = "CALL_STATE_AMBIGUOUS"
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "abandonment_id",
+            "execution_id",
+            "command_id",
+            "attempt_id",
+            "frame_set_id",
+            "owner_id",
+        ):
+            _identifier(getattr(self, field_name), field_name)
+        if THREAD_ID_PATTERN.fullmatch(self.thread_id) is None:
+            raise GraphContractError("parallel receipt abandonment thread_id is invalid")
+        for field_name in (
+            "request_hash",
+            "receipt_sha256",
+            "authority_sha256",
+            "abandonment_sha256",
+        ):
+            _sha256(getattr(self, field_name), field_name)
+        _aware(self.abandoned_at, "abandoned_at")
+        if (
+            isinstance(self.fencing_token, bool)
+            or self.fencing_token < 1
+            or isinstance(self.provider_call_count_before, bool)
+            or isinstance(self.provider_call_count_after, bool)
+            or self.provider_call_count_before < 0
+            or self.provider_call_count_after <= self.provider_call_count_before
+        ):
+            raise GraphContractError("parallel receipt abandonment counters are invalid")
+        receipt_document = _validated_parallel_receipt_document(
+            self.admission_receipt
+        )
+        object.__setattr__(self, "admission_receipt", receipt_document)
+        if (
+            receipt_document["request_hash"] != self.request_hash
+            or receipt_document["frame_set_id"] != self.frame_set_id
+            or receipt_document["attempt_id"] != self.attempt_id
+            or receipt_document["receipt_sha256"] != self.receipt_sha256
+            or receipt_document["authority_sha256"] != self.authority_sha256
+        ):
+            raise GraphTerminalBindingError(
+                "parallel admission receipt differs from its abandonment"
+            )
+        if self.execution_id != ParallelReceiptExecutionRecord.execution_id_for_receipt(
+            self.receipt_sha256,
+            self.fencing_token,
+        ):
+            raise GraphTerminalBindingError(
+                "parallel receipt abandonment execution ID is not deterministic"
+            )
+        if self.abandonment_id != self.abandonment_id_for_receipt(
+            self.receipt_sha256,
+            self.fencing_token,
+        ):
+            raise GraphTerminalBindingError(
+                "parallel receipt abandonment ID is not deterministic"
+            )
+        if canonical_sha256(self.hash_document()) != self.abandonment_sha256:
+            raise GraphTerminalBindingError(
+                "parallel receipt abandonment self-hash is invalid"
+            )
+
+    @staticmethod
+    def abandonment_id_for_receipt(
+        receipt_sha256: str,
+        fencing_token: int,
+    ) -> str:
+        _sha256(receipt_sha256, "receipt_sha256")
+        if isinstance(fencing_token, bool) or fencing_token < 1:
+            raise GraphContractError("parallel receipt abandonment fence is invalid")
+        return f"parallel-receipt-abandonment.{receipt_sha256[:24]}.{fencing_token}"
+
+    @staticmethod
+    def _canonical_time(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def hash_document(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "abandonment_id": self.abandonment_id,
+            "execution_id": self.execution_id,
+            "thread_id": self.thread_id,
+            "command_id": self.command_id,
+            "request_hash": self.request_hash,
+            "attempt_id": self.attempt_id,
+            "frame_set_id": self.frame_set_id,
+            "receipt_sha256": self.receipt_sha256,
+            "authority_sha256": self.authority_sha256,
+            "admission_receipt": dict(self.admission_receipt),
+            "provider_call_count_before": self.provider_call_count_before,
+            "provider_call_count_after": self.provider_call_count_after,
+            "owner_id": self.owner_id,
+            "fencing_token": self.fencing_token,
+            "abandoned_at": self._canonical_time(self.abandoned_at),
+        }
+
+    def canonical_document(self) -> dict[str, Any]:
+        document = self.hash_document()
+        if canonical_sha256(document) != self.abandonment_sha256:
+            raise GraphTerminalBindingError(
+                "parallel receipt abandonment self-hash is invalid"
+            )
+        document["abandonment_sha256"] = self.abandonment_sha256
+        return json.loads(canonicalize(document))
+
+    def canonical_admission_receipt_json_text(self) -> str:
+        refreshed = _validated_parallel_receipt_document(self.admission_receipt)
+        return canonicalize(refreshed).decode("utf-8")
+
+    def require_successor_receipt(
+        self,
+        successor: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Validate Java's monotonic successor without inventing lane state."""
+
+        current = _validated_parallel_receipt_document(self.admission_receipt)
+        candidate = _validated_parallel_receipt_document(successor)
+        if (
+            candidate["receipt_sha256"] == current["receipt_sha256"]
+            or any(
+                candidate[field] != current[field]
+                for field in (
+                    "request_hash",
+                    "frame_set_id",
+                    "run_id",
+                    "attempt_id",
+                    "authority_sha256",
+                )
+            )
+        ):
+            raise GraphTerminalBindingError(
+                "parallel abandonment successor crossed its predecessor authority"
+            )
+        retry_count = 0
+        for prior_lane, next_lane in zip(
+            current["lanes"], candidate["lanes"], strict=True
+        ):
+            if next_lane["frame_type"] != prior_lane["frame_type"]:
+                raise GraphTerminalBindingError(
+                    "parallel abandonment successor Frame order drifted"
+                )
+            if prior_lane["action"] == "SKIP_SEALED":
+                stable_fields = (
+                    "generation",
+                    "frame_id",
+                    "slot_state",
+                    "action",
+                    "next_local_index",
+                    "slot_version",
+                    "result_id",
+                    "result_sha256",
+                    "public_projection_sha256",
+                    "predecessor_failure_code",
+                )
+                if any(next_lane[field] != prior_lane[field] for field in stable_fields):
+                    raise GraphTerminalBindingError(
+                        "parallel abandonment changed an already sealed sibling"
+                    )
+                continue
+            if next_lane["action"] == "SKIP_SEALED":
+                if (
+                    next_lane["generation"] != prior_lane["generation"]
+                    or next_lane["frame_id"] != prior_lane["frame_id"]
+                    or next_lane["slot_version"] <= prior_lane["slot_version"]
+                ):
+                    raise GraphTerminalBindingError(
+                        "parallel abandonment successor changed a newly sealed lane"
+                    )
+                continue
+            if (
+                next_lane["action"] == prior_lane["action"]
+                and next_lane["generation"] == prior_lane["generation"]
+                and next_lane["frame_id"] == prior_lane["frame_id"]
+                and next_lane["slot_state"] == prior_lane["slot_state"]
+                and next_lane["next_local_index"] == prior_lane["next_local_index"]
+                and next_lane["slot_version"] == prior_lane["slot_version"]
+                and next_lane["result_id"] == prior_lane["result_id"]
+                and next_lane["result_sha256"] == prior_lane["result_sha256"]
+                and next_lane["public_projection_sha256"]
+                == prior_lane["public_projection_sha256"]
+                and next_lane["predecessor_failure_code"]
+                == prior_lane["predecessor_failure_code"]
+            ):
+                continue
+            if (
+                prior_lane["generation"] >= 2
+                or next_lane["action"] != "RUN_RETRY"
+                or next_lane["generation"] != prior_lane["generation"] + 1
+                or next_lane["frame_id"] == prior_lane["frame_id"]
+                or next_lane["slot_state"] != "ADMITTED"
+                or next_lane["next_local_index"] != 0
+                or next_lane["slot_version"] <= prior_lane["slot_version"]
+                or next_lane["result_id"] is not None
+                or next_lane["result_sha256"] is not None
+                or next_lane["public_projection_sha256"] is not None
+                or next_lane["predecessor_failure_code"]
+                != self.AMBIGUOUS_FAILURE_CODE
+            ):
+                raise GraphTerminalBindingError(
+                    "parallel abandonment successor lacks exact ambiguous lineage"
+                )
+            retry_count += 1
+        if retry_count < 1:
+            raise GraphTerminalBindingError(
+                "parallel abandonment successor did not retry an ambiguous lane"
+            )
+        return candidate
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        thread_id: str,
+        command_id: str,
+        request_hash: str,
+        attempt_id: str,
+        frame_set_id: str,
+        receipt_sha256: str,
+        authority_sha256: str,
+        admission_receipt: Mapping[str, Any],
+        provider_call_count_before: int,
+        provider_call_count_after: int,
+        owner_id: str,
+        fencing_token: int,
+        abandoned_at: datetime,
+    ) -> ParallelReceiptAbandonmentRecord:
+        abandonment_id = cls.abandonment_id_for_receipt(
+            receipt_sha256,
+            fencing_token,
+        )
+        execution_id = ParallelReceiptExecutionRecord.execution_id_for_receipt(
+            receipt_sha256,
+            fencing_token,
+        )
+        values = {
+            "schema_version": cls.SCHEMA_VERSION,
+            "abandonment_id": abandonment_id,
+            "execution_id": execution_id,
+            "thread_id": thread_id,
+            "command_id": command_id,
+            "request_hash": request_hash,
+            "attempt_id": attempt_id,
+            "frame_set_id": frame_set_id,
+            "receipt_sha256": receipt_sha256,
+            "authority_sha256": authority_sha256,
+            "admission_receipt": dict(admission_receipt),
+            "provider_call_count_before": provider_call_count_before,
+            "provider_call_count_after": provider_call_count_after,
+            "owner_id": owner_id,
+            "fencing_token": fencing_token,
+            "abandoned_at": cls._canonical_time(abandoned_at),
+        }
+        return cls(
+            abandonment_id=abandonment_id,
+            execution_id=execution_id,
+            thread_id=thread_id,
+            command_id=command_id,
+            request_hash=request_hash,
+            attempt_id=attempt_id,
+            frame_set_id=frame_set_id,
+            receipt_sha256=receipt_sha256,
+            authority_sha256=authority_sha256,
+            admission_receipt=dict(admission_receipt),
+            provider_call_count_before=provider_call_count_before,
+            provider_call_count_after=provider_call_count_after,
+            owner_id=owner_id,
+            fencing_token=fencing_token,
+            abandoned_at=abandoned_at,
+            abandonment_sha256=canonical_sha256(values),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1439,7 +1754,8 @@ select {TECHNICAL_COMPLETION_COLUMNS}
 PARALLEL_RECEIPT_EXECUTION_COLUMNS: Final[str] = """
 execution_id, thread_id, command_id, request_hash, attempt_id, frame_set_id,
 receipt_sha256, authority_sha256, predecessor_cycle_id, predecessor_execution_id,
-provider_call_count_at_admission, owner_id, fencing_token
+provider_call_count_at_admission, owner_id, fencing_token,
+predecessor_abandonment_id
 """
 
 LOAD_PARALLEL_RECEIPT_EXECUTION_SQL: Final[str] = f"""
@@ -1458,12 +1774,51 @@ insert into agent_graph_parallel_receipt_execution (
     execution_id, thread_id, command_id, request_hash, attempt_id, frame_set_id,
     receipt_sha256, authority_sha256, predecessor_cycle_id,
     predecessor_execution_id, provider_call_count_at_admission, owner_id,
-    fencing_token
+    fencing_token, predecessor_abandonment_id
 )
-values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 on conflict (thread_id, command_id, attempt_id, receipt_sha256, fencing_token)
 do nothing
 returning {PARALLEL_RECEIPT_EXECUTION_COLUMNS}
+"""
+
+PARALLEL_RECEIPT_ABANDONMENT_COLUMNS: Final[str] = """
+abandonment_id, execution_id, thread_id, command_id, request_hash, attempt_id,
+frame_set_id, receipt_sha256, authority_sha256, admission_receipt_json,
+provider_call_count_before, provider_call_count_after, owner_id, fencing_token,
+abandoned_at, abandonment_sha256
+"""
+
+LOAD_PARALLEL_RECEIPT_ABANDONMENT_SQL: Final[str] = f"""
+select {PARALLEL_RECEIPT_ABANDONMENT_COLUMNS}
+  from agent_graph_parallel_receipt_abandonment
+ where thread_id = %s
+   and command_id = %s
+   and attempt_id = %s
+   and receipt_sha256 = %s
+"""
+
+LOAD_LATEST_PARALLEL_RECEIPT_ABANDONMENT_SQL: Final[str] = f"""
+select {PARALLEL_RECEIPT_ABANDONMENT_COLUMNS}
+  from agent_graph_parallel_receipt_abandonment
+ where thread_id = %s
+   and command_id = %s
+   and attempt_id = %s
+ order by fencing_token desc
+ limit 1
+"""
+
+INSERT_PARALLEL_RECEIPT_ABANDONMENT_SQL: Final[str] = f"""
+insert into agent_graph_parallel_receipt_abandonment (
+    abandonment_id, execution_id, thread_id, command_id, request_hash,
+    attempt_id, frame_set_id, receipt_sha256, authority_sha256,
+    admission_receipt_json, provider_call_count_before,
+    provider_call_count_after, owner_id, fencing_token, abandoned_at,
+    abandonment_sha256
+)
+values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
+on conflict (execution_id) do nothing
+returning {PARALLEL_RECEIPT_ABANDONMENT_COLUMNS}
 """
 
 PARALLEL_RECEIPT_CYCLE_COLUMNS: Final[str] = """
@@ -1559,8 +1914,13 @@ update agent_graph_command_attempt attempt
          from agent_graph_parallel_receipt_execution execution
          left join agent_graph_parallel_receipt_cycle cycle
            on cycle.cycle_id = execution.predecessor_cycle_id
+         left join agent_graph_parallel_receipt_abandonment abandonment
+           on abandonment.abandonment_id = execution.predecessor_abandonment_id
          left join agent_graph_parallel_receipt_execution predecessor
-           on predecessor.execution_id = execution.predecessor_execution_id
+           on predecessor.execution_id = coalesce(
+               execution.predecessor_execution_id,
+               abandonment.execution_id
+           )
         where execution.execution_id = %s
           and execution.attempt_id = attempt.attempt_id
           and execution.thread_id = attempt.thread_id
@@ -1578,6 +1938,7 @@ update agent_graph_command_attempt attempt
               or (
                   execution.predecessor_cycle_id is null
                   and execution.predecessor_execution_id is not null
+                  and execution.predecessor_abandonment_id is null
                   and predecessor.attempt_id = attempt.attempt_id
                   and predecessor.thread_id = attempt.thread_id
                   and predecessor.command_id = attempt.command_id
@@ -1591,6 +1952,35 @@ update agent_graph_command_attempt attempt
                         from agent_graph_parallel_receipt_cycle receipt_cycle
                        where receipt_cycle.attempt_id = attempt.attempt_id
                          and receipt_cycle.receipt_sha256 = execution.receipt_sha256
+                  )
+              )
+              or (
+                  execution.predecessor_cycle_id is null
+                  and execution.predecessor_execution_id is null
+                  and execution.predecessor_abandonment_id is not null
+                  and predecessor.attempt_id = attempt.attempt_id
+                  and predecessor.thread_id = attempt.thread_id
+                  and predecessor.command_id = attempt.command_id
+                  and predecessor.receipt_sha256 <> execution.receipt_sha256
+                  and predecessor.authority_sha256 = execution.authority_sha256
+                  and predecessor.owner_id = attempt.owner_id
+                  and predecessor.fencing_token = attempt.fencing_token
+                  and abandonment.execution_id = predecessor.execution_id
+                  and abandonment.attempt_id = attempt.attempt_id
+                  and abandonment.thread_id = attempt.thread_id
+                  and abandonment.command_id = attempt.command_id
+                  and abandonment.receipt_sha256 = predecessor.receipt_sha256
+                  and abandonment.authority_sha256 = predecessor.authority_sha256
+                  and abandonment.owner_id = attempt.owner_id
+                  and abandonment.fencing_token = attempt.fencing_token
+                  and abandonment.provider_call_count_before
+                      = predecessor.provider_call_count_at_admission
+                  and abandonment.provider_call_count_after
+                      = attempt.provider_call_count
+                  and not exists (
+                      select 1
+                        from agent_graph_parallel_receipt_cycle receipt_cycle
+                       where receipt_cycle.execution_id = predecessor.execution_id
                   )
               )
           )
@@ -2139,6 +2529,47 @@ class PostgresCommandLedger:
         ).fetchone()
         return None if row is None else self._parallel_receipt_execution_from_row(row)
 
+    async def load_parallel_receipt_abandonment(
+        self,
+        connection: Any,
+        *,
+        thread_id: str,
+        command_id: str,
+        attempt_id: str,
+        receipt_sha256: str,
+    ) -> ParallelReceiptAbandonmentRecord | None:
+        row = await (
+            await connection.execute(
+                LOAD_PARALLEL_RECEIPT_ABANDONMENT_SQL,
+                (thread_id, command_id, attempt_id, receipt_sha256),
+            )
+        ).fetchone()
+        return (
+            None
+            if row is None
+            else self._parallel_receipt_abandonment_from_row(row)
+        )
+
+    async def load_latest_parallel_receipt_abandonment(
+        self,
+        connection: Any,
+        *,
+        thread_id: str,
+        command_id: str,
+        attempt_id: str,
+    ) -> ParallelReceiptAbandonmentRecord | None:
+        row = await (
+            await connection.execute(
+                LOAD_LATEST_PARALLEL_RECEIPT_ABANDONMENT_SQL,
+                (thread_id, command_id, attempt_id),
+            )
+        ).fetchone()
+        return (
+            None
+            if row is None
+            else self._parallel_receipt_abandonment_from_row(row)
+        )
+
     async def store_parallel_receipt_execution(
         self,
         connection: Any,
@@ -2174,6 +2605,7 @@ class PostgresCommandLedger:
                     receipt_execution.provider_call_count_at_admission,
                     receipt_execution.owner_id,
                     receipt_execution.fencing_token,
+                    receipt_execution.predecessor_abandonment_id,
                 ),
             )
         ).fetchone()
@@ -2189,6 +2621,65 @@ class PostgresCommandLedger:
         if existing != receipt_execution:
             raise GraphTerminalBindingError(
                 "immutable parallel receipt execution conflicts with existing row"
+            )
+        return existing
+
+    async def store_parallel_receipt_abandonment(
+        self,
+        connection: Any,
+        *,
+        execution_attempt: AttemptRecord,
+        abandonment: ParallelReceiptAbandonmentRecord,
+    ) -> ParallelReceiptAbandonmentRecord:
+        abandonment.canonical_document()
+        if (
+            abandonment.thread_id != execution_attempt.thread_id
+            or abandonment.command_id != execution_attempt.command_id
+            or abandonment.attempt_id != execution_attempt.attempt_id
+            or abandonment.owner_id != execution_attempt.owner_id
+            or abandonment.fencing_token != execution_attempt.fencing_token
+            or abandonment.provider_call_count_after
+            != execution_attempt.provider_call_count
+            or execution_attempt.status is not AttemptStatus.EXECUTING
+        ):
+            raise GraphTerminalBindingError(
+                "parallel receipt abandonment differs from its executing attempt"
+            )
+        row = await (
+            await connection.execute(
+                INSERT_PARALLEL_RECEIPT_ABANDONMENT_SQL,
+                (
+                    abandonment.abandonment_id,
+                    abandonment.execution_id,
+                    abandonment.thread_id,
+                    abandonment.command_id,
+                    abandonment.request_hash,
+                    abandonment.attempt_id,
+                    abandonment.frame_set_id,
+                    abandonment.receipt_sha256,
+                    abandonment.authority_sha256,
+                    abandonment.canonical_admission_receipt_json_text(),
+                    abandonment.provider_call_count_before,
+                    abandonment.provider_call_count_after,
+                    abandonment.owner_id,
+                    abandonment.fencing_token,
+                    abandonment.abandoned_at,
+                    abandonment.abandonment_sha256,
+                ),
+            )
+        ).fetchone()
+        if row is not None:
+            return self._parallel_receipt_abandonment_from_row(row)
+        existing = await self.load_parallel_receipt_abandonment(
+            connection,
+            thread_id=abandonment.thread_id,
+            command_id=abandonment.command_id,
+            attempt_id=abandonment.attempt_id,
+            receipt_sha256=abandonment.receipt_sha256,
+        )
+        if existing != abandonment:
+            raise GraphTerminalBindingError(
+                "immutable parallel receipt abandonment conflicts with existing row"
             )
         return existing
 
@@ -2283,6 +2774,7 @@ class PostgresCommandLedger:
         attempt: AttemptRecord,
         prior_cycle: ParallelReceiptCycleRecord | None,
         prior_execution: ParallelReceiptExecutionRecord | None,
+        prior_abandonment: ParallelReceiptAbandonmentRecord | None,
         receipt_execution: ParallelReceiptExecutionRecord,
         next_owner_id: str,
         next_fencing_token: int,
@@ -2291,6 +2783,10 @@ class PostgresCommandLedger:
         if (prior_cycle is None) == (prior_execution is None):
             raise GraphTerminalBindingError(
                 "parallel attempt handoff requires one exact predecessor"
+            )
+        if prior_abandonment is not None and prior_execution is None:
+            raise GraphTerminalBindingError(
+                "parallel attempt abandonment requires its exact execution"
             )
         predecessor_frame_set_id = (
             prior_cycle.frame_set_id
@@ -2325,26 +2821,58 @@ class PostgresCommandLedger:
             or prior_cycle.provider_call_count_after != attempt.provider_call_count
             or receipt_execution.predecessor_cycle_id != prior_cycle.cycle_id
             or receipt_execution.predecessor_execution_id is not None
+            or receipt_execution.predecessor_abandonment_id is not None
             or receipt_execution.provider_call_count_at_admission
             != attempt.provider_call_count
         )
-        execution_invalid = prior_execution is not None and (
+        execution_common_invalid = prior_execution is not None and (
             prior_execution.thread_id != binding.thread_id
             or prior_execution.command_id != binding.command_id
             or prior_execution.request_hash != binding.request_hash
             or prior_execution.attempt_id != attempt.attempt_id
             or prior_execution.frame_set_id != receipt_execution.frame_set_id
-            or prior_execution.receipt_sha256 != receipt_execution.receipt_sha256
             or prior_execution.authority_sha256 != receipt_execution.authority_sha256
             or prior_execution.owner_id != attempt.owner_id
             or prior_execution.fencing_token != attempt.fencing_token
-            or prior_execution.provider_call_count_at_admission
-            != attempt.provider_call_count
             or receipt_execution.predecessor_cycle_id is not None
-            or receipt_execution.predecessor_execution_id
-            != prior_execution.execution_id
             or receipt_execution.provider_call_count_at_admission
             != attempt.provider_call_count
+        )
+        same_receipt_lineage = prior_execution is not None and (
+            prior_abandonment is None
+            and prior_execution.receipt_sha256 == receipt_execution.receipt_sha256
+            and prior_execution.provider_call_count_at_admission
+            == attempt.provider_call_count
+            and receipt_execution.predecessor_execution_id
+            == prior_execution.execution_id
+            and receipt_execution.predecessor_abandonment_id is None
+        )
+        abandonment_lineage = (
+            prior_execution is not None
+            and prior_abandonment is not None
+            and prior_execution.receipt_sha256 != receipt_execution.receipt_sha256
+            and prior_abandonment.execution_id == prior_execution.execution_id
+            and prior_abandonment.thread_id == binding.thread_id
+            and prior_abandonment.command_id == binding.command_id
+            and prior_abandonment.request_hash == binding.request_hash
+            and prior_abandonment.attempt_id == attempt.attempt_id
+            and prior_abandonment.frame_set_id == prior_execution.frame_set_id
+            and prior_abandonment.receipt_sha256 == prior_execution.receipt_sha256
+            and prior_abandonment.authority_sha256
+            == prior_execution.authority_sha256
+            and prior_abandonment.owner_id == attempt.owner_id
+            and prior_abandonment.fencing_token == attempt.fencing_token
+            and prior_abandonment.provider_call_count_before
+            == prior_execution.provider_call_count_at_admission
+            and prior_abandonment.provider_call_count_after
+            == attempt.provider_call_count
+            and receipt_execution.predecessor_execution_id is None
+            and receipt_execution.predecessor_abandonment_id
+            == prior_abandonment.abandonment_id
+        )
+        execution_invalid = prior_execution is not None and (
+            execution_common_invalid
+            or not (same_receipt_lineage or abandonment_lineage)
         )
         if common_invalid or cycle_invalid or execution_invalid:
             raise GraphTerminalBindingError(
@@ -3297,10 +3825,39 @@ class PostgresCommandLedger:
                 ],
                 owner_id=row["owner_id"],
                 fencing_token=row["fencing_token"],
+                predecessor_abandonment_id=row["predecessor_abandonment_id"],
             )
         except (KeyError, TypeError, ValueError) as error:
             raise GraphTerminalBindingError(
                 "persisted parallel receipt execution binding is invalid"
+            ) from error
+
+    @staticmethod
+    def _parallel_receipt_abandonment_from_row(
+        row: Mapping[str, Any],
+    ) -> ParallelReceiptAbandonmentRecord:
+        try:
+            return ParallelReceiptAbandonmentRecord(
+                abandonment_id=row["abandonment_id"],
+                execution_id=row["execution_id"],
+                thread_id=row["thread_id"],
+                command_id=row["command_id"],
+                request_hash=row["request_hash"],
+                attempt_id=row["attempt_id"],
+                frame_set_id=row["frame_set_id"],
+                receipt_sha256=row["receipt_sha256"],
+                authority_sha256=row["authority_sha256"],
+                admission_receipt=row["admission_receipt_json"],
+                provider_call_count_before=row["provider_call_count_before"],
+                provider_call_count_after=row["provider_call_count_after"],
+                owner_id=row["owner_id"],
+                fencing_token=row["fencing_token"],
+                abandoned_at=row["abandoned_at"],
+                abandonment_sha256=row["abandonment_sha256"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise GraphTerminalBindingError(
+                "persisted parallel receipt abandonment binding is invalid"
             ) from error
 
     @staticmethod

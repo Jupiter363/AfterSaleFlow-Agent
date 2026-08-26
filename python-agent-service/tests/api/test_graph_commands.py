@@ -61,6 +61,7 @@ from app.graph_runtime import intake_executor as intake_executor_module
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.harness.prompt_composer import PromptResourceError
 from app.graph_runtime.identity import ActorScopeBinding, RoomType, ThreadIdentity
+from app.graph_runtime.ledger import ParallelReceiptAbandonmentRecord
 from app.graph_runtime.target_e2e import (
     TargetE2EGraphCommandEnvelope,
     VerifiedTargetE2EInvocation,
@@ -143,6 +144,7 @@ class FakeParallelStreamService:
             tuple[RoomGraphCommand, VerifiedTargetE2EInvocation, ThreadIdentity]
         ] = []
         self.calls: list[tuple[RoomGraphCommand, VerifiedInvocation, ThreadIdentity]] = []
+        self.abandonment_calls: list[str] = []
         self.termination_calls: list[tuple[str, str]] = []
         self.closed = False
         frames = tuple(
@@ -243,6 +245,33 @@ class FakeParallelStreamService:
             provider_permit_statuses=("RELEASED",),
         )
 
+    async def abandon_stale_execution(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+        admission_receipt: ParallelFrameAdmissionReceipt,
+    ) -> ParallelReceiptAbandonmentRecord:
+        del verified_invocation, expected_thread
+        admission_receipt.require_authority(command=command, authority=self.authority)
+        self.abandonment_calls.append(admission_receipt.receipt_sha256)
+        return ParallelReceiptAbandonmentRecord.create(
+            thread_id=command.thread_id,
+            command_id=command.command_id,
+            request_hash=command.request_hash,
+            attempt_id=command.attempt_id,
+            frame_set_id=admission_receipt.frame_set_id,
+            receipt_sha256=admission_receipt.receipt_sha256,
+            authority_sha256=admission_receipt.authority_sha256,
+            admission_receipt=admission_receipt.canonical_document(),
+            provider_call_count_before=0,
+            provider_call_count_after=1,
+            owner_id="python:test-endpoint",
+            fencing_token=1,
+            abandoned_at=datetime(2026, 8, 26, tzinfo=timezone.utc),
+        )
+
 
 async def _collect_validated_ndjson(
     command: RoomGraphCommand,
@@ -310,7 +339,7 @@ class TargetVerifier:
         assert kwargs["envelope"] == self.envelope
         if kwargs["phase"] == "PREPARE":
             assert kwargs["admission_receipt_sha256"] is None
-        elif kwargs["phase"] == "EXECUTE":
+        elif kwargs["phase"] in {"EXECUTE", "ABANDON"}:
             assert isinstance(kwargs["admission_receipt_sha256"], str)
             assert len(kwargs["admission_receipt_sha256"]) == 64
         else:
@@ -922,6 +951,43 @@ def test_target_exact_parallel_terminate_returns_bound_failure_receipt() -> None
     ]
     assert len(parallel.termination_calls) == 1
     assert parallel.termination_calls[0][1] == "ACTIVITY_RETRY_EXHAUSTED"
+
+
+def test_target_exact_parallel_abandon_returns_bound_immutable_receipt() -> None:
+    command = _parallel_command()
+    envelope = _target_envelope(command)
+    parallel = FakeParallelStreamService(command)
+    client = _target_client(
+        envelope=envelope,
+        service=FakeStreamService(()),
+        parallel_service=parallel,
+    )
+
+    response = client.post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+            "X-Intake-Parallel-Phase": "ABANDON",
+            "X-Intake-Parallel-Admission": _parallel_admission_header(
+                command,
+                parallel.authority,
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["schema_version"] == (
+        "intake.parallel-receipt-abandonment.v1"
+    )
+    assert response.headers["x-agent-stream-protocol"] == "agent-stream.v4"
+    assert response.headers["x-intake-frame-set-id"] == parallel.authority.frame_set_id
+    assert response.headers["x-intake-parallel-abandonment-receipt"] == (
+        response.json()["abandonment_sha256"]
+    )
+    assert parallel.abandonment_calls == [response.json()["receipt_sha256"]]
+    assert parallel.calls == []
 
 
 def test_target_exact_parallel_command_fails_closed_without_parallel_runtime() -> None:

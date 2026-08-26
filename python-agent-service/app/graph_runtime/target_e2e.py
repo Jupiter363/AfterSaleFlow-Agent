@@ -232,7 +232,7 @@ class TargetE2EInvocationClaims(InvocationClaims):
     command_hash: str = Field(pattern=_SHA256.pattern)
     command_envelope_hash: str = Field(pattern=_SHA256.pattern)
     agent_session_id: str | None = Field(default=None, pattern=_IDENTIFIER.pattern)
-    parallel_phase: Literal["PREPARE", "EXECUTE", "TERMINATE"] | None = None
+    parallel_phase: Literal["PREPARE", "EXECUTE", "ABANDON", "TERMINATE"] | None = None
     parallel_admission_receipt_sha256: str | None = Field(
         default=None,
         pattern=_SHA256.pattern,
@@ -251,7 +251,7 @@ class TargetE2EInvocationClaims(InvocationClaims):
                 or self.parallel_failure_code is not None
             )
         ) or (
-            self.parallel_phase == "EXECUTE"
+            self.parallel_phase in {"EXECUTE", "ABANDON"}
             and (
                 self.parallel_admission_receipt_sha256 is None
                 or self.parallel_failure_code is not None
@@ -410,7 +410,7 @@ class TargetE2EInvocationVerifier(InvocationEnvelopeVerifier):
         token: str,
         envelope: TargetE2EGraphCommandEnvelope,
         transport_identity: TransportIdentity,
-        phase: Literal["PREPARE", "EXECUTE", "TERMINATE"],
+        phase: Literal["PREPARE", "EXECUTE", "ABANDON", "TERMINATE"],
         admission_receipt_sha256: str | None,
         failure_code: str | None = None,
     ) -> VerifiedTargetE2EInvocation:
@@ -420,7 +420,7 @@ class TargetE2EInvocationVerifier(InvocationEnvelopeVerifier):
             phase == "PREPARE"
             and (admission_receipt_sha256 is not None or failure_code is not None)
         ) or (
-            phase == "EXECUTE"
+            phase in {"EXECUTE", "ABANDON"}
             and (
                 admission_receipt_sha256 is None
                 or _SHA256.fullmatch(admission_receipt_sha256) is None
@@ -472,7 +472,7 @@ class TargetE2EInvocationVerifier(InvocationEnvelopeVerifier):
         envelope: TargetE2EGraphCommandEnvelope,
         transport_identity: TransportIdentity,
         allow_expired: bool,
-        parallel_phase: Literal["PREPARE", "EXECUTE", "TERMINATE"] | None,
+        parallel_phase: Literal["PREPARE", "EXECUTE", "ABANDON", "TERMINATE"] | None,
         admission_receipt_sha256: str | None,
         failure_code: str | None,
     ) -> VerifiedTargetE2EInvocation:
