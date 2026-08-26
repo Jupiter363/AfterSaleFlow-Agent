@@ -41,6 +41,7 @@ from app.graphs.intake.parallel_outputs import (
     QualityPublicGapDraftV2,
     QualityPublicMetricDraftV2,
     QualityPublicProjectionDraftV2,
+    materialize_request_bound_dossier_item,
     materialize_request_bound_frame_output,
     request_bound_dialogue_output_types,
     request_bound_dossier_output_types,
@@ -944,7 +945,18 @@ async def _invoke_frame_model(
                     try:
                         provider_item = _decode_visible_item(update.delta)
                         item_model = public_item_type.model_validate(provider_item)
-                        normalized_provider_item = item_model.model_dump(mode="json")
+                        visible_item_model: BaseModel = item_model
+                        if frame_type == "DOSSIER_FRAME":
+                            visible_item_model = materialize_request_bound_dossier_item(
+                                item_model,
+                                frozen_case_matrix=(
+                                    request.model_input.common_model_context
+                                    .frozen_case_matrix.payload
+                                ),
+                            )
+                        normalized_provider_item = visible_item_model.model_dump(
+                            mode="json"
+                        )
                         _validate_public_projection_prefix(
                             frame_type,
                             provider_items,
@@ -964,7 +976,7 @@ async def _invoke_frame_model(
                             )
                         canonical_item = canonical_parallel_public_projection(
                             frame_type,
-                            item_model,
+                            visible_item_model,
                             actor_role=request.actor_role,
                         )
                     except (IntakeGraphContractError, TypeError, ValueError) as error:
@@ -1065,9 +1077,42 @@ async def _invoke_frame_model(
                 request.model_input.common_model_context.source_capacity.litigation_capacity
                 == "RESPONDENT"
             ),
+            frozen_case_matrix=(
+                request.model_input.common_model_context.frozen_case_matrix.payload
+            ),
         )
         final_payload = final.model_dump(mode="json")
-        if final_payload["public_projection_items"] != provider_items:
+        final_items = final_payload["public_projection_items"]
+        if final_items[: len(provider_items)] != provider_items:
+            raise IntakeGraphContractError(
+                "INTAKE_PARALLEL_FRAME_VISIBLE_PREFIX_DIVERGED"
+            )
+        if frame_type == "QUALITY_FRAME":
+            for materialized_item in final_items[len(provider_items) :]:
+                item_model = QualityPublicProjectionDraftV2.model_validate(
+                    materialized_item
+                )
+                normalized_item = item_model.model_dump(mode="json")
+                canonical_item = canonical_parallel_public_projection(
+                    frame_type,
+                    item_model,
+                    actor_role=request.actor_role,
+                )
+                local_index = len(provider_items)
+                provider_items.append(normalized_item)
+                canonical_items.append(
+                    canonical_item.model_dump(mode="json", exclude_none=True)
+                )
+                await runtime.event_sink.emit(
+                    _projection_event(
+                        request,
+                        generation=generation,
+                        frame_id=frame_id,
+                        local_index=local_index,
+                        item=canonical_item,
+                    )
+                )
+        if final_items != provider_items:
             raise IntakeGraphContractError(
                 "INTAKE_PARALLEL_FRAME_VISIBLE_PREFIX_DIVERGED"
             )
@@ -1414,6 +1459,7 @@ def _request_bound_frame_semantic_validator(
             respondent_capacity=(
                 model_context.source_capacity.litigation_capacity == "RESPONDENT"
             ),
+            frozen_case_matrix=model_context.frozen_case_matrix.payload,
         )
         if isinstance(frame, IntakeDialogueFrameV3):
             phase = model_context.previous_state.persisted_phase

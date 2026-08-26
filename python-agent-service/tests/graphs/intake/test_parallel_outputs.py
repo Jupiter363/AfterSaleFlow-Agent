@@ -197,6 +197,9 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
     assert frame_type.model_validate(payload)
     initiator_schema = frame_type.model_json_schema()
     assert set(initiator_schema["properties"]) == {"public_projection_items"}
+    schema_text = json.dumps(initiator_schema, sort_keys=True)
+    assert '"category"' not in schema_text
+    assert '"materiality"' not in schema_text
 
     unknown = _dossier_provider_frame()["public_projection_items"][0]
     unknown["source_row"]["fact_key"] = "FACT_UNKNOWN"
@@ -221,7 +224,40 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
         _dossier_provider_frame(),
         persisted_phase="NOT_READY",
         respondent_capacity=False,
+        frozen_case_matrix=_frozen_matrix(),
     ).model_dump(mode="json") == _dossier_frame()
+
+    provider_drift = _dossier_provider_frame()
+    provider_drift["public_projection_items"][0]["source_row"]["fact_target"] = (
+        "模型改写的既有目标"
+    )
+    restored = materialize_request_bound_frame_output(
+        "DOSSIER_FRAME",
+        provider_drift,
+        persisted_phase="NOT_READY",
+        respondent_capacity=False,
+        frozen_case_matrix=_frozen_matrix(),
+    )
+    assert restored.public_projection_items[0].source_row.fact_target == "商品使用状态"
+    assert restored.public_projection_items[0].source_row.category == "PRODUCT_STATE"
+    assert restored.public_projection_items[0].source_row.materiality == "CORE"
+
+    new_fact = _dossier_provider_frame()
+    new_fact["public_projection_items"][0]["source_row"].update(
+        {
+            "fact_key": "NEW_AAAAAAAAAAAAAAAAAAAAAAAA_USAGE",
+            "fact_target": "本轮新增事实",
+        }
+    )
+    materialized_new = materialize_request_bound_frame_output(
+        "DOSSIER_FRAME",
+        new_fact,
+        persisted_phase="NOT_READY",
+        respondent_capacity=False,
+        frozen_case_matrix=_frozen_matrix(),
+    )
+    assert materialized_new.public_projection_items[0].source_row.category == "OTHER"
+    assert materialized_new.public_projection_items[0].source_row.materiality == "CORE"
 
     respondent_frame_type, _ = request_bound_dossier_output_types(
         existing_fact_keys=("FACT_01",),
@@ -248,6 +284,7 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
             empty_updates,
             persisted_phase="NOT_READY",
             respondent_capacity=True,
+            frozen_case_matrix=_frozen_matrix(),
         ).dossier_delta.respondent_claim
         is None
     )
@@ -264,6 +301,7 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
         respondent_claim,
         persisted_phase="NOT_READY",
         respondent_capacity=True,
+        frozen_case_matrix=_frozen_matrix(),
     )
     assert materialized.dossier_delta.respondent_claim.model_dump(mode="json") == {
         "attitude": "ALTERNATIVE_PROPOSED",
@@ -328,20 +366,89 @@ def test_request_bound_quality_schema_accepts_only_frozen_fact_keys() -> None:
     frame_type, item_type = request_bound_quality_output_types(
         existing_fact_keys=("FACT_01",),
     )
-    assert frame_type.model_validate(_quality_frame())
-    assert item_type.model_validate(_quality_frame()["public_projection_items"][-1])
+    provider = _quality_provider_frame()
+    assert frame_type.model_validate(provider)
+    assert item_type.model_validate(provider["public_projection_items"][0])
 
-    foreign = _quality_frame()
-    foreign["public_projection_items"][-1]["linked_fact_keys"] = ["FACT_FOREIGN"]
+    foreign = _quality_provider_frame()
+    foreign["gap_candidates"][-1]["linked_fact_keys"] = ["FACT_FOREIGN"]
     with pytest.raises(ValidationError, match="literal_error"):
         frame_type.model_validate(foreign)
 
     no_facts_type, _ = request_bound_quality_output_types(existing_fact_keys=())
-    no_facts = _quality_frame()
-    no_facts["public_projection_items"][-1]["linked_fact_keys"] = []
+    no_facts = _quality_provider_frame()
+    no_facts["gap_candidates"][-1]["linked_fact_keys"] = []
     assert no_facts_type.model_validate(no_facts)
     with pytest.raises(ValidationError, match="too_long"):
-        no_facts_type.model_validate(_quality_frame())
+        no_facts_type.model_validate(_quality_provider_frame())
+
+
+def test_quality_provider_draft_materializes_fixed_scores_and_filters_full_score_gap() -> None:
+    frame_type, _ = request_bound_quality_output_types(existing_fact_keys=())
+    provider = _quality_provider_frame()
+    provider["public_projection_items"][0]["candidate_score"] = 15
+    provider["gap_candidates"][-1]["linked_fact_keys"] = []
+
+    validated = frame_type.model_validate(provider)
+    materialized = materialize_request_bound_frame_output(
+        "QUALITY_FRAME",
+        validated,
+        persisted_phase="NOT_READY",
+        respondent_capacity=False,
+    )
+
+    assert len(materialized.public_projection_items) == 6
+    assert [
+        item.root.dimension for item in materialized.public_projection_items
+    ] == [
+        "REFERENCES",
+        "EVENT_STORY",
+        "PARTY_POSITIONS",
+        "REQUESTED_RESOLUTION",
+        "RISK_AND_CONFLICTS",
+        "NEXT_ACTION_CLARITY",
+    ]
+    schema = frame_type.model_json_schema()
+    score_schema = schema["properties"]["public_projection_items"]
+    assert score_schema["minItems"] == score_schema["maxItems"] == 6
+    assert len(score_schema["prefixItems"]) == 6
+
+
+def test_quality_gap_materialization_is_independent_of_provider_candidate_order() -> None:
+    first = _quality_provider_frame()
+    first["gap_candidates"] = [
+        {
+            "dimension": "EVENT_STORY",
+            "question": "请说明商品首次使用时间？",
+            "linked_fact_keys": ["FACT_01"],
+        },
+        {
+            "dimension": "REFERENCES",
+            "question": "请补充检测报告机构名称？",
+            "linked_fact_keys": ["FACT_01"],
+        },
+        {
+            "dimension": "REFERENCES",
+            "question": "请补充第三方报告名称？",
+            "linked_fact_keys": ["FACT_01"],
+        },
+    ]
+    second = {
+        **first,
+        "gap_candidates": list(reversed(first["gap_candidates"])),
+    }
+
+    def materialize(value: dict[str, object]) -> dict[str, object]:
+        return materialize_request_bound_frame_output(
+            "QUALITY_FRAME",
+            value,
+            persisted_phase="NOT_READY",
+            respondent_capacity=False,
+        ).model_dump(mode="json")
+
+    assert materialize(first) == materialize(second)
+    gaps = materialize(first)["public_projection_items"][6:]
+    assert [gap["dimension"] for gap in gaps] == ["REFERENCES", "EVENT_STORY"]
 
 
 def test_dossier_public_items_are_the_only_registered_patch_authority() -> None:
@@ -499,8 +606,24 @@ def _dossier_frame() -> dict[str, object]:
 
 
 def _dossier_provider_frame() -> dict[str, object]:
+    source_row = dict(_source_row())
+    source_row.pop("category")
+    source_row.pop("materiality")
     return {
-        "public_projection_items": _dossier_frame()["public_projection_items"],
+        "public_projection_items": [{"source_row": source_row}],
+    }
+
+
+def _frozen_matrix() -> dict[str, object]:
+    return {
+        "fact_rows": [
+            {
+                "fact_id": "FACT_01",
+                "category": "PRODUCT_STATE",
+                "fact_target": "商品使用状态",
+                "materiality": "CORE",
+            }
+        ]
     }
 
 
@@ -558,4 +681,21 @@ def _quality_frame() -> dict[str, object]:
         "quality": {
             "assessment_reasoning": "主要事实和处理方向已较清楚，但证据来源仍需补充。",
         },
+    }
+
+
+def _quality_provider_frame() -> dict[str, object]:
+    stable = _quality_frame()
+    public_items = stable["public_projection_items"]
+    assert isinstance(public_items, list)
+    return {
+        "public_projection_items": public_items[:6],
+        "gap_candidates": [
+            {
+                key: value
+                for key, value in public_items[6].items()
+                if key != "projection_kind"
+            }
+        ],
+        "quality": stable["quality"],
     }

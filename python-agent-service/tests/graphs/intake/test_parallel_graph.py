@@ -1434,14 +1434,14 @@ async def test_invalid_dossier_source_row_never_emits_a_public_projection() -> N
 
 
 @pytest.mark.asyncio
-async def test_quality_gap_cannot_stream_before_the_fixed_score_prefix() -> None:
+async def test_quality_score_cannot_stream_outside_the_fixed_prefix_order() -> None:
     orchestrator = ParallelIntakeFrameOrchestrator(
         compile_parallel_frame_graphs(checkpointer=InMemorySaver())
     )
     requests, contexts = _requests_and_contexts()
     outputs = deepcopy(_outputs())
     quality_items = outputs["intake_turn_quality_frame"]["public_projection_items"]
-    quality_items.insert(0, quality_items.pop())
+    quality_items[0], quality_items[1] = quality_items[1], quality_items[0]
     sink = _CollectingSink()
 
     result = await orchestrator.execute(
@@ -1683,7 +1683,7 @@ async def test_quality_provider_cannot_author_gap_role() -> None:
 
     call = runner.calls[0]
     invalid = deepcopy(_quality_output())
-    invalid["public_projection_items"][-1]["source_role"] = "MERCHANT"
+    invalid["gap_candidates"][-1]["source_role"] = "MERCHANT"
     with pytest.raises(
         ValidationError,
         match="Extra inputs are not permitted",
@@ -2227,9 +2227,7 @@ def _outputs() -> dict[str, dict[str, Any]]:
                 {
                     "source_row": {
                         "fact_key": "FACT_01",
-                        "category": "PRODUCT_STATE",
                         "fact_target": "商品使用状态",
-                        "materiality": "CORE",
                         "stance": "CONFIRM",
                         "position_summary": "商品已使用约半小时。",
                         "asserted_value": "约半小时",
@@ -2263,14 +2261,9 @@ def _quality_output() -> dict[str, Any]:
             }
             for dimension, score in dimensions
         ]
-    public_items.append(
-        {
-            "projection_kind": "BLOCKING_GAP",
-            **gap,
-        }
-    )
     return {
         "public_projection_items": public_items,
+        "gap_candidates": [gap],
         "quality": {
             "assessment_reasoning": "主要事实和处理方向已较清楚，但证据来源仍需补充。",
         },

@@ -16,11 +16,11 @@ legacy_execution_profile: MONOLITHIC_V3
 parallel_stream_protocol: agent-stream.v4
 ```
 
-截至 2026-08-25，R1–R4 的契约、三路独立 Graph/checkpoint、Java V4 staging/assembly/finalization、前端三槽 provisional projection 与局部 reset 已完成。Quality 的六项评分和缺口现按独立 typed item 流式输出；Java 会在正式状态派生前用 sealed Dossier matrix 对缺口 fact binding 做跨 Frame 对账，且不改写六项分数。
+截至 2026-08-27，R1–R4 的契约、三路独立 Graph/checkpoint、Java V4 staging/assembly/finalization、前端三槽 provisional projection 与局部 reset 已完成。Quality Provider 只生成 Schema 固定的六个评分槽和独立 `gap_candidates`；服务端按固定维度顺序物化成既有 score/gap typed item 后送入 Java。Java 在正式状态派生前用 sealed Dossier matrix 对缺口 fact binding 做跨 Frame 对账，且不改写六项分数。
 
 2026-08-26 的拓扑校正把 Python 顶层明确实现为一个仅含 `dialogue_frame`、`dossier_frame`、`quality_frame` 三个并列 Node 的父 `StateGraph`。三个 Node 分别调用既有的 lane-local child graph，继续使用独立 Prompt、Schema、checkpoint namespace、generation/reset 和 Provider 调用；Python 父图没有 join/assembler/Proposal 节点。每路 canonical item 与 sealed 事件仍在产生时直接进入 Java durable ingress，父图的 END barrier 只决定本次技术调用何时返回，不阻塞任一路首包或 checkpoint。单路重试时另外两个 Node 只执行无副作用 skip，不调用 sibling 模型或 child graph。
 
-最新 pre-activation 聚焦门共通过 22 项：Java profile selector、V4 execution gateway、exact-three assembly、transactional terminal store、formal assembly finalization 共 13 项；Python private parallel stream prepare/execute/retry 共 9 项。fresh activation、真实 Provider 调用和浏览器全链路 UAT 仍未执行，因此当前状态不构成运行态验收或发布结论。
+首轮 fresh activation 已证明三个父图 Node 会同时进入真实 Provider，但 Dossier 分类枚举和 Quality Provider-invisible root validator 造成首代及单路重生成重复失败。2026-08-27 已把这两路改为短 Provider draft + 服务端确定性物化，相关 Provider draft/materialization、三节点 Graph、Prompt、API stream 和 parallel contract 聚焦门通过 84/84；新的 fresh activation、正式矩阵写入和浏览器全链路 UAT仍待执行，因此当前状态不构成运行态验收或发布结论。
 
 三节点父 Graph 校正后的完整 `test_parallel_graph.py` 通过 28/28，包含精确三 sibling 拓扑、父完成前独立首包、独立 child checkpoint、单路 generation reset、单路失败隔离、只重跑一个 active lane 以及外部取消传播；`py_compile` 与 `git diff --check` 同时通过。该结果只证明 Python 技术拓扑，不替代 fresh activation 下的 Java exact-three assembly、正式 Intake 事务和冻结矩阵 UAT。
 
@@ -334,28 +334,15 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
 {
   "public_projection_items": [
     {
-      "schema_version": "intake.dossier-public-fact-proposal.v2",
-      "projection_kind": "CURRENT_FACT",
-      "projection_path_id": "case_story.one_sentence_summary",
       "source_row": {
         "fact_key": "FACT_01",
-        "category": "PRODUCT_STATE",
         "fact_target": "商品使用状态",
-        "materiality": "CORE",
         "stance": "CONFIRM",
         "position_summary": "当前来源事实摘要",
-        "asserted_value": "当前来源事实",
-        "source_scope": "CURRENT_SOURCE",
-        "agreed_statement": null,
-        "conflict_summary": null
+        "asserted_value": "当前来源事实"
       }
     }
-  ],
-  "frame_type": "DOSSIER_FRAME",
-  "schema_version": "intake.dossier-frame.v2",
-  "dossier_delta": {
-    "respondent_claim": null
-  }
+  ]
 }
 ```
 
@@ -367,11 +354,12 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
 - fact key 必须逐字复制 authority 中的完整 key；新事实必须使用服务端提供的 namespace。
 - Dossier 可见面只允许 `CURRENT_FACT + case_story.one_sentence_summary`；该字段复用现有持久化结构，不引入新的卷宗成员。
 - 每条 current-source 事实只生成一次完整 `source_row`。`candidate_value`、`provider_slot_id`、`public_projection_slots`、`matrix_patch.fact_rows` 和 `summary_source_fact_keys` 都由服务端从该唯一行确定性派生，不再要求模型跨字段复制同一事实。
+- Provider 不生成 `category`、`materiality` 或 source scope。既有 `FACT_` 行由服务端从冻结矩阵恢复原分类/目标/重要性；当前 `NEW_` 行使用一个保守、确定性的服务端分类，再进入既有稳定 `IntakeDossierFrameV3`。因此 Provider 枚举漂移不会改变 Java 输入 Schema。
 - 每个 command 的 Provider-visible Dossier Schema 都由冻结矩阵和 authenticated capacity 请求级收窄：已有 key 是 exact `FACT_` 枚举，新 key 只能匹配该 event 的 `NEW_<namespace>_` 前缀；发起方 Schema 将 `respondent_claim` 固定为 `null`。Prompt 只解释同一规则，Python terminal validator 与 Java assembler 继续作为纵深拒绝边界。
 - Python 每闭合一个 item 即以 `source_row.fact_key` 作为 technical projection identity，并以 `source_row.position_summary` 流式公开；Java Assembler 按 accepted item 原顺序构造现有 `case_fact_matrix.delta.v2` 与 `case_story.one_sentence_summary`，最终 `IntakeTurnProposal` 结构不变。
 - Provider 仍只写本轮 current-source rows；Java 从 command-bound immutable previous dossier 读取 Java-owned frozen matrix，先按原 formal row 顺序补齐每个未更新父事实的 `PREVIOUS_MATRIX` carry，再追加当前 `NEW_` rows。现有 initiator/respondent freezer 仍是正式矩阵写入边界，缺父行、rebound、跨角色 claim 或 namespace 漂移全部 fail closed。
 - respondent 的纯事实后续轮若没有新 claim，Java carry 保留上一版 grounded respondent position、`respondent_direct` 与 `claim_conflict`，不得把历史陈述重新归因到当前 message，也不得用 `null` 清空历史权威。
-- Dossier v2 Provider Schema 把 source scope、substantive stance、非空文本与字段封闭规则直接暴露给模型；根级只保留 fact-key 唯一性和聚合长度纵深校验。
+- Dossier Provider Schema 只暴露 current-source fact key、目标、stance 和短文本；source scope、分类、materiality 与历史 carry 都是服务端权威。根级只保留 fact-key 唯一性和聚合长度纵深校验。
 - 初始输出预算建议不超过 2,048 tokens，后续按数据分布收敛。
 
 ### 7.3 Quality Frame
@@ -382,34 +370,24 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
 {
   "public_projection_items": [
     {
-      "schema_version": "intake.quality-public-metric-proposal.v1",
-      "provider_slot_id": "QMETRIC_01",
       "projection_kind": "DIMENSION_SCORE",
-      "dimension": "EVENT_STORY",
-      "candidate_score": 0,
-      "linked_fact_keys": []
-    }
+      "dimension": "REFERENCES",
+      "candidate_score": 0
+    },
+    {"projection_kind":"DIMENSION_SCORE","dimension":"EVENT_STORY","candidate_score":0},
+    {"projection_kind":"DIMENSION_SCORE","dimension":"PARTY_POSITIONS","candidate_score":0},
+    {"projection_kind":"DIMENSION_SCORE","dimension":"REQUESTED_RESOLUTION","candidate_score":0},
+    {"projection_kind":"DIMENSION_SCORE","dimension":"RISK_AND_CONFLICTS","candidate_score":0},
+    {"projection_kind":"DIMENSION_SCORE","dimension":"NEXT_ACTION_CLARITY","candidate_score":0}
   ],
-  "frame_type": "QUALITY_FRAME",
-  "schema_version": "intake.quality-frame.v1",
-  "scores": {
-    "references": 0,
-    "event_story": 0,
-    "party_positions": 0,
-    "requested_resolution": 0,
-    "risk_and_conflicts": 0,
-    "next_action_clarity": 0
-  },
-  "gap_proposals": [
+  "gap_candidates": [
     {
       "dimension": "EVENT_STORY",
-      "question": "具体、可回答的中文问题",
-      "source_role": "USER",
+      "question": "具体、可回答的中文问题？",
       "linked_fact_keys": []
     }
   ],
-  "assessment_reasoning": "简短中文说明",
-  "public_projection_slots": ["QMETRIC_01"]
+  "quality": {"assessment_reasoning": "简短中文说明"}
 }
 ```
 
@@ -419,9 +397,9 @@ tenant/case/thread/room 标识、actor id、fence、内部 authority ref 和写�
 - `dimension` 使用封闭 Enum；禁止任意机器字段名直接成为 blocking gap。
 - gap 必须是当前角色可回答、当前上下文尚未覆盖且能绑定到合法来源或 fact key 的具体缺口。
 - 六项分数是基于 Model View 的唯一模型评分候选。Java Assembler 只做范围/完整性校验和求和，不依据 Dossier Frame 重算或改写分项；如果 Dossier binding 与 Quality 声称的覆盖情况发生不可解释冲突，整次 Java assembly fail closed。Dossier 仅可证明某个 gap 已被覆盖，从而删除该 gap，不得提高或降低六项分数。
-- 每个完整 `QualityPublicMetricProposalV1` 只允许封闭 dimension/gap kind、范围内分值及合法 fact binding；prefix validator 按固定六项顺序、去重和累计预算 canonicalize。它不派生 total/ready/phase，UI 始终标记为 provisional。
-- Quality proposal Schema 必须用封闭 discriminated union 分开 score item 与 gap item；每项只携带该 kind 必需字段，禁止用可选字段大对象表达多种语义。
-- Final Quality Frame 的 scores/gap proposals 必须与 accepted `public_projection_slots` exact reconciliation；同一 dimension 第二次赋值、slot 缺失或最终值漂移均使该 generation 失败。
+- Provider Schema 用六元素 typed tuple 固定 score 的类型、顺序和范围；Provider 无法在第七项再生成 score。`gap_candidates` 是独立数组，不与 score prefix 交错。
+- 服务端丢弃满分维度候选，按候选规范内容确定性处理同维重复，再严格按六维固定顺序物化成既有 `BLOCKING_GAP`。Provider 数组顺序不参与 result/proposal hash。
+- Final Quality Frame 仍使用既有 `IntakeQualityFrameV2`，其 score/gap typed trace 与已送入 Java 的 canonical item exact reconciliation；它不派生 total/ready/phase，UI 始终标记为 provisional。
 - 不输出 ready、conversation action、phase、remark status、handoff 或 admission。
 - 初始输出预算建议不超过 1,024 tokens。
 
@@ -454,7 +432,7 @@ authority_binding_sha256
 
 只有 validator return 可送往 Java；raw Provider item、半 JSON、reasoning、未知 path 和 Provider 自带 canonical id/hash/revision 永不公开。validator 每次重验 prior prefix，执行 source order、duplicate、count/byte/item budget 和 authority lineage；任一 candidate 失败时整个 Frame generation interrupted，不发布该 candidate。
 
-完整 Frame Schema 通过后执行 terminal reconciliation：Dialogue/Dossier 直接以 accepted canonical item trace 为唯一 slot/source-row authority；Quality 的 Provider `public_projection_slots` 仍须与 accepted trace 和最终 scores/gaps 一一对应、同序、同值。reconciliation 不得丢弃已公开 item，也不得在 terminal 静默添加未流式声明的模型语义；服务端确定性 action/question/notice 除外，并由单独 canonical composer 追加。
+完整 Frame Schema 通过后执行 terminal reconciliation：Dialogue 直接以 accepted canonical item trace 为唯一 slot authority；Dossier 的 Provider row 在公开前先物化成既有稳定 row，最终必须与该 V3 trace 同序同值；Quality 的六项 score prefix 必须 exact reconciliation，规范化 gap candidates 由服务端按固定规则追加成旧 gap trace。除这些显式登记的确定性物化，以及 action/question/notice composer 外，terminal 不得静默添加模型语义。
 
 ## 8. 目标 Graph 结构
 

@@ -9,11 +9,11 @@
 输出边界：
 
 - `public_projection_items` 必须是根对象第一个字段。
-- `public_projection_items` 是六项分数和缺口的唯一语义来源。先严格按 `REFERENCES` → `EVENT_STORY` → `PARTY_POSITIONS` → `REQUESTED_RESOLUTION` → `RISK_AND_CONFLICTS` → `NEXT_ACTION_CLARITY` 输出六个 `DIMENSION_SCORE`，再输出零到六个 `BLOCKING_GAP`；不得交错、遗漏、重复或重排。
+- `public_projection_items` 只输出六项分数，并且由 Schema 固定为六个位置。严格按 `REFERENCES` → `EVENT_STORY` → `PARTY_POSITIONS` → `REQUESTED_RESOLUTION` → `RISK_AND_CONFLICTS` → `NEXT_ACTION_CLARITY` 填写六个 `DIMENSION_SCORE`，不得遗漏、重复或重排。
 - 六项分数上限固定为：`REFERENCES=15`、`EVENT_STORY=20`、`PARTY_POSITIONS=20`、`REQUESTED_RESOLUTION=15`、`RISK_AND_CONFLICTS=15`、`NEXT_ACTION_CLARITY=15`。
 - `DIMENSION_SCORE` 只输出 `projection_kind`、`dimension`、`candidate_score`。
-- `BLOCKING_GAP` 只输出 `projection_kind`、`dimension`、一个不超过 160 字且以 `？` 结尾的中文具体问题、以及仅来自冻结矩阵的 `linked_fact_keys`；没有可绑定事实时使用空数组。每个维度最多一个缺口，满分维度不得有缺口。
-- `quality` 只输出一段不超过 600 字的 `assessment_reasoning`。不得在其他字段再次输出分数、缺口、槽位或来源角色。
+- `gap_candidates` 独立输出零到六个候选。每项只输出 `dimension`、一个不超过 160 字且以 `？` 结尾的中文具体问题、以及仅来自冻结矩阵的 `linked_fact_keys`；没有可绑定事实时使用空数组。每个维度最多一个候选，满分维度不要生成候选。服务端会按固定六维顺序和候选规范内容确定性去重，丢弃满分维度候选，再物化为现有 `BLOCKING_GAP`；Provider 数组顺序不构成权威。
+- `quality` 只输出一段不超过 600 字的 `assessment_reasoning`。不得在其他字段再次输出分数、候选、槽位或来源角色。
 - Provider 不输出 `frame_type`、`schema_version`、item id、slot id 或 projection path；这些均由服务端根据当前 Quality 任务确定性补齐。
 - 不输出独立 `total_score`；服务端只以六项整数之和作为唯一总分。
 - 不得输出六项之和、ready 或下一阶段；Java 会依据六项分数与规范化 blocking gap 计算唯一状态。

@@ -105,6 +105,19 @@ def test_parallel_dialogue_and_dossier_prompts_omit_server_determined_nulls() ->
     assert "未表达新回应时使用空数组" in dossier
 
 
+def test_parallel_dossier_prompt_keeps_server_classification_out_of_provider_wire() -> None:
+    repository = PromptRepository()
+    dossier = repository.render_system_prompt(
+        "intake_turn_dossier_frame",
+        prompt_profile_id="intake_turn_dossier_frame",
+    )
+
+    assert "不要输出 category、materiality 或来源范围" in dossier
+    assert "全部由服务端依据冻结矩阵和 fact-key authority 确定性补齐" in dossier
+    assert "PARTIALLY_AGREE" in dossier
+    assert "部分同意必须写 PARTIALLY_AGREE" in dossier
+
+
 def test_target_e2e_v2_prompt_bundle_resolves_evidence_contract() -> None:
     repository = PromptRepository()
 
