@@ -202,6 +202,7 @@ class _FakeRequest:
     run_id: str
     attempt_id: str
     frame_type: ParallelFrameType
+    actor_role: str
     generation: int
     frame_id: str
     context_envelope_sha256: str
@@ -1434,6 +1435,7 @@ def _requests() -> tuple[_FakeRequest, _FakeRequest, _FakeRequest]:
             run_id=RUN_ID,
             attempt_id=ATTEMPT_ID,
             frame_type=frame_type,
+            actor_role="USER",
             generation=1,
             frame_id=f"frame.{frame_type.lower()}",
             context_envelope_sha256=CONTEXT_HASH,
@@ -1452,6 +1454,7 @@ def _authority() -> ParallelFrameStreamAuthority:
         frames=tuple(
             ExpectedParallelFrame(
                 frame_type=request.frame_type,
+                actor_role="USER",
                 generation=request.generation,
                 frame_id=request.frame_id,
                 frame_model_input_sha256=request.model_input.frame_model_input_sha256,

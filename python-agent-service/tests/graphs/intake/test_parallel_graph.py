@@ -16,6 +16,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from testcontainers.postgres import PostgresContainer
 
 import app.graphs.intake.parallel_graph as parallel_graph_module
+from pydantic import ValidationError
 from app.api.intake_parallel_stream import (
     ExpectedParallelFrame,
     ParallelFrameStreamAuthority,
@@ -659,6 +660,7 @@ async def test_prestarted_generation_reset_emits_replacement_start_before_projec
         frames=tuple(
             ExpectedParallelFrame(
                 frame_type=item.frame_type,
+                actor_role=item.actor_role,
                 generation=item.generation,
                 frame_id=item.frame_id,
                 frame_model_input_sha256=item.model_input.frame_model_input_sha256,
@@ -1209,7 +1211,7 @@ async def test_reset_checkpoint_replays_transition_before_replacement_generation
     )
 
     assert replay.replayed_from_checkpoint
-    assert len(runner.calls) == 1
+    assert len(runner.calls) == 2
     assert [type(event) for event in replay_sink.events] == [
         FrameInterrupted,
         FrameGenerationReset,
@@ -1237,7 +1239,7 @@ async def test_reset_checkpoint_replays_transition_before_replacement_generation
     )
 
     assert terminal_replay.replayed_from_checkpoint
-    assert len(runner.calls) == 1
+    assert len(runner.calls) == 2
     assert [type(event) for event in terminal_sink.events] == [FrameSealed]
 
 
@@ -1313,9 +1315,6 @@ async def test_quality_gap_cannot_stream_before_the_fixed_score_prefix() -> None
     outputs = deepcopy(_outputs())
     quality_items = outputs["intake_turn_quality_frame"]["public_projection_items"]
     quality_items.insert(0, quality_items.pop())
-    outputs["intake_turn_quality_frame"]["quality"]["public_projection_slots"] = [
-        item["provider_slot_id"] for item in quality_items
-    ]
     sink = _CollectingSink()
 
     result = await orchestrator.execute(
@@ -1377,7 +1376,7 @@ async def test_quality_cross_item_violation_uses_bounded_native_regeneration() -
 
 
 @pytest.mark.asyncio
-async def test_dialogue_two_visible_items_seal_without_terminal_slot_echo() -> None:
+async def test_dialogue_single_visible_item_seals_without_terminal_slot_echo() -> None:
     orchestrator = ParallelIntakeFrameOrchestrator(
         compile_parallel_frame_graphs(checkpointer=InMemorySaver())
     )
@@ -1386,15 +1385,6 @@ async def test_dialogue_two_visible_items_seal_without_terminal_slot_echo() -> N
         item for item in requests if item.frame_type == "DIALOGUE_FRAME"
     )
     outputs = deepcopy(_outputs())
-    output = outputs["intake_turn_dialogue_frame"]
-    output["public_projection_items"].append(
-        {
-            "schema_version": "intake.dialogue-public-segment-proposal.v1",
-            "provider_slot_id": "DSEG_02",
-            "segment_kind": "TRANSITION",
-            "candidate_text": "下面将按已有核验重点继续处理。",
-        }
-    )
     sink = _CollectingSink()
 
     result = await orchestrator.execute_frame(
@@ -1409,7 +1399,6 @@ async def test_dialogue_two_visible_items_seal_without_terminal_slot_echo() -> N
     ]
     assert [(event.generation, event.local_index) for event in projections] == [
         (1, 0),
-        (1, 1),
     ]
     assert result.generation == 1
     assert result.result.model_dump(mode="json")["dialogue"] == {
@@ -1548,7 +1537,7 @@ async def test_post_complete_seal_failure_emits_lane_interruption(
 
 
 @pytest.mark.asyncio
-async def test_quality_semantic_validator_binds_gap_role_to_authenticated_actor() -> None:
+async def test_quality_provider_cannot_author_gap_role() -> None:
     orchestrator = ParallelIntakeFrameOrchestrator(
         compile_parallel_frame_graphs(checkpointer=InMemorySaver())
     )
@@ -1568,13 +1557,11 @@ async def test_quality_semantic_validator_binds_gap_role_to_authenticated_actor(
     call = runner.calls[0]
     invalid = deepcopy(_quality_output())
     invalid["public_projection_items"][-1]["source_role"] = "MERCHANT"
-    invalid["quality"]["gap_proposals"][0]["source_role"] = "MERCHANT"
-    value = call["output_type"].model_validate(invalid)
     with pytest.raises(
-        ValueError,
-        match="authenticated actor",
+        ValidationError,
+        match="Extra inputs are not permitted",
     ):
-        call["semantic_validator"](value)
+        call["output_type"].model_validate(invalid)
 
 
 @pytest.mark.asyncio
@@ -2103,14 +2090,10 @@ def _outputs() -> dict[str, dict[str, Any]]:
         "intake_turn_dialogue_frame": {
             "public_projection_items": [
                 {
-                    "schema_version": "intake.dialogue-public-segment-proposal.v1",
-                    "provider_slot_id": "DSEG_01",
                     "segment_kind": "ACKNOWLEDGEMENT",
                     "candidate_text": "已记录您本轮补充的事实与处理意见。",
                 }
             ],
-            "frame_type": "DIALOGUE_FRAME",
-            "schema_version": "intake.dialogue-frame.v2",
             "dialogue": {
                 "remark_disposition": None,
             },
@@ -2118,9 +2101,6 @@ def _outputs() -> dict[str, dict[str, Any]]:
         "intake_turn_dossier_frame": {
             "public_projection_items": [
                 {
-                    "schema_version": "intake.dossier-public-fact-proposal.v2",
-                    "projection_kind": "CURRENT_FACT",
-                    "projection_path_id": "case_story.one_sentence_summary",
                     "source_row": {
                         "fact_key": "FACT_01",
                         "category": "PRODUCT_STATE",
@@ -2129,14 +2109,9 @@ def _outputs() -> dict[str, dict[str, Any]]:
                         "stance": "CONFIRM",
                         "position_summary": "商品已使用约半小时。",
                         "asserted_value": "约半小时",
-                        "source_scope": "PREVIOUS_AND_CURRENT_SOURCE",
-                        "agreed_statement": None,
-                        "conflict_summary": None,
                     },
                 }
             ],
-            "frame_type": "DOSSIER_FRAME",
-            "schema_version": "intake.dossier-frame.v2",
             "dossier_delta": {
                 "respondent_claim": None,
             },
@@ -2147,55 +2122,36 @@ def _outputs() -> dict[str, dict[str, Any]]:
 
 def _quality_output() -> dict[str, Any]:
     dimensions = [
-        ("REFERENCES", 10, "QMETRIC_01"),
-        ("EVENT_STORY", 18, "QMETRIC_02"),
-        ("PARTY_POSITIONS", 18, "QMETRIC_03"),
-        ("REQUESTED_RESOLUTION", 14, "QMETRIC_04"),
-        ("RISK_AND_CONFLICTS", 13, "QMETRIC_05"),
-        ("NEXT_ACTION_CLARITY", 12, "QMETRIC_06"),
+        ("REFERENCES", 10),
+        ("EVENT_STORY", 18),
+        ("PARTY_POSITIONS", 18),
+        ("REQUESTED_RESOLUTION", 14),
+        ("RISK_AND_CONFLICTS", 13),
+        ("NEXT_ACTION_CLARITY", 12),
     ]
     gap = {
         "dimension": "REFERENCES",
         "question": "请补充第三方检测报告的机构名称？",
-        "source_role": "USER",
         "linked_fact_keys": ["FACT_01"],
     }
     public_items = [
             {
-                "schema_version": "intake.quality-public-metric-proposal.v1",
-                "provider_slot_id": slot,
                 "projection_kind": "DIMENSION_SCORE",
                 "dimension": dimension,
                 "candidate_score": score,
-                "linked_fact_keys": ["FACT_01"],
             }
-            for dimension, score, slot in dimensions
+            for dimension, score in dimensions
         ]
     public_items.append(
         {
-            "schema_version": "intake.quality-public-gap-proposal.v1",
-            "provider_slot_id": "QGAP_01",
             "projection_kind": "BLOCKING_GAP",
             **gap,
         }
     )
     return {
         "public_projection_items": public_items,
-        "frame_type": "QUALITY_FRAME",
-        "schema_version": "intake.quality-frame.v1",
         "quality": {
-            "scores": {
-                "references": 10,
-                "event_story": 18,
-                "party_positions": 18,
-                "requested_resolution": 14,
-                "risk_and_conflicts": 13,
-                "next_action_clarity": 12,
-            },
-            "gap_proposals": [gap],
             "assessment_reasoning": "主要事实和处理方向已较清楚，但证据来源仍需补充。",
-            "public_projection_slots": [slot for _, _, slot in dimensions]
-            + ["QGAP_01"],
         },
     }
 

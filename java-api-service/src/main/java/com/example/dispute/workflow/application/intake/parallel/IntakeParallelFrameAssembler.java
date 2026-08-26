@@ -47,10 +47,11 @@ public final class IntakeParallelFrameAssembler {
     public static final String TARGET_RESULT_SCHEMA = "target-e2e-room-proposal-source.v2";
     public static final String EXECUTION_PROFILE = "PARALLEL_FRAMES_V1";
     private static final int QUALITY_THRESHOLD = 85;
-    private static final int DIALOGUE_SEGMENT_LIMIT = 2;
-    private static final int DIALOGUE_SEGMENT_MAX_LENGTH = 200;
+    private static final int DIALOGUE_SEGMENT_LIMIT = 1;
+    private static final int DIALOGUE_SEGMENT_MAX_LENGTH = 80;
     private static final int DOSSIER_FACT_LIMIT = 6;
-    private static final int DOSSIER_TEXT_MAX_LENGTH = 240;
+    private static final int DOSSIER_TEXT_MAX_LENGTH = 100;
+    private static final int DOSSIER_SHORT_TEXT_MAX_LENGTH = 60;
     private static final int DOSSIER_SUMMARY_MAX_LENGTH =
             DOSSIER_FACT_LIMIT * DOSSIER_TEXT_MAX_LENGTH + DOSSIER_FACT_LIMIT - 1;
     private static final Pattern IDENTIFIER =
@@ -172,44 +173,18 @@ public final class IntakeParallelFrameAssembler {
                 throw invalid("sealed Frame map key does not match its result authority");
             }
             JsonNode document = parseCanonical(frame.canonicalResultJson(), frame.resultSha256());
-            requireText(document, "frame_type", frameType.name());
-            requireText(document, "schema_version", switch (frameType) {
-                case DIALOGUE_FRAME -> "intake.dialogue-frame.v2";
-                case DOSSIER_FRAME -> "intake.dossier-frame.v2";
-                case QUALITY_FRAME -> "intake.quality-frame.v1";
-            });
             ArrayNode publicItems = requireArray(document.path("public_projection_items"),
                     "public_projection_items");
             if (frameType == FrameType.DOSSIER_FRAME) {
                 requireDossierProjectionPrefix(publicItems, frame.nextLocalIndex());
             } else if (frameType == FrameType.DIALOGUE_FRAME) {
                 requireProviderProjectionItems(publicItems, frame.nextLocalIndex());
-            } else {
-                ArrayNode slots = requireArray(
-                        document.path("quality").path("public_projection_slots"),
-                        "quality.public_projection_slots");
-                requireProjectionSlots(publicItems, slots, frame.nextLocalIndex());
+            } else if (publicItems.size() != frame.nextLocalIndex()) {
+                throw invalid("Quality final projection length differs from the durable prefix");
             }
             parsed.put(frameType, new ParsedFrame(frame, document));
         }
         return Map.copyOf(parsed);
-    }
-
-    private static void requireProjectionSlots(
-            ArrayNode publicItems, ArrayNode slots, long nextLocalIndex) {
-        if (publicItems.size() != slots.size() || publicItems.size() != nextLocalIndex) {
-            throw invalid("Frame final projection slots do not match the durable prefix length");
-        }
-        Set<String> observed = new LinkedHashSet<>();
-        for (int index = 0; index < publicItems.size(); index++) {
-            String itemSlot = identifier(
-                    publicItems.get(index).path("provider_slot_id").asText(null),
-                    "provider_slot_id");
-            String finalSlot = identifier(slots.get(index).asText(null), "public_projection_slot");
-            if (!itemSlot.equals(finalSlot) || !observed.add(itemSlot)) {
-                throw invalid("Frame projection slots are missing, reordered, or repeated");
-            }
-        }
     }
 
     private static void requireProviderProjectionItems(
@@ -217,14 +192,8 @@ public final class IntakeParallelFrameAssembler {
         if (publicItems.size() != nextLocalIndex) {
             throw invalid("Dialogue final projection items do not match the durable prefix length");
         }
-        Set<String> observed = new LinkedHashSet<>();
-        for (JsonNode item : publicItems) {
-            String itemSlot = identifier(
-                    item.path("provider_slot_id").asText(null),
-                    "provider_slot_id");
-            if (!observed.add(itemSlot)) {
-                throw invalid("Dialogue projection items repeat a provider slot");
-            }
+        if (publicItems.size() != DIALOGUE_SEGMENT_LIMIT) {
+            throw invalid("Dialogue final projection must contain exactly one reply segment");
         }
     }
 
@@ -248,7 +217,7 @@ public final class IntakeParallelFrameAssembler {
     private static void requireDialogueAuthority(JsonNode dialogueFrame) {
         requireExactFields(
                 dialogueFrame,
-                Set.of("public_projection_items", "frame_type", "schema_version", "dialogue"),
+                Set.of("public_projection_items", "dialogue"),
                 "Dialogue Frame root");
         JsonNode dialogue = requireObject(dialogueFrame.path("dialogue"), "dialogue");
         requireExactFields(
@@ -258,15 +227,14 @@ public final class IntakeParallelFrameAssembler {
 
         ArrayNode items = requireArray(dialogueFrame.path("public_projection_items"),
                 "dialogue public_projection_items");
-        if (items.isEmpty() || items.size() > DIALOGUE_SEGMENT_LIMIT) {
-            throw invalid("Dialogue Frame requires 1..2 bounded public segments");
+        if (items.size() != DIALOGUE_SEGMENT_LIMIT) {
+            throw invalid("Dialogue Frame requires exactly one bounded public segment");
         }
         for (JsonNode item : items) {
             requireExactFields(
                     item,
-                    Set.of("schema_version", "provider_slot_id", "segment_kind", "candidate_text"),
+                    Set.of("segment_kind", "candidate_text"),
                     "Dialogue projection item");
-            requireText(item, "schema_version", "intake.dialogue-public-segment-proposal.v1");
             String kind = item.path("segment_kind").asText("");
             if (!Set.of("ACKNOWLEDGEMENT", "TRANSITION", "REMARK_ACKNOWLEDGEMENT")
                     .contains(kind)) {
@@ -289,7 +257,7 @@ public final class IntakeParallelFrameAssembler {
             String sourceEventHash) {
         requireExactFields(
                 frame,
-                Set.of("public_projection_items", "frame_type", "schema_version", "dossier_delta"),
+                Set.of("public_projection_items", "dossier_delta"),
                 "Dossier Frame root");
         JsonNode delta = requireObject(frame.path("dossier_delta"), "dossier_delta");
         requireExactFields(
@@ -320,26 +288,10 @@ public final class IntakeParallelFrameAssembler {
         for (JsonNode item : items) {
             requireExactFields(
                     item,
-                    Set.of(
-                            "schema_version",
-                            "projection_kind",
-                            "projection_path_id",
-                            "source_row"),
+                    Set.of("source_row"),
                     "Dossier projection item");
-            requireText(
-                    item,
-                    "schema_version",
-                    "intake.dossier-public-fact-proposal.v2");
-            requireText(item, "projection_kind", "CURRENT_FACT");
-            requireText(item, "projection_path_id", "case_story.one_sentence_summary");
             JsonNode sourceRow = requireObject(item.path("source_row"), "source_row");
-            String sourceScope = sourceRow.path("source_scope").asText("");
-            String stance = sourceRow.path("stance").asText("");
-            if (!("CURRENT_SOURCE".equals(sourceScope)
-                            || "PREVIOUS_AND_CURRENT_SOURCE".equals(sourceScope))
-                    || "NOT_ADDRESSED".equals(stance)) {
-                throw invalid("Dossier public fact has no substantive current-source authority");
-            }
+            requireDossierFactDraft(sourceRow);
             String positionSummary = preservedBoundedText(
                     sourceRow.path("position_summary"),
                     DOSSIER_TEXT_MAX_LENGTH,
@@ -388,9 +340,7 @@ public final class IntakeParallelFrameAssembler {
         List<ObjectNode> currentNew = new ArrayList<>();
         for (JsonNode item : items) {
             ObjectNode sourceRow = requireObject(item.path("source_row"), "source_row");
-            if (!isSubstantiveCurrentSourceRow(sourceRow)) {
-                throw invalid("Dossier fact has no substantive current-source authority");
-            }
+            requireDossierFactDraft(sourceRow);
             String factKey = identifier(
                     sourceRow.path("fact_key").asText(null),
                     "source_row.fact_key");
@@ -404,11 +354,12 @@ public final class IntakeParallelFrameAssembler {
                     throw invalid("Dossier fact references an unknown formal FACT_ key");
                 }
                 requireStableFactBinding(prior, sourceRow);
-                requireText(sourceRow, "source_scope", "PREVIOUS_AND_CURRENT_SOURCE");
-                currentExisting.put(factKey, sourceRow.deepCopy());
-            } else if (factKey.startsWith(newFactPrefix)) {
-                requireText(sourceRow, "source_scope", "CURRENT_SOURCE");
-                currentNew.add(sourceRow.deepCopy());
+                currentExisting.put(
+                        factKey,
+                        materializeCurrentSourceRow(
+                                sourceRow, "PREVIOUS_AND_CURRENT_SOURCE"));
+            } else if (isIssuedNewFactKey(factKey, newFactPrefix)) {
+                currentNew.add(materializeCurrentSourceRow(sourceRow, "CURRENT_SOURCE"));
             } else {
                 throw invalid("Dossier NEW_ fact is outside the issued namespace");
             }
@@ -488,6 +439,64 @@ public final class IntakeParallelFrameAssembler {
         }
     }
 
+    private static void requireDossierFactDraft(JsonNode row) {
+        requireExactFields(
+                row,
+                Set.of(
+                        "fact_key",
+                        "category",
+                        "fact_target",
+                        "materiality",
+                        "stance",
+                        "position_summary",
+                        "asserted_value"),
+                "Dossier fact draft");
+        identifier(row.path("fact_key").asText(null), "source_row.fact_key");
+        if (!Set.of(
+                        "ORDER",
+                        "PRODUCT_PAGE",
+                        "PAYMENT",
+                        "FULFILLMENT",
+                        "LOGISTICS",
+                        "PRODUCT_STATE",
+                        "COMMUNICATION",
+                        "AFTER_SALES",
+                        "TIME",
+                        "OTHER")
+                .contains(row.path("category").asText(""))) {
+            throw invalid("Dossier fact category is not allowlisted");
+        }
+        preservedBoundedText(
+                row.path("fact_target"), DOSSIER_TEXT_MAX_LENGTH, "source_row.fact_target");
+        if (!Set.of("CORE", "SUPPORTING", "CONTEXT")
+                .contains(row.path("materiality").asText(""))) {
+            throw invalid("Dossier fact materiality is not allowlisted");
+        }
+        if (!Set.of("CONFIRM", "DENY", "PARTIAL", "UNKNOWN")
+                .contains(row.path("stance").asText(""))) {
+            throw invalid("Dossier fact stance is not substantive");
+        }
+        preservedBoundedText(
+                row.path("position_summary"),
+                DOSSIER_TEXT_MAX_LENGTH,
+                "source_row.position_summary");
+        JsonNode asserted = row.get("asserted_value");
+        if (asserted != null && !asserted.isNull()) {
+            preservedBoundedText(
+                    asserted,
+                    DOSSIER_SHORT_TEXT_MAX_LENGTH,
+                    "source_row.asserted_value");
+        }
+    }
+
+    private static ObjectNode materializeCurrentSourceRow(
+            ObjectNode draft, String sourceScope) {
+        requireDossierFactDraft(draft);
+        ObjectNode row = draft.deepCopy();
+        row.put("source_scope", sourceScope);
+        return row;
+    }
+
     private static ObjectNode previousMatrixCarry(
             ObjectNode prior, String actorRole, boolean respondentCarry) {
         ObjectNode position = requireObject(
@@ -523,50 +532,67 @@ public final class IntakeParallelFrameAssembler {
                 .toUpperCase(Locale.ROOT) + "_";
     }
 
+    private static boolean isIssuedNewFactKey(String factKey, String prefix) {
+        if (!factKey.startsWith(prefix)) {
+            return false;
+        }
+        String suffix = factKey.substring(prefix.length());
+        return suffix.matches("[A-Za-z0-9_]{1,32}");
+    }
+
     private static QualityOutcome quality(JsonNode frame, String actorRole) {
         requireExactFields(
                 frame,
-                Set.of("public_projection_items", "frame_type", "schema_version", "quality"),
+                Set.of("public_projection_items", "quality"),
                 "Quality Frame root");
         JsonNode quality = requireObject(frame.path("quality"), "quality");
-        requireExactFields(
-                quality,
-                Set.of(
-                        "scores",
-                        "gap_proposals",
-                        "assessment_reasoning",
-                        "public_projection_slots"),
-                "quality");
-        JsonNode scores = requireObject(quality.path("scores"), "quality.scores");
-        requireExactFields(scores, QUALITY_MAXIMA.keySet(), "quality.scores");
-        Map<String, Integer> normalizedScores = new LinkedHashMap<>();
-        int total = 0;
-        for (String field : QUALITY_MAXIMA.keySet().stream().sorted().toList()) {
-            JsonNode value = scores.path(field);
-            if (!value.isIntegralNumber()
-                    || !value.canConvertToInt()
-                    || value.intValue() < 0
-                    || value.intValue() > QUALITY_MAXIMA.get(field)) {
-                throw invalid("quality score is outside the bounded dimension range");
-            }
-            normalizedScores.put(field, value.intValue());
-            total += value.intValue();
-        }
+        requireExactFields(quality, Set.of("assessment_reasoning"), "quality");
         String reasoning = boundedText(
                 quality.path("assessment_reasoning").asText(null),
-                2_000,
+                600,
                 "assessment_reasoning");
-        ArrayNode gaps = requireArray(quality.path("gap_proposals"), "gap_proposals");
-        if (gaps.size() > 6) {
-            throw invalid("Quality Frame may propose at most one gap per dimension");
+        ArrayNode items = requireArray(
+                frame.path("public_projection_items"), "quality public items");
+        if (items.size() < QUALITY_DIMENSION_ORDER.size() || items.size() > 12) {
+            throw invalid("Quality Frame must contain six scores and at most six gaps");
+        }
+        Map<String, Integer> normalizedScores = new LinkedHashMap<>();
+        int total = 0;
+        for (int index = 0; index < QUALITY_DIMENSION_ORDER.size(); index++) {
+            JsonNode item = items.get(index);
+            requireExactFields(
+                    item,
+                    Set.of("projection_kind", "dimension", "candidate_score"),
+                    "Quality score item");
+            requireText(item, "projection_kind", "DIMENSION_SCORE");
+            String dimension = item.path("dimension").asText("");
+            String expectedDimension = QUALITY_DIMENSION_ORDER.get(index);
+            String scoreField = DIMENSION_FIELDS.get(dimension);
+            JsonNode value = item.path("candidate_score");
+            if (!expectedDimension.equals(dimension)
+                    || scoreField == null
+                    || !value.isIntegralNumber()
+                    || !value.canConvertToInt()
+                    || value.intValue() < 0
+                    || value.intValue() > QUALITY_MAXIMA.get(scoreField)) {
+                throw invalid("quality score is outside the bounded dimension range");
+            }
+            normalizedScores.put(scoreField, value.intValue());
+            total += value.intValue();
         }
         List<Gap> normalizedGaps = new ArrayList<>();
         Set<String> observedDimensions = new HashSet<>();
-        for (JsonNode gap : gaps) {
+        for (int index = QUALITY_DIMENSION_ORDER.size(); index < items.size(); index++) {
+            JsonNode gap = items.get(index);
             requireExactFields(
                     gap,
-                    Set.of("dimension", "question", "source_role", "linked_fact_keys"),
-                    "gap proposal");
+                    Set.of(
+                            "projection_kind",
+                            "dimension",
+                            "question",
+                            "linked_fact_keys"),
+                    "Quality gap item");
+            requireText(gap, "projection_kind", "BLOCKING_GAP");
             String dimension = gap.path("dimension").asText("");
             String scoreField = DIMENSION_FIELDS.get(dimension);
             if (scoreField == null || !observedDimensions.add(dimension)) {
@@ -575,8 +601,7 @@ public final class IntakeParallelFrameAssembler {
             if (normalizedScores.get(scoreField).equals(QUALITY_MAXIMA.get(scoreField))) {
                 throw invalid("a full-score dimension cannot remain blocking");
             }
-            requireText(gap, "source_role", actorRole);
-            String question = boundedText(gap.path("question").asText(null), 1_000, "gap question");
+            String question = boundedText(gap.path("question").asText(null), 160, "gap question");
             if (!question.endsWith("？")) {
                 throw invalid("gap question must be one concrete Chinese question");
             }
@@ -601,78 +626,7 @@ public final class IntakeParallelFrameAssembler {
                     .substring(0, 24);
             normalizedGaps.add(new Gap(gapId, dimension, question, List.copyOf(factKeys)));
         }
-        requireQualityProjectionItems(
-                requireArray(frame.path("public_projection_items"), "quality public items"),
-                normalizedScores,
-                normalizedGaps,
-                actorRole);
         return new QualityOutcome(Map.copyOf(normalizedScores), total, List.copyOf(normalizedGaps), reasoning);
-    }
-
-    private static void requireQualityProjectionItems(
-            ArrayNode items,
-            Map<String, Integer> scores,
-            List<Gap> gaps,
-            String actorRole) {
-        if (items.size() != QUALITY_DIMENSION_ORDER.size() + gaps.size()) {
-            throw invalid("Quality public trace must contain six scores and every sealed gap");
-        }
-        for (int index = 0; index < QUALITY_DIMENSION_ORDER.size(); index++) {
-            JsonNode item = items.get(index);
-            requireExactFields(
-                    item,
-                    Set.of(
-                            "schema_version",
-                            "provider_slot_id",
-                            "projection_kind",
-                            "dimension",
-                            "candidate_score",
-                            "linked_fact_keys"),
-                    "Quality projection item");
-            requireText(item, "schema_version", "intake.quality-public-metric-proposal.v1");
-            requireText(item, "projection_kind", "DIMENSION_SCORE");
-            String dimension = item.path("dimension").asText("");
-            String expectedDimension = QUALITY_DIMENSION_ORDER.get(index);
-            String scoreField = DIMENSION_FIELDS.get(dimension);
-            if (!expectedDimension.equals(dimension) || scoreField == null) {
-                throw invalid("Quality public scores differ from the fixed dimension order");
-            }
-            if (!item.path("candidate_score").isIntegralNumber()
-                    || item.path("candidate_score").intValue() != scores.get(scoreField)) {
-                throw invalid("Quality public trace differs from the sealed score map");
-            }
-            requireArray(item.path("linked_fact_keys"), "quality linked_fact_keys");
-        }
-        for (int gapIndex = 0; gapIndex < gaps.size(); gapIndex++) {
-            JsonNode item = items.get(QUALITY_DIMENSION_ORDER.size() + gapIndex);
-            Gap gap = gaps.get(gapIndex);
-            requireExactFields(
-                    item,
-                    Set.of(
-                            "schema_version",
-                            "provider_slot_id",
-                            "projection_kind",
-                            "dimension",
-                            "question",
-                            "source_role",
-                            "linked_fact_keys"),
-                    "Quality gap projection item");
-            requireText(item, "schema_version", "intake.quality-public-gap-proposal.v1");
-            requireText(item, "projection_kind", "BLOCKING_GAP");
-            requireText(item, "dimension", gap.dimension());
-            requireText(item, "question", gap.question());
-            requireText(item, "source_role", actorRole);
-            ArrayNode factKeys = requireArray(
-                    item.path("linked_fact_keys"), "quality gap linked_fact_keys");
-            if (factKeys.size() != gap.factKeys().size()) {
-                throw invalid("Quality public gap fact binding differs from sealed authority");
-            }
-            for (int factIndex = 0; factIndex < factKeys.size(); factIndex++) {
-                if (!gap.factKeys().get(factIndex).equals(factKeys.get(factIndex).asText(null))) {
-                    throw invalid("Quality public gap fact binding differs from sealed authority");
-                }
-            }
-        }
     }
 
     private static QualityOutcome reconcileQualityGaps(

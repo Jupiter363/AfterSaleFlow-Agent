@@ -340,12 +340,8 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
         ObjectNode root = MAPPER.createObjectNode();
         ArrayNode items = root.putArray("public_projection_items");
         ObjectNode item = items.addObject();
-        item.put("schema_version", "intake.dialogue-public-segment-proposal.v1");
-        item.put("provider_slot_id", "DSEG_01");
         item.put("segment_kind", "ACKNOWLEDGEMENT");
         item.put("candidate_text", "已记录您本轮补充的信息。");
-        root.put("frame_type", "DIALOGUE_FRAME");
-        root.put("schema_version", "intake.dialogue-frame.v2");
         ObjectNode dialogue = root.putObject("dialogue");
         dialogue.putNull("remark_disposition");
         return root;
@@ -354,11 +350,6 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
     private static ObjectNode dossier() {
         ObjectNode root = MAPPER.createObjectNode();
         ObjectNode item = root.putArray("public_projection_items").addObject();
-        item.put("schema_version", "intake.dossier-public-fact-proposal.v2");
-        item.put("projection_kind", "CURRENT_FACT");
-        item.put("projection_path_id", "case_story.one_sentence_summary");
-        root.put("frame_type", "DOSSIER_FRAME");
-        root.put("schema_version", "intake.dossier-frame.v2");
         ObjectNode delta = root.putObject("dossier_delta");
         ObjectNode row = MAPPER.createObjectNode();
         row.put("fact_key", "FACT_01");
@@ -368,9 +359,6 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
         row.put("stance", "CONFIRM");
         row.put("position_summary", "本轮补充了核心事实");
         row.put("asserted_value", "本轮补充了核心事实");
-        row.put("source_scope", "PREVIOUS_AND_CURRENT_SOURCE");
-        row.putNull("agreed_statement");
-        row.putNull("conflict_summary");
         item.set("source_row", row.deepCopy());
         delta.putNull("respondent_claim");
         return root;
@@ -380,7 +368,6 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
         ObjectNode root = MAPPER.createObjectNode();
         ArrayNode items = root.putArray("public_projection_items");
         ObjectNode quality = root.putObject("quality");
-        ObjectNode scores = quality.putObject("scores");
         Map<String, Integer> values = Map.ofEntries(
                 Map.entry("references", 15),
                 Map.entry("event_story", 20),
@@ -397,22 +384,13 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 Map.entry("next_action_clarity", "NEXT_ACTION_CLARITY"));
         dimensions.forEach(dimension -> {
             String field = dimension.getKey();
-            scores.put(field, values.get(field));
             ObjectNode item = items.addObject();
-            item.put("schema_version", "intake.quality-public-metric-proposal.v1");
-            item.put("provider_slot_id", "QMETRIC_" + dimension.getValue());
             item.put("projection_kind", "DIMENSION_SCORE");
             item.put("dimension", dimension.getValue());
             item.put("candidate_score", values.get(field));
-            item.putArray("linked_fact_keys");
         });
-        quality.putArray("gap_proposals");
         quality.put("assessment_reasoning", "依据当前消息形成六项评分。");
-        ArrayNode slots = quality.putArray("public_projection_slots");
-        items.forEach(item -> slots.add(item.path("provider_slot_id").asText()));
-        root.put("frame_type", "QUALITY_FRAME");
-        root.put("schema_version", "intake.quality-frame.v1");
-        return reorderRoot(root, "public_projection_items", "frame_type", "schema_version", "quality");
+        return reorderRoot(root, "public_projection_items", "quality");
     }
 
     private static ObjectNode previousDossier() {

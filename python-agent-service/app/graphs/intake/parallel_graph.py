@@ -31,18 +31,19 @@ from app.graphs.intake.parallel_contracts import (
 )
 from app.graphs.intake.parallel_outputs import (
     FRAME_OUTPUT_MODELS,
-    DialoguePublicSegmentProposalV1,
-    DossierPublicFactProposalV2,
-    IntakeDialogueFrameV2,
-    IntakeDossierFrameV2,
-    IntakeQualityFrameV1,
+    DialoguePublicSegmentDraftV3,
+    DossierPublicFactDraftV3,
+    IntakeDialogueFrameV3,
+    IntakeDossierFrameV3,
+    IntakeQualityFrameV2,
     ParallelFrameOutput,
     QUALITY_DIMENSION_ORDER,
-    QualityPublicGapProposalV1,
-    QualityPublicMetricProposalV1,
-    QualityPublicProjectionProposalV1,
+    QualityPublicGapDraftV2,
+    QualityPublicMetricDraftV2,
+    QualityPublicProjectionDraftV2,
     request_bound_dialogue_output_types,
     request_bound_dossier_output_types,
+    request_bound_quality_output_types,
     validate_parallel_frame_output,
 )
 from app.harness.context_window import PromptSection
@@ -63,15 +64,15 @@ FRAME_NODE_NAMES: Mapping[ParallelFrameType, str] = {
 }
 
 FRAME_PUBLIC_ITEM_LIMITS: Mapping[ParallelFrameType, int] = {
-    "DIALOGUE_FRAME": 4,
-    "DOSSIER_FRAME": 32,
+    "DIALOGUE_FRAME": 1,
+    "DOSSIER_FRAME": 6,
     "QUALITY_FRAME": 12,
 }
 
 FRAME_PUBLIC_ITEM_MODELS: Mapping[ParallelFrameType, type[BaseModel]] = {
-    "DIALOGUE_FRAME": DialoguePublicSegmentProposalV1,
-    "DOSSIER_FRAME": DossierPublicFactProposalV2,
-    "QUALITY_FRAME": QualityPublicProjectionProposalV1,
+    "DIALOGUE_FRAME": DialoguePublicSegmentDraftV3,
+    "DOSSIER_FRAME": DossierPublicFactDraftV3,
+    "QUALITY_FRAME": QualityPublicProjectionDraftV2,
 }
 
 QUALITY_DIMENSION_MAXIMA: Mapping[str, int] = {
@@ -829,6 +830,7 @@ async def _invoke_frame_model(
                         canonical_item = canonical_parallel_public_projection(
                             frame_type,
                             item_model,
+                            actor_role=request.actor_role,
                         )
                     except (IntakeGraphContractError, TypeError, ValueError) as error:
                         pending_projection_error = error
@@ -1135,45 +1137,53 @@ def _sealed_event(
 def canonical_parallel_public_projection(
     frame_type: ParallelFrameType,
     item: BaseModel,
+    *,
+    actor_role: PartyRole,
 ) -> CanonicalPublicProjectionItem:
+    # Request-bound item classes are intentionally distinct Pydantic types.
+    # Normalize their trusted values before validating against the stable base
+    # contract; passing one RootModel subclass to another is not a value cast.
+    payload = item.model_dump(mode="json")
     if frame_type == "DIALOGUE_FRAME":
-        dialogue = DialoguePublicSegmentProposalV1.model_validate(item)
+        dialogue = DialoguePublicSegmentDraftV3.model_validate(payload)
         return CanonicalPublicProjectionItem(
-            canonical_item_id=dialogue.provider_slot_id,
+            # Dialogue v3 is intentionally a single-item Provider contract.
+            # The slot is protocol authority, not model semantics.
+            canonical_item_id="DSEG_01",
             projection_kind=dialogue.segment_kind,
             projection_path_id="intake.dialogue.public_segments",
             value_kind="TEXT",
             public_text=dialogue.candidate_text,
         )
     if frame_type == "DOSSIER_FRAME":
-        dossier = DossierPublicFactProposalV2.model_validate(item)
+        dossier = DossierPublicFactDraftV3.model_validate(payload)
         return CanonicalPublicProjectionItem(
             canonical_item_id=dossier.source_row.fact_key,
-            projection_kind=dossier.projection_kind,
-            projection_path_id=dossier.projection_path_id,
+            projection_kind="CURRENT_FACT",
+            projection_path_id="case_story.one_sentence_summary",
             value_kind="JSON_VALUE",
             canonical_value=dossier.source_row.position_summary,
         )
-    quality = QualityPublicProjectionProposalV1.model_validate(item).root
-    if isinstance(quality, QualityPublicGapProposalV1):
+    quality = QualityPublicProjectionDraftV2.model_validate(payload).root
+    if isinstance(quality, QualityPublicGapDraftV2):
         return CanonicalPublicProjectionItem(
-            canonical_item_id=quality.provider_slot_id,
+            canonical_item_id=f"QGAP_{quality.dimension}",
             projection_kind=quality.projection_kind,
             projection_path_id=f"intake.quality.gaps.{quality.dimension.lower()}",
             value_kind="JSON_VALUE",
             canonical_value={
                 "dimension": quality.dimension,
                 "question": quality.question,
-                "source_role": quality.source_role,
+                "source_role": actor_role,
                 "linked_fact_keys": list(quality.linked_fact_keys),
             },
         )
-    if not isinstance(quality, QualityPublicMetricProposalV1):
+    if not isinstance(quality, QualityPublicMetricDraftV2):
         raise ParallelFrameStreamProtocolError(
             "Quality public projection type is invalid"
         )
     return CanonicalPublicProjectionItem(
-        canonical_item_id=quality.provider_slot_id,
+        canonical_item_id=f"QSCORE_{quality.dimension}",
         projection_kind=quality.projection_kind,
         projection_path_id=f"intake.quality.scores.{quality.dimension.lower()}",
         value_kind="JSON_VALUE",
@@ -1207,10 +1217,6 @@ def _validate_public_projection_prefix(
         if current_item.get("projection_kind") != "BLOCKING_GAP":
             raise IntakeGraphContractError(
                 "INTAKE_PARALLEL_QUALITY_GAP_ORDER_INVALID"
-            )
-        if current_item.get("source_role") != actor_role:
-            raise IntakeGraphContractError(
-                "INTAKE_PARALLEL_QUALITY_GAP_SOURCE_INVALID"
             )
         dimension = str(current_item.get("dimension", ""))
         gap_dimensions = {
@@ -1260,26 +1266,33 @@ def _request_bound_frame_semantic_validator(
 
     def validate(value: Any) -> Any:
         frame = validate_parallel_frame_output(frame_type, value)
-        if isinstance(frame, IntakeDialogueFrameV2):
+        if isinstance(frame, IntakeDialogueFrameV3):
             phase = model_context.previous_state.persisted_phase
             disposition = frame.dialogue.remark_disposition
             if (phase == "WAITING_FOR_REMARK") != (disposition is not None):
                 raise ValueError(
                     "Dialogue remark disposition does not match the persisted phase"
                 )
-        elif isinstance(frame, IntakeQualityFrameV1):
-            if any(
-                gap.source_role != actor_role
-                for gap in frame.quality.gap_proposals
-            ):
+        elif isinstance(frame, IntakeQualityFrameV2):
+            allowed_fact_keys = set(
+                model_context.fact_key_authority.existing_fact_keys
+            )
+            gap_fact_keys = {
+                fact_key
+                for wrapped in frame.public_projection_items[
+                    len(QUALITY_DIMENSION_ORDER) :
+                ]
+                if isinstance(wrapped.root, QualityPublicGapDraftV2)
+                for fact_key in wrapped.root.linked_fact_keys
+            }
+            if not gap_fact_keys.issubset(allowed_fact_keys):
                 raise ValueError(
-                    "Quality gap source role differs from the authenticated actor"
+                    "Quality gap references a fact outside the frozen matrix authority"
                 )
-        elif isinstance(frame, IntakeDossierFrameV2):
+        elif isinstance(frame, IntakeDossierFrameV3):
             # This is an aggregate persisted-field bound and is intentionally not
             # weakened to the per-item string limit exposed in JSON Schema.
             frame.materialized_dossier_patch()
-            frame.materialized_matrix_patch()
             _validate_dossier_frame_authority(frame, model_context)
         return value
 
@@ -1294,6 +1307,10 @@ def _request_bound_frame_types(
         return request_bound_dialogue_output_types(
             persisted_phase=model_context.previous_state.persisted_phase,
         )
+    if frame_type == "QUALITY_FRAME":
+        return request_bound_quality_output_types(
+            existing_fact_keys=model_context.fact_key_authority.existing_fact_keys,
+        )
     if frame_type != "DOSSIER_FRAME":
         return FRAME_OUTPUT_MODELS[frame_type], FRAME_PUBLIC_ITEM_MODELS[frame_type]
     output_type, item_type = request_bound_dossier_output_types(
@@ -1307,7 +1324,7 @@ def _request_bound_frame_types(
 
 
 def _validate_dossier_frame_authority(
-    frame: IntakeDossierFrameV2,
+    frame: IntakeDossierFrameV3,
     model_context: IntakeModelContextViewV1,
 ) -> None:
     if (
@@ -1341,11 +1358,8 @@ def _validate_dossier_frame_authority(
                 or prior.get("materiality") != row.materiality
             ):
                 raise ValueError("Dossier fact changes a frozen formal binding")
-            if row.source_scope != "PREVIOUS_AND_CURRENT_SOURCE":
-                raise ValueError("an existing Dossier fact must bind previous and current source")
         elif row.fact_key.startswith(prefix):
-            if row.source_scope != "CURRENT_SOURCE":
-                raise ValueError("a new Dossier fact must bind only the current source")
+            pass
         else:
             raise ValueError("Dossier NEW_ fact is outside the issued namespace")
 
@@ -1361,7 +1375,13 @@ def _provider_item_identity(
                 "INTAKE_PARALLEL_DOSSIER_SOURCE_ROW_INVALID"
             )
         return str(source_row.get("fact_key", ""))
-    return str(item.get("provider_slot_id", ""))
+    if frame_type == "DIALOGUE_FRAME":
+        return "DSEG_01"
+    dimension = str(item.get("dimension", ""))
+    kind = str(item.get("projection_kind", ""))
+    if not dimension or kind not in {"DIMENSION_SCORE", "BLOCKING_GAP"}:
+        return ""
+    return ("QSCORE_" if kind == "DIMENSION_SCORE" else "QGAP_") + dimension
 
 
 def _provider_usage(

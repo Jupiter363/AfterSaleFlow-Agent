@@ -16,7 +16,11 @@ from app.contracts.v1.models import (
     PARALLEL_INTAKE_AGENT_PROFILE_ID,
     PARALLEL_INTAKE_OUTPUT_SCHEMA,
 )
-from app.graphs.intake.parallel_contracts import FRAME_TYPES, ParallelFrameType
+from app.graphs.intake.parallel_contracts import (
+    FRAME_TYPES,
+    ParallelFrameType,
+    PartyRole,
+)
 from app.graphs.intake.parallel_graph import (
     FrameGenerationReset,
     FrameInterrupted,
@@ -46,6 +50,7 @@ _STREAM_CLOSE_TIMEOUT_SECONDS = 5.0
 @dataclass(frozen=True, slots=True)
 class ExpectedParallelFrame:
     frame_type: ParallelFrameType
+    actor_role: PartyRole
     generation: int
     frame_id: str
     frame_model_input_sha256: str
@@ -56,6 +61,7 @@ class ExpectedParallelFrame:
     def __post_init__(self) -> None:
         if (
             self.frame_type not in FRAME_TYPES
+            or self.actor_role not in {"USER", "MERCHANT"}
             or isinstance(self.generation, bool)
             or self.generation < 1
             or not self.frame_id
@@ -92,6 +98,7 @@ class ParallelFrameStreamAuthority:
             or not self.attempt_id
             or len(self.attempt_id) > 128
             or tuple(frame.frame_type for frame in self.frames) != FRAME_TYPES
+            or len({frame.actor_role for frame in self.frames}) != 1
             or len({frame.context_envelope_sha256 for frame in self.frames}) != 1
             or len({frame.model_context_view_sha256 for frame in self.frames}) != 1
         ):
@@ -259,6 +266,7 @@ class ParallelFrameAdmissionReceipt:
             projected.append(
                 ExpectedParallelFrame(
                     frame_type=prepared.frame_type,
+                    actor_role=prepared.actor_role,
                     generation=lane.generation,
                     frame_id=lane.frame_id,
                     frame_model_input_sha256=prepared.frame_model_input_sha256,
@@ -638,7 +646,11 @@ class ParallelFrameStreamProtocolValidator:
                 "parallel Frame sealed result is invalid"
             ) from error
         expected_items = [
-            canonical_parallel_public_projection(event.frame_type, item).model_dump(
+            canonical_parallel_public_projection(
+                event.frame_type,
+                item,
+                actor_role=state.expected.actor_role,
+            ).model_dump(
                 mode="json",
                 exclude_none=True,
             )

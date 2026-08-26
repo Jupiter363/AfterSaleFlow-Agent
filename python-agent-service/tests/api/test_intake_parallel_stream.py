@@ -508,6 +508,7 @@ def _expected(frame_type: ParallelFrameType) -> ExpectedParallelFrame:
     suffix = FRAME_TYPES.index(frame_type) + 1
     return ExpectedParallelFrame(
         frame_type=frame_type,
+        actor_role="USER",
         generation=1,
         frame_id=f"frame.{frame_type.lower()}",
         frame_model_input_sha256=str(suffix) * 64,
@@ -547,7 +548,11 @@ def _successful_lane(
     selected_frame_id = expected.frame_id if frame_id is None else frame_id
     result = validate_parallel_frame_output(frame_type, _result_payload(frame_type))
     canonical_items = [
-        canonical_parallel_public_projection(frame_type, item)
+        canonical_parallel_public_projection(
+            frame_type,
+            item,
+            actor_role="USER",
+        )
         for item in result.public_projection_items
     ]
     events: list[FrameStarted | FrameProjectionItem | FrameSealed] = [
@@ -607,14 +612,10 @@ def _result_payload(frame_type: ParallelFrameType) -> dict[str, Any]:
         return {
             "public_projection_items": [
                 {
-                    "schema_version": "intake.dialogue-public-segment-proposal.v1",
-                    "provider_slot_id": "DSEG_01",
                     "segment_kind": "ACKNOWLEDGEMENT",
                     "candidate_text": "已记录您本轮补充的事实与处理意见。",
                 }
             ],
-            "frame_type": frame_type,
-            "schema_version": "intake.dialogue-frame.v2",
             "dialogue": {
                 "remark_disposition": None,
             },
@@ -623,9 +624,6 @@ def _result_payload(frame_type: ParallelFrameType) -> dict[str, Any]:
         return {
             "public_projection_items": [
                 {
-                    "schema_version": "intake.dossier-public-fact-proposal.v2",
-                    "projection_kind": "CURRENT_FACT",
-                    "projection_path_id": "case_story.one_sentence_summary",
                     "source_row": {
                         "fact_key": "FACT_01",
                         "category": "PRODUCT_STATE",
@@ -634,67 +632,43 @@ def _result_payload(frame_type: ParallelFrameType) -> dict[str, Any]:
                         "stance": "CONFIRM",
                         "position_summary": "商品已使用约半小时。",
                         "asserted_value": "约半小时",
-                        "source_scope": "CURRENT_SOURCE",
-                        "agreed_statement": None,
-                        "conflict_summary": None,
                     },
                 }
             ],
-            "frame_type": frame_type,
-            "schema_version": "intake.dossier-frame.v2",
             "dossier_delta": {
                 "respondent_claim": None,
             },
         }
     dimensions = [
-        ("REFERENCES", 10, "QMETRIC_01"),
-        ("EVENT_STORY", 18, "QMETRIC_02"),
-        ("PARTY_POSITIONS", 18, "QMETRIC_03"),
-        ("REQUESTED_RESOLUTION", 14, "QMETRIC_04"),
-        ("RISK_AND_CONFLICTS", 13, "QMETRIC_05"),
-        ("NEXT_ACTION_CLARITY", 12, "QMETRIC_06"),
+        ("REFERENCES", 10),
+        ("EVENT_STORY", 18),
+        ("PARTY_POSITIONS", 18),
+        ("REQUESTED_RESOLUTION", 14),
+        ("RISK_AND_CONFLICTS", 13),
+        ("NEXT_ACTION_CLARITY", 12),
     ]
     gap = {
         "dimension": "REFERENCES",
         "question": "请补充第三方检测报告的机构名称？",
-        "source_role": "USER",
         "linked_fact_keys": ["FACT_01"],
     }
     public_items = [
             {
-                "schema_version": "intake.quality-public-metric-proposal.v1",
-                "provider_slot_id": slot,
                 "projection_kind": "DIMENSION_SCORE",
                 "dimension": dimension,
                 "candidate_score": score,
-                "linked_fact_keys": ["FACT_01"],
             }
-            for dimension, score, slot in dimensions
+            for dimension, score in dimensions
         ]
     public_items.append(
         {
-            "schema_version": "intake.quality-public-gap-proposal.v1",
-            "provider_slot_id": "QGAP_01",
             "projection_kind": "BLOCKING_GAP",
             **gap,
         }
     )
     return {
         "public_projection_items": public_items,
-        "frame_type": frame_type,
-        "schema_version": "intake.quality-frame.v1",
         "quality": {
-            "scores": {
-                "references": 10,
-                "event_story": 18,
-                "party_positions": 18,
-                "requested_resolution": 14,
-                "risk_and_conflicts": 13,
-                "next_action_clarity": 12,
-            },
-            "gap_proposals": [gap],
             "assessment_reasoning": "事实和处理方向较清楚，但证据来源仍需补充。",
-            "public_projection_slots": [slot for _, _, slot in dimensions]
-            + ["QGAP_01"],
         },
     }

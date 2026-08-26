@@ -150,6 +150,7 @@ class FakeParallelStreamService:
         frames = tuple(
             ExpectedParallelFrame(
                 frame_type=frame_type,
+                actor_role=command.actor_scope.actor_role,
                 generation=1,
                 frame_id=f"IFR_{index}",
                 frame_model_input_sha256=str(index) * 64,

@@ -1288,6 +1288,7 @@ def _authority_from_command_bundle(
     frames = tuple(
         ExpectedParallelFrame(
             frame_type=request.frame_type,
+            actor_role=request.actor_role,
             generation=request.generation,
             frame_id=request.frame_id,
             frame_model_input_sha256=request.model_input.frame_model_input_sha256,

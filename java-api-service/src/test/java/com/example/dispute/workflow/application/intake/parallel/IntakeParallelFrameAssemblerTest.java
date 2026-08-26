@@ -71,6 +71,7 @@ class IntakeParallelFrameAssemblerTest {
                 .isEqualTo("intake.proposal." + first.proposalSha256().substring(0, 32));
         assertThat(first.artifactUri())
                 .isEqualTo("urn:target-e2e:proposal:intake:" + first.proposalSha256());
+        assertThat(first.proposal().schemaVersion()).isEqualTo("intake-turn-proposal.v2");
         assertThat(first.proposal().dossierPatch().at("/case_story/one_sentence_summary").asText())
                 .isEqualTo("本轮补充了核心事实");
     }
@@ -155,7 +156,7 @@ class IntakeParallelFrameAssemblerTest {
     }
 
     @Test
-    void rejectsPublicGapThatDiffersFromTheSealedGapAuthority() {
+    void rejectsProviderAuthoredQualityGapSourceRole() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode quality = quality(Map.of(
                         "references", 10,
@@ -166,14 +167,14 @@ class IntakeParallelFrameAssemblerTest {
                         "next_action_clarity", 15),
                 List.of(gap("REFERENCES", "请补充第三方检测报告？")));
         ((ObjectNode) quality.at("/public_projection_items/6"))
-                .put("question", "请补充另一项材料？");
+                .put("source_role", "MERCHANT");
 
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
                         dialogue(previous, "ASK_SUBSTANTIVE"),
                         dossier(),
                         quality))))
                 .isInstanceOf(AssemblyRejectedException.class)
-                .hasMessageContaining("question differs from trusted authority");
+                .hasMessageContaining("Quality gap item fields differ");
     }
 
     @Test
@@ -234,12 +235,8 @@ class IntakeParallelFrameAssemblerTest {
     void rejectsParallelFramesThatExceedTheSmallOutputContract() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode dialogue = dialogue(previous, "ASK_SUBSTANTIVE");
-        for (int index = 2; index <= 3; index++) {
-            ObjectNode repeated = ((ObjectNode) dialogue.at("/public_projection_items/0"))
-                    .deepCopy();
-            repeated.put("provider_slot_id", "DSEG_0" + index);
-            dialogue.withArray("public_projection_items").add(repeated);
-        }
+        dialogue.withArray("public_projection_items").add(
+                dialogue.at("/public_projection_items/0").deepCopy());
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
                         dialogue,
                         dossier(),
@@ -252,15 +249,14 @@ class IntakeParallelFrameAssemblerTest {
                                         "next_action_clarity", 15),
                                 List.of())))))
                 .isInstanceOf(AssemblyRejectedException.class)
-                .hasMessageContaining("1..2 bounded public segments");
+                .hasMessageContaining("exactly one reply segment");
 
         ObjectNode dossier = dossier();
         for (int index = 2; index <= 7; index++) {
             ObjectNode repeated = ((ObjectNode) dossier.at("/public_projection_items/0"))
                     .deepCopy();
             repeated.with("source_row")
-                    .put("fact_key", "NEW_" + "C".repeat(24) + "_FACT_" + index)
-                    .put("source_scope", "CURRENT_SOURCE");
+                    .put("fact_key", "NEW_" + "C".repeat(24) + "_FACT_" + index);
             dossier.withArray("public_projection_items").add(repeated);
         }
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
@@ -276,6 +272,48 @@ class IntakeParallelFrameAssemblerTest {
                                 List.of())))))
                 .isInstanceOf(AssemblyRejectedException.class)
                 .hasMessageContaining("durable prefix length");
+    }
+
+    @Test
+    void rejectsLegacyV2DialogueAndDossierProviderShapes() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode legacyDialogue = dialogue(previous, "ASK_SUBSTANTIVE");
+        legacyDialogue.put("frame_type", "DIALOGUE_FRAME");
+        legacyDialogue.put("schema_version", "intake.dialogue-frame.v2");
+        ((ObjectNode) legacyDialogue.at("/public_projection_items/0"))
+                .put("provider_slot_id", "DSEG_01");
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        legacyDialogue,
+                        dossier(),
+                        quality(Map.of(
+                                        "references", 15,
+                                        "event_story", 20,
+                                        "party_positions", 20,
+                                        "requested_resolution", 15,
+                                        "risk_and_conflicts", 15,
+                                        "next_action_clarity", 15),
+                                List.of())))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("Dialogue Frame root fields differ");
+
+        ObjectNode legacyDossier = dossier();
+        legacyDossier.put("frame_type", "DOSSIER_FRAME");
+        legacyDossier.put("schema_version", "intake.dossier-frame.v2");
+        ((ObjectNode) legacyDossier.at("/public_projection_items/0"))
+                .put("projection_path_id", "case_story.one_sentence_summary");
+        assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                        dialogue(previous, "ASK_SUBSTANTIVE"),
+                        legacyDossier,
+                        quality(Map.of(
+                                        "references", 15,
+                                        "event_story", 20,
+                                        "party_positions", 20,
+                                        "requested_resolution", 15,
+                                        "risk_and_conflicts", 15,
+                                        "next_action_clarity", 15),
+                                List.of())))))
+                .isInstanceOf(AssemblyRejectedException.class)
+                .hasMessageContaining("Dossier Frame root fields differ");
     }
 
     @Test
@@ -295,11 +333,7 @@ class IntakeParallelFrameAssemblerTest {
                 .deepCopy();
         newRow.put("fact_key", "NEW_" + "C".repeat(24) + "_CURRENT");
         newRow.put("fact_target", "本轮新增物流事实");
-        newRow.put("source_scope", "CURRENT_SOURCE");
         ObjectNode newItem = dossier.withArray("public_projection_items").addObject();
-        newItem.put("schema_version", "intake.dossier-public-fact-proposal.v2");
-        newItem.put("projection_kind", "CURRENT_FACT");
-        newItem.put("projection_path_id", "case_story.one_sentence_summary");
         newItem.set("source_row", newRow);
 
         var output = assembler.assemble(command(previous, frames(
@@ -347,8 +381,7 @@ class IntakeParallelFrameAssemblerTest {
 
         ObjectNode foreignNamespace = dossier();
         ((ObjectNode) foreignNamespace.at("/public_projection_items/0/source_row"))
-                .put("fact_key", "NEW_" + "D".repeat(24) + "_FOREIGN")
-                .put("source_scope", "CURRENT_SOURCE");
+                .put("fact_key", "NEW_" + "D".repeat(24) + "_FOREIGN");
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
                         dialogue(previous, "ASK_SUBSTANTIVE"),
                         foreignNamespace,
@@ -432,15 +465,15 @@ class IntakeParallelFrameAssemblerTest {
                                 "next_action_clarity", 15),
                                 List.of())))))
                 .isInstanceOf(AssemblyRejectedException.class)
-                .hasMessageContaining("projection_path_id");
+                .hasMessageContaining("Dossier projection item fields differ");
     }
 
     @Test
-    void rejectsProviderAuthoredDossierSourceBinding() {
+    void rejectsProviderAuthoredDossierSourceScope() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode dossier = dossier();
-        ((ObjectNode) dossier.at("/public_projection_items/0"))
-                .put("source_binding_id", "SOURCE_01");
+        ((ObjectNode) dossier.at("/public_projection_items/0/source_row"))
+                .put("source_scope", "CURRENT_SOURCE");
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
                         dialogue(previous, "ASK_SUBSTANTIVE"),
                         dossier,
@@ -453,16 +486,15 @@ class IntakeParallelFrameAssemblerTest {
                                 "next_action_clarity", 15),
                                 List.of())))))
                 .isInstanceOf(AssemblyRejectedException.class)
-                .hasMessageContaining("fields differ");
+                .hasMessageContaining("Dossier fact draft fields differ");
     }
 
     @Test
-    void rejectsOverlappingDossierProjectionPaths() {
+    void rejectsRepeatedDossierFactKeys() {
         ObjectNode previous = previousDossier("NOT_READY", 0, false);
         ObjectNode dossier = dossier();
         ObjectNode overlapping = ((ObjectNode) dossier.at("/public_projection_items/0"))
                 .deepCopy();
-        overlapping.put("projection_path_id", "case_story.one_sentence_summary");
         ((ArrayNode) dossier.path("public_projection_items")).add(overlapping);
 
         assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
@@ -490,11 +522,7 @@ class IntakeParallelFrameAssemblerTest {
         second.put("fact_target", "补充事实");
         second.put("position_summary", "第二项当前事实");
         second.put("asserted_value", "第二项当前事实");
-        second.put("source_scope", "CURRENT_SOURCE");
         ObjectNode secondItem = dossier.withArray("public_projection_items").addObject();
-        secondItem.put("schema_version", "intake.dossier-public-fact-proposal.v2");
-        secondItem.put("projection_kind", "CURRENT_FACT");
-        secondItem.put("projection_path_id", "case_story.one_sentence_summary");
         secondItem.set("source_row", second.deepCopy());
 
         var output = assembler.assemble(command(previous, frames(
@@ -682,12 +710,8 @@ class IntakeParallelFrameAssemblerTest {
         ObjectNode root = MAPPER.createObjectNode();
         ArrayNode items = root.putArray("public_projection_items");
         ObjectNode item = items.addObject();
-        item.put("schema_version", "intake.dialogue-public-segment-proposal.v1");
-        item.put("provider_slot_id", "DSEG_01");
         item.put("segment_kind", "ACKNOWLEDGEMENT");
         item.put("candidate_text", "已记录您本轮补充的信息。");
-        root.put("frame_type", "DIALOGUE_FRAME");
-        root.put("schema_version", "intake.dialogue-frame.v2");
         ObjectNode dialogue = root.putObject("dialogue");
         if ("ACK_REMARK".equals(action)) {
             dialogue.put("remark_disposition", "REMARK");
@@ -702,11 +726,6 @@ class IntakeParallelFrameAssemblerTest {
     private static ObjectNode dossier() {
         ObjectNode root = MAPPER.createObjectNode();
         ObjectNode item = root.putArray("public_projection_items").addObject();
-        item.put("schema_version", "intake.dossier-public-fact-proposal.v2");
-        item.put("projection_kind", "CURRENT_FACT");
-        item.put("projection_path_id", "case_story.one_sentence_summary");
-        root.put("frame_type", "DOSSIER_FRAME");
-        root.put("schema_version", "intake.dossier-frame.v2");
         ObjectNode delta = root.putObject("dossier_delta");
         ObjectNode row = MAPPER.createObjectNode();
         row.put("fact_key", "FACT_01");
@@ -716,9 +735,6 @@ class IntakeParallelFrameAssemblerTest {
         row.put("stance", "CONFIRM");
         row.put("position_summary", "本轮补充了核心事实");
         row.put("asserted_value", "本轮补充了核心事实");
-        row.put("source_scope", "PREVIOUS_AND_CURRENT_SOURCE");
-        row.putNull("agreed_statement");
-        row.putNull("conflict_summary");
         item.set("source_row", row.deepCopy());
         delta.putNull("respondent_claim");
         return root;
@@ -729,7 +745,6 @@ class IntakeParallelFrameAssemblerTest {
         ObjectNode root = MAPPER.createObjectNode();
         ArrayNode items = root.putArray("public_projection_items");
         ObjectNode quality = root.putObject("quality");
-        ObjectNode scoreNode = quality.putObject("scores");
         List<Map.Entry<String, String>> dimensions = List.of(
                 Map.entry("references", "REFERENCES"),
                 Map.entry("event_story", "EVENT_STORY"),
@@ -739,41 +754,27 @@ class IntakeParallelFrameAssemblerTest {
                 Map.entry("next_action_clarity", "NEXT_ACTION_CLARITY"));
         dimensions.forEach(dimension -> {
             String field = dimension.getKey();
-            scoreNode.put(field, scores.get(field));
             ObjectNode item = items.addObject();
-            item.put("schema_version", "intake.quality-public-metric-proposal.v1");
-            item.put("provider_slot_id", "QMETRIC_" + dimension.getValue());
             item.put("projection_kind", "DIMENSION_SCORE");
             item.put("dimension", dimension.getValue());
             item.put("candidate_score", scores.get(field));
-            item.putArray("linked_fact_keys");
         });
-        ArrayNode gapArray = quality.putArray("gap_proposals");
         for (int index = 0; index < gaps.size(); index++) {
             ObjectNode gap = gaps.get(index);
-            gapArray.add(gap.deepCopy());
             ObjectNode publicGap = items.addObject();
-            publicGap.put("schema_version", "intake.quality-public-gap-proposal.v1");
-            publicGap.put("provider_slot_id", "QGAP_" + (index + 1));
             publicGap.put("projection_kind", "BLOCKING_GAP");
             publicGap.put("dimension", gap.path("dimension").asText());
             publicGap.put("question", gap.path("question").asText());
-            publicGap.put("source_role", gap.path("source_role").asText());
             publicGap.set("linked_fact_keys", gap.path("linked_fact_keys").deepCopy());
         }
         quality.put("assessment_reasoning", "依据当前消息形成六项评分。");
-        ArrayNode slots = quality.putArray("public_projection_slots");
-        items.forEach(item -> slots.add(item.path("provider_slot_id").asText()));
-        root.put("frame_type", "QUALITY_FRAME");
-        root.put("schema_version", "intake.quality-frame.v1");
-        return reorderRoot(root, "public_projection_items", "frame_type", "schema_version", "quality");
+        return reorderRoot(root, "public_projection_items", "quality");
     }
 
     private static ObjectNode gap(String dimension, String question, String... factKeys) {
         ObjectNode gap = MAPPER.createObjectNode();
         gap.put("dimension", dimension);
         gap.put("question", question);
-        gap.put("source_role", "USER");
         ArrayNode linked = gap.putArray("linked_fact_keys");
         Stream.of(factKeys).forEach(linked::add);
         return gap;
