@@ -4,7 +4,7 @@
 
 ```text
 plan_status: IMPLEMENTED_FOCUSED_VERIFIED
-implementation_status: R5_PRE_ACTIVATION_GATE_PASSED
+implementation_status: R5_THREE_NODE_PARENT_FOCUSED_VERIFIED
 runtime_change: SOURCE_COMPLETE_FRESH_ACTIVATION_REQUIRED
 database_change: IMPLEMENTED_JAVA_V081_TO_V088_AND_GRAPH_G011_TO_G013
 uat_status: PENDING_FRESH_ACTIVATION
@@ -18,7 +18,11 @@ parallel_stream_protocol: agent-stream.v4
 
 截至 2026-08-25，R1–R4 的契约、三路独立 Graph/checkpoint、Java V4 staging/assembly/finalization、前端三槽 provisional projection 与局部 reset 已完成。Quality 的六项评分和缺口现按独立 typed item 流式输出；Java 会在正式状态派生前用 sealed Dossier matrix 对缺口 fact binding 做跨 Frame 对账，且不改写六项分数。
 
+2026-08-26 的拓扑校正把 Python 顶层明确实现为一个仅含 `dialogue_frame`、`dossier_frame`、`quality_frame` 三个并列 Node 的父 `StateGraph`。三个 Node 分别调用既有的 lane-local child graph，继续使用独立 Prompt、Schema、checkpoint namespace、generation/reset 和 Provider 调用；Python 父图没有 join/assembler/Proposal 节点。每路 canonical item 与 sealed 事件仍在产生时直接进入 Java durable ingress，父图的 END barrier 只决定本次技术调用何时返回，不阻塞任一路首包或 checkpoint。单路重试时另外两个 Node 只执行无副作用 skip，不调用 sibling 模型或 child graph。
+
 最新 pre-activation 聚焦门共通过 22 项：Java profile selector、V4 execution gateway、exact-three assembly、transactional terminal store、formal assembly finalization 共 13 项；Python private parallel stream prepare/execute/retry 共 9 项。fresh activation、真实 Provider 调用和浏览器全链路 UAT 仍未执行，因此当前状态不构成运行态验收或发布结论。
+
+三节点父 Graph 校正后的完整 `test_parallel_graph.py` 通过 28/28，包含精确三 sibling 拓扑、父完成前独立首包、独立 child checkpoint、单路 generation reset、单路失败隔离、只重跑一个 active lane 以及外部取消传播；`py_compile` 与 `git diff --check` 同时通过。该结果只证明 Python 技术拓扑，不替代 fresh activation 下的 Java exact-three assembly、正式 Intake 事务和冻结矩阵 UAT。
 
 本文定义最终交付所需的完整实施边界、协议、切分顺序和验收门，不在规划阶段修改业务代码、数据库、运行服务或现有案件。当前单体接待官仍是生产真值。实施切片只用于控制提交和验证边界，不代表功能降级、分期协议或临时子集；`PARALLEL_FRAMES_V1` 只有在本文全部契约和验收门同时完成后才能启用。
 
@@ -507,11 +511,11 @@ frame sealed -> persist immutable Frame result + CAS current Frame slot
 
 `fresh_form_opening_node` 与 `respondent_opening_node` 各自使用既有开场语义对应的专属 Prompt/Schema，只负责首次进入房间的说明和首组提问；它们不进入 Dossier/Quality 三路，也不得写本轮并行评分增量。`ROOM_MESSAGE` 才是“接收参与方回答后整理回复”的三路并行路径。`FORMAL_EVENT` 只执行服务端确定性阶段转换。路由值只能来自可信 `IntakeTurnEvent.source_type`，不得让模型自行判断当前属于开场还是整理回复。
 
-这里不是 LangGraph 普通并行 superstep 的 barrier 模式。三个 Frame 必须作为可独立调度、独立完成、独立持久化的 child graph 运行；任一路完成后无需等待另外两路即可写自己的 terminal checkpoint。父协调图只消费完成通知和 checkpoint 引用，不承载三个 Provider 调用的共同 barrier。
+顶层使用 LangGraph 的一个 fan-out superstep，结构上只有三个并列业务 Node；每个 Node 内部是可独立调度、独立完成、独立持久化的 child graph。superstep 的父调用完成 barrier 不构成业务或流式 barrier：任一路无需等待另外两路即可向 Java 写 projection、usage、sealed 事件并完成自己的 terminal checkpoint。父图只形成技术执行摘要，不读取三个结果做语义拼装。
 
 ### 8.2 父图状态与三个独立子图 checkpoint
 
-父 `IntakeGraphStateV2` 不让三个并行任务并发写同一个 state key。父图只保存调度、retry 和 Java receipt 状态；它不保存可供 Python 合并的 Frame Set，也不生成 Proposal：
+父 `StateGraph` 不让三个并行任务并发写同一个 state key：三个 Node 分别写 `dialogue_outcome`、`dossier_outcome`、`quality_outcome`，且这些 outcome 仅用于本次技术返回。持久化的父级调度、retry、Frame slot 和 Java receipt 权威由 Java admission/staging 保存；Python 不再维护第二份可变父 checkpoint，也不保存可供 Python 合并的 Frame Set或生成 Proposal：
 
 ```text
 context_envelope_ref
@@ -536,7 +540,7 @@ java_assembly_status
 java_terminal_receipt_ref
 ```
 
-父图必须先把 immutable dispatch manifest 作为 parent checkpoint 原子落盘，再启动任何 child。manifest 精确列出三个 frame type、generation、child namespace、context/model-view hash、Java admission receipt、provider lease 和 deadline。child saver 只能写自己的 namespace，不得推进 `graph_thread_registry.last_checkpoint_ns/id` 等 parent 恢复指针；父恢复只能从 parent manifest 枚举 child，禁止从“最新 checkpoint”猜测父子关系。
+Java 必须先把 immutable dispatch manifest 作为 FrameSet admission 原子落盘，再允许父图启动任何 child。manifest 精确列出三个 frame type、generation、child namespace、context/model-view hash、admission receipt、provider lease 和 deadline。child saver 只能写自己的 namespace，不得推进其他 child 的恢复指针；恢复只能由 Java current slot/immutable result 选择需要运行的 lane，再读取该 lane 的 exact namespace，禁止从“最新 checkpoint”猜测父子关系。
 
 每个 child graph 使用独立 checkpoint namespace：
 
@@ -548,7 +552,7 @@ intake/{logical_run_id}/{attempt_id}/frames/QUALITY_FRAME/g{generation}
 
 每个 child 只写自己的 namespace，terminal checkpoint 内保存完整 `FrameAttemptResult` 和 canonical Frame result。checkpoint 完成后，该 child 以 `frame_type + generation + child_terminal_checkpoint_sha256` 作为幂等 identity，把 canonical Frame 直接提交 Java。重复提交必须返回同一 Java Frame receipt；相同 identity 不同 hash 必须 fail closed。Python 父图不读取三个结果做业务合并。
 
-为了避免 child 已封存但通知尚未送达造成遗失，顺序必须是“先持久化 child terminal checkpoint，再发 at-least-once completion notification”。若进程恰好在两者之间崩溃，父图恢复时枚举三个预期 namespace，补收已经存在的 terminal checkpoint。父图对 completion event 的合并必须串行化，禁止三个 child 直接并发修改父 checkpoint。
+为了避免 child 已封存但通知尚未送达造成遗失，顺序必须是“先持久化 child terminal checkpoint，再发 at-least-once completion notification”。若进程恰好在两者之间崩溃，恢复路径按 Java FrameSet 的三个预期 slot 与 child namespace 补收已经存在的 terminal checkpoint，不重调已 sealed lane 的 Provider。三个 child 不直接修改同一个 Python 父 checkpoint；Java ingress 负责全局事件序号和 current-slot CAS。
 
 三个 Frame 允许分别停留在不同 generation，例如 `Dialogue:g1 / Dossier:g2 / Quality:g1`。Java Frame slot authority 只选择每个类型当前唯一、已确认的 sealed generation；server-only envelope 不进入 LCEL message，只用于 Frame manifest 和 Java assembly 校验。
 
@@ -569,7 +573,7 @@ intake/{logical_run_id}/{attempt_id}/frames/QUALITY_FRAME/g{generation}
 
 三个 Frame 是一次 Intake turn 的独立计算提交，但不是三笔正式案件变更。它们共享一条 Java multiplex ingress，以 `frame_type + generation + local_index` 区分各路；connection-scoped transport sequence 只证明当前会话内顺序，durable cursor、`next_local_index`、projection hash 和 immutable item identity 才证明重放位置。Python 不再增加第二条 final Proposal 通道。
 
-- 三个 child terminal checkpoint 分别保存各自 generation、input/output hash、校验状态和局部 retry 进度；父 checkpoint 只保存三个引用和 join 状态。
+- 三个 child terminal checkpoint 分别保存各自 generation、input/output hash、校验状态和局部 retry 进度；Java FrameSet/slot 保存三个 current child 引用和 assembly 状态，Python 父图只返回临时 outcome 摘要。
 - Java 对三类 canonical typed projection item、active snapshot、generation boundary、sealed/failed 和 run terminal 全部写 durable stream/staging；不存在 arbitrary text prefix 或非持久化 semantic preview。对每路 terminal 保存 immutable Frame result 和 current Frame slot authority。这些属于执行/流式 staging 写入，不是 dossier、评分、phase 或业务 completion truth。
 - Python 不生成 `IntakeParallelFrameSetV1`，不运行 final Reducer，也不 materialize 或提交 `IntakeTurnProposal`。
 - 每次 Java 收到 sealed Frame 都在 technical transaction 内更新该路 slot，并检查三个 current slot。前两路只完成 staging；使 exact required set 首次齐全的那次事务执行 Java Assembler、把 assembly CAS 为 `READY`、持久化不可变 `IntakeTurnProposal` artifact 和可重放的 RoomGraphResult/FINAL 所需材料，但不得写公开正式消息、dossier revision、六项评分、下一阶段、业务 outbox 或终态回执。

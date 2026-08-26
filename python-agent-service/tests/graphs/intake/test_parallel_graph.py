@@ -47,6 +47,7 @@ from app.graphs.intake.parallel_graph import (
     ParallelFrameExecutionRequest,
     ParallelIntakeFrameOrchestrator,
     build_parallel_frame_graph,
+    build_parallel_intake_graph,
     compile_parallel_frame_graphs,
 )
 from app.graph_runtime.checkpoint import (
@@ -333,8 +334,28 @@ def _nested_keys(value: object) -> tuple[str, ...]:
     return ()
 
 
+def test_parent_graph_is_exactly_three_sibling_frame_nodes() -> None:
+    graph = build_parallel_intake_graph().compile().get_graph()
+
+    assert set(graph.nodes) == {
+        "__start__",
+        "dialogue_frame",
+        "dossier_frame",
+        "quality_frame",
+        "__end__",
+    }
+    assert {(edge.source, edge.target) for edge in graph.edges} == {
+        ("__start__", "dialogue_frame"),
+        ("__start__", "dossier_frame"),
+        ("__start__", "quality_frame"),
+        ("dialogue_frame", "__end__"),
+        ("dossier_frame", "__end__"),
+        ("quality_frame", "__end__"),
+    }
+
+
 @pytest.mark.asyncio
-async def test_three_physical_graphs_stream_independently_before_fan_in() -> None:
+async def test_three_physical_graphs_stream_independently_before_parent_completion() -> None:
     saver = InMemorySaver()
     orchestrator = ParallelIntakeFrameOrchestrator(
         compile_parallel_frame_graphs(checkpointer=saver)
@@ -353,8 +374,17 @@ async def test_three_physical_graphs_stream_independently_before_fan_in() -> Non
         )
     )
     await asyncio.wait_for(sink.first_projection.wait(), timeout=1)
+    for _ in range(10):
+        if len(runner.calls) == 3:
+            break
+        await asyncio.sleep(0)
 
     assert not task.done()
+    assert {call["node_name"] for call in runner.calls} == {
+        "intake_turn_dialogue_frame",
+        "intake_turn_dossier_frame",
+        "intake_turn_quality_frame",
+    }
     first_projection = next(
         event for event in sink.events if isinstance(event, FrameProjectionItem)
     )
@@ -405,6 +435,63 @@ async def test_three_physical_graphs_stream_independently_before_fan_in() -> Non
         FRAME_TYPES
     )
     assert completion.canonical_json_text()
+
+
+@pytest.mark.asyncio
+async def test_parent_graph_single_lane_retry_does_not_invoke_sealed_siblings() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    quality_request = next(
+        request for request in requests if request.frame_type == "QUALITY_FRAME"
+    )
+    runner = _StreamingRunner(_outputs())
+    sink = _CollectingSink()
+
+    result = await orchestrator.execute(
+        (quality_request,),
+        agent_contexts={"QUALITY_FRAME": contexts["QUALITY_FRAME"]},
+        model_runner=runner,
+        event_sink=sink,
+    )
+
+    assert set(result.completed) == {"QUALITY_FRAME"}
+    assert not result.failed
+    assert [call["node_name"] for call in runner.calls] == [
+        "intake_turn_quality_frame"
+    ]
+    assert {
+        event.frame_type
+        for event in sink.events
+        if isinstance(event, (FrameStarted, FrameProjectionItem, FrameSealed))
+    } == {"QUALITY_FRAME"}
+
+
+@pytest.mark.asyncio
+async def test_parent_graph_external_cancellation_is_not_a_lane_failure() -> None:
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    release = asyncio.Event()
+    runner = _StreamingRunner(_outputs(), release=release)
+    sink = _CollectingSink()
+    task = asyncio.create_task(
+        orchestrator.execute(
+            requests,
+            agent_contexts=contexts,
+            model_runner=runner,
+            event_sink=sink,
+        )
+    )
+    await asyncio.wait_for(sink.first_projection.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not any(isinstance(event, FrameSealed) for event in sink.events)
 
 
 @pytest.mark.asyncio

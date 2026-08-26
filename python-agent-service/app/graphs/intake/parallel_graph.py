@@ -372,6 +372,63 @@ class ParallelFrameBatchResult:
         return not self.failed
 
 
+@dataclass(frozen=True)
+class ParallelFrameNodeOutcome:
+    frame_type: ParallelFrameType
+    result: ParallelFrameExecutionResult | None = None
+    failure: ParallelFrameFailure | None = None
+
+    def __post_init__(self) -> None:
+        if self.result is not None and self.failure is not None:
+            raise ValueError("a parallel Frame node cannot both succeed and fail")
+        if self.result is not None and self.result.frame_type != self.frame_type:
+            raise ValueError("parallel Frame node result belongs to a foreign lane")
+        if self.failure is not None and self.failure.frame_type != self.frame_type:
+            raise ValueError("parallel Frame node failure belongs to a foreign lane")
+
+
+class ParallelFrameExecutor(Protocol):
+    async def __call__(
+        self,
+        request: ParallelFrameExecutionRequest,
+        *,
+        agent_context: AgentInvocationContext,
+        model_runner: ParallelFrameModelRunner,
+        event_sink: ParallelFrameTechnicalEventSink,
+        checkpoint_config: Mapping[str, Any] | None = None,
+    ) -> ParallelFrameExecutionResult: ...
+
+
+class ParallelIntakeGraphState(TypedDict, total=False):
+    frame_set_id: str
+    dialogue_outcome: ParallelFrameNodeOutcome
+    dossier_outcome: ParallelFrameNodeOutcome
+    quality_outcome: ParallelFrameNodeOutcome
+
+
+@dataclass(frozen=True)
+class ParallelIntakeGraphRuntime:
+    requests: Mapping[ParallelFrameType, ParallelFrameExecutionRequest]
+    agent_contexts: Mapping[ParallelFrameType, AgentInvocationContext]
+    model_runner: ParallelFrameModelRunner
+    event_sink: ParallelFrameTechnicalEventSink
+    checkpoint_configs: Mapping[ParallelFrameType, Mapping[str, Any]]
+    frame_executor: ParallelFrameExecutor
+
+
+PARENT_NODE_NAMES: Mapping[ParallelFrameType, str] = {
+    "DIALOGUE_FRAME": "dialogue_frame",
+    "DOSSIER_FRAME": "dossier_frame",
+    "QUALITY_FRAME": "quality_frame",
+}
+
+PARENT_OUTCOME_KEYS: Mapping[ParallelFrameType, str] = {
+    "DIALOGUE_FRAME": "dialogue_outcome",
+    "DOSSIER_FRAME": "dossier_outcome",
+    "QUALITY_FRAME": "quality_outcome",
+}
+
+
 def new_parallel_frame_state(
     request: ParallelFrameExecutionRequest,
 ) -> ParallelFrameGraphState:
@@ -490,11 +547,83 @@ def compile_parallel_frame_graphs(*, checkpointer: Any) -> Mapping[ParallelFrame
     }
 
 
+def build_parallel_intake_graph() -> StateGraph:
+    """Build the three-node parent graph without a Python semantic join.
+
+    Every parent node invokes exactly one lane-local child graph.  Nodes write
+    disjoint outcome channels, stream directly through the shared durable event
+    sink, and contain their own lane failure.  The returned parent state is only
+    a technical execution summary; Java remains the first semantic convergence
+    and the sole owner of exact-three proposal assembly.
+    """
+
+    def frame_node(
+        frame_type: ParallelFrameType,
+        outcome_key: str,
+    ) -> Callable[
+        [ParallelIntakeGraphState, Runtime[ParallelIntakeGraphRuntime]],
+        Awaitable[dict[str, ParallelFrameNodeOutcome]],
+    ]:
+        async def execute_lane(
+            state: ParallelIntakeGraphState,
+            runtime: Runtime[ParallelIntakeGraphRuntime],
+        ) -> dict[str, ParallelFrameNodeOutcome]:
+            del state
+            request = runtime.context.requests.get(frame_type)
+            if request is None:
+                return {
+                    outcome_key: ParallelFrameNodeOutcome(frame_type=frame_type)
+                }
+            try:
+                result = await runtime.context.frame_executor(
+                    request,
+                    agent_context=runtime.context.agent_contexts[frame_type],
+                    model_runner=runtime.context.model_runner,
+                    event_sink=runtime.context.event_sink,
+                    checkpoint_config=runtime.context.checkpoint_configs[frame_type],
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                return {
+                    outcome_key: ParallelFrameNodeOutcome(
+                        frame_type=frame_type,
+                        failure=ParallelFrameFailure(
+                            frame_type=frame_type,
+                            error_code=_public_error_code(error),
+                        ),
+                    )
+                }
+            return {
+                outcome_key: ParallelFrameNodeOutcome(
+                    frame_type=frame_type,
+                    result=result,
+                )
+            }
+
+        return execute_lane
+
+    builder = StateGraph(
+        ParallelIntakeGraphState,
+        context_schema=ParallelIntakeGraphRuntime,
+    )
+    for frame_type in FRAME_TYPES:
+        node_name = PARENT_NODE_NAMES[frame_type]
+        builder.add_node(
+            node_name,
+            frame_node(frame_type, PARENT_OUTCOME_KEYS[frame_type]),
+        )
+        builder.add_edge(START, node_name)
+        builder.add_edge(node_name, END)
+    return builder
+
+
 class ParallelIntakeFrameOrchestrator:
     def __init__(self, graphs: Mapping[ParallelFrameType, Any]) -> None:
         if set(graphs) != set(FRAME_TYPES):
             raise ValueError("orchestrator requires exactly three physical Frame graphs")
         self._graphs = dict(graphs)
+        self._parent_graph = build_parallel_intake_graph().compile()
 
     async def execute(
         self,
@@ -552,30 +681,35 @@ class ParallelIntakeFrameOrchestrator:
         if len(checkpoint_locations) != len(resolved_checkpoint_configs):
             raise ValueError("parallel Frames cannot share one checkpoint namespace")
 
-        tasks = {
-            frame_type: asyncio.create_task(
-                self.execute_frame(
-                    request,
-                    agent_context=agent_contexts[frame_type],
-                    model_runner=model_runner,
-                    event_sink=event_sink,
-                    checkpoint_config=resolved_checkpoint_configs[frame_type],
-                ),
-                name=f"intake-parallel-{frame_type.lower()}",
-            )
-            for frame_type, request in by_type.items()
-        }
+        parent_runtime = ParallelIntakeGraphRuntime(
+            requests=dict(by_type),
+            agent_contexts={
+                frame_type: agent_contexts[frame_type] for frame_type in by_type
+            },
+            model_runner=model_runner,
+            event_sink=event_sink,
+            checkpoint_configs=resolved_checkpoint_configs,
+            frame_executor=self.execute_frame,
+        )
+        parent_state = await self._parent_graph.ainvoke(
+            {"frame_set_id": next(iter(frame_set_ids))},
+            context=parent_runtime,
+        )
         completed: dict[ParallelFrameType, ParallelFrameExecutionResult] = {}
         failed: dict[ParallelFrameType, ParallelFrameFailure] = {}
-        outcomes = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        for frame_type, outcome in zip(tasks, outcomes, strict=True):
-            if isinstance(outcome, BaseException):
-                failed[frame_type] = ParallelFrameFailure(
-                    frame_type=frame_type,
-                    error_code=_public_error_code(outcome),
-                )
+        for frame_type in by_type:
+            outcome = cast(
+                ParallelFrameNodeOutcome,
+                parent_state[PARENT_OUTCOME_KEYS[frame_type]],
+            )
+            if outcome.result is not None:
+                completed[frame_type] = outcome.result
+            elif outcome.failure is not None:
+                failed[frame_type] = outcome.failure
             else:
-                completed[frame_type] = outcome
+                raise IntakeGraphContractError(
+                    "INTAKE_PARALLEL_PARENT_NODE_OUTCOME_MISSING"
+                )
         return ParallelFrameBatchResult(
             completed=dict(completed),
             failed=dict(failed),
@@ -1890,8 +2024,11 @@ __all__ = [
     "ParallelFrameExecutionResult",
     "ParallelFrameFailure",
     "ParallelFrameGraphRuntime",
+    "ParallelFrameNodeOutcome",
     "ParallelFrameTechnicalEvent",
+    "ParallelIntakeGraphRuntime",
     "ParallelIntakeFrameOrchestrator",
+    "build_parallel_intake_graph",
     "build_parallel_frame_graph",
     "canonical_parallel_public_projection",
     "compile_parallel_frame_graphs",
