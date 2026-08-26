@@ -9,6 +9,8 @@ import json
 import re
 from typing import Literal, Protocol, cast
 
+import anyio
+
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.contracts.v1.models import (
     PARALLEL_INTAKE_AGENT_PROFILE_ID,
@@ -36,6 +38,7 @@ class ParallelFrameStreamProtocolError(RuntimeError):
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_STREAM_CLOSE_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -724,10 +727,29 @@ async def stream_parallel_frame_ndjson(
     validator: ParallelFrameStreamProtocolValidator,
     first_line: bytes,
 ) -> AsyncIterator[bytes]:
-    yield first_line
-    async for event in iterator:
-        yield encode_parallel_frame_event(validator, event)
-    validator.finish()
+    try:
+        yield first_line
+        async for event in iterator:
+            yield encode_parallel_frame_event(validator, event)
+        validator.finish()
+    finally:
+        await _close_iterator_safely(iterator)
+
+
+async def _close_iterator_safely(iterator: AsyncIterator[object]) -> None:
+    close = getattr(iterator, "aclose", None)
+    if not callable(close):
+        return
+    try:
+        # Starlette closes a streaming response under AnyIO level cancellation.
+        # Shield the child iterator long enough for its durable attempt/permit/lease
+        # teardown to run instead of abandoning Graph execution authority.
+        with anyio.fail_after(_STREAM_CLOSE_TIMEOUT_SECONDS, shield=True):
+            await close()
+    except BaseException:
+        # The HTTP stream is already terminal. Cleanup failures are bounded here so
+        # they cannot replace the original disconnect/protocol outcome.
+        return
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

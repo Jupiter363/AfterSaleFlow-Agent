@@ -16,6 +16,7 @@ from app.api.intake_parallel_stream import (
     ParallelFrameStreamAuthority,
     ParallelFrameStreamProtocolError,
     ParallelFrameStreamProtocolValidator,
+    stream_parallel_frame_ndjson,
 )
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.graphs.intake.parallel_contracts import FRAME_TYPES, ParallelFrameType
@@ -36,6 +37,36 @@ RUN_ID = "run.test"
 ATTEMPT_ID = "attempt.test"
 CONTEXT_HASH = "a" * 64
 MODEL_CONTEXT_HASH = "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_ndjson_close_propagates_to_live_parallel_iterator() -> None:
+    class RetainedIterator:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __aiter__(self) -> RetainedIterator:
+            return self
+
+        async def __anext__(self) -> FrameStarted:
+            raise AssertionError("outer stream must yield its prepared first line first")
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    retained = RetainedIterator()
+    stream = stream_parallel_frame_ndjson(
+        iterator=retained,
+        validator=ParallelFrameStreamProtocolValidator(_authority()),
+        first_line=b'{"first":true}\n',
+    )
+
+    assert await anext(stream) == b'{"first":true}\n'
+    assert retained.closed is False
+
+    await stream.aclose()
+
+    assert retained.closed is True
 
 
 def test_admission_receipt_decodes_exact_three_literal_frame_types() -> None:
