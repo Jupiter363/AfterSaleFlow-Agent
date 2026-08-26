@@ -116,6 +116,30 @@ class JdbcIntakeParallelFrameStagingStoreContractTest {
     }
 
     @Test
+    void bindsReplacementGenerationCreationToTheResetEventClock() throws Exception {
+        String source = normalizedSource();
+        int retryInsert = source.indexOf("private static final string insert_retry_generation_sql");
+        int nextStatement = source.indexOf("private static final string insert_slot_sql", retryInsert);
+        int admitRetry = source.indexOf("public frameretryreceipt admitretry", nextStatement);
+        int retryUpdate = source.indexOf("jdbc.update(insert_retry_generation_sql", admitRetry);
+        int startFrame = source.indexOf("private void startframe", retryUpdate);
+
+        assertThat(retryInsert).isGreaterThanOrEqualTo(0);
+        assertThat(nextStatement).isGreaterThan(retryInsert);
+        assertThat(source.substring(retryInsert, nextStatement))
+                .contains("created_at, updated_at")
+                .contains(":admittedat, :admittedat");
+        assertThat(admitRetry).isGreaterThan(nextStatement);
+        assertThat(retryUpdate).isGreaterThan(admitRetry);
+        assertThat(source.substring(admitRetry, retryUpdate))
+                .contains("timestamp.from(admission.admittedat())");
+        assertThat(startFrame).isGreaterThan(retryUpdate);
+        assertThat(source.substring(startFrame))
+                .contains("started_at = :occurredat")
+                .contains("updated_at = greatest(updated_at, :occurredat)");
+    }
+
+    @Test
     void keepsRoomIdentitySeparateFromRoomEpochIdentityDuringAdmission() throws Exception {
         String source = normalizedSource();
 

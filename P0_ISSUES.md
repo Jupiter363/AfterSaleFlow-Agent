@@ -1173,7 +1173,7 @@
 ## P1-20260824-EVIDENCE-FAILED-FINALIZATION-LEAVES-NONRETRYABLE-SUBMISSION
 
 - Severity: P1
-- Status: FIXED / FOCUSED_VERIFIED / AUTHORITY_REVIEW_PASSED / UAT_PENDING
+- Status: RUNTIME_RECURRENCE / FAILURE_CONVERGENCE_VERIFIED / DIAGNOSIS_PENDING
 - Component: Evidence submission persistence, failed finalization, and browser retry state
 - Confirmed fact: After the MERCHANT Evidence run in `CASE_P9_6A8AC2C9_10` ended with `AGENT_RUN_FINALIZATION_REJECTED`, the browser continued to show the same image in the pending batch and allowed another click on `提交本批给书记官`. The second POST returned HTTP 500 before creating any new `case_command`, `agent_run`, or `agent_run_attempt`.
 - Root cause and evidence: The initial submission transaction persisted evidence `EVIDENCE_b4b29c92e16545318ea0f5e7382fb415` and batch `EVIDENCE_BATCH_291aaba02558470fa51c8fbb90b58191` as `SUBMITTED` before asynchronous agent-run finalization. Finalization later marked only case command sequence `13` as `FAILED` and logical run `target-evidence-run:29a81b83fd1e3bb3b311258003abb141` as `ABORTED`; it did not change the already submitted evidence or batch. The browser failure path retained its pre-submit catalog instead of refreshing it, so the stale item remained actionable. At `2026-08-24T05:34:23.005+08:00`, the retry reached `EvidenceSubmissionService.createSubmission` and failed at line `219` with `only pending evidence can be submitted`; the global handler exposed that domain-state rejection as HTTP 500.
@@ -1615,7 +1615,7 @@
 ## P0-20260826-PARALLEL-FAILURE-TERMINALIZATION-DB-PRIVILEGE
 
 - Severity: P0
-- Status: FIXED / FOCUSED_VERIFIED / UAT_PENDING
+- Status: FIXED / FOCUSED_VERIFIED / RUNTIME_FAILURE_CONVERGENCE_VERIFIED
 - Component: Python Graph bulkhead transaction terminalization and Java V4 external-failure convergence
 - Confirmed fact: Fresh activation `p9act.v1.3792230b03de8e4e0108bfd1784f8d00` at candidate `68e6221232e16069c40686af6e80d6babe32c264` reached the first USER V4 turn in `CASE_P9_6A8ECC8A_1`. Dialogue generation 1 emitted projections and reset to generation 2; the Java slot advanced to generation 2 `ADMITTED`, while Dossier and Quality remained generation 1 `STARTED`.
 - Failure evidence: The Python service logged `target-E2E graph stream startup failed` with `error_type=InsufficientPrivilege` at `app.graph_runtime.postgres_bulkhead:terminalize_transaction:624`. The affected HTTP stream retry returned 500. Java then attempted external failure terminalization on three Activity attempts; each was rejected as a sanitized `TargetE2EGraphClientException`, leaving the AgentRun `RUNNING / UNCOMMITTED` and the frame set `COLLECTING` with no proposal or graph-result artifact.
@@ -1625,6 +1625,19 @@
 - Replay-boundary fact: The owner function's cancelled-lease `fence + 1` branch preserves exact command, attempt, owner, and permit authority, but it requires the mutable current `agent_graph_lease` row for every call. A later command takeover rewrites that single per-thread lease row and clears the prior cancellation fields, so an already-terminal exact permit set for the prior command can no longer be replayed even though no mutation is needed.
 - Replay impact: Cross-command lease turnover breaks historical idempotent terminalization and can cause a retry of an already-converged failure receipt to be rejected. The current integration proof covers cancellation followed by immediate replay, but not takeover followed by replay.
 - Replay-boundary verification fact: The focused PostgreSQL integration now proves cancellation and exact terminalization, then a different command taking over the same thread lease at `fence + 2`, followed by byte/record-equal replay of the prior command while the next command's permit remains `GRANTED`. The migration unit and integration node both passed; the final read-only authority review found no fail-open or lock-order regression.
+- Runtime verification recurrence: Fresh activation `p9act.v1.e217b71eae0a4684d93941e72bd9e6ad` at candidate `ac6f2d6c3e72cc0669bdb830e0166fa3d7c187b5` completed the opening V3 turn for `CASE_P9_6A8ED646_1`, then the first USER V4 run terminated `ABORTED / UNCOMMITTED` with `TARGET_E2E_GRAPH_TRANSPORT_FAILED` after about 21 seconds. The run no longer remained stuck `RUNNING`, but no parallel Intake proposal or formal turn committed.
+- Runtime recurrence metadata: run `target-intake-run:44dcdc03ea0b39d48053acc032b7764e`; activation generation `1787745862`; opening run `target-intake-run:80cec79d46b737d7950a5ae85cdec894` completed `COMMITTED`.
+
+## P0-20260826-PARALLEL-RETRY-START-TIME-PREDATES-ADMISSION
+
+- Severity: P0
+- Status: FIXED / FOCUSED_VERIFIED / UAT_PENDING
+- Component: Java Intake V4 retry-generation staging timestamps
+- Confirmed fact: In the first USER V4 turn of fresh case `CASE_P9_6A8ED646_1`, Dialogue generation 1 emitted two previews, failed schema validation, and durably advanced through `public_frame_interrupted` and `frame_generation_reset` to generation 2. The generation-2 child checkpoint reached `RETRY_AUTHORIZED` and invoked the replacement Provider, while Dossier and Quality remained active.
+- Root cause and evidence: The replacement `public_frame_start` carried source event time `2026-08-26 20:10:40.242624+08`, but `admitRetry` inserted the generation-2 row later with database `created_at=2026-08-26 20:10:40.31888+08`. `JdbcIntakeParallelFrameStagingStore.startFrame` then stored the earlier source time as `started_at`, and PostgreSQL rejected the update against `ck_intake_parallel_frame_generation_time`, which requires `started_at >= created_at`. The Java stream closed on that persistence exception; Python subsequently observed cancellation and terminalized the three-lane Graph attempt as `CLIENT_STREAM_CANCELLED`.
+- Impact: A valid lane-local generation reset cannot enter replacement `STARTED`, so one retryable model schema error aborts all three Frames before exact-three sealing, Java proposal assembly, matrix freeze, or formal Intake write.
+- Identifying metadata: activation `p9act.v1.e217b71eae0a4684d93941e72bd9e6ad`; candidate `ac6f2d6c3e72cc0669bdb830e0166fa3d7c187b5`; run `target-intake-run:44dcdc03ea0b39d48053acc032b7764e`; attempt `target-intake-attempt:44dcdc03ea0b39d48053acc032b7764e:1`; frame set `IFS_da257a9f6f1fc5eeffbfce479d1fb8f3`; PostgreSQL error observed at `2026-08-26 20:10:40.388 CST`.
+- Verification fact: The retry admission contract now preserves the reset event timestamp at microsecond precision, the Java HTTP execution client binds that timestamp from `FRAME_GENERATION_RESET`, and retry generation persistence writes the same source timestamp into both `created_at` and `updated_at`. Focused compilation plus `IntakeParallelFrameStagingPortTest`, `JdbcIntakeParallelFrameStagingStoreContractTest`, and `HttpTargetE2EIntakeParallelFrameExecutionClientTest` completed with 30 tests and zero failures; fresh activation UAT remains pending.
 
 ## P1-20260826-GRAPH-PARALLEL-PURGE-CYCLE-LINEAGE-INVALID
 

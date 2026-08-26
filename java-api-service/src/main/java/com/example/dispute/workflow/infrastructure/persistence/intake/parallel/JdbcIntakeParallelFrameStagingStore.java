@@ -155,6 +155,22 @@ public class JdbcIntakeParallelFrameStagingStore
             on conflict do nothing
             """;
 
+    private static final String INSERT_RETRY_GENERATION_SQL =
+            """
+            insert into intake_parallel_frame_generation (
+                frame_set_id, frame_type, frame_generation, frame_id,
+                prompt_profile_id, output_schema_id, model_profile_id,
+                frame_model_input_sha256, frame_prompt_sha256,
+                repair_code, validation_path, created_at, updated_at
+            ) values (
+                :frameSetId, :frameType, :frameGeneration, :frameId,
+                :promptProfileId, :outputSchemaId, :modelProfileId,
+                :frameModelInputSha256, :framePromptSha256,
+                :repairCode, :validationPath, :admittedAt, :admittedAt
+            )
+            on conflict do nothing
+            """;
+
     private static final String INSERT_SLOT_SQL =
             """
             insert into intake_parallel_frame_slot (
@@ -715,8 +731,9 @@ public class JdbcIntakeParallelFrameStagingStore
                 admission.frameSetId(),
                 replacement,
                 admission.repairCode(),
-                admission.validationPath());
-        if (jdbc.update(INSERT_GENERATION_SQL, replacementParameters) != 1) {
+                admission.validationPath())
+                .addValue("admittedAt", Timestamp.from(admission.admittedAt()));
+        if (jdbc.update(INSERT_RETRY_GENERATION_SQL, replacementParameters) != 1) {
             throw conflict(
                     "INTAKE_PARALLEL_RETRY_GENERATION_CONFLICT",
                     "replacement generation identity already exists");

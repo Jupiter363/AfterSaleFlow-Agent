@@ -599,7 +599,8 @@ public interface IntakeParallelFrameStagingPort {
             long expectedCurrentGeneration,
             SlotState expectedCurrentState,
             String repairCode,
-            String validationPath) {
+            String validationPath,
+            Instant admittedAt) {
 
         public FrameRetryAdmission {
             frameSetId = identifier(frameSetId, "frameSetId");
@@ -609,6 +610,8 @@ public interface IntakeParallelFrameStagingPort {
                     expectedCurrentState, "expectedCurrentState");
             repairCode = identifier(repairCode, "repairCode");
             validationPath = bounded(validationPath, "validationPath", 1024);
+            admittedAt = Objects.requireNonNull(admittedAt, "admittedAt")
+                    .truncatedTo(ChronoUnit.MICROS);
             if (expectedCurrentState != SlotState.FAILED
                     && expectedCurrentState != SlotState.AMBIGUOUS) {
                 throw new IllegalArgumentException(

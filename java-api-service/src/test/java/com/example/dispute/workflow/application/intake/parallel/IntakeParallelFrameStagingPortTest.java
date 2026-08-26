@@ -133,14 +133,18 @@ class IntakeParallelFrameStagingPortTest {
     @Test
     void retryCanAdvanceOnlyOneFailedOrAmbiguousSlotGeneration() {
         FrameManifest replacement = manifest(FrameType.DIALOGUE_FRAME, 2);
+        Instant admittedAt = Instant.parse("2026-08-24T01:00:00.123456789Z");
         FrameRetryAdmission retry = new FrameRetryAdmission(
                 "FRAME_SET_1",
                 replacement,
                 1,
                 SlotState.FAILED,
                 "OUTPUT_SCHEMA_INVALID",
-                "$.dialogue.segments[0]");
+                "$.dialogue.segments[0]",
+                admittedAt);
         assertThat(retry.replacement().generation()).isEqualTo(2);
+        assertThat(retry.admittedAt())
+                .isEqualTo(Instant.parse("2026-08-24T01:00:00.123456Z"));
 
         assertThatThrownBy(() -> new FrameRetryAdmission(
                         "FRAME_SET_1",
@@ -148,7 +152,8 @@ class IntakeParallelFrameStagingPortTest {
                         1,
                         SlotState.SEALED,
                         "OUTPUT_SCHEMA_INVALID",
-                        "$.dialogue"))
+                        "$.dialogue",
+                        admittedAt))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("FAILED or AMBIGUOUS");
 
@@ -158,7 +163,8 @@ class IntakeParallelFrameStagingPortTest {
                         1,
                         SlotState.AMBIGUOUS,
                         "CALL_STATE_AMBIGUOUS",
-                        "$.dialogue"))
+                        "$.dialogue",
+                        admittedAt))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("advance exactly once");
     }

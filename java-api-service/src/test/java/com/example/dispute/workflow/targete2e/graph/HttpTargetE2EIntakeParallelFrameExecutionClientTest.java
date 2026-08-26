@@ -136,6 +136,8 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         assertThat(staging.admission.manifests())
                 .extracting(IntakeParallelFrameStagingPort.FrameManifest::frameType)
                 .containsExactly(FrameType.values());
+        assertThat(staging.lastRetry).isNotNull();
+        assertThat(staging.lastRetry.admittedAt()).isEqualTo(OCCURRED_AT);
     }
 
     @Test
@@ -1058,6 +1060,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         private boolean planningConflict;
         private PublishedAdmissionReceipt currentAdmissionReceipt;
         private final List<AbandonmentApplication> abandonments = new ArrayList<>();
+        private FrameRetryAdmission lastRetry;
 
         private RecordingStaging(ExecuteAgentRunRequest request, StreamFixture fixture) {
             this.request = request;
@@ -1324,6 +1327,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
 
         @Override
         public FrameRetryReceipt admitRetry(FrameRetryAdmission admission) {
+            lastRetry = admission;
             actions.add("retry:" + admission.replacement().frameType() + ":"
                     + admission.replacement().generation());
             slots.put(

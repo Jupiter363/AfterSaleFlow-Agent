@@ -1376,7 +1376,8 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                     event.oldGeneration(),
                     failedState,
                     event.reasonCode(),
-                    IntakeParallelFrameStagingPort.RETRY_VALIDATION_PATH));
+                    IntakeParallelFrameStagingPort.RETRY_VALIDATION_PATH,
+                    event.common().occurredAt()));
             AgentStreamEventV4.Payload payload = AgentStreamEventV4.Payload.generationResetPayload(
                     event.oldFrameId(),
                     event.newFrameId(),
