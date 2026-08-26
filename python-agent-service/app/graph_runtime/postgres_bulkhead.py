@@ -597,17 +597,19 @@ class PostgresGraphFanoutBulkhead:
     async def terminalize_command_permits(
         self,
         *,
-        thread_id: str,
-        command_id: str,
+        attempt_id: str,
         frame_set_id: str,
+        fence: GraphPermitFenceContext,
+        error_code: str,
+        error_classification: str,
     ) -> tuple[PostgresPermitRecord, ...]:
         """Release every exact provider-group permit before issuing a terminal receipt."""
 
         self._require_open()
-        if THREAD_ID_PATTERN.fullmatch(thread_id) is None:
-            raise GraphContractError("thread_id must be an opaque grt.v1 ID")
-        _identifier(command_id, "command_id")
+        _identifier(attempt_id, "attempt_id")
         _identifier(frame_set_id, "frame_set_id")
+        _identifier(error_code, "error_code")
+        _identifier(error_classification, "error_classification")
         terminal_statuses = {"RELEASED", "CANCELLED", "EXPIRED", "TIMED_OUT", "ORPHANED"}
 
         async def terminalize_transaction(
@@ -620,10 +622,19 @@ class PostgresGraphFanoutBulkhead:
                 """
                 select result.*
                   from agent_graph_terminalize_command_fanout_permits(
-                      %s, %s, %s
+                      %s, %s, %s, %s, %s, %s, %s, %s
                   ) as result
                 """,
-                (thread_id, command_id, frame_set_id),
+                (
+                    fence.thread_id,
+                    fence.command_id,
+                    attempt_id,
+                    frame_set_id,
+                    fence.graph_lease_owner_id,
+                    fence.graph_lease_fencing_token,
+                    error_code,
+                    error_classification,
+                ),
             )
             rows = await cursor.fetchall()
             if len(rows) > 32:

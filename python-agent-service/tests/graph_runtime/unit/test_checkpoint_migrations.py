@@ -144,6 +144,12 @@ def test_command_terminalization_migration_keeps_fanout_mutation_function_owned(
         "update agent_graph_fanout_permit"
     )
     assert "selected_count > 32" in normalized
+    assert "command.status in ('aborted', 'cancelled')" in normalized
+    assert "attempt.attempt_status in ('failed', 'lease_lost', 'cancelled')" in normalized
+    assert "if active_count > 0 then" in normalized
+    assert "lease.cancelled_at is not null" in normalized
+    assert "lease.fencing_token = selected_graph_fence + 1" in normalized
+    assert "permit.graph_lease_owner_id <> selected_graph_owner_id" in normalized
     assert "agent_graph_dispatch_fanout_permits()" in normalized
     grant_source = inspect.getsource(GraphMigrationRunner._apply_runtime_grants)
     assert "agent_graph_terminalize_command_fanout_permits" in grant_source

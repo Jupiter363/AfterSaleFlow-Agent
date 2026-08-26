@@ -247,9 +247,11 @@ class _ProviderGroupBulkhead(Protocol):
     async def terminalize_command_permits(
         self,
         *,
-        thread_id: str,
-        command_id: str,
+        attempt_id: str,
         frame_set_id: str,
+        fence: GraphPermitFenceContext,
+        error_code: str,
+        error_classification: str,
     ) -> tuple[Any, ...]: ...
 
 
@@ -753,11 +755,25 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 authority_sha256=admission_receipt.authority_sha256,
                 failure_code=failure_code,
             )
-            permits = await self._provider_bulkhead.terminalize_command_permits(
-                thread_id=command.thread_id,
-                command_id=command.command_id,
-                frame_set_id=authority.frame_set_id,
-            )
+            if terminal.attempt_status is None:
+                permits = ()
+            else:
+                if terminal.owner_id is None or terminal.fencing_token is None:
+                    raise GraphContractError(
+                        "parallel terminal attempt lost its exact fence"
+                    )
+                permits = await self._provider_bulkhead.terminalize_command_permits(
+                    attempt_id=command.attempt_id,
+                    frame_set_id=authority.frame_set_id,
+                    fence=GraphPermitFenceContext(
+                        thread_id=command.thread_id,
+                        command_id=command.command_id,
+                        graph_lease_owner_id=terminal.owner_id,
+                        graph_lease_fencing_token=terminal.fencing_token,
+                    ),
+                    error_code=terminal.error_code,
+                    error_classification=terminal.error_classification,
+                )
             permit_statuses = tuple(sorted(str(permit.status) for permit in permits))
             return ParallelFrameFailureTerminationReceipt.create(
                 request_hash=command.request_hash,

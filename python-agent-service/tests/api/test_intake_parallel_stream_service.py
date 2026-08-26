@@ -28,6 +28,7 @@ from app.api.intake_parallel_stream_service import (
 )
 from app.contracts.v1.codec import canonical_sha256
 from app.graph_runtime.gateway import AdmissionAction, ParallelUncommittedFailureTerminal
+from app.graph_runtime.bulkhead import GraphPermitFenceContext
 from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.ledger import AttemptStatus, CommandStatus
 from app.graph_runtime.recovery import RecoveryAction
@@ -1386,9 +1387,16 @@ async def test_final_retry_exhaustion_returns_a_bound_graph_terminal_receipt() -
     ]
     assert provider_bulkhead.terminalize_calls == [
         {
-            "thread_id": command.thread_id,
-            "command_id": command.command_id,
+            "attempt_id": command.attempt_id,
             "frame_set_id": FRAME_SET_ID,
+            "fence": GraphPermitFenceContext(
+                thread_id=command.thread_id,
+                command_id=command.command_id,
+                graph_lease_owner_id="python:test",
+                graph_lease_fencing_token=17,
+            ),
+            "error_code": "ACTIVITY_RETRY_EXHAUSTED",
+            "error_classification": "JAVA_FINAL_RETRY_EXHAUSTED",
         }
     ]
 

@@ -1114,6 +1114,35 @@ async def test_runtime_terminalizes_exact_command_permits_without_table_update_p
         ("tenant-terminalize-command",),
         start_ordinal=1701,
     )
+    attempt_id = "attempt-terminalize-command-1"
+    failure_code = "ACTIVITY_RETRY_EXHAUSTED"
+    failure_classification = "JAVA_FINAL_RETRY_EXHAUSTED"
+    async with await AsyncConnection.connect(
+        graph_database.migration_dsn,
+        autocommit=True,
+        prepare_threshold=0,
+    ) as connection:
+        await connection.execute(sql.SQL("set role {}").format(sql.Identifier(OWNER)))
+        await connection.execute(
+            sql.SQL("set search_path to {}, pg_catalog, pg_temp").format(
+                sql.Identifier(SCHEMA)
+            )
+        )
+        await connection.execute(
+            """
+            insert into agent_graph_command_attempt (
+                attempt_id, thread_id, command_id, attempt_no,
+                owner_id, fencing_token, attempt_status
+            ) values (%s, %s, %s, 1, %s, %s, 'EXECUTING')
+            """,
+            (
+                attempt_id,
+                fence.thread_id,
+                fence.command_id,
+                fence.graph_lease_owner_id,
+                fence.graph_lease_fencing_token,
+            ),
+        )
     pool = _runtime_pool(graph_database)
     await pool.open(wait=True, timeout=10)
     bulkhead = PostgresGraphFanoutBulkhead(
@@ -1137,10 +1166,76 @@ async def test_runtime_terminalizes_exact_command_permits_without_table_update_p
         )
         assert second._record.status == "GRANTED"  # noqa: SLF001 - DB transition proof
 
+        async with pool.connection(timeout=5) as connection:
+            async with connection.transaction():
+                await PostgresLeaseRepository().cancel(
+                    connection,
+                    thread_id=fence.thread_id,
+                    active_command_id=fence.command_id,
+                    expected_fencing_token=fence.graph_lease_fencing_token,
+                    cancellation_command_id=fence.command_id,
+                )
+
+        async with await AsyncConnection.connect(
+            graph_database.migration_dsn,
+            autocommit=True,
+            prepare_threshold=0,
+        ) as connection:
+            await connection.execute(
+                sql.SQL("set role {}").format(sql.Identifier(OWNER))
+            )
+            await connection.execute(
+                sql.SQL("set search_path to {}, pg_catalog, pg_temp").format(
+                    sql.Identifier(SCHEMA)
+                )
+            )
+            await connection.execute(
+                """
+                update agent_graph_command
+                   set status = 'ABORTED', error_code = %s,
+                       error_classification = %s,
+                       aborted_at = clock_timestamp(), updated_at = clock_timestamp(),
+                       command_revision = command_revision + 1
+                 where thread_id = %s and command_id = %s
+                """,
+                (
+                    failure_code,
+                    failure_classification,
+                    fence.thread_id,
+                    fence.command_id,
+                ),
+            )
+            await connection.execute(
+                """
+                update agent_graph_command_attempt
+                   set attempt_status = 'FAILED', error_code = %s,
+                       error_classification = %s,
+                       completed_at = clock_timestamp()
+                 where attempt_id = %s
+                """,
+                (failure_code, failure_classification, attempt_id),
+            )
+
+        with pytest.raises(GraphPermitBindingError):
+            await bulkhead.terminalize_command_permits(
+                attempt_id=attempt_id,
+                frame_set_id=scope.item_key,
+                fence=GraphPermitFenceContext(
+                    thread_id=fence.thread_id,
+                    command_id=fence.command_id,
+                    graph_lease_owner_id=fence.graph_lease_owner_id,
+                    graph_lease_fencing_token=fence.graph_lease_fencing_token + 1,
+                ),
+                error_code=failure_code,
+                error_classification=failure_classification,
+            )
+
         terminal = await bulkhead.terminalize_command_permits(
-            thread_id=fence.thread_id,
-            command_id=fence.command_id,
+            attempt_id=attempt_id,
             frame_set_id=scope.item_key,
+            fence=fence,
+            error_code=failure_code,
+            error_classification=failure_classification,
         )
         assert [record.request_id for record in terminal] == [
             "permit-terminalize-command-1",
@@ -1149,11 +1244,96 @@ async def test_runtime_terminalizes_exact_command_permits_without_table_update_p
         assert {record.status for record in terminal} == {"RELEASED"}
 
         replay = await bulkhead.terminalize_command_permits(
-            thread_id=fence.thread_id,
-            command_id=fence.command_id,
+            attempt_id=attempt_id,
             frame_set_id=scope.item_key,
+            fence=fence,
+            error_code=failure_code,
+            error_classification=failure_classification,
         )
         assert replay == terminal
+
+        next_command_id = "command-terminalize-next"
+        next_owner_id = "graph-owner-terminalize-next"
+        next_request = _request_document("terminalize-next-command")
+        async with await AsyncConnection.connect(
+            graph_database.migration_dsn,
+            autocommit=True,
+            prepare_threshold=0,
+        ) as connection:
+            await connection.execute(
+                sql.SQL("set role {}").format(sql.Identifier(OWNER))
+            )
+            await connection.execute(
+                sql.SQL("set search_path to {}, pg_catalog, pg_temp").format(
+                    sql.Identifier(SCHEMA)
+                )
+            )
+            await connection.execute(
+                """
+                insert into agent_graph_command (
+                    thread_id, command_id, request_schema_version,
+                    request_json, request_hash, execution_mode, room_epoch,
+                    graph_key, graph_version, checkpoint_schema_version,
+                    prompt_version, model_profile_id, output_schema_version,
+                    policy_version, guardrail_version, tool_policy_version,
+                    deadline_at, status, attempt_count, fencing_token, started_at
+                ) values (
+                    %s, %s, 'room-graph-command.v1', %s::jsonb, %s,
+                    'SHADOW', 3, 'hearing_flow', 'hearing_flow.v2',
+                    'hearing_checkpoint.v2', 'prompt.v1', 'model.v1',
+                    'output.v1', 'policy.v1', 'guardrail.v1', 'tools.v1',
+                    clock_timestamp() + interval '10 minutes',
+                    'EXECUTING', 1, 3, clock_timestamp()
+                )
+                """,
+                (
+                    fence.thread_id,
+                    next_command_id,
+                    json.dumps(next_request, separators=(",", ":")),
+                    next_request["request_hash"],
+                ),
+            )
+
+        async with pool.connection(timeout=5) as connection:
+            async with connection.transaction():
+                takeover = await PostgresLeaseRepository().acquire(
+                    connection,
+                    thread_id=fence.thread_id,
+                    command_id=next_command_id,
+                    owner_id=next_owner_id,
+                )
+        assert takeover.kind is LeaseAcquisitionKind.TAKEOVER
+        assert takeover.lease.fencing_token == fence.graph_lease_fencing_token + 2
+        next_fence = GraphPermitFenceContext(
+            thread_id=fence.thread_id,
+            command_id=next_command_id,
+            graph_lease_owner_id=next_owner_id,
+            graph_lease_fencing_token=takeover.lease.fencing_token,
+        )
+        next_permit = await bulkhead.acquire(
+            scope,
+            next_fence,
+            request_id="permit-terminalize-next-command",
+            owner_id="permit-owner-terminalize-next",
+        )
+        assert next_permit._record.status == "GRANTED"  # noqa: SLF001
+
+        replay_after_takeover = await bulkhead.terminalize_command_permits(
+            attempt_id=attempt_id,
+            frame_set_id=scope.item_key,
+            fence=fence,
+            error_code=failure_code,
+            error_classification=failure_classification,
+        )
+        assert replay_after_takeover == terminal
+        recovered_next = await bulkhead.validate_recovery(
+            "permit-terminalize-next-command",
+            1,
+            next_fence,
+            owner_id="permit-owner-terminalize-next",
+        )
+        assert recovered_next.status == "GRANTED"
+        assert await next_permit.release()
 
         async with pool.connection(timeout=5) as connection:
             privilege = await (

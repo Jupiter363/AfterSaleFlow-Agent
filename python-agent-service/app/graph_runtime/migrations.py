@@ -791,7 +791,10 @@ class GraphMigrationRunner:
                 ),
                 (
                     "agent_graph_terminalize_command_fanout_permits",
-                    ("varchar", "varchar", "varchar"),
+                    (
+                        "varchar", "varchar", "varchar", "varchar",
+                        "varchar", "bigint", "varchar", "varchar",
+                    ),
                 ),
                 (
                     "agent_graph_validate_fanout_recovery",

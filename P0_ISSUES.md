@@ -1173,7 +1173,7 @@
 ## P1-20260824-EVIDENCE-FAILED-FINALIZATION-LEAVES-NONRETRYABLE-SUBMISSION
 
 - Severity: P1
-- Status: FIXED / FOCUSED_VERIFIED / UAT_PENDING
+- Status: FIXED / FOCUSED_VERIFIED / AUTHORITY_REVIEW_PASSED / UAT_PENDING
 - Component: Evidence submission persistence, failed finalization, and browser retry state
 - Confirmed fact: After the MERCHANT Evidence run in `CASE_P9_6A8AC2C9_10` ended with `AGENT_RUN_FINALIZATION_REJECTED`, the browser continued to show the same image in the pending batch and allowed another click on `提交本批给书记官`. The second POST returned HTTP 500 before creating any new `case_command`, `agent_run`, or `agent_run_attempt`.
 - Root cause and evidence: The initial submission transaction persisted evidence `EVIDENCE_b4b29c92e16545318ea0f5e7382fb415` and batch `EVIDENCE_BATCH_291aaba02558470fa51c8fbb90b58191` as `SUBMITTED` before asynchronous agent-run finalization. Finalization later marked only case command sequence `13` as `FAILED` and logical run `target-evidence-run:29a81b83fd1e3bb3b311258003abb141` as `ABORTED`; it did not change the already submitted evidence or batch. The browser failure path retained its pre-submit catalog instead of refreshing it, so the stale item remained actionable. At `2026-08-24T05:34:23.005+08:00`, the retry reached `EvidenceSubmissionService.createSubmission` and failed at line `219` with `only pending evidence can be submitted`; the global handler exposed that domain-state rejection as HTTP 500.
@@ -1622,6 +1622,9 @@
 - Root cause and evidence: `graph_runtime` intentionally had only `SELECT` on `agent_graph_fanout_permit`, while `terminalize_command_permits` issued a direct `SELECT ... FOR UPDATE` before calling the existing owner function. PostgreSQL requires table `UPDATE` privilege for that row lock, so the least-privilege grant contract and the Python transaction were incompatible. The focused PostgreSQL test now proves the runtime role still lacks table `UPDATE` while exact command permit terminalization and replay both succeed.
 - Impact: The first substantive Intake turn cannot converge to either a committed proposal or a durable failed terminal state, so the new parallel Intake lane and full-chain UAT are blocked before Intake completion.
 - Metadata: case `CASE_P9_6A8ECC8A_1`; run `target-intake-run:da9d2f78fbf43043a8585139cce0cb1c`; frame set `IFS_a62f92a6bebadb47cf11520f5a348a6e`; activation generation `1787743370`; unit verification `30 passed`; isolated PostgreSQL integration verification `1 passed`.
+- Replay-boundary fact: The owner function's cancelled-lease `fence + 1` branch preserves exact command, attempt, owner, and permit authority, but it requires the mutable current `agent_graph_lease` row for every call. A later command takeover rewrites that single per-thread lease row and clears the prior cancellation fields, so an already-terminal exact permit set for the prior command can no longer be replayed even though no mutation is needed.
+- Replay impact: Cross-command lease turnover breaks historical idempotent terminalization and can cause a retry of an already-converged failure receipt to be rejected. The current integration proof covers cancellation followed by immediate replay, but not takeover followed by replay.
+- Replay-boundary verification fact: The focused PostgreSQL integration now proves cancellation and exact terminalization, then a different command taking over the same thread lease at `fence + 2`, followed by byte/record-equal replay of the prior command while the next command's permit remains `GRANTED`. The migration unit and integration node both passed; the final read-only authority review found no fail-open or lock-order regression.
 
 ## P1-20260826-GRAPH-PARALLEL-PURGE-CYCLE-LINEAGE-INVALID
 
