@@ -144,6 +144,37 @@ class JdbcIntakeParallelFrameStagingStoreContractTest {
     }
 
     @Test
+    void appliesOneGraphAbandonmentOnlyToExactCurrentStartedLanes()
+            throws Exception {
+        String source = normalizedSource();
+        int apply = source.indexOf(
+                "public abandonmentreceipt applyabandonment(abandonmentapplication application)");
+        int frameLock = source.indexOf("lock_execution_plan_sql", apply);
+        int admissionLoad = source.indexOf("load_admission_receipt_by_hash_sql", frameLock);
+        int currentAdmission = source.indexOf(
+                "lock_admission_receipt_authority_sql", admissionLoad);
+        int insert = source.indexOf("insert_frame_abandonment_sql", currentAdmission);
+        int generationCas = source.indexOf("mark_generation_ambiguous_sql", insert);
+        int slotCas = source.indexOf("mark_slot_ambiguous_sql", generationCas);
+
+        assertThat(apply).isGreaterThanOrEqualTo(0);
+        assertThat(frameLock).isGreaterThan(apply);
+        assertThat(admissionLoad).isGreaterThan(frameLock);
+        assertThat(currentAdmission).isGreaterThan(admissionLoad);
+        assertThat(insert).isGreaterThan(currentAdmission);
+        assertThat(generationCas).isGreaterThan(insert);
+        assertThat(slotCas).isGreaterThan(generationCas);
+        assertThat(source)
+                .contains("if (state != slotstate.started) { continue;")
+                .contains("parallel abandonment requires at least one current started lane")
+                .contains("provider_call_lease_state = 'ambiguous'")
+                .contains("failure_code = 'call_state_ambiguous'")
+                .contains("slot_state = 'ambiguous'")
+                .contains("requirestoredabandonment(application, existing.getfirst())")
+                .contains("contractjson.canonicalize(graphreceipt.get(\"admission_receipt\"))");
+    }
+
+    @Test
     void bindsUsageToFrameTypeAndGenerationWithoutInventingAFrameId() {
         Map<String, Object> authority = Map.of(
                 "current_frame_generation", 1L,

@@ -70,7 +70,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(97);
+        assertThat(first.migrationsExecuted).isEqualTo(101);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -179,7 +179,8 @@ class MigrationIntegrationTest {
                             "agent_run_stream_backfill_cursor",
                             "agent_run_stream_archive_manifest",
                             "agent_run_stream_archive_receipt",
-                            "agent_run_stream_migration_receipt");
+                            "agent_run_stream_migration_receipt",
+                            "intake_parallel_frame_abandonment_receipt");
             assertThat(
                             countRows(
                                     connection,

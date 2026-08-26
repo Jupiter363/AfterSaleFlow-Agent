@@ -5,6 +5,8 @@ import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentR
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyView;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AbandonmentApplication;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AbandonmentReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptLookup;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptPublication;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.EventAuthority;
@@ -61,6 +63,25 @@ import org.springframework.transaction.annotation.Transactional;
 @Repository
 public class JdbcIntakeParallelFrameStagingStore
         implements IntakeParallelFrameStagingPort {
+
+    private static final Set<String> ABANDONMENT_FIELDS = Set.of(
+            "schema_version",
+            "abandonment_id",
+            "execution_id",
+            "thread_id",
+            "command_id",
+            "request_hash",
+            "attempt_id",
+            "frame_set_id",
+            "receipt_sha256",
+            "authority_sha256",
+            "admission_receipt",
+            "provider_call_count_before",
+            "provider_call_count_after",
+            "owner_id",
+            "fencing_token",
+            "abandoned_at",
+            "abandonment_sha256");
 
     private static final String LOCK_ADMISSION_AUTHORITY_SQL =
             """
@@ -372,6 +393,82 @@ public class JdbcIntakeParallelFrameStagingStore
                and history.agent_run_attempt_id = :attemptId
                and history.command_id = :commandId
                and history.command_request_sha256 = :commandRequestSha256
+            """;
+
+    private static final String LOAD_FRAME_ABANDONMENT_SQL =
+            """
+            select abandonment_id, frame_set_id, agent_run_id,
+                   agent_run_attempt_id, command_id, command_request_sha256,
+                   thread_id, admission_receipt_sha256, authority_sha256,
+                   graph_execution_id, provider_call_count_before,
+                   provider_call_count_after, graph_owner_id,
+                   graph_fencing_token, abandoned_at, abandonment_sha256,
+                   ambiguous_frame_types::text as ambiguous_frame_types,
+                   canonical_graph_receipt_bytes, receipt_size_bytes
+              from intake_parallel_frame_abandonment_receipt
+             where abandonment_id = :abandonmentId
+                or (frame_set_id = :frameSetId
+                    and admission_receipt_sha256 = :admissionReceiptSha256)
+             order by abandonment_id
+            """;
+
+    private static final String INSERT_FRAME_ABANDONMENT_SQL =
+            """
+            insert into intake_parallel_frame_abandonment_receipt (
+                abandonment_id, frame_set_id, agent_run_id,
+                agent_run_attempt_id, command_id, command_request_sha256,
+                thread_id, admission_receipt_sha256, authority_sha256,
+                graph_execution_id, provider_call_count_before,
+                provider_call_count_after, graph_owner_id,
+                graph_fencing_token, abandoned_at, abandonment_sha256,
+                ambiguous_frame_types, canonical_graph_receipt_bytes,
+                receipt_size_bytes
+            ) values (
+                :abandonmentId, :frameSetId, :runId,
+                :attemptId, :commandId, :commandRequestSha256,
+                :threadId, :admissionReceiptSha256, :authoritySha256,
+                :executionId, :providerCallCountBefore,
+                :providerCallCountAfter, :graphOwnerId,
+                :graphFencingToken, :abandonedAt, :abandonmentSha256,
+                cast(:ambiguousFrameTypes as jsonb), :canonicalGraphReceipt,
+                :receiptSizeBytes
+            )
+            on conflict do nothing
+            """;
+
+    private static final String MARK_GENERATION_AMBIGUOUS_SQL =
+            """
+            update intake_parallel_frame_generation
+               set provider_call_lease_state = 'AMBIGUOUS',
+                   staging_state = 'AMBIGUOUS',
+                   failure_code = 'CALL_STATE_AMBIGUOUS',
+                   failure_retryable = true,
+                   terminal_at = :abandonedAt,
+                   updated_at = :abandonedAt
+             where frame_set_id = :frameSetId
+               and frame_type = :frameType
+               and frame_generation = :generation
+               and frame_id = :frameId
+               and provider_call_lease_state = 'STARTED'
+               and staging_state = 'STARTED'
+               and result_id is null
+               and failure_code is null
+               and terminal_at is null
+            """;
+
+    private static final String MARK_SLOT_AMBIGUOUS_SQL =
+            """
+            update intake_parallel_frame_slot
+               set slot_state = 'AMBIGUOUS',
+                   slot_version = slot_version + 1,
+                   updated_at = :abandonedAt
+             where frame_set_id = :frameSetId
+               and frame_type = :frameType
+               and current_generation = :generation
+               and current_frame_id = :frameId
+               and slot_state = 'STARTED'
+               and current_result_id is null
+               and slot_version = :expectedSlotVersion
             """;
 
     private static final String INSERT_ADMISSION_RECEIPT_HISTORY_SQL =
@@ -1017,6 +1114,134 @@ public class JdbcIntakeParallelFrameStagingStore
                 text(row, "receipt_sha256"),
                 canonical);
         return Optional.of(publishedAdmissionReceipt(row));
+    }
+
+    @Override
+    @Transactional(
+            propagation = Propagation.REQUIRES_NEW,
+            isolation = Isolation.READ_COMMITTED)
+    public AbandonmentReceipt applyAbandonment(AbandonmentApplication application) {
+        Objects.requireNonNull(application, "application");
+        ObjectNode graphReceipt = requireAbandonmentDocument(application);
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                LOCK_EXECUTION_PLAN_SQL,
+                Map.of("frameSetId", application.frameSetId()));
+        if (rows.size() != FrameType.values().length) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_FRAME_SET_INCOMPLETE",
+                    "parallel abandonment requires exactly three current Frame slots");
+        }
+        for (Map<String, Object> row : rows) {
+            requireAbandonmentFrameSet(application, row);
+            requireCurrentEventAuthority(row);
+            requireRunningCollecting(row);
+        }
+
+        MapSqlParameterSource identity = abandonmentParameters(application);
+        List<Map<String, Object>> existing = jdbc.queryForList(
+                LOAD_FRAME_ABANDONMENT_SQL,
+                identity);
+        if (existing.size() > 1) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_RECEIPT_AMBIGUOUS",
+                    "parallel abandonment receipt is not unique");
+        }
+        if (!existing.isEmpty()) {
+            return requireStoredAbandonment(application, existing.getFirst());
+        }
+
+        List<Map<String, Object>> admissionRows = jdbc.queryForList(
+                LOAD_ADMISSION_RECEIPT_BY_HASH_SQL,
+                identity);
+        if (admissionRows.size() != 1) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_ADMISSION_MISSING",
+                    "parallel abandonment lacks its exact admission receipt");
+        }
+        Map<String, Object> admission = admissionRows.getFirst();
+        byte[] canonicalAdmission = bytes(admission, "canonical_receipt_bytes");
+        requireStoredAdmissionReceipt(
+                admission,
+                application.runId(),
+                application.attemptId(),
+                application.commandId(),
+                application.commandRequestSha256(),
+                application.admissionReceiptSha256(),
+                canonicalAdmission);
+        if (!application.authoritySha256().equals(text(admission, "authority_sha256"))
+                || !Arrays.equals(
+                        canonicalAdmission,
+                        ContractJson.canonicalize(graphReceipt.get("admission_receipt")))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_ADMISSION_DRIFT",
+                    "Graph abandonment crossed the current Java admission receipt");
+        }
+        List<Map<String, Object>> currentReceipt = jdbc.queryForList(
+                LOCK_ADMISSION_RECEIPT_AUTHORITY_SQL,
+                Map.of("frameSetId", application.frameSetId()));
+        if (currentReceipt.size() != 1
+                || !application.admissionReceiptSha256().equals(
+                        text(currentReceipt.getFirst(), "current_receipt_sha256"))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_ADMISSION_SUPERSEDED",
+                    "only the current admission receipt may be abandoned");
+        }
+
+        java.util.LinkedHashSet<FrameType> ambiguous = new java.util.LinkedHashSet<>();
+        for (Map<String, Object> row : rows) {
+            SlotState state = SlotState.valueOf(text(row, "slot_state"));
+            if (state != SlotState.STARTED) {
+                continue;
+            }
+            if (!"STARTED".equals(text(row, "staging_state"))
+                    || !"STARTED".equals(text(row, "provider_call_lease_state"))
+                    || nullableText(row, "current_result_id") != null
+                    || nullableText(row, "result_id") != null
+                    || nullableText(row, "failure_code") != null) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ABANDONMENT_STARTED_DRIFT",
+                        "a STARTED slot differs from its current STARTED generation");
+            }
+            ambiguous.add(FrameType.valueOf(text(row, "frame_type")));
+        }
+        if (ambiguous.isEmpty()) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_NO_STARTED_LANE",
+                    "parallel abandonment requires at least one current STARTED lane");
+        }
+        identity.addValue(
+                "ambiguousFrameTypes",
+                writeJson(ambiguous.stream().map(Enum::name).toList()));
+        if (jdbc.update(INSERT_FRAME_ABANDONMENT_SQL, identity) != 1) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_INSERT_FAILED",
+                    "parallel abandonment receipt was not inserted");
+        }
+        for (Map<String, Object> row : rows) {
+            FrameType type = FrameType.valueOf(text(row, "frame_type"));
+            if (!ambiguous.contains(type)) {
+                continue;
+            }
+            MapSqlParameterSource lane = new MapSqlParameterSource()
+                    .addValue("frameSetId", application.frameSetId())
+                    .addValue("frameType", type.name())
+                    .addValue("generation", number(row, "current_generation"))
+                    .addValue("frameId", text(row, "current_frame_id"))
+                    .addValue("expectedSlotVersion", number(row, "slot_version"))
+                    .addValue("abandonedAt", Timestamp.from(application.abandonedAt()));
+            if (jdbc.update(MARK_GENERATION_AMBIGUOUS_SQL, lane) != 1
+                    || jdbc.update(MARK_SLOT_AMBIGUOUS_SQL, lane) != 1) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ABANDONMENT_CAS_FAILED",
+                        "STARTED Frame did not atomically become AMBIGUOUS");
+            }
+        }
+        return new AbandonmentReceipt(
+                application.frameSetId(),
+                application.abandonmentId(),
+                application.abandonmentSha256(),
+                ambiguous,
+                true);
     }
 
     @Override
@@ -2476,6 +2701,163 @@ public class JdbcIntakeParallelFrameStagingStore
         return canonical;
     }
 
+    private ObjectNode requireAbandonmentDocument(AbandonmentApplication application) {
+        byte[] canonical = application.canonicalGraphReceipt();
+        JsonNode parsed = readJson(
+                new String(canonical, StandardCharsets.UTF_8),
+                "parallel Graph abandonment receipt");
+        if (!(parsed instanceof ObjectNode root)
+                || !Arrays.equals(canonical, ContractJson.canonicalize(root))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_RECEIPT_NONCANONICAL",
+                    "parallel Graph abandonment receipt is not canonical JSON");
+        }
+        Set<String> fields = new HashSet<>();
+        root.fieldNames().forEachRemaining(fields::add);
+        if (!fields.equals(ABANDONMENT_FIELDS)
+                || !"intake.parallel-receipt-abandonment.v1"
+                        .equals(receiptText(root, "schema_version"))
+                || !application.abandonmentId().equals(
+                        receiptText(root, "abandonment_id"))
+                || !application.executionId().equals(receiptText(root, "execution_id"))
+                || !application.threadId().equals(receiptText(root, "thread_id"))
+                || !application.commandId().equals(receiptText(root, "command_id"))
+                || !application.commandRequestSha256().equals(
+                        receiptText(root, "request_hash"))
+                || !application.attemptId().equals(receiptText(root, "attempt_id"))
+                || !application.frameSetId().equals(receiptText(root, "frame_set_id"))
+                || !application.admissionReceiptSha256().equals(
+                        receiptText(root, "receipt_sha256"))
+                || !application.authoritySha256().equals(
+                        receiptText(root, "authority_sha256"))
+                || application.providerCallCountBefore()
+                        != receiptLong(root, "provider_call_count_before")
+                || application.providerCallCountAfter()
+                        != receiptLong(root, "provider_call_count_after")
+                || !application.graphOwnerId().equals(receiptText(root, "owner_id"))
+                || application.graphFencingToken() != receiptLong(root, "fencing_token")
+                || !application.abandonedAt().equals(
+                        Instant.parse(receiptText(root, "abandoned_at")))
+                || !application.abandonmentSha256().equals(
+                        receiptText(root, "abandonment_sha256"))
+                || !root.path("admission_receipt").isObject()) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_RECEIPT_DRIFT",
+                    "parallel Graph abandonment receipt crossed Java authority");
+        }
+        String deterministicId = "parallel-receipt-abandonment."
+                + application.admissionReceiptSha256().substring(0, 24)
+                + "." + application.graphFencingToken();
+        String deterministicExecutionId = "parallel-receipt-execution."
+                + application.admissionReceiptSha256().substring(0, 24)
+                + "." + application.graphFencingToken();
+        ObjectNode unsigned = root.deepCopy();
+        unsigned.remove("abandonment_sha256");
+        if (!deterministicId.equals(application.abandonmentId())
+                || !deterministicExecutionId.equals(application.executionId())
+                || !application.abandonmentSha256().equals(
+                        ContractJson.sha256Hex(unsigned))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_HASH_INVALID",
+                    "parallel Graph abandonment receipt self-hash is invalid");
+        }
+        return root;
+    }
+
+    private static void requireAbandonmentFrameSet(
+            AbandonmentApplication application,
+            Map<String, Object> row) {
+        if (!application.frameSetId().equals(text(row, "frame_set_id"))
+                || !application.runId().equals(text(row, "agent_run_id"))
+                || !application.attemptId().equals(text(row, "agent_run_attempt_id"))
+                || !application.commandId().equals(text(row, "command_id"))
+                || !application.commandRequestSha256().equals(
+                        text(row, "command_request_sha256"))
+                || !application.threadId().equals(text(row, "thread_id"))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_FRAME_SET_DRIFT",
+                    "parallel abandonment crossed its Frame-set authority");
+        }
+    }
+
+    private MapSqlParameterSource abandonmentParameters(
+            AbandonmentApplication application) {
+        return new MapSqlParameterSource()
+                .addValue("abandonmentId", application.abandonmentId())
+                .addValue("frameSetId", application.frameSetId())
+                .addValue("runId", application.runId())
+                .addValue("attemptId", application.attemptId())
+                .addValue("commandId", application.commandId())
+                .addValue("commandRequestSha256", application.commandRequestSha256())
+                .addValue("threadId", application.threadId())
+                .addValue("admissionReceiptSha256", application.admissionReceiptSha256())
+                .addValue("authoritySha256", application.authoritySha256())
+                .addValue("executionId", application.executionId())
+                .addValue("providerCallCountBefore", application.providerCallCountBefore())
+                .addValue("providerCallCountAfter", application.providerCallCountAfter())
+                .addValue("graphOwnerId", application.graphOwnerId())
+                .addValue("graphFencingToken", application.graphFencingToken())
+                .addValue("abandonedAt", Timestamp.from(application.abandonedAt()))
+                .addValue("abandonmentSha256", application.abandonmentSha256())
+                .addValue("canonicalGraphReceipt", application.canonicalGraphReceipt())
+                .addValue("receiptSizeBytes", application.canonicalGraphReceipt().length);
+    }
+
+    private AbandonmentReceipt requireStoredAbandonment(
+            AbandonmentApplication application,
+            Map<String, Object> row) {
+        byte[] canonical = application.canonicalGraphReceipt();
+        if (!application.abandonmentId().equals(text(row, "abandonment_id"))
+                || !application.frameSetId().equals(text(row, "frame_set_id"))
+                || !application.runId().equals(text(row, "agent_run_id"))
+                || !application.attemptId().equals(text(row, "agent_run_attempt_id"))
+                || !application.commandId().equals(text(row, "command_id"))
+                || !application.commandRequestSha256().equals(
+                        text(row, "command_request_sha256"))
+                || !application.threadId().equals(text(row, "thread_id"))
+                || !application.admissionReceiptSha256().equals(
+                        text(row, "admission_receipt_sha256"))
+                || !application.authoritySha256().equals(text(row, "authority_sha256"))
+                || !application.executionId().equals(text(row, "graph_execution_id"))
+                || application.providerCallCountBefore()
+                        != number(row, "provider_call_count_before")
+                || application.providerCallCountAfter()
+                        != number(row, "provider_call_count_after")
+                || !application.graphOwnerId().equals(text(row, "graph_owner_id"))
+                || application.graphFencingToken() != number(row, "graph_fencing_token")
+                || !application.abandonedAt().equals(instant(row, "abandoned_at"))
+                || !application.abandonmentSha256().equals(
+                        text(row, "abandonment_sha256"))
+                || canonical.length != number(row, "receipt_size_bytes")
+                || !Arrays.equals(canonical, bytes(row, "canonical_graph_receipt_bytes"))) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_REPLAY_CONFLICT",
+                    "stored parallel abandonment receipt drifted");
+        }
+        JsonNode typesNode = readJson(
+                text(row, "ambiguous_frame_types"),
+                "parallel abandonment Frame types");
+        if (!(typesNode instanceof ArrayNode typesArray)) {
+            throw conflict(
+                    "INTAKE_PARALLEL_ABANDONMENT_REPLAY_CONFLICT",
+                    "stored abandonment Frame types are invalid");
+        }
+        java.util.LinkedHashSet<FrameType> types = new java.util.LinkedHashSet<>();
+        for (JsonNode item : typesArray) {
+            if (!item.isTextual() || !types.add(FrameType.valueOf(item.textValue()))) {
+                throw conflict(
+                        "INTAKE_PARALLEL_ABANDONMENT_REPLAY_CONFLICT",
+                        "stored abandonment Frame types are invalid");
+            }
+        }
+        return new AbandonmentReceipt(
+                application.frameSetId(),
+                application.abandonmentId(),
+                application.abandonmentSha256(),
+                types,
+                false);
+    }
+
     private void requireStoredAdmissionReceipt(
             Map<String, Object> row,
             String runId,
@@ -2900,6 +3282,16 @@ public class JdbcIntakeParallelFrameStagingStore
 
     private static String randomId(String prefix) {
         return prefix + "_" + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private String writeJson(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException failure) {
+            throw conflict(
+                    "INTAKE_PARALLEL_JSON_ENCODING_FAILED",
+                    "parallel technical authority could not be encoded");
+        }
     }
 
     private static String sha256Text(String value) {

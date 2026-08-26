@@ -12,6 +12,8 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.FrameExecutionReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.LocalReconciliationException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AbandonmentApplication;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AbandonmentReceipt;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyView;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptLookup;
@@ -287,6 +289,71 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                 .containsExactly(
                         "admit",
                         "plan");
+    }
+
+    @Test
+    void abandonsOnlyAStaleStartedLaneThenPublishesAndExecutesItsSuccessor() {
+        ExecuteAgentRunRequest request = validParallelRequest();
+        StreamFixture complete = StreamFixture.complete(request);
+        StreamFixture staleStarted = complete.withLines(List.of(
+                complete.lines().get(0),
+                complete.lines().get(1),
+                complete.lines().get(2),
+                complete.lines().get(7),
+                complete.lines().get(8),
+                complete.lines().get(9),
+                complete.lines().get(11)));
+        GraphTransportSecurityProof proof = mutualTlsProof();
+        RecordingStaging staging = new RecordingStaging(request, complete);
+
+        assertThatThrownBy(() -> client(
+                                request,
+                                proof,
+                                new FakeCommandTransport(proof, staleStarted),
+                                staging)
+                        .executeOrResume(
+                                request,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOf(TargetE2EGraphClientException.class);
+
+        AbandonmentTransport transport = new AbandonmentTransport(
+                proof, complete);
+        FrameExecutionReceipt receipt = client(request, proof, transport, staging)
+                .executeOrResume(
+                        request,
+                        ignored -> {},
+                        new AgentRunCancellationToken());
+
+        assertThat(receipt.frameSetId()).isEqualTo(complete.frameSetId());
+        assertThat(receipt.lastSequenceNo()).isEqualTo(12L);
+        assertThat(receipt.publicOutputEmitted()).isTrue();
+        assertThat(transport.phases)
+                .containsExactly("PREPARE", "ABANDON", "PREPARE", "EXECUTE");
+        assertThat(transport.executedFrameTypes)
+                .containsExactly(FrameType.DIALOGUE_FRAME);
+        assertThat(staging.abandonments).hasSize(1);
+        assertThat(staging.actions)
+                .containsSubsequence("plan", "abandon", "admit", "plan")
+                .endsWith(
+                        "append:PUBLIC_FRAME_START:DIALOGUE_FRAME",
+                        "append:PUBLIC_FRAME_PROJECTION_ITEM:DIALOGUE_FRAME",
+                        "append:USAGE:DIALOGUE_FRAME",
+                        "seal:DIALOGUE_FRAME",
+                        "find-completion");
+        assertThat(staging.slots)
+                .allSatisfy((type, slot) -> assertThat(slot.state())
+                        .as(type.name())
+                        .isEqualTo(SlotState.SEALED));
+        assertThat(staging.slots.get(FrameType.DIALOGUE_FRAME).generation())
+                .isEqualTo(2L);
+        assertThat(staging.slots.get(FrameType.QUALITY_FRAME).generation())
+                .isEqualTo(1L);
+        assertThat(staging.slots.get(FrameType.DOSSIER_FRAME).generation())
+                .isEqualTo(1L);
+        assertThat(staging.deliveryBindings)
+                .extracting(TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding::phase)
+                .endsWith("PREPARE", "ABANDON", "PREPARE", "EXECUTE");
     }
 
     @Test
@@ -595,6 +662,193 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         }
     }
 
+    private static final class AbandonmentTransport implements GraphCommandHttpTransport {
+
+        private final GraphTransportSecurityProof proof;
+        private final StreamFixture fixture;
+        private final FakeCommandTransport prepared;
+        private final List<String> phases = new ArrayList<>();
+        private final List<FrameType> executedFrameTypes = new ArrayList<>();
+
+        private AbandonmentTransport(
+                GraphTransportSecurityProof proof, StreamFixture fixture) {
+            this.proof = proof;
+            this.fixture = fixture;
+            this.prepared = new FakeCommandTransport(proof, fixture);
+        }
+
+        @Override
+        public GraphTransportSecurityProof transportProof() {
+            return proof;
+        }
+
+        @Override
+        public void stream(
+                Request request,
+                AgentRunCancellationToken cancellationToken,
+                Listener listener) {
+            String phase = request.headers().get(
+                    HttpTargetE2EIntakeParallelFrameExecutionClient.PHASE_HEADER);
+            phases.add(phase);
+            if ("PREPARE".equals(phase)) {
+                prepared.stream(request, cancellationToken, listener);
+                return;
+            }
+            TargetE2EGraphCommandEnvelope envelope =
+                    TargetE2EGraphTestFixtures.codec().decodeCommand(request.body());
+            ObjectNode admission = admissionReceipt(request);
+            if ("ABANDON".equals(phase)) {
+                respondWithAbandonment(request, listener, envelope, admission);
+                return;
+            }
+            assertThat(phase).isEqualTo("EXECUTE");
+            respondWithSuccessorExecution(request, listener, envelope, admission);
+        }
+
+        private void respondWithAbandonment(
+                Request request,
+                Listener listener,
+                TargetE2EGraphCommandEnvelope envelope,
+                ObjectNode admission) {
+            String receiptSha256 = admission.required("receipt_sha256").asText();
+            String authoritySha256 = admission.required("authority_sha256").asText();
+            long fencingToken = 2L;
+            ObjectNode receipt = TargetE2EGraphTestFixtures.MAPPER.createObjectNode();
+            receipt.put("schema_version", "intake.parallel-receipt-abandonment.v1");
+            receipt.put(
+                    "abandonment_id",
+                    "parallel-receipt-abandonment."
+                            + receiptSha256.substring(0, 24)
+                            + "." + fencingToken);
+            receipt.put(
+                    "execution_id",
+                    "parallel-receipt-execution."
+                            + receiptSha256.substring(0, 24)
+                            + "." + fencingToken);
+            receipt.put("thread_id", envelope.command().threadId());
+            receipt.put("command_id", envelope.command().commandId());
+            receipt.put("request_hash", envelope.command().requestHash());
+            receipt.put("attempt_id", envelope.command().attemptId());
+            receipt.put("frame_set_id", fixture.frameSetId());
+            receipt.put("receipt_sha256", receiptSha256);
+            receipt.put("authority_sha256", authoritySha256);
+            receipt.set("admission_receipt", admission);
+            receipt.put("provider_call_count_before", 1);
+            receipt.put("provider_call_count_after", 2);
+            receipt.put("owner_id", "graph-owner-1");
+            receipt.put("fencing_token", fencingToken);
+            receipt.put("abandoned_at", "2026-08-25T01:00:05Z");
+            String abandonmentSha256 = ContractJson.sha256Hex(receipt);
+            receipt.put("abandonment_sha256", abandonmentSha256);
+            listener.onResponse(new ResponseHead(
+                    200,
+                    request.uri(),
+                    Map.of(
+                            "Content-Type", List.of("application/json; charset=utf-8"),
+                            "Cache-Control", List.of("no-store, no-transform"),
+                            "X-Agent-Run-Id", List.of(envelope.command().logicalRunId()),
+                            "X-Agent-Stream-Protocol", List.of("agent-stream.v4"),
+                            "X-Graph-Execution-Lane", List.of(envelope.executionLane()),
+                            "X-Graph-Activation-Id", List.of(envelope.activationId()),
+                            "X-Intake-Frame-Set-Id", List.of(fixture.frameSetId()),
+                            "X-Intake-Parallel-Abandonment-Receipt",
+                                    List.of(abandonmentSha256))));
+            listener.onLine(ContractJson.canonicalString(receipt));
+        }
+
+        private void respondWithSuccessorExecution(
+                Request request,
+                Listener listener,
+                TargetE2EGraphCommandEnvelope envelope,
+                ObjectNode admission) {
+            ObjectNode authority = TargetE2EGraphTestFixtures.MAPPER.createObjectNode();
+            authority.put(
+                    "schema_version",
+                    TargetE2EIntakeParallelTransportCodec.AUTHORITY_SCHEMA);
+            authority.put("frame_set_id", fixture.frameSetId());
+            authority.put("run_id", envelope.command().logicalRunId());
+            authority.put("attempt_id", envelope.command().attemptId());
+            ArrayNode authorityFrames = authority.putArray("frames");
+            List<FrameWire> active = new ArrayList<>();
+            JsonNode lanes = admission.required("lanes");
+            for (FrameType type : FrameType.values()) {
+                JsonNode lane = null;
+                for (JsonNode candidate : lanes) {
+                    if (type.name().equals(candidate.required("frame_type").asText())) {
+                        lane = candidate;
+                        break;
+                    }
+                }
+                if (lane == null) {
+                    throw new AssertionError("successor admission is missing " + type);
+                }
+                FrameWire original = fixture.frames().get(type);
+                int generation = lane.required("generation").intValue();
+                String frameId = lane.required("frame_id").asText();
+                ObjectNode raw = authorityFrames.addObject();
+                raw.put("frame_type", type.name());
+                raw.put("generation", generation);
+                raw.put("frame_id", frameId);
+                raw.put("frame_model_input_sha256", original.inputHash());
+                raw.put("frame_prompt_sha256", original.promptHash());
+                raw.put("context_envelope_sha256", CONTEXT_HASH);
+                raw.put("model_context_view_sha256", MODEL_CONTEXT_HASH);
+                if (!"SKIP_SEALED".equals(lane.required("action").asText())) {
+                    active.add(new FrameWire(
+                            type,
+                            frameId,
+                            original.inputHash(),
+                            original.promptHash(),
+                            generation));
+                    executedFrameTypes.add(type);
+                }
+            }
+            authority.put("authority_sha256", ContractJson.sha256Hex(authority));
+            String authorityHeader = Base64.getUrlEncoder()
+                    .withoutPadding()
+                    .encodeToString(ContractJson.canonicalize(authority));
+            listener.onResponse(new ResponseHead(
+                    200,
+                    request.uri(),
+                    Map.of(
+                            "Content-Type", List.of("application/x-ndjson; charset=utf-8"),
+                            "Cache-Control", List.of("no-store, no-transform"),
+                            "X-Agent-Run-Id", List.of(envelope.command().logicalRunId()),
+                            "X-Agent-Stream-Protocol", List.of("agent-stream.v4"),
+                            "X-Graph-Execution-Lane", List.of(envelope.executionLane()),
+                            "X-Graph-Activation-Id", List.of(envelope.activationId()),
+                            "X-Intake-Frame-Set-Id", List.of(fixture.frameSetId()),
+                            "X-Intake-Parallel-Authority", List.of(authorityHeader))));
+            for (FrameWire frame : active) {
+                listener.onLine(started(
+                        envelopeRequest(envelope), fixture.frameSetId(), frame));
+                listener.onLine(projection(
+                        envelopeRequest(envelope), fixture.frameSetId(), frame));
+                listener.onLine(sealed(
+                        envelopeRequest(envelope), fixture.frameSetId(), frame));
+            }
+        }
+
+        private ObjectNode admissionReceipt(Request request) {
+            try {
+                String encoded = request.headers().get(
+                        HttpTargetE2EIntakeParallelFrameExecutionClient.ADMISSION_HEADER);
+                return (ObjectNode) TargetE2EGraphTestFixtures.MAPPER.readTree(
+                        Base64.getUrlDecoder().decode(encoded));
+            } catch (Exception failure) {
+                throw new IllegalStateException(
+                        "parallel admission receipt could not be decoded", failure);
+            }
+        }
+
+        private ExecuteAgentRunRequest envelopeRequest(
+                TargetE2EGraphCommandEnvelope envelope) {
+            ExecuteAgentRunRequest fixtureRequest = validParallelRequest();
+            assertThat(envelope.command()).isEqualTo(fixtureRequest.command());
+            return fixtureRequest;
+        }
+    }
+
     private static final class PrepareErrorTransport implements GraphCommandHttpTransport {
 
         private final GraphTransportSecurityProof proof;
@@ -761,6 +1015,7 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         private boolean incompleteCompletionConflict;
         private boolean planningConflict;
         private PublishedAdmissionReceipt currentAdmissionReceipt;
+        private final List<AbandonmentApplication> abandonments = new ArrayList<>();
 
         private RecordingStaging(ExecuteAgentRunRequest request, StreamFixture fixture) {
             this.request = request;
@@ -788,16 +1043,18 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
         public FrameSetReceipt admit(FrameSetAdmission value) {
             actions.add("admit");
             admission = value;
-            value.manifests().forEach(manifest -> {
-                slots.put(
-                        manifest.frameType(),
-                        new FrameSlotView(
-                                manifest.frameType(),
-                                manifest.generation(),
-                                manifest.frameId(),
-                                SlotState.ADMITTED,
-                                null));
-            });
+            if (slots.isEmpty()) {
+                value.manifests().forEach(manifest -> {
+                    slots.put(
+                            manifest.frameType(),
+                            new FrameSlotView(
+                                    manifest.frameType(),
+                                    manifest.generation(),
+                                    manifest.frameId(),
+                                    SlotState.ADMITTED,
+                                    null));
+                });
+            }
             return new FrameSetReceipt(
                     value.frameSetId(),
                     true,
@@ -840,20 +1097,63 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                         "parallel execution plan no longer matches current authority");
             }
             EnumMap<FrameType, ExecutionLane> lanes = new EnumMap<>(FrameType.class);
-            value.manifests().forEach(manifest -> lanes.put(
-                    manifest.frameType(),
-                    new ExecutionLane(
-                            manifest.frameType(),
-                            manifest.generation(),
-                            manifest.frameId(),
+            for (FrameType type : FrameType.values()) {
+                FrameSlotView slot = slots.get(type);
+                if (slot.state() == SlotState.STARTED) {
+                    throw new StagingConflictException(
+                            "INTAKE_PARALLEL_EXECUTION_STARTED_AMBIGUOUS",
+                            "parallel STARTED execution requires Graph abandonment");
+                }
+                if (slot.state() == SlotState.SEALED) {
+                    FrameSealCommand seal = seals.get(type);
+                    lanes.put(type, new ExecutionLane(
+                            type,
+                            slot.generation(),
+                            slot.frameId(),
+                            SlotState.SEALED,
+                            ExecutionAction.SKIP_SEALED,
+                            seal.nextLocalIndex(),
+                            0,
+                            slot.resultId(),
+                            seal.resultSha256(),
+                            seal.publicProjectionSha256(),
+                            null));
+                    continue;
+                }
+                if (slot.state() == SlotState.AMBIGUOUS) {
+                    FrameWire previous = fixture.frames().get(type);
+                    long generation = slot.generation() + 1;
+                    String frameId = replacementFrameId(
+                            value.frameSetId(), previous, Math.toIntExact(generation));
+                    slots.put(type, new FrameSlotView(
+                            type, generation, frameId, SlotState.ADMITTED, null));
+                    lanes.put(type, new ExecutionLane(
+                            type,
+                            generation,
+                            frameId,
                             SlotState.ADMITTED,
-                            ExecutionAction.RUN_CURRENT,
+                            ExecutionAction.RUN_RETRY,
                             0,
-                            0,
+                            1,
                             null,
                             null,
                             null,
-                            null)));
+                            "CALL_STATE_AMBIGUOUS"));
+                    continue;
+                }
+                lanes.put(type, new ExecutionLane(
+                        type,
+                        slot.generation(),
+                        slot.frameId(),
+                        SlotState.ADMITTED,
+                        ExecutionAction.RUN_CURRENT,
+                        0,
+                        0,
+                        null,
+                        null,
+                        null,
+                        null));
+            }
             return new ExecutionPlan(
                     value.frameSetId(), value.runId(), value.attemptId(), lanes);
         }
@@ -890,6 +1190,31 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                             && receipt.commandId().equals(lookup.commandId())
                             && receipt.commandRequestSha256()
                                     .equals(lookup.commandRequestSha256()));
+        }
+
+        @Override
+        public AbandonmentReceipt applyAbandonment(AbandonmentApplication application) {
+            actions.add("abandon");
+            abandonments.add(application);
+            java.util.LinkedHashSet<FrameType> ambiguous = new java.util.LinkedHashSet<>();
+            slots.replaceAll((type, slot) -> {
+                if (slot.state() != SlotState.STARTED) {
+                    return slot;
+                }
+                ambiguous.add(type);
+                return new FrameSlotView(
+                        type,
+                        slot.generation(),
+                        slot.frameId(),
+                        SlotState.AMBIGUOUS,
+                        null);
+            });
+            return new AbandonmentReceipt(
+                    application.frameSetId(),
+                    application.abandonmentId(),
+                    application.abandonmentSha256(),
+                    ambiguous,
+                    true);
         }
 
         @Override

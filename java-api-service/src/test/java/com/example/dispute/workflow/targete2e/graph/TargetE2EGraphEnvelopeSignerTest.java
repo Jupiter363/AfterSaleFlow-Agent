@@ -152,7 +152,7 @@ class TargetE2EGraphEnvelopeSignerTest {
   }
 
   @Test
-  void signsFreshPrepareExecuteAndFailureBoundTerminateCredentialsWithoutWideningGenericClaims()
+  void signsFreshPrepareExecuteAbandonAndFailureBoundTerminateCredentialsWithoutWideningGenericClaims()
       throws Exception {
     var codec = TargetE2EGraphTestFixtures.codec();
     var command = codec.wrapCommand(ACTIVATION_ID, 7L, TargetE2EGraphTestFixtures.command());
@@ -174,6 +174,10 @@ class TargetE2EGraphEnvelopeSignerTest {
         command,
         REGISTRY_BINDING,
         TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.execute(receiptHash));
+    var abandoned = signer.signParallel(
+        command,
+        REGISTRY_BINDING,
+        TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.abandon(receiptHash));
     var terminated = signer.signParallel(
         command,
         REGISTRY_BINDING,
@@ -181,6 +185,7 @@ class TargetE2EGraphEnvelopeSignerTest {
             receiptHash, "ACTIVITY_RETRY_EXHAUSTED"));
     ObjectNode prepareClaims = decode(prepared.compactJws().split("\\.", -1)[1]);
     ObjectNode executeClaims = decode(executed.compactJws().split("\\.", -1)[1]);
+    ObjectNode abandonClaims = decode(abandoned.compactJws().split("\\.", -1)[1]);
     ObjectNode terminateClaims = decode(terminated.compactJws().split("\\.", -1)[1]);
 
     assertThat(prepareClaims.path("parallel_phase").asText()).isEqualTo("PREPARE");
@@ -188,6 +193,10 @@ class TargetE2EGraphEnvelopeSignerTest {
     assertThat(executeClaims.path("parallel_phase").asText()).isEqualTo("EXECUTE");
     assertThat(executeClaims.path("parallel_admission_receipt_sha256").asText())
         .isEqualTo(receiptHash);
+    assertThat(abandonClaims.path("parallel_phase").asText()).isEqualTo("ABANDON");
+    assertThat(abandonClaims.path("parallel_admission_receipt_sha256").asText())
+        .isEqualTo(receiptHash);
+    assertThat(abandonClaims.has("parallel_failure_code")).isFalse();
     assertThat(terminateClaims.path("parallel_phase").asText()).isEqualTo("TERMINATE");
     assertThat(terminateClaims.path("parallel_admission_receipt_sha256").asText())
         .isEqualTo(receiptHash);
@@ -196,6 +205,8 @@ class TargetE2EGraphEnvelopeSignerTest {
     assertThat(prepareClaims.path("jti").asText())
         .isNotEqualTo(executeClaims.path("jti").asText());
     assertThat(executeClaims.path("jti").asText())
+        .isNotEqualTo(abandonClaims.path("jti").asText());
+    assertThat(abandonClaims.path("jti").asText())
         .isNotEqualTo(terminateClaims.path("jti").asText());
   }
 

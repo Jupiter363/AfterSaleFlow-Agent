@@ -1584,12 +1584,13 @@
 ## P1-20260826-PARALLEL-STARTED-FRAME-HAS-NO-RECOVERY-STATE
 
 - Severity: P1
-- Status: OPEN / REPAIR_PENDING / SOURCE_CONFIRMED
+- Status: FIXED / FOCUSED_CHECK_PASSED / FRESH_MIGRATION_PASSED / UAT_PENDING
 - Component: Java V4 Frame staging plan/replay
 - Confirmed fact: A durable `PUBLIC_FRAME_START` changes a Frame slot to `STARTED`, but a later EOF or worker loss before `INTERRUPTED/SEALED` has no adoption or ambiguity transition. Replanning the same immutable command rejects every `STARTED` slot as `INTAKE_PARALLEL_EXECUTION_STARTED_AMBIGUOUS`.
 - Root cause and evidence: `HttpTargetE2EIntakeParallelFrameExecutionClient.java:564` persists the START prefix before later events; `JdbcIntakeParallelFrameStagingStore.java:722` unconditionally rejects the persisted STARTED state. The existing partial-EOF coverage proves the prefix remains durable but does not prove a subsequent recovery transition.
 - Impact: Any lane connection loss after its public START and before its terminal event can permanently block the Intake turn even when its two sibling lanes are sealed and the command/request authority is unchanged.
 - Identifying metadata: confirmed by static production call-chain audit at HEAD `e07063db3f9c3c8560ceecc07fba45dda08a6bfa`; no runtime mutation was used.
+- Verification fact: Graph G016 now freezes one immutable stale-execution abandonment under the predecessor receipt fence; Java V092 and the staging store accept that proof only for exact current `STARTED` lanes, advance only those lanes to `AMBIGUOUS`, then publish a successor receipt that leaves sealed siblings unchanged. The focused HTTP successor test, its 9 adjacent HTTP cases, the signer suite, the JDBC staging contract, and the V092 contract passed. A fresh PostgreSQL schema then applied all 101 migrations through `V092`, replayed with zero pending migrations, and exposed the abandonment authority table. Runtime UAT remains pending.
 
 ## P1-20260826-GRAPH-PARALLEL-PURGE-CYCLE-LINEAGE-INVALID
 

@@ -10,6 +10,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFr
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameExecutionClient.LocalReconciliationException;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AbandonmentApplication;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptLookup;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AdmissionReceiptPublication;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.FrameManifest;
@@ -49,8 +50,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -72,7 +77,11 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
     static final String PHASE_HEADER = "X-Intake-Parallel-Phase";
     static final String FAILURE_CODE_HEADER = "X-Intake-Parallel-Failure-Code";
     static final String TERMINAL_RECEIPT_HEADER = "X-Intake-Parallel-Terminal-Receipt";
+    static final String ABANDONMENT_RECEIPT_HEADER =
+            "X-Intake-Parallel-Abandonment-Receipt";
     private static final String FRAME_SET_HEADER = "X-Intake-Frame-Set-Id";
+    private static final String STARTED_AMBIGUOUS =
+            "INTAKE_PARALLEL_EXECUTION_STARTED_AMBIGUOUS";
     private static final String PROJECTION_REGISTRY_VERSION = "intake-projection-registry.v1";
     private static final Set<String> REMOTE_ERROR_FIELDS = Set.of("code", "retryable");
     private static final Set<String> FAILURE_TERMINATION_FIELDS = Set.of(
@@ -91,6 +100,24 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
             "graph_error_classification",
             "provider_permit_statuses",
             "receipt_sha256");
+    private static final Set<String> ABANDONMENT_FIELDS = Set.of(
+            "schema_version",
+            "abandonment_id",
+            "execution_id",
+            "thread_id",
+            "command_id",
+            "request_hash",
+            "attempt_id",
+            "frame_set_id",
+            "receipt_sha256",
+            "authority_sha256",
+            "admission_receipt",
+            "provider_call_count_before",
+            "provider_call_count_after",
+            "owner_id",
+            "fencing_token",
+            "abandoned_at",
+            "abandonment_sha256");
     private static final Set<String> TERMINAL_PERMIT_STATUSES = Set.of(
             "RELEASED", "CANCELLED", "EXPIRED", "TIMED_OUT", "ORPHANED");
     private static final Pattern ERROR_CODE = Pattern.compile("[A-Za-z0-9_.-]{1,128}");
@@ -166,11 +193,28 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
         GraphRegistryBindingPolicy.ExpectedBinding registryBinding =
                 GraphRegistryBindingPolicy.requireExpected(
                         registryBindingPolicy, GraphStreamVisibilityPolicy.Binding.from(command));
-        PreparedAdmission prepared = prepare(
-                request,
-                roomFencingToken,
-                registryBinding,
-                cancellationToken);
+        PreparedAdmission prepared;
+        try {
+            prepared = prepare(
+                    request,
+                    roomFencingToken,
+                    registryBinding,
+                    cancellationToken);
+        } catch (LocalReconciliationException failure) {
+            if (!STARTED_AMBIGUOUS.equals(failure.code())) {
+                throw failure;
+            }
+            abandonStartedExecution(
+                    request,
+                    roomFencingToken,
+                    registryBinding,
+                    cancellationToken);
+            prepared = prepare(
+                    request,
+                    roomFencingToken,
+                    registryBinding,
+                    cancellationToken);
+        }
         try {
             if (prepared.executionPlan().allSealed()) {
                 var completion = staging
@@ -239,6 +283,71 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                     failure);
         } catch (TargetE2EGraphClientException failure) {
             throw failure;
+        }
+    }
+
+    private void abandonStartedExecution(
+            ExecuteAgentRunRequest request,
+            long roomFencingToken,
+            GraphRegistryBindingPolicy.ExpectedBinding registryBinding,
+            AgentRunCancellationToken cancellationToken) {
+        PublishedAdmissionReceipt published = staging
+                .findCurrentAdmissionReceipt(new AdmissionReceiptLookup(
+                        request.agentRunId(),
+                        request.attemptId(),
+                        request.command().commandId(),
+                        request.command().requestHash()))
+                .orElseThrow(() -> new LocalReconciliationException(
+                        "INTAKE_PARALLEL_ABANDONMENT_ADMISSION_MISSING",
+                        "ambiguous STARTED Frame lacks its published admission receipt",
+                        null));
+        TargetE2ESealedGraphCommand sealed = envelopeCodec.sealParallelCommand(
+                activationId,
+                roomFencingToken,
+                request.command(),
+                registryBinding,
+                signer,
+                TargetE2EGraphEnvelopeSigner.ParallelDeliveryBinding.abandon(
+                        published.receiptSha256()));
+        AbandonmentSession session = new AbandonmentSession(
+                request,
+                sealed.envelope(),
+                published,
+                cancellationToken);
+        GraphCommandHttpTransport.Request transportRequest =
+                new GraphCommandHttpTransport.Request(
+                        endpoint,
+                        requestHeaders(
+                                sealed,
+                                "ABANDON",
+                                published.encodedReceipt()),
+                        sealed.body(),
+                        timeout,
+                        GraphCommandHttpTransport.MAXIMUM_LINE_BYTES,
+                        GraphCommandHttpTransport.MAXIMUM_RESPONSE_BYTES);
+        try {
+            transport.stream(transportRequest, cancellationToken, session);
+            cancellationToken.throwIfCancellationRequested();
+            staging.applyAbandonment(session.finish());
+        } catch (StagingConflictException failure) {
+            throw new LocalReconciliationException(
+                    failure.code(),
+                    "parallel STARTED abandonment requires local reconciliation",
+                    failure);
+        } catch (GraphCommandTransportException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            if (failure.protocolViolation()) {
+                throw TargetE2EGraphClientException.protocol(
+                        "parallel target Graph abandonment violated the protocol",
+                        failure);
+            }
+            throw TargetE2EGraphClientException.transport(
+                    "parallel target Graph abandonment transport failed",
+                    failure);
+        } catch (IllegalArgumentException failure) {
+            throw TargetE2EGraphClientException.protocol(
+                    "parallel target Graph abandonment is invalid",
+                    failure);
         }
     }
 
@@ -547,6 +656,197 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
         }
     }
 
+    private final class AbandonmentSession implements GraphCommandHttpTransport.Listener {
+
+        private final ExecuteAgentRunRequest request;
+        private final TargetE2EGraphCommandEnvelope envelope;
+        private final PublishedAdmissionReceipt published;
+        private final AgentRunCancellationToken cancellationToken;
+        private boolean responseReceived;
+        private int statusCode;
+        private String responseLine;
+        private String receiptHeader;
+
+        private AbandonmentSession(
+                ExecuteAgentRunRequest request,
+                TargetE2EGraphCommandEnvelope envelope,
+                PublishedAdmissionReceipt published,
+                AgentRunCancellationToken cancellationToken) {
+            this.request = request;
+            this.envelope = envelope;
+            this.published = published;
+            this.cancellationToken = cancellationToken;
+        }
+
+        @Override
+        public void onResponse(GraphCommandHttpTransport.ResponseHead response) {
+            cancellationToken.throwIfCancellationRequested();
+            if (responseReceived) {
+                throw protocol("parallel abandonment returned duplicate metadata", null);
+            }
+            responseReceived = true;
+            statusCode = response.statusCode();
+            if (statusCode >= 300 && statusCode <= 399) {
+                throw protocol("parallel abandonment redirect is forbidden", null);
+            }
+            if (statusCode != 200) {
+                requireRemoteErrorMetadata(
+                        response,
+                        "parallel abandonment error metadata is invalid");
+                return;
+            }
+            if (!sharedResponseMetadataIsValid(response, false)
+                    || !endpoint.equals(response.uri())
+                    || !"application/json".equalsIgnoreCase(
+                            mediaType(singleHeader(response.headers(), "Content-Type")))
+                    || !request.agentRunId().equals(
+                            singleHeader(response.headers(), "X-Agent-Run-Id"))
+                    || !"agent-stream.v4".equals(
+                            singleHeader(response.headers(), "X-Agent-Stream-Protocol"))
+                    || !envelope.executionLane().equals(
+                            singleHeader(response.headers(), "X-Graph-Execution-Lane"))
+                    || !activationId.equals(
+                            singleHeader(response.headers(), "X-Graph-Activation-Id"))
+                    || !published.frameSetId().equals(
+                            singleHeader(response.headers(), FRAME_SET_HEADER))) {
+                throw protocol("parallel abandonment metadata drifted", null);
+            }
+            receiptHeader = singleHeader(
+                    response.headers(), ABANDONMENT_RECEIPT_HEADER);
+            if (!receiptHeader.matches("[0-9a-f]{64}")) {
+                throw protocol("parallel abandonment receipt header is invalid", null);
+            }
+        }
+
+        @Override
+        public void onLine(String line) {
+            cancellationToken.throwIfCancellationRequested();
+            if (!responseReceived) {
+                throw protocol("parallel abandonment emitted data before metadata", null);
+            }
+            if (responseLine != null) {
+                throw protocol("parallel abandonment returned multiple bodies", null);
+            }
+            responseLine = Objects.requireNonNull(line, "line");
+        }
+
+        private AbandonmentApplication finish() {
+            if (!responseReceived) {
+                throw protocol("parallel abandonment response is absent", null);
+            }
+            if (statusCode != 200) {
+                throw parseRemoteFailure(
+                        responseLine,
+                        "Python rejected parallel Intake abandonment");
+            }
+            if (responseLine == null || receiptHeader == null) {
+                throw protocol("parallel abandonment receipt is absent", null);
+            }
+            try {
+                JsonNode decoded = mapper.readTree(responseLine);
+                if (!(decoded instanceof ObjectNode root)) {
+                    throw new IllegalArgumentException(
+                            "parallel abandonment receipt must be an object");
+                }
+                Set<String> fields = new HashSet<>();
+                root.fieldNames().forEachRemaining(fields::add);
+                if (!fields.equals(ABANDONMENT_FIELDS)) {
+                    throw new IllegalArgumentException(
+                            "parallel abandonment receipt fields drifted");
+                }
+                byte[] admissionBytes = Base64.getUrlDecoder()
+                        .decode(published.encodedReceipt());
+                JsonNode admissionDecoded = mapper.readTree(
+                        new String(admissionBytes, StandardCharsets.UTF_8));
+                if (!(admissionDecoded instanceof ObjectNode admission)
+                        || !Arrays.equals(
+                                admissionBytes,
+                                ContractJson.canonicalize(admission))
+                        || !admission.equals(root.required("admission_receipt"))) {
+                    throw new IllegalArgumentException(
+                            "parallel abandonment admission receipt drifted");
+                }
+                String schemaVersion = receiptText(root, "schema_version");
+                String abandonmentId = receiptText(root, "abandonment_id");
+                String executionId = receiptText(root, "execution_id");
+                String threadId = receiptText(root, "thread_id");
+                String commandId = receiptText(root, "command_id");
+                String requestHash = receiptText(root, "request_hash");
+                String attemptId = receiptText(root, "attempt_id");
+                String frameSetId = receiptText(root, "frame_set_id");
+                String receiptSha256 = receiptText(root, "receipt_sha256");
+                String authoritySha256 = receiptText(root, "authority_sha256");
+                long providerCallCountBefore = receiptLong(
+                        root, "provider_call_count_before");
+                long providerCallCountAfter = receiptLong(
+                        root, "provider_call_count_after");
+                String ownerId = receiptText(root, "owner_id");
+                long fencingToken = receiptLong(root, "fencing_token");
+                Instant abandonedAt = Instant.parse(
+                        receiptText(root, "abandoned_at"));
+                String abandonmentSha256 = receiptText(
+                        root, "abandonment_sha256");
+                if (!"intake.parallel-receipt-abandonment.v1".equals(schemaVersion)
+                        || !request.command().threadId().equals(threadId)
+                        || !request.command().commandId().equals(commandId)
+                        || !request.command().requestHash().equals(requestHash)
+                        || !request.attemptId().equals(attemptId)
+                        || !published.frameSetId().equals(frameSetId)
+                        || !published.receiptSha256().equals(receiptSha256)
+                        || !receiptSha256.equals(
+                                receiptText(admission, "receipt_sha256"))
+                        || !authoritySha256.equals(
+                                receiptText(admission, "authority_sha256"))
+                        || !request.agentRunId().equals(
+                                receiptText(admission, "run_id"))
+                        || providerCallCountBefore < 0
+                        || providerCallCountAfter <= providerCallCountBefore
+                        || providerCallCountAfter > Integer.MAX_VALUE
+                        || fencingToken < 1
+                        || !receiptHeader.equals(abandonmentSha256)
+                        || !abandonmentId.equals(
+                                "parallel-receipt-abandonment."
+                                        + receiptSha256.substring(0, 24)
+                                        + "." + fencingToken)
+                        || !executionId.equals(
+                                "parallel-receipt-execution."
+                                        + receiptSha256.substring(0, 24)
+                                        + "." + fencingToken)) {
+                    throw new IllegalArgumentException(
+                            "parallel abandonment receipt authority drifted");
+                }
+                ObjectNode unsigned = root.deepCopy();
+                unsigned.remove("abandonment_sha256");
+                if (!abandonmentSha256.equals(ContractJson.sha256Hex(unsigned))) {
+                    throw new IllegalArgumentException(
+                            "parallel abandonment receipt self-hash drifted");
+                }
+                byte[] canonicalBytes = ContractJson.canonicalize(root);
+                return new AbandonmentApplication(
+                        frameSetId,
+                        request.agentRunId(),
+                        attemptId,
+                        commandId,
+                        requestHash,
+                        threadId,
+                        receiptSha256,
+                        authoritySha256,
+                        abandonmentId,
+                        executionId,
+                        providerCallCountBefore,
+                        providerCallCountAfter,
+                        ownerId,
+                        fencingToken,
+                        abandonedAt,
+                        canonicalBytes,
+                        abandonmentSha256);
+            } catch (RuntimeException
+                    | com.fasterxml.jackson.core.JsonProcessingException failure) {
+                throw protocol("parallel abandonment receipt is invalid", failure);
+            }
+        }
+    }
+
     private final class FailureTerminationSession implements GraphCommandHttpTransport.Listener {
 
         private final ExecuteAgentRunRequest request;
@@ -735,9 +1035,18 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
         JsonNode value = receipt.required(field);
         if (!value.isTextual() || value.asText().isBlank()) {
             throw new IllegalArgumentException(
-                    "parallel failure termination receipt field is invalid: " + field);
+                    "parallel receipt field is invalid: " + field);
         }
         return value.asText();
+    }
+
+    private static long receiptLong(ObjectNode receipt, String field) {
+        JsonNode value = receipt.required(field);
+        if (!value.isIntegralNumber() || !value.canConvertToLong()) {
+            throw new IllegalArgumentException(
+                    "parallel receipt field is not an integer: " + field);
+        }
+        return value.longValue();
     }
 
     private record PreparedAdmission(

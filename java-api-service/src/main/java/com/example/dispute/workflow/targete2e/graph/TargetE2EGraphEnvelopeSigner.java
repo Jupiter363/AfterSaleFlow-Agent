@@ -24,7 +24,8 @@ public interface TargetE2EGraphEnvelopeSigner {
   record ParallelDeliveryBinding(
       String phase, String admissionReceiptSha256, String failureCode) {
 
-    private static final Set<String> PHASES = Set.of("PREPARE", "EXECUTE", "TERMINATE");
+    private static final Set<String> PHASES =
+        Set.of("PREPARE", "EXECUTE", "ABANDON", "TERMINATE");
 
     public ParallelDeliveryBinding(String phase, String admissionReceiptSha256) {
       this(phase, admissionReceiptSha256, null);
@@ -34,7 +35,7 @@ public interface TargetE2EGraphEnvelopeSigner {
       if (!PHASES.contains(phase)
           || ("PREPARE".equals(phase)
               && (admissionReceiptSha256 != null || failureCode != null))
-          || ("EXECUTE".equals(phase)
+          || (("EXECUTE".equals(phase) || "ABANDON".equals(phase))
               && (admissionReceiptSha256 == null
                   || !admissionReceiptSha256.matches("[0-9a-f]{64}")
                   || failureCode != null))
@@ -53,6 +54,10 @@ public interface TargetE2EGraphEnvelopeSigner {
 
     public static ParallelDeliveryBinding execute(String admissionReceiptSha256) {
       return new ParallelDeliveryBinding("EXECUTE", admissionReceiptSha256, null);
+    }
+
+    public static ParallelDeliveryBinding abandon(String admissionReceiptSha256) {
+      return new ParallelDeliveryBinding("ABANDON", admissionReceiptSha256, null);
     }
 
     public static ParallelDeliveryBinding terminate(

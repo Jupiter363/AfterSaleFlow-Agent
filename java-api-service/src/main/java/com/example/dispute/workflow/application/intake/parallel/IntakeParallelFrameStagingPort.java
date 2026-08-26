@@ -40,6 +40,8 @@ public interface IntakeParallelFrameStagingPort {
     Optional<PublishedAdmissionReceipt> findCurrentAdmissionReceipt(
             AdmissionReceiptLookup lookup);
 
+    AbandonmentReceipt applyAbandonment(AbandonmentApplication application);
+
     Optional<AssemblyView> findAssembly(String frameSetId);
 
     Optional<ExactThreeCompletion> findExactThreeCompletion(
@@ -320,6 +322,83 @@ public interface IntakeParallelFrameStagingPort {
             positive(receiptGeneration, "receiptGeneration");
             encodedReceipt = bounded(encodedReceipt, "encodedReceipt", 16 * 1024);
             receiptSha256 = sha256(receiptSha256, "receiptSha256");
+        }
+    }
+
+    record AbandonmentApplication(
+            String frameSetId,
+            String runId,
+            String attemptId,
+            String commandId,
+            String commandRequestSha256,
+            String threadId,
+            String admissionReceiptSha256,
+            String authoritySha256,
+            String abandonmentId,
+            String executionId,
+            long providerCallCountBefore,
+            long providerCallCountAfter,
+            String graphOwnerId,
+            long graphFencingToken,
+            Instant abandonedAt,
+            byte[] canonicalGraphReceipt,
+            String abandonmentSha256) {
+
+        public AbandonmentApplication {
+            frameSetId = identifier(frameSetId, "frameSetId");
+            runId = identifier(runId, "runId");
+            attemptId = identifier(attemptId, "attemptId");
+            commandId = identifier(commandId, "commandId");
+            commandRequestSha256 = sha256(
+                    commandRequestSha256, "commandRequestSha256");
+            threadId = bounded(threadId, "threadId", 64);
+            admissionReceiptSha256 = sha256(
+                    admissionReceiptSha256, "admissionReceiptSha256");
+            authoritySha256 = sha256(authoritySha256, "authoritySha256");
+            abandonmentId = identifier(abandonmentId, "abandonmentId");
+            executionId = identifier(executionId, "executionId");
+            nonNegative(providerCallCountBefore, "providerCallCountBefore");
+            positive(providerCallCountAfter, "providerCallCountAfter");
+            graphOwnerId = identifier(graphOwnerId, "graphOwnerId");
+            positive(graphFencingToken, "graphFencingToken");
+            abandonedAt = Objects.requireNonNull(abandonedAt, "abandonedAt");
+            canonicalGraphReceipt = Objects.requireNonNull(
+                    canonicalGraphReceipt, "canonicalGraphReceipt").clone();
+            if (canonicalGraphReceipt.length < 2 || canonicalGraphReceipt.length > 65536) {
+                throw new IllegalArgumentException(
+                        "canonicalGraphReceipt must contain 2..65536 bytes");
+            }
+            abandonmentSha256 = sha256(abandonmentSha256, "abandonmentSha256");
+            if (providerCallCountAfter <= providerCallCountBefore) {
+                throw new IllegalArgumentException(
+                        "abandonment must prove an advanced Provider intent count");
+            }
+        }
+
+        @Override
+        public byte[] canonicalGraphReceipt() {
+            return canonicalGraphReceipt.clone();
+        }
+    }
+
+    record AbandonmentReceipt(
+            String frameSetId,
+            String abandonmentId,
+            String abandonmentSha256,
+            Set<FrameType> ambiguousFrameTypes,
+            boolean inserted) {
+
+        public AbandonmentReceipt {
+            frameSetId = identifier(frameSetId, "frameSetId");
+            abandonmentId = identifier(abandonmentId, "abandonmentId");
+            abandonmentSha256 = sha256(abandonmentSha256, "abandonmentSha256");
+            ambiguousFrameTypes = Set.copyOf(Objects.requireNonNull(
+                    ambiguousFrameTypes, "ambiguousFrameTypes"));
+            if (ambiguousFrameTypes.isEmpty()
+                    || !Set.of(FrameType.values()).containsAll(ambiguousFrameTypes)) {
+                throw new IllegalArgumentException(
+                        "abandonment must bind at least one known ambiguous Frame");
+            }
         }
     }
 
