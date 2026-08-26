@@ -23,7 +23,7 @@ from app.harness.prompt_composer import (
         ),
         (
             "intake_turn_dossier_frame",
-            "你只负责 DOSSIER_FRAME 的本轮卷宗增量",
+            "你只负责 DOSSIER_FRAME 的本轮卷宗事实增量",
             ("DIALOGUE_FRAME 的公开回复投影", "QUALITY_FRAME 的六项质量评估"),
         ),
         (
@@ -45,8 +45,9 @@ def test_parallel_intake_frame_prompts_share_authority_but_isolate_frame_rules(
         prompt_profile_id=node_name,
     )
 
-    shared_rule = "common_model_context 是本次指令唯一、不可变的业务事实视图"
+    shared_rule = "lane_model_context 是当前独立任务唯一、不可变的最小业务事实视图"
     assert shared_rule in system_prompt
+    assert "common_model_context" not in system_prompt
     assert own_rule in system_prompt
     assert system_prompt.index(shared_rule) < system_prompt.index(own_rule)
     assert all(foreign_rule not in system_prompt for foreign_rule in foreign_rules)

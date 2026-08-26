@@ -2,9 +2,9 @@
 
 输入边界：
 
-- 只使用当前参与方的 `source_capacity`、上一版卷宗、`frozen_case_matrix`、合法 fact-key namespace 和 `current_user_message`。
+- 只使用 `lane_model_context` 中当前参与方的 `source_capacity`、`frozen_case_matrix`、合法 fact-key namespace 和 `current_user_message`。
 - 只提取当前消息实际表达的事实、本人观点或本人回应；不得替另一方生成直接立场。
-- 旧卷宗只帮助理解历史。本轮未更新的事实不要复制，不要重新归因到当前消息。
+- `frozen_case_matrix` 是既有事实的唯一历史视图。本轮未更新的事实不要复制，不要重新归因到当前消息。
 
 单一输出权威：
 

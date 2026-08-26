@@ -10,6 +10,7 @@ from app.graphs.intake.parallel_contracts import (
     IntakeAuthorityRefV1,
     IntakeCaseRefV1,
     IntakeFrameInstructionPackV1,
+    IntakeFrameModelInputV2,
     IntakeModelContextViewV1,
     IntakeSourceEventRefV1,
     IntakeTurnRouteV1,
@@ -178,6 +179,18 @@ def _instruction_packs() -> tuple[IntakeFrameInstructionPackV1, ...]:
     )
 
 
+def _nested_keys(value: object) -> tuple[str, ...]:
+    if isinstance(value, dict):
+        return tuple(
+            key
+            for name, child in value.items()
+            for key in (str(name), *_nested_keys(child))
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(key for child in value for key in _nested_keys(child))
+    return ()
+
+
 def test_exact_three_inputs_share_one_immutable_business_context() -> None:
     context = _common_context()
 
@@ -186,13 +199,103 @@ def test_exact_three_inputs_share_one_immutable_business_context() -> None:
         common_model_context=context,
         instruction_packs=_instruction_packs(),
     )
+    replay = build_frame_model_inputs(
+        context_envelope=_context_envelope(context),
+        common_model_context=context,
+        instruction_packs=_instruction_packs(),
+    )
 
+    assert inputs == replay
     assert tuple(item.frame_type for item in inputs) == FRAME_TYPES
     assert {
         item.common_model_context.model_context_view_sha256 for item in inputs
     } == {context.model_context_view_sha256}
+    assert all(
+        item.model_dump(mode="json")["common_model_context"]
+        == context.model_dump(mode="json")
+        for item in inputs
+    )
+    assert len({item.lane_model_context.contract_version for item in inputs}) == 3
+    assert len({item.lane_model_context.lane_context_sha256 for item in inputs}) == 3
     assert len({item.instruction_pack.instruction_pack_sha256 for item in inputs}) == 3
     assert len({item.frame_model_input_sha256 for item in inputs}) == 3
+
+
+def test_provider_payloads_expose_only_each_lane_minimum_context() -> None:
+    context = _common_context()
+    inputs = {
+        item.frame_type: item
+        for item in build_frame_model_inputs(
+            context_envelope=_context_envelope(context),
+            common_model_context=context,
+            instruction_packs=_instruction_packs(),
+        )
+    }
+    payloads = {frame_type: item.provider_payload() for frame_type, item in inputs.items()}
+
+    for frame_type, payload in payloads.items():
+        assert payload == inputs[frame_type].provider_payload()
+        assert set(payload) == {"contract_version", "frame_type", "lane_model_context"}
+        assert payload["frame_type"] == frame_type
+        assert "common_model_context" not in payload
+        assert "instruction_pack" not in payload
+        assert not any(key.endswith("_sha256") for key in _nested_keys(payload))
+
+    dialogue = payloads["DIALOGUE_FRAME"]["lane_model_context"]
+    assert not {
+        "frozen_case_matrix",
+        "fact_key_authority",
+        "previous_quality",
+    } & set(dialogue)
+
+    dossier = payloads["DOSSIER_FRAME"]["lane_model_context"]
+    assert not {
+        "current_action_binding",
+        "authorized_question_slots",
+        "recent_dialogue_messages",
+        "previous_quality",
+    } & set(dossier)
+
+    quality = payloads["QUALITY_FRAME"]["lane_model_context"]
+    assert not {
+        "current_action_binding",
+        "authorized_question_slots",
+        "recent_dialogue_messages",
+    } & set(quality)
+
+
+def test_frame_model_input_rejects_rehashed_lane_drift_from_common_authority() -> None:
+    context = _common_context()
+    dialogue = build_frame_model_inputs(
+        context_envelope=_context_envelope(context),
+        common_model_context=context,
+        instruction_packs=_instruction_packs(),
+    )[0]
+    payload = dialogue.model_dump(mode="json")
+    payload.pop("frame_model_input_sha256")
+    lane_payload = payload["lane_model_context"]
+    lane_payload.pop("lane_context_sha256")
+    lane_payload["recent_dialogue_messages"] = []
+    payload["lane_model_context"] = type(dialogue.lane_model_context).seal(
+        lane_payload
+    ).model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="lane model context differs"):
+        IntakeFrameModelInputV2.seal(payload)
+
+
+def test_frame_model_input_rejects_lane_hash_drift_on_replay() -> None:
+    context = _common_context()
+    dialogue = build_frame_model_inputs(
+        context_envelope=_context_envelope(context),
+        common_model_context=context,
+        instruction_packs=_instruction_packs(),
+    )[0]
+    payload = dialogue.model_dump(mode="json")
+    payload["lane_model_context"]["lane_context_sha256"] = "f" * 64
+
+    with pytest.raises(ValueError, match="lane_context_sha256"):
+        IntakeFrameModelInputV2.model_validate(payload)
 
 
 def test_instruction_packs_have_disjoint_frame_owned_outputs() -> None:

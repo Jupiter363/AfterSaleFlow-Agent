@@ -321,6 +321,18 @@ class _CrossItemRepairRunner:
         )
 
 
+def _nested_keys(value: object) -> tuple[str, ...]:
+    if isinstance(value, dict):
+        return tuple(
+            key
+            for name, child in value.items()
+            for key in (str(name), *_nested_keys(child))
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(key for child in value for key in _nested_keys(child))
+    return ()
+
+
 @pytest.mark.asyncio
 async def test_three_physical_graphs_stream_independently_before_fan_in() -> None:
     saver = InMemorySaver()
@@ -360,6 +372,17 @@ async def test_three_physical_graphs_stream_independently_before_fan_in() -> Non
         "intake_turn_dossier_frame",
         "intake_turn_quality_frame",
     }
+    requests_by_type = {request.frame_type: request for request in requests}
+    for call in runner.calls:
+        frame_type = call["case_data"]["frame_type"]
+        context_sections = call["context_sections"]
+        assert len(context_sections) == 1
+        provider_payload = json.loads(context_sections[0].content)
+        assert provider_payload == requests_by_type[frame_type].model_input.provider_payload()
+        assert "common_model_context" not in provider_payload
+        assert not any(
+            key.endswith("_sha256") for key in _nested_keys(provider_payload)
+        )
     assert len({item.child_checkpoint_ref for item in result.completed.values()}) == 3
     assert all("checkpoint_id" not in request.model_input.model_dump_json()
                for request in requests)
@@ -523,6 +546,17 @@ def test_frozen_parallel_ingress_projects_one_shared_model_context_for_three_fra
         item.common_model_context.model_context_view_sha256
         for item in material.frame_inputs
     } == {material.model_context.model_context_view_sha256}
+    assert len(
+        {item.lane_model_context.contract_version for item in material.frame_inputs}
+    ) == 3
+    assert len(
+        {item.lane_model_context.lane_context_sha256 for item in material.frame_inputs}
+    ) == 3
+    assert all(
+        item.model_dump(mode="json")["common_model_context"]
+        == material.model_context.model_dump(mode="json")
+        for item in material.frame_inputs
+    )
     assert material.model_context.source_capacity.litigation_capacity == "INITIATOR"
     assert material.model_context.current_action_binding.action == "ASK_SUBSTANTIVE"
     assert material.model_context.current_user_message.text == "商品于昨日签收。"

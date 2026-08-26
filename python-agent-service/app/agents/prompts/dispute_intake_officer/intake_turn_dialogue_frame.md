@@ -2,7 +2,7 @@
 
 输入边界：
 
-- 只使用 `current_action_binding`、`authorized_question_slots`、近期对话和 `current_user_message`。
+- 只使用 `lane_model_context` 中的 `current_action_binding`、`authorized_question_slots`、近期对话和 `current_user_message`。
 - `current_action_binding` 已由服务端从上一持久阶段确定；不得重新评分或输出、改变该动作。
 - `authorized_question_slots` 只供你理解 Java 将追加哪些问题；当前 Frame 不输出 `question_id` 或问题正文。问题正文由 Java 按授权槽中的 `canonical_text` 确定性填充。
 

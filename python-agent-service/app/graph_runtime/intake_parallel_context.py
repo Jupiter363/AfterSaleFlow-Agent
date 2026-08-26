@@ -17,7 +17,7 @@ from app.graphs.intake.parallel_contracts import (
     IntakeAuthorityRefV1,
     IntakeCaseRefV1,
     IntakeFrameInstructionPackV1,
-    IntakeFrameModelInputV1,
+    IntakeFrameModelInputV2,
     IntakeModelContextViewV1,
     IntakeParallelContextEnvelopeV1,
     IntakeSourceEventRefV1,
@@ -102,9 +102,9 @@ class ParallelTurnModelMaterial:
     context_envelope: IntakeParallelContextEnvelopeV1
     model_context: IntakeModelContextViewV1
     frame_inputs: tuple[
-        IntakeFrameModelInputV1,
-        IntakeFrameModelInputV1,
-        IntakeFrameModelInputV1,
+        IntakeFrameModelInputV2,
+        IntakeFrameModelInputV2,
+        IntakeFrameModelInputV2,
     ]
 
 

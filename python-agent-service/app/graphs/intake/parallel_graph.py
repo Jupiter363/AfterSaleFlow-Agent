@@ -23,7 +23,7 @@ from app.graphs.intake.parallel_contracts import (
     FRAME_PROMPT_PROFILE,
     FRAME_TYPES,
     Identifier,
-    IntakeFrameModelInputV1,
+    IntakeFrameModelInputV2,
     IntakeModelContextViewV1,
     ParallelFrameType,
     PartyRole,
@@ -116,7 +116,7 @@ class ParallelFrameExecutionRequest(StrictParallelRuntimeModel):
     frame_type: ParallelFrameType
     generation: int = Field(ge=1)
     frame_id: Identifier
-    model_input: IntakeFrameModelInputV1
+    model_input: IntakeFrameModelInputV2
     resume_generation: int | None = Field(default=None, ge=1)
     resume_frame_id: Identifier | None = None
     resume_local_index: int = Field(default=0, ge=0)
@@ -776,7 +776,7 @@ async def _invoke_frame_model(
                 PromptSection(
                     name=_MODEL_CONTEXT_SECTION_NAME,
                     content=json.dumps(
-                        request.model_input.model_dump(mode="json"),
+                        request.model_input.provider_payload(),
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),
@@ -1609,7 +1609,7 @@ def _require_checkpoint_authority(
         raise IntakeGraphContractError("INTAKE_PARALLEL_FRAME_CHECKPOINT_INCOMPLETE")
     raw_model_input = state.get("model_input")
     try:
-        persisted_model_input = IntakeFrameModelInputV1.model_validate(raw_model_input)
+        persisted_model_input = IntakeFrameModelInputV2.model_validate(raw_model_input)
     except Exception as error:
         raise IntakeGraphContractError(
             "INTAKE_PARALLEL_FRAME_CHECKPOINT_MODEL_INPUT_INVALID"

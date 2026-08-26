@@ -426,6 +426,178 @@ class IntakeModelContextViewV1(_SelfHashedParallelModel):
         return self
 
 
+class IntakeDialogueLaneContextV1(_SelfHashedParallelModel):
+    """Minimum Provider-visible authority for the independent Dialogue task."""
+
+    _hash_field = "lane_context_sha256"
+
+    contract_version: Literal["intake.dialogue-lane-context.v1"]
+    source_capacity: IntakeSourceCapacityV1
+    persisted_phase: PersistedIntakePhase
+    current_action_binding: IntakeActionBindingV1
+    authorized_question_slots: tuple[IntakeAuthorizedQuestionSlotV1, ...] = Field(
+        max_length=8
+    )
+    recent_dialogue_messages: tuple[IntakeDialogueMessageViewV1, ...] = Field(
+        max_length=6
+    )
+    current_user_message: IntakeCurrentMessageViewV1
+    lane_context_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_lane_authority(self) -> IntakeDialogueLaneContextV1:
+        _reject_provider_forbidden_keys(self.model_dump(mode="json"))
+        if (
+            self.source_capacity.business_role
+            != self.current_user_message.source_role
+            or self.source_capacity.litigation_capacity
+            != self.current_user_message.source_capacity
+        ):
+            raise ValueError("Dialogue lane current message source drifted")
+        if self.current_action_binding.derived_from_phase != self.persisted_phase:
+            raise ValueError("Dialogue lane action phase drifted")
+        if any(
+            slot.target_capacity != self.source_capacity.litigation_capacity
+            for slot in self.authorized_question_slots
+        ):
+            raise ValueError("Dialogue lane question targets a foreign capacity")
+        return self
+
+
+class IntakeDossierLaneContextV1(_SelfHashedParallelModel):
+    """Minimum Provider-visible authority for the independent Dossier task."""
+
+    _hash_field = "lane_context_sha256"
+
+    contract_version: Literal["intake.dossier-lane-context.v1"]
+    source_capacity: IntakeSourceCapacityV1
+    frozen_case_matrix: IntakeFrozenMatrixViewV1
+    fact_key_authority: IntakeFactKeyAuthorityV1
+    current_user_message: IntakeCurrentMessageViewV1
+    lane_context_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_lane_authority(self) -> IntakeDossierLaneContextV1:
+        _reject_provider_forbidden_keys(self.model_dump(mode="json"))
+        _require_lane_source_binding(self.source_capacity, self.current_user_message)
+        _require_lane_matrix_binding(
+            self.frozen_case_matrix,
+            self.fact_key_authority,
+        )
+        return self
+
+
+class IntakeQualityLaneContextV1(_SelfHashedParallelModel):
+    """Minimum Provider-visible authority for the independent Quality task."""
+
+    _hash_field = "lane_context_sha256"
+
+    contract_version: Literal["intake.quality-lane-context.v1"]
+    source_capacity: IntakeSourceCapacityV1
+    previous_revision: int = Field(ge=0)
+    persisted_phase: PersistedIntakePhase
+    previous_quality: dict[str, Any]
+    frozen_case_matrix: IntakeFrozenMatrixViewV1
+    fact_key_authority: IntakeFactKeyAuthorityV1
+    current_user_message: IntakeCurrentMessageViewV1
+    lane_context_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_lane_authority(self) -> IntakeQualityLaneContextV1:
+        _reject_provider_forbidden_keys(self.model_dump(mode="json"))
+        _require_lane_source_binding(self.source_capacity, self.current_user_message)
+        _require_lane_matrix_binding(
+            self.frozen_case_matrix,
+            self.fact_key_authority,
+        )
+        return self
+
+
+IntakeLaneModelContextV1 = (
+    IntakeDialogueLaneContextV1
+    | IntakeDossierLaneContextV1
+    | IntakeQualityLaneContextV1
+)
+
+
+def _require_lane_source_binding(
+    source_capacity: IntakeSourceCapacityV1,
+    current_message: IntakeCurrentMessageViewV1,
+) -> None:
+    if (
+        source_capacity.business_role != current_message.source_role
+        or source_capacity.litigation_capacity != current_message.source_capacity
+    ):
+        raise ValueError("lane current message source drifted")
+
+
+def _require_lane_matrix_binding(
+    frozen_matrix: IntakeFrozenMatrixViewV1,
+    fact_key_authority: IntakeFactKeyAuthorityV1,
+) -> None:
+    rows = frozen_matrix.payload.get("fact_rows")
+    if not isinstance(rows, list):
+        raise ValueError("lane frozen matrix fact rows are absent")
+    fact_keys = tuple(
+        row.get("fact_id") if isinstance(row, Mapping) else None for row in rows
+    )
+    if fact_keys != fact_key_authority.existing_fact_keys:
+        raise ValueError("lane fact-key authority differs from the frozen matrix")
+
+
+def build_lane_model_context(
+    frame_type: ParallelFrameType,
+    common: IntakeModelContextViewV1,
+) -> IntakeLaneModelContextV1:
+    """Project one immutable full authority into a Frame-specific Provider view."""
+
+    shared = {
+        "source_capacity": common.source_capacity.model_dump(mode="json"),
+        "current_user_message": common.current_user_message.model_dump(mode="json"),
+    }
+    if frame_type == "DIALOGUE_FRAME":
+        return IntakeDialogueLaneContextV1.seal(
+            {
+                "contract_version": "intake.dialogue-lane-context.v1",
+                **shared,
+                "persisted_phase": common.previous_state.persisted_phase,
+                "current_action_binding": common.current_action_binding.model_dump(
+                    mode="json"
+                ),
+                "authorized_question_slots": [
+                    slot.model_dump(mode="json")
+                    for slot in common.authorized_question_slots
+                ],
+                "recent_dialogue_messages": [
+                    message.model_dump(mode="json")
+                    for message in common.recent_dialogue_messages
+                ],
+            }
+        )
+    if frame_type == "DOSSIER_FRAME":
+        return IntakeDossierLaneContextV1.seal(
+            {
+                "contract_version": "intake.dossier-lane-context.v1",
+                **shared,
+                "frozen_case_matrix": common.frozen_case_matrix.model_dump(mode="json"),
+                "fact_key_authority": common.fact_key_authority.model_dump(mode="json"),
+            }
+        )
+    if frame_type == "QUALITY_FRAME":
+        return IntakeQualityLaneContextV1.seal(
+            {
+                "contract_version": "intake.quality-lane-context.v1",
+                **shared,
+                "previous_revision": common.previous_state.revision,
+                "persisted_phase": common.previous_state.persisted_phase,
+                "previous_quality": deepcopy(common.previous_state.quality),
+                "frozen_case_matrix": common.frozen_case_matrix.model_dump(mode="json"),
+                "fact_key_authority": common.fact_key_authority.model_dump(mode="json"),
+            }
+        )
+    raise ValueError("unknown parallel Frame type")
+
+
 def build_parallel_context_envelope(
     *,
     case_ref: IntakeCaseRefV1,
@@ -487,20 +659,40 @@ class IntakeFrameInstructionPackV1(_SelfHashedParallelModel):
         return self
 
 
-class IntakeFrameModelInputV1(_SelfHashedParallelModel):
+class IntakeFrameModelInputV2(_SelfHashedParallelModel):
     _hash_field = "frame_model_input_sha256"
 
-    contract_version: Literal["intake.frame-model-input.v1"]
+    contract_version: Literal["intake.frame-model-input.v2"]
     frame_type: ParallelFrameType
     common_model_context: IntakeModelContextViewV1
+    lane_model_context: IntakeLaneModelContextV1
     instruction_pack: IntakeFrameInstructionPackV1
     frame_model_input_sha256: Sha256
 
     @model_validator(mode="after")
-    def validate_frame_binding(self) -> IntakeFrameModelInputV1:
+    def validate_frame_binding(self) -> IntakeFrameModelInputV2:
         if self.instruction_pack.frame_type != self.frame_type:
             raise ValueError("instruction pack belongs to a different frame")
+        expected_lane = build_lane_model_context(
+            self.frame_type,
+            self.common_model_context,
+        )
+        if self.lane_model_context.model_dump(
+            mode="json"
+        ) != expected_lane.model_dump(mode="json"):
+            raise ValueError("lane model context differs from common authority")
         return self
+
+    def provider_payload(self) -> dict[str, Any]:
+        """Return only this task's bounded model view, never sibling authority."""
+
+        return {
+            "contract_version": "intake.frame-provider-input.v1",
+            "frame_type": self.frame_type,
+            "lane_model_context": _without_provider_hashes(
+                self.lane_model_context.model_dump(mode="json")
+            ),
+        }
 
 
 def build_instruction_pack(
@@ -530,17 +722,21 @@ def build_frame_model_inputs(
     context_envelope: IntakeParallelContextEnvelopeV1,
     common_model_context: IntakeModelContextViewV1,
     instruction_packs: Sequence[IntakeFrameInstructionPackV1],
-) -> tuple[IntakeFrameModelInputV1, IntakeFrameModelInputV1, IntakeFrameModelInputV1]:
+) -> tuple[IntakeFrameModelInputV2, IntakeFrameModelInputV2, IntakeFrameModelInputV2]:
     require_envelope_model_context_binding(context_envelope, common_model_context)
     by_type = {pack.frame_type: pack for pack in instruction_packs}
     if set(by_type) != set(FRAME_TYPES) or len(instruction_packs) != len(FRAME_TYPES):
         raise ValueError("exactly one instruction pack per frame type is required")
     inputs = tuple(
-        IntakeFrameModelInputV1.seal(
+        IntakeFrameModelInputV2.seal(
             {
-                "contract_version": "intake.frame-model-input.v1",
+                "contract_version": "intake.frame-model-input.v2",
                 "frame_type": frame_type,
                 "common_model_context": common_model_context.model_dump(mode="json"),
+                "lane_model_context": build_lane_model_context(
+                    frame_type,
+                    common_model_context,
+                ).model_dump(mode="json"),
                 "instruction_pack": by_type[frame_type].model_dump(mode="json"),
             }
         )
@@ -561,6 +757,20 @@ def _reject_provider_forbidden_keys(value: Any, *, path: str = "$") -> None:
     elif isinstance(value, (list, tuple)):
         for index, child in enumerate(value):
             _reject_provider_forbidden_keys(child, path=f"{path}[{index}]")
+
+
+def _without_provider_hashes(value: Any) -> Any:
+    """Remove replay-only digests from the bounded model-facing projection."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _without_provider_hashes(child)
+            for key, child in value.items()
+            if not str(key).endswith("_sha256")
+        }
+    if isinstance(value, (list, tuple)):
+        return [_without_provider_hashes(child) for child in value]
+    return value
 
 
 def _json_compatible(value: Any) -> Any:
