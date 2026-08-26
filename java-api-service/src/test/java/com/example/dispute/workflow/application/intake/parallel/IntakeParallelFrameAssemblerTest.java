@@ -252,7 +252,7 @@ class IntakeParallelFrameAssemblerTest {
                 .hasMessageContaining("exactly one reply segment");
 
         ObjectNode dossier = dossier();
-        for (int index = 2; index <= 7; index++) {
+        for (int index = 2; index <= 6; index++) {
             ObjectNode repeated = ((ObjectNode) dossier.at("/public_projection_items/0"))
                     .deepCopy();
             repeated.with("source_row")

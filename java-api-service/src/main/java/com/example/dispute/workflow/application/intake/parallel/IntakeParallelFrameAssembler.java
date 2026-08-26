@@ -49,7 +49,7 @@ public final class IntakeParallelFrameAssembler {
     private static final int QUALITY_THRESHOLD = 85;
     private static final int DIALOGUE_SEGMENT_LIMIT = 1;
     private static final int DIALOGUE_SEGMENT_MAX_LENGTH = 80;
-    private static final int DOSSIER_FACT_LIMIT = 6;
+    private static final int DOSSIER_FACT_LIMIT = 5;
     private static final int DOSSIER_TEXT_MAX_LENGTH = 100;
     private static final int DOSSIER_SHORT_TEXT_MAX_LENGTH = 60;
     private static final int DOSSIER_SUMMARY_MAX_LENGTH =

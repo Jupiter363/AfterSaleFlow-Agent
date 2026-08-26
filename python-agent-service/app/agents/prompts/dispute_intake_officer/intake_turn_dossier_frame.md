@@ -8,7 +8,7 @@
 
 单一输出权威：
 
-- 每一条本轮事实只在 `public_projection_items[*].source_row` 中生成一次；整个数组最多 6 项。每个 item 只能包含 `source_row`，不得输出 `matrix_patch`、`candidate_value`、slot、路径或协议常量。
+- 每一条本轮事实只在 `public_projection_items[*].source_row` 中生成一次；整个数组最多 5 项。优先合并同一主题的细节为一条可核验事实；生成第 5 项后必须立即闭合数组并输出 `dossier_delta`，绝对不要开始第 6 项。每个 item 只能包含 `source_row`，不得输出 `matrix_patch`、`candidate_value`、slot、路径或协议常量。
 - `source_row` 只包含 `fact_key`、`category`、`fact_target`、`materiality`、`stance`、`position_summary` 和可空的 `asserted_value`。`stance` 只能是 `CONFIRM`、`DENY`、`PARTIAL` 或 `UNKNOWN`；来源范围由 Java 根据 fact-key authority 确定，不得输出。
 - 已存在事实只能从 `fact_key_authority.existing_fact_keys` 逐字选择完整 `FACT_` key，并且必须保持冻结矩阵中该行的 `category`、`fact_target`、`materiality` 不变。不得创造或改写任何 `FACT_` key。
 - 新增事实的 key 必须以 `fact_key_authority.new_fact_key_prefix` 的完整值开头，再追加简短且本 Frame 内唯一的英文数字下划线后缀。不得使用其他 `NEW_` namespace。

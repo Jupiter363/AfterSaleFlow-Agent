@@ -139,7 +139,7 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
     assert "NOT_ADDRESSED" not in source_row["stance"]["enum"]
     respondent_claim = dossier_schema["$defs"]["DossierRespondentClaimV2"]
     assert "NOT_ADDRESSED" not in respondent_claim["properties"]["attitude"]["enum"]
-    assert dossier_schema["properties"]["public_projection_items"]["maxItems"] == 6
+    assert dossier_schema["properties"]["public_projection_items"]["maxItems"] == 5
     assert source_row["position_summary"]["maxLength"] == 100
     assert any(
         option.get("maxLength") == 60
@@ -186,6 +186,38 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
         respondent_capacity=True,
     )
     assert respondent_frame_type.model_validate(initiator_claim)
+
+
+def test_dossier_schema_accepts_five_facts_and_rejects_the_sixth() -> None:
+    dossier = _dossier_frame()
+    template = dossier["public_projection_items"][0]
+    for index in range(2, 6):
+        item = {
+            "source_row": {
+                **template["source_row"],
+                "fact_key": f"NEW_{'A' * 24}_FACT_{index}",
+                "position_summary": f"补充事实{index}。",
+            }
+        }
+        dossier["public_projection_items"].append(item)
+
+    assert len(
+        validate_parallel_frame_output(
+            "DOSSIER_FRAME", dossier
+        ).public_projection_items
+    ) == 5
+
+    dossier["public_projection_items"].append(
+        {
+            "source_row": {
+                **template["source_row"],
+                "fact_key": f"NEW_{'A' * 24}_FACT_6",
+                "position_summary": "第六项事实。",
+            }
+        }
+    )
+    with pytest.raises(ValidationError, match="too_long"):
+        validate_parallel_frame_output("DOSSIER_FRAME", dossier)
 
 
 def test_quality_public_gap_is_the_single_typed_gap_authority() -> None:

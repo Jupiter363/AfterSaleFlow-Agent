@@ -65,7 +65,7 @@ FRAME_NODE_NAMES: Mapping[ParallelFrameType, str] = {
 
 FRAME_PUBLIC_ITEM_LIMITS: Mapping[ParallelFrameType, int] = {
     "DIALOGUE_FRAME": 1,
-    "DOSSIER_FRAME": 6,
+    "DOSSIER_FRAME": 5,
     "QUALITY_FRAME": 12,
 }
 
