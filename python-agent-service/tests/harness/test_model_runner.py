@@ -22,6 +22,7 @@ from app.harness.model_runner import (
     HarnessStreamCompleted,
     HarnessStreamDelta,
     HarnessStreamReset,
+    _semantic_output_type,
 )
 from app.harness.prompt_composer import PromptRepository
 from app.llm import (
@@ -38,12 +39,39 @@ class RunnerOutput(BaseModel):
     answer: str
 
 
+class DocumentedRunnerOutput(BaseModel):
+    """Provider-visible output description that is part of its JSON Schema."""
+
+    answer: str
+
+
 class ArbitraryAgentContext(BaseModel):
     agent_session_id: str
     prompt_profile_id: str
     model_profile_id: str
     tool_capabilities: list[str]
     deadline_at: str
+
+
+def test_semantic_output_type_preserves_documented_provider_schema() -> None:
+    observed: list[str] = []
+
+    def require_valid_answer(value: DocumentedRunnerOutput) -> DocumentedRunnerOutput:
+        observed.append(value.answer)
+        if value.answer != "有效回复":
+            raise ValueError("answer is not valid")
+        return value
+
+    governed = _semantic_output_type(
+        DocumentedRunnerOutput,
+        require_valid_answer,
+    )
+
+    assert governed.model_json_schema() == DocumentedRunnerOutput.model_json_schema()
+    assert governed(answer="有效回复").answer == "有效回复"
+    with pytest.raises(ValueError, match="answer is not valid"):
+        governed(answer="无效回复")
+    assert observed == ["有效回复", "无效回复"]
 
 
 def _trusted_agent_context() -> AgentInvocationContext:

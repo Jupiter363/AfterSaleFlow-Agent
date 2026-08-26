@@ -836,6 +836,13 @@ def _semantic_output_type(
         output_type.__name__,
         __base__=output_type,
         __module__=output_type.__module__,
+        # ``create_model`` does not inherit a base model's docstring. Pydantic
+        # projects that docstring into the provider JSON Schema as
+        # ``description``; dropping it would make an otherwise validator-only
+        # wrapper appear to mutate the wire contract and reject the invocation
+        # before the Provider is called. Preserve the exact descriptive schema
+        # authority while adding only the local after-validator.
+        __doc__=output_type.__doc__,
         __validators__={"_governed_semantic_contract": require_semantic_contract},
     )
     if constrained.model_json_schema() != output_type.model_json_schema():
