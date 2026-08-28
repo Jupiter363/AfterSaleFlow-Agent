@@ -113,8 +113,13 @@ public final class TargetE2eExecutionLaneVerifier {
         requireEqual(request.logicalRunId(), run.agentRunId(), "logical run id");
         requireEqual(request.attemptId(), attempt.attemptId(), "attempt id");
         requireEqual(request.attemptNo(), attempt.attemptNo(), "attempt number");
-        requireEqual(request.streamProtocol(), "agent-stream.v3", "request stream protocol");
-        requireEqual(run.protocol(), "agent-stream.v3", "persisted stream protocol");
+        String expectedAgentRunProtocol = expectedAgentRunProtocol(request);
+        requireEqual(
+                request.streamProtocol(),
+                expectedAgentRunProtocol,
+                "request stream protocol");
+        requireEqual(
+                run.protocol(), expectedAgentRunProtocol, "persisted stream protocol");
         requireEqual(run.roomType(), RoomType.INTAKE.name(), "run room type");
         requireEqual(run.executorKind(), AgentRunExecutorKind.TEMPORAL_ACTIVITY.name(), "run executor");
         requireEqual(
@@ -253,6 +258,13 @@ public final class TargetE2eExecutionLaneVerifier {
                 command.checkpointSchemaVersion(),
                 "thread checkpoint schema");
         return grant;
+    }
+
+    static String expectedAgentRunProtocol(ExecuteAgentRunRequest request) {
+        Objects.requireNonNull(request, "request");
+        return ExecuteAgentRunRequest.isParallelIntakeCommand(request.command())
+                ? "agent-stream.v4"
+                : "agent-stream.v3";
     }
 
     private static void requireLifecycle(

@@ -38,7 +38,12 @@ import com.example.dispute.workflow.targete2e.artifact.finalization.ReconciledTa
 import com.example.dispute.workflow.targete2e.artifact.finalization.TargetE2eIntakeDomainEventLiveRelay;
 import com.example.dispute.workflow.targete2e.artifact.finalization.TargetE2eMultiRoomFinalizationGateway;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eGraphOutputSnapshotMaterializer;
+import com.example.dispute.workflow.targete2e.finalization.IntakeParallelV4DurableFinalAuthorityResolver;
+import com.example.dispute.workflow.targete2e.finalization.JdbcTargetE2eV4FinalAuthoritySource;
+import com.example.dispute.workflow.targete2e.finalization.RoutingTargetE2eDurableFinalAuthorityResolver;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eDurableFinalAuthorityResolver;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eMultiRoomOuterFinalizer;
+import com.example.dispute.workflow.targete2e.finalization.V3TargetE2eDurableFinalAuthorityResolver;
 import com.example.dispute.workflow.targete2e.finalization.JdbcTargetE2eIntakeFinalizationStateReader;
 import com.example.dispute.workflow.targete2e.finalization.MinioTargetE2eIntakeProposalStore;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eAgentRunV2FinalizationFactsProvider;
@@ -604,10 +609,24 @@ public class TargetE2eArtifactConfiguration {
     @Bean
     TargetE2eGraphOutputSnapshotMaterializer targetE2eGraphOutputSnapshotMaterializer(
             DataSource dataSource,
-            AgentRunV2StreamStore streamStore,
+            TargetE2eDurableFinalAuthorityResolver durableFinalAuthority,
             PlatformTransactionManager transactionManager) {
         return new TargetE2eGraphOutputSnapshotMaterializer(
-                dataSource, streamStore, transactionManager);
+                dataSource, durableFinalAuthority, transactionManager);
+    }
+
+    @Bean
+    TargetE2eDurableFinalAuthorityResolver targetE2eDurableFinalAuthorityResolver(
+            DataSource dataSource,
+            AgentRunV2StreamStore streamStore,
+            IntakeParallelAssemblyStore assemblyStore,
+            ObjectMapper objectMapper) {
+        return new RoutingTargetE2eDurableFinalAuthorityResolver(
+                new V3TargetE2eDurableFinalAuthorityResolver(streamStore),
+                new IntakeParallelV4DurableFinalAuthorityResolver(
+                        new JdbcTargetE2eV4FinalAuthoritySource(dataSource, objectMapper),
+                        assemblyStore,
+                        objectMapper));
     }
 
     /*

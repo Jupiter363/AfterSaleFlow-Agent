@@ -3,10 +3,8 @@ package com.example.dispute.workflow.targete2e.finalization;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.workflow.application.intake.IntakeContractHashes;
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
-import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
-import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import java.net.URI;
@@ -112,15 +110,26 @@ public final class TargetE2eGraphOutputSnapshotMaterializer {
     private static final Set<String> ALLOWED_URI_SCHEMES = Set.of("s3", "minio", "urn");
 
     private final NamedParameterJdbcTemplate jdbc;
-    private final AgentRunV2StreamStore streamStore;
+    private final TargetE2eDurableFinalAuthorityResolver durableFinalAuthority;
     private final TransactionTemplate transactions;
 
     public TargetE2eGraphOutputSnapshotMaterializer(
             DataSource dataSource,
             AgentRunV2StreamStore streamStore,
             PlatformTransactionManager transactionManager) {
+        this(
+                dataSource,
+                new V3TargetE2eDurableFinalAuthorityResolver(streamStore),
+                transactionManager);
+    }
+
+    public TargetE2eGraphOutputSnapshotMaterializer(
+            DataSource dataSource,
+            TargetE2eDurableFinalAuthorityResolver durableFinalAuthority,
+            PlatformTransactionManager transactionManager) {
         this.jdbc = new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
-        this.streamStore = Objects.requireNonNull(streamStore, "streamStore");
+        this.durableFinalAuthority = Objects.requireNonNull(
+                durableFinalAuthority, "durableFinalAuthority");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(
                 transactionManager, "transactionManager"));
         this.transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
@@ -171,7 +180,11 @@ public final class TargetE2eGraphOutputSnapshotMaterializer {
             throw new IllegalArgumentException("target graph output snapshot input is invalid");
         }
         lockLogicalRun(request.agentRunId());
-        String resultRef = durableFinalResultRef(request, result);
+        String resultRef = durableFinalAuthority.requireResultRef(request, result);
+        if (!immutableUri(resultRef)) {
+            throw new IllegalStateException(
+                    "target AgentRun durable final has an invalid result reference");
+        }
         Map<String, ?> parameters = Map.of(
                 "id", snapshotId(request.agentRunId(), result.resultHash()),
                 "tenantSurrogate", request.command().tenantSurrogate(),
@@ -269,30 +282,6 @@ public final class TargetE2eGraphOutputSnapshotMaterializer {
         if (rows.size() != 1 || !agentRunId.equals(rows.getFirst())) {
             throw new IllegalStateException("target AgentRun is absent or ambiguous");
         }
-    }
-
-    private String durableFinalResultRef(ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
-        long previous = Math.subtractExact(result.lastSequenceNo(), 1L);
-        List<AgentStreamEvent> events = streamStore.replay(
-                request.agentRunId(), request.attemptId(), previous, 2);
-        if (events.size() != 1) {
-            throw new IllegalStateException("target AgentRun durable final is absent or ambiguous");
-        }
-        AgentStreamEvent terminal = events.getFirst();
-        if (terminal.eventType() != StreamEventType.FINAL
-                || terminal.sequenceNo() != result.lastSequenceNo()
-                || !request.agentRunId().equals(terminal.runId())
-                || !request.attemptId().equals(terminal.attemptId())
-                || request.command().actorScope().audience() != terminal.audience()
-                || terminal.payload() == null
-                || !result.resultHash().equals(terminal.payload().finalResultHash())) {
-            throw new IllegalStateException("target AgentRun durable final conflicts with completed result");
-        }
-        String resultRef = terminal.payload().finalResultRef();
-        if (!immutableUri(resultRef)) {
-            throw new IllegalStateException("target AgentRun durable final has an invalid result reference");
-        }
-        return resultRef;
     }
 
     private static boolean immutableUri(String value) {

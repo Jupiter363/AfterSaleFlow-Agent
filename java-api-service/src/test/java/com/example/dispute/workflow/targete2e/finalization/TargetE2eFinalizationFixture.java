@@ -183,7 +183,7 @@ final class TargetE2eFinalizationFixture {
                 RUN_ID,
                 attemptNo,
                 Math.max(1, attemptNo),
-                "agent-stream.v2",
+                "agent-stream.v3",
                 "e".repeat(64),
                 attemptNo == 1 ? null : ATTEMPT_ID,
                 false,
@@ -212,7 +212,7 @@ final class TargetE2eFinalizationFixture {
                 "EPOCH_TARGET_E2E",
                 "INTAKE",
                 "key:target-e2e",
-                "agent-stream.v2",
+                "agent-stream.v3",
                 "TEMPORAL_ACTIVITY",
                 "RESULT_READY",
                 "UNCOMMITTED",
@@ -268,7 +268,7 @@ final class TargetE2eFinalizationFixture {
                 command.graphKey(),
                 command.graphVersion(),
                 command.checkpointSchemaVersion(),
-                "agent-stream.v2");
+                "agent-stream.v3");
         var projection = new TargetE2eIntakeFinalizationState.Projection(
                 TENANT,
                 CASE_ID,
@@ -302,7 +302,7 @@ final class TargetE2eFinalizationFixture {
                 "TEMPORAL_RUN_TARGET_E2E",
                 BUILD_ID);
         ObjectNode proposalSource = MAPPER.createObjectNode();
-        proposalSource.put("schema_version", "target-e2e-room-proposal-source.v1");
+        proposalSource.put("schema_version", "target-e2e-room-proposal-source.v2");
         proposalSource.put("room_type", "INTAKE");
         ObjectNode normalizedProposal = proposalSource.putObject("proposal");
         normalizedProposal.put("schema_version", "target-e2e-intake-proposal.v1");
@@ -420,7 +420,7 @@ final class TargetE2eFinalizationFixture {
                 "intake-graph-state.v2",
                 "intake-prompt.v2",
                 "intake-model.target-e2e.v1",
-                "target-e2e-room-proposal-source.v1",
+                "target-e2e-room-proposal-source.v2",
                 "intake-policy.v2",
                 "intake-guardrail.v2",
                 "no-tools.v1",

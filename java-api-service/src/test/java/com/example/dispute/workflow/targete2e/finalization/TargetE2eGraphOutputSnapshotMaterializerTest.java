@@ -137,7 +137,7 @@ class TargetE2eGraphOutputSnapshotMaterializerTest {
     private TargetE2eGraphOutputSnapshotMaterializer materializer(
             String resultRef, String resultHash) {
         AgentStreamEvent terminal = new AgentStreamEvent(
-                "agent-stream.v2",
+                "agent-stream.v3",
                 fixture.request().agentRunId(),
                 fixture.request().attemptId(),
                 fixture.result().lastSequenceNo(),
