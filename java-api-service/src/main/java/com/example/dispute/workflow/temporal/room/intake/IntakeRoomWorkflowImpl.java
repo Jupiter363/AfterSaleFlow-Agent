@@ -2597,6 +2597,15 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         || (deferredCancellation != null && !handlerRevalidation)) {
       throw new IllegalStateException("target finalization recovery requires idle orchestration");
     }
+    long recoveryLastCaseEventSequence =
+        targetAgentRunPreCommandState.lastCaseEventSequence();
+    if (request.isPendingCommittedReceiptRecovery()) {
+      if (nextEventSequence <= 0) {
+        throw new IllegalStateException(
+            "pending committed receipt recovery requires a current case-event cursor");
+      }
+      recoveryLastCaseEventSequence = nextEventSequence - 1;
+    }
     request.requireMatches(
         Workflow.getInfo().getWorkflowId(),
         Workflow.getInfo().getRunId(),
@@ -2606,7 +2615,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         authoritativeCommittedTargetFinalization,
         processRevision,
         roomRevision,
-        targetAgentRunPreCommandState.lastCaseEventSequence());
+        recoveryLastCaseEventSequence);
   }
 
   private static void requireExpectedRecoveryFinalization(
