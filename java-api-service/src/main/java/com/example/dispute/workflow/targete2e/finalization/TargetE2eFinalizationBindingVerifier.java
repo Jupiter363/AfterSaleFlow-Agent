@@ -66,7 +66,7 @@ public final class TargetE2eFinalizationBindingVerifier {
         text(commandEnvelope, "execution_lane", LANE);
         long fence = positiveLong(commandEnvelope, "room_fencing_token");
         requireEqual(fence, state.run().fencingToken(), "command room fence");
-        String activationId = activationId(commandEnvelope);
+        String graphActivationId = activationId(commandEnvelope);
         requireEqual(
                 request.command().requestHash(),
                 IntakeContractHashes.graphCommandHash(request.command()),
@@ -127,7 +127,7 @@ public final class TargetE2eFinalizationBindingVerifier {
         exactFields(resultEnvelope, RESULT_ENVELOPE_FIELDS, "result envelope");
         text(resultEnvelope, "schema_version", "target-e2e-graph-result-envelope.v1");
         text(resultEnvelope, "execution_lane", LANE);
-        text(resultEnvelope, "activation_id", activationId);
+        text(resultEnvelope, "activation_id", graphActivationId);
         requireEqual(
                 positiveLong(resultEnvelope, "room_fencing_token"),
                 fence,
@@ -152,7 +152,17 @@ public final class TargetE2eFinalizationBindingVerifier {
         JsonNode dbBinding = evidence.isolatedDomainDbBinding();
         exactFields(dbBinding, DB_BINDING_FIELDS, "isolated Domain DB binding");
         text(dbBinding, "schema_version", "target-e2e-isolated-domain-db-binding.v1");
-        text(dbBinding, "activation_id", activationId);
+        // A READY result may cross deployments: Graph envelopes retain execution provenance,
+        // while this binding names the activation currently authorized to perform formal DML.
+        String finalizationActivationId = activationId(dbBinding);
+        boolean parallelV4 = "agent-stream.v4".equals(request.streamProtocol())
+                && ExecuteAgentRunRequest.isParallelIntakeCommand(request.command());
+        if (!parallelV4) {
+            requireEqual(
+                    finalizationActivationId,
+                    graphActivationId,
+                    "legacy finalization activation id");
+        }
         text(dbBinding, "binding_kind", "ISOLATED_DOMAIN_POSTGRESQL");
         positiveLong(dbBinding, "environment_generation");
         boundedIdentifier(dbBinding, "environment_id");
@@ -161,7 +171,8 @@ public final class TargetE2eFinalizationBindingVerifier {
         boundedIdentifier(dbBinding, "runtime_principal_identity");
         String dbBindingHash = selfHash(dbBinding, "binding_hash");
         return new VerifiedEvidence(
-                activationId,
+                graphActivationId,
+                finalizationActivationId,
                 evidence.activationManifestHash(),
                 commandHash,
                 commandEnvelopeHash,
@@ -174,7 +185,10 @@ public final class TargetE2eFinalizationBindingVerifier {
     }
 
     public void requireGrantBindings(ActivationGrant grant, VerifiedEvidence evidence) {
-        requireEqual(grant.activationId(), evidence.activationId(), "activation id");
+        requireEqual(
+                grant.activationId(),
+                evidence.finalizationActivationId(),
+                "finalization activation id");
         requireEqual(
                 grant.activationManifestHash(),
                 evidence.activationManifestHash(),
@@ -293,7 +307,8 @@ public final class TargetE2eFinalizationBindingVerifier {
     }
 
     public record VerifiedEvidence(
-            String activationId,
+            String graphActivationId,
+            String finalizationActivationId,
             String activationManifestHash,
             String commandHash,
             String commandEnvelopeHash,

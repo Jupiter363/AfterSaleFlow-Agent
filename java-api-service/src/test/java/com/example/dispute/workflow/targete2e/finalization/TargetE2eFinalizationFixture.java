@@ -55,7 +55,11 @@ final class TargetE2eFinalizationFixture {
     private TargetE2eFinalizationFixture() {}
 
     static Fixture valid() {
-        return validAttempt(1, ATTEMPT_ID, "COMMAND_TARGET_E2E", "nonce-target-e2e");
+        return validAttempt(1, ATTEMPT_ID, "COMMAND_TARGET_E2E", "nonce-target-e2e", false);
+    }
+
+    static Fixture validParallel() {
+        return validAttempt(1, ATTEMPT_ID, "COMMAND_TARGET_E2E", "nonce-target-e2e", true);
     }
 
     static Fixture validRetry() {
@@ -63,11 +67,16 @@ final class TargetE2eFinalizationFixture {
                 2,
                 RETRY_ATTEMPT_ID,
                 "COMMAND_TARGET_E2E_RETRY",
-                "nonce-target-e2e-retry");
+                "nonce-target-e2e-retry",
+                false);
     }
 
     private static Fixture validAttempt(
-            int attemptNo, String attemptId, String commandId, String commandNonce) {
+            int attemptNo,
+            String attemptId,
+            String commandId,
+            String commandNonce,
+            boolean parallel) {
         String threadId = "grt.v1." + "b".repeat(32);
         var actor = new IntakePrivateThreadRegistration.ActorScope(
                 "user-target-e2e",
@@ -127,10 +136,18 @@ final class TargetE2eFinalizationFixture {
                 event,
                 "COMMAND_TARGET_E2E",
                 ATTEMPT_ID,
-                "nonce-target-e2e");
+                "nonce-target-e2e",
+                parallel);
         RoomGraphCommand command = attemptNo == 1
                 ? originCommand
-                : command(binding, snapshot, event, commandId, attemptId, commandNonce);
+                : command(
+                        binding,
+                        snapshot,
+                        event,
+                        commandId,
+                        attemptId,
+                        commandNonce,
+                        parallel);
         ArtifactPointer proposal = new ArtifactPointer(
                 "intake.proposal." + HASH.substring(0, 32),
                 "intake-turn-proposal.v2",
@@ -183,7 +200,7 @@ final class TargetE2eFinalizationFixture {
                 RUN_ID,
                 attemptNo,
                 Math.max(1, attemptNo),
-                "agent-stream.v3",
+                parallel ? "agent-stream.v4" : "agent-stream.v3",
                 "e".repeat(64),
                 attemptNo == 1 ? null : ATTEMPT_ID,
                 false,
@@ -212,7 +229,7 @@ final class TargetE2eFinalizationFixture {
                 "EPOCH_TARGET_E2E",
                 "INTAKE",
                 "key:target-e2e",
-                "agent-stream.v3",
+                parallel ? "agent-stream.v4" : "agent-stream.v3",
                 "TEMPORAL_ACTIVITY",
                 "RESULT_READY",
                 "UNCOMMITTED",
@@ -460,20 +477,24 @@ final class TargetE2eFinalizationFixture {
             IntakeEventReference event,
             String commandId,
             String attemptId,
-            String commandNonce) {
+            String commandNonce,
+            boolean parallel) {
         return new IntakeGraphCommandFactory().create(
                 new IntakeGraphCommandFactory.CommandRequest(
                         commandId,
                         RUN_ID,
                         attemptId,
+                        parallel ? ROOM_ID : null,
                         binding,
                         snapshot,
                         event,
                         14,
                         "INTAKE_ACTIVE",
                         7,
-                        "intake-agent.v2",
-                        2,
+                        parallel
+                                ? RoomGraphCommand.PARALLEL_INTAKE_AGENT_PROFILE_ID
+                                : "intake-agent.v2",
+                        parallel ? RoomGraphCommand.PARALLEL_INTAKE_PROVIDER_ATTEMPT_LIMIT : 2,
                         3,
                         1,
                         NOW.plusSeconds(300),

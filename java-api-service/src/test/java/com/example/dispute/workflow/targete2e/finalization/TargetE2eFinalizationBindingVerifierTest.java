@@ -7,14 +7,115 @@ import com.example.dispute.workflow.application.intake.IntakeContractHashes;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactOperationType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactPointer;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.ActivationGrant;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationDecision;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class TargetE2eFinalizationBindingVerifierTest {
+
+    @Test
+    void acceptsHistoricalGraphActivationWhenCurrentGrantOwnsFormalWriteBinding() {
+        var fixture = TargetE2eFinalizationFixture.validParallel();
+        String currentActivationId = "p9act.v1." + "2".repeat(32);
+        String currentManifestHash = "8".repeat(64);
+        ObjectNode currentDbBinding = fixture.evidence().isolatedDomainDbBinding().deepCopy();
+        currentDbBinding.put("activation_id", currentActivationId);
+        putSelfHash(currentDbBinding, "binding_hash");
+        var currentEvidence = new TargetE2eFinalizationEvidence(
+                currentManifestHash,
+                fixture.evidence().commandEnvelope(),
+                fixture.evidence().resultEnvelope(),
+                fixture.evidence().proposalSource(),
+                currentDbBinding);
+        ActivationGrant historical =
+                TargetE2eFinalizationFixture.activeDecision(fixture).grant();
+        var currentGrant = new ActivationGrant(
+                currentActivationId,
+                historical.executionLane(),
+                historical.tenantSurrogate(),
+                historical.allowedCaseIds(),
+                historical.allowedRoomTypes(),
+                historical.expectedAgentBuildId(),
+                historical.graphKey(),
+                historical.graphVersion(),
+                historical.checkpointSchemaVersion(),
+                currentManifestHash,
+                currentDbBinding.required("binding_hash").textValue(),
+                historical.lifecycle(),
+                historical.acceptedCommandProof(),
+                historical.issuedAt(),
+                historical.expiresAt(),
+                historical.revokedAt());
+
+        var verifier = verifier();
+        var source = new TargetE2eAuthorizedIntakeFinalizationSource(
+                (request, result) -> java.util.Optional.of(fixture.state()),
+                request -> AuthorizationDecision.allowed(currentGrant),
+                () -> fixture.runtime(),
+                new TargetE2eExecutionLaneVerifier(java.time.Clock.fixed(
+                        TargetE2eFinalizationFixture.NOW, java.time.ZoneOffset.UTC)),
+                (request, result, runtime, state) -> currentEvidence,
+                verifier);
+        var authorized = source.resolve(fixture.request(), fixture.result());
+        var prepared = new TargetE2eIntakeRoomFinalizationStrategy(
+                        source,
+                        new TargetE2eAgentRunV2FinalizationFactsProvider(source),
+                        org.mockito.Mockito.mock(
+                                TargetE2eIntakeParallelAssemblyFinalizationPort.class))
+                .prepare(fixture.request(), fixture.result());
+        var verified = authorized.evidence();
+
+        assertThatThrownBy(() -> verifier.requireGrantBindings(historical, verified))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessageContaining("finalization activation id");
+        assertThat(fixture.request().streamProtocol()).isEqualTo("agent-stream.v4");
+        assertThat(ExecuteAgentRunRequest.isParallelIntakeCommand(fixture.request().command()))
+                .isTrue();
+        assertThat(fixture.state().epoch().streamProtocol()).isEqualTo("agent-stream.v3");
+        assertThat(verified.graphActivationId())
+                .isEqualTo(TargetE2eFinalizationFixture.ACTIVATION_ID);
+        assertThat(verified.finalizationActivationId()).isEqualTo(currentActivationId);
+        assertThat(prepared.receiptBindings().activationId()).isEqualTo(currentActivationId);
+        assertThat(prepared.activationManifestHash()).isEqualTo(currentManifestHash);
+        assertThat(prepared.receiptBindings().isolatedDomainDbBindingHash())
+                .isEqualTo(currentDbBinding.required("binding_hash").textValue());
+        assertThat(verified.commandEnvelopeHash())
+                .isEqualTo(fixture.evidence()
+                        .commandEnvelope()
+                        .required("command_envelope_hash")
+                        .textValue());
+        assertThat(verified.isolatedDomainDbBindingHash())
+                .isEqualTo(currentDbBinding.required("binding_hash").textValue());
+    }
+
+    @Test
+    void rejectsHistoricalGraphActivationForLegacyProfile() {
+        var fixture = TargetE2eFinalizationFixture.valid();
+        ObjectNode currentDbBinding = fixture.evidence().isolatedDomainDbBinding().deepCopy();
+        currentDbBinding.put("activation_id", "p9act.v1." + "2".repeat(32));
+        putSelfHash(currentDbBinding, "binding_hash");
+        var currentEvidence = new TargetE2eFinalizationEvidence(
+                "8".repeat(64),
+                fixture.evidence().commandEnvelope(),
+                fixture.evidence().resultEnvelope(),
+                fixture.evidence().proposalSource(),
+                currentDbBinding);
+
+        assertThatThrownBy(() -> verifier()
+                        .verify(
+                                fixture.request(),
+                                fixture.result(),
+                                fixture.state(),
+                                currentEvidence))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessageContaining("legacy finalization activation id");
+    }
 
     @Test
     void acceptsDistinctProposalAndArtifactIdsDerivedFromTheSamePayloadHash() {
