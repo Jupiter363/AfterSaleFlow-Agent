@@ -96,9 +96,6 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
                         identityResolver.resolve(request),
                         "durable AgentRun identity resolver returned no identity")
                 .requireExact(request);
-        GraphRegistryBindingPolicy.ExpectedBinding registryBinding =
-                GraphRegistryBindingPolicy.requireExpected(
-                        registryBindingPolicy, GraphStreamVisibilityPolicy.Binding.from(command));
         ReadyLookup readyLookup = new ReadyLookup(
                 request.agentRunId(),
                 request.attemptId(),
@@ -106,11 +103,7 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
                 command.requestHash());
         Optional<ReadyArtifact> replay = assemblyStore.loadReady(readyLookup);
         if (replay.isPresent()) {
-            return replayResult(
-                    request,
-                    roomFencingToken,
-                    registryBinding,
-                    replay.orElseThrow());
+            return replayResult(request, roomFencingToken, replay.orElseThrow());
         }
 
         AssemblyLookup lookup = new AssemblyLookup(
@@ -127,9 +120,11 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
                 throw race;
             }
             ReadyArtifact raced = assemblyStore.loadReady(readyLookup).orElseThrow(() -> race);
-            return replayResult(
-                    request, roomFencingToken, registryBinding, raced);
+            return replayResult(request, roomFencingToken, raced);
         }
+        GraphRegistryBindingPolicy.ExpectedBinding registryBinding =
+                GraphRegistryBindingPolicy.requireExpected(
+                        registryBindingPolicy, GraphStreamVisibilityPolicy.Binding.from(command));
         requireRequestAuthority(request, roomFencingToken, inputs);
         TrustedTurnContext context = Objects.requireNonNull(
                 contextResolver.resolve(request, inputs.authority()),
@@ -166,9 +161,6 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
                         identityResolver.resolve(request),
                         "durable AgentRun identity resolver returned no identity")
                 .requireExact(request);
-        GraphRegistryBindingPolicy.ExpectedBinding registryBinding =
-                GraphRegistryBindingPolicy.requireExpected(
-                        registryBindingPolicy, GraphStreamVisibilityPolicy.Binding.from(command));
         ReadyArtifact artifact = assemblyStore
                 .loadReady(new ReadyLookup(
                         request.agentRunId(),
@@ -178,8 +170,7 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
                 .orElseThrow(() -> new AssemblyConflictException(
                         "INTAKE_PARALLEL_READY_MISSING",
                         "parallel Intake READY artifact was not found"));
-        AssemblyResult replay = replayResult(
-                request, roomFencingToken, registryBinding, artifact);
+        AssemblyResult replay = replayResult(request, roomFencingToken, artifact);
         return reconciliation(request, replay);
     }
 
@@ -219,26 +210,21 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
     private AssemblyResult replayResult(
             ExecuteAgentRunRequest request,
             long roomFencingToken,
-            GraphRegistryBindingPolicy.ExpectedBinding registryBinding,
             ReadyArtifact artifact) {
         TargetE2EGraphCommandEnvelope storedCommand =
                 envelopeCodec.decodeCommand(artifact.canonicalCommandEnvelopeBytes());
-        // The stored activation is immutable execution provenance: decodeCommand validates it as
-        // part of the historical command-envelope hash, and decodeResult binds the result to that
-        // same envelope. Replay authority instead comes from the exact current command, durable
-        // room fence, and current registry/tool-policy binding, so a deployment must not strand a
-        // previously published READY artifact merely because its activation has changed.
+        // Activation, registry, and tool-policy pins are immutable execution provenance frozen in
+        // the READY artifact. Result-only replay executes no Graph, Provider, or tool; its current
+        // authority is therefore the exact allocated command plus the durable room fence. The
+        // command, proposal, and result envelopes below revalidate the complete historical hash
+        // chain, so a deployment must not strand an already published READY result.
         if (roomFencingToken != storedCommand.roomFencingToken()
                 || !request.command().equals(storedCommand.command())
                 || !artifact.commandEnvelopeSha256().equals(
-                        storedCommand.commandEnvelopeHash())
-                || !artifact.registryBindingSha256().equals(
-                        registryBinding.registryBindingHash())
-                || !artifact.toolPolicyVersion().equals(
-                        registryBinding.toolPolicyVersion())) {
+                        storedCommand.commandEnvelopeHash())) {
             throw new AssemblyConflictException(
                     "INTAKE_PARALLEL_READY_REQUEST_CONFLICT",
-                    "READY artifact differs from the current command or registry authority");
+                    "READY artifact differs from the current command authority");
         }
         byte[] proposalSource = envelopeCodec.validateProposalSource(
                 artifact.canonicalProposalSourceBytes(),

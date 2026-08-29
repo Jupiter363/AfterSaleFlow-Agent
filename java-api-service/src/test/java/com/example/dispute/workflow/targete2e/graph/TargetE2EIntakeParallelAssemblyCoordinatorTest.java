@@ -131,7 +131,7 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
     }
 
     @Test
-    void rejectsReadyReplayWhenTheCurrentRegistryBindingDrifts() {
+    void replaysReadyWithoutResolvingTheCurrentRegistryBinding() {
         ExecuteAgentRunRequest request = request(
                 TargetE2EIntakeParallelAssemblyCoordinator.AGENT_PROFILE_ID);
         ObjectNode previous = previousDossier();
@@ -149,21 +149,32 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
         firstCoordinator.assembleReady(
                 request, FRAME_SET_ID, new AgentRunCancellationToken());
 
-        var changedRegistry = coordinator(
+        var replayCoordinator = coordinator(
+                NEXT_ACTIVATION,
                 store,
                 (execution, authority) -> {
                     throw new AssertionError("READY replay must not resolve mutable context");
                 },
-                "8".repeat(64));
+                binding -> {
+                    throw new AssertionError("READY replay must not resolve current registry");
+                },
+                31);
 
-        assertThatThrownBy(() -> changedRegistry.assembleReady(
-                        request, FRAME_SET_ID, new AgentRunCancellationToken()))
-                .isInstanceOf(AssemblyConflictException.class)
-                .hasMessageContaining("registry authority");
+        var replay = replayCoordinator.assembleReady(
+                request, FRAME_SET_ID, new AgentRunCancellationToken());
+        var reconciliation = replayCoordinator.reconcileReady(
+                request, new AgentRunCancellationToken());
+
+        assertThat(replay.newlyPublished()).isFalse();
+        assertThat(replay.artifact().registryBindingSha256()).isEqualTo(REGISTRY_HASH);
+        assertThat(replay.artifact().toolPolicyVersion()).isEqualTo(TOOL_POLICY);
+        assertThat(reconciliation.registryBindingHash()).isEqualTo(REGISTRY_HASH);
+        assertThat(reconciliation.toolPolicyVersion()).isEqualTo(TOOL_POLICY);
+        assertThat(store.publishCalls).isEqualTo(1);
     }
 
     @Test
-    void replaysDurableReadyAcrossActivationWithExactCurrentAuthorities() {
+    void replaysDurableReadyAcrossDeploymentWithExactCommandAndRoomAuthorities() {
         ExecuteAgentRunRequest request = request(
                 TargetE2EIntakeParallelAssemblyCoordinator.AGENT_PROFILE_ID);
         ObjectNode previous = previousDossier();
@@ -197,8 +208,8 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 (execution, authority) -> {
                     throw new AssertionError("READY replay must not resolve mutable context");
                 },
-                REGISTRY_HASH,
-                TOOL_POLICY,
+                "8".repeat(64),
+                "tools.none.v2",
                 31);
         var replay = reactivatedCoordinator.assembleReady(
                 request, FRAME_SET_ID, new AgentRunCancellationToken());
@@ -215,8 +226,12 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 .isEqualTo(first.artifact().canonicalCommandEnvelopeBytes());
         assertThat(replay.artifact().canonicalResultEnvelopeBytes())
                 .isEqualTo(first.artifact().canonicalResultEnvelopeBytes());
+        assertThat(replay.artifact().registryBindingSha256()).isEqualTo(REGISTRY_HASH);
+        assertThat(replay.artifact().toolPolicyVersion()).isEqualTo(TOOL_POLICY);
         assertThat(replay.graphResult()).isEqualTo(first.graphResult());
         assertThat(reconciliation.result()).isEqualTo(first.graphResult());
+        assertThat(reconciliation.registryBindingHash()).isEqualTo(REGISTRY_HASH);
+        assertThat(reconciliation.toolPolicyVersion()).isEqualTo(TOOL_POLICY);
         assertThat(contextCalls).hasValue(1);
         assertThat(store.publishCalls).isEqualTo(1);
 
@@ -227,8 +242,10 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                         (execution, authority) -> {
                             throw new AssertionError("READY race replay must not resolve context");
                         },
-                        REGISTRY_HASH,
-                        TOOL_POLICY,
+                        binding -> {
+                            throw new AssertionError(
+                                    "READY race replay must not resolve current registry");
+                        },
                         31)
                 .assembleReady(request, FRAME_SET_ID, new AgentRunCancellationToken());
         assertThat(racedReplay.newlyPublished()).isFalse();
@@ -260,28 +277,6 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                         TOOL_POLICY,
                         32),
                 request);
-        assertReadyRequestConflict(
-                coordinator(
-                        NEXT_ACTIVATION,
-                        store,
-                        (execution, authority) -> {
-                            throw new AssertionError("READY replay must not resolve mutable context");
-                        },
-                        "8".repeat(64),
-                        TOOL_POLICY,
-                        31),
-                request);
-        assertReadyRequestConflict(
-                coordinator(
-                        NEXT_ACTIVATION,
-                        store,
-                        (execution, authority) -> {
-                            throw new AssertionError("READY replay must not resolve mutable context");
-                        },
-                        REGISTRY_HASH,
-                        "tools.none.v2",
-                        31),
-                request);
         assertThat(store.publishCalls).isEqualTo(1);
     }
 
@@ -309,6 +304,21 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
             long roomFencingToken) {
         GraphRegistryBindingPolicy registry = binding ->
                 new GraphRegistryBindingPolicy.ExpectedBinding(registryHash, toolPolicy);
+        return coordinator(
+                activationId,
+                store,
+                contextResolver,
+                registry,
+                roomFencingToken);
+    }
+
+    private static TargetE2EIntakeParallelAssemblyCoordinator coordinator(
+            String activationId,
+            IntakeParallelAssemblyStore store,
+            com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyContextResolver
+                    contextResolver,
+            GraphRegistryBindingPolicy registry,
+            long roomFencingToken) {
         TargetE2EAgentRunIdentityResolver identities = execution ->
                 TargetE2EAgentRunIdentityResolver.DurableIdentity.from(
                         execution, roomFencingToken);
