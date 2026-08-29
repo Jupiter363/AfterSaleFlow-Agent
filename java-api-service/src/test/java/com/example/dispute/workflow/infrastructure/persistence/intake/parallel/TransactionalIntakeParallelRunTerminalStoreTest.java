@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.infrastructure.persistence.intake.parallel;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -20,6 +21,7 @@ import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAs
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.ReadyAuthority;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelFrameStagingPort.AssemblyState;
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalCommand;
+import com.example.dispute.workflow.application.intake.parallel.IntakeParallelRunTerminalStore.TerminalConflictException;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
 import com.example.dispute.workflow.contract.v1.ContractJson;
@@ -28,6 +30,7 @@ import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.util.List;
@@ -38,6 +41,7 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class TransactionalIntakeParallelRunTerminalStoreTest {
 
@@ -103,7 +107,8 @@ class TransactionalIntakeParallelRunTerminalStoreTest {
     }
 
     @Test
-    void atomicallyBindsReadyToOneDeterministicFinalAndReplaysItExactly() {
+    void atomicallyBindsReadyToOneDeterministicFinalAndReplaysJsonbNormalizedResultExactly()
+            throws Exception {
         ExecuteAgentRunRequest request = AgentRunPersistenceFixtures.parallelIntakeRequest();
         RoomGraphResult graphResult = AgentRunPersistenceFixtures.parallelIntakeGraphResult();
         AgentRunEntity run = AgentRunEntity.logicalV4(
@@ -172,6 +177,13 @@ class TransactionalIntakeParallelRunTerminalStoreTest {
                         mapperWithDefaultNullInclusion());
 
         var first = store.appendOrLoad(new TerminalCommand(request, reconciliation));
+        ObjectNode persistedDocument =
+                (ObjectNode) MAPPER.readTree(attempt.getResultJson());
+        String jsonbNormalizedResult = MAPPER.writerWithDefaultPrettyPrinter()
+                .writeValueAsString(persistedDocument);
+        assertThat(jsonbNormalizedResult).isNotEqualTo(attempt.getResultJson());
+        ReflectionTestUtils.setField(attempt, "resultJson", jsonbNormalizedResult);
+
         var replay = store.appendOrLoad(new TerminalCommand(request, reconciliation));
 
         assertThat(first.inserted()).isTrue();
@@ -186,6 +198,20 @@ class TransactionalIntakeParallelRunTerminalStoreTest {
         assertThat(attempt.isFinalFrameObserved()).isTrue();
         assertThat(run.getRunStatus()).isEqualTo("RESULT_READY");
         assertThat(run.getResultReadyAttemptId()).isEqualTo(request.attemptId());
+
+        ObjectNode conflictingDocument = persistedDocument.deepCopy();
+        conflictingDocument.put("last_sequence_no", 999L);
+        ReflectionTestUtils.setField(
+                attempt,
+                "resultJson",
+                MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(conflictingDocument));
+        assertThatThrownBy(
+                        () -> store.appendOrLoad(new TerminalCommand(request, reconciliation)))
+                .isInstanceOfSatisfying(
+                        TerminalConflictException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("INTAKE_PARALLEL_TERMINAL_AUTHORITY_CONFLICT"))
+                .hasMessage("serializedResult differs from terminal authority");
 
         ArgumentCaptor<EventWriteCommand> events =
                 ArgumentCaptor.forClass(EventWriteCommand.class);

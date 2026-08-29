@@ -144,6 +144,9 @@ public class TransactionalIntakeParallelRunTerminalStore
         ExecuteAgentRunResult result = completedResult(
                 request, reconciliation.result(), terminalSequence, terminalAt);
         String canonicalResultJson = canonicalJson(result);
+        String serializedResult = phase.replay()
+                ? requirePersistedResultEquivalent(attempt.getResultJson(), canonicalResultJson)
+                : canonicalResultJson;
 
         TerminalWriteReceipt persisted = eventWriter
                 .appendOrLoadExactTerminalInCurrentTransaction(new EventWriteCommand(
@@ -166,7 +169,7 @@ public class TransactionalIntakeParallelRunTerminalStore
                             : "new terminalization found a pre-existing FINAL");
         }
 
-        attempt.recordV4ResultReady(result, canonicalResultJson, previousSequence);
+        attempt.recordV4ResultReady(result, serializedResult, previousSequence);
         if (phase == TerminalPhase.NEW || phase == TerminalPhase.RESULT_READY_REPLAY) {
             run.markV4ResultReady(
                     request.attemptId(), ready.artifact().graphResultSha256(), terminalAt);
@@ -360,6 +363,31 @@ public class TransactionalIntakeParallelRunTerminalStore
                     "INTAKE_PARALLEL_TERMINAL_AUDIENCE_CORRUPT",
                     field + " is not valid canonicalizable JSON");
         }
+    }
+
+    private String requirePersistedResultEquivalent(
+            String persistedResultJson, String canonicalResultJson) {
+        if (persistedResultJson == null || persistedResultJson.isBlank()) {
+            throw conflict(
+                    "INTAKE_PARALLEL_TERMINAL_RESULT_CORRUPT",
+                    "persisted resultJson is empty");
+        }
+        final String canonicalPersistedResult;
+        try {
+            JsonNode document = objectMapper.readTree(persistedResultJson);
+            if (document == null) {
+                throw conflict(
+                        "INTAKE_PARALLEL_TERMINAL_RESULT_CORRUPT",
+                        "persisted resultJson is empty JSON");
+            }
+            canonicalPersistedResult = ContractJson.canonicalString(document);
+        } catch (JsonProcessingException failure) {
+            throw conflict(
+                    "INTAKE_PARALLEL_TERMINAL_RESULT_CORRUPT",
+                    "persisted resultJson is not valid canonicalizable JSON");
+        }
+        requireEqual(canonicalPersistedResult, canonicalResultJson, "serializedResult");
+        return persistedResultJson;
     }
 
     private String canonicalJson(Object value) {
