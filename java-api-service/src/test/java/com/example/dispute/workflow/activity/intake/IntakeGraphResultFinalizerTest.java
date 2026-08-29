@@ -81,6 +81,35 @@ class IntakeGraphResultFinalizerTest {
     }
 
     @Test
+    void exactParallelV4ReadyProposalRetainsHistoricalToolPolicyDuringFinalization()
+            throws Exception {
+        Fixture fixture = parallelFixture("tools.none.v1");
+        RecordingCommitPort port = new RecordingCommitPort();
+        IntakeGraphResultFinalizer finalizer = finalizer(
+                fixture, port, IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY);
+
+        IntakeFinalizationReceipt first = finalizer.finalizeResult(fixture.request());
+        IntakeFinalizationReceipt replay = finalizer.finalizeResult(fixture.request());
+
+        assertThat(replay).isEqualTo(first);
+        assertThat(port.calls).isEqualTo(2);
+        assertThat(port.commands).allMatch(command -> "tools.none.v1".equals(
+                command.request().authority().profileVersions().toolPolicyVersion()));
+    }
+
+    @Test
+    void exactParallelV4RejectsTheLegacyProposalToolPolicy() throws Exception {
+        Fixture fixture = parallelFixture("no-tools.v1");
+        RecordingCommitPort port = new RecordingCommitPort();
+
+        assertRejected(
+                "INTAKE_PROPOSAL_AUTHORITY_MISMATCH",
+                () -> finalizer(fixture, port, IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY)
+                        .finalizeResult(fixture.request()));
+        assertThat(port.calls).isZero();
+    }
+
+    @Test
     void targetRejectsAnUnexpectedOuterToolPolicyBeforePreflight() throws Exception {
         Fixture fixture = fixture(
                 WriterMode.TEMPORAL,
@@ -437,12 +466,37 @@ class IntakeGraphResultFinalizerTest {
 
     private static Fixture fixture(
             WriterMode writerMode, String graphKey, String outerToolPolicyVersion) throws Exception {
-        IntakeGraphThreadBinding binding = binding(writerMode, graphKey, outerToolPolicyVersion);
+        return fixture(
+                writerMode,
+                graphKey,
+                outerToolPolicyVersion,
+                false,
+                "no-tools.v1");
+    }
+
+    private static Fixture parallelFixture(String proposalToolPolicyVersion) throws Exception {
+        return fixture(
+                WriterMode.TEMPORAL,
+                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY,
+                "tools.none.v1",
+                true,
+                proposalToolPolicyVersion);
+    }
+
+    private static Fixture fixture(
+            WriterMode writerMode,
+            String graphKey,
+            String outerToolPolicyVersion,
+            boolean exactParallel,
+            String proposalToolPolicyVersion) throws Exception {
+        IntakeGraphThreadBinding binding =
+                binding(writerMode, graphKey, outerToolPolicyVersion);
         JsonNode document = MAPPER.readTree(PROPOSAL_FIXTURE.toFile());
         if (IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY.equals(graphKey)) {
             ObjectNode profiles = (ObjectNode) document.required("profile_versions");
-            profiles.put("graph_version", "target-e2e-graph.2026-07-27.1");
-            profiles.put("checkpoint_schema_version", "target-e2e-checkpoint.v1");
+            profiles.put("graph_version", "target-e2e-graph.2026-08-18.1");
+            profiles.put("checkpoint_schema_version", "target-e2e-checkpoint.v2");
+            profiles.put("tool_policy_version", proposalToolPolicyVersion);
             ((ObjectNode) document)
                     .put("actor_scope_hash", binding.registration().actorScopeHash());
             ((ObjectNode) document).put(
@@ -464,14 +518,17 @@ class IntakeGraphResultFinalizerTest {
                         "COMMAND_P4_USER_2",
                         "RUN_P4_USER_2",
                         "ATTEMPT_P4_USER_2_1",
+                        exactParallel ? "INTAKE_ROOM_P4_USER_2" : null,
                         binding,
                         snapshot,
                         event,
                         5,
                         "INTAKE_ACTIVE",
                         2,
-                        "intake-agent.v2",
-                        2,
+                        exactParallel
+                                ? RoomGraphCommand.PARALLEL_INTAKE_AGENT_PROFILE_ID
+                                : "intake-agent.v2",
+                        exactParallel ? 3 : 2,
                         3,
                         1,
                         Instant.parse("2026-07-20T08:03:00Z"),
@@ -560,13 +617,13 @@ class IntakeGraphResultFinalizerTest {
                         "AGENT_SESSION_P4_USER_1",
                         new IntakePrivateThreadRegistrationFactory.VersionPins(
                                 graphKey,
-                                targetGraph ? "target-e2e-graph.2026-07-27.1" : "2.0.0",
-                                targetGraph ? "target-e2e-checkpoint.v1" : "intake-checkpoint.v2",
+                                targetGraph ? "target-e2e-graph.2026-08-18.1" : "2.0.0",
+                                targetGraph ? "target-e2e-checkpoint.v2" : "intake-checkpoint.v2",
                                 "intake-graph-state.v2",
                                 "intake-prompt.v2",
                                 "intake-model.synthetic.v1",
                                 targetGraph
-                                        ? "target-e2e-room-proposal-source.v1"
+                                        ? RoomGraphCommand.PARALLEL_INTAKE_OUTPUT_SCHEMA
                                         : "intake-turn-proposal.v2",
                                 "intake-policy.v2",
                                 "intake-guardrail.v2",

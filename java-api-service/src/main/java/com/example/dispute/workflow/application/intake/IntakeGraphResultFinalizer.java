@@ -6,6 +6,7 @@ import com.example.dispute.workflow.application.intake.IntakeFormalCommitPort.Cu
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactOperationType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.GraphStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult.ArtifactOperation;
@@ -119,7 +120,7 @@ public final class IntakeGraphResultFinalizer {
                 authority.cognitiveRevision(),
                 request.initialSnapshot().payloadRef().sha256(),
                 request.event() == null ? null : request.event().payloadRef().sha256(),
-                proposalProfileVersions(authority.profileVersions()));
+                proposalProfileVersions(authority.profileVersions(), request.command()));
 
         // The object is loaded only after every envelope and graph hash check and before any
         // formal transaction can begin.
@@ -455,8 +456,11 @@ public final class IntakeGraphResultFinalizer {
     }
 
     private IntakeTurnProposal.ProfileVersions proposalProfileVersions(
-            IntakeTurnProposal.ProfileVersions outerProfiles) {
+            IntakeTurnProposal.ProfileVersions outerProfiles, RoomGraphCommand command) {
         if (!TARGET_E2E_GRAPH_KEY.equals(expectedGraphKey)) {
+            return outerProfiles;
+        }
+        if (ExecuteAgentRunRequest.isParallelIntakeCommand(command)) {
             return outerProfiles;
         }
         return new IntakeTurnProposal.ProfileVersions(
