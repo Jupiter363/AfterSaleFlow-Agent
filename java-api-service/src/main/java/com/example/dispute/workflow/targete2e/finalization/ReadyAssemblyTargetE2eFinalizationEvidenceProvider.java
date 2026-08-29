@@ -62,18 +62,32 @@ public final class ReadyAssemblyTargetE2eFinalizationEvidenceProvider
                     "TARGET_E2E_PARALLEL_RESULT_MISMATCH",
                     "parallel READY result differs from the persisted AgentRun result");
         }
+        JsonNode commandEnvelope = readCanonicalObject(
+                artifact.canonicalCommandEnvelopeBytes(), "command envelope");
+        String authorityActivationId = authorityActivationId(commandEnvelope);
         EnvironmentEvidence environment = Objects.requireNonNull(
-                environmentSource.loadEnvironmentEvidence(),
+                environmentSource.loadEnvironmentEvidence(authorityActivationId),
                 "environment evidence source returned null");
         return new TargetE2eFinalizationEvidence(
                 environment.manifestHash(),
-                readCanonicalObject(
-                        artifact.canonicalCommandEnvelopeBytes(), "command envelope"),
+                commandEnvelope,
                 readCanonicalObject(
                         artifact.canonicalResultEnvelopeBytes(), "result envelope"),
                 readCanonicalObject(
                         artifact.canonicalProposalSourceBytes(), "proposal source"),
                 environment.isolatedDomainDbBinding());
+    }
+
+    private static String authorityActivationId(JsonNode commandEnvelope) {
+        JsonNode value = commandEnvelope.get("activation_id");
+        if (value == null
+                || !value.isTextual()
+                || !value.textValue().matches("p9act[.]v1[.][0-9a-f]{32}")) {
+            throw rejected(
+                    "TARGET_E2E_PARALLEL_EVIDENCE_INVALID",
+                    "command envelope activation is invalid");
+        }
+        return value.textValue();
     }
 
     private JsonNode readCanonicalObject(byte[] bytes, String label) {

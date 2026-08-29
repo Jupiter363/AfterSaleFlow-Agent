@@ -10,6 +10,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalization
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationRequest;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationDecision;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.Lifecycle;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.RuntimeAttestation;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider.RuntimeContext;
 import java.time.Clock;
 import java.time.Instant;
@@ -51,6 +52,8 @@ public final class TargetE2eExecutionLaneVerifier {
                     "target-E2E activation was denied: " + decision.decision());
         }
         ActivationGrant grant = Objects.requireNonNull(decision.grant(), "activation grant");
+        RuntimeAttestation runtimeAttestation = Objects.requireNonNull(
+                decision.runtimeAttestation(), "runtime attestation");
         Instant now = clock.instant();
         if (!EXECUTION_LANE.equals(grant.executionLane())) {
             throw rejected(
@@ -61,6 +64,8 @@ public final class TargetE2eExecutionLaneVerifier {
             throw rejected("TARGET_E2E_ACTIVATION_REVOKED", "target-E2E activation is revoked");
         }
         requireLifecycle(grant, authorizationRequest, now);
+        requireSameActivationIdentity(runtimeAttestation, grant);
+        requireRuntimeLifecycle(runtimeAttestation, grant, now);
 
         var run = state.run();
         var attempt = state.attempt();
@@ -85,6 +90,10 @@ public final class TargetE2eExecutionLaneVerifier {
                 runtime.workflowBuildId(),
                 "authorized workflow build");
         requireEqual(authorizationRequest.commandId(), command.commandId(), "authorized command");
+        requireEqual(
+                authorizationRequest.authorityActivationId(),
+                grant.activationId(),
+                "command authority activation");
         requireEqual(authorizationRequest.roomEpoch(), run.roomEpoch(), "authorized room epoch");
         requireEqual(
                 authorizationRequest.roomFencingToken(),
@@ -97,7 +106,45 @@ public final class TargetE2eExecutionLaneVerifier {
                     "TARGET_E2E_SCOPE_MISMATCH",
                     "finalization is outside the activation case or room scope");
         }
-        requireEqual(grant.expectedAgentBuildId(), runtime.workflowBuildId(), "agent build");
+        requireEqual(
+                runtimeAttestation.authorityActivationId(),
+                grant.activationId(),
+                "runtime handoff authority");
+        requireEqual(
+                runtimeAttestation.activationId(),
+                runtime.activationId(),
+                "runtime activation");
+        requireEqual(
+                runtimeAttestation.executionLane(), EXECUTION_LANE, "runtime activation lane");
+        requireEqual(
+                runtimeAttestation.tenantSurrogate(), run.tenantSurrogate(), "runtime tenant");
+        if (!runtimeAttestation.allowedRoomTypes().contains(RoomType.INTAKE)) {
+            throw rejected(
+                    "TARGET_E2E_SCOPE_MISMATCH",
+                    "finalization room is outside the runtime activation scope");
+        }
+        requireEqual(
+                runtimeAttestation.expectedAgentBuildId(),
+                runtime.workflowBuildId(),
+                "runtime agent build");
+        requireEqual(
+                runtimeAttestation.activationManifestHash(),
+                runtime.activationManifestHash(),
+                "runtime activation manifest");
+        requireEqual(
+                runtimeAttestation.isolatedDomainDbBindingHash(),
+                runtime.isolatedDomainDbBindingHash(),
+                "runtime isolated Domain DB binding");
+        requireEqual(
+                runtimeAttestation.graphKey(), GRAPH_KEY, "runtime activation graph key");
+        requireEqual(
+                runtimeAttestation.graphVersion(),
+                GRAPH_VERSION,
+                "runtime activation graph version");
+        requireEqual(
+                runtimeAttestation.checkpointSchemaVersion(),
+                CHECKPOINT_SCHEMA_VERSION,
+                "runtime activation checkpoint schema");
         requireEqual(grant.graphKey(), GRAPH_KEY, "activation graph key");
         requireEqual(grant.graphVersion(), GRAPH_VERSION, "activation graph version");
         requireEqual(
@@ -298,6 +345,85 @@ public final class TargetE2eExecutionLaneVerifier {
         throw rejected(
                 "TARGET_E2E_ACTIVATION_DRAINED",
                 "DRAINED activation cannot finalize additional work");
+    }
+
+    private static void requireRuntimeLifecycle(
+            RuntimeAttestation runtime, ActivationGrant authority, Instant now) {
+        if (runtime.revokedAt() != null || runtime.lifecycle() == Lifecycle.REVOKED_TERMINAL) {
+            throw rejected(
+                    "TARGET_E2E_RUNTIME_ACTIVATION_REVOKED",
+                    "target-E2E runtime activation is revoked");
+        }
+        if (now.isBefore(runtime.issuedAt())) {
+            throw rejected(
+                    "TARGET_E2E_RUNTIME_ACTIVATION_EXPIRED",
+                    "target-E2E runtime activation is not active");
+        }
+        if (runtime.lifecycle() == Lifecycle.ACTIVE) {
+            if (!now.isBefore(runtime.expiresAt())) {
+                throw rejected(
+                        "TARGET_E2E_RUNTIME_ACTIVATION_EXPIRED",
+                        "target-E2E runtime activation is expired");
+            }
+            return;
+        }
+        if (runtime.lifecycle() == Lifecycle.DRAIN_ONLY
+                && runtime.activationId().equals(authority.activationId())
+                && runtime.authorityActivationId().equals(authority.activationId())
+                && authority.lifecycle() == Lifecycle.DRAIN_ONLY) {
+            return;
+        }
+        throw rejected(
+                "TARGET_E2E_RUNTIME_ACTIVATION_DRAINED",
+                "runtime activation cannot execute this authority finalizer");
+    }
+
+    private static void requireSameActivationIdentity(
+            RuntimeAttestation runtime, ActivationGrant authority) {
+        if (!runtime.activationId().equals(authority.activationId())) {
+            return;
+        }
+        requireEqual(
+                runtime.authorityActivationId(),
+                authority.activationId(),
+                "same-activation authority link");
+        requireEqual(
+                runtime.executionLane(),
+                authority.executionLane(),
+                "same-activation execution lane");
+        requireEqual(
+                runtime.tenantSurrogate(),
+                authority.tenantSurrogate(),
+                "same-activation tenant");
+        requireEqual(
+                runtime.allowedRoomTypes(),
+                authority.allowedRoomTypes(),
+                "same-activation room scope");
+        requireEqual(
+                runtime.expectedAgentBuildId(),
+                authority.expectedAgentBuildId(),
+                "same-activation agent build");
+        requireEqual(runtime.graphKey(), authority.graphKey(), "same-activation graph key");
+        requireEqual(
+                runtime.graphVersion(),
+                authority.graphVersion(),
+                "same-activation graph version");
+        requireEqual(
+                runtime.checkpointSchemaVersion(),
+                authority.checkpointSchemaVersion(),
+                "same-activation checkpoint schema");
+        requireEqual(
+                runtime.activationManifestHash(),
+                authority.activationManifestHash(),
+                "same-activation manifest");
+        requireEqual(
+                runtime.isolatedDomainDbBindingHash(),
+                authority.isolatedDomainDbBindingHash(),
+                "same-activation isolated Domain DB binding");
+        requireEqual(runtime.lifecycle(), authority.lifecycle(), "same-activation lifecycle");
+        requireEqual(runtime.issuedAt(), authority.issuedAt(), "same-activation issuance");
+        requireEqual(runtime.expiresAt(), authority.expiresAt(), "same-activation expiry");
+        requireEqual(runtime.revokedAt(), authority.revokedAt(), "same-activation revocation");
     }
 
     private static boolean requireTerminalEligibility(

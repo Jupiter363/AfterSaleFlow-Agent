@@ -2,6 +2,7 @@ package com.example.dispute.workflow.targete2e.artifact.finalization;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.RuntimeAttestation;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationEnvironmentSource;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationEnvironmentSource.EnvironmentEvidence;
 import java.sql.Array;
@@ -80,7 +81,7 @@ public final class JdbcTargetE2eFinalizationAuthority
             """;
 
     private final JdbcTemplate jdbc;
-    private final String activationId;
+    private final String runtimeActivationId;
     private final Clock clock;
 
     public JdbcTargetE2eFinalizationAuthority(
@@ -89,13 +90,106 @@ public final class JdbcTargetE2eFinalizationAuthority
         if (activationId == null || !activationId.matches("p9act[.]v1[.][0-9a-f]{32}")) {
             throw new IllegalArgumentException("activationId is invalid");
         }
-        this.activationId = activationId;
+        this.runtimeActivationId = activationId;
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     @Override
     public AuthorizationDecision authorize(AuthorizationRequest request) {
         Objects.requireNonNull(request, "request");
+        String authorityActivationId = request.authorityActivationId() == null
+                ? runtimeActivationId
+                : request.authorityActivationId();
+        AuthorizationRow authority = uniqueAuthorization(
+                request, authorityActivationId, "command authority");
+        if (authority == null) {
+            return AuthorizationDecision.denied(Decision.ABSENT);
+        }
+        AuthorizationRow runtime = authorityActivationId.equals(runtimeActivationId)
+                ? authority
+                : uniqueAuthorization(request, runtimeActivationId, "runtime activation");
+        if (runtime == null) {
+            return AuthorizationDecision.denied(Decision.ABSENT);
+        }
+        if (!authority.caseReserved()
+                || !authority.epochBound()
+                || !authority.executionLane().equals("TARGET_E2E_CANDIDATE")
+                || !authority.tenantSurrogate().equals(request.tenantSurrogate())
+                || !authority.allowedRoomTypes().contains(request.roomType())
+                || !authority.graphKey().equals("all-rooms.target-e2e.v2")) {
+            return AuthorizationDecision.denied(Decision.SCOPE_DENIED);
+        }
+        if (!authority.exactAdmission(request)) {
+            return AuthorizationDecision.denied(Decision.SCOPE_DENIED);
+        }
+        if (!runtime.executionLane().equals("TARGET_E2E_CANDIDATE")
+                || !runtime.tenantSurrogate().equals(request.tenantSurrogate())
+                || !runtime.allowedRoomTypes().contains(request.roomType())
+                || !runtime.agentBuildId().equals(request.workflowBuildId())
+                || !runtime.graphKey().equals("all-rooms.target-e2e.v2")) {
+            return AuthorizationDecision.denied(Decision.SCOPE_DENIED);
+        }
+        if (!authority.sameRuntimeEnvironment(runtime)) {
+            return AuthorizationDecision.denied(Decision.ENVIRONMENT_MISMATCH);
+        }
+        Instant now = clock.instant();
+        Decision authorityDenied = lifecycleDenial(authority, now, true);
+        if (authorityDenied != null) {
+            return AuthorizationDecision.denied(authorityDenied);
+        }
+        boolean sameActivation = authority.activationId().equals(runtime.activationId());
+        Decision runtimeDenied = lifecycleDenial(runtime, now, sameActivation);
+        if (runtimeDenied != null) {
+            return AuthorizationDecision.denied(runtimeDenied);
+        }
+        Lifecycle lifecycle = Lifecycle.valueOf(authority.lifecycleStatus());
+        AcceptedCommandProof proof = lifecycle == Lifecycle.DRAIN_ONLY
+                ? new AcceptedCommandProof(
+                        request.commandId(),
+                        authority.admissionCommandHash(),
+                        authority.admissionEnvelopeHash(),
+                        authority.admissionRoomEpoch(),
+                        authority.admissionRoomFence(),
+                        authority.admittedAt())
+                : null;
+        ActivationGrant authorityGrant = new ActivationGrant(
+                authority.activationId(),
+                authority.executionLane(),
+                authority.tenantSurrogate(),
+                Set.of(request.caseId()),
+                authority.allowedRoomTypes(),
+                authority.agentBuildId(),
+                authority.graphKey(),
+                authority.graphVersion(),
+                authority.checkpointSchemaVersion(),
+                authority.manifestHash(),
+                authority.domainDbBindingHash(),
+                lifecycle,
+                proof,
+                authority.issuedAt(),
+                authority.expiresAt(),
+                authority.revokedAt());
+        RuntimeAttestation runtimeAttestation = new RuntimeAttestation(
+                runtime.activationId(),
+                authority.activationId(),
+                runtime.executionLane(),
+                runtime.tenantSurrogate(),
+                runtime.allowedRoomTypes(),
+                runtime.agentBuildId(),
+                runtime.graphKey(),
+                runtime.graphVersion(),
+                runtime.checkpointSchemaVersion(),
+                runtime.manifestHash(),
+                runtime.domainDbBindingHash(),
+                Lifecycle.valueOf(runtime.lifecycleStatus()),
+                runtime.issuedAt(),
+                runtime.expiresAt(),
+                runtime.revokedAt());
+        return AuthorizationDecision.allowed(authorityGrant, runtimeAttestation);
+    }
+
+    private AuthorizationRow uniqueAuthorization(
+            AuthorizationRequest request, String requestedActivationId, String label) {
         var rows = jdbc.query(
                 AUTHORIZATION_SQL,
                 (result, ignored) -> authorizationRow(result),
@@ -108,71 +202,44 @@ public final class JdbcTargetE2eFinalizationAuthority
                 request.roomFencingToken(),
                 request.roomId(),
                 request.commandId(),
-                activationId);
+                requestedActivationId);
         if (rows.isEmpty()) {
-            return AuthorizationDecision.denied(Decision.ABSENT);
+            return null;
         }
         if (rows.size() != 1) {
-            throw new IllegalStateException("target E2E activation authority is not unique");
+            throw new IllegalStateException("target E2E " + label + " is not unique");
         }
-        AuthorizationRow row = rows.getFirst();
-        if (!row.caseReserved()
-                || !row.epochBound()
-                || !row.executionLane().equals("TARGET_E2E_CANDIDATE")
-                || !row.tenantSurrogate().equals(request.tenantSurrogate())
-                || !row.allowedRoomTypes().contains(request.roomType())
-                || !row.agentBuildId().equals(request.workflowBuildId())
-                || !row.graphKey().equals("all-rooms.target-e2e.v2")) {
-            return AuthorizationDecision.denied(Decision.SCOPE_DENIED);
-        }
-        if (!row.exactAdmission(request)) {
-            return AuthorizationDecision.denied(Decision.SCOPE_DENIED);
-        }
-        Instant now = clock.instant();
+        return rows.getFirst();
+    }
+
+    private static Decision lifecycleDenial(
+            AuthorizationRow row, Instant now, boolean allowDrainOnly) {
         if (row.revokedAt() != null || "REVOKED_TERMINAL".equals(row.lifecycleStatus())) {
-            return AuthorizationDecision.denied(Decision.REVOKED);
+            return Decision.REVOKED;
         }
         if ("REGISTERED".equals(row.lifecycleStatus())) {
-            return AuthorizationDecision.denied(Decision.ABSENT);
+            return Decision.ABSENT;
         }
-        if ("ACTIVE".equals(row.lifecycleStatus()) && !now.isBefore(row.expiresAt())) {
-            return AuthorizationDecision.denied(Decision.EXPIRED);
+        if ("ACTIVE".equals(row.lifecycleStatus())) {
+            return now.isBefore(row.expiresAt()) ? null : Decision.EXPIRED;
         }
-        if (!"ACTIVE".equals(row.lifecycleStatus())
-                && !"DRAIN_ONLY".equals(row.lifecycleStatus())) {
-            return AuthorizationDecision.denied(Decision.REVOKED);
+        if (allowDrainOnly && "DRAIN_ONLY".equals(row.lifecycleStatus())) {
+            return null;
         }
-        Lifecycle lifecycle = Lifecycle.valueOf(row.lifecycleStatus());
-        AcceptedCommandProof proof = lifecycle == Lifecycle.DRAIN_ONLY
-                ? new AcceptedCommandProof(
-                        request.commandId(),
-                        row.admissionCommandHash(),
-                        row.admissionEnvelopeHash(),
-                        row.admissionRoomEpoch(),
-                        row.admissionRoomFence(),
-                        row.admittedAt())
-                : null;
-        return AuthorizationDecision.allowed(new ActivationGrant(
-                row.activationId(),
-                row.executionLane(),
-                row.tenantSurrogate(),
-                Set.of(request.caseId()),
-                row.allowedRoomTypes(),
-                row.agentBuildId(),
-                row.graphKey(),
-                row.graphVersion(),
-                row.checkpointSchemaVersion(),
-                row.manifestHash(),
-                row.domainDbBindingHash(),
-                lifecycle,
-                proof,
-                row.issuedAt(),
-                row.expiresAt(),
-                row.revokedAt()));
+        return Decision.REVOKED;
     }
 
     @Override
     public EnvironmentEvidence loadEnvironmentEvidence() {
+        return loadEnvironmentEvidence(runtimeActivationId);
+    }
+
+    @Override
+    public EnvironmentEvidence loadEnvironmentEvidence(String authorityActivationId) {
+        if (authorityActivationId == null
+                || !authorityActivationId.matches("p9act[.]v1[.][0-9a-f]{32}")) {
+            throw new IllegalArgumentException("authorityActivationId is invalid");
+        }
         var rows = jdbc.query(
                 EVIDENCE_SQL,
                 (result, ignored) -> new EnvironmentEvidence(
@@ -184,7 +251,7 @@ public final class JdbcTargetE2eFinalizationAuthority
                         result.getString("domain_database_identity"),
                         result.getString("domain_runtime_principal_identity"),
                         result.getString("isolated_domain_db_binding_hash")),
-                activationId);
+                authorityActivationId);
         if (rows.size() != 1) {
             throw new IllegalStateException("target E2E activation evidence is absent or ambiguous");
         }
@@ -207,6 +274,11 @@ public final class JdbcTargetE2eFinalizationAuthority
                 result.getString("graph_version"),
                 result.getString("graph_checkpoint_schema_version"),
                 result.getString("isolated_domain_db_binding_hash"),
+                result.getString("environment_id"),
+                result.getLong("environment_generation"),
+                result.getString("domain_cluster_identity"),
+                result.getString("domain_database_identity"),
+                result.getString("domain_runtime_principal_identity"),
                 result.getBoolean("case_reserved"),
                 result.getBoolean("epoch_bound"),
                 result.getString("admission_manifest_hash"),
@@ -258,6 +330,11 @@ public final class JdbcTargetE2eFinalizationAuthority
             String graphVersion,
             String checkpointSchemaVersion,
             String domainDbBindingHash,
+            String environmentId,
+            long environmentGeneration,
+            String domainClusterIdentity,
+            String domainDatabaseIdentity,
+            String domainRuntimePrincipalIdentity,
             boolean caseReserved,
             boolean epochBound,
             String admissionManifestHash,
@@ -281,6 +358,29 @@ public final class JdbcTargetE2eFinalizationAuthority
                     && Objects.equals(request.commandEnvelopeHash(), admissionEnvelopeHash)
                     && request.roomEpoch() == admissionRoomEpoch
                     && request.roomFencingToken() == admissionRoomFence;
+        }
+
+        private boolean sameRuntimeEnvironment(AuthorizationRow runtime) {
+            environmentEvidence();
+            runtime.environmentEvidence();
+            return Objects.equals(environmentId, runtime.environmentId)
+                    && Objects.equals(domainClusterIdentity, runtime.domainClusterIdentity)
+                    && Objects.equals(domainDatabaseIdentity, runtime.domainDatabaseIdentity)
+                    && Objects.equals(
+                            domainRuntimePrincipalIdentity,
+                            runtime.domainRuntimePrincipalIdentity);
+        }
+
+        private EnvironmentEvidence environmentEvidence() {
+            return new EnvironmentEvidence(
+                    activationId,
+                    manifestHash,
+                    environmentId,
+                    environmentGeneration,
+                    domainClusterIdentity,
+                    domainDatabaseIdentity,
+                    domainRuntimePrincipalIdentity,
+                    domainDbBindingHash);
         }
     }
 }

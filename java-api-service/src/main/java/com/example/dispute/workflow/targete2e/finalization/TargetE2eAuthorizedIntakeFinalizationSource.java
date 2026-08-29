@@ -61,7 +61,8 @@ public final class TargetE2eAuthorizedIntakeFinalizationSource {
                 evidence.commandHash(),
                 evidence.commandEnvelopeHash(),
                 request.command().roomEpoch(),
-                state.run().fencingToken());
+                state.run().fencingToken(),
+                evidence.graphActivationId());
         var decision = Objects.requireNonNull(
                 activation.authorize(authorizationRequest),
                 "activation authority returned null");

@@ -10,6 +10,17 @@ public interface TargetE2eFinalizationEnvironmentSource {
 
     EnvironmentEvidence loadEnvironmentEvidence();
 
+    default EnvironmentEvidence loadEnvironmentEvidence(String authorityActivationId) {
+        Objects.requireNonNull(authorityActivationId, "authorityActivationId");
+        EnvironmentEvidence evidence = Objects.requireNonNull(
+                loadEnvironmentEvidence(), "environment evidence");
+        if (!authorityActivationId.equals(evidence.activationId())) {
+            throw new IllegalStateException(
+                    "environment source cannot resolve the requested authority activation");
+        }
+        return evidence;
+    }
+
     record EnvironmentEvidence(
             String activationId,
             String manifestHash,

@@ -52,6 +52,20 @@ class TargetE2eArtifactConfigurationParallelWiringTest {
         .contains("dataSource, targetE2eAgentActivationLedger, objectMapper");
   }
 
+  @Test
+  void pinsFinalizationRuntimeContextToTheCurrentDeploymentIdentity() throws IOException {
+    String source = Files.readString(CONFIGURATION_SOURCE);
+    String runtimeContext = method(source, "targetE2eFinalizationRuntimeContextProvider");
+
+    assertThat(runtimeContext)
+        .contains("TargetE2eAgentDeploymentBinding deploymentBinding")
+        .contains("Environment environment")
+        .contains("deploymentBinding.agentBuildId()")
+        .contains("deploymentBinding.activationId()")
+        .contains("deploymentBinding.manifestHash()")
+        .contains("required(environment, \"target.e2e.isolated-domain-db-binding-hash\")");
+  }
+
   private static String method(String source, String methodName) {
     int start = source.indexOf(methodName);
     int end = source.indexOf("\n    @Bean", start + methodName.length());

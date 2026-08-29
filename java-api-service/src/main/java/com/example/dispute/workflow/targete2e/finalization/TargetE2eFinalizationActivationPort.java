@@ -31,7 +31,39 @@ public interface TargetE2eFinalizationActivationPort {
             String commandHash,
             String commandEnvelopeHash,
             long roomEpoch,
-            long roomFencingToken) {
+            long roomFencingToken,
+            String authorityActivationId) {
+
+        public AuthorizationRequest(
+                String tenantSurrogate,
+                String caseId,
+                String roomId,
+                RoomType roomType,
+                String agentRunId,
+                String workflowId,
+                String workflowRunId,
+                String workflowBuildId,
+                String commandId,
+                String commandHash,
+                String commandEnvelopeHash,
+                long roomEpoch,
+                long roomFencingToken) {
+            this(
+                    tenantSurrogate,
+                    caseId,
+                    roomId,
+                    roomType,
+                    agentRunId,
+                    workflowId,
+                    workflowRunId,
+                    workflowBuildId,
+                    commandId,
+                    commandHash,
+                    commandEnvelopeHash,
+                    roomEpoch,
+                    roomFencingToken,
+                    null);
+        }
 
         public AuthorizationRequest {
             required(tenantSurrogate, "tenantSurrogate");
@@ -51,28 +83,38 @@ public interface TargetE2eFinalizationActivationPort {
                     || roomFencingToken > MAX_SAFE_INTEGER) {
                 throw new IllegalArgumentException("room epoch or fencing token is invalid");
             }
+            if (authorityActivationId != null
+                    && !authorityActivationId.matches("p9act[.]v1[.][0-9a-f]{32}")) {
+                throw new IllegalArgumentException("authorityActivationId is invalid");
+            }
         }
     }
 
-    record AuthorizationDecision(Decision decision, ActivationGrant grant) {
+    record AuthorizationDecision(
+            Decision decision, ActivationGrant grant, RuntimeAttestation runtimeAttestation) {
 
         public AuthorizationDecision {
             decision = Objects.requireNonNull(decision, "decision");
-            if ((decision == Decision.ALLOWED) != (grant != null)) {
+            boolean allowed = decision == Decision.ALLOWED;
+            if (allowed != (grant != null) || allowed != (runtimeAttestation != null)) {
                 throw new IllegalArgumentException(
-                        "only an allowed activation decision may carry a grant");
+                        "only an allowed activation decision may carry both authority and runtime grants");
             }
         }
 
-        public static AuthorizationDecision allowed(ActivationGrant grant) {
-            return new AuthorizationDecision(Decision.ALLOWED, Objects.requireNonNull(grant));
+        public static AuthorizationDecision allowed(
+                ActivationGrant grant, RuntimeAttestation runtimeAttestation) {
+            return new AuthorizationDecision(
+                    Decision.ALLOWED,
+                    Objects.requireNonNull(grant),
+                    Objects.requireNonNull(runtimeAttestation));
         }
 
         public static AuthorizationDecision denied(Decision decision) {
             if (decision == Decision.ALLOWED) {
                 throw new IllegalArgumentException("allowed decisions require a grant");
             }
-            return new AuthorizationDecision(decision, null);
+            return new AuthorizationDecision(decision, null, null);
         }
     }
 
@@ -145,6 +187,50 @@ public interface TargetE2eFinalizationActivationPort {
         }
     }
 
+    /** Current deployment proof for executing one immutable authority activation's finalizer. */
+    record RuntimeAttestation(
+            String activationId,
+            String authorityActivationId,
+            String executionLane,
+            String tenantSurrogate,
+            Set<RoomType> allowedRoomTypes,
+            String expectedAgentBuildId,
+            String graphKey,
+            String graphVersion,
+            String checkpointSchemaVersion,
+            String activationManifestHash,
+            String isolatedDomainDbBindingHash,
+            Lifecycle lifecycle,
+            Instant issuedAt,
+            Instant expiresAt,
+            Instant revokedAt) {
+
+        public RuntimeAttestation {
+            validatedActivationId(activationId, "activationId");
+            validatedActivationId(authorityActivationId, "authorityActivationId");
+            required(executionLane, "executionLane");
+            required(tenantSurrogate, "tenantSurrogate");
+            allowedRoomTypes = Set.copyOf(
+                    Objects.requireNonNull(allowedRoomTypes, "allowedRoomTypes"));
+            if (allowedRoomTypes.isEmpty()) {
+                throw new IllegalArgumentException("runtime room scope must not be empty");
+            }
+            allowedRoomTypes.forEach(value -> Objects.requireNonNull(value, "allowedRoomType"));
+            required(expectedAgentBuildId, "expectedAgentBuildId");
+            required(graphKey, "graphKey");
+            required(graphVersion, "graphVersion");
+            required(checkpointSchemaVersion, "checkpointSchemaVersion");
+            sha256(activationManifestHash, "activationManifestHash");
+            sha256(isolatedDomainDbBindingHash, "isolatedDomainDbBindingHash");
+            lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
+            issuedAt = Objects.requireNonNull(issuedAt, "issuedAt");
+            expiresAt = Objects.requireNonNull(expiresAt, "expiresAt");
+            if (!expiresAt.isAfter(issuedAt)) {
+                throw new IllegalArgumentException("runtime activation expiry must follow issuance");
+            }
+        }
+    }
+
     enum Lifecycle {
         ACTIVE,
         DRAIN_ONLY,
@@ -173,6 +259,13 @@ public interface TargetE2eFinalizationActivationPort {
     private static String sha256(String value, String field) {
         if (value == null || !value.matches("[0-9a-f]{64}")) {
             throw new IllegalArgumentException(field + " must be a lowercase SHA-256");
+        }
+        return value;
+    }
+
+    private static String validatedActivationId(String value, String field) {
+        if (value == null || !value.matches("p9act[.]v1[.][0-9a-f]{32}")) {
+            throw new IllegalArgumentException(field + " is invalid");
         }
         return value;
     }

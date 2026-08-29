@@ -12,6 +12,7 @@ import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.ActivationGrant;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationDecision;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.RuntimeAttestation;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.List;
@@ -20,35 +21,33 @@ import org.junit.jupiter.api.Test;
 class TargetE2eFinalizationBindingVerifierTest {
 
     @Test
-    void acceptsHistoricalGraphActivationWhenCurrentGrantOwnsFormalWriteBinding() {
+    void acceptsHistoricalReceiptAuthorityWithCurrentRuntimeAttestation() {
         var fixture = TargetE2eFinalizationFixture.validParallel();
-        String currentActivationId = "p9act.v1." + "2".repeat(32);
-        String currentManifestHash = "8".repeat(64);
-        ObjectNode currentDbBinding = fixture.evidence().isolatedDomainDbBinding().deepCopy();
-        currentDbBinding.put("activation_id", currentActivationId);
-        putSelfHash(currentDbBinding, "binding_hash");
-        var currentEvidence = new TargetE2eFinalizationEvidence(
-                currentManifestHash,
-                fixture.evidence().commandEnvelope(),
-                fixture.evidence().resultEnvelope(),
-                fixture.evidence().proposalSource(),
-                currentDbBinding);
         ActivationGrant historical =
                 TargetE2eFinalizationFixture.activeDecision(fixture).grant();
-        var currentGrant = new ActivationGrant(
+        String currentActivationId = "p9act.v1." + "2".repeat(32);
+        String currentManifestHash = "8".repeat(64);
+        String currentDbBindingHash = "7".repeat(64);
+        var currentRuntime = new TargetE2eFinalizationRuntimeContextProvider.RuntimeContext(
+                fixture.runtime().workflowId(),
+                fixture.runtime().workflowRunId(),
+                "current-finalizer-build",
                 currentActivationId,
+                currentManifestHash,
+                currentDbBindingHash);
+        var runtimeAttestation = new RuntimeAttestation(
+                currentActivationId,
+                historical.activationId(),
                 historical.executionLane(),
                 historical.tenantSurrogate(),
-                historical.allowedCaseIds(),
                 historical.allowedRoomTypes(),
-                historical.expectedAgentBuildId(),
+                currentRuntime.workflowBuildId(),
                 historical.graphKey(),
                 historical.graphVersion(),
                 historical.checkpointSchemaVersion(),
                 currentManifestHash,
-                currentDbBinding.required("binding_hash").textValue(),
+                currentDbBindingHash,
                 historical.lifecycle(),
-                historical.acceptedCommandProof(),
                 historical.issuedAt(),
                 historical.expiresAt(),
                 historical.revokedAt());
@@ -56,11 +55,11 @@ class TargetE2eFinalizationBindingVerifierTest {
         var verifier = verifier();
         var source = new TargetE2eAuthorizedIntakeFinalizationSource(
                 (request, result) -> java.util.Optional.of(fixture.state()),
-                request -> AuthorizationDecision.allowed(currentGrant),
-                () -> fixture.runtime(),
+                request -> AuthorizationDecision.allowed(historical, runtimeAttestation),
+                () -> currentRuntime,
                 new TargetE2eExecutionLaneVerifier(java.time.Clock.fixed(
                         TargetE2eFinalizationFixture.NOW, java.time.ZoneOffset.UTC)),
-                (request, result, runtime, state) -> currentEvidence,
+                (request, result, runtime, state) -> fixture.evidence(),
                 verifier);
         var authorized = source.resolve(fixture.request(), fixture.result());
         var prepared = new TargetE2eIntakeRoomFinalizationStrategy(
@@ -71,27 +70,75 @@ class TargetE2eFinalizationBindingVerifierTest {
                 .prepare(fixture.request(), fixture.result());
         var verified = authorized.evidence();
 
-        assertThatThrownBy(() -> verifier.requireGrantBindings(historical, verified))
-                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
-                .hasMessageContaining("finalization activation id");
         assertThat(fixture.request().streamProtocol()).isEqualTo("agent-stream.v4");
         assertThat(ExecuteAgentRunRequest.isParallelIntakeCommand(fixture.request().command()))
                 .isTrue();
         assertThat(fixture.state().epoch().streamProtocol()).isEqualTo("agent-stream.v3");
         assertThat(verified.graphActivationId())
                 .isEqualTo(TargetE2eFinalizationFixture.ACTIVATION_ID);
-        assertThat(verified.finalizationActivationId()).isEqualTo(currentActivationId);
-        assertThat(prepared.receiptBindings().activationId()).isEqualTo(currentActivationId);
-        assertThat(prepared.activationManifestHash()).isEqualTo(currentManifestHash);
+        assertThat(verified.finalizationActivationId())
+                .isEqualTo(TargetE2eFinalizationFixture.ACTIVATION_ID);
+        assertThat(prepared.receiptBindings().activationId())
+                .isEqualTo(TargetE2eFinalizationFixture.ACTIVATION_ID);
+        assertThat(prepared.activationManifestHash())
+                .isEqualTo(fixture.evidence().activationManifestHash());
         assertThat(prepared.receiptBindings().isolatedDomainDbBindingHash())
-                .isEqualTo(currentDbBinding.required("binding_hash").textValue());
+                .isEqualTo(fixture.evidence()
+                        .isolatedDomainDbBinding()
+                        .required("binding_hash")
+                        .textValue());
         assertThat(verified.commandEnvelopeHash())
                 .isEqualTo(fixture.evidence()
                         .commandEnvelope()
                         .required("command_envelope_hash")
                         .textValue());
         assertThat(verified.isolatedDomainDbBindingHash())
-                .isEqualTo(currentDbBinding.required("binding_hash").textValue());
+                .isEqualTo(fixture.evidence()
+                        .isolatedDomainDbBinding()
+                        .required("binding_hash")
+                        .textValue());
+
+        var foreignHandoff = new RuntimeAttestation(
+                runtimeAttestation.activationId(),
+                "p9act.v1." + "3".repeat(32),
+                runtimeAttestation.executionLane(),
+                runtimeAttestation.tenantSurrogate(),
+                runtimeAttestation.allowedRoomTypes(),
+                runtimeAttestation.expectedAgentBuildId(),
+                runtimeAttestation.graphKey(),
+                runtimeAttestation.graphVersion(),
+                runtimeAttestation.checkpointSchemaVersion(),
+                runtimeAttestation.activationManifestHash(),
+                runtimeAttestation.isolatedDomainDbBindingHash(),
+                runtimeAttestation.lifecycle(),
+                runtimeAttestation.issuedAt(),
+                runtimeAttestation.expiresAt(),
+                runtimeAttestation.revokedAt());
+        var foreignSource = new TargetE2eAuthorizedIntakeFinalizationSource(
+                (request, result) -> java.util.Optional.of(fixture.state()),
+                request -> AuthorizationDecision.allowed(historical, foreignHandoff),
+                () -> currentRuntime,
+                new TargetE2eExecutionLaneVerifier(java.time.Clock.fixed(
+                        TargetE2eFinalizationFixture.NOW, java.time.ZoneOffset.UTC)),
+                (request, result, runtime, state) -> fixture.evidence(),
+                verifier);
+        assertThatThrownBy(() -> foreignSource.resolve(fixture.request(), fixture.result()))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessageContaining("runtime handoff authority");
+
+        var staleRuntimeSource = new TargetE2eAuthorizedIntakeFinalizationSource(
+                (request, result) -> java.util.Optional.of(fixture.state()),
+                request -> AuthorizationDecision.allowed(
+                        historical,
+                        TargetE2eFinalizationFixture.runtimeAttestation(fixture, historical)),
+                () -> currentRuntime,
+                new TargetE2eExecutionLaneVerifier(java.time.Clock.fixed(
+                        TargetE2eFinalizationFixture.NOW, java.time.ZoneOffset.UTC)),
+                (request, result, runtime, state) -> fixture.evidence(),
+                verifier);
+        assertThatThrownBy(() -> staleRuntimeSource.resolve(fixture.request(), fixture.result()))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessageContaining("runtime activation");
     }
 
     @Test
@@ -114,7 +161,7 @@ class TargetE2eFinalizationBindingVerifierTest {
                                 fixture.state(),
                                 currentEvidence))
                 .isInstanceOf(TargetE2eFinalizationRejectedException.class)
-                .hasMessageContaining("legacy finalization activation id");
+                .hasMessageContaining("receipt authority activation id");
     }
 
     @Test

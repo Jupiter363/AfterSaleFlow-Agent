@@ -387,9 +387,12 @@ public class TargetE2eArtifactConfiguration {
 
     @Bean
     TargetE2eFinalizationRuntimeContextProvider targetE2eFinalizationRuntimeContextProvider(
-            TargetE2eAgentDeploymentBinding deploymentBinding) {
+            TargetE2eAgentDeploymentBinding deploymentBinding, Environment environment) {
         return new TemporalTargetE2eFinalizationRuntimeContextProvider(
-                deploymentBinding.agentBuildId());
+                deploymentBinding.agentBuildId(),
+                deploymentBinding.activationId(),
+                deploymentBinding.manifestHash(),
+                required(environment, "target.e2e.isolated-domain-db-binding-hash"));
     }
 
     @Bean

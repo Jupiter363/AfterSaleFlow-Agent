@@ -8,6 +8,8 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalization
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AcceptedCommandProof;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationDecision;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.Lifecycle;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.RuntimeAttestation;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider.RuntimeContext;
 import java.time.Clock;
 import java.time.ZoneOffset;
 import java.util.Optional;
@@ -156,7 +158,7 @@ class TargetE2eExecutionLaneVerifierTest {
     void wrongLaneWriterModeAndExecutorAreRejected() {
         var fixture = TargetE2eFinalizationFixture.valid();
         ActivationGrant active = TargetE2eFinalizationFixture.activeDecision(fixture).grant();
-        var wrongLane = AuthorizationDecision.allowed(new ActivationGrant(
+        var wrongLane = TargetE2eFinalizationFixture.decision(fixture, new ActivationGrant(
                 active.activationId(),
                 "SHADOW",
                 active.tenantSurrogate(),
@@ -184,7 +186,7 @@ class TargetE2eExecutionLaneVerifierTest {
                 .isInstanceOf(TargetE2eFinalizationRejectedException.class)
                 .hasMessageContaining("exact target-E2E candidate lane");
 
-        var wrongGraph = AuthorizationDecision.allowed(new ActivationGrant(
+        var wrongGraph = TargetE2eFinalizationFixture.decision(fixture, new ActivationGrant(
                 active.activationId(),
                 active.executionLane(),
                 active.tenantSurrogate(),
@@ -231,7 +233,7 @@ class TargetE2eExecutionLaneVerifierTest {
     void expiredAndRevokedActivationAreRejected() {
         var fixture = TargetE2eFinalizationFixture.valid();
         ActivationGrant active = TargetE2eFinalizationFixture.activeDecision(fixture).grant();
-        var expired = AuthorizationDecision.allowed(new ActivationGrant(
+        var expired = TargetE2eFinalizationFixture.decision(fixture, new ActivationGrant(
                 active.activationId(), active.executionLane(), active.tenantSurrogate(),
                 active.allowedCaseIds(), active.allowedRoomTypes(), active.expectedAgentBuildId(),
                 active.graphKey(), active.graphVersion(), active.checkpointSchemaVersion(),
@@ -244,7 +246,7 @@ class TargetE2eExecutionLaneVerifierTest {
                 .isInstanceOf(TargetE2eFinalizationRejectedException.class)
                 .hasMessageContaining("expired activation");
 
-        var revoked = AuthorizationDecision.allowed(new ActivationGrant(
+        var revoked = TargetE2eFinalizationFixture.decision(fixture, new ActivationGrant(
                 active.activationId(), active.executionLane(), active.tenantSurrogate(),
                 active.allowedCaseIds(), active.allowedRoomTypes(), active.expectedAgentBuildId(),
                 active.graphKey(), active.graphVersion(), active.checkpointSchemaVersion(),
@@ -270,7 +272,7 @@ class TargetE2eExecutionLaneVerifierTest {
                 request.roomEpoch(),
                 request.roomFencingToken(),
                 drainExpiry.minusSeconds(1));
-        var draining = AuthorizationDecision.allowed(new ActivationGrant(
+        var draining = TargetE2eFinalizationFixture.decision(fixture, new ActivationGrant(
                 active.activationId(), active.executionLane(), active.tenantSurrogate(),
                 active.allowedCaseIds(), active.allowedRoomTypes(), active.expectedAgentBuildId(),
                 active.graphKey(), active.graphVersion(), active.checkpointSchemaVersion(),
@@ -284,7 +286,7 @@ class TargetE2eExecutionLaneVerifierTest {
         var wrongProof = new AcceptedCommandProof(
                 request.commandId(), "f".repeat(64), request.commandEnvelopeHash(),
                 request.roomEpoch(), request.roomFencingToken(), proof.admittedAt());
-        var wrongDrain = AuthorizationDecision.allowed(new ActivationGrant(
+        var wrongDrain = TargetE2eFinalizationFixture.decision(fixture, new ActivationGrant(
                 active.activationId(), active.executionLane(), active.tenantSurrogate(),
                 active.allowedCaseIds(), active.allowedRoomTypes(), active.expectedAgentBuildId(),
                 active.graphKey(), active.graphVersion(), active.checkpointSchemaVersion(),
@@ -294,7 +296,7 @@ class TargetE2eExecutionLaneVerifierTest {
                 .isInstanceOf(TargetE2eFinalizationRejectedException.class)
                 .hasMessageContaining("pre-cutoff accepted work");
 
-        var drained = AuthorizationDecision.allowed(new ActivationGrant(
+        var drained = TargetE2eFinalizationFixture.decision(fixture, new ActivationGrant(
                 active.activationId(), active.executionLane(), active.tenantSurrogate(),
                 active.allowedCaseIds(), active.allowedRoomTypes(), active.expectedAgentBuildId(),
                 active.graphKey(), active.graphVersion(), active.checkpointSchemaVersion(),
@@ -303,6 +305,160 @@ class TargetE2eExecutionLaneVerifierTest {
         assertThatThrownBy(() -> verify(drained, fixture, fixture.state()))
                 .isInstanceOf(TargetE2eFinalizationRejectedException.class)
                 .hasMessageContaining("DRAINED");
+    }
+
+    @Test
+    void sameActivationRequiresOneImmutableIdentity() {
+        var fixture = TargetE2eFinalizationFixture.validParallel();
+        ActivationGrant authority = TargetE2eFinalizationFixture.activeDecision(fixture).grant();
+        RuntimeAttestation exact =
+                TargetE2eFinalizationFixture.runtimeAttestation(fixture, authority);
+
+        assertRuntimeRejected(
+                fixture,
+                authority,
+                copyRuntime(exact, exact.expectedAgentBuildId(), exact.activationManifestHash(),
+                        exact.isolatedDomainDbBindingHash(), Lifecycle.DRAIN_ONLY),
+                fixture.runtime(),
+                "same-activation lifecycle");
+        assertRuntimeRejected(
+                fixture,
+                authority,
+                copyRuntime(exact, "other-build", exact.activationManifestHash(),
+                        exact.isolatedDomainDbBindingHash(), exact.lifecycle()),
+                fixture.runtime(),
+                "same-activation agent build");
+        assertRuntimeRejected(
+                fixture,
+                authority,
+                copyRuntime(exact, exact.expectedAgentBuildId(), "f".repeat(64),
+                        exact.isolatedDomainDbBindingHash(), exact.lifecycle()),
+                fixture.runtime(),
+                "same-activation manifest");
+        assertRuntimeRejected(
+                fixture,
+                authority,
+                copyRuntime(exact, exact.expectedAgentBuildId(), exact.activationManifestHash(),
+                        "e".repeat(64), exact.lifecycle()),
+                fixture.runtime(),
+                "same-activation isolated Domain DB binding");
+    }
+
+    @Test
+    void historicalDrainAuthorityRequiresADistinctActiveRuntime() {
+        var fixture = TargetE2eFinalizationFixture.validParallel();
+        ActivationGrant active = TargetE2eFinalizationFixture.activeDecision(fixture).grant();
+        var request = fixture.authorizationRequest();
+        var drainExpiry = TargetE2eFinalizationFixture.NOW.minusSeconds(1);
+        var proof = new AcceptedCommandProof(
+                request.commandId(),
+                request.commandHash(),
+                request.commandEnvelopeHash(),
+                request.roomEpoch(),
+                request.roomFencingToken(),
+                drainExpiry.minusSeconds(1));
+        var historical = new ActivationGrant(
+                active.activationId(),
+                active.executionLane(),
+                active.tenantSurrogate(),
+                active.allowedCaseIds(),
+                active.allowedRoomTypes(),
+                active.expectedAgentBuildId(),
+                active.graphKey(),
+                active.graphVersion(),
+                active.checkpointSchemaVersion(),
+                active.activationManifestHash(),
+                active.isolatedDomainDbBindingHash(),
+                Lifecycle.DRAIN_ONLY,
+                proof,
+                active.issuedAt(),
+                drainExpiry,
+                null);
+        String currentActivationId = "p9act.v1." + "2".repeat(32);
+        String currentManifestHash = "8".repeat(64);
+        String currentDbBindingHash = "7".repeat(64);
+        var currentRuntime = new RuntimeContext(
+                fixture.runtime().workflowId(),
+                fixture.runtime().workflowRunId(),
+                fixture.runtime().workflowBuildId(),
+                currentActivationId,
+                currentManifestHash,
+                currentDbBindingHash);
+        var activeCurrent = new RuntimeAttestation(
+                currentActivationId,
+                historical.activationId(),
+                historical.executionLane(),
+                historical.tenantSurrogate(),
+                historical.allowedRoomTypes(),
+                currentRuntime.workflowBuildId(),
+                historical.graphKey(),
+                historical.graphVersion(),
+                historical.checkpointSchemaVersion(),
+                currentManifestHash,
+                currentDbBindingHash,
+                Lifecycle.ACTIVE,
+                TargetE2eFinalizationFixture.NOW.minusSeconds(120),
+                TargetE2eFinalizationFixture.NOW.plusSeconds(120),
+                null);
+
+        assertThat(verifier.requireAuthorized(
+                        AuthorizationDecision.allowed(historical, activeCurrent),
+                        request,
+                        fixture.request(),
+                        fixture.result(),
+                        currentRuntime,
+                        fixture.state(),
+                        verified(fixture)))
+                .isEqualTo(historical);
+
+        assertRuntimeRejected(
+                fixture,
+                historical,
+                copyRuntime(activeCurrent, "other-build", currentManifestHash,
+                        currentDbBindingHash, Lifecycle.ACTIVE),
+                currentRuntime,
+                "runtime agent build");
+        assertRuntimeRejected(
+                fixture,
+                historical,
+                copyRuntime(activeCurrent, currentRuntime.workflowBuildId(), "f".repeat(64),
+                        currentDbBindingHash, Lifecycle.ACTIVE),
+                currentRuntime,
+                "runtime activation manifest");
+        assertRuntimeRejected(
+                fixture,
+                historical,
+                copyRuntime(activeCurrent, currentRuntime.workflowBuildId(), currentManifestHash,
+                        "e".repeat(64), Lifecycle.ACTIVE),
+                currentRuntime,
+                "runtime isolated Domain DB binding");
+
+        var drainingCurrent = new RuntimeAttestation(
+                activeCurrent.activationId(),
+                activeCurrent.authorityActivationId(),
+                activeCurrent.executionLane(),
+                activeCurrent.tenantSurrogate(),
+                activeCurrent.allowedRoomTypes(),
+                activeCurrent.expectedAgentBuildId(),
+                activeCurrent.graphKey(),
+                activeCurrent.graphVersion(),
+                activeCurrent.checkpointSchemaVersion(),
+                activeCurrent.activationManifestHash(),
+                activeCurrent.isolatedDomainDbBindingHash(),
+                Lifecycle.DRAIN_ONLY,
+                activeCurrent.issuedAt(),
+                drainExpiry,
+                null);
+        assertThatThrownBy(() -> verifier.requireAuthorized(
+                        AuthorizationDecision.allowed(historical, drainingCurrent),
+                        request,
+                        fixture.request(),
+                        fixture.result(),
+                        currentRuntime,
+                        fixture.state(),
+                        verified(fixture)))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessageContaining("runtime activation cannot execute");
     }
 
     @Test
@@ -348,6 +504,48 @@ class TargetE2eExecutionLaneVerifierTest {
                 fixture.runtime(),
                 state,
                 verified(fixture));
+    }
+
+    private void assertRuntimeRejected(
+            TargetE2eFinalizationFixture.Fixture fixture,
+            ActivationGrant authority,
+            RuntimeAttestation runtimeAttestation,
+            RuntimeContext runtime,
+            String field) {
+        assertThatThrownBy(() -> verifier.requireAuthorized(
+                        AuthorizationDecision.allowed(authority, runtimeAttestation),
+                        fixture.authorizationRequest(),
+                        fixture.request(),
+                        fixture.result(),
+                        runtime,
+                        fixture.state(),
+                        verified(fixture)))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessageContaining(field);
+    }
+
+    private static RuntimeAttestation copyRuntime(
+            RuntimeAttestation value,
+            String buildId,
+            String manifestHash,
+            String dbBindingHash,
+            Lifecycle lifecycle) {
+        return new RuntimeAttestation(
+                value.activationId(),
+                value.authorityActivationId(),
+                value.executionLane(),
+                value.tenantSurrogate(),
+                value.allowedRoomTypes(),
+                buildId,
+                value.graphKey(),
+                value.graphVersion(),
+                value.checkpointSchemaVersion(),
+                manifestHash,
+                dbBindingHash,
+                lifecycle,
+                value.issuedAt(),
+                value.expiresAt(),
+                value.revokedAt());
     }
 
     private static TargetE2eFinalizationBindingVerifier.VerifiedEvidence verified(

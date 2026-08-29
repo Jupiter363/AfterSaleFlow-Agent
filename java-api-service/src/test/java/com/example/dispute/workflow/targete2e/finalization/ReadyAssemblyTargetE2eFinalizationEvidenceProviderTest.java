@@ -36,15 +36,20 @@ class ReadyAssemblyTargetE2eFinalizationEvidenceProviderTest {
     private static final String COMMAND = "COMMAND_PARALLEL_EVIDENCE";
     private static final String REQUEST_HASH = "1".repeat(64);
     private static final String RESULT_HASH = "2".repeat(64);
+    private static final String AUTHORITY_ACTIVATION = "p9act.v1." + "3".repeat(32);
 
     @Test
     void loadsCanonicalReadyEvidenceWithoutCallingTheLegacyGraph() throws Exception {
         IntakeParallelAssemblyStore store = mock(IntakeParallelAssemblyStore.class);
-        ReadyArtifact artifact = artifact("{}".getBytes(StandardCharsets.UTF_8));
+        ReadyArtifact artifact = artifact(validCommandEnvelopeBytes());
         ReadyLookup lookup = new ReadyLookup(RUN, ATTEMPT, COMMAND, REQUEST_HASH);
         when(store.loadReady(lookup)).thenReturn(Optional.of(artifact));
+        TargetE2eFinalizationEnvironmentSource environmentSource =
+                mock(TargetE2eFinalizationEnvironmentSource.class);
+        when(environmentSource.loadEnvironmentEvidence(AUTHORITY_ACTIVATION))
+                .thenReturn(environment());
         var provider = new ReadyAssemblyTargetE2eFinalizationEvidenceProvider(
-                store, ReadyAssemblyTargetE2eFinalizationEvidenceProviderTest::environment, MAPPER);
+                store, environmentSource, MAPPER);
         ExecuteAgentRunRequest request = parallelRequest();
         ExecuteAgentRunResult result = completedResult();
 
@@ -52,19 +57,25 @@ class ReadyAssemblyTargetE2eFinalizationEvidenceProviderTest {
                 request, result, mock(RuntimeContext.class), mock(TargetE2eIntakeFinalizationState.class));
 
         assertThat(evidence.activationManifestHash()).isEqualTo("9".repeat(64));
-        assertThat(evidence.commandEnvelope()).isEqualTo(MAPPER.readTree("{}"));
+        assertThat(evidence.commandEnvelope())
+                .isEqualTo(MAPPER.readTree(validCommandEnvelopeBytes()));
         assertThat(evidence.resultEnvelope()).isEqualTo(MAPPER.readTree("{}"));
         assertThat(evidence.proposalSource()).isEqualTo(MAPPER.readTree("{}"));
         assertThat(evidence.isolatedDomainDbBinding().required("binding_hash").textValue())
                 .isEqualTo(environment().domainDbBindingHash());
         verify(store).loadReady(lookup);
+        verify(environmentSource).loadEnvironmentEvidence(AUTHORITY_ACTIVATION);
+        verify(environmentSource, never()).loadEnvironmentEvidence();
     }
 
     @Test
     void rejectsNonCanonicalReadyEnvelopeBytes() {
         IntakeParallelAssemblyStore store = mock(IntakeParallelAssemblyStore.class);
         when(store.loadReady(new ReadyLookup(RUN, ATTEMPT, COMMAND, REQUEST_HASH)))
-                .thenReturn(Optional.of(artifact("{ }".getBytes(StandardCharsets.UTF_8))));
+                .thenReturn(Optional.of(artifact(("{ \"activation_id\":\""
+                                + AUTHORITY_ACTIVATION
+                                + "\" }")
+                        .getBytes(StandardCharsets.UTF_8))));
         var provider = new ReadyAssemblyTargetE2eFinalizationEvidenceProvider(
                 store, ReadyAssemblyTargetE2eFinalizationEvidenceProviderTest::environment, MAPPER);
 
@@ -133,7 +144,7 @@ class ReadyAssemblyTargetE2eFinalizationEvidenceProviderTest {
     }
 
     private static EnvironmentEvidence environment() {
-        String activation = "p9act.v1." + "3".repeat(32);
+        String activation = AUTHORITY_ACTIVATION;
         String environment = "p9-isolated-preprod-01";
         long generation = 7;
         String cluster = "p9-domain-cluster-01";
@@ -149,6 +160,11 @@ class ReadyAssemblyTargetE2eFinalizationEvidenceProviderTest {
                 principal,
                 TargetE2eIsolatedDomainDbBinding.hash(
                         environment, generation, activation, cluster, database, principal));
+    }
+
+    private static byte[] validCommandEnvelopeBytes() {
+        return ("{\"activation_id\":\"" + AUTHORITY_ACTIVATION + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
     }
 
     private static ReadyArtifact artifact(byte[] commandEnvelopeBytes) {

@@ -10,6 +10,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalization
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationRequest;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.Decision;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.Lifecycle;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.RuntimeAttestation;
 import java.time.Instant;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
@@ -32,7 +33,7 @@ class TargetE2eCrossRoomActivationVerifierTest {
         TargetE2eExecutionLaneVerifier.CHECKPOINT_SCHEMA_VERSION);
 
     assertThat(TargetE2eCrossRoomActivationVerifier.requireAuthorized(
-        AuthorizationDecision.allowed(grant), request, ACTIVATION_ID, MANIFEST_HASH, DB_HASH))
+        decision(grant), request, ACTIVATION_ID, MANIFEST_HASH, DB_HASH))
         .isEqualTo(grant);
   }
 
@@ -66,7 +67,7 @@ class TargetE2eCrossRoomActivationVerifierTest {
         Lifecycle.DRAIN_ONLY, exact, TargetE2eExecutionLaneVerifier.GRAPH_VERSION,
         TargetE2eExecutionLaneVerifier.CHECKPOINT_SCHEMA_VERSION);
     assertThat(TargetE2eCrossRoomActivationVerifier.requireAuthorized(
-        AuthorizationDecision.allowed(draining), request, ACTIVATION_ID, MANIFEST_HASH, DB_HASH))
+        decision(draining), request, ACTIVATION_ID, MANIFEST_HASH, DB_HASH))
         .isEqualTo(draining);
 
     AcceptedCommandProof wrong = new AcceptedCommandProof(
@@ -90,7 +91,16 @@ class TargetE2eCrossRoomActivationVerifierTest {
 
   private static void verify(AuthorizationRequest request, ActivationGrant grant) {
     TargetE2eCrossRoomActivationVerifier.requireAuthorized(
-        AuthorizationDecision.allowed(grant), request, ACTIVATION_ID, MANIFEST_HASH, DB_HASH);
+        decision(grant), request, ACTIVATION_ID, MANIFEST_HASH, DB_HASH);
+  }
+
+  private static AuthorizationDecision decision(ActivationGrant grant) {
+    return AuthorizationDecision.allowed(grant, new RuntimeAttestation(
+        grant.activationId(), grant.activationId(), grant.executionLane(), grant.tenantSurrogate(),
+        grant.allowedRoomTypes(), grant.expectedAgentBuildId(), grant.graphKey(),
+        grant.graphVersion(), grant.checkpointSchemaVersion(), grant.activationManifestHash(),
+        grant.isolatedDomainDbBindingHash(), grant.lifecycle(), grant.issuedAt(),
+        grant.expiresAt(), grant.revokedAt()));
   }
 
   private static AuthorizationRequest request() {

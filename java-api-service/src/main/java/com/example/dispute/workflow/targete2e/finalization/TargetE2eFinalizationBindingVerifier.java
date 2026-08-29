@@ -152,17 +152,13 @@ public final class TargetE2eFinalizationBindingVerifier {
         JsonNode dbBinding = evidence.isolatedDomainDbBinding();
         exactFields(dbBinding, DB_BINDING_FIELDS, "isolated Domain DB binding");
         text(dbBinding, "schema_version", "target-e2e-isolated-domain-db-binding.v1");
-        // A READY result may cross deployments: Graph envelopes retain execution provenance,
-        // while this binding names the activation currently authorized to perform formal DML.
+        // Deployment identity may change, but the v1 receipt remains on the immutable
+        // command activation that owns reservation, epoch, and admission authority.
         String finalizationActivationId = activationId(dbBinding);
-        boolean parallelV4 = "agent-stream.v4".equals(request.streamProtocol())
-                && ExecuteAgentRunRequest.isParallelIntakeCommand(request.command());
-        if (!parallelV4) {
-            requireEqual(
-                    finalizationActivationId,
-                    graphActivationId,
-                    "legacy finalization activation id");
-        }
+        requireEqual(
+                finalizationActivationId,
+                graphActivationId,
+                "receipt authority activation id");
         text(dbBinding, "binding_kind", "ISOLATED_DOMAIN_POSTGRESQL");
         positiveLong(dbBinding, "environment_generation");
         boundedIdentifier(dbBinding, "environment_id");

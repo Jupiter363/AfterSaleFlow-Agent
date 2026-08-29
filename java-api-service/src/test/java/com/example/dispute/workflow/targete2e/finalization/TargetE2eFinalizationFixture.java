@@ -23,6 +23,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalization
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationRequest;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationDecision;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.Lifecycle;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.RuntimeAttestation;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider.RuntimeContext;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -314,10 +315,6 @@ final class TargetE2eFinalizationFixture {
                         graphResult.schemaVersion(),
                         "urn:graph-result:target-e2e",
                         result.resultHash()));
-        var runtime = new RuntimeContext(
-                TemporalAgentRunV2WorkflowLauncher.workflowId(RUN_ID),
-                "TEMPORAL_RUN_TARGET_E2E",
-                BUILD_ID);
         ObjectNode proposalSource = MAPPER.createObjectNode();
         proposalSource.put("schema_version", "target-e2e-room-proposal-source.v2");
         proposalSource.put("room_type", "INTAKE");
@@ -377,11 +374,18 @@ final class TargetE2eFinalizationFixture {
                 resultEnvelope,
                 proposalSource,
                 dbBinding);
+        var runtime = new RuntimeContext(
+                TemporalAgentRunV2WorkflowLauncher.workflowId(RUN_ID),
+                "TEMPORAL_RUN_TARGET_E2E",
+                BUILD_ID,
+                ACTIVATION_ID,
+                ACTIVATION_MANIFEST_HASH,
+                dbBinding.required("binding_hash").textValue());
         return new Fixture(request, result, state, runtime, proposal, evidence);
     }
 
     static AuthorizationDecision activeDecision(Fixture fixture) {
-        return AuthorizationDecision.allowed(new ActivationGrant(
+        return decision(fixture, new ActivationGrant(
                 ACTIVATION_ID,
                 TargetE2eExecutionLaneVerifier.EXECUTION_LANE,
                 TENANT,
@@ -398,6 +402,31 @@ final class TargetE2eFinalizationFixture {
                 NOW.minusSeconds(120),
                 NOW.plusSeconds(120),
                 null));
+    }
+
+    static AuthorizationDecision decision(Fixture fixture, ActivationGrant grant) {
+        return AuthorizationDecision.allowed(grant, runtimeAttestation(fixture, grant));
+    }
+
+    static RuntimeAttestation runtimeAttestation(Fixture fixture, ActivationGrant authority) {
+        RuntimeContext runtime = fixture.runtime();
+        boolean sameActivation = runtime.activationId().equals(authority.activationId());
+        return new RuntimeAttestation(
+                runtime.activationId(),
+                authority.activationId(),
+                TargetE2eExecutionLaneVerifier.EXECUTION_LANE,
+                authority.tenantSurrogate(),
+                authority.allowedRoomTypes(),
+                runtime.workflowBuildId(),
+                TargetE2eExecutionLaneVerifier.GRAPH_KEY,
+                TargetE2eExecutionLaneVerifier.GRAPH_VERSION,
+                TargetE2eExecutionLaneVerifier.CHECKPOINT_SCHEMA_VERSION,
+                runtime.activationManifestHash(),
+                runtime.isolatedDomainDbBindingHash(),
+                sameActivation ? authority.lifecycle() : Lifecycle.ACTIVE,
+                sameActivation ? authority.issuedAt() : NOW.minusSeconds(120),
+                sameActivation ? authority.expiresAt() : NOW.plusSeconds(120),
+                sameActivation ? authority.revokedAt() : null);
     }
 
     static TargetE2eAuthorizedIntakeFinalizationSource authorizedSource(Fixture fixture) {
@@ -527,7 +556,8 @@ final class TargetE2eFinalizationFixture {
                     verified.commandHash(),
                     verified.commandEnvelopeHash(),
                     request.command().roomEpoch(),
-                    state.run().fencingToken());
+                    state.run().fencingToken(),
+                    verified.graphActivationId());
         }
     }
 }
