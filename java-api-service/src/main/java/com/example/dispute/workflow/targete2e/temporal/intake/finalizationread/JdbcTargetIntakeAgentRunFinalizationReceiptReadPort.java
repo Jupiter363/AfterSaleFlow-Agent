@@ -83,7 +83,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
               from target_e2e_finalization_receipt receipt
               join agent_run run
                 on run.id = receipt.logical_run_id
-               and run.protocol = 'agent-stream.v3'
+               and run.protocol = :agentRunProtocol
                and run.executor_kind = 'TEMPORAL_ACTIVITY'
                and run.committed_attempt_id = receipt.attempt_id
                and run.final_result_hash = receipt.result_hash
@@ -317,6 +317,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
 
     private IntakeAgentRunFinalizationReadResult readInTransaction(
             IntakeAgentRunFinalizationReadRequest request) {
+        String agentRunProtocol = requiredAgentRunProtocol(request);
         var command = request.command();
         var target = command.executionContext().targetAgentRun();
         var child = request.childState();
@@ -329,6 +330,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 Map.entry("roomFencingToken", command.fencingToken()),
                 Map.entry("processRevision", target.expectedProcessRevision()),
                 Map.entry("logicalRunId", child.logicalRunId()),
+                Map.entry("agentRunProtocol", agentRunProtocol),
                 Map.entry("commandId", command.commandId()),
                 Map.entry("commandHash", target.commandHash()),
                 Map.entry("commandEnvelopeHash", target.commandEnvelopeHash()));
@@ -342,7 +344,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
 
         TargetRow row = rows.getFirst();
         TargetE2eFinalizationReceipt receipt = decodeTargetReceipt(row);
-        requireTargetBinding(request, receipt, row);
+        requireTargetBinding(request, receipt, row, agentRunProtocol);
         requireSingleCompletion(parameters, receipt, row);
         FormalProjection formal = readFormalProjection(request, receipt, row);
         return new IntakeAgentRunFinalizationReadResult(
@@ -351,6 +353,22 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 locator(receipt, row.activationManifestHash(), formal.formal()),
                 formal.toActivityReceipt(
                         command.requestHash(), command.party(), receipt.checkpointId()));
+    }
+
+    static String requiredAgentRunProtocol(IntakeAgentRunFinalizationReadRequest request) {
+        Objects.requireNonNull(request, "request");
+        ExecuteAgentRunRequest executionRequest =
+                request.command().executionContext().targetAgentRun().request();
+        String protocol = executionRequest.streamProtocol();
+        boolean parallel =
+                ExecuteAgentRunRequest.isParallelIntakeCommand(executionRequest.command());
+        if ((parallel && AgentRunProtocol.V4.wireValue().equals(protocol))
+                || (!parallel && AgentRunProtocol.V3.wireValue().equals(protocol))) {
+            return protocol;
+        }
+        throw rejected(
+                "TARGET_E2E_FINALIZATION_PROTOCOL_AUTHORITY_INVALID",
+                "target Intake finalization request has no exact AgentRun protocol authority");
     }
 
     private IntakeAgentRunFinalizationReadResult unresolved(
@@ -709,12 +727,14 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
     private void requireTargetBinding(
             IntakeAgentRunFinalizationReadRequest request,
             TargetE2eFinalizationReceipt receipt,
-            TargetRow row) {
+            TargetRow row,
+            String agentRunProtocol) {
         var command = request.command();
         var target = command.executionContext().targetAgentRun();
         var child = request.childState();
         RoomGraphCommand winningCommand = decodeAttemptCommand(row);
-        ExecuteAgentRunRequest winningRequest = decodeWinningMaterial(row, receipt, winningCommand);
+        ExecuteAgentRunRequest winningRequest =
+                decodeWinningMaterial(row, receipt, winningCommand, agentRunProtocol);
         if (!receipt.activationId().equals(target.activationId())
                 || !row.activationManifestHash().equals(target.activationManifestHash())
                 || !receipt.tenantSurrogate().equals(command.tenantSurrogate())
@@ -828,7 +848,8 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
     private ExecuteAgentRunRequest decodeWinningMaterial(
             TargetRow row,
             TargetE2eFinalizationReceipt receipt,
-            RoomGraphCommand winningCommand) {
+            RoomGraphCommand winningCommand,
+            String agentRunProtocol) {
         try {
             JsonNode materialDocument = objectMapper.readTree(row.materialCanonicalJson());
             if (materialDocument == null
@@ -846,7 +867,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                     receipt.logicalRunId(),
                     row.attemptNo(),
                     row.attemptLimit(),
-                    "agent-stream.v3",
+                    agentRunProtocol,
                     row.logicalInputHash(),
                     row.previousAttemptId(),
                     row.resetRequired(),

@@ -2,11 +2,14 @@ package com.example.dispute.workflow.targete2e.temporal.intake.finalizationread;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.util.List;
@@ -40,7 +43,11 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
     private static final String COMMAND_HASH_TWO = "4".repeat(64);
     private static final String ENVELOPE_HASH_ONE = "5".repeat(64);
     private static final String ENVELOPE_HASH_TWO = "6".repeat(64);
+    private static final String PARALLEL_RESULT = "a".repeat(64);
+    private static final String PARALLEL_COMMAND_HASH = "b".repeat(64);
+    private static final String PARALLEL_ENVELOPE_HASH = "c".repeat(64);
     private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
+    private static final AgentPlatformContractCodec V1_CODEC = new AgentPlatformContractCodec();
     private static final Path COMMAND_FIXTURE = Path.of(
             "..",
             "contracts",
@@ -168,28 +175,22 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
     }
 
     @Test
-    void selectsTheCommittedSecondAttemptAndDecodesItsRealJsonbText() throws Exception {
+    void selectsOnlyTheCommittedRunWithTheExactPersistedProtocolAndDecodesRealJsonb()
+            throws Exception {
         JsonNode fixture = MAPPER.readTree(COMMAND_FIXTURE.toFile()).required("instance");
-        RoomGraphCommand command = MAPPER.treeToValue(fixture, RoomGraphCommand.class);
+        RoomGraphCommand v3Command = MAPPER.treeToValue(fixture, RoomGraphCommand.class);
+        RoomGraphCommand v4Command = parallelCommand(v3Command);
         String canonicalCommand = ContractJson.canonicalString(fixture);
         String requestHash = fixture.required("request_hash").textValue();
 
-        jdbc.update("""
-                insert into agent_run (
-                    id, protocol, executor_kind, committed_attempt_id, final_result_hash,
-                    finalization_status, logical_input_hash, attempt_limit
-                ) values (
-                    :runId, 'agent-stream.v3', 'TEMPORAL_ACTIVITY', :winningAttemptId,
-                    :winningResultHash, 'COMMITTED', :logicalInputHash, 3
-                )
-                """, new MapSqlParameterSource()
-                .addValue("runId", command.logicalRunId())
-                .addValue("winningAttemptId", command.attemptId())
-                .addValue("winningResultHash", RESULT_TWO)
-                .addValue("logicalInputHash", LOGICAL_INPUT_HASH));
+        insertRun(
+                v3Command.logicalRunId(),
+                AgentRunProtocol.V3.wireValue(),
+                v3Command.attemptId(),
+                RESULT_TWO);
         insertAttempt(
                 "failed-attempt-1",
-                command.logicalRunId(),
+                v3Command.logicalRunId(),
                 1,
                 "FAILED",
                 RESULT_ONE,
@@ -198,17 +199,18 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
                 "{\"attempt\":1}",
                 null);
         insertAttempt(
-                command.attemptId(),
-                command.logicalRunId(),
+                v3Command.attemptId(),
+                v3Command.logicalRunId(),
                 2,
                 "COMPLETED",
                 RESULT_TWO,
-                command.commandId(),
+                v3Command.commandId(),
                 requestHash,
                 canonicalCommand,
                 "failed-attempt-1");
         insertReceiptAndMaterial(
                 "receipt-failed-1",
+                v3Command.logicalRunId(),
                 "failed-attempt-1",
                 "failed-command-1",
                 RESULT_ONE,
@@ -216,35 +218,80 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
                 ENVELOPE_HASH_ONE);
         insertReceiptAndMaterial(
                 "receipt-winning-2",
-                command.attemptId(),
-                command.commandId(),
+                v3Command.logicalRunId(),
+                v3Command.attemptId(),
+                v3Command.commandId(),
                 RESULT_TWO,
                 COMMAND_HASH_TWO,
                 ENVELOPE_HASH_TWO);
 
-        List<Map<String, Object>> rows = jdbc.queryForList(
-                targetReceiptSql(),
-                Map.of(
-                        "activationId", ACTIVATION_ID,
-                        "activationManifestHash", ACTIVATION_HASH,
-                        "tenantSurrogate", TENANT,
-                        "caseId", CASE_ID,
-                        "roomEpoch", 1L,
-                        "roomFencingToken", 2L,
-                        "processRevision", 3L,
-                        "logicalRunId", command.logicalRunId()));
+        insertRun(
+                v4Command.logicalRunId(),
+                AgentRunProtocol.V4.wireValue(),
+                v4Command.attemptId(),
+                PARALLEL_RESULT);
+        insertAttempt(
+                v4Command.attemptId(),
+                v4Command.logicalRunId(),
+                1,
+                "COMPLETED",
+                PARALLEL_RESULT,
+                v4Command.commandId(),
+                v4Command.requestHash(),
+                ContractJson.canonicalString(
+                        V1_CODEC.encode("room-graph-command.schema.json", v4Command)),
+                null);
+        insertReceiptAndMaterial(
+                "receipt-parallel-1",
+                v4Command.logicalRunId(),
+                v4Command.attemptId(),
+                v4Command.commandId(),
+                PARALLEL_RESULT,
+                PARALLEL_COMMAND_HASH,
+                PARALLEL_ENVELOPE_HASH);
 
-        assertThat(rows).singleElement().satisfies(row -> {
-            assertThat(row.get("attempt_id")).isEqualTo(command.attemptId());
+        List<Map<String, Object>> v3Rows =
+                targetReceiptRows(v3Command.logicalRunId(), AgentRunProtocol.V3);
+        assertThat(v3Rows).singleElement().satisfies(row -> {
+            assertThat(row.get("attempt_id")).isEqualTo(v3Command.attemptId());
             assertThat(((Number) row.get("attempt_no")).longValue()).isEqualTo(2L);
-            assertThat(row.get("attempt_command_id")).isEqualTo(command.commandId());
+            assertThat(row.get("attempt_command_id")).isEqualTo(v3Command.commandId());
             assertThat(row.get("attempt_request_hash")).isEqualTo(requestHash);
             String persistedJsonbText = (String) row.get("attempt_command_json");
             assertThat(persistedJsonbText).isNotEqualTo(canonicalCommand);
             assertThat(JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.decodeAttemptCommand(
-                            MAPPER, persistedJsonbText, requestHash))
-                    .isEqualTo(command);
+                             MAPPER, persistedJsonbText, requestHash))
+                    .isEqualTo(v3Command);
         });
+        assertThat(targetReceiptRows(v3Command.logicalRunId(), AgentRunProtocol.V4)).isEmpty();
+
+        assertThat(targetReceiptRows(v4Command.logicalRunId(), AgentRunProtocol.V4))
+                .singleElement()
+                .satisfies(row -> {
+                    assertThat(row.get("attempt_id")).isEqualTo(v4Command.attemptId());
+                    assertThat(((Number) row.get("attempt_no")).longValue()).isEqualTo(1L);
+                    assertThat(row.get("attempt_command_id"))
+                            .isEqualTo(v4Command.commandId());
+                });
+        assertThat(targetReceiptRows(v4Command.logicalRunId(), AgentRunProtocol.V3)).isEmpty();
+    }
+
+    private static void insertRun(
+            String runId, String protocol, String committedAttemptId, String resultHash) {
+        jdbc.update("""
+                insert into agent_run (
+                    id, protocol, executor_kind, committed_attempt_id, final_result_hash,
+                    finalization_status, logical_input_hash, attempt_limit
+                ) values (
+                    :runId, :protocol, 'TEMPORAL_ACTIVITY', :committedAttemptId,
+                    :resultHash, 'COMMITTED', :logicalInputHash, 3
+                )
+                """, new MapSqlParameterSource()
+                .addValue("runId", runId)
+                .addValue("protocol", protocol)
+                .addValue("committedAttemptId", committedAttemptId)
+                .addValue("resultHash", resultHash)
+                .addValue("logicalInputHash", LOGICAL_INPUT_HASH));
     }
 
     private static void insertAttempt(
@@ -282,6 +329,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
 
     private static void insertReceiptAndMaterial(
             String receiptId,
+            String runId,
             String attemptId,
             String commandId,
             String resultHash,
@@ -307,7 +355,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
                     'manifest-1', :manifestHash, :databaseBindingHash, current_timestamp,
                     :receiptHash, 'INTAKE_GRAPH_RESULT_FINALIZER', 'COMMITTED'
                 )
-                """, commonParameters(receiptId, attemptId, commandHash, envelopeHash)
+                """, commonParameters(receiptId, runId, attemptId, commandHash, envelopeHash)
                 .addValue("resultHash", resultHash));
         jdbc.update("""
                 insert into target_e2e_command_admission (
@@ -319,7 +367,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
                     :databaseBindingHash, :tenant, :caseId, :commandId,
                     :commandHash, :envelopeHash, 1, 2
                 )
-                """, commonParameters(receiptId, attemptId, commandHash, envelopeHash)
+                """, commonParameters(receiptId, runId, attemptId, commandHash, envelopeHash)
                 .addValue("admissionId", admissionId)
                 .addValue("commandId", commandId));
         jdbc.update("""
@@ -333,7 +381,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
                     :tenant, :caseId, :commandId, :commandHash, :envelopeHash, 1, 2,
                     '{}', :contextHash
                 )
-                """, commonParameters(receiptId, attemptId, commandHash, envelopeHash)
+                """, commonParameters(receiptId, runId, attemptId, commandHash, envelopeHash)
                 .addValue("admissionId", admissionId)
                 .addValue("commandId", commandId)
                 .addValue("contextHash", ContractJson.sha256Hex(MAPPER.createObjectNode())));
@@ -341,6 +389,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
 
     private static MapSqlParameterSource commonParameters(
             String receiptId,
+            String runId,
             String attemptId,
             String commandHash,
             String envelopeHash) {
@@ -350,7 +399,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
                 .addValue("activationId", ACTIVATION_ID)
                 .addValue("tenant", TENANT)
                 .addValue("caseId", CASE_ID)
-                .addValue("runId", readFixtureCommand().logicalRunId())
+                .addValue("runId", runId)
                 .addValue("attemptId", attemptId)
                 .addValue("commandHash", commandHash)
                 .addValue("envelopeHash", envelopeHash)
@@ -361,14 +410,73 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortIntegrationTest {
                 .addValue("receiptHash", "e".repeat(64));
     }
 
-    private static RoomGraphCommand readFixtureCommand() {
-        try {
-            return MAPPER.treeToValue(
-                    MAPPER.readTree(COMMAND_FIXTURE.toFile()).required("instance"),
-                    RoomGraphCommand.class);
-        } catch (Exception failure) {
-            throw new IllegalStateException("cannot read command fixture", failure);
-        }
+    private static List<Map<String, Object>> targetReceiptRows(
+            String logicalRunId, AgentRunProtocol protocol) {
+        return jdbc.queryForList(
+                targetReceiptSql(),
+                Map.of(
+                        "activationId", ACTIVATION_ID,
+                        "activationManifestHash", ACTIVATION_HASH,
+                        "tenantSurrogate", TENANT,
+                        "caseId", CASE_ID,
+                        "roomEpoch", 1L,
+                        "roomFencingToken", 2L,
+                        "processRevision", 3L,
+                        "logicalRunId", logicalRunId,
+                        "agentRunProtocol", protocol.wireValue()));
+    }
+
+    private static RoomGraphCommand parallelCommand(RoomGraphCommand source) {
+        RoomGraphCommand.InvocationContext invocation =
+                new RoomGraphCommand.InvocationContext(
+                        RoomGraphCommand.PARALLEL_INTAKE_AGENT_PROFILE_ID,
+                        source.invocationContext().promptProfileId(),
+                        source.invocationContext().modelProfileId(),
+                        RoomGraphCommand.PARALLEL_INTAKE_OUTPUT_SCHEMA,
+                        source.invocationContext().policyVersion(),
+                        source.invocationContext().guardrailVersion(),
+                        source.invocationContext().toolCapabilities(),
+                        source.invocationContext().envelopeKeyId(),
+                        "nonce-parallel-001");
+        RoomGraphCommand.SnapshotRef eventRef =
+                new RoomGraphCommand.SnapshotRef(
+                        "event-parallel-001",
+                        "room-message.v1",
+                        "s3://graph-input/case-001/event-parallel-001.json",
+                        "d".repeat(64),
+                        512);
+        RoomGraphCommand provisional =
+                new RoomGraphCommand(
+                        source.schemaVersion(),
+                        "graph-cmd-parallel-001",
+                        "run-parallel-001",
+                        "attempt-parallel-001",
+                        source.tenantSurrogate(),
+                        source.caseId(),
+                        "ROOM_INTAKE_READER_PARALLEL",
+                        source.roomType(),
+                        source.roomEpoch(),
+                        source.graphKey(),
+                        source.graphVersion(),
+                        source.checkpointSchemaVersion(),
+                        "grt.v1.019bdf9f4a7279d3a23b7fd5c1e4a902",
+                        source.actorScope(),
+                        source.processRevision(),
+                        source.stageCode(),
+                        source.stageSequence(),
+                        source.domainSnapshotRef(),
+                        eventRef,
+                        invocation,
+                        new RoomGraphCommand.RetryBudget(3, 3, 1),
+                        source.deadlineAt(),
+                        source.traceparent(),
+                        "0".repeat(64));
+        ObjectNode canonical = (ObjectNode)
+                V1_CODEC.encode("room-graph-command.schema.json", provisional);
+        canonical.remove("request_hash");
+        canonical.put("request_hash", ContractJson.sha256Hex(canonical));
+        return V1_CODEC.decode(
+                "room-graph-command.schema.json", canonical, RoomGraphCommand.class);
     }
 
     private static String targetReceiptSql() {
