@@ -49,6 +49,7 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
 
     private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
     private static final String ACTIVATION = "p9act.v1." + "a".repeat(32);
+    private static final String NEXT_ACTIVATION = "p9act.v1." + "b".repeat(32);
     private static final String FRAME_SET_ID = "IPFS_TEST_1";
     private static final String ACTOR_SCOPE_HASH = "c".repeat(64);
     private static final String REGISTRY_HASH = "9".repeat(64);
@@ -161,17 +162,158 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 .hasMessageContaining("registry authority");
     }
 
+    @Test
+    void replaysDurableReadyAcrossActivationWithExactCurrentAuthorities() {
+        ExecuteAgentRunRequest request = request(
+                TargetE2EIntakeParallelAssemblyCoordinator.AGENT_PROFILE_ID);
+        ObjectNode previous = previousDossier();
+        InMemoryAssemblyStore store = new InMemoryAssemblyStore(inputs(request, previous));
+        AtomicInteger contextCalls = new AtomicInteger();
+        var originalCoordinator = coordinator(
+                ACTIVATION,
+                store,
+                (execution, authority) -> {
+                    contextCalls.incrementAndGet();
+                    return new TrustedTurnContext(
+                            "MESSAGE_1",
+                            "本轮补充了核心事实。",
+                            2,
+                            previous,
+                            "aliyun-bailian",
+                            "qwen3.7-max-2026-06-08");
+                },
+                REGISTRY_HASH,
+                TOOL_POLICY,
+                31);
+        var first = originalCoordinator.assembleReady(
+                request, FRAME_SET_ID, new AgentRunCancellationToken());
+        TargetE2EGraphCommandEnvelope historicalEnvelope =
+                new TargetE2EGraphEnvelopeCodec(MAPPER)
+                        .decodeCommand(first.artifact().canonicalCommandEnvelopeBytes());
+
+        var reactivatedCoordinator = coordinator(
+                NEXT_ACTIVATION,
+                store,
+                (execution, authority) -> {
+                    throw new AssertionError("READY replay must not resolve mutable context");
+                },
+                REGISTRY_HASH,
+                TOOL_POLICY,
+                31);
+        var replay = reactivatedCoordinator.assembleReady(
+                request, FRAME_SET_ID, new AgentRunCancellationToken());
+        var reconciliation = reactivatedCoordinator.reconcileReady(
+                request, new AgentRunCancellationToken());
+
+        assertThat(historicalEnvelope.activationId()).isEqualTo(ACTIVATION);
+        assertThat(historicalEnvelope.activationId()).isNotEqualTo(NEXT_ACTIVATION);
+        assertThat(historicalEnvelope.command()).isEqualTo(request.command());
+        assertThat(historicalEnvelope.commandEnvelopeHash())
+                .isEqualTo(first.artifact().commandEnvelopeSha256());
+        assertThat(replay.newlyPublished()).isFalse();
+        assertThat(replay.artifact().canonicalCommandEnvelopeBytes())
+                .isEqualTo(first.artifact().canonicalCommandEnvelopeBytes());
+        assertThat(replay.artifact().canonicalResultEnvelopeBytes())
+                .isEqualTo(first.artifact().canonicalResultEnvelopeBytes());
+        assertThat(replay.graphResult()).isEqualTo(first.graphResult());
+        assertThat(reconciliation.result()).isEqualTo(first.graphResult());
+        assertThat(contextCalls).hasValue(1);
+        assertThat(store.publishCalls).isEqualTo(1);
+
+        ReadyRaceAssemblyStore raceStore = new ReadyRaceAssemblyStore(first.artifact());
+        var racedReplay = coordinator(
+                        NEXT_ACTIVATION,
+                        raceStore,
+                        (execution, authority) -> {
+                            throw new AssertionError("READY race replay must not resolve context");
+                        },
+                        REGISTRY_HASH,
+                        TOOL_POLICY,
+                        31)
+                .assembleReady(request, FRAME_SET_ID, new AgentRunCancellationToken());
+        assertThat(racedReplay.newlyPublished()).isFalse();
+        assertThat(racedReplay.artifact().canonicalResultEnvelopeBytes())
+                .isEqualTo(first.artifact().canonicalResultEnvelopeBytes());
+        assertThat(racedReplay.graphResult()).isEqualTo(first.graphResult());
+        assertThat(raceStore.readyReads).isEqualTo(2);
+        assertThat(raceStore.publishCalls).isZero();
+
+        assertReadyRequestConflict(
+                coordinator(
+                        NEXT_ACTIVATION,
+                        store,
+                        (execution, authority) -> {
+                            throw new AssertionError("READY replay must not resolve mutable context");
+                        },
+                        REGISTRY_HASH,
+                        TOOL_POLICY,
+                        31),
+                withChangedCommand(request));
+        assertReadyRequestConflict(
+                coordinator(
+                        NEXT_ACTIVATION,
+                        store,
+                        (execution, authority) -> {
+                            throw new AssertionError("READY replay must not resolve mutable context");
+                        },
+                        REGISTRY_HASH,
+                        TOOL_POLICY,
+                        32),
+                request);
+        assertReadyRequestConflict(
+                coordinator(
+                        NEXT_ACTIVATION,
+                        store,
+                        (execution, authority) -> {
+                            throw new AssertionError("READY replay must not resolve mutable context");
+                        },
+                        "8".repeat(64),
+                        TOOL_POLICY,
+                        31),
+                request);
+        assertReadyRequestConflict(
+                coordinator(
+                        NEXT_ACTIVATION,
+                        store,
+                        (execution, authority) -> {
+                            throw new AssertionError("READY replay must not resolve mutable context");
+                        },
+                        REGISTRY_HASH,
+                        "tools.none.v2",
+                        31),
+                request);
+        assertThat(store.publishCalls).isEqualTo(1);
+    }
+
     private static TargetE2EIntakeParallelAssemblyCoordinator coordinator(
             IntakeParallelAssemblyStore store,
             com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyContextResolver
                     contextResolver,
             String registryHash) {
-        GraphRegistryBindingPolicy registry = binding ->
-                new GraphRegistryBindingPolicy.ExpectedBinding(registryHash, TOOL_POLICY);
-        TargetE2EAgentRunIdentityResolver identities = execution ->
-                TargetE2EAgentRunIdentityResolver.DurableIdentity.from(execution, 31);
-        return new TargetE2EIntakeParallelAssemblyCoordinator(
+        return coordinator(
                 ACTIVATION,
+                store,
+                contextResolver,
+                registryHash,
+                TOOL_POLICY,
+                31);
+    }
+
+    private static TargetE2EIntakeParallelAssemblyCoordinator coordinator(
+            String activationId,
+            IntakeParallelAssemblyStore store,
+            com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyContextResolver
+                    contextResolver,
+            String registryHash,
+            String toolPolicy,
+            long roomFencingToken) {
+        GraphRegistryBindingPolicy registry = binding ->
+                new GraphRegistryBindingPolicy.ExpectedBinding(registryHash, toolPolicy);
+        TargetE2EAgentRunIdentityResolver identities = execution ->
+                TargetE2EAgentRunIdentityResolver.DurableIdentity.from(
+                        execution, roomFencingToken);
+        return new TargetE2EIntakeParallelAssemblyCoordinator(
+                activationId,
                 identities,
                 registry,
                 contextResolver,
@@ -179,6 +321,41 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                 new IntakeParallelFrameAssembler(),
                 new TargetE2EGraphEnvelopeCodec(MAPPER),
                 MAPPER);
+    }
+
+    private static void assertReadyRequestConflict(
+            TargetE2EIntakeParallelAssemblyCoordinator coordinator,
+            ExecuteAgentRunRequest request) {
+        assertThatThrownBy(() -> coordinator.assembleReady(
+                        request, FRAME_SET_ID, new AgentRunCancellationToken()))
+                .isInstanceOfSatisfying(AssemblyConflictException.class, failure ->
+                        assertThat(failure.code())
+                                .isEqualTo("INTAKE_PARALLEL_READY_REQUEST_CONFLICT"));
+    }
+
+    private static ExecuteAgentRunRequest withChangedCommand(ExecuteAgentRunRequest request) {
+        ObjectNode changedJson = (ObjectNode) TargetE2EGraphTestFixtures.V1_CODEC
+                .encode("room-graph-command.schema.json", request.command())
+                .deepCopy();
+        changedJson.put(
+                "traceparent",
+                "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01");
+        ObjectNode hashSource = changedJson.deepCopy();
+        hashSource.remove("request_hash");
+        changedJson.put("request_hash", ContractJson.sha256Hex(hashSource));
+        RoomGraphCommand changed = TargetE2EGraphTestFixtures.V1_CODEC.decode(
+                "room-graph-command.schema.json", changedJson, RoomGraphCommand.class);
+        return new ExecuteAgentRunRequest(
+                request.schemaVersion(),
+                request.logicalRunId(),
+                request.attemptNo(),
+                request.attemptLimit(),
+                request.streamProtocol(),
+                request.logicalInputHash(),
+                request.previousAttemptId(),
+                request.resetRequired(),
+                request.publicSequenceOffset(),
+                changed);
     }
 
     private static ExactThreeInputs inputs(
@@ -507,6 +684,40 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                     1,
                     Instant.parse("2026-08-19T00:00:00Z"),
                     ready);
+        }
+    }
+
+    private static final class ReadyRaceAssemblyStore implements IntakeParallelAssemblyStore {
+        private final ReadyArtifact ready;
+        private int readyReads;
+        private int publishCalls;
+
+        private ReadyRaceAssemblyStore(ReadyArtifact ready) {
+            this.ready = ready;
+        }
+
+        @Override
+        public ExactThreeInputs loadExactThree(AssemblyLookup lookup) {
+            throw new AssemblyConflictException(
+                    "INTAKE_PARALLEL_ASSEMBLY_NOT_COLLECTING",
+                    "parallel Intake assembly became READY concurrently");
+        }
+
+        @Override
+        public ReadyReceipt publishReady(PublishReady command) {
+            publishCalls++;
+            throw new AssertionError("READY race replay must not publish");
+        }
+
+        @Override
+        public Optional<ReadyArtifact> loadReady(ReadyLookup lookup) {
+            readyReads++;
+            return readyReads == 1 ? Optional.empty() : Optional.of(ready);
+        }
+
+        @Override
+        public ReadyAuthority lockReadyForTerminal(ReadyLookup lookup) {
+            throw new AssertionError("READY race replay must not lock for terminal");
         }
     }
 }

@@ -223,8 +223,12 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
             ReadyArtifact artifact) {
         TargetE2EGraphCommandEnvelope storedCommand =
                 envelopeCodec.decodeCommand(artifact.canonicalCommandEnvelopeBytes());
-        if (!activationId.equals(storedCommand.activationId())
-                || roomFencingToken != storedCommand.roomFencingToken()
+        // The stored activation is immutable execution provenance: decodeCommand validates it as
+        // part of the historical command-envelope hash, and decodeResult binds the result to that
+        // same envelope. Replay authority instead comes from the exact current command, durable
+        // room fence, and current registry/tool-policy binding, so a deployment must not strand a
+        // previously published READY artifact merely because its activation has changed.
+        if (roomFencingToken != storedCommand.roomFencingToken()
                 || !request.command().equals(storedCommand.command())
                 || !artifact.commandEnvelopeSha256().equals(
                         storedCommand.commandEnvelopeHash())
