@@ -16,6 +16,7 @@ public record IntakeAgentRunFinalizationRecoveryResult(
 
   public static final String SCHEMA_VERSION = "intake-agent-run-finalization-recovery-result.v1";
   public static final String V2_SCHEMA_VERSION = "intake-agent-run-finalization-recovery-result.v2";
+  public static final String V3_SCHEMA_VERSION = "intake-agent-run-finalization-recovery-result.v3";
 
   public IntakeAgentRunFinalizationRecoveryResult(
       String schemaVersion,
@@ -27,9 +28,12 @@ public record IntakeAgentRunFinalizationRecoveryResult(
 
   public IntakeAgentRunFinalizationRecoveryResult {
     boolean terminalNoCommit = V2_SCHEMA_VERSION.equals(schemaVersion);
-    if (!SCHEMA_VERSION.equals(schemaVersion) && !terminalNoCommit) {
+    boolean pendingCommittedReceipt = V3_SCHEMA_VERSION.equals(schemaVersion);
+    if (!SCHEMA_VERSION.equals(schemaVersion)
+        && !terminalNoCommit
+        && !pendingCommittedReceipt) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-agent-run-finalization-recovery-result.v1 or .v2");
+          "schemaVersion must be intake-agent-run-finalization-recovery-result.v1, .v2, or .v3");
     }
     Objects.requireNonNull(request, "request must not be null");
     Objects.requireNonNull(adoptedChildState, "adoptedChildState must not be null");
@@ -37,14 +41,15 @@ public record IntakeAgentRunFinalizationRecoveryResult(
     if (!request.expectedFinalization().equals(finalization)) {
       throw new IllegalArgumentException("recovery result does not match its request authority");
     }
-    if (!terminalNoCommit) {
+    if (SCHEMA_VERSION.equals(schemaVersion)) {
       if (request.isTerminalNoCommitRecovery()
+          || request.isPendingCommittedReceiptRecovery()
           || disposition != null
           || terminalNoCommitAuthority != null
           || !request.committedChildState().equals(adoptedChildState)) {
         throw new IllegalArgumentException("v1 recovery result does not match committed authority");
       }
-    } else {
+    } else if (terminalNoCommit) {
       if (!request.isTerminalNoCommitRecovery()
           || disposition != Disposition.TERMINAL_NO_COMMIT_CONVERGED
           || terminalNoCommitAuthority == null
@@ -53,6 +58,12 @@ public record IntakeAgentRunFinalizationRecoveryResult(
             "v2 recovery result requires terminal convergence authority");
       }
       requireTerminalNoCommitAuthority(request, finalization, terminalNoCommitAuthority);
+    } else if (!request.isPendingCommittedReceiptRecovery()
+        || disposition != Disposition.PENDING_COMMITTED_RECEIPT_ADOPTED
+        || terminalNoCommitAuthority != null
+        || !request.committedChildState().equals(adoptedChildState)) {
+      throw new IllegalArgumentException(
+          "v3 recovery result requires pending committed receipt adoption authority");
     }
   }
 
@@ -114,6 +125,7 @@ public record IntakeAgentRunFinalizationRecoveryResult(
   }
 
   public enum Disposition {
-    TERMINAL_NO_COMMIT_CONVERGED
+    TERMINAL_NO_COMMIT_CONVERGED,
+    PENDING_COMMITTED_RECEIPT_ADOPTED
   }
 }

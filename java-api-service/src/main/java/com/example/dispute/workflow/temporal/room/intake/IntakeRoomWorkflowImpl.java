@@ -322,11 +322,20 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         throw new IllegalStateException("target finalization recovery event was not applied");
       }
       IntakeAgentRunFinalizationRecoveryResult recovered =
-          new IntakeAgentRunFinalizationRecoveryResult(
-              IntakeAgentRunFinalizationRecoveryResult.SCHEMA_VERSION,
-              request,
-              adoptedChildState,
-              finalization);
+          request.isPendingCommittedReceiptRecovery()
+              ? new IntakeAgentRunFinalizationRecoveryResult(
+                  IntakeAgentRunFinalizationRecoveryResult.V3_SCHEMA_VERSION,
+                  request,
+                  adoptedChildState,
+                  finalization,
+                  IntakeAgentRunFinalizationRecoveryResult.Disposition
+                      .PENDING_COMMITTED_RECEIPT_ADOPTED,
+                  null)
+              : new IntakeAgentRunFinalizationRecoveryResult(
+                  IntakeAgentRunFinalizationRecoveryResult.SCHEMA_VERSION,
+                  request,
+                  adoptedChildState,
+                  finalization);
       completedTargetFinalizationRecoveryRequest = request;
       completedTargetFinalizationRecoveryResult = recovered;
       return recovered;
@@ -3490,16 +3499,22 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         return false;
       }
     }
-    boolean carryPendingFinalizationRecovery = hasCompletedPendingFinalizationRecoveryCache();
+    boolean carryTargetFinalizationRecovery = hasCompletedTargetFinalizationRecoveryCarryCache();
+    boolean carryPendingCommittedReceiptRecovery =
+        carryTargetFinalizationRecovery
+            && completedTargetFinalizationRecoveryRequest
+                .isPendingCommittedReceiptRecovery();
     boolean carryAcknowledgedTerminalNoCommit =
         completedTerminalNoCommitRecoveryResult != null
             && IntakeTerminalNoCommitRecoveryResult.V2_SCHEMA_VERSION.equals(
                 completedTerminalNoCommitRecoveryResult.schemaVersion());
     IntakeRoomCarryState carry =
         new IntakeRoomCarryState(
-            carryAcknowledgedTerminalNoCommit
+            carryPendingCommittedReceiptRecovery
+                ? IntakeRoomCarryState.V7_SCHEMA_VERSION
+                : carryAcknowledgedTerminalNoCommit
                 ? "intake-room-carry-state.v6"
-                : carryPendingFinalizationRecovery
+                : carryTargetFinalizationRecovery
                 ? "intake-room-carry-state.v5"
                 : completedTerminalNoCommitRecoveryResult != null
                 ? "intake-room-carry-state.v4"
@@ -3550,10 +3565,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
                             "intake-observed-target-source-event.v1", event))
                 .toList(),
             completedTerminalNoCommitRecoveryResult,
-            carryPendingFinalizationRecovery
+            carryTargetFinalizationRecovery
                 ? completedTargetFinalizationRecoveryRequest
                 : null,
-            carryPendingFinalizationRecovery
+            carryTargetFinalizationRecovery
                 ? completedTargetFinalizationRecoveryResult
                 : null);
     ContinueAsNewOptions options =
@@ -3562,7 +3577,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     return true;
   }
 
-  private boolean hasCompletedPendingFinalizationRecoveryCache() {
+  private boolean hasCompletedTargetFinalizationRecoveryCarryCache() {
     if (completedTargetFinalizationRecoveryRequest == null
         && completedTargetFinalizationRecoveryResult == null) {
       return false;
@@ -3579,10 +3594,16 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     boolean v2Result =
         IntakeAgentRunFinalizationRecoveryResult.V2_SCHEMA_VERSION.equals(
             completedTargetFinalizationRecoveryResult.schemaVersion());
-    if (v2Request != v2Result) {
+    boolean v3Request =
+        IntakeAgentRunFinalizationRecoveryRequest.V3_SCHEMA_VERSION.equals(
+            completedTargetFinalizationRecoveryRequest.schemaVersion());
+    boolean v3Result =
+        IntakeAgentRunFinalizationRecoveryResult.V3_SCHEMA_VERSION.equals(
+            completedTargetFinalizationRecoveryResult.schemaVersion());
+    if (v2Request != v2Result || v3Request != v3Result || (v2Request && v3Request)) {
       throw new IllegalStateException("target finalization recovery cache schema conflicts");
     }
-    return v2Request;
+    return v2Request || v3Request;
   }
 
   private boolean matchesEnvelope(IntakeWorkflowCommand command) {

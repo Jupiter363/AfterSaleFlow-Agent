@@ -40,6 +40,7 @@ public record IntakeRoomCarryState(
 
   public static final int MAX_OBSERVED = 256;
   public static final int MAX_THREAD_INITIALIZATIONS = 2;
+  public static final String V7_SCHEMA_VERSION = "intake-room-carry-state.v7";
 
   public IntakeRoomCarryState(
       String schemaVersion,
@@ -289,9 +290,10 @@ public record IntakeRoomCarryState(
         && !"intake-room-carry-state.v3".equals(schemaVersion)
         && !"intake-room-carry-state.v4".equals(schemaVersion)
         && !"intake-room-carry-state.v5".equals(schemaVersion)
-        && !"intake-room-carry-state.v6".equals(schemaVersion)) {
+        && !"intake-room-carry-state.v6".equals(schemaVersion)
+        && !V7_SCHEMA_VERSION.equals(schemaVersion)) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-room-carry-state.v1, v2, v3, v4, v5, or v6");
+          "schemaVersion must be intake-room-carry-state.v1, v2, v3, v4, v5, v6, or v7");
     }
     if ("intake-room-carry-state.v1".equals(schemaVersion) && targetAgentRunChild != null) {
       throw new IllegalArgumentException("v1 carry state cannot contain target child identity");
@@ -327,6 +329,7 @@ public record IntakeRoomCarryState(
         && !"intake-room-carry-state.v4".equals(schemaVersion)
         && !"intake-room-carry-state.v5".equals(schemaVersion)
         && !"intake-room-carry-state.v6".equals(schemaVersion)
+        && !V7_SCHEMA_VERSION.equals(schemaVersion)
         && !observedTargetSourceEvents.isEmpty()) {
       throw new IllegalArgumentException(
           "target source event observations require intake-room-carry-state.v3");
@@ -337,7 +340,8 @@ public record IntakeRoomCarryState(
     if (completedTerminalNoCommitRecovery != null
         && !"intake-room-carry-state.v4".equals(schemaVersion)
         && !"intake-room-carry-state.v5".equals(schemaVersion)
-        && !"intake-room-carry-state.v6".equals(schemaVersion)) {
+        && !"intake-room-carry-state.v6".equals(schemaVersion)
+        && !V7_SCHEMA_VERSION.equals(schemaVersion)) {
       throw new IllegalArgumentException(
           "terminal-no-commit recovery cache requires intake-room-carry-state.v4");
     }
@@ -349,11 +353,18 @@ public record IntakeRoomCarryState(
         throw new IllegalArgumentException(
             "v6 carry state requires acknowledged terminal-no-commit convergence");
       }
-    } else if (completedTerminalNoCommitRecovery != null
-        && !IntakeTerminalNoCommitRecoveryResult.SCHEMA_VERSION.equals(
-            completedTerminalNoCommitRecovery.schemaVersion())) {
-      throw new IllegalArgumentException(
-          "legacy carry state requires the legacy terminal-no-commit cache");
+    } else if (completedTerminalNoCommitRecovery != null) {
+      boolean legacyTerminalCache =
+          IntakeTerminalNoCommitRecoveryResult.SCHEMA_VERSION.equals(
+              completedTerminalNoCommitRecovery.schemaVersion());
+      boolean acknowledgedTerminalCache =
+          V7_SCHEMA_VERSION.equals(schemaVersion)
+              && IntakeTerminalNoCommitRecoveryResult.V2_SCHEMA_VERSION.equals(
+                  completedTerminalNoCommitRecovery.schemaVersion());
+      if (!legacyTerminalCache && !acknowledgedTerminalCache) {
+        throw new IllegalArgumentException(
+            "carry state terminal-no-commit cache conflicts with its schema");
+      }
     }
     boolean targetRecoveryRequestPresent = completedTargetFinalizationRecoveryRequest != null;
     boolean targetRecoveryResultPresent = completedTargetFinalizationRecoveryResult != null;
@@ -362,7 +373,8 @@ public record IntakeRoomCarryState(
           "target finalization recovery carry cache must contain both request and result");
     }
     boolean v5 = "intake-room-carry-state.v5".equals(schemaVersion);
-    if (!v5 && !v6 && targetRecoveryRequestPresent) {
+    boolean v7 = V7_SCHEMA_VERSION.equals(schemaVersion);
+    if (!v5 && !v6 && !v7 && targetRecoveryRequestPresent) {
       throw new IllegalArgumentException(
           "target finalization recovery carry cache requires intake-room-carry-state.v5");
     }
@@ -376,6 +388,17 @@ public record IntakeRoomCarryState(
                 completedTargetFinalizationRecoveryResult.request()))) {
       throw new IllegalArgumentException(
           "new carry state requires an exact v2 target finalization recovery cache");
+    }
+    if (v7
+        && (!targetRecoveryRequestPresent
+            || !IntakeAgentRunFinalizationRecoveryRequest.V3_SCHEMA_VERSION.equals(
+                completedTargetFinalizationRecoveryRequest.schemaVersion())
+            || !IntakeAgentRunFinalizationRecoveryResult.V3_SCHEMA_VERSION.equals(
+                completedTargetFinalizationRecoveryResult.schemaVersion())
+            || !completedTargetFinalizationRecoveryRequest.equals(
+                completedTargetFinalizationRecoveryResult.request()))) {
+      throw new IllegalArgumentException(
+          "v7 carry state requires an exact v3 target finalization recovery cache");
     }
   }
 

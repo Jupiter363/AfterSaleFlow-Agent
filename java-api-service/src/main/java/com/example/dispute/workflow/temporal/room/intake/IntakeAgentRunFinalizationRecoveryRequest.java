@@ -27,6 +27,8 @@ public record IntakeAgentRunFinalizationRecoveryRequest(
   public static final String SCHEMA_VERSION = "intake-agent-run-finalization-recovery-request.v1";
   public static final String V2_SCHEMA_VERSION =
       "intake-agent-run-finalization-recovery-request.v2";
+  public static final String V3_SCHEMA_VERSION =
+      "intake-agent-run-finalization-recovery-request.v3";
 
   public IntakeAgentRunFinalizationRecoveryRequest(
       String schemaVersion,
@@ -57,9 +59,12 @@ public record IntakeAgentRunFinalizationRecoveryRequest(
 
   public IntakeAgentRunFinalizationRecoveryRequest {
     boolean terminalNoCommit = V2_SCHEMA_VERSION.equals(schemaVersion);
-    if (!SCHEMA_VERSION.equals(schemaVersion) && !terminalNoCommit) {
+    boolean pendingCommittedReceipt = V3_SCHEMA_VERSION.equals(schemaVersion);
+    if (!SCHEMA_VERSION.equals(schemaVersion)
+        && !terminalNoCommit
+        && !pendingCommittedReceipt) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-agent-run-finalization-recovery-request.v1 or .v2");
+          "schemaVersion must be intake-agent-run-finalization-recovery-request.v1, .v2, or .v3");
     }
     requireIdentifier(roomWorkflowId, "roomWorkflowId");
     requireIdentifier(roomWorkflowRunId, "roomWorkflowRunId");
@@ -89,11 +94,11 @@ public record IntakeAgentRunFinalizationRecoveryRequest(
       throw new IllegalArgumentException("recovery requires a target Intake message command");
     }
     childState.requireMatches(pendingCommand, execution.targetAgentRun());
-    if (!terminalNoCommit) {
+    if (SCHEMA_VERSION.equals(schemaVersion)) {
       if (sourceProcessRevision != null
           || sourceRoomRevision != null
           || sourceLastCaseEventSequence != null) {
-        throw new IllegalArgumentException("v1 recovery request must omit v2 source coordinates");
+        throw new IllegalArgumentException("v1 recovery request must omit source coordinates");
       }
       if (childState.status() != IntakeAgentRunChildState.Status.RESULT_READY) {
         throw new IllegalArgumentException("recovery authority requires a result-ready child");
@@ -115,27 +120,65 @@ public record IntakeAgentRunFinalizationRecoveryRequest(
           || sourceProcessRevision < 0
           || sourceRoomRevision < 0
           || sourceLastCaseEventSequence < 0) {
-        throw new IllegalArgumentException("v2 recovery request requires valid source coordinates");
+        throw new IllegalArgumentException(
+            "v2/v3 recovery request requires valid source coordinates");
       }
       IntakeTargetAgentRunContext target = execution.targetAgentRun();
       if (sourceProcessRevision != target.expectedProcessRevision()
           || sourceRoomRevision != target.expectedRoomRevision()) {
         throw new IllegalArgumentException(
-            "v2 recovery source revisions conflict with the command");
+            "recovery source revisions conflict with the command");
       }
-      if (childState.status() != IntakeAgentRunChildState.Status.PENDING
-          || expectedFinalization.resolution()
-              != IntakeAgentRunFinalizationReadResult.Resolution.TERMINAL_NO_COMMIT
-          || expectedFinalization.terminalNoCommitEvidence() == null) {
-        throw new IllegalArgumentException(
-            "v2 recovery requires a pending child and complete terminal-no-commit evidence");
+      if (terminalNoCommit) {
+        if (childState.status() != IntakeAgentRunChildState.Status.PENDING
+            || expectedFinalization.resolution()
+                != IntakeAgentRunFinalizationReadResult.Resolution.TERMINAL_NO_COMMIT
+            || expectedFinalization.terminalNoCommitEvidence() == null) {
+          throw new IllegalArgumentException(
+              "v2 recovery requires a pending child and complete terminal-no-commit evidence");
+        }
+        expectedFinalization.requireMatches(
+            IntakeAgentRunFinalizationReadRequest.winningAttempt(
+                IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION,
+                pendingCommand,
+                childState),
+            true);
+      } else {
+        if (childState.status() != IntakeAgentRunChildState.Status.PENDING
+            || expectedFinalization.resolution()
+                != IntakeAgentRunFinalizationReadResult.Resolution.COMMITTED) {
+          throw new IllegalArgumentException(
+              "v3 recovery requires a pending child and committed winning receipt");
+        }
+        expectedFinalization.requireMatches(
+            IntakeAgentRunFinalizationReadRequest.winningAttempt(
+                IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION,
+                pendingCommand,
+                childState),
+            true);
+        requirePendingCommittedEventContinuity(
+            expectedFinalization,
+            sourceProcessRevision,
+            sourceRoomRevision,
+            sourceLastCaseEventSequence);
       }
-      expectedFinalization.requireMatches(
-          IntakeAgentRunFinalizationReadRequest.winningAttempt(
-              IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION,
-              pendingCommand,
-              childState),
-          true);
+    }
+  }
+
+  private static void requirePendingCommittedEventContinuity(
+      IntakeAgentRunFinalizationReadResult finalization,
+      long sourceProcessRevision,
+      long sourceRoomRevision,
+      long sourceLastCaseEventSequence) {
+    var committedEvent = finalization.receipt().committedEvent();
+    if (sourceProcessRevision == Long.MAX_VALUE
+        || sourceRoomRevision == Long.MAX_VALUE
+        || sourceLastCaseEventSequence == Long.MAX_VALUE
+        || committedEvent.processRevision() != sourceProcessRevision + 1
+        || committedEvent.roomRevision() != sourceRoomRevision + 1
+        || committedEvent.eventSequence() != sourceLastCaseEventSequence + 1) {
+      throw new IllegalArgumentException(
+          "v3 recovery committed event is not the exact successor of its source coordinates");
     }
   }
 
@@ -199,6 +242,22 @@ public record IntakeAgentRunFinalizationRecoveryRequest(
       }
       return;
     }
+    if (isPendingCommittedReceiptRecovery()) {
+      boolean sourceCoordinatesMatch =
+          sourceProcessRevision == currentProcessRevision
+              && sourceRoomRevision == currentRoomRevision
+              && currentLastCaseEventSequence != null
+              && sourceLastCaseEventSequence.equals(currentLastCaseEventSequence);
+      boolean pending = childState.equals(currentChild) && currentFinalization == null;
+      boolean alreadyAdopted =
+          committedChildState().equals(currentChild)
+              && expectedFinalization.equals(currentFinalization);
+      if (!sourceCoordinatesMatch || (!pending && !alreadyAdopted)) {
+        throw new IllegalArgumentException(
+            "v3 recovery request does not match the pending committed source state");
+      }
+      return;
+    }
     boolean resultReady = childState.equals(currentChild) && currentFinalization == null;
     boolean alreadyAdopted =
         committedChildState().equals(currentChild)
@@ -212,7 +271,11 @@ public record IntakeAgentRunFinalizationRecoveryRequest(
     if (isTerminalNoCommitRecovery()) {
       throw new IllegalStateException("v2 recovery does not adopt a committed child");
     }
-    return childState.committed(expectedFinalization, true);
+    IntakeAgentRunChildState resultReadyChild = childState;
+    if (isPendingCommittedReceiptRecovery()) {
+      resultReadyChild = childState.resultReady(expectedFinalization.locator().resultHash());
+    }
+    return resultReadyChild.committed(expectedFinalization, true);
   }
 
   public IntakeAgentRunChildState terminalNoCommitChildState() {
@@ -225,6 +288,11 @@ public record IntakeAgentRunFinalizationRecoveryRequest(
   @JsonIgnore
   public boolean isTerminalNoCommitRecovery() {
     return V2_SCHEMA_VERSION.equals(schemaVersion);
+  }
+
+  @JsonIgnore
+  public boolean isPendingCommittedReceiptRecovery() {
+    return V3_SCHEMA_VERSION.equals(schemaVersion);
   }
 
   public boolean matchesAlreadyAdopted(
