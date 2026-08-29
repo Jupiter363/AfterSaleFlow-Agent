@@ -18,6 +18,7 @@ import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.time.Instant;
@@ -34,12 +35,16 @@ class IntakeParallelV4DurableFinalAuthorityResolverTest {
     private static final long FINAL_SEQUENCE = 20;
     private static final Instant FINAL_AT = Instant.parse("2026-08-27T10:00:00Z");
     private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
+    private static final ObjectMapper READY_ARTIFACT_MAPPER = JsonMapper.builder()
+            .findAndAddModules()
+            .serializationInclusion(JsonInclude.Include.NON_NULL)
+            .build();
     private static final RoomGraphResult GRAPH_RESULT =
             TargetE2eFinalizationFixture.valid().result().graphResult();
     private static final String RESULT_HASH = GRAPH_RESULT.outputHash();
 
     @Test
-    void exactV4FinalJoinsItsPrivateReadyResultReference() {
+    void exactV4FinalJoinsItsPrivateReadyResultReferenceAcrossCanonicalMapperProfiles() {
         ExecuteAgentRunRequest request = parallelRequest();
         ExecuteAgentRunResult result = completedResult();
         IntakeParallelAssemblyStore assemblyStore = mock(IntakeParallelAssemblyStore.class);
@@ -142,7 +147,8 @@ class IntakeParallelV4DurableFinalAuthorityResolverTest {
     }
 
     private static ReadyArtifact artifact(RoomGraphResult graph) {
-        byte[] graphBytes = ContractJson.canonicalize(MAPPER.valueToTree(graph));
+        byte[] graphBytes =
+                ContractJson.canonicalize(READY_ARTIFACT_MAPPER.valueToTree(graph));
         String proposalHash = "d".repeat(64);
         return new ReadyArtifact(
                 "e".repeat(64),

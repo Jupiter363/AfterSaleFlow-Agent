@@ -7,6 +7,7 @@ import com.example.dispute.workflow.contract.v1.AgentStreamEventV4;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.security.MessageDigest;
 import java.util.List;
@@ -27,6 +28,7 @@ public final class IntakeParallelV4DurableFinalAuthorityResolver
         this.terminalSource = Objects.requireNonNull(terminalSource, "terminalSource");
         this.assemblyStore = Objects.requireNonNull(assemblyStore, "assemblyStore");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
+        this.objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
     }
 
     @Override
