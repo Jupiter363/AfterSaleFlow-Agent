@@ -112,6 +112,8 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
         throw session.remoteFailure();
       }
       session.requireComplete();
+    } catch (SinkFailure failure) {
+      throw failure.original();
     } catch (TargetE2EGraphClientException exception) {
       if ("TARGET_E2E_GRAPH_PROTOCOL_REJECTED".equals(exception.errorCode())) {
         session.logProtocolRejection();
@@ -122,6 +124,10 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
       if (exception.protocolViolation()) {
         throw protocol(session,
             "target Graph command transport violated the protocol", exception);
+      }
+      if (exception.notSubmitted()) {
+        throw TargetE2EGraphClientException.notSubmitted(
+            "target Graph command was rejected before HTTP submission", exception);
       }
       throw TargetE2EGraphClientException.transport(
           "target Graph command transport failed", exception);
@@ -252,7 +258,11 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
             "target Graph command emitted data after terminal", null);
       }
       lastAcceptedSequence = event.sequenceNo();
-      sink.accept(event);
+      try {
+        sink.accept(event);
+      } catch (RuntimeException failure) {
+        throw new SinkFailure(failure);
+      }
       if (event.eventType() == StreamEventType.FINAL
           || event.eventType() == StreamEventType.ERROR
           || event.eventType() == StreamEventType.ATTEMPT_ABORTED) {
@@ -376,6 +386,19 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
   private record ProtocolLineMetadata(int byteSize, String eventType, String field) {
     private static ProtocolLineMetadata unavailable() {
       return new ProtocolLineMetadata(-1, DIAGNOSTIC_UNAVAILABLE, DIAGNOSTIC_UNAVAILABLE);
+    }
+  }
+
+  private static final class SinkFailure extends RuntimeException {
+    private final RuntimeException original;
+
+    private SinkFailure(RuntimeException original) {
+      super("target Graph command event sink failed", original);
+      this.original = original;
+    }
+
+    private RuntimeException original() {
+      return original;
     }
   }
 

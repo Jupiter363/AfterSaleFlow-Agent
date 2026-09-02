@@ -749,7 +749,7 @@ class HearingIntakeSynthesisLlmOutputV5(StrictModel):
     @model_validator(mode="before")
     @classmethod
     def require_root_order(cls, value: Any) -> Any:
-        if isinstance(value, dict) and list(value) != [
+        canonical_order = [
             "lead_public_text",
             "schema_version",
             "frames",
@@ -757,6 +757,9 @@ class HearingIntakeSynthesisLlmOutputV5(StrictModel):
             "new_issue_proposals",
             "matrix_effects",
             "matrix_summary",
+        ]
+        if isinstance(value, dict) and list(value) != [
+            field for field in canonical_order if field in value
         ]:
             raise ValueError("synthesis output root property order is invalid")
         return value

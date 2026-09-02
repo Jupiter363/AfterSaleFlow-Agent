@@ -70,6 +70,7 @@ class ModelGenerationBudget:
     """单个节点在供应商侧的结构化输出上限。"""
 
     max_completion_tokens: int
+    strict_json_stop_sequences: tuple[str, ...] = ()
 
 
 _DEFAULT_GENERATION_BUDGET = ModelGenerationBudget(
@@ -82,13 +83,19 @@ _NODE_GENERATION_BUDGETS: dict[str, ModelGenerationBudget] = {
     "intake_analyze": ModelGenerationBudget(4_096),
     "intake_turn_dialogue": ModelGenerationBudget(4_096),
     "intake_turn_case_detail": ModelGenerationBudget(6_144),
-    "intake_turn_dialogue_frame": ModelGenerationBudget(1_024),
-    "intake_turn_dossier_frame": ModelGenerationBudget(4_096),
+    "intake_turn_dialogue_frame": ModelGenerationBudget(
+        1_024,
+        strict_json_stop_sequences=("\n```",),
+    ),
+    "intake_turn_dossier_frame": ModelGenerationBudget(
+        8_192,
+        strict_json_stop_sequences=("\n```",),
+    ),
     "intake_turn_quality_frame": ModelGenerationBudget(2_048),
     "evidence_turn": ModelGenerationBudget(8_192),
     "evaluation_analyze": ModelGenerationBudget(8_192),
     "hearing_intake_questions": ModelGenerationBudget(4_096),
-    "hearing_intake_synthesis": ModelGenerationBudget(6_144),
+    "hearing_intake_synthesis": ModelGenerationBudget(8_192),
     "hearing_evidence_requests": ModelGenerationBudget(4_096),
     "hearing_evidence_file_assessment": ModelGenerationBudget(4_096),
     "hearing_evidence_synthesis": ModelGenerationBudget(12_288),
@@ -1834,6 +1841,8 @@ class LiteLlmProxyClient:
                     "schema": output_type.model_json_schema(),
                 },
             }
+            if budget.strict_json_stop_sequences:
+                request_body["stop"] = list(budget.strict_json_stop_sequences)
         return request_body
 
     def _effective_model(

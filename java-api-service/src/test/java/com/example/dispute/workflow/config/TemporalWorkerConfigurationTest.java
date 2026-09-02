@@ -4,6 +4,8 @@ import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.CASE_CONTROL;
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.NOTIFICATION_AND_TOOLS;
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.ROOM_CONTROL;
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED;
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_ACTIVITY_TASK_STARTED;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -28,6 +30,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
 import com.example.dispute.workflow.activity.domain.ProcessProjectionActivitiesImpl;
+import com.example.dispute.workflow.activity.domain.ProcessProjectionActivities;
 import com.example.dispute.workflow.activity.intake.IntakeSnapshotPublicationPort;
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeActivities;
 import com.example.dispute.workflow.activity.system.IntakeInfrastructurePreparationWorkflowImpl;
@@ -36,11 +39,15 @@ import com.example.dispute.workflow.activity.system.TemporalWorkerProbeActivitie
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeWorkflow;
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeWorkflowImpl;
 import com.example.dispute.workflow.application.EvidenceWindowActivitiesAdapter;
+import com.example.dispute.workflow.config.TemporalWorkerProperties.ControlRegistrationScope;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.QueueCapacity;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.VersioningMode;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.WorkerRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionOutcome;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionResult;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticGraphExecutionPort;
@@ -48,23 +55,58 @@ import com.example.dispute.workflow.shadow.intake.IntakeSyntheticComparisonLedge
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
 import com.example.dispute.workflow.targete2e.TargetE2eAgentDeploymentBinding;
+import com.example.dispute.workflow.targete2e.temporal.TargetTemporalWorkerRegistration;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomCaseProcessDispatcher;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.LoadSequenceRange;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.SequenceGapReport;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.SequenceStream;
+import com.google.protobuf.Timestamp;
+import io.temporal.activity.ActivityInterface;
+import io.temporal.activity.ActivityMethod;
+import io.temporal.activity.ActivityOptions;
+import io.temporal.api.common.v1.WorkerVersionCapabilities;
+import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
+import io.temporal.api.taskqueue.v1.PollerInfo;
+import io.temporal.api.taskqueue.v1.TaskQueuePartitionMetadata;
+import io.temporal.api.workflowservice.v1.DescribeTaskQueueRequest;
+import io.temporal.api.workflowservice.v1.DescribeTaskQueueResponse;
+import io.temporal.api.workflowservice.v1.ListTaskQueuePartitionsRequest;
+import io.temporal.api.workflowservice.v1.ListTaskQueuePartitionsResponse;
+import io.temporal.api.workflowservice.v1.WorkflowServiceGrpc.WorkflowServiceBlockingStub;
+import io.temporal.activity.ActivityOptions;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowClientOptions;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
+import io.temporal.common.VersioningOverride;
+import io.temporal.common.WorkerDeploymentVersion;
+import io.temporal.common.RetryOptions;
+import io.temporal.common.VersioningIntent;
+import io.temporal.serviceclient.WorkflowServiceStubs;
 import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
+import io.temporal.workflow.Workflow;
+import io.temporal.workflow.WorkflowInterface;
+import io.temporal.workflow.WorkflowMethod;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URI;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -77,6 +119,8 @@ import org.springframework.context.annotation.Scope;
 class TemporalWorkerConfigurationTest {
 
     private static final String LEGACY_EVIDENCE_WINDOW = "legacy-evidence-window";
+    private static final String SCOPE_DRIVER_QUEUE = "control-registration-scope-driver";
+    private static final String STARTUP_PROBE_IDENTITY = "startup-probe-test@localhost";
 
     @Test
     void startupProbeLifecycleIsRoleExactBoundedAndFailClosed() {
@@ -92,6 +136,274 @@ class TemporalWorkerConfigurationTest {
         assertRegistrationFailurePreservesSameCleanupFailureIdentity();
         assertEagerSingletonWorkerBeansAndDisabledGuard();
         assertBusinessNeutralProbeShape();
+    }
+
+    @Test
+    void deploymentStartupProbePinsExactWorkerDeploymentVersion() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.CONTROL, VersioningMode.DEPLOYMENT);
+
+        assertSuccessfulStartupProbe(properties, List.of(CASE_CONTROL, ROOM_CONTROL));
+    }
+
+    @Test
+    void startupProbeActivityExplicitlyInheritsWorkflowBuildId() throws Exception {
+        Method optionsFactory =
+                TemporalWorkerProbeWorkflowImpl.class.getDeclaredMethod("probeActivityOptions");
+        optionsFactory.setAccessible(true);
+
+        ActivityOptions options = (ActivityOptions) optionsFactory.invoke(null);
+
+        assertThat(options.getTaskQueue()).isNull();
+        assertThat(options.getVersioningIntent())
+                .isEqualTo(VersioningIntent.VERSIONING_INTENT_COMPATIBLE);
+        assertThat(options.getVersioningIntent().determineUseCompatibleFlag(false)).isTrue();
+    }
+
+    @Test
+    void deploymentStartupProbeGivesEachTaskQueueAnIndependentBoundedDeadline() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.CONTROL, VersioningMode.DEPLOYMENT);
+        WorkerFactory factory = mock(WorkerFactory.class);
+        List<String> lifecycle = new ArrayList<>();
+        doAnswer(invocation -> {
+                    lifecycle.add("factory.start");
+                    return null;
+                })
+                .when(factory)
+                .start();
+        long provenEndToEndRouteCompletion = Duration.ofSeconds(181).toNanos();
+        ArrayDeque<Long> nanoTimes = new ArrayDeque<>(List.of(
+                0L,
+                0L,
+                provenEndToEndRouteCompletion,
+                provenEndToEndRouteCompletion,
+                provenEndToEndRouteCompletion,
+                Math.multiplyExact(provenEndToEndRouteCompletion, 2L)));
+        LongSupplier nanoTime = () -> {
+            assertThat(nanoTimes).isNotEmpty();
+            return nanoTimes.removeFirst();
+        };
+
+        try (StartupProbeHarness harness = new StartupProbeHarness(
+                properties,
+                taskQueue -> expectedDescription(properties, taskQueue),
+                false,
+                lifecycle)) {
+            WorkerFactory returned = TemporalWorkerConfiguration.start(
+                    factory,
+                    () -> lifecycle.add("registration"),
+                    harness.workflowClient,
+                    properties,
+                    () -> lifecycle.add("ready"),
+                    nanoTime);
+
+            assertThat(returned).isSameAs(factory);
+            assertThat(lifecycle)
+                    .containsExactly(
+                            "registration",
+                            "factory.start",
+                            "probe:" + CASE_CONTROL,
+                            "probe:" + ROOM_CONTROL,
+                            "ready");
+            harness.assertExactContract(List.of(CASE_CONTROL, ROOM_CONTROL));
+            assertThat(harness.options)
+                    .extracting(WorkflowOptions::getWorkflowExecutionTimeout)
+                    .containsExactly(
+                            TemporalWorkerConfiguration.DEPLOYMENT_STARTUP_PROBE_TIMEOUT,
+                            TemporalWorkerConfiguration.DEPLOYMENT_STARTUP_PROBE_TIMEOUT);
+            assertThat(harness.resultTimeoutNanos)
+                    .containsExactly(
+                            TemporalWorkerConfiguration.DEPLOYMENT_STARTUP_PROBE_TIMEOUT.toNanos()
+                                    - provenEndToEndRouteCompletion,
+                            TemporalWorkerConfiguration.DEPLOYMENT_STARTUP_PROBE_TIMEOUT.toNanos()
+                                    - provenEndToEndRouteCompletion);
+        }
+
+        assertThat(provenEndToEndRouteCompletion)
+                .isGreaterThan(Duration.ofMinutes(2).toNanos())
+                .isGreaterThan(TemporalWorkerConfiguration.STARTUP_PROBE_TIMEOUT.toNanos())
+                .isLessThan(
+                        TemporalWorkerConfiguration.DEPLOYMENT_STARTUP_PROBE_TIMEOUT.toNanos());
+        assertThat(nanoTimes).isEmpty();
+        verify(factory, times(1)).start();
+        verify(factory, never()).shutdownNow();
+        verifyNoMoreInteractions(factory);
+    }
+
+    @Test
+    void buildIdStartupProbeGivesEachTaskQueueAnIndependentBoundedDeadline() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.CONTROL, VersioningMode.BUILD_ID);
+        long provenPollerConvergence = Duration.ofSeconds(238).toNanos();
+        long provenProbeCompletion = Duration.ofSeconds(181).toNanos();
+        long firstQueueCompletion = Math.addExact(
+                provenPollerConvergence, provenProbeCompletion);
+        long secondQueuePollersReady = Math.addExact(
+                firstQueueCompletion, provenPollerConvergence);
+        long secondQueueCompletion = Math.addExact(
+                secondQueuePollersReady, provenProbeCompletion);
+        ArrayDeque<Long> nanoTimes = new ArrayDeque<>(List.of(
+                0L,
+                provenPollerConvergence,
+                provenPollerConvergence,
+                provenPollerConvergence,
+                firstQueueCompletion,
+                firstQueueCompletion,
+                secondQueuePollersReady,
+                secondQueuePollersReady,
+                secondQueuePollersReady,
+                secondQueueCompletion));
+        LongSupplier nanoTime = () -> {
+            assertThat(nanoTimes).isNotEmpty();
+            return nanoTimes.removeFirst();
+        };
+
+        List<String> lifecycle =
+                new ArrayList<>(List.of("registration", "factory.start"));
+        try (StartupProbeHarness harness = new StartupProbeHarness(
+                properties,
+                taskQueue -> expectedDescription(properties, taskQueue),
+                false,
+                lifecycle)) {
+            TemporalWorkerConfiguration.requireStartupProbes(
+                    harness.workflowClient, properties, nanoTime);
+
+            harness.assertExactContract(List.of(CASE_CONTROL, ROOM_CONTROL));
+            assertThat(harness.options)
+                    .extracting(WorkflowOptions::getWorkflowExecutionTimeout)
+                    .containsExactly(
+                            TemporalWorkerConfiguration.BUILD_ID_STARTUP_PROBE_TIMEOUT,
+                            TemporalWorkerConfiguration.BUILD_ID_STARTUP_PROBE_TIMEOUT);
+            assertThat(harness.options)
+                    .extracting(WorkflowOptions::getVersioningOverride)
+                    .containsOnlyNulls();
+            assertThat(harness.resultTimeoutNanos)
+                    .containsExactly(
+                            TemporalWorkerConfiguration.BUILD_ID_STARTUP_PROBE_TIMEOUT.toNanos()
+                                    - provenProbeCompletion,
+                            TemporalWorkerConfiguration.BUILD_ID_STARTUP_PROBE_TIMEOUT.toNanos()
+                                    - provenProbeCompletion);
+        }
+
+        assertThat(provenPollerConvergence)
+                .isLessThan(
+                        TemporalWorkerConfiguration.BUILD_ID_POLLER_READINESS_TIMEOUT.toNanos());
+        assertThat(provenProbeCompletion)
+                .isLessThan(
+                        TemporalWorkerConfiguration.BUILD_ID_STARTUP_PROBE_TIMEOUT.toNanos());
+        assertThat(nanoTimes).isEmpty();
+    }
+
+    @Test
+    void buildIdStartupProbeWaitsForExactRootPollerAndRequestsEagerFirstTask() {
+        TemporalWorkerProperties properties = properties(
+                true,
+                WorkerRole.CONTROL,
+                VersioningMode.BUILD_ID,
+                ControlRegistrationScope.CASE_PROCESS_RECOVERY_ONLY);
+        AtomicInteger rootPartitionReads = new AtomicInteger();
+        Function<DescribeTaskQueueRequest, DescribeTaskQueueResponse> describeResult = request -> {
+            assertThat(request.getTaskQueue().getName()).isEqualTo(CASE_CONTROL);
+            DescribeTaskQueueResponse exact = exactBuildIdPollerResponse(properties);
+            if (rootPartitionReads.incrementAndGet() == 1) {
+                PollerInfo wrongBuild = exact.getPollers(0).toBuilder()
+                        .setWorkerVersionCapabilities(
+                                WorkerVersionCapabilities.newBuilder()
+                                        .setUseVersioning(true)
+                                        .setBuildId("foreign-build"))
+                        .build();
+                return DescribeTaskQueueResponse.newBuilder()
+                        .addPollers(wrongBuild)
+                        .build();
+            }
+            return exact;
+        };
+        List<String> lifecycle =
+                new ArrayList<>(List.of("registration", "factory.start"));
+
+        try (StartupProbeHarness harness = new StartupProbeHarness(
+                properties,
+                taskQueue -> expectedDescription(properties, taskQueue),
+                false,
+                lifecycle,
+                describeResult)) {
+            TemporalWorkerConfiguration.requireStartupProbes(
+                    harness.workflowClient, properties, System::nanoTime);
+
+            assertThat(harness.partitionRequests)
+                    .extracting(request -> request.getTaskQueue().getName())
+                    .containsExactly(CASE_CONTROL, CASE_CONTROL);
+            assertThat(harness.describeRequests)
+                    .extracting(request -> request.getTaskQueue().getName())
+                    .containsExactly(CASE_CONTROL, CASE_CONTROL);
+            assertThat(rootPartitionReads).hasValue(2);
+            assertThat(lifecycle).containsExactly(
+                    "registration", "factory.start", "probe:" + CASE_CONTROL);
+            harness.assertOptionsContract(List.of(CASE_CONTROL));
+            assertThat(harness.options)
+                    .extracting(WorkflowOptions::isDisableEagerExecution)
+                    .containsExactly(false);
+        }
+    }
+
+    @Test
+    void deploymentStartupProbeTimeoutRemainsBoundedAndCleansTheFactory() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.AGENT, VersioningMode.DEPLOYMENT);
+        WorkerFactory factory = mock(WorkerFactory.class);
+        List<String> lifecycle = new ArrayList<>();
+        doAnswer(invocation -> {
+                    lifecycle.add("factory.start");
+                    return null;
+                })
+                .when(factory)
+                .start();
+        ArrayDeque<Long> nanoTimes = new ArrayDeque<>(List.of(
+                0L,
+                0L,
+                TemporalWorkerConfiguration.DEPLOYMENT_STARTUP_PROBE_TIMEOUT.toNanos()));
+        LongSupplier nanoTime = () -> {
+            assertThat(nanoTimes).isNotEmpty();
+            return nanoTimes.removeFirst();
+        };
+
+        try (StartupProbeHarness harness = new StartupProbeHarness(
+                properties,
+                taskQueue -> expectedDescription(properties, taskQueue),
+                false,
+                lifecycle)) {
+            assertThatThrownBy(() -> TemporalWorkerConfiguration.start(
+                            factory,
+                            () -> lifecycle.add("registration"),
+                            harness.workflowClient,
+                            properties,
+                            () -> lifecycle.add("ready"),
+                            nanoTime))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("Temporal worker startup probe timed out");
+
+            assertThat(lifecycle)
+                    .containsExactly(
+                            "registration", "factory.start", "probe:" + AGENT_EXECUTION);
+            harness.assertOptionsContract(List.of(AGENT_EXECUTION));
+            assertThat(harness.resultTimeoutNanos).isEmpty();
+        }
+
+        assertThat(nanoTimes).isEmpty();
+        verify(factory, times(1)).start();
+        verify(factory, times(1)).shutdownNow();
+        verifyNoMoreInteractions(factory);
+    }
+
+    @Test
+    void deploymentStartupProbeRejectsInvalidOrInconsistentAuthorityBeforeCreatingStub() {
+        assertDeploymentStartupProbeAuthorityRejected(
+                "", "test-build", "after-sale-control.test-build", "invalid");
+        assertDeploymentStartupProbeAuthorityRejected(
+                "after-sale-control", "bad build", "after-sale-control.bad build", "invalid");
+        assertDeploymentStartupProbeAuthorityRejected(
+                "after-sale-control", "test-build", "after-sale-control.other-build", "inconsistent");
     }
 
     @Test
@@ -122,6 +434,195 @@ class TemporalWorkerConfigurationTest {
                 assertProbe(environment, ROOM_CONTROL, WorkerRole.CONTROL);
                 assertProbe(environment, NOTIFICATION_AND_TOOLS, WorkerRole.CONTROL);
                 assertProbe(environment, LEGACY_EVIDENCE_WINDOW, WorkerRole.CONTROL);
+            } finally {
+                shutdown(factory);
+            }
+        }
+    }
+
+    @Test
+    void caseProcessRecoveryOnlyScopeExecutesProjectionButNeverPollsRoomActivities()
+            throws Exception {
+        TemporalWorkerProperties properties = properties(
+                WorkerRole.CONTROL,
+                VersioningMode.BUILD_ID,
+                ControlRegistrationScope.CASE_PROCESS_RECOVERY_ONLY);
+        ProcessProjectionActivitiesImpl projectionActivities =
+                mock(ProcessProjectionActivitiesImpl.class);
+        CaseProcessLedgerActivitiesImpl ledgerActivities =
+                mock(CaseProcessLedgerActivitiesImpl.class);
+        CompleteConsumedIntakeProjectionCommand projectionCommand = projectionCommand();
+        CompleteConsumedIntakeProjectionResult projectionResult =
+                projectionResult(projectionCommand);
+        when(projectionActivities.completeConsumedIntakeProjection(projectionCommand))
+                .thenReturn(projectionResult);
+        LoadSequenceRange eventRange = new LoadSequenceRange(
+                "load-sequence-range.v1", "tenant-scope-test", "CASE_ScopeTest", 5, 5, 1);
+        SequenceGapReport gapReport = new SequenceGapReport(
+                "sequence-gap-report.v1",
+                "tenant-scope-test",
+                "CASE_ScopeTest",
+                "case-process:tenant-scope-test:CASE_ScopeTest",
+                "case-run-scope-test",
+                SequenceStream.DOMAIN_EVENT,
+                5,
+                5,
+                3,
+                "DOMAIN_EVENT_LEDGER_UNAVAILABLE");
+        when(ledgerActivities.loadDomainEvents(eventRange)).thenReturn(List.of());
+        CountingOutcomeActivities outcomeActivities = new CountingOutcomeActivities();
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            registerScopeDriver(environment);
+            environment.start();
+            WorkerFactory factory = createFactory(
+                    environment,
+                    properties,
+                    LEGACY_EVIDENCE_WINDOW,
+                    ledgerActivities,
+                    projectionActivities,
+                    targetRegistration(outcomeActivities));
+            try {
+                assertThat(factory.isStarted()).isTrue();
+                assertThat(factory.tryGetWorker(CASE_CONTROL)).isNotNull();
+                assertThat(factory.tryGetWorker(ROOM_CONTROL)).isNull();
+                assertThat(factory.tryGetWorker(NOTIFICATION_AND_TOOLS)).isNull();
+                assertThat(factory.tryGetWorker(LEGACY_EVIDENCE_WINDOW)).isNull();
+                assertThat(factory.tryGetWorker(AGENT_EXECUTION)).isNull();
+                assertProbe(environment, CASE_CONTROL, WorkerRole.CONTROL);
+
+                ProjectionDispatchWorkflow projection = environment.getWorkflowClient()
+                        .newWorkflowStub(
+                                ProjectionDispatchWorkflow.class,
+                                WorkflowOptions.newBuilder()
+                                        .setWorkflowId("scope-projection:" + UUID.randomUUID())
+                                        .setTaskQueue(SCOPE_DRIVER_QUEUE)
+                                        .build());
+                assertThat(projection.complete(projectionCommand)).isEqualTo(projectionResult);
+                verify(projectionActivities).completeConsumedIntakeProjection(projectionCommand);
+
+                LedgerRecoveryDispatchWorkflow ledgerRecovery = environment.getWorkflowClient()
+                        .newWorkflowStub(
+                                LedgerRecoveryDispatchWorkflow.class,
+                                WorkflowOptions.newBuilder()
+                                        .setWorkflowId("scope-ledger-recovery:" + UUID.randomUUID())
+                                        .setTaskQueue(SCOPE_DRIVER_QUEUE)
+                                        .build());
+                assertThat(ledgerRecovery.recover(eventRange, gapReport)).isZero();
+                verify(ledgerActivities).loadDomainEvents(eventRange);
+                verify(ledgerActivities).reportSequenceGap(gapReport);
+
+                String outcomeWorkflowId = "scope-outcome:" + UUID.randomUUID();
+                OutcomeDispatchWorkflow outcome = environment.getWorkflowClient()
+                        .newWorkflowStub(
+                                OutcomeDispatchWorkflow.class,
+                                WorkflowOptions.newBuilder()
+                                        .setWorkflowId(outcomeWorkflowId)
+                                        .setTaskQueue(SCOPE_DRIVER_QUEUE)
+                                        .build());
+                WorkflowExecution outcomeExecution =
+                        WorkflowClient.start(outcome::complete, ROOM_CONTROL);
+                awaitHistoryEvent(
+                        environment,
+                        outcomeWorkflowId,
+                        outcomeExecution.getRunId(),
+                        EVENT_TYPE_ACTIVITY_TASK_SCHEDULED);
+                Thread.sleep(250L);
+                assertThat(environment.getWorkflowClient()
+                                .fetchHistory(outcomeWorkflowId, outcomeExecution.getRunId())
+                                .getEvents())
+                        .noneMatch(event ->
+                                event.getEventType() == EVENT_TYPE_ACTIVITY_TASK_STARTED);
+                assertThat(outcomeActivities.executions()).isZero();
+            } finally {
+                shutdown(factory);
+            }
+        }
+    }
+
+    @Test
+    void intakeContinuationScopeCreatesOnlyCaseAndIntakeWorkflowWorkers() throws Exception {
+        TemporalWorkerProperties properties = properties(
+                WorkerRole.CONTROL,
+                VersioningMode.BUILD_ID,
+                ControlRegistrationScope.CASE_PROCESS_INTAKE_CONTINUATION_ONLY);
+        CaseProcessLedgerActivitiesImpl ledgerActivities =
+                mock(CaseProcessLedgerActivitiesImpl.class);
+        ProcessProjectionActivitiesImpl projectionActivities =
+                mock(ProcessProjectionActivitiesImpl.class);
+        CountingOutcomeActivities outcomeActivities = new CountingOutcomeActivities();
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            registerScopeDriver(environment);
+            environment.start();
+            WorkerFactory factory = createFactory(
+                    environment,
+                    properties,
+                    LEGACY_EVIDENCE_WINDOW,
+                    ledgerActivities,
+                    projectionActivities,
+                    targetRegistration(outcomeActivities));
+            try {
+                assertThat(factory.isStarted()).isTrue();
+                assertThat(factory.tryGetWorker(CASE_CONTROL)).isNotNull();
+                assertThat(factory.tryGetWorker(ROOM_CONTROL)).isNotNull();
+                assertThat(factory.tryGetWorker(NOTIFICATION_AND_TOOLS)).isNull();
+                assertThat(factory.tryGetWorker(LEGACY_EVIDENCE_WINDOW)).isNull();
+                assertThat(factory.tryGetWorker(AGENT_EXECUTION)).isNull();
+                assertProbe(environment, CASE_CONTROL, WorkerRole.CONTROL);
+
+                String outcomeWorkflowId = "continuation-room-activity:" + UUID.randomUUID();
+                OutcomeDispatchWorkflow outcome = environment.getWorkflowClient()
+                        .newWorkflowStub(
+                                OutcomeDispatchWorkflow.class,
+                                WorkflowOptions.newBuilder()
+                                        .setWorkflowId(outcomeWorkflowId)
+                                        .setTaskQueue(SCOPE_DRIVER_QUEUE)
+                                        .build());
+                WorkflowExecution outcomeExecution =
+                        WorkflowClient.start(outcome::complete, ROOM_CONTROL);
+                awaitHistoryEvent(
+                        environment,
+                        outcomeWorkflowId,
+                        outcomeExecution.getRunId(),
+                        EVENT_TYPE_ACTIVITY_TASK_SCHEDULED);
+                Thread.sleep(250L);
+                assertThat(environment.getWorkflowClient()
+                                .fetchHistory(outcomeWorkflowId, outcomeExecution.getRunId())
+                                .getEvents())
+                        .noneMatch(event ->
+                                event.getEventType() == EVENT_TYPE_ACTIVITY_TASK_STARTED);
+                assertThat(outcomeActivities.executions()).isZero();
+            } finally {
+                shutdown(factory);
+            }
+        }
+    }
+
+    @Test
+    void fullControlScopeStillExecutesTargetOutcomeActivities() {
+        TemporalWorkerProperties properties = properties(WorkerRole.CONTROL);
+        CountingOutcomeActivities outcomeActivities = new CountingOutcomeActivities();
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            registerScopeDriver(environment);
+            environment.start();
+            WorkerFactory factory = createFactory(
+                    environment,
+                    properties,
+                    LEGACY_EVIDENCE_WINDOW,
+                    mock(ProcessProjectionActivitiesImpl.class),
+                    targetRegistration(outcomeActivities));
+            try {
+                OutcomeDispatchWorkflow outcome = environment.getWorkflowClient()
+                        .newWorkflowStub(
+                                OutcomeDispatchWorkflow.class,
+                                WorkflowOptions.newBuilder()
+                                        .setWorkflowId("full-outcome:" + UUID.randomUUID())
+                                        .setTaskQueue(SCOPE_DRIVER_QUEUE)
+                                        .build());
+                assertThat(outcome.complete(ROOM_CONTROL)).isEqualTo("completed");
+                assertThat(outcomeActivities.executions()).isEqualTo(1);
             } finally {
                 shutdown(factory);
             }
@@ -852,6 +1353,28 @@ class TemporalWorkerConfigurationTest {
         verifyNoMoreInteractions(factory);
     }
 
+    private static void assertDeploymentStartupProbeAuthorityRejected(
+            String deploymentName,
+            String buildId,
+            String legacyBuildId,
+            String expectedMessageFragment) {
+        TemporalWorkerProperties properties = mock(TemporalWorkerProperties.class);
+        WorkflowClient workflowClient = mock(WorkflowClient.class);
+        when(properties.role()).thenReturn(WorkerRole.CONTROL);
+        when(properties.versioningMode()).thenReturn(VersioningMode.DEPLOYMENT);
+        when(properties.deploymentName()).thenReturn(deploymentName);
+        when(properties.buildId()).thenReturn(buildId);
+        when(properties.legacyBuildId()).thenReturn(legacyBuildId);
+
+        assertThatThrownBy(
+                        () -> TemporalWorkerConfiguration.requireStartupProbes(
+                                workflowClient, properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(expectedMessageFragment);
+
+        verifyNoInteractions(workflowClient);
+    }
+
     private static void assertProbeFailureCleansUnpublishedFactory(boolean timeout) {
         TemporalWorkerProperties properties = properties(WorkerRole.AGENT);
         WorkerFactory factory = mock(WorkerFactory.class);
@@ -964,7 +1487,7 @@ class TemporalWorkerConfigurationTest {
                 .containsExactly(TemporalWorkerProbeActivities.class);
         assertThat(TemporalWorkerProbeWorkflowImpl.class.getDeclaredMethods())
                 .extracting(Method::getName)
-                .containsExactly("probe");
+                .containsExactlyInAnyOrder("probe", "probeActivityOptions");
         assertThat(TemporalWorkerProbeActivitiesImpl.class.getDeclaredFields())
                 .extracting(java.lang.reflect.Field::getType)
                 .containsExactly(
@@ -1012,6 +1535,37 @@ class TemporalWorkerConfigurationTest {
                 properties.versioningMode().name());
     }
 
+    private static ListTaskQueuePartitionsResponse workflowPartitionResponse(
+            String taskQueue) {
+        ListTaskQueuePartitionsResponse.Builder response =
+                ListTaskQueuePartitionsResponse.newBuilder();
+        for (int partition = 0; partition < 4; partition++) {
+            response.addWorkflowTaskQueuePartitions(
+                    TaskQueuePartitionMetadata.newBuilder()
+                            .setKey(partition == 0
+                                    ? taskQueue
+                                    : "/_sys/" + taskQueue + "/" + partition)
+                            .setOwnerHostName("test-matching:7235"));
+        }
+        return response.build();
+    }
+
+    private static DescribeTaskQueueResponse exactBuildIdPollerResponse(
+            TemporalWorkerProperties properties) {
+        Instant now = Instant.now();
+        return DescribeTaskQueueResponse.newBuilder()
+                .addPollers(PollerInfo.newBuilder()
+                        .setIdentity(STARTUP_PROBE_IDENTITY)
+                        .setLastAccessTime(Timestamp.newBuilder()
+                                .setSeconds(now.getEpochSecond())
+                                .setNanos(now.getNano()))
+                        .setWorkerVersionCapabilities(
+                                WorkerVersionCapabilities.newBuilder()
+                                        .setUseVersioning(true)
+                                        .setBuildId(properties.legacyBuildId())))
+                .build();
+    }
+
     private static final class StartupProbeHarness implements AutoCloseable {
 
         private final TemporalWorkerProperties properties;
@@ -1021,6 +1575,12 @@ class TemporalWorkerConfigurationTest {
         private final WorkflowClient workflowClient = mock(WorkflowClient.class);
         private final List<WorkflowOptions> options = new ArrayList<>();
         private final List<Long> resultTimeoutNanos = new ArrayList<>();
+        private final List<ListTaskQueuePartitionsRequest> partitionRequests =
+                new ArrayList<>();
+        private final List<DescribeTaskQueueRequest> describeRequests = new ArrayList<>();
+        private final WorkflowServiceStubs serviceStubs = mock(WorkflowServiceStubs.class);
+        private final WorkflowServiceBlockingStub blockingStub =
+                mock(WorkflowServiceBlockingStub.class);
         private final MockedStatic<WorkflowClient> workflowStarts = mockStatic(WorkflowClient.class);
         private final MockedStatic<WorkflowStub> workflowStubs = mockStatic(WorkflowStub.class);
 
@@ -1029,10 +1589,45 @@ class TemporalWorkerConfigurationTest {
                 Function<String, TemporalWorkerDescription> result,
                 boolean timeout,
                 List<String> lifecycle) {
+            this(
+                    properties,
+                    result,
+                    timeout,
+                    lifecycle,
+                    request -> exactBuildIdPollerResponse(properties));
+        }
+
+        private StartupProbeHarness(
+                TemporalWorkerProperties properties,
+                Function<String, TemporalWorkerDescription> result,
+                boolean timeout,
+                List<String> lifecycle,
+                Function<DescribeTaskQueueRequest, DescribeTaskQueueResponse> describeResult) {
             this.properties = properties;
             this.result = result;
             this.timeout = timeout;
             this.lifecycle = lifecycle;
+            when(workflowClient.getOptions())
+                    .thenReturn(WorkflowClientOptions.newBuilder()
+                            .setNamespace("default")
+                            .setIdentity(STARTUP_PROBE_IDENTITY)
+                            .build());
+            when(workflowClient.getWorkflowServiceStubs()).thenReturn(serviceStubs);
+            when(serviceStubs.blockingStub()).thenReturn(blockingStub);
+            when(blockingStub.withDeadlineAfter(anyLong(), eq(TimeUnit.NANOSECONDS)))
+                    .thenReturn(blockingStub);
+            when(blockingStub.listTaskQueuePartitions(any()))
+                    .thenAnswer(invocation -> {
+                        ListTaskQueuePartitionsRequest request = invocation.getArgument(0);
+                        partitionRequests.add(request);
+                        return workflowPartitionResponse(request.getTaskQueue().getName());
+                    });
+            when(blockingStub.describeTaskQueue(any()))
+                    .thenAnswer(invocation -> {
+                        DescribeTaskQueueRequest request = invocation.getArgument(0);
+                        describeRequests.add(request);
+                        return describeResult.apply(request);
+                    });
             when(workflowClient.newWorkflowStub(
                             eq(TemporalWorkerProbeWorkflow.class), any(WorkflowOptions.class)))
                     .thenAnswer(invocation -> createProbe(invocation.getArgument(1)));
@@ -1065,6 +1660,55 @@ class TemporalWorkerConfigurationTest {
         }
 
         private void assertExactContract(List<String> expectedTaskQueues) {
+            assertOptionsContract(expectedTaskQueues);
+            Duration expectedTimeout = switch (properties.versioningMode()) {
+                case BUILD_ID -> TemporalWorkerConfiguration.BUILD_ID_STARTUP_PROBE_TIMEOUT;
+                case DEPLOYMENT ->
+                    TemporalWorkerConfiguration.DEPLOYMENT_STARTUP_PROBE_TIMEOUT;
+                case NONE -> TemporalWorkerConfiguration.STARTUP_PROBE_TIMEOUT;
+            };
+            assertThat(resultTimeoutNanos).hasSize(expectedTaskQueues.size());
+            assertThat(resultTimeoutNanos)
+                    .allSatisfy(remainingNanos -> assertThat(remainingNanos)
+                            .isPositive()
+                            .isLessThanOrEqualTo(expectedTimeout.toNanos()));
+            if (expectedTaskQueues.isEmpty()) {
+                verifyNoInteractions(workflowClient);
+            } else {
+                if (properties.versioningMode() == VersioningMode.BUILD_ID) {
+                    assertThat(partitionRequests)
+                            .extracting(request -> request.getTaskQueue().getName())
+                            .containsExactlyElementsOf(expectedTaskQueues);
+                    assertThat(describeRequests)
+                            .extracting(request -> request.getTaskQueue().getName())
+                            .containsExactlyElementsOf(expectedTaskQueues.stream()
+                                    .flatMap(taskQueue -> Stream.of(
+                                            taskQueue,
+                                            "/_sys/" + taskQueue + "/1",
+                                            "/_sys/" + taskQueue + "/2",
+                                            "/_sys/" + taskQueue + "/3"))
+                                    .toList());
+                    verify(workflowClient, times(1)).getOptions();
+                    verify(workflowClient, times(1)).getWorkflowServiceStubs();
+                } else {
+                    assertThat(partitionRequests).isEmpty();
+                    assertThat(describeRequests).isEmpty();
+                }
+                verify(workflowClient, times(expectedTaskQueues.size()))
+                        .newWorkflowStub(
+                                eq(TemporalWorkerProbeWorkflow.class),
+                                any(WorkflowOptions.class));
+                verifyNoMoreInteractions(workflowClient);
+            }
+        }
+
+        private void assertOptionsContract(List<String> expectedTaskQueues) {
+            Duration expectedTimeout = switch (properties.versioningMode()) {
+                case BUILD_ID -> TemporalWorkerConfiguration.BUILD_ID_STARTUP_PROBE_TIMEOUT;
+                case DEPLOYMENT ->
+                    TemporalWorkerConfiguration.DEPLOYMENT_STARTUP_PROBE_TIMEOUT;
+                case NONE -> TemporalWorkerConfiguration.STARTUP_PROBE_TIMEOUT;
+            };
             assertThat(options)
                     .extracting(WorkflowOptions::getTaskQueue)
                     .containsExactlyElementsOf(expectedTaskQueues);
@@ -1072,37 +1716,36 @@ class TemporalWorkerConfigurationTest {
                     .extracting(WorkflowOptions::getWorkflowId)
                     .doesNotHaveDuplicates();
             for (WorkflowOptions workflowOptions : options) {
-                String prefix = "temporal-worker-startup-probe:"
-                        + properties.role().name()
-                        + ":"
-                        + workflowOptions.getTaskQueue()
-                        + ":";
-                assertThat(workflowOptions.getWorkflowId()).startsWith(prefix);
-                assertThat(UUID.fromString(
-                                workflowOptions.getWorkflowId().substring(prefix.length())))
-                        .isNotNull();
+                assertProbeWorkflowId(
+                        workflowOptions.getWorkflowId(), workflowOptions.getTaskQueue());
                 assertThat(workflowOptions.getWorkflowIdReusePolicy())
                         .isEqualTo(
                                 WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE);
                 assertThat(workflowOptions.getWorkflowExecutionTimeout())
                         .isPositive()
-                        .isLessThanOrEqualTo(TemporalWorkerConfiguration.STARTUP_PROBE_TIMEOUT);
+                        .isLessThanOrEqualTo(expectedTimeout);
+                if (properties.versioningMode() == VersioningMode.DEPLOYMENT) {
+                    assertThat(workflowOptions.getVersioningOverride())
+                            .isInstanceOfSatisfying(
+                                    VersioningOverride.PinnedVersioningOverride.class,
+                                    override -> assertThat(override.getVersion())
+                                            .isEqualTo(new WorkerDeploymentVersion(
+                                                    properties.deploymentName(),
+                                                    properties.buildId())));
+                } else {
+                    assertThat(workflowOptions.getVersioningOverride()).isNull();
+                }
             }
-            assertThat(resultTimeoutNanos).hasSize(expectedTaskQueues.size());
-            assertThat(resultTimeoutNanos)
-                    .allSatisfy(remainingNanos -> assertThat(remainingNanos)
-                            .isPositive()
-                            .isLessThanOrEqualTo(
-                                    TemporalWorkerConfiguration.STARTUP_PROBE_TIMEOUT.toNanos()));
-            if (expectedTaskQueues.isEmpty()) {
-                verifyNoInteractions(workflowClient);
-            } else {
-                verify(workflowClient, times(expectedTaskQueues.size()))
-                        .newWorkflowStub(
-                                eq(TemporalWorkerProbeWorkflow.class),
-                                any(WorkflowOptions.class));
-                verifyNoMoreInteractions(workflowClient);
-            }
+        }
+
+        private void assertProbeWorkflowId(String workflowId, String taskQueue) {
+            String prefix = "temporal-worker-startup-probe:"
+                    + properties.role().name()
+                    + ":"
+                    + taskQueue
+                    + ":";
+            assertThat(workflowId).startsWith(prefix);
+            assertThat(UUID.fromString(workflowId.substring(prefix.length()))).isNotNull();
         }
 
         @Override
@@ -1121,6 +1764,36 @@ class TemporalWorkerConfigurationTest {
             TestWorkflowEnvironment environment,
             TemporalWorkerProperties properties,
             String legacyTaskQueue) {
+        return createFactory(
+                environment,
+                properties,
+                legacyTaskQueue,
+                mock(ProcessProjectionActivitiesImpl.class),
+                null);
+    }
+
+    private static WorkerFactory createFactory(
+            TestWorkflowEnvironment environment,
+            TemporalWorkerProperties properties,
+            String legacyTaskQueue,
+            ProcessProjectionActivitiesImpl projectionActivities,
+            TargetTemporalWorkerRegistration targetRegistration) {
+        return createFactory(
+                environment,
+                properties,
+                legacyTaskQueue,
+                mock(CaseProcessLedgerActivitiesImpl.class),
+                projectionActivities,
+                targetRegistration);
+    }
+
+    private static WorkerFactory createFactory(
+            TestWorkflowEnvironment environment,
+            TemporalWorkerProperties properties,
+            String legacyTaskQueue,
+            CaseProcessLedgerActivitiesImpl ledgerActivities,
+            ProcessProjectionActivitiesImpl projectionActivities,
+            TargetTemporalWorkerRegistration targetRegistration) {
         AppProperties appProperties = mock(AppProperties.class);
         when(appProperties.temporal())
                 .thenReturn(
@@ -1151,11 +1824,13 @@ class TemporalWorkerConfigurationTest {
                 disabledIntakeSelection(),
                 optionsFactory,
                 mock(EvidenceWindowActivitiesAdapter.class),
-                mock(CaseProcessLedgerActivitiesImpl.class),
-                mock(ProcessProjectionActivitiesImpl.class),
+                ledgerActivities,
+                projectionActivities,
                 streamProvider(),
                 provider(mock(IntakeChildBridgeReadPort.class)),
-                streamProvider());
+                targetRegistration == null
+                        ? streamProvider()
+                        : streamProvider(targetRegistration));
     }
 
     @SuppressWarnings("unchecked")
@@ -1192,7 +1867,14 @@ class TemporalWorkerConfigurationTest {
 
     private static TemporalWorkerProperties properties(
             WorkerRole role, VersioningMode versioningMode) {
-        return properties(true, role, versioningMode);
+        return properties(role, versioningMode, ControlRegistrationScope.FULL);
+    }
+
+    private static TemporalWorkerProperties properties(
+            WorkerRole role,
+            VersioningMode versioningMode,
+            ControlRegistrationScope controlRegistrationScope) {
+        return properties(true, role, versioningMode, controlRegistrationScope);
     }
 
     private static TemporalWorkerProperties disabledApiProperties() {
@@ -1201,6 +1883,14 @@ class TemporalWorkerConfigurationTest {
 
     private static TemporalWorkerProperties properties(
             boolean enabled, WorkerRole role, VersioningMode versioningMode) {
+        return properties(enabled, role, versioningMode, ControlRegistrationScope.FULL);
+    }
+
+    private static TemporalWorkerProperties properties(
+            boolean enabled,
+            WorkerRole role,
+            VersioningMode versioningMode,
+            ControlRegistrationScope controlRegistrationScope) {
         QueueCapacity control = new QueueCapacity(64, 32, 2, 2, 0);
         QueueCapacity room = new QueueCapacity(64, 16, 2, 2, 0);
         QueueCapacity agent = new QueueCapacity(8, 32, 2, 2, 0);
@@ -1208,6 +1898,7 @@ class TemporalWorkerConfigurationTest {
         return new TemporalWorkerProperties(
                 enabled,
                 role,
+                controlRegistrationScope,
                 versioningMode,
                 role == WorkerRole.CONTROL ? "after-sale-control" : "after-sale-agent",
                 "test-build",
@@ -1294,6 +1985,201 @@ class TemporalWorkerConfigurationTest {
                 mock(IntakeSignedSyntheticGraphExecutionPort.class),
                 mock(IntakeSyntheticParityObservationPort.class),
                 mock(IntakeSyntheticComparisonLedger.class));
+    }
+
+    private static void registerScopeDriver(TestWorkflowEnvironment environment) {
+        Worker driver = environment.newWorker(SCOPE_DRIVER_QUEUE);
+        driver.registerWorkflowImplementationTypes(
+                ProjectionDispatchWorkflowImpl.class,
+                LedgerRecoveryDispatchWorkflowImpl.class,
+                OutcomeDispatchWorkflowImpl.class);
+    }
+
+    private static TargetTemporalWorkerRegistration targetRegistration(
+            CountingOutcomeActivities outcomeActivities) {
+        TargetTemporalWorkerRegistration.Registration registration =
+                new TargetTemporalWorkerRegistration.Registration(
+                        "target-e2e",
+                        "TARGET_E2E_CANDIDATE",
+                        "p9act.v1." + "a".repeat(32),
+                        "test-build",
+                        RecoveryTargetCaseProcessWorkflow.class,
+                        TargetTypedRoomProtocol.additionalWorkflowImplementations(),
+                        List.of(outcomeActivities),
+                        List.of(outcomeActivities));
+        return () -> registration;
+    }
+
+    private static void awaitHistoryEvent(
+            TestWorkflowEnvironment environment,
+            String workflowId,
+            String runId,
+            io.temporal.api.enums.v1.EventType eventType)
+            throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (System.nanoTime() < deadlineNanos) {
+            if (environment.getWorkflowClient()
+                    .fetchHistory(workflowId, runId)
+                    .getEvents()
+                    .stream()
+                    .anyMatch(event -> event.getEventType() == eventType)) {
+                return;
+            }
+            Thread.sleep(10L);
+        }
+        throw new AssertionError("Temporal history did not reach " + eventType);
+    }
+
+    private static CompleteConsumedIntakeProjectionCommand projectionCommand() {
+        return new CompleteConsumedIntakeProjectionCommand(
+                "complete-consumed-intake-projection.v1",
+                "tenant-scope-test",
+                "CASE_ScopeTest",
+                "event.scope-test",
+                3,
+                "INTAKE_TURN_NEEDS_INPUT",
+                2,
+                0,
+                7,
+                2,
+                2,
+                "case-process:tenant-scope-test:CASE_ScopeTest",
+                "case-run-scope-test",
+                "room-run-scope-test");
+    }
+
+    private static CompleteConsumedIntakeProjectionResult projectionResult(
+            CompleteConsumedIntakeProjectionCommand command) {
+        return new CompleteConsumedIntakeProjectionResult(
+                "complete-consumed-intake-projection-result.v1",
+                command.eventId(),
+                command.caseEventSequence(),
+                CompleteConsumedIntakeProjectionOutcome.APPLIED,
+                command.lastCommandSequence(),
+                command.processRevision(),
+                command.roomRevision(),
+                command.roomEpoch(),
+                command.fencingToken(),
+                command.temporalWorkflowId(),
+                command.firstExecutionRunId(),
+                command.activeChildRunId(),
+                "urn:scope-test:projection-result",
+                "b".repeat(64),
+                Instant.parse("2026-08-30T00:00:00Z"));
+    }
+
+    @WorkflowInterface
+    public interface ProjectionDispatchWorkflow {
+
+        @WorkflowMethod(name = "ProjectionDispatchWorkflow")
+        CompleteConsumedIntakeProjectionResult complete(
+                CompleteConsumedIntakeProjectionCommand command);
+    }
+
+    public static final class ProjectionDispatchWorkflowImpl
+            implements ProjectionDispatchWorkflow {
+
+        @Override
+        public CompleteConsumedIntakeProjectionResult complete(
+                CompleteConsumedIntakeProjectionCommand command) {
+            ProcessProjectionActivities activities = Workflow.newActivityStub(
+                    ProcessProjectionActivities.class,
+                    ActivityOptions.newBuilder()
+                            .setTaskQueue(CASE_CONTROL)
+                            .setStartToCloseTimeout(Duration.ofSeconds(10))
+                            .setRetryOptions(
+                                    RetryOptions.newBuilder()
+                                            .setMaximumAttempts(1)
+                                            .build())
+                            .build());
+            return activities.completeConsumedIntakeProjection(command);
+        }
+    }
+
+    @WorkflowInterface
+    public interface LedgerRecoveryDispatchWorkflow {
+
+        @WorkflowMethod(name = "LedgerRecoveryDispatchWorkflow")
+        int recover(LoadSequenceRange range, SequenceGapReport report);
+    }
+
+    public static final class LedgerRecoveryDispatchWorkflowImpl
+            implements LedgerRecoveryDispatchWorkflow {
+
+        @Override
+        public int recover(LoadSequenceRange range, SequenceGapReport report) {
+            CaseProcessLedgerActivities activities = Workflow.newActivityStub(
+                    CaseProcessLedgerActivities.class,
+                    ActivityOptions.newBuilder()
+                            .setTaskQueue(CASE_CONTROL)
+                            .setStartToCloseTimeout(Duration.ofSeconds(10))
+                            .setRetryOptions(
+                                    RetryOptions.newBuilder()
+                                            .setMaximumAttempts(1)
+                                            .build())
+                            .build());
+            int loaded = activities.loadDomainEvents(range).size();
+            activities.reportSequenceGap(report);
+            return loaded;
+        }
+    }
+
+    @WorkflowInterface
+    public interface OutcomeDispatchWorkflow {
+
+        @WorkflowMethod(name = "OutcomeDispatchWorkflow")
+        String complete(String taskQueue);
+    }
+
+    public static final class OutcomeDispatchWorkflowImpl implements OutcomeDispatchWorkflow {
+
+        @Override
+        public String complete(String taskQueue) {
+            UnrelatedOutcomeActivities activities = Workflow.newActivityStub(
+                    UnrelatedOutcomeActivities.class,
+                    ActivityOptions.newBuilder()
+                            .setTaskQueue(taskQueue)
+                            .setStartToCloseTimeout(Duration.ofMinutes(1))
+                            .setScheduleToCloseTimeout(Duration.ofHours(1))
+                            .setRetryOptions(
+                                    RetryOptions.newBuilder()
+                                            .setMaximumAttempts(1)
+                                            .build())
+                            .build());
+            return activities.complete("unrelated-outcome");
+        }
+    }
+
+    @ActivityInterface
+    public interface UnrelatedOutcomeActivities {
+
+        @ActivityMethod(name = "CompleteTargetOutcome")
+        String complete(String request);
+    }
+
+    public static final class CountingOutcomeActivities
+            implements UnrelatedOutcomeActivities {
+
+        private final AtomicInteger executions = new AtomicInteger();
+
+        @Override
+        public String complete(String request) {
+            executions.incrementAndGet();
+            return "completed";
+        }
+
+        int executions() {
+            return executions.get();
+        }
+    }
+
+    public static final class RecoveryTargetCaseProcessWorkflow
+            extends TargetTypedRoomCaseProcessDispatcher {
+
+        @Override
+        protected boolean targetArtifactPresent() {
+            return true;
+        }
     }
 
     private static void assertProbe(

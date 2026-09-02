@@ -87,7 +87,59 @@ def test_parallel_intake_frame_prompt_profile_cannot_authorize_another_frame() -
     }
 
 
-def test_parallel_dialogue_and_dossier_prompts_omit_server_determined_nulls() -> None:
+def test_intake_verification_focus_prompts_require_public_chinese_actions() -> None:
+    repository = PromptRepository()
+    baseline = repository.render_system_prompt("intake_turn_case_detail")
+    target = repository.render_system_prompt("target_intake_cognition")
+
+    for prompt in (baseline, target):
+        assert "会直接展示给当事人" in prompt
+        assert "facts_in_dispute" in prompt
+        assert "focus_points" in prompt
+        assert "key_conflicts" in prompt
+        assert "facts_to_verify" in prompt
+        assert "blocking_gaps" in prompt
+        assert "nice_to_have_gaps" in prompt
+        assert "next_questions" in prompt
+        assert "fact_key、字段名、JSON 路径" in prompt
+        assert "snake_case、camelCase 或英文缺口标签" in prompt
+        assert "只能继承其业务含义" in prompt
+        assert "输出 JSON 前" in prompt
+        assert "未完成输出" in prompt
+        assert "含下划线、JSON 路径或机器式英文标签都禁止返回" in prompt
+        assert "若仍有一项未通过，继续改写，不得返回 JSON" in prompt
+        assert "必须先理解业务含义再改写为中文" in prompt
+        assert "核验用户三次自测的具体日期" in prompt
+        assert "核验商品页 CADR 宣传参数的来源及对应测试报告" in prompt
+        assert "不要先生成英文主题名再翻译" in prompt
+        assert "表面文案" in prompt
+        assert "先删除" in prompt
+        assert "不得为了累计" in prompt
+        assert "列表长度或顺序" in prompt
+
+        for leaked_machine_label in (
+            "user_self_test_specific_dates",
+            "post_merchant_response_communication_status",
+            "user_self_test_dates_and_environment_consistency",
+            "user_test_procedure_alignment_with_gb_t_18801_2022",
+            "product_page_cadr_claim_source_and_test_report",
+        ):
+            assert leaked_machine_label not in prompt
+
+    assert "核验商家回应后双方的沟通与处理进展" in baseline
+    assert "核验三次自测日期与环境条件是否一致" in baseline
+    assert "核验用户自测步骤与 GB/T 18801-2022 检测方法是否一致" in baseline
+
+    for role in ("USER", "MERCHANT"):
+        role_prompt = repository.render_system_prompt(
+            "intake_turn_case_detail",
+            prompt_profile_id=f"DISPUTE_INTAKE_OFFICER:{role}:v1",
+        )
+        assert role_prompt.endswith("若仍有一项未通过，继续改写，不得返回 JSON。")
+        assert "不要先生成英文主题名再翻译" in role_prompt
+
+
+def test_parallel_dialogue_phase_authority_and_dossier_prompt_boundary() -> None:
     repository = PromptRepository()
     dialogue = repository.render_system_prompt(
         "intake_turn_dialogue_frame",
@@ -98,11 +150,16 @@ def test_parallel_dialogue_and_dossier_prompts_omit_server_determined_nulls() ->
         prompt_profile_id="intake_turn_dossier_frame",
     )
 
-    assert "根对象只输出 public_projection_items，不得输出 dialogue" in dialogue
+    assert "上一持久阶段为 NOT_READY 时，根对象只输出 public_projection_items" in dialogue
+    assert (
+        "READY_PENDING_REMARK_INVITE 时，必须额外输出 "
+        "dialogue.remark_disposition=null"
+    ) in dialogue
+    assert "该 null 只是服务端固定占位，不授予备注判定权" in dialogue
     assert "dialogue.remark_disposition=REMARK 或 NO_REMARK" in dialogue
     assert "根对象只输出 public_projection_items，不得输出 dossier_delta" in dossier
-    assert "dossier_delta.respondent_claim_updates" in dossier
-    assert "未表达新回应时使用空数组" in dossier
+    assert "必须先依次完整输出根字段 respondent_attitude" in dossier
+    assert "不得输出嵌套 dossier_delta" in dossier
 
 
 def test_parallel_dossier_prompt_keeps_server_classification_out_of_provider_wire() -> None:

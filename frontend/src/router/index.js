@@ -76,9 +76,17 @@ export const routes = [
   { path: "/:pathMatch(.*)*", redirect: "/disputes" },
 ];
 
+export function routeScrollBehavior(_to, _from, savedPosition) {
+  return savedPosition ?? { left: 0, top: 0 };
+}
+
 // 业务位置：【案件路由】createAppRouter：把 案件状态、准入结论和风险信息 组装为本块需要的 当前阶段业务数据，供 下一处理房间或工作流路径 使用。上游：案件状态、准入结论和风险信息。下游：下一处理房间或工作流路径。边界：路由只决定流程，不作责任认定。
 export function createAppRouter(history = createWebHistory()) {
-  const router = createRouter({ history, routes });
+  const router = createRouter({
+    history,
+    routes,
+    scrollBehavior: routeScrollBehavior,
+  });
   router.beforeEach((to) => routeAccessDecision(to, actor));
   return router;
 }

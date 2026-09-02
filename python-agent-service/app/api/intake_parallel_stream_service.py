@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
+import logging
 import re
 from typing import Any, Protocol, cast
 
@@ -86,6 +87,7 @@ _SESSION_CLOSE_GRACE_SECONDS = 1.0
 _SESSION_EVENT_CAPACITY = 64
 _SESSION_BYTE_CAPACITY = 8 * 1024 * 1024
 _SUBSET_TECHNICAL_COMPLETION_SCHEMA = "intake-parallel-technical-completion.v2"
+_runtime_logger = logging.getLogger("uvicorn.error")
 
 
 class _ParallelFrameBatchStreamError(GraphContractError):
@@ -1164,6 +1166,13 @@ class GatewayBackedParallelIntakeFrameStreamService:
                 durable_terminal = True
                 raise _ParallelFrameBatchStreamError(retryable=batch_retryable)
         except BaseException as error:
+            if not isinstance(error, (asyncio.CancelledError, GeneratorExit)):
+                _runtime_logger.error(
+                    "intake_parallel_live_failed exception_class=%s error_code=%s",
+                    type(error).__name__,
+                    _public_error_code(error),
+                    exc_info=(type(error), error, error.__traceback__),
+                )
             if runner is not None and not runner.done():
                 runner.cancel()
                 await asyncio.gather(runner, return_exceptions=True)

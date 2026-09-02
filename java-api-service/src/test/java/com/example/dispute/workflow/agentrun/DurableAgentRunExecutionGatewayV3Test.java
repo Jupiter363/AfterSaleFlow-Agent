@@ -29,7 +29,9 @@ import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.QueryTimeoutException;
 
 /** Focused proof for the v3 transient-delta and frame-commit boundary. */
 class DurableAgentRunExecutionGatewayV3Test {
@@ -38,6 +40,58 @@ class DurableAgentRunExecutionGatewayV3Test {
     private static final Path FIXTURES =
             Path.of("..", "contracts", "agent-platform", "v1", "fixtures", "valid");
     private static final Instant NOW = Instant.parse("2026-08-18T08:00:00Z");
+
+    @Test
+    void retriesTheExactDurableBatchInlineBeforeATransientAppendCanCancelTheGraphStream()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult result = graphResult();
+        AtomicInteger appendCalls = new AtomicInteger();
+        List<List<Long>> attemptedBatches = new ArrayList<>();
+        List<Long> progress = new ArrayList<>();
+        AgentRunV2StreamStore store = new AgentRunV2StreamStore() {
+            @Override
+            public AppendReceipt append(AgentStreamEvent event) {
+                BatchAppendReceipt receipt = appendBatch(List.of(event));
+                return new AppendReceipt(
+                        receipt.inserted().getFirst(), receipt.durableHighWatermark());
+            }
+
+            @Override
+            public BatchAppendReceipt appendBatch(List<AgentStreamEvent> events) {
+                attemptedBatches.add(
+                        events.stream().map(AgentStreamEvent::sequenceNo).toList());
+                if (appendCalls.incrementAndGet() == 1) {
+                    throw new QueryTimeoutException("transient append timeout");
+                }
+                boolean inserted = appendCalls.get() != 2;
+                return new BatchAppendReceipt(
+                        events.stream().map(ignored -> inserted).toList(),
+                        events.getLast().sequenceNo());
+            }
+        };
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(attemptStarted(request));
+            eventSink.accept(visibleDelta(request, 1, "durable text"));
+            assertThat(progress).containsExactly(1L);
+            eventSink.accept(finalEvent(request, 2, result.outputHash()));
+            return result;
+        };
+
+        var completion = new DurableAgentRunExecutionGateway(client, store)
+                .execute(
+                        request,
+                        ExecutionMode.EXECUTE_OR_RECONCILE,
+                        frame -> progress.add(frame.lastSequenceNo()),
+                        new AgentRunCancellationToken());
+
+        assertThat(attemptedBatches)
+                .containsExactly(List.of(1L), List.of(1L), List.of(2L));
+        assertThat(appendCalls).hasValue(3);
+        assertThat(progress).containsExactly(1L);
+        assertThat(completion.lastSequenceNo()).isEqualTo(2);
+        assertThat(completion.graphResult()).isEqualTo(result);
+    }
 
     @Test
     void durablyOrdersGenerationResetBeforeTheReplacementVisibleDelta() throws Exception {

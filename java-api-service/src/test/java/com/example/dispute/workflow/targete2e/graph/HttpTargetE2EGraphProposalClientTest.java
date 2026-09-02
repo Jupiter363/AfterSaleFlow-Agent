@@ -47,6 +47,92 @@ class HttpTargetE2EGraphProposalClientTest {
   private static final String EXECUTION_MODEL = "room-provider-dispatch";
 
   @Test
+  void propagatesTheExactEventSinkFailureWithoutReclassifyingItAsTransportLoss() {
+    var codec = TargetE2EGraphTestFixtures.codec();
+    TargetE2ESealedGraphCommand sealed =
+        codec.sealCommand(
+            ACTIVATION_ID,
+            7L,
+            TargetE2EGraphTestFixtures.command(),
+            REGISTRY_BINDING,
+            (envelope, binding) -> credential());
+    GraphTransportSecurityProof proof = mutualTlsProof();
+    FakeCommandTransport command =
+        new FakeCommandTransport("0".repeat(64), proof) {
+          @Override
+          public void stream(
+              Request request,
+              AgentRunCancellationToken cancellationToken,
+              Listener listener) {
+            var decoded = codec.decodeCommand(request.body());
+            TargetE2ESealedGraphCommand actual =
+                new TargetE2ESealedGraphCommand(decoded, request.body(), credential());
+            listener.onResponse(
+                successHead(request.uri(), actual, actual.envelope().activationId()));
+            listener.onLine(
+                event(actual, 0, "attempt_started", "{\"node\":\"intake.reason\"}")
+                    .replace("\"agent-stream.v2\"", "\"agent-stream.v3\""));
+          }
+        };
+    FakeReconciliationTransport reconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), proof);
+    var client = proposalClient(command, reconciliation, proof, codec);
+    IllegalStateException sinkFailure = new IllegalStateException("durable append failed");
+
+    assertThatThrownBy(
+            () ->
+                client.execute(
+                    sealed,
+                    Map.of(),
+                    ignored -> {
+                      throw sinkFailure;
+                    },
+                    new AgentRunCancellationToken()))
+        .isSameAs(sinkFailure);
+    assertThat(reconciliation.requests).isEmpty();
+  }
+
+  @Test
+  void commandRejectedBeforeHttpSubmissionRetriesWithoutResultReconciliation() {
+    var codec = TargetE2EGraphTestFixtures.codec();
+    TargetE2ESealedGraphCommand sealed =
+        codec.sealCommand(
+            ACTIVATION_ID,
+            7L,
+            TargetE2EGraphTestFixtures.command(),
+            REGISTRY_BINDING,
+            (envelope, binding) -> credential());
+    GraphTransportSecurityProof proof = mutualTlsProof();
+    GraphCommandHttpTransport notSubmitted =
+        new FakeCommandTransport("0".repeat(64), proof) {
+          @Override
+          public void stream(
+              Request request, AgentRunCancellationToken cancellationToken, Listener listener) {
+            throw GraphCommandTransportException.notSubmitted(
+                "continuous readiness rejected admission", new IllegalStateException("unavailable"));
+          }
+        };
+    FakeReconciliationTransport reconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), proof);
+    var client = proposalClient(notSubmitted, reconciliation, proof, codec);
+
+    assertThatThrownBy(
+            () ->
+                client.execute(
+                    sealed, Map.of(), ignored -> {}, new AgentRunCancellationToken()))
+        .isInstanceOfSatisfying(
+            TargetE2EGraphClientException.class,
+            failure -> {
+              assertThat(failure.errorCode())
+                  .isEqualTo("TARGET_E2E_GRAPH_COMMAND_NOT_SUBMITTED");
+              assertThat(failure.recoveryAction())
+                  .isEqualTo(
+                      TargetE2EGraphClientException.RecoveryAction.RETRY_SAME_SEALED_COMMAND);
+            });
+    assertThat(reconciliation.requests).isEmpty();
+  }
+
+  @Test
   void usesTargetOnlyPathsAndReusesExactSealedBytesAndJwsForRetryAndReconciliation()
       throws Exception {
     var codec = TargetE2EGraphTestFixtures.codec();

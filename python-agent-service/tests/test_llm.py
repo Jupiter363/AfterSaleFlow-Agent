@@ -174,7 +174,7 @@ def test_all_business_generation_requests_disable_thinking(node_name: str) -> No
     ("node_name", "expected_max_tokens"),
     [
         ("intake_turn_dialogue_frame", 1_024),
-        ("intake_turn_dossier_frame", 4_096),
+        ("intake_turn_dossier_frame", 8_192),
         ("intake_turn_quality_frame", 2_048),
     ],
 )
@@ -199,6 +199,13 @@ def test_parallel_intake_frames_use_small_independent_generation_budgets(
 
     assert body["max_tokens"] == expected_max_tokens
     assert body["enable_thinking"] is False
+    if node_name in {
+        "intake_turn_dialogue_frame",
+        "intake_turn_dossier_frame",
+    }:
+        assert body["stop"] == ["\n```"]
+    else:
+        assert "stop" not in body
 
 
 def test_business_generation_uses_enabled_thinking_configuration() -> None:

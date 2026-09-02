@@ -2016,6 +2016,17 @@ def test_v1_and_v2_assemble_separate_contexts_over_one_frozen_authority() -> Non
 
     v1_call = next(call for call in runner.calls if call["node_name"] == "hearing_judge_v1")
     v2_call = next(call for call in runner.calls if call["node_name"] == "hearing_judge_v2")
+    v1_semantic_validator = v1_call["semantic_validator"]
+    incomplete_v1_payload = {
+        "draft": _adjudication_draft(),
+        "review_focus": ["签收主体"],
+    }
+    incomplete_v1_payload["draft"]["fact_findings"] = incomplete_v1_payload[
+        "draft"
+    ]["fact_findings"][:1]
+    incomplete_v1 = v1_call["output_type"].model_validate(incomplete_v1_payload)
+    with pytest.raises(ValueError, match="must cover the frozen M2 exactly"):
+        v1_semantic_validator(incomplete_v1)
     v1_context = v1_call["case_data"]
     v2_context = v2_call["case_data"]
     assert list(v1_context)[-1] == "decision_action_catalog"
@@ -2027,7 +2038,36 @@ def test_v1_and_v2_assemble_separate_contexts_over_one_frozen_authority() -> Non
         "case_fact_matrix",
         "fact_evidence_matrix",
         "adjudication_rules",
+        "validation_requirements_pack",
     }
+    validation_requirements = v1_context["frozen_adjudication_context"][
+        "validation_requirements_pack"
+    ]
+    assert validation_requirements["required_fact_count"] == len(
+        dossier.case_fact_matrix.fact_rows
+    )
+    assert [
+        item["fact_id"] for item in validation_requirements["required_fact_findings"]
+    ] == [item.fact_id for item in dossier.case_fact_matrix.fact_rows]
+    assert validation_requirements["required_rule_count"] == len(
+        dossier.adjudication_rules
+    )
+    assert [
+        (item["rule_code"], item["rule_version"], item["rule_name"])
+        for item in validation_requirements["required_rule_applications"]
+    ] == [
+        (item.rule_code, item.rule_version, item.rule_name)
+        for item in dossier.adjudication_rules
+    ]
+    assert all(
+        item["allowed_evidence_ids"]
+        == [
+            link.evidence_id
+            for link in dossier.fact_evidence_matrix.links
+            if link.fact_id == item["fact_id"]
+        ]
+        for item in validation_requirements["required_fact_findings"]
+    )
     forbidden = {
         "trial_dossier_id",
         "frozen_at",

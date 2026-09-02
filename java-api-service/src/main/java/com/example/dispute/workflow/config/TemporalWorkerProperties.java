@@ -7,12 +7,14 @@ import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.ROOM_C
 
 import java.util.regex.Pattern;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 @ConfigurationProperties(prefix = "app.temporal.worker")
 public record TemporalWorkerProperties(
         @DefaultValue("false") boolean enabled,
         @DefaultValue("CONTROL") WorkerRole role,
+        @DefaultValue("FULL") ControlRegistrationScope controlRegistrationScope,
         @DefaultValue("NONE") VersioningMode versioningMode,
         @DefaultValue("after-sale-control") String deploymentName,
         @DefaultValue("local-dev") String buildId,
@@ -25,9 +27,19 @@ public record TemporalWorkerProperties(
     private static final Pattern VERSION_COMPONENT =
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
 
+    @ConstructorBinding
     public TemporalWorkerProperties {
         if (role == null) {
             throw new IllegalArgumentException("Temporal worker role must be configured");
+        }
+        if (controlRegistrationScope == null) {
+            throw new IllegalArgumentException(
+                    "Temporal worker controlRegistrationScope must be configured");
+        }
+        if (role != WorkerRole.CONTROL
+                && controlRegistrationScope != ControlRegistrationScope.FULL) {
+            throw new IllegalArgumentException(
+                    "Temporal worker restricted controlRegistrationScope requires CONTROL role");
         }
         if (enabled && role == WorkerRole.API) {
             throw new IllegalArgumentException("API process role cannot enable a Temporal worker");
@@ -51,6 +63,31 @@ public record TemporalWorkerProperties(
         if ((deploymentName + "." + buildId).length() > 255) {
             throw new IllegalArgumentException("legacy Temporal build ID exceeds 255 characters");
         }
+    }
+
+    public TemporalWorkerProperties(
+            boolean enabled,
+            WorkerRole role,
+            VersioningMode versioningMode,
+            String deploymentName,
+            String buildId,
+            int maxWorkflowThreads,
+            QueueCapacity caseControl,
+            QueueCapacity roomControl,
+            QueueCapacity agentExecution,
+            QueueCapacity notificationAndTools) {
+        this(
+                enabled,
+                role,
+                ControlRegistrationScope.FULL,
+                versioningMode,
+                deploymentName,
+                buildId,
+                maxWorkflowThreads,
+                caseControl,
+                roomControl,
+                agentExecution,
+                notificationAndTools);
     }
 
     public QueueCapacity capacity(String taskQueue) {
@@ -77,6 +114,12 @@ public record TemporalWorkerProperties(
         API,
         CONTROL,
         AGENT
+    }
+
+    public enum ControlRegistrationScope {
+        FULL,
+        CASE_PROCESS_RECOVERY_ONLY,
+        CASE_PROCESS_INTAKE_CONTINUATION_ONLY
     }
 
     public enum VersioningMode {

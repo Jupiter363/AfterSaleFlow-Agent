@@ -114,27 +114,35 @@ def complete_user_intake() -> None:
         flush=True,
     )
 
-    for follow_up in range(1, len(USER_INTAKE_ANSWERS) + 2):
+    while True:
         phase = resume.actor_intake_phase(memory, "USER")
-        if phase in {"HAS_REMARKS", "NO_EXTRA_REMARKS"}:
+        if phase in {"WAITING_FOR_REMARK", "HAS_REMARKS", "NO_EXTRA_REMARKS"}:
             break
-        if phase == "WAITING_FOR_REMARK":
-            answer = "无额外备注，确认按现有陈述提交。"
+        if phase == "READY_PENDING_REMARK_INVITE":
+            run_id = resume.base.post_handoff_bridge(
+                resume.USER,
+                "fresh_user_handoff_bridge",
+                expected_dossier_version=resume.intake_dossier_version(memory),
+                expected_source_turn_no=source_turn,
+            )
+            operation = "HANDOFF_BRIDGE"
         else:
-            answer_index = follow_up - 1
+            answer_index = source_turn - 1
             if answer_index >= len(USER_INTAKE_ANSWERS):
                 raise RuntimeError(
                     "user intake remains substantive after all question-aligned "
                     "fixture answers were submitted"
                 )
-            answer = USER_INTAKE_ANSWERS[answer_index]
+            run_id = resume.post_intake_text(
+                resume.USER,
+                f"fresh_user_follow_up_{source_turn + 1}",
+                USER_INTAKE_ANSWERS[answer_index],
+            )
+            operation = "FIXTURE_ANSWER"
         source_turn += 1
-        run_id = resume.post_intake_text(
-            resume.USER, f"fresh_user_follow_up_{follow_up}", answer
-        )
-        resume.wait_run(resume.USER, f"fresh_user_follow_up_run_{follow_up}", run_id)
+        resume.wait_run(resume.USER, f"fresh_user_follow_up_run_{source_turn}", run_id)
         memory = resume.wait_intake_turn(
-            resume.USER, f"fresh_user_follow_up_turn_{follow_up}", source_turn
+            resume.USER, f"fresh_user_follow_up_turn_{source_turn}", source_turn
         )
         print(
             json.dumps(
@@ -142,6 +150,7 @@ def complete_user_intake() -> None:
                     "checkpoint": "USER_INTAKE_FOLLOW_UP",
                     "source_turn": source_turn,
                     "run_id": run_id,
+                    "operation": operation,
                     "previous_phase": phase,
                     "persisted_phase": resume.actor_intake_phase(memory, "USER"),
                 }
@@ -149,6 +158,7 @@ def complete_user_intake() -> None:
             flush=True,
         )
     if resume.actor_intake_phase(memory, "USER") not in {
+        "WAITING_FOR_REMARK",
         "HAS_REMARKS",
         "NO_EXTRA_REMARKS",
     }:

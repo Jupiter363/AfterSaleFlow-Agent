@@ -141,6 +141,33 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
     }
 
     @Test
+    void exactThreeSealedReplaySkipsCurrentActivationPrepareTransport() {
+        ExecuteAgentRunRequest request = validParallelRequest();
+        StreamFixture fixture = StreamFixture.complete(request);
+        GraphTransportSecurityProof proof = mutualTlsProof();
+        RecordingStaging staging = new RecordingStaging(request, fixture);
+        FakeCommandTransport firstTransport = new FakeCommandTransport(proof, fixture);
+        FrameExecutionReceipt first = client(request, proof, firstTransport, staging)
+                .executeOrResume(
+                        request,
+                        ignored -> {},
+                        new AgentRunCancellationToken());
+        int actionsBeforeReplay = staging.actions.size();
+        FakeCommandTransport replayTransport = new FakeCommandTransport(proof, fixture);
+
+        FrameExecutionReceipt replay = client(request, proof, replayTransport, staging)
+                .executeOrResume(
+                        request,
+                        ignored -> {},
+                        new AgentRunCancellationToken());
+
+        assertThat(replay).isEqualTo(first);
+        assertThat(replayTransport.requests).isEmpty();
+        assertThat(staging.actions.subList(actionsBeforeReplay, staging.actions.size()))
+                .containsExactly("find-completion");
+    }
+
+    @Test
     void rejectsCorruptedAuthorityBeforeAdmission() {
         ExecuteAgentRunRequest request = validParallelRequest();
         StreamFixture fixture = StreamFixture.complete(request).withAuthoritySuffix("A");

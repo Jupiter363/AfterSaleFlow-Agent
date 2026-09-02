@@ -257,7 +257,7 @@ def _target_e2e_command(
         {
             "room_type": room_type,
             "graph_key": graph_key,
-            "graph_version": "target-e2e-graph.2026-08-18.1",
+        "graph_version": "target-e2e-graph.2026-08-18.2",
             "checkpoint_schema_version": "target-e2e-checkpoint.v2",
             "actor_scope": {
                 **payload["actor_scope"],
@@ -286,7 +286,7 @@ def _target_e2e_registry(*, prompt_version: str = "all-rooms-prompt.target-e2e.v
         binding=replace(
             record.binding,
             graph_key="all-rooms.target-e2e.v2",
-            graph_version="target-e2e-graph.2026-08-18.1",
+            graph_version="target-e2e-graph.2026-08-18.2",
             checkpoint_schema_version="target-e2e-checkpoint.v2",
             prompt_version=prompt_version,
             output_schema_version="target-e2e-room-proposal-source.v2",
@@ -2291,6 +2291,34 @@ async def test_new_command_takeover_resolves_expired_execution_in_same_transacti
         "old_command_aborted",
         "new_attempt_started",
     ]
+    assert "transaction:commit" in pool.events
+
+
+@pytest.mark.asyncio
+async def test_new_command_takeover_accepts_displaced_technical_completion() -> None:
+    admission = _registered_admission()
+    pool = _Pool()
+    ledger = _DisplacedCommandLedger(
+        admission,
+        CommandStatus.TECHNICAL_COMPLETED,
+    )
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=_DisplacingLeases(admission),  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    execution = await gateway.acquire_execution(
+        admission,
+        owner_id="worker-new",
+        attempt_id=admission.command.attempt_id,
+    )
+
+    assert execution.fence.fencing_token == 2
+    assert ledger.events == ["new_attempt_started"]
     assert "transaction:commit" in pool.events
 
 

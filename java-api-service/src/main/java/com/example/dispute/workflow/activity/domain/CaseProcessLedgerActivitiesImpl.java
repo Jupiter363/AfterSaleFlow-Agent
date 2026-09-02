@@ -1875,7 +1875,7 @@ public class CaseProcessLedgerActivitiesImpl
         }
         if (!authority.tenantSurrogate().equals(run.getTenantSurrogate())
                 || !authority.caseId().equals(run.getCaseId())
-                || !AgentRunProtocol.V3.wireValue().equals(run.getProtocol())
+                || !supportsTargetIntakeTerminalNoCommit(run.getProtocol())
                 || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY
                 || run.getRoomType() != RoomType.INTAKE
                 || run.getRoomEpoch() != authority.roomEpoch()
@@ -1899,6 +1899,11 @@ public class CaseProcessLedgerActivitiesImpl
                     "TARGET_INTAKE_TERMINAL_NO_COMMIT_RUN_INVALID",
                     "logical AgentRun is not terminal without a finalization");
         }
+    }
+
+    private static boolean supportsTargetIntakeTerminalNoCommit(String protocol) {
+        return AgentRunProtocol.V3.wireValue().equals(protocol)
+                || AgentRunProtocol.V4.wireValue().equals(protocol);
     }
 
     private static void requireFinalizationRejectedCompletedAudit(

@@ -33,6 +33,14 @@ public final class TargetE2EGraphClientException extends RuntimeException {
         cause);
   }
 
+  public static TargetE2EGraphClientException notSubmitted(String message, Throwable cause) {
+    return new TargetE2EGraphClientException(
+        "TARGET_E2E_GRAPH_COMMAND_NOT_SUBMITTED",
+        RecoveryAction.RETRY_SAME_SEALED_COMMAND,
+        message,
+        cause);
+  }
+
   public static TargetE2EGraphClientException remote(
       String code, boolean retryable, String message) {
     return new TargetE2EGraphClientException(

@@ -677,6 +677,7 @@ async function createDispute() {
       : await disputeApi.create(actor, command);
     const caseId = created?.id || created?.case_id || created?.caseId;
     if (!caseId) throw new Error("案件创建未返回可确认的案件标识");
+    intakeOpen.value = false;
     await prepareCommittedCase(caseId);
   } catch (failure) {
     createError.value = failure.message;

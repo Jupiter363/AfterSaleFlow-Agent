@@ -192,7 +192,10 @@ select {LEASE_COLUMNS}, db_clock.now as database_now
 
 RENEW_SQL: Final[str] = f"""
 with locked_lease as materialized (
-    select lease.ctid as lease_ctid,
+    select lease.thread_id as lease_thread_id,
+           lease.command_id as lease_command_id,
+           lease.owner_id as lease_owner_id,
+           lease.fencing_token as lease_fencing_token,
            command.deadline_at as command_deadline_at
       from agent_graph_lease lease
       join agent_graph_command command
@@ -220,7 +223,10 @@ update agent_graph_lease lease
        lease_expires_at = db_clock.now + {LEASE_DURATION_SQL},
        lease_revision = lease.lease_revision + 1
   from locked_lease, db_clock
- where lease.ctid = locked_lease.lease_ctid
+ where lease.thread_id = locked_lease.lease_thread_id
+   and lease.command_id = locked_lease.lease_command_id
+   and lease.owner_id = locked_lease.lease_owner_id
+   and lease.fencing_token = locked_lease.lease_fencing_token
    and lease.released_at is null
    and lease.cancelled_at is null
    and lease.lease_expires_at > db_clock.now

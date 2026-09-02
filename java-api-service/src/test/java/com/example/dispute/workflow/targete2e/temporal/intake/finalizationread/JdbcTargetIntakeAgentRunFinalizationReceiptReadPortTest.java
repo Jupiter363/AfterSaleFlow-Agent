@@ -23,6 +23,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalization
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceipt;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptCodec;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReceiptReadPort;
@@ -345,10 +346,12 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
     void projectsFormalAuthorityPreconditionsToOneCommittedSuccessorRevision() throws Exception {
         IntakeFinalizationReceipt freshFormal = formalReceipt(0, 0);
         TurnFinalizationReceipt freshProjected = projection(freshFormal).toActivityReceipt(
-                "a".repeat(64), IntakeParty.INITIATOR, "checkpoint-1");
+                "a".repeat(64), IntakeParty.INITIATOR,
+                TargetTypedRoomProtocol.GRAPH_VERSION, "checkpoint-1");
         IntakeFinalizationReceipt formal = formalReceipt(6, 3);
         TurnFinalizationReceipt projected = projection(formal).toActivityReceipt(
-                "a".repeat(64), IntakeParty.INITIATOR, "checkpoint-1");
+                "a".repeat(64), IntakeParty.INITIATOR,
+                TargetTypedRoomProtocol.GRAPH_VERSION, "checkpoint-1");
 
         assertThat(freshProjected.operation().processRevision()).isEqualTo(1);
         assertThat(freshProjected.operation().roomRevision()).isEqualTo(1);
@@ -376,7 +379,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
     @Test
     void pendingChildWithDurableFinalizationRejectionResolvesExactTerminalNoCommitAuthority()
             throws Exception {
-        IntakeWorkflowCommand command = terminalCommand();
+        IntakeWorkflowCommand command = committedCommand(AgentRunProtocol.V4.wireValue());
         IntakeAgentRunChildState child = IntakeAgentRunChildState.pending(
                 IntakeAgentRunChildIds.forCommand(command),
                 command.executionContext().targetAgentRun());
@@ -835,7 +838,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
                 graph.logicalRunId(),
                 1,
                 1,
-                "agent-stream.v3",
+                AgentRunProtocol.V3.wireValue(),
                 "6".repeat(64),
                 null,
                 false,
@@ -943,7 +946,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
                 request.logicalRunId(),
                 command.tenantSurrogate(),
                 command.caseId(),
-                "agent-stream.v3",
+                request.streamProtocol(),
                 "TEMPORAL_ACTIVITY",
                 "INTAKE",
                 command.roomEpoch(),
@@ -974,7 +977,7 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
                 request.command().commandId(),
                 request.command().requestHash(),
                 request.logicalInputHash(),
-                MAPPER.writeValueAsString(request.command()),
+                V1_CODEC.encode("room-graph-command.schema.json", request.command()).toString(),
                 null,
                 false,
                 0,
@@ -1051,7 +1054,8 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
                 projection(formalReceipt(processRevision, roomRevision));
 
         assertThatThrownBy(() -> projection.toActivityReceipt(
-                        "a".repeat(64), IntakeParty.INITIATOR, "checkpoint-1"))
+                        "a".repeat(64), IntakeParty.INITIATOR,
+                        TargetTypedRoomProtocol.GRAPH_VERSION, "checkpoint-1"))
                 .isInstanceOf(TargetE2eFinalizationRejectedException.class)
                 .hasMessage("formal Intake revision cannot advance to its committed successor")
                 .extracting(failure -> ((TargetE2eFinalizationRejectedException) failure).code())

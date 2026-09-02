@@ -111,7 +111,7 @@ public class ReviewCopilotStreamService {
     // 下游影响：「ReviewCopilotStreamService.request(String,String,ReviewPacketView)」向下依次触达 「objectMapper.createObjectNode」、「packet.caseId」、「packet.packetVersion」、「request.putArray」；计算结果以「ObjectNode」交给调用方。
     // 系统意义：「ReviewCopilotStreamService.request(String,String,ReviewPacketView)」负责主链路中的“请求”；最终决定权属于具备平台审核角色的人；过期、改版或哈希不一致的审批必须失效
     // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
-    private ObjectNode request(
+    ObjectNode request(
             String taskId, String question, ReviewPacketView packet) {
         ObjectNode request = objectMapper.createObjectNode();
         request.put("review_id", taskId);
@@ -155,8 +155,11 @@ public class ReviewCopilotStreamService {
                 draftRefs,
                 packet.draft() == null ? null : packet.draft().path("id").asText(null));
 
-        request.set(
-                "available_deliberation_refs", objectMapper.createArrayNode());
+        ArrayNode deliberationRefs = request.putArray("available_deliberation_refs");
+        Set<String> deliberations = new LinkedHashSet<>();
+        collectIdentifiers(
+                packet.reviewSourceItems(), Set.of("review_item_ref"), deliberations);
+        deliberations.forEach(value -> addIdentifier(deliberationRefs, value));
         request.set("frozen_packet", frozenPacket(packet));
         return request;
     }

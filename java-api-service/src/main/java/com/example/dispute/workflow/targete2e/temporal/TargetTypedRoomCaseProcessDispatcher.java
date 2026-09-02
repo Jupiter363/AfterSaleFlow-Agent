@@ -96,6 +96,8 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       "target-intake-source-event-cursor-v1";
   public static final String TARGET_INTAKE_COMPLETE_TIMELINE_CURSOR_CHANGE_ID =
       "target-intake-complete-timeline-cursor-v1";
+  public static final String TARGET_INTAKE_CURRENT_RUN_SIGNAL_CHANGE_ID =
+      "target-intake-current-run-signal-v1";
   public static final String TARGET_REVIEW_NON_EXECUTION_CHANGE_ID =
       "target-review-non-execution-v1";
   public static final String TARGET_REVIEW_OUTCOME_CHILD_UPDATE_ACTIVITY_CHANGE_ID =
@@ -238,7 +240,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     return switch (descriptor.roomType()) {
       case INTAKE ->
           new IntakeHandle(
-              Workflow.newExternalWorkflowStub(IntakeRoomWorkflow.class, execution),
+              restoredIntakeWorkflow(descriptor, execution),
               execution,
               descriptor.roomEpoch(),
               descriptor.fencingToken(),
@@ -267,6 +269,49 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
                   descriptor.reviewOutcomeStartBinding(),
                   "restored target Review Outcome binding"));
     };
+  }
+
+  @Override
+  protected final TargetTypedRoomChildHandle restoreTargetTypedRoomChildForCurrentRun(
+      ActiveChildDescriptor descriptor, String currentRunId) {
+    requireTargetArtifact();
+    Objects.requireNonNull(descriptor, "descriptor");
+    if (descriptor.roomType() != RoomType.INTAKE
+        || currentRunId == null
+        || currentRunId.isBlank()
+        || currentRunId.equals(descriptor.startedRunId())) {
+      return null;
+    }
+    WorkflowExecution startedExecution =
+        WorkflowExecution.newBuilder()
+            .setWorkflowId(descriptor.workflowId())
+            .setRunId(descriptor.startedRunId())
+            .build();
+    WorkflowExecution currentExecution =
+        WorkflowExecution.newBuilder()
+            .setWorkflowId(descriptor.workflowId())
+            .setRunId(currentRunId)
+            .build();
+    return new IntakeHandle(
+        Workflow.newExternalWorkflowStub(IntakeRoomWorkflow.class, currentExecution),
+        startedExecution,
+        descriptor.roomEpoch(),
+        descriptor.fencingToken(),
+        descriptor.currentProcessRevision(),
+        descriptor.currentRoomRevision(),
+        descriptor.initiatorActorScopeHash(),
+        descriptor.respondentActorScopeHash());
+  }
+
+  private static IntakeRoomWorkflow restoredIntakeWorkflow(
+      ActiveChildDescriptor descriptor, WorkflowExecution startedExecution) {
+    int version =
+        Workflow.getVersion(
+            TARGET_INTAKE_CURRENT_RUN_SIGNAL_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+    if (version == Workflow.DEFAULT_VERSION) {
+      return Workflow.newExternalWorkflowStub(IntakeRoomWorkflow.class, startedExecution);
+    }
+    return Workflow.newExternalWorkflowStub(IntakeRoomWorkflow.class, descriptor.workflowId());
   }
 
   private EvidenceHandle restoreEvidenceHandle(

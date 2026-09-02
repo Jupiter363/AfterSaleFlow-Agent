@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.projection.evidence;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
@@ -574,13 +575,12 @@ public record EvidenceProcessProjectionView(
                 String policyVersion,
                 String guardrailVersion,
                 String toolPolicyVersion) {
-            requireEquals(
-                    graphVersion,
-                    "target-e2e-graph.2026-08-18.1",
-                    "target graphVersion");
+            if (!TargetTypedRoomProtocol.supportsGraphVersion(graphVersion)) {
+                throw new IllegalArgumentException("target graphVersion is not supported");
+            }
             requireEquals(
                     checkpointSchemaVersion,
-                    "target-e2e-checkpoint.v2",
+                    TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
                     "target checkpointSchemaVersion");
             requireEquals(
                     promptVersion,
@@ -622,8 +622,9 @@ public record EvidenceProcessProjectionView(
 
         boolean hasTargetComposite() {
             return hasRuntimePins()
-                    && "target-e2e-graph.2026-08-18.1".equals(graphVersion)
-                    && "target-e2e-checkpoint.v2".equals(checkpointSchemaVersion)
+                    && TargetTypedRoomProtocol.supportsGraphVersion(graphVersion)
+                    && TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION.equals(
+                            checkpointSchemaVersion)
                     && "evidence-graph-state.v2".equals(stateSchemaVersion)
                     && "all-rooms-prompt.target-e2e.v2".equals(promptVersion)
                     && "target-e2e.contract-blocked".equals(modelProfileId)

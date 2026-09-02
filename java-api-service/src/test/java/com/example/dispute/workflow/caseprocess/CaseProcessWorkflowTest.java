@@ -51,6 +51,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.R
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessExpiredTargetEvidenceTerminalRecoveryResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessIntakeProjectionRecoveryRequest;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessTargetIntakeCurrentRunDispatchRecoveryRequest;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessIntakeProjectionRecoveryResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerEntry;
@@ -700,6 +701,208 @@ class CaseProcessWorkflowTest {
     assertTerminalNoCommitAccountingUnchanged(before, targetWorkflow.state());
     assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(1);
     assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isZero();
+  }
+
+  @Test
+  void exactV3ReplayRecoversRejectedV3WithoutSelfAcknowledgingOrAcceptingDrift() {
+    CaseProcessWorkflow targetWorkflow =
+        client.newWorkflowStub(
+            CaseProcessWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(WORKFLOW_ID)
+                .setTaskQueue(RECOVERY_TASK_QUEUE)
+                .build());
+    WorkflowClient.start(targetWorkflow::run, (CaseProcessCarryState) null);
+    provision(targetWorkflow, projectionRecoveryProvisioning());
+    CaseCommandRef command = projectionRecoveryCommand();
+    ledger.put(command);
+    targetWorkflow.acceptCommand(command);
+    CaseProcessSnapshot before =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 2
+                    && snapshot.observedProcessRevision() == 1
+                    && Long.valueOf(1).equals(snapshot.activeRoomRevision()));
+    TargetIntakeCommandTerminalNoCommit rejectedV3 =
+        terminalNoCommitAuthority(command, before).withProjectionLineage(0, 0, List.of());
+    ledger.rejectNextTerminalNoCommit = true;
+
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(rejectedV3);
+    CaseProcessSnapshot rejected =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                "TARGET_INTAKE_TERMINAL_NO_COMMIT_REJECTED".equals(
+                    snapshot.protocolErrorCode()));
+    assertThat(ledger.terminalNoCommitConvergences).hasSize(1);
+    assertThat(ledger.terminalNoCommitOutcomes).isEmpty();
+
+    CaseCommandRef foreignCommand = command(2, RoomType.INTAKE, before.activeRoomEpoch());
+    TargetIntakeCommandTerminalNoCommit foreignV3 =
+        terminalNoCommitAuthority(foreignCommand, before)
+            .withProjectionLineage(0, 0, List.of());
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(foreignV3);
+    environment.sleep(Duration.ofSeconds(1));
+    assertThat(ledger.terminalNoCommitConvergences).hasSize(1);
+    assertThat(targetWorkflow.state().protocolErrorCode())
+        .isEqualTo(rejected.protocolErrorCode());
+
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(rejectedV3);
+    awaitTerminalNoCommitConvergences(2);
+
+    assertThat(ledger.terminalNoCommitConvergences)
+        .extracting(convergence -> convergence.authority())
+        .containsExactly(rejectedV3, rejectedV3);
+    assertThat(ledger.terminalNoCommitOutcomes)
+        .containsExactly(TerminalNoCommitOutcome.IDEMPOTENT_REPLAY);
+    assertTerminalNoCommitAccountingUnchanged(before, targetWorkflow.state());
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isZero();
+  }
+
+  @Test
+  void explicitStrictV3RecoverySignalReopensOnlyTheExactRejectedInbox() {
+    CaseProcessWorkflow targetWorkflow =
+        client.newWorkflowStub(
+            CaseProcessWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(WORKFLOW_ID)
+                .setTaskQueue(RECOVERY_TASK_QUEUE)
+                .build());
+    WorkflowClient.start(targetWorkflow::run, (CaseProcessCarryState) null);
+    provision(targetWorkflow, projectionRecoveryProvisioning());
+    CaseCommandRef command = projectionRecoveryCommand();
+    ledger.put(command);
+    targetWorkflow.acceptCommand(command);
+    CaseProcessSnapshot before =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 2
+                    && snapshot.observedProcessRevision() == 1
+                    && Long.valueOf(1).equals(snapshot.activeRoomRevision()));
+    TargetIntakeCommandTerminalNoCommit rejectedV3 =
+        terminalNoCommitAuthority(command, before).withProjectionLineage(0, 0, List.of());
+    ledger.rejectNextTerminalNoCommit = true;
+
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(rejectedV3);
+    CaseProcessSnapshot rejected =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                "TARGET_INTAKE_TERMINAL_NO_COMMIT_REJECTED".equals(
+                    snapshot.protocolErrorCode()));
+    assertThat(ledger.terminalNoCommitConvergences).hasSize(1);
+
+    CaseCommandRef foreignCommand = command(2, RoomType.INTAKE, before.activeRoomEpoch());
+    TargetIntakeCommandTerminalNoCommit foreignV3 =
+        terminalNoCommitAuthority(foreignCommand, before)
+            .withProjectionLineage(0, 0, List.of());
+    targetWorkflow.recoverRejectedTargetIntakeCommandTerminalNoCommit(foreignV3);
+    environment.sleep(Duration.ofSeconds(1));
+    assertThat(ledger.terminalNoCommitConvergences).hasSize(1);
+    assertThat(targetWorkflow.state().protocolErrorCode())
+        .isEqualTo(rejected.protocolErrorCode());
+
+    targetWorkflow.recoverRejectedTargetIntakeCommandTerminalNoCommit(rejectedV3);
+    awaitTerminalNoCommitConvergences(2);
+    assertThat(ledger.terminalNoCommitConvergences)
+        .extracting(convergence -> convergence.authority())
+        .containsExactly(rejectedV3, rejectedV3);
+    assertThat(ledger.terminalNoCommitOutcomes)
+        .containsExactly(TerminalNoCommitOutcome.IDEMPOTENT_REPLAY);
+    assertTerminalNoCommitAccountingUnchanged(before, targetWorkflow.state());
+
+    targetWorkflow.recoverRejectedTargetIntakeCommandTerminalNoCommit(rejectedV3);
+    environment.sleep(Duration.ofSeconds(1));
+    assertThat(ledger.terminalNoCommitConvergences).hasSize(2);
+  }
+
+  @Test
+  void exactCurrentChildRunRecoveryRebindsAndRetriesOneStrandedIntakeCommand() {
+    CaseProcessWorkflow targetWorkflow =
+        client.newWorkflowStub(
+            CaseProcessWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(WORKFLOW_ID)
+                .setTaskQueue(RECOVERY_TASK_QUEUE)
+                .build());
+    WorkflowClient.start(targetWorkflow::run, (CaseProcessCarryState) null);
+    ProvisionRoomEpochReceipt provisioned =
+        provision(targetWorkflow, projectionRecoveryProvisioning());
+    CaseCommandRef command = projectionRecoveryCommand();
+    RecoveryTargetCaseProcessWorkflow.failedIntakeCommandIds.put(command.commandId(), true);
+    ledger.put(command);
+
+    assertThatThrownBy(() -> targetWorkflow.acceptCommand(command))
+        .isInstanceOf(WorkflowUpdateException.class);
+    CaseProcessSnapshot blocked =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                "TARGET_TYPED_ROOM_COMMAND_DISPATCH_FAILED"
+                        .equals(snapshot.protocolErrorCode())
+                    && snapshot.pendingCommandCount() == 1);
+    String currentChildRunId = "intake-projection-recovery-current-run";
+    CaseProcessTargetIntakeCurrentRunDispatchRecoveryRequest exact =
+        new CaseProcessTargetIntakeCurrentRunDispatchRecoveryRequest(
+            CaseProcessTargetIntakeCurrentRunDispatchRecoveryRequest.SCHEMA_VERSION,
+            blocked.workflowId(),
+            blocked.workflowRunId(),
+            TENANT,
+            CASE_ID,
+            blocked.activeChildWorkflowId(),
+            provisioned.roomWorkflowRunId(),
+            currentChildRunId,
+            blocked.activeRoomEpoch(),
+            blocked.activeFencingToken(),
+            blocked.observedProcessRevision(),
+            blocked.activeRoomRevision(),
+            blocked.nextCommandSequence(),
+            blocked.processedCommandCount(),
+            command.commandId(),
+            command.requestHash());
+    CaseProcessTargetIntakeCurrentRunDispatchRecoveryRequest drifted =
+        new CaseProcessTargetIntakeCurrentRunDispatchRecoveryRequest(
+            exact.schemaVersion(),
+            exact.workflowId(),
+            exact.workflowRunId(),
+            exact.tenantSurrogate(),
+            exact.caseId(),
+            exact.childWorkflowId(),
+            exact.childStartedRunId(),
+            exact.childCurrentRunId(),
+            exact.roomEpoch(),
+            exact.fencingToken(),
+            exact.expectedProcessRevision(),
+            exact.expectedRoomRevision(),
+            exact.expectedNextCommandSequence(),
+            exact.expectedProcessedCommandCount(),
+            exact.expectedCommandId() + "-foreign",
+            exact.expectedRequestHash());
+
+    targetWorkflow.recoverTargetIntakeCurrentRunCommandDispatch(drifted);
+    environment.sleep(Duration.ofSeconds(1));
+    assertThat(RecoveryTargetCaseProcessWorkflow.intakeDispatchRunIds)
+        .containsExactly(provisioned.roomWorkflowRunId());
+    assertThat(targetWorkflow.state().protocolErrorCode())
+        .isEqualTo("TARGET_TYPED_ROOM_COMMAND_DISPATCH_FAILED");
+
+    targetWorkflow.recoverTargetIntakeCurrentRunCommandDispatch(exact);
+    CaseProcessSnapshot recovered =
+        awaitProcess(
+            targetWorkflow,
+            snapshot -> snapshot.nextCommandSequence() == 2 && snapshot.pendingCommandCount() == 0);
+    assertThat(recovered.processedCommandCount()).isEqualTo(1);
+    assertThat(recovered.protocolErrorCode()).isNull();
+    assertThat(RecoveryTargetCaseProcessWorkflow.intakeDispatchRunIds)
+        .containsExactly(provisioned.roomWorkflowRunId(), currentChildRunId);
+
+    targetWorkflow.recoverTargetIntakeCurrentRunCommandDispatch(exact);
+    environment.sleep(Duration.ofSeconds(1));
+    assertThat(RecoveryTargetCaseProcessWorkflow.intakeDispatchRunIds)
+        .containsExactly(provisioned.roomWorkflowRunId(), currentChildRunId);
   }
 
   @Test
@@ -2954,6 +3157,9 @@ class CaseProcessWorkflowTest {
     private static final List<String> nonHearingCommandCoordinates =
         new CopyOnWriteArrayList<>();
     private static final List<RoomType> startedRoomTypes = new CopyOnWriteArrayList<>();
+    private static final ConcurrentSkipListMap<String, Boolean> failedIntakeCommandIds =
+        new ConcurrentSkipListMap<>();
+    private static final List<String> intakeDispatchRunIds = new CopyOnWriteArrayList<>();
 
     private static void reset() {
       startCalls.set(0);
@@ -2969,6 +3175,8 @@ class CaseProcessWorkflowTest {
       hearingCommandCoordinates.clear();
       nonHearingCommandCoordinates.clear();
       startedRoomTypes.clear();
+      failedIntakeCommandIds.clear();
+      intakeDispatchRunIds.clear();
     }
 
     @Override
@@ -3003,6 +3211,22 @@ class CaseProcessWorkflowTest {
           descriptor.currentRoomRevision());
     }
 
+    @Override
+    protected TargetTypedRoomChildHandle restoreTargetTypedRoomChildForCurrentRun(
+        ActiveChildDescriptor descriptor, String currentRunId) {
+      return new RecordingTargetHandle(
+          WorkflowExecution.newBuilder()
+              .setWorkflowId(descriptor.workflowId())
+              .setRunId(descriptor.startedRunId())
+              .build(),
+          descriptor.roomType(),
+          descriptor.roomEpoch(),
+          descriptor.fencingToken(),
+          descriptor.currentProcessRevision(),
+          descriptor.currentRoomRevision(),
+          currentRunId);
+    }
+
     private final class RecordingTargetHandle implements TargetTypedRoomChildHandle {
       private final WorkflowExecution execution;
       private final RoomType roomType;
@@ -3010,6 +3234,7 @@ class CaseProcessWorkflowTest {
       private final long fencingToken;
       private long processRevision;
       private long roomRevision;
+      private final String routedRunId;
 
       private RecordingTargetHandle(
           WorkflowExecution execution,
@@ -3018,12 +3243,31 @@ class CaseProcessWorkflowTest {
           long fencingToken,
           long processRevision,
           long roomRevision) {
+        this(
+            execution,
+            roomType,
+            roomEpoch,
+            fencingToken,
+            processRevision,
+            roomRevision,
+            execution.getRunId());
+      }
+
+      private RecordingTargetHandle(
+          WorkflowExecution execution,
+          RoomType roomType,
+          long roomEpoch,
+          long fencingToken,
+          long processRevision,
+          long roomRevision,
+          String routedRunId) {
         this.execution = execution;
         this.roomType = roomType;
         this.roomEpoch = roomEpoch;
         this.fencingToken = fencingToken;
         this.processRevision = processRevision;
         this.roomRevision = roomRevision;
+        this.routedRunId = routedRunId;
       }
 
       @Override
@@ -3033,6 +3277,13 @@ class CaseProcessWorkflowTest {
 
       @Override
       public TargetTypedRoomDispatchReceipt commandAccepted(CaseCommandRef command) {
+        if (command.roomType() == RoomType.INTAKE) {
+          intakeDispatchRunIds.add(routedRunId);
+          if (failedIntakeCommandIds.containsKey(command.commandId())
+              && routedRunId.equals(execution.getRunId())) {
+            throw new IllegalStateException("synthetic stale Intake run dispatch");
+          }
+        }
         boolean firstObservedDispatch =
             observedCommandDispatches.putIfAbsent(command.commandId(), true) == null;
         if (firstObservedDispatch) {

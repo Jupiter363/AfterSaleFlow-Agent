@@ -51,9 +51,16 @@ public final class IntakeParallelFrameAssembler {
     private static final int DIALOGUE_SEGMENT_MAX_LENGTH = 80;
     private static final int DOSSIER_FACT_LIMIT = 5;
     private static final int DOSSIER_TEXT_MAX_LENGTH = 100;
+    private static final int DOSSIER_PERSISTED_SUMMARY_MAX_LENGTH = 20_000;
+    private static final int DOSSIER_POSITION_SUMMARY_MAX_LENGTH =
+            (DOSSIER_PERSISTED_SUMMARY_MAX_LENGTH - (DOSSIER_FACT_LIMIT - 1))
+                    / DOSSIER_FACT_LIMIT;
     private static final int DOSSIER_SHORT_TEXT_MAX_LENGTH = 60;
     private static final int DOSSIER_SUMMARY_MAX_LENGTH =
-            DOSSIER_FACT_LIMIT * DOSSIER_TEXT_MAX_LENGTH + DOSSIER_FACT_LIMIT - 1;
+            DOSSIER_FACT_LIMIT * DOSSIER_POSITION_SUMMARY_MAX_LENGTH
+                    + DOSSIER_FACT_LIMIT - 1;
+    private static final String THRESHOLD_BRIDGE_QUESTION =
+            "请确认以上案情与诉求是否完整，如有遗漏请补充最后一项可核验事实？";
     private static final Pattern IDENTIFIER =
             Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
     private static final Pattern SHA256 = Pattern.compile("^[0-9a-f]{64}$");
@@ -294,7 +301,7 @@ public final class IntakeParallelFrameAssembler {
             requireDossierFactDraft(sourceRow);
             String positionSummary = preservedBoundedText(
                     sourceRow.path("position_summary"),
-                    DOSSIER_TEXT_MAX_LENGTH,
+                    DOSSIER_POSITION_SUMMARY_MAX_LENGTH,
                     "source_row.position_summary");
             summaries.add(positionSummary);
         }
@@ -478,7 +485,7 @@ public final class IntakeParallelFrameAssembler {
         }
         preservedBoundedText(
                 row.path("position_summary"),
-                DOSSIER_TEXT_MAX_LENGTH,
+                DOSSIER_POSITION_SUMMARY_MAX_LENGTH,
                 "source_row.position_summary");
         JsonNode asserted = row.get("asserted_value");
         if (asserted != null && !asserted.isNull()) {
@@ -761,6 +768,10 @@ public final class IntakeParallelFrameAssembler {
             questions.add(gap.question());
             gapIds.add(gap.gapId());
             questionTexts.add(gap.question());
+        }
+        if (ready && questionTexts.isEmpty()) {
+            questions.add(THRESHOLD_BRIDGE_QUESTION);
+            questionTexts.add(THRESHOLD_BRIDGE_QUESTION);
         }
         missing.putArray("nice_to_have_gaps");
         ObjectNode previousHandoff = previousActorEntry.path("handoff_notes").isObject()

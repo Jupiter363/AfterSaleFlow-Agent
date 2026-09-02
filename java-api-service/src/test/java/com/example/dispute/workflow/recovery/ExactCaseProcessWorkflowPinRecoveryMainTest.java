@@ -3,12 +3,16 @@ package com.example.dispute.workflow.recovery;
 import static com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE;
 import static com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE;
 import static com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol.DOMAIN_EVENT_SIGNAL;
+import static com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol.TARGET_INTAKE_TERMINAL_NO_COMMIT_SIGNAL;
 import static com.example.dispute.workflow.recovery.ExactCaseProcessWorkflowPinRecoveryMain.CASE_PROCESS_WORKFLOW_CLASS;
 import static com.example.dispute.workflow.recovery.ExactCaseProcessWorkflowPinRecoveryMain.UPDATE_IDENTITY;
 import static com.example.dispute.workflow.recovery.ExactCaseProcessWorkflowPinRecoveryMain.UPDATE_MASK_PATH;
 import static com.example.dispute.workflow.recovery.ExactCaseProcessWorkflowPinRecoveryMain.WORKTREE_MARKER;
+import static com.example.dispute.workflow.recovery.ExactCaseProcessWorkflowPinRecoveryMain.PendingTaskState.ABSENT;
 import static com.example.dispute.workflow.recovery.ExactCaseProcessWorkflowPinRecoveryMain.PendingTaskState.OTHER;
 import static com.example.dispute.workflow.recovery.ExactCaseProcessWorkflowPinRecoveryMain.PendingTaskState.SCHEDULED;
+import static com.example.dispute.workflow.recovery.ExactCaseProcessWorkflowPinRecoveryMain.WorkflowClassAuthority.IDENTICAL;
+import static com.example.dispute.workflow.recovery.ExactCaseProcessWorkflowPinRecoveryMain.WorkflowClassAuthority.TARGET_INTAKE_TERMINAL_V3_ACK_RECOVERY_V1;
 import static com.example.dispute.workflow.recovery.ExactCaseProcessWorkflowPinRecoveryMain.WorkflowStatus.RUNNING;
 import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_UNSPECIFIED;
 import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_WORKFLOW_EXECUTION_OPTIONS_UPDATED;
@@ -42,12 +46,14 @@ import io.temporal.api.enums.v1.VersioningBehavior;
 import io.temporal.api.history.v1.ChildWorkflowExecutionStartedEventAttributes;
 import io.temporal.api.history.v1.ChildWorkflowExecutionTerminatedEventAttributes;
 import io.temporal.api.history.v1.HistoryEvent;
+import io.temporal.api.history.v1.MarkerRecordedEventAttributes;
 import io.temporal.api.history.v1.StartChildWorkflowExecutionInitiatedEventAttributes;
 import io.temporal.api.history.v1.WorkflowExecutionSignaledEventAttributes;
 import io.temporal.api.history.v1.WorkflowExecutionStartedEventAttributes;
 import io.temporal.api.history.v1.WorkflowExecutionOptionsUpdatedEventAttributes;
 import io.temporal.api.history.v1.WorkflowTaskCompletedEventAttributes;
 import io.temporal.api.history.v1.WorkflowTaskScheduledEventAttributes;
+import io.temporal.api.history.v1.WorkflowTaskStartedEventAttributes;
 import io.temporal.api.taskqueue.v1.TaskQueue;
 import io.temporal.api.workflow.v1.VersioningOverride;
 import io.temporal.api.workflow.v1.WorkflowExecutionInfo;
@@ -76,6 +82,7 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
     private static final long PENDING_WFT_SCHEDULED_EVENT_ID = 125;
     private static final long HISTORY_TAIL_EVENT_ID = 126;
     private static final long LAST_SIGNAL_EVENT_ID = 126;
+    private static final long TERMINAL_SIGNAL_EVENT_ID = 123;
     private static final int HISTORY_MAX_EVENTS = 200;
     private static final String RECOVERY_DEPLOYMENT = "local-final-control";
     private static final String RECOVERY_BUILD_ID = "recovery-build-1";
@@ -151,6 +158,54 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
     }
 
     @Test
+    void legacyAbsentWorkflowTaskV3TransitionPinsExactChildAndReplays() throws Exception {
+        byte[] newWorkflowBytes =
+                ("case-process-after:"
+                                + ExactCaseProcessWorkflowPinRecoveryMain
+                                        .TARGET_INTAKE_TERMINAL_V3_ACK_RECOVERY_CHANGE_ID)
+                        .getBytes(StandardCharsets.UTF_8);
+        Path retained =
+                retainedClasses("legacy-absent-v3-transition", WORKTREE_BINDING, WORKFLOW_BYTES);
+        RecoveryRequest prepareRequest = transitionRequest(retained);
+        FakeAuthority authority =
+                new FakeAuthority("1.29.7", absentExecution(), absentWorkflowTaskHistory());
+        RecoveryPlan prepared =
+                ExactCaseProcessWorkflowPinRecoveryMain.prepare(
+                        prepareRequest, authority, () -> newWorkflowBytes.clone());
+        RecordingPinExecutor pinExecutor = new RecordingPinExecutor(authority, true, false);
+
+        OperationResult first =
+                ExactCaseProcessWorkflowPinRecoveryMain.operate(
+                        prepareRequest.forApply(prepared.authoritySha256()),
+                        authority,
+                        () -> newWorkflowBytes.clone(),
+                        pinExecutor);
+        OperationResult replay =
+                ExactCaseProcessWorkflowPinRecoveryMain.operate(
+                        prepareRequest.forApply(prepared.authoritySha256()),
+                        authority,
+                        () -> newWorkflowBytes.clone(),
+                        pinExecutor);
+
+        assertThat(prepared.history().pendingWorkflowTaskScheduledEventId()).isZero();
+        assertThat(first.disposition()).isEqualTo(Disposition.PINNED);
+        assertThat(replay.disposition()).isEqualTo(Disposition.ALREADY_PINNED);
+        assertThat(replay.authoritySha256()).isEqualTo(prepared.authoritySha256());
+        assertThat(pinExecutor.commands).hasSize(1);
+
+        Path invalidOld =
+                retainedClasses(
+                        "legacy-absent-v3-marker-already-old",
+                        WORKTREE_BINDING,
+                        newWorkflowBytes);
+        assertRejected(
+                transitionRequest(invalidOld),
+                new FakeAuthority("1.29.7", absentExecution(), absentWorkflowTaskHistory()),
+                newWorkflowBytes,
+                new RecordingPinExecutor(null, false, false));
+    }
+
+    @Test
     void pinRequestUsesOnlyTopLevelPinnedVersioningOverride() {
         PinCommand command =
                 new PinCommand(
@@ -177,19 +232,55 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
     }
 
     @Test
-    void overrideReadersRequireTopLevelCanonicalPinnedVersion() {
+    void serverPersistedNestedHistoryAndDualDescribeReplayWithoutAnotherRpc()
+            throws Exception {
         VersioningOverride exact =
                 topLevelOverride(VERSIONING_BEHAVIOR_PINNED, RECOVERY_PINNED_VERSION);
-
-        assertThat(
-                        ExactCaseProcessWorkflowPinRecoveryMain.requirePinnedVersion(
-                                options(exact), "response"))
-                .isEqualTo(targetVersion());
-        assertThat(ExactCaseProcessWorkflowPinRecoveryMain.currentOverride(info(exact)))
-                .isEqualTo(
-                        CurrentOverride.pinned(RECOVERY_DEPLOYMENT, RECOVERY_BUILD_ID));
-
         VersioningOverride nestedOnly = nestedOverride();
+        VersioningOverride exactDual =
+                exact.toBuilder().setPinned(nestedOnly.getPinned()).build();
+
+        for (VersioningOverride persisted : List.of(exact, nestedOnly, exactDual)) {
+            assertThat(
+                            ExactCaseProcessWorkflowPinRecoveryMain.requirePinnedVersion(
+                                    options(persisted), "response"))
+                    .isEqualTo(targetVersion());
+            assertThat(ExactCaseProcessWorkflowPinRecoveryMain.currentOverride(info(persisted)))
+                    .isEqualTo(
+                            CurrentOverride.pinned(RECOVERY_DEPLOYMENT, RECOVERY_BUILD_ID));
+        }
+
+        Path retained = retainedClasses("server-persisted-replay", WORKTREE_BINDING, WORKFLOW_BYTES);
+        RecoveryRequest request = request(retained);
+        RecoveryPlan before =
+                ExactCaseProcessWorkflowPinRecoveryMain.prepare(
+                        request,
+                        new FakeAuthority("1.29.7", execution(), validHistory()),
+                        () -> WORKFLOW_BYTES.clone());
+        ExecutionAuthority pinnedExecution =
+                withOverride(
+                        execution(),
+                        ExactCaseProcessWorkflowPinRecoveryMain.currentOverride(info(exactDual)));
+        FakeAuthority persisted =
+                new FakeAuthority(
+                        "1.29.7",
+                        pinnedExecution,
+                        historyWithSuffix(
+                                optionsUpdatedEvent(
+                                        nestedOnly, true, false, "", false, "", false)));
+        RecordingPinExecutor executor = new RecordingPinExecutor(persisted, true, false);
+
+        OperationResult replay =
+                ExactCaseProcessWorkflowPinRecoveryMain.operate(
+                        request.forApply(before.authoritySha256()),
+                        persisted,
+                        () -> WORKFLOW_BYTES.clone(),
+                        executor);
+
+        assertThat(replay.disposition()).isEqualTo(Disposition.ALREADY_PINNED);
+        assertThat(replay.authoritySha256()).isEqualTo(before.authoritySha256());
+        assertThat(executor.commands).isEmpty();
+
         VersioningOverride wrongBehavior =
                 topLevelOverride(VERSIONING_BEHAVIOR_AUTO_UPGRADE, RECOVERY_PINNED_VERSION);
         VersioningOverride blankVersion =
@@ -198,17 +289,25 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
                 topLevelOverride(VERSIONING_BEHAVIOR_PINNED, "not-canonical");
         VersioningOverride noncanonicalVersion =
                 topLevelOverride(VERSIONING_BEHAVIOR_PINNED, " " + RECOVERY_PINNED_VERSION);
-        VersioningOverride dualAuthority =
-                exact.toBuilder().setPinned(nestedOverride().getPinned()).build();
+        VersioningOverride conflictingDual =
+                exact.toBuilder()
+                        .setPinned(
+                                nestedOnly
+                                        .getPinned()
+                                        .toBuilder()
+                                        .setVersion(
+                                                WorkerDeploymentVersion.newBuilder()
+                                                        .setDeploymentName("other")
+                                                        .setBuildId("other-build")))
+                        .build();
 
         for (VersioningOverride invalid :
                 List.of(
-                        nestedOnly,
                         wrongBehavior,
                         blankVersion,
                         invalidVersion,
                         noncanonicalVersion,
-                        dualAuthority)) {
+                        conflictingDual)) {
             assertThatThrownBy(
                             () ->
                                     ExactCaseProcessWorkflowPinRecoveryMain.requirePinnedVersion(
@@ -619,9 +718,11 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
                 RUN_ID,
                 LEGACY_BUILD_ID,
                 retained,
+                IDENTICAL,
                 RECOVERY_DEPLOYMENT,
                 RECOVERY_BUILD_ID,
                 RECOVERY_PINNED_VERSION,
+                SCHEDULED,
                 PENDING_WFT_SCHEDULED_EVENT_ID,
                 1,
                 CHILD_WORKFLOW_ID,
@@ -634,6 +735,34 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
                 HISTORY_MAX_EVENTS,
                 Mode.PREPARE,
                 null);
+    }
+
+    private static RecoveryRequest transitionRequest(Path retained) {
+        RecoveryRequest source = request(retained);
+        return new RecoveryRequest(
+                source.address(),
+                source.namespace(),
+                source.workflowId(),
+                source.runId(),
+                source.legacyBuildId(),
+                source.retainedClasses(),
+                TARGET_INTAKE_TERMINAL_V3_ACK_RECOVERY_V1,
+                source.recoveryDeploymentName(),
+                source.recoveryBuildId(),
+                source.recoveryPinnedVersion(),
+                ABSENT,
+                0,
+                0,
+                source.pendingChildWorkflowId(),
+                source.pendingChildRunId(),
+                source.pendingChildWorkflowType(),
+                source.pendingChildInitiatedEventId(),
+                source.expectedLastEventId(),
+                TERMINAL_SIGNAL_EVENT_ID,
+                TARGET_INTAKE_TERMINAL_NO_COMMIT_SIGNAL,
+                source.historyMaxEvents(),
+                source.mode(),
+                source.expectedAuthoritySha256());
     }
 
     private static RecoveryRequest withLastEvent(
@@ -675,9 +804,11 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
                 source.runId(),
                 source.legacyBuildId(),
                 source.retainedClasses(),
+                source.workflowClassAuthority(),
                 source.recoveryDeploymentName(),
                 source.recoveryBuildId(),
                 source.recoveryPinnedVersion(),
+                source.pendingWorkflowTaskState(),
                 pendingWorkflowTaskScheduledEventId,
                 source.pendingWorkflowTaskAttempt(),
                 source.pendingChildWorkflowId(),
@@ -709,6 +840,24 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
                 CurrentOverride.absent(),
                 false,
                 false);
+    }
+
+    private static ExecutionAuthority absentExecution() {
+        ExecutionAuthority source = execution();
+        return copy(
+                source,
+                source.workflowId(),
+                source.runId(),
+                source.workflowType(),
+                source.status(),
+                source.taskQueue(),
+                source.assignedBuildId(),
+                source.mostRecentBuildId(),
+                source.versioned(),
+                ABSENT,
+                0,
+                source.pendingActivities(),
+                source.pendingChildren());
     }
 
     private static ExecutionAuthority copy(
@@ -886,12 +1035,27 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
         events.add(childInitiated(2));
         events.add(childStarted(3));
         for (long eventId = 4; eventId < PENDING_WFT_SCHEDULED_EVENT_ID; eventId++) {
-            events.add(workflowTaskCompleted(eventId));
+            events.add(filler(eventId));
         }
         events.add(
                 workflowTaskScheduled(
                         PENDING_WFT_SCHEDULED_EVENT_ID, 1, TASK_QUEUE_KIND_NORMAL));
         events.add(signaled(LAST_SIGNAL_EVENT_ID, DOMAIN_EVENT_SIGNAL));
+        return List.copyOf(events);
+    }
+
+    private static List<HistoryEvent> absentWorkflowTaskHistory() {
+        List<HistoryEvent> events = new ArrayList<>();
+        events.add(workflowStarted(1));
+        events.add(childInitiated(2));
+        events.add(childStarted(3));
+        for (long eventId = 4; eventId < TERMINAL_SIGNAL_EVENT_ID; eventId++) {
+            events.add(filler(eventId));
+        }
+        events.add(signaled(TERMINAL_SIGNAL_EVENT_ID, TARGET_INTAKE_TERMINAL_NO_COMMIT_SIGNAL));
+        events.add(workflowTaskScheduled(124, 1, TASK_QUEUE_KIND_NORMAL));
+        events.add(workflowTaskStarted(125, 124));
+        events.add(workflowTaskCompleted(126, 124, 125));
         return List.copyOf(events);
     }
 
@@ -909,6 +1073,13 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
                 .setEventId(eventId)
                 .setWorkflowExecutionStartedEventAttributes(
                         WorkflowExecutionStartedEventAttributes.getDefaultInstance())
+                .build();
+    }
+
+    private static HistoryEvent filler(long eventId) {
+        return HistoryEvent.newBuilder()
+                .setEventId(eventId)
+                .setMarkerRecordedEventAttributes(MarkerRecordedEventAttributes.getDefaultInstance())
                 .build();
     }
 
@@ -962,6 +1133,26 @@ class ExactCaseProcessWorkflowPinRecoveryMainTest {
                 .setEventId(eventId)
                 .setWorkflowTaskCompletedEventAttributes(
                         WorkflowTaskCompletedEventAttributes.getDefaultInstance())
+                .build();
+    }
+
+    private static HistoryEvent workflowTaskCompleted(
+            long eventId, long scheduledEventId, long startedEventId) {
+        return HistoryEvent.newBuilder()
+                .setEventId(eventId)
+                .setWorkflowTaskCompletedEventAttributes(
+                        WorkflowTaskCompletedEventAttributes.newBuilder()
+                                .setScheduledEventId(scheduledEventId)
+                                .setStartedEventId(startedEventId))
+                .build();
+    }
+
+    private static HistoryEvent workflowTaskStarted(long eventId, long scheduledEventId) {
+        return HistoryEvent.newBuilder()
+                .setEventId(eventId)
+                .setWorkflowTaskStartedEventAttributes(
+                        WorkflowTaskStartedEventAttributes.newBuilder()
+                                .setScheduledEventId(scheduledEventId))
                 .build();
     }
 

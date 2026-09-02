@@ -397,6 +397,8 @@ class CanonicalTargetRoomCommandMaterializerTest {
     @Test
     void materializesExactFrozenEvidenceOpeningOnceAndRejectsMissingOneSidedOrDriftedAuthority()
             throws Exception {
+        ObjectMapper applicationMapper =
+                MAPPER.copy().setSerializationInclusion(JsonInclude.Include.ALWAYS);
         Map<String, byte[]> objects = new LinkedHashMap<>();
         MinioClient minio = mock(MinioClient.class);
         doAnswer(
@@ -410,9 +412,14 @@ class CanonicalTargetRoomCommandMaterializerTest {
         TargetE2eRoomObjectIndex objectIndex = mock(TargetE2eRoomObjectIndex.class);
         MinioTargetE2eRoomCommandPayloadPublisher payloads =
                 new MinioTargetE2eRoomCommandPayloadPublisher(
-                        minio, MAPPER, "target-e2e", "room-command-inputs", objectIndex);
+                        minio,
+                        applicationMapper,
+                        "target-e2e",
+                        "room-command-inputs",
+                        objectIndex);
         TargetE2eEvidenceTurnInvocationPublisher invocationPublisher =
-                new TargetE2eEvidenceTurnInvocationPublisher(payloads, objectIndex, MAPPER);
+                new TargetE2eEvidenceTurnInvocationPublisher(
+                        payloads, objectIndex, applicationMapper);
         TargetE2eEvidenceManifestPublisher syntheticManifest =
                 mock(TargetE2eEvidenceManifestPublisher.class);
         TargetEvidenceCommandMaterialStore evidence = mock(TargetEvidenceCommandMaterialStore.class);
@@ -448,8 +455,8 @@ class CanonicalTargetRoomCommandMaterializerTest {
                         authority,
                         pins(),
                         ledger,
-                        new AgentRunCommandBindingFactory(MAPPER),
-                        new TargetE2EGraphEnvelopeCodec(MAPPER),
+                        new AgentRunCommandBindingFactory(applicationMapper),
+                        new TargetE2EGraphEnvelopeCodec(applicationMapper),
                         payloads,
                         objectIndex,
                         syntheticManifest,
@@ -460,7 +467,7 @@ class CanonicalTargetRoomCommandMaterializerTest {
                         mock(TargetEvidenceCompletionCommandMaterialStore.class),
                         mock(TargetHearingCommandMaterialStore.class),
                         mock(TargetReviewCommandMaterialStore.class),
-                        MAPPER,
+                        applicationMapper,
                         Clock.fixed(NOW, ZoneOffset.UTC));
         AcceptCaseCommand opening = evidenceOpeningCommand(3L);
         EvidenceAgentTurnCommand openingTurn = openingTurn();

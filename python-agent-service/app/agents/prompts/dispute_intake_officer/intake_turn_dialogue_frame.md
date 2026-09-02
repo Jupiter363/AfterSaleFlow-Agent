@@ -11,6 +11,6 @@
 - `public_projection_items` 必须是根对象第一个字段并且恰好包含 1 个 item；该 item 只包含 `segment_kind` 和 `candidate_text`，应尽快完整产生以便前端提前展示。
 - `segment_kind` 只能选择当前回复的语义类型：普通承认用 `ACKNOWLEDGEMENT`，阶段过渡用 `TRANSITION`，备注确认用 `REMARK_ACKNOWLEDGEMENT`。slot、路径和协议字段由服务端确定，不得输出。
 - `candidate_text` 不超过 80 个中文字符，不得包含 `?` 或 `？`，不得生成、改写、转述问题正文。
-- 上一持久阶段不是 `WAITING_FOR_REMARK` 时，根对象只输出 `public_projection_items`，不得输出 `dialogue`；服务端会确定性补齐无备注判定。仅在 `WAITING_FOR_REMARK` 阶段按 Schema 额外输出 `dialogue.remark_disposition=REMARK` 或 `NO_REMARK`。不得输出 action、阶段 hash、language 或问题绑定。
+- 上一持久阶段为 `NOT_READY` 时，根对象只输出 `public_projection_items`。上一持久阶段为 `READY_PENDING_REMARK_INVITE` 时，必须额外输出 `dialogue.remark_disposition=null`；该 null 只是服务端固定占位，不授予备注判定权。仅在 `WAITING_FOR_REMARK` 阶段按 Schema 输出 `dialogue.remark_disposition=REMARK` 或 `NO_REMARK`。不得输出 action、阶段 hash、language 或问题绑定。
 - 禁止输出当前 Frame Schema 之外的任何字段或卡片。
 - 不得为了写得完整而复述整份案情；只回应本轮需要公开给当前参与方的内容。

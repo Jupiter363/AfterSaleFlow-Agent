@@ -534,6 +534,9 @@ class HearingFlowWorkflows:
             "hearing_judge_v1",
             _judge_v1_model_context(request),
             JudgeV1Draft,
+            semantic_validator=lambda candidate: _validate_v1_model_output(
+                request, candidate
+            ),
         )
         output = output.model_copy(
             update={
@@ -582,6 +585,9 @@ class HearingFlowWorkflows:
             "hearing_judge_v1",
             _judge_v1_model_context(request),
             JudgeV1Draft,
+            semantic_validator=lambda candidate: _validate_v1_model_output(
+                request, candidate
+            ),
             agent_context=agent_context,
         )
         return self._judge_v1_proposal(request, _output=output)
@@ -1526,6 +1532,41 @@ def _merge_evidence_batch(
     return FactEvidenceMatrixV3.model_validate(payload)
 
 
+def _adjudication_validation_requirements(dossier: Any) -> dict[str, Any]:
+    """Project the frozen adjudication authority into an exact coverage checklist."""
+
+    evidence_ids_by_fact: dict[str, list[str]] = {
+        row.fact_id: [] for row in dossier.case_fact_matrix.fact_rows
+    }
+    for link in dossier.fact_evidence_matrix.links:
+        allowed = evidence_ids_by_fact.get(link.fact_id)
+        if allowed is not None and link.evidence_id not in allowed:
+            allowed.append(link.evidence_id)
+    return {
+        "fact_coverage_rule": "EXACTLY_ONE_FINDING_PER_REQUIRED_FACT",
+        "evidence_binding_rule": "USE_ONLY_SAME_FACT_ALLOWED_EVIDENCE_IDS",
+        "missing_evidence_rule": "NONEMPTY_EVIDENCE_GAP_WHEN_NO_EVIDENCE_IDS",
+        "required_fact_count": len(dossier.case_fact_matrix.fact_rows),
+        "required_fact_findings": [
+            {
+                "fact_id": row.fact_id,
+                "allowed_evidence_ids": evidence_ids_by_fact[row.fact_id],
+            }
+            for row in dossier.case_fact_matrix.fact_rows
+        ],
+        "rule_coverage_rule": "EXACTLY_ONE_APPLICATION_PER_REQUIRED_RULE",
+        "required_rule_count": len(dossier.adjudication_rules),
+        "required_rule_applications": [
+            {
+                "rule_code": rule.rule_code,
+                "rule_version": rule.rule_version,
+                "rule_name": rule.rule_name,
+            }
+            for rule in dossier.adjudication_rules
+        ],
+    }
+
+
 def _frozen_adjudication_context(dossier: Any) -> dict[str, Any]:
     """Return the exact model-visible frozen authority allowlist."""
 
@@ -1535,6 +1576,12 @@ def _frozen_adjudication_context(dossier: Any) -> dict[str, Any]:
         "adjudication_rules": [
             item.model_dump(mode="json") for item in dossier.adjudication_rules
         ],
+        # This is a deterministic projection of the three authorities above,
+        # not a fourth source of facts. It keeps exact semantic obligations
+        # visible on both the initial generation and the bounded repair call.
+        "validation_requirements_pack": _adjudication_validation_requirements(
+            dossier
+        ),
     }
 
 
@@ -1754,10 +1801,31 @@ def _validate_intake_synthesis_model_output(
     return output
 
 
+def _validate_v1_model_output(
+    request: HearingJudgeV1Request, output: JudgeV1Draft
+) -> JudgeV1Draft:
+    try:
+        normalized_draft = _normalize_adjudication_draft(
+            output.draft, request.trial_dossier
+        )
+        _validate_adjudication_draft(
+            "hearing_judge_v1", normalized_draft, request.trial_dossier
+        )
+    except AgentOutputSchemaError as error:
+        raise ValueError(str(error)) from error
+    return output
+
+
 def _validate_v2_model_output(
     request: HearingJudgeV2Request, output: HearingJudgeV2Draft
 ) -> HearingJudgeV2Draft:
     try:
+        normalized_draft = _normalize_adjudication_draft(
+            output.draft, request.trial_dossier
+        )
+        _validate_adjudication_draft(
+            "hearing_judge_v2", normalized_draft, request.trial_dossier
+        )
         _validate_review_responses(request, output)
     except AgentOutputSchemaError as error:
         raise ValueError(str(error)) from error

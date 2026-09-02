@@ -1538,6 +1538,7 @@ class GraphCommandGateway:
             )
         if command.status in {
             CommandStatus.COMPLETED,
+            CommandStatus.TECHNICAL_COMPLETED,
             CommandStatus.CANCELLED,
             CommandStatus.ABORTED,
         }:

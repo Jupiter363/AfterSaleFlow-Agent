@@ -813,7 +813,7 @@ async def test_target_evidence_runs_formal_turn_and_replays_exact_guarded_uttera
                 "room_type": "EVIDENCE",
                 "room_epoch": identity["room_epoch"],
                 "graph_key": "all-rooms.target-e2e.v2",
-                "graph_version": "target-e2e-graph.2026-08-18.1",
+        "graph_version": "target-e2e-graph.2026-08-18.2",
                 "checkpoint_schema_version": "target-e2e-checkpoint.v2",
                 "thread_id": identity["thread_id"],
                 "actor_scope": actor_scope,

@@ -4,6 +4,7 @@ package com.example.dispute.workflow.infrastructure.agent;
 public final class GraphCommandTransportException extends RuntimeException {
 
     public enum Kind {
+        NOT_SUBMITTED,
         TRANSPORT,
         PROTOCOL
     }
@@ -23,11 +24,20 @@ public final class GraphCommandTransportException extends RuntimeException {
         return new GraphCommandTransportException(message, null, Kind.PROTOCOL);
     }
 
+    public static GraphCommandTransportException notSubmitted(
+            String message, Throwable cause) {
+        return new GraphCommandTransportException(message, cause, Kind.NOT_SUBMITTED);
+    }
+
     public Kind kind() {
         return kind;
     }
 
     public boolean protocolViolation() {
         return kind == Kind.PROTOCOL;
+    }
+
+    public boolean notSubmitted() {
+        return kind == Kind.NOT_SUBMITTED;
     }
 }

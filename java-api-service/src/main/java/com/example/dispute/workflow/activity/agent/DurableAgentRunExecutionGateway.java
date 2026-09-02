@@ -15,6 +15,7 @@ import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HexFormat;
@@ -24,6 +25,9 @@ import java.util.Objects;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.RecoverableDataAccessException;
+import org.springframework.dao.TransientDataAccessException;
 
 /** Persists bounded public-event batches before exposing their progress to the Activity. */
 public final class DurableAgentRunExecutionGateway implements AgentRunExecutionGateway {
@@ -584,9 +588,11 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             cancellationToken.throwIfCancellationRequested();
         }
         BatchAppendReceipt receipt;
+        boolean recoveredInline;
         try {
-            receipt = Objects.requireNonNull(
-                    streamStore.appendBatch(events), "durable batch append receipt");
+            InlineAppend append = appendBatchInline(events);
+            receipt = append.receipt();
+            recoveredInline = append.recoveredInline();
             if (receipt.inserted().size() != events.size()) {
                 throw new IllegalStateException(
                         "durable batch receipt does not describe every event");
@@ -628,13 +634,62 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             state.commit(events.get(index));
             inserted |= receipt.inserted().get(index);
         }
-        AgentRunProgress notification = inserted && !commitsFinal ? state.snapshot() : null;
+        AgentRunProgress notification =
+                (inserted || recoveredInline) && !commitsFinal ? state.snapshot() : null;
         batch.clear();
         if (notification != null) {
             cancellationToken.throwIfCancellationRequested();
             progressListener.onProgress(notification);
         }
     }
+
+    private InlineAppend appendBatchInline(List<AgentStreamEvent> events) {
+        try {
+            return new InlineAppend(
+                    Objects.requireNonNull(
+                            streamStore.appendBatch(events), "durable batch append receipt"),
+                    false);
+        } catch (NonRunningAttemptException failure) {
+            throw failure;
+        } catch (RuntimeException firstFailure) {
+            if (!retryablePersistenceFailure(firstFailure)) {
+                throw firstFailure;
+            }
+            try {
+                return new InlineAppend(
+                        Objects.requireNonNull(
+                                streamStore.appendBatch(events),
+                                "durable batch append receipt"),
+                        true);
+            } catch (RuntimeException retryFailure) {
+                firstFailure.addSuppressed(retryFailure);
+                throw firstFailure;
+            }
+        }
+    }
+
+    private static boolean retryablePersistenceFailure(Throwable failure) {
+        Throwable current = failure;
+        for (int depth = 0; current != null && depth < 16; depth++) {
+            if (current instanceof TransientDataAccessException
+                    || current instanceof RecoverableDataAccessException
+                    || current instanceof DataAccessResourceFailureException) {
+                return true;
+            }
+            if (current instanceof SQLException sqlFailure) {
+                String sqlState = sqlFailure.getSQLState();
+                if (sqlState != null
+                        && (sqlState.startsWith("08") || sqlState.startsWith("40"))) {
+                    return true;
+                }
+            }
+            Throwable next = current.getCause();
+            current = next == current ? null : next;
+        }
+        return false;
+    }
+
+    private record InlineAppend(BatchAppendReceipt receipt, boolean recoveredInline) {}
 
     private static boolean durableAppendFailure(RuntimeException failure) {
         if (!(failure instanceof AgentRunExecutionException executionFailure)) {

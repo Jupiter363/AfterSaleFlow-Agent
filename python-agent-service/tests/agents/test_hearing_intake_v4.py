@@ -16,7 +16,7 @@ from app.agents.hearing_flow import HearingFlowWorkflows
 from app.harness.hearing_intake_context_v4 import (
     assemble_hearing_intake_context_v4,
 )
-from app.llm import AgentOutputSchemaError
+from app.llm import AgentOutputSchemaError, governed_max_output_tokens
 from app.harness.invocation_context import AgentInvocationContext
 from app.schemas import (
     CaseFactMatrixV2,
@@ -462,6 +462,24 @@ def test_v4_rebinding_emits_current_position_once_and_projects_effective_state()
     )
 
 
+def test_v5_synthesis_root_order_accepts_an_omitted_optional_issue_list_only() -> None:
+    request, output = _synthesis_fixture()
+    payload = deepcopy(output.model_dump(mode="json"))
+    payload.pop("new_issue_proposals")
+
+    parsed = HearingIntakeSynthesisLlmOutputV5.model_validate(payload)
+    result = materialize_hearing_synthesis_v5(request, parsed)
+
+    assert parsed.new_issue_proposals == []
+    assert [issue.issue_kind for issue in result.issue_transition_set.issues] == [
+        "REBIND"
+    ]
+
+    frames_first = {"frames": payload["frames"], **payload}
+    with pytest.raises(ValidationError, match="root property order"):
+        HearingIntakeSynthesisLlmOutputV5.model_validate(frames_first)
+
+
 def test_v5_rebinding_action_does_not_reclassify_model_owned_position() -> None:
     request, output = _synthesis_fixture()
     payload = deepcopy(output.model_dump(mode="json"))
@@ -535,6 +553,13 @@ def test_v4_synthesis_context_exposes_one_copy_only_binding_catalog() -> None:
     assert "若 `new_issue_proposals` 为空" in prompt
     assert "如果 `new_fact_effects` 为空" in prompt
     assert "未激活新槽引用为零" in prompt
+    assert "重复 `source_issue_refs` 为零" in prompt
+    assert "数组长度必须等于其去重后的长度" in prompt
+    assert "`HeARING_ISSUE_`" in prompt
+    assert "区分大小写、逐字属于上述有效集合" in prompt
+    assert "完整闭合 JSON 优先于扩写" in prompt
+    assert "`matrix_effects` 是相对 M1 的稀疏增量" in prompt
+    assert governed_max_output_tokens("hearing_intake_synthesis") == 8_192
     assert "allowed_issue_refs" not in prompt
     assert "allowed_fact_refs" not in prompt
 

@@ -40,6 +40,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleAct
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ProvisionedRoomEpochHighWater;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerEntry;
@@ -56,6 +57,7 @@ import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomSignal;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomSnapshot;
 import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
+import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowProtocol;
 import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart.ExecutionLane;
@@ -69,6 +71,7 @@ import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyS
 import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
 import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.api.history.v1.HistoryEvent;
 import io.temporal.client.UpdateOptions;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
@@ -83,6 +86,7 @@ import io.temporal.worker.Worker;
 import io.temporal.workflow.Workflow;
 import io.temporal.workflow.WorkflowInterface;
 import io.temporal.workflow.WorkflowMethod;
+import io.temporal.workflow.SignalMethod;
 import io.temporal.workflow.ContinueAsNewOptions;
 import java.lang.reflect.Modifier;
 import java.time.Duration;
@@ -557,6 +561,94 @@ class TargetTypedRoomCaseProcessDispatcherTest {
   }
 
   @Test
+  void restoredTargetIntakeSignalsTheCurrentContinueAsNewRun() {
+    String caseQueue = "restored-intake-current-run-case";
+    String roomQueue = "restored-intake-current-run-room";
+    String childWorkflowId = "room-workflow:CASE_CHAIN_SIGNAL:INTAKE:0";
+    String parentWorkflowId = "case-process:tenant-test:CASE_CHAIN_SIGNAL";
+    ContinuedIntakeSignalWorkflowImpl.reset();
+
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      Worker caseWorker = environment.newWorker(caseQueue);
+      Worker roomWorker = environment.newWorker(roomQueue);
+      caseWorker.registerWorkflowImplementationTypes(
+          RestoredIntakeCurrentRunDispatcherWorkflow.class);
+      roomWorker.registerWorkflowImplementationTypes(ContinuedIntakeSignalWorkflowImpl.class);
+      environment.start();
+
+      ContinuedIntakeSignalWorkflow child =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  ContinuedIntakeSignalWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(childWorkflowId)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      WorkflowExecution firstExecution = WorkflowClient.start(child::run, false);
+      for (int attempt = 0;
+          attempt < 100 && ContinuedIntakeSignalWorkflowImpl.currentRunId.get() == null;
+          attempt++) {
+        environment.sleep(Duration.ofMillis(10));
+      }
+      String currentRunId = ContinuedIntakeSignalWorkflowImpl.currentRunId.get();
+      assertThat(currentRunId).isNotNull().isNotEqualTo(firstExecution.getRunId());
+
+      CaseDomainEventRef event = globalCaseEvent(5, "INTAKE_PROJECTION_READY");
+      RestoredIntakeCurrentRunDispatcherWorkflow.reset(
+          new ActiveChildDescriptor(
+              ActiveChildKind.TARGET_TYPED_ROOM,
+              "room-epoch-selection.v2",
+              WriterMode.TEMPORAL,
+              CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+              "case-build-current-run-test",
+              "IntakeRoomWorkflow",
+              "room-build-current-run-test",
+              RoomType.INTAKE,
+              0,
+              1,
+              childWorkflowId,
+              firstExecution.getRunId(),
+              "a".repeat(64),
+              "b".repeat(64),
+              0L,
+              0L,
+              2L,
+              2L),
+          event);
+      CaseProcessWorkflow parent =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  CaseProcessWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(parentWorkflowId)
+                      .setTaskQueue(caseQueue)
+                      .build());
+      WorkflowClient.start(parent::run, (CaseProcessCarryState) null);
+
+      WorkflowStub.fromTyped(parent).getResult(Void.class);
+      WorkflowStub.fromTyped(child).getResult(Void.class);
+
+      assertThat(ContinuedIntakeSignalWorkflowImpl.observedRunId.get())
+          .isEqualTo(currentRunId);
+      assertThat(ContinuedIntakeSignalWorkflowImpl.observedEvent.get())
+          .isEqualTo(TargetIntakeSourceEventRef.fromGlobalIntakeProjectionReady(event, 0, 1));
+      var initiated =
+          environment.getWorkflowClient().fetchHistory(parentWorkflowId).getEvents().stream()
+              .filter(HistoryEvent::hasSignalExternalWorkflowExecutionInitiatedEventAttributes)
+              .findFirst()
+              .orElseThrow();
+      assertThat(
+              initiated
+                  .getSignalExternalWorkflowExecutionInitiatedEventAttributes()
+                  .getWorkflowExecution()
+                  .getRunId())
+          .isEmpty();
+    }
+  }
+
+  @Test
   void globalIntakeProjectionReadyBindsToTheActiveIntakeEpochAndFenceOnly() {
     CaseDomainEventRef readiness = globalCaseEvent(2, "INTAKE_PROJECTION_READY");
 
@@ -581,6 +673,67 @@ class TargetTypedRoomCaseProcessDispatcherTest {
                 TargetIntakeSourceEventRef.fromGlobalIntakeProjectionReady(
                     caseEvent(4, "INTAKE_PROJECTION_READY"), 7, 11))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void successfulTargetTypedRoomEventRetryClearsItsDispatchError() {
+    Instant now = Instant.parse("2026-07-30T03:00:00Z");
+    ProjectionHighWaterLedger ledger = new ProjectionHighWaterLedger();
+    ReadyHighWaterProjectionActivities projection =
+        new ReadyHighWaterProjectionActivities(ledger, now);
+    HighWaterTargetCaseProcessWorkflow.reset();
+    HighWaterTargetCaseProcessWorkflow.failNextGlobalReady();
+
+    try (TestWorkflowEnvironment environment =
+        TestWorkflowEnvironment.newInstance(
+            TestEnvironmentOptions.newBuilder().setInitialTime(now).build())) {
+      Worker worker =
+          environment.newWorker(CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE);
+      worker.registerWorkflowImplementationTypes(HighWaterTargetCaseProcessWorkflow.class);
+      worker.registerActivitiesImplementations(ledger, projection);
+      environment.start();
+
+      ProvisionRoomEpoch provision = highWaterTargetIntakeProvision(now);
+      CaseProcessWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  CaseProcessWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(provision.caseWorkflowId())
+                      .setTaskQueue(CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE)
+                      .build());
+      WorkflowClient.start(workflow::run, (CaseProcessCarryState) null);
+      provision(workflow, provision);
+
+      workflow.domainEventCommitted(globalCaseEvent(1, "INTAKE_PROJECTION_READY"));
+      CaseProcessSnapshot blocked =
+          awaitProcess(
+              environment,
+              workflow,
+              state ->
+                  "TARGET_TYPED_ROOM_EVENT_DISPATCH_FAILED"
+                      .equals(state.protocolErrorCode()));
+      assertThat(blocked.nextCaseEventSequence()).isEqualTo(1);
+      assertThat(blocked.processedEventCount()).isZero();
+      assertThat(blocked.bufferedEventCount()).isEqualTo(1);
+      assertThat(blocked.protocolErrorOrigin()).isEqualTo(RecoveryErrorOrigin.DOMAIN_EVENT);
+
+      workflow.retrySequenceGap();
+
+      CaseProcessSnapshot recovered =
+          awaitProcess(
+              environment,
+              workflow,
+              state -> state.nextCaseEventSequence() == 2 && state.bufferedEventCount() == 0);
+      assertThat(recovered.processedEventCount()).isEqualTo(1);
+      assertThat(recovered.highestObservedEventSequence()).isEqualTo(1);
+      assertThat(recovered.protocolErrorCode()).isNull();
+      assertThat(recovered.protocolErrorOrigin()).isNull();
+      assertThat(HighWaterTargetCaseProcessWorkflow.globalReadyEvents)
+          .extracting(CaseDomainEventRef::caseEventSequence)
+          .containsExactly(1L);
+    }
   }
 
   @Test
@@ -1217,11 +1370,17 @@ class TargetTypedRoomCaseProcessDispatcherTest {
     private static final List<CaseDomainEventRef> domainEvents = new CopyOnWriteArrayList<>();
     private static final List<CaseDomainEventRef> globalReadyEvents =
         new CopyOnWriteArrayList<>();
+    private static final AtomicInteger globalReadyFailures = new AtomicInteger();
 
     static void reset() {
       commands.clear();
       domainEvents.clear();
       globalReadyEvents.clear();
+      globalReadyFailures.set(0);
+    }
+
+    static void failNextGlobalReady() {
+      globalReadyFailures.incrementAndGet();
     }
 
     @Override
@@ -1304,6 +1463,9 @@ class TargetTypedRoomCaseProcessDispatcherTest {
             || event.roomEpoch() != 0
             || !"INTAKE_PROJECTION_READY".equals(event.eventType())) {
           throw new IllegalArgumentException("global ready event is not canonical");
+        }
+        if (globalReadyFailures.getAndUpdate(remaining -> Math.max(0, remaining - 1)) > 0) {
+          throw new IllegalStateException("synthetic target typed-room dispatch failure");
         }
         globalReadyEvents.add(event);
         return receipt();
@@ -1693,6 +1855,75 @@ class TargetTypedRoomCaseProcessDispatcherTest {
           false,
           0,
           graph);
+    }
+  }
+
+  @WorkflowInterface
+  public interface ContinuedIntakeSignalWorkflow {
+
+    @WorkflowMethod(name = "ContinuedIntakeSignalWorkflow")
+    void run(boolean continued);
+
+    @SignalMethod(name = IntakeWorkflowProtocol.TARGET_SOURCE_EVENT_SIGNAL)
+    void targetSourceEventObserved(TargetIntakeSourceEventRef event);
+  }
+
+  public static final class ContinuedIntakeSignalWorkflowImpl
+      implements ContinuedIntakeSignalWorkflow {
+    private static final AtomicReference<String> currentRunId = new AtomicReference<>();
+    private static final AtomicReference<String> observedRunId = new AtomicReference<>();
+    private static final AtomicReference<TargetIntakeSourceEventRef> observedEvent =
+        new AtomicReference<>();
+    private boolean observed;
+
+    static void reset() {
+      currentRunId.set(null);
+      observedRunId.set(null);
+      observedEvent.set(null);
+    }
+
+    @Override
+    public void run(boolean continued) {
+      if (!continued) {
+        Workflow.continueAsNew(
+            ContinueAsNewOptions.newBuilder()
+                .setTaskQueue(Workflow.getInfo().getTaskQueue())
+                .build(),
+            true);
+        return;
+      }
+      currentRunId.set(Workflow.getInfo().getRunId());
+      Workflow.await(() -> observed);
+    }
+
+    @Override
+    public void targetSourceEventObserved(TargetIntakeSourceEventRef event) {
+      observedRunId.set(Workflow.getInfo().getRunId());
+      observedEvent.set(event);
+      observed = true;
+    }
+  }
+
+  public static final class RestoredIntakeCurrentRunDispatcherWorkflow
+      extends TargetTypedRoomCaseProcessDispatcher {
+    private static final AtomicReference<ActiveChildDescriptor> descriptor =
+        new AtomicReference<>();
+    private static final AtomicReference<CaseDomainEventRef> event = new AtomicReference<>();
+
+    static void reset(ActiveChildDescriptor activeChild, CaseDomainEventRef sourceEvent) {
+      descriptor.set(activeChild);
+      event.set(sourceEvent);
+    }
+
+    @Override
+    public void run(CaseProcessCarryState ignored) {
+      restoreTargetTypedRoomChild(java.util.Objects.requireNonNull(descriptor.get()))
+          .globalIntakeProjectionReady(java.util.Objects.requireNonNull(event.get()));
+    }
+
+    @Override
+    protected boolean targetArtifactPresent() {
+      return true;
     }
   }
 

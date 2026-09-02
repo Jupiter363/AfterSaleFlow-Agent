@@ -3,6 +3,7 @@ package com.example.dispute.workflow.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.workflow.config.TemporalWorkerProperties.ControlRegistrationScope;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.VersioningMode;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.WorkerRole;
 import java.io.IOException;
@@ -33,6 +34,8 @@ class TemporalWorkerPropertiesTest {
                                     context.getBean(TemporalWorkerProperties.class);
                             assertThat(properties.enabled()).isTrue();
                             assertThat(properties.role()).isEqualTo(WorkerRole.AGENT);
+                            assertThat(properties.controlRegistrationScope())
+                                    .isEqualTo(ControlRegistrationScope.FULL);
                             assertThat(properties.versioningMode())
                                     .isEqualTo(VersioningMode.DEPLOYMENT);
                             assertThat(properties.deploymentName())
@@ -41,6 +44,38 @@ class TemporalWorkerPropertiesTest {
                                     .isEqualTo(96);
                             assertThat(properties.caseControl().workflowPollers()).isEqualTo(4);
                         });
+    }
+
+    @Test
+    void bindsCaseProcessRecoveryOnlyScopeOnlyForControlWorkersAndRejectsUnknownValues() {
+        ApplicationContextRunner runner = new ApplicationContextRunner()
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .withPropertyValues(
+                        "app.temporal.worker.enabled=true",
+                        "app.temporal.worker.versioning-mode=BUILD_ID",
+                        "app.temporal.worker.control-registration-scope=CASE_PROCESS_RECOVERY_ONLY");
+
+        runner.withPropertyValues("app.temporal.worker.role=CONTROL")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(TemporalWorkerProperties.class)
+                                    .controlRegistrationScope())
+                            .isEqualTo(ControlRegistrationScope.CASE_PROCESS_RECOVERY_ONLY);
+                });
+
+        runner.withPropertyValues("app.temporal.worker.role=AGENT")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .rootCause()
+                            .hasMessageContaining(
+                                    "restricted controlRegistrationScope requires CONTROL role");
+                });
+
+        runner.withPropertyValues(
+                        "app.temporal.worker.role=CONTROL",
+                        "app.temporal.worker.control-registration-scope=UNKNOWN")
+                .run(context -> assertThat(context).hasFailed());
     }
 
     @Test

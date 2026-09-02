@@ -5,16 +5,21 @@ import base64
 import datetime as dt
 import hashlib
 import importlib
+import ipaddress
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts" / "target-e2e"
@@ -66,6 +71,52 @@ def _local_source_identity_namespace() -> dict[str, object]:
         elif isinstance(node, ast.FunctionDef) and node.name in selected_functions:
             selected.append(node)
     namespace: dict[str, object] = {"hashlib": hashlib, "re": re}
+    exec(
+        compile(
+            ast.Module(body=selected, type_ignores=[]),
+            str(LOCAL_SOURCE_PROVISIONER),
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace
+
+
+def _local_source_certificate_namespace() -> dict[str, object]:
+    source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    selected_names = {"KEY_ID", "MTLS_PASSWORD"}
+    selected_functions = {
+        "certificate",
+        "generate_key_material",
+        "sha256_bytes",
+        "write_bytes",
+    }
+    selected: list[ast.stmt] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id in selected_names
+            for target in node.targets
+        ):
+            selected.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name in selected_functions:
+            selected.append(node)
+    namespace: dict[str, object] = {
+        "ExtendedKeyUsageOID": ExtendedKeyUsageOID,
+        "NameOID": NameOID,
+        "Path": Path,
+        "datetime": dt.datetime,
+        "ec": ec,
+        "hashes": hashes,
+        "hashlib": hashlib,
+        "ipaddress": ipaddress,
+        "pkcs12": pkcs12,
+        "serialization": serialization,
+        "shutil": shutil,
+        "subprocess": subprocess,
+        "timedelta": dt.timedelta,
+        "x509": x509,
+    }
     exec(
         compile(
             ast.Module(body=selected, type_ignores=[]),
@@ -504,6 +555,8 @@ def test_activation_graph_hash_is_distinct_from_executor_registry_hash() -> None
     target, registry_hash = provision._target_binding("a" * 40)
     activation, activation_hash = provision._activation_graph_binding(target)
 
+    assert target["graph_version"] == "target-e2e-graph.2026-08-18.2"
+    assert target["graph_version"] != "target-e2e-graph.2026-08-18.1"
     preimage = dict(activation)
     preimage.pop("bindingHash")
     assert activation_hash == common.canonical_sha256(preimage)
@@ -1001,3 +1054,63 @@ def test_local_source_graph_code_identity_remains_independent() -> None:
     assert "provision._target_binding(compiled_worktree_binding)" not in source
     assert '"compiledWorktreeBinding": compiled_worktree_binding' in source
     assert '"compiled_worktree_binding": compiled_worktree_binding' in source
+
+
+def test_local_source_activation_rotation_preserves_graph_authority_and_runtime_receipt() -> None:
+    source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+
+    assert "reset_local_graph_candidate_state" not in source
+    assert "TRUNCATE TABLE" not in source
+    assert "DISABLE TRIGGER USER" not in source
+    assert "await seed_target_e2e_registry(" in source
+    assert 'archived_runtime_path = key_root / "target-runtime.json"' in source
+    assert "retained_state != serialized_state" in source
+    assert 'STATE_DIR / "target-runtime.json"' in source
+
+
+def test_local_source_mtls_certificates_cover_the_activation_lifetime(
+    tmp_path: Path,
+) -> None:
+    namespace = _local_source_certificate_namespace()
+    generate_key_material = namespace["generate_key_material"]
+    assert callable(generate_key_material)
+    issued_at = dt.datetime(2026, 9, 1, 12, 0, tzinfo=dt.timezone.utc)
+    expires_at = issued_at + dt.timedelta(days=30)
+
+    state = generate_key_material(tmp_path / "valid", issued_at, expires_at)
+    mtls = Path(state["mtls_directory"])
+    ca = x509.load_pem_x509_certificate((mtls / "ca.crt").read_bytes())
+    server = x509.load_pem_x509_certificate((mtls / "server.crt").read_bytes())
+    client = x509.load_pem_x509_certificate((mtls / "client.crt").read_bytes())
+
+    assert ca.not_valid_after_utc == expires_at + dt.timedelta(days=1)
+    assert server.not_valid_after_utc == expires_at
+    assert client.not_valid_after_utc == expires_at
+    assert server.not_valid_before_utc <= issued_at
+    assert client.not_valid_before_utc <= issued_at
+
+    with pytest.raises(ValueError, match="expiry must follow"):
+        generate_key_material(tmp_path / "invalid", issued_at, issued_at)
+
+
+def test_graph_patch_release_domain_authority_preserves_predecessor() -> None:
+    migration = (
+        ROOT
+        / "java-api-service"
+        / "src"
+        / "main"
+        / "resources"
+        / "db"
+        / "migration"
+        / "V093__target_e2e_graph_patch_release_identity.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "ck_target_e2e_activation_bindings" in migration
+    assert "ck_r15_selection_constants" in migration
+    assert "ck_intake_graph_thread_constants" in migration
+    assert "create or replace function enforce_target_e2e_intake_selection()" in migration
+    assert migration.count("'target-e2e-graph.2026-08-18.1'") == 4
+    assert migration.count("'target-e2e-graph.2026-08-18.2'") == 4
+    assert "'target-e2e-graph.2026-07-27.1'" in migration
+    assert "'target-e2e-room-proposal-source.v1'" in migration
+    assert "activation_row.graph_version is distinct from new.graph_version" in migration

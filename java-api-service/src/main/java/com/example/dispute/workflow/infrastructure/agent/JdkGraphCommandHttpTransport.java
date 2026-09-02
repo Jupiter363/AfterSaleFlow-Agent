@@ -14,6 +14,7 @@ import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /** Incremental, bounded JDK HTTP transport. The client must carry the service identity. */
@@ -71,9 +72,25 @@ public final class JdkGraphCommandHttpTransport implements GraphCommandHttpTrans
                 .POST(HttpRequest.BodyPublishers.ofByteArray(request.body()));
         request.headers().forEach(builder::header);
         HttpRequest httpRequest = builder.build();
-        CompletableFuture<HttpResponse<InputStream>> future = readinessCoordinator == null
-                ? send(httpRequest)
-                : readinessCoordinator.submitCommand(() -> send(httpRequest));
+        CompletableFuture<HttpResponse<InputStream>> future;
+        if (readinessCoordinator == null) {
+            future = send(httpRequest);
+        } else {
+            AtomicBoolean submissionStarted = new AtomicBoolean();
+            try {
+                future = readinessCoordinator.submitCommand(() -> {
+                    submissionStarted.set(true);
+                    return send(httpRequest);
+                });
+            } catch (RuntimeException failure) {
+                if (!submissionStarted.get()) {
+                    throw GraphCommandTransportException.notSubmitted(
+                            "Graph command admission rejected before HTTP submission",
+                            failure);
+                }
+                throw failure;
+            }
+        }
         AtomicReference<InputStream> activeBody = new AtomicReference<>();
 
         try (AgentRunCancellationToken.Registration ignored =

@@ -64,6 +64,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -190,6 +191,11 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                         identityResolver.resolve(request),
                         "durable AgentRun identity resolver returned no identity")
                 .requireExact(request);
+        Optional<FrameExecutionReceipt> exactThreeReplay =
+                findExactThreeReplay(request, cancellationToken);
+        if (exactThreeReplay.isPresent()) {
+            return exactThreeReplay.orElseThrow();
+        }
         RoomGraphCommand command = request.command();
         GraphRegistryBindingPolicy.ExpectedBinding registryBinding =
                 GraphRegistryBindingPolicy.requireExpected(
@@ -284,6 +290,38 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                     failure);
         } catch (TargetE2EGraphClientException failure) {
             throw failure;
+        }
+    }
+
+    private Optional<FrameExecutionReceipt> findExactThreeReplay(
+            ExecuteAgentRunRequest request,
+            AgentRunCancellationToken cancellationToken) {
+        RoomGraphCommand command = request.command();
+        AdmissionReceiptLookup lookup = new AdmissionReceiptLookup(
+                request.agentRunId(),
+                request.attemptId(),
+                command.commandId(),
+                command.requestHash());
+        try {
+            Optional<PublishedAdmissionReceipt> published =
+                    staging.findCurrentAdmissionReceipt(lookup);
+            if (published.isEmpty()) {
+                return Optional.empty();
+            }
+            cancellationToken.throwIfCancellationRequested();
+            PublishedAdmissionReceipt receipt = published.orElseThrow();
+            return staging
+                    .findExactThreeCompletion(
+                            receipt.frameSetId(), request.agentRunId(), request.attemptId())
+                    .map(completion -> new FrameExecutionReceipt(
+                            completion.frameSetId(),
+                            completion.lastSequenceNo(),
+                            completion.publicOutputEmitted()));
+        } catch (StagingConflictException failure) {
+            throw new LocalReconciliationException(
+                    failure.code(),
+                    "parallel exact-three replay requires local reconciliation",
+                    failure);
         }
     }
 

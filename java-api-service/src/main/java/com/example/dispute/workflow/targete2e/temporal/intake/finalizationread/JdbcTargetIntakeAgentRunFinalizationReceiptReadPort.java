@@ -352,7 +352,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 IntakeAgentRunFinalizationReadResult.Resolution.COMMITTED,
                 locator(receipt, row.activationManifestHash(), formal.formal()),
                 formal.toActivityReceipt(
-                        command.requestHash(), command.party(), receipt.checkpointId()));
+                        command.requestHash(), command.party(), receipt.graphVersion(), receipt.checkpointId()));
     }
 
     static String requiredAgentRunProtocol(IntakeAgentRunFinalizationReadRequest request) {
@@ -471,7 +471,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
 
         ExecuteAgentRunResult completedAudit = decodeCompletedAudit(terminal);
         AgentRunAttemptStatus terminalStatus = terminalAttemptStatus(terminal.attemptStatus());
-        if (!AgentRunProtocol.V3.wireValue().equals(terminal.runProtocol())
+        if (!requiredAgentRunProtocol(request).equals(terminal.runProtocol())
                 || !AgentRunExecutorKind.TEMPORAL_ACTIVITY.name().equals(terminal.runExecutorKind())
                 || !command.tenantSurrogate().equals(terminal.runTenantSurrogate())
                 || !command.caseId().equals(terminal.runCaseId())
@@ -1121,6 +1121,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
         TurnFinalizationReceipt toActivityReceipt(
                 String workflowCommandRequestHash,
                 com.example.dispute.workflow.temporal.room.intake.IntakeParty party,
+                String graphVersion,
                 String checkpointId) {
             // The persisted formal receipt binds the authority precondition. Temporal consumes an
             // activity-only projection of the authority after that commit, so every exposed
@@ -1132,7 +1133,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
             IntakeAgentRunRef agentRun = new IntakeAgentRunRef("intake-agent-run-ref.v1", formal.logicalRunId(),
                     formal.attemptId(), formal.resultHash());
             IntakeGraphExecutionRef graph = new IntakeGraphExecutionRef("intake-graph-execution-ref.v1", formal.threadId(),
-                    formal.commandId(), "intake.v2", "target-e2e-graph.2026-08-18.1", checkpointId,
+                    formal.commandId(), "intake.v2", graphVersion, checkpointId,
                     "urn:target-e2e:result:intake:" + formal.resultHash(), formal.resultHash(),
                     "urn:target-e2e:proposal:intake:" + formal.proposalHash(), formal.proposalHash());
             IntakeDomainEventRef committed = new IntakeDomainEventRef("intake-domain-event-ref.v1", event.id(),

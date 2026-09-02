@@ -27,6 +27,10 @@ DIALOGUE_SEGMENT_MAX_ITEMS = 1
 DOSSIER_TEXT_MAX_LENGTH = 100
 DOSSIER_SHORT_TEXT_MAX_LENGTH = 60
 DOSSIER_FACT_MAX_ITEMS = 5
+DOSSIER_PERSISTED_SUMMARY_MAX_LENGTH = 20_000
+DOSSIER_POSITION_SUMMARY_MAX_LENGTH = (
+    DOSSIER_PERSISTED_SUMMARY_MAX_LENGTH - (DOSSIER_FACT_MAX_ITEMS - 1)
+) // DOSSIER_FACT_MAX_ITEMS
 DOSSIER_NEW_FACT_SUFFIX_MAX_LENGTH = 32
 
 DialogueSegmentText = Annotated[
@@ -108,6 +112,18 @@ DossierShortText = Annotated[
         pattern=r"[\s\S]*\S[\s\S]*",
     ),
 ]
+DossierPositionSummary = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=DOSSIER_POSITION_SUMMARY_MAX_LENGTH,
+        pattern=r"[\s\S]*\S[\s\S]*",
+    ),
+]
+DossierOptionalProposalText = Annotated[
+    str,
+    StringConstraints(max_length=DOSSIER_TEXT_MAX_LENGTH),
+]
 
 
 class StrictFrameOutput(BaseModel):
@@ -160,6 +176,18 @@ class IntakeDialogueGenerationV4(StrictFrameOutput):
     )
 
 
+class DialogueNullAuthorityV5(StrictFrameOutput):
+    """Exact placeholder for a transition whose remark decision is server-owned."""
+
+    remark_disposition: None
+
+
+class IntakeDialogueTransitionGenerationV5(IntakeDialogueGenerationV4):
+    """Provider draft for the explicit optional-remark invitation transition."""
+
+    dialogue: DialogueNullAuthorityV5
+
+
 class IntakeDialogueRemarkGenerationV4(IntakeDialogueGenerationV4):
     dialogue: DialogueRemarkUpdateDraftV4
 
@@ -176,11 +204,12 @@ def request_bound_dialogue_output_types(
         "WAITING_FOR_REMARK",
     }:
         raise ValueError("request-bound Dialogue phase cannot accept a ROOM_MESSAGE")
-    frame_type: type[BaseModel] = (
-        IntakeDialogueRemarkGenerationV4
-        if persisted_phase == "WAITING_FOR_REMARK"
-        else IntakeDialogueGenerationV4
-    )
+    if persisted_phase == "WAITING_FOR_REMARK":
+        frame_type: type[BaseModel] = IntakeDialogueRemarkGenerationV4
+    elif persisted_phase == "READY_PENDING_REMARK_INVITE":
+        frame_type = IntakeDialogueTransitionGenerationV5
+    else:
+        frame_type = IntakeDialogueGenerationV4
     return (
         frame_type,
         DialoguePublicSegmentDraftV3,
@@ -202,7 +231,7 @@ class DossierCurrentFactDraftV3(StrictFrameOutput):
     stance: DossierStance = Field(
         description="Exact enum: CONFIRM, DENY, PARTIAL, or UNKNOWN."
     )
-    position_summary: DossierLongText
+    position_summary: DossierPositionSummary
     asserted_value: DossierShortText | None = None
 
 
@@ -213,7 +242,7 @@ class DossierRespondentClaimV2(StrictFrameOutput):
             "ALTERNATIVE_PROPOSED, or NEED_MORE_INFO."
         )
     )
-    position_summary: DossierLongText
+    position_summary: DossierPositionSummary
     alternative_proposal: DossierLongText | None = None
 
 class DossierPublicFactDraftV3(StrictFrameOutput):
@@ -228,7 +257,7 @@ class DossierCurrentFactDraftV5(StrictFrameOutput):
     stance: DossierStance = Field(
         description="Exact enum: CONFIRM, DENY, PARTIAL, or UNKNOWN."
     )
-    position_summary: DossierLongText
+    position_summary: DossierPositionSummary
     asserted_value: DossierShortText | None = None
 
 
@@ -247,7 +276,7 @@ class DossierRespondentClaimDraftV4(StrictFrameOutput):
             "ALTERNATIVE_PROPOSED, or NEED_MORE_INFO; PARTIAL is not valid here."
         )
     )
-    position_summary: DossierLongText
+    position_summary: DossierPositionSummary
     alternative_proposals: tuple[DossierLongText, ...] = Field(max_length=1)
 
 
@@ -313,6 +342,30 @@ class IntakeDossierGenerationV5(StrictFrameOutput):
 class IntakeRespondentDossierGenerationV5(IntakeDossierGenerationV5):
     dossier_delta: DossierFrameDeltaDraftV4
 
+
+class IntakeRespondentDossierGenerationV6(StrictFrameOutput):
+    """Flat provider draft with the required respondent authority emitted first."""
+
+    respondent_attitude: DossierRespondentAttitude
+    respondent_position_summary: DossierPositionSummary
+    respondent_alternative_proposal: DossierOptionalProposalText
+    public_projection_items: tuple[DossierPublicFactDraftV5, ...] = Field(
+        min_length=1,
+        max_length=DOSSIER_FACT_MAX_ITEMS,
+    )
+
+    @model_validator(mode="after")
+    def validate_fact_identity(self) -> IntakeRespondentDossierGenerationV6:
+        proposal = self.respondent_alternative_proposal
+        if proposal and proposal != proposal.strip():
+            raise ValueError(
+                "Dossier respondent alternative proposal must be empty or trimmed"
+            )
+        fact_keys = tuple(item.source_row.fact_key for item in self.public_projection_items)
+        if len(fact_keys) != len(set(fact_keys)):
+            raise ValueError("Dossier current-source facts must have unique fact keys")
+        return self
+
 def request_bound_dossier_output_types(
     *,
     existing_fact_keys: tuple[str, ...],
@@ -369,17 +422,22 @@ def request_bound_dossier_output_types(
         source_row=(row_type, ...),
     )
     frame_base: type[BaseModel] = (
-        IntakeRespondentDossierGenerationV5
+        IntakeRespondentDossierGenerationV6
         if respondent_capacity
         else IntakeDossierGenerationV5
     )
+    public_items_field = (
+        Field(min_length=1, max_length=DOSSIER_FACT_MAX_ITEMS)
+        if respondent_capacity
+        else Field(max_length=DOSSIER_FACT_MAX_ITEMS)
+    )
     frame_type = create_model(
-        f"IntakeDossierGenerationV5_{identity}",
+        f"{frame_base.__name__}_{identity}",
         __base__=frame_base,
         __module__=__name__,
         public_projection_items=(
             tuple[item_type, ...],
-            Field(max_length=DOSSIER_FACT_MAX_ITEMS),
+            public_items_field,
         ),
     )
     return (
@@ -609,6 +667,10 @@ def materialize_request_bound_frame_output(
                 draft.dialogue.remark_disposition
             )
             items = draft.public_projection_items
+        elif persisted_phase == "READY_PENDING_REMARK_INVITE":
+            draft = IntakeDialogueTransitionGenerationV5.model_validate(payload)
+            disposition = draft.dialogue.remark_disposition
+            items = draft.public_projection_items
         else:
             draft = IntakeDialogueGenerationV4.model_validate(payload)
             disposition = None
@@ -622,24 +684,18 @@ def materialize_request_bound_frame_output(
             }
         )
     if frame_type == "DOSSIER_FRAME":
-        if respondent_capacity:
-            draft = IntakeRespondentDossierGenerationV5.model_validate(payload)
-            updates = draft.dossier_delta.respondent_claim_updates
-        else:
-            draft = IntakeDossierGenerationV5.model_validate(payload)
-            updates = ()
         respondent_claim: dict[str, Any] | None = None
-        if updates:
-            update = updates[0]
+        if respondent_capacity:
+            draft = IntakeRespondentDossierGenerationV6.model_validate(payload)
             respondent_claim = {
-                "attitude": update.attitude,
-                "position_summary": update.position_summary,
+                "attitude": draft.respondent_attitude,
+                "position_summary": draft.respondent_position_summary,
                 "alternative_proposal": (
-                    update.alternative_proposals[0]
-                    if update.alternative_proposals
-                    else None
+                    draft.respondent_alternative_proposal or None
                 ),
             }
+        else:
+            draft = IntakeDossierGenerationV5.model_validate(payload)
         materialized_items = [
             materialize_request_bound_dossier_item(
                 item,
@@ -767,7 +823,7 @@ def _materialize_dossier_patch(
     if not items:
         return {}
     summary = "；".join(item.source_row.position_summary for item in items)
-    if len(summary) > 20_000:
+    if len(summary) > DOSSIER_PERSISTED_SUMMARY_MAX_LENGTH:
         raise ValueError("Dossier current-source summary exceeds the persisted field limit")
     return {
         "case_story": {

@@ -9,6 +9,7 @@ import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegist
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistrationFactory;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -24,9 +25,10 @@ class TargetIntakeRuntimePinsTest {
 
         var registration = pins.registrationPins();
 
-        assertThat(registration.graphKey()).isEqualTo("all-rooms.target-e2e.v2");
-        assertThat(registration.graphVersion()).isEqualTo("target-e2e-graph.2026-08-18.1");
-        assertThat(registration.checkpointSchemaVersion()).isEqualTo("target-e2e-checkpoint.v2");
+        assertThat(registration.graphKey()).isEqualTo(TargetTypedRoomProtocol.GRAPH_KEY);
+        assertThat(registration.graphVersion()).isEqualTo("target-e2e-graph.2026-08-18.2");
+        assertThat(registration.checkpointSchemaVersion())
+                .isEqualTo(TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION);
         assertThat(registration.stateSchemaVersion()).isEqualTo("intake-graph-state.v2");
         assertThat(registration.outputSchemaVersion())
                 .isEqualTo("target-e2e-room-proposal-source.v2");

@@ -4,6 +4,7 @@ import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.SourceType;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
@@ -221,6 +222,8 @@ public final class IntakeDossierProjectionMerger {
         nonPartitionPatch.remove("handoff_remark_partition");
         rejectDerivedMatrixDossierKeys(nonPartitionPatch);
         requirePartyIntakeTransition(current, (ObjectNode) patch, matrixAuthority);
+        projectOmittedHandoffRemarkPartition(current, (ObjectNode) patch, matrixAuthority);
+        validateHandoffRemarkPartition(patch.get("handoff_remark_partition"));
         requireNewAcknowledgementPartition(current, (ObjectNode) patch, matrixAuthority);
         requireHandoffRemarkPartitionTransition(
                 current.get("handoff_remark_partition"),
@@ -673,6 +676,134 @@ public final class IntakeDossierProjectionMerger {
                     "INTAKE_HANDOFF_REMARK_PARTITION_REQUIRED",
                     "new Intake remark acknowledgements require the formal remark partition");
         }
+    }
+
+    private static void projectOmittedHandoffRemarkPartition(
+            JsonNode current, ObjectNode patch, MatrixAuthority authority) {
+        if (patch.has("handoff_remark_partition") || authority == null) {
+            return;
+        }
+        JsonNode currentPartition = current.get("handoff_remark_partition");
+        JsonNode proposedState = patch.get("party_intake_state");
+        if (proposedState == null || !proposedState.isObject()) {
+            return;
+        }
+
+        String actorRole = authority.actorRole().name();
+        JsonNode previousHandoff = current.path("party_intake_state")
+                .path(actorRole)
+                .path("handoff_notes");
+        JsonNode proposedHandoff = proposedState.path(actorRole).path("handoff_notes");
+        String previousStatus = previousHandoff.path("remark_status").asText(null);
+        String proposedStatus = proposedHandoff.path("remark_status").asText(null);
+        if (Objects.equals(previousStatus, proposedStatus)) {
+            return;
+        }
+
+        if (!POST_THRESHOLD_HANDOFF_STATUSES.contains(proposedStatus)) {
+            return;
+        }
+        if (authority.sourceType() != SourceType.ROOM_MESSAGE
+                || !authority.sourceRef()
+                        .equals(proposedHandoff.path("phase_source_message_id").asText(null))) {
+            throw rejected(
+                    "INTAKE_HANDOFF_REMARK_PARTITION_SOURCE_MISMATCH",
+                    "omitted handoff remark transition lacks exact current message authority");
+        }
+
+        ObjectNode projectedPartition;
+        if (currentPartition instanceof ObjectNode partition) {
+            requireHandoffRemarkPartitionPartyStateConsistency(current);
+            projectedPartition = partition.deepCopy();
+        } else {
+            projectedPartition = newHandoffRemarkPartition(current);
+        }
+        ObjectNode projectedActor = projectedPartition
+                .withObject("parties")
+                .withObject(actorRole);
+        projectedActor.put("party_role", actorRole);
+        projectedActor.put("remark_status", proposedStatus);
+        ObjectNode source = projectedActor.putObject("source");
+        source.put("source_kind", "ROOM_MESSAGE");
+        source.put("message_id", authority.sourceRef());
+        source.put("message_hash", authority.sourceContextHash());
+
+        JsonNode previousRemarks =
+                projectedPartition.path("parties").path(actorRole).path("remarks");
+        JsonNode proposedRemarks = proposedHandoff.path("remarks");
+        ArrayNode projectedRemarks = projectedActor.putArray("remarks");
+        if ("HAS_REMARKS".equals(proposedStatus)) {
+            if (proposedRemarks.size() < previousRemarks.size()
+                    || proposedRemarks.size() > previousRemarks.size() + 1) {
+                throw rejected(
+                        "INTAKE_HANDOFF_REMARK_PARTITION_APPEND_INVALID",
+                        "omitted handoff remarks must advance by one exact current message");
+            }
+            for (int index = 0; index < proposedRemarks.size(); index++) {
+                JsonNode proposedRemark = proposedRemarks.get(index);
+                if (!"ROOM_MESSAGE".equals(proposedRemark.path("turn_source").asText(null))) {
+                    throw rejected(
+                            "INTAKE_HANDOFF_REMARK_PARTITION_SOURCE_MISMATCH",
+                            "omitted handoff remark entry lacks room-message authority");
+                }
+                if (index < previousRemarks.size()) {
+                    JsonNode previousRemark = previousRemarks.get(index);
+                    if (!previousRemark.path("party_role").equals(proposedRemark.path("role"))
+                            || !previousRemark.path("text").equals(proposedRemark.path("text"))
+                            || !previousRemark
+                                    .path("source_message_id")
+                                    .equals(proposedRemark.path("source_message_id"))) {
+                        throw rejected(
+                                "INTAKE_HANDOFF_REMARK_PARTITION_MIRROR_MISMATCH",
+                                "omitted handoff remark replay conflicts with formal authority");
+                    }
+                    projectedRemarks.add(previousRemark.deepCopy());
+                    continue;
+                }
+                if (!authority.sourceRef()
+                        .equals(proposedRemark.path("source_message_id").asText(null))) {
+                    throw rejected(
+                            "INTAKE_HANDOFF_REMARK_PARTITION_SOURCE_MISMATCH",
+                            "omitted handoff remark append is not the current message");
+                }
+                ObjectNode projectedRemark = projectedRemarks.addObject();
+                projectedRemark.put("party_role", actorRole);
+                projectedRemark.set("text", proposedRemark.path("text").deepCopy());
+                projectedRemark.put("source_message_id", authority.sourceRef());
+                projectedRemark.put("turn_source", "ROOM_MESSAGE");
+                projectedRemark.put(
+                        "source_message_hash", handoffRemarkSourceHash(projectedRemark));
+            }
+            source.set(
+                    "message_hash",
+                    projectedRemarks
+                            .get(projectedRemarks.size() - 1)
+                            .path("source_message_hash")
+                            .deepCopy());
+            projectedActor.set(
+                    "latest_remark", proposedHandoff.path("latest_remark").deepCopy());
+        } else {
+            projectedActor.put("latest_remark", "");
+        }
+        patch.set("handoff_remark_partition", projectedPartition);
+    }
+
+    private static ObjectNode newHandoffRemarkPartition(JsonNode current) {
+        JsonNode matrix = current.path("case_fact_matrix");
+        ObjectNode partition = JsonNodeFactory.instance.objectNode();
+        partition.put("schema_version", HANDOFF_REMARK_PARTITION_SCHEMA_VERSION);
+        partition.set("case_fact_matrix_id", matrix.path("matrix_id").deepCopy());
+        partition.set("case_fact_matrix_version", matrix.path("matrix_version").deepCopy());
+        partition.set("case_fact_matrix_hash", matrix.path("content_hash").deepCopy());
+        ObjectNode parties = partition.putObject("parties");
+        PARTY_INTAKE_ROLES.forEach(role -> {
+            ObjectNode party = parties.putObject(role);
+            party.put("party_role", role);
+            party.put("remark_status", "NOT_READY");
+            party.put("latest_remark", "");
+            party.putArray("remarks");
+        });
+        return partition;
     }
 
     private static void requireHandoffRemarkPartitionPartyStateConsistency(JsonNode dossier) {

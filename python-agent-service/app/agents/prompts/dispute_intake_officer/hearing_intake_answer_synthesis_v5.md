@@ -14,6 +14,8 @@
 
 `schema_version` 固定为 `hearing_intake_answer_stream.v5`。`lead_public_text` 先告诉双方陈述已收齐、正在按争议点汇总。`frames` 必须先覆盖全部旧 issue，再按连续 `NEW_ISSUE_SLOT_*` 覆盖本轮真正新增的争议。旧 issue 的 frame type 固定为 `REBIND_ISSUE_SYNTHESIS`；新 issue 固定为 `NEW_ISSUE_SYNTHESIS`；sequence 从 2 连续递增。
 
+完整闭合 JSON 优先于扩写。公开文本、立场摘要、对齐结论和矩阵摘要都只写 1 至 3 句足以区分双方当前立场的中文，不要在多个字段重复抄写同一组时间点、检测步骤或处理条件。`matrix_effects` 是相对 M1 的稀疏增量：只有本轮回答实质新增或改变 claim、fact 或 relationship 时才输出对应 effect；未变化的既有事实不生成 effect，禁止为了展示“已覆盖”而遍历重写 `existing_fact_ids`。
+
 每个 frame 是一个不可拆分对象，且只能按 `header`、`public_text` 的顺序生成：
 
 ```json
@@ -43,7 +45,11 @@
 
 所有 claim、existing fact、new fact 和 relationship effect 必须引用至少一个本轮旧 rebind 或新 issue。发起方 claim effect 只能引用发起方 answer；被发起方 effect 同理。旧 fact 的 ID、category、fact_target、materiality 和 origin 不可改；修正旧命题时新增 fact，并用 `CORRECTS/QUALIFIES/DUPLICATES` 关系连接。
 
+每一个 effect 的 `source_issue_refs` 都必须是非空、逐字去重的最小引用集合。一个争点无论被 USER、MERCHANT 或多个 answer unit 同时支撑，在同一 effect 中都只能出现一次；不得为双方各复制一遍相同 issue ID，不得重复整个目录，也不得用任何未激活的 `NEW_ISSUE_SLOT_*` 占位。关闭最终 JSON 前，对 claim、existing fact、new fact、relationship 四类 effect 逐项检查：`source_issue_refs` 的数组长度必须等于其去重后的长度，且每个值都属于本轮有效争点引用集合。
+
 `binding_authority_catalog` 是所有引用字段的唯一取值权威，必须逐字复制，禁止根据字段含义自行缩写、补全或制造别名：
+
+- 所有 ID 比较均区分大小写并按 UTF-8 字节逐字相等；`HEARING_ISSUE_` 前缀必须保持全大写，`HeARING_ISSUE_`、`Hearing_ISSUE_` 等任何大小写变化都属于不存在的 ID。只能复制目录中的完整值，禁止凭记忆或按前后项手工重写 ID；
 
 - `issue_rebindings.issue_id` 与旧 frame 的 `header.issue_ref` 必须按 `formal_issue_ids` 原顺序逐项复制；
 - 每个旧 issue 的 USER/MERCHANT `answer_bundle_id` 与 `answer_unit_id` 必须从同一项 `answer_binding_catalog.role_bindings` 复制；
@@ -60,7 +66,7 @@
 1. 能归入 `formal_issue_ids` 中既有争点的本轮陈述，只生成对应 `issue_rebindings`，所有 effect 的 `source_issue_refs` 使用该正式 issue ID。
 2. 只有本轮首次出现且无法归入任何既有争点的独立争议，才生成 `new_issue_proposals`，并依次占用 `authorized_new_issue_slots` 的连续前缀。
 3. 先完整确定 `new_issue_proposals`，再把其中实际出现的 `new_issue_slot_id` 视为“已激活新争点槽”。本轮有效争点引用集合严格等于 `formal_issue_ids` 加“已激活新争点槽”。
-4. 所有 `source_issue_refs` 和新 frame 的 `header.issue_ref` 必须逐字属于上述有效集合。若 `new_issue_proposals` 为空，任何 `NEW_ISSUE_SLOT_*` 都不得出现在其他字段。
+4. 所有 `source_issue_refs` 和新 frame 的 `header.issue_ref` 必须区分大小写、逐字属于上述有效集合。关闭 JSON 前逐项与 `formal_issue_ids` 或已激活槽做字节级回查；若 `new_issue_proposals` 为空，任何 `NEW_ISSUE_SLOT_*` 都不得出现在其他字段。
 
 事实绑定必须先完成“归类与激活”，再生成引用：
 
@@ -70,7 +76,7 @@
 4. 所有 issue、relationship 和 summary fact 引用只能逐字属于有效集合。任何新槽在被引用前必须已经且只能声明一次。
 5. 如果 `new_fact_effects` 为空，则所有 fact 引用字段只能使用 `existing_fact_ids`，任何 `NEW_FACT_SLOT_*` 都不得出现在其他字段。
 6. `matrix_summary.summary_fact_refs` 必须非空、去重，并只列实际支撑摘要与核心冲突的有效事实引用。
-7. 关闭最终 JSON 前逐项回查：目录外 issue/fact 引用为零、未激活新槽引用为零、重复 summary refs 为零。
+7. 关闭最终 JSON 前逐项回查：目录外 issue/fact 引用为零、未激活新槽引用为零、重复 `source_issue_refs` 为零、重复 summary refs 为零。
 
 双方都 REAFFIRM 时仍要完整输出 rebind、当前 alignment 和公开 frame；matrix effects 可以为空。不要输出 `PRESERVE`、`CARRY_FORWARD` 或超时回答。`party_updates.*.stance` 由你根据当前回答自主选择响应 Schema 允许的值，应用层不会根据自然语言重新判定该立场。
 

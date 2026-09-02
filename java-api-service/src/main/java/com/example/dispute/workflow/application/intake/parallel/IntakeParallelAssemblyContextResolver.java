@@ -27,7 +27,8 @@ public interface IntakeParallelAssemblyContextResolver {
             long cognitiveRevision,
             JsonNode previousDossier,
             String executionProvider,
-            String executionModel) {
+            String executionModel,
+            String authorityActivationId) {
 
         private static final Pattern IDENTIFIER =
                 Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
@@ -56,6 +57,10 @@ public interface IntakeParallelAssemblyContextResolver {
                     executionModel,
                     TargetE2EGraphResultEnvelope.EXECUTION_MODEL_MAX_LENGTH,
                     "executionModel");
+            if (authorityActivationId == null
+                    || !authorityActivationId.matches("p9act[.]v1[.][0-9a-f]{32}")) {
+                throw new IllegalArgumentException("authorityActivationId is invalid");
+            }
         }
 
         @Override

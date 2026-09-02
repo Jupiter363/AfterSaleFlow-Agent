@@ -37,7 +37,7 @@ APPLICATION_IMAGE_KEYS = {"java", "python", "ocr", "frontend"}
 # identities are the v2 cutover boundary; policy identifiers remain the
 # existing approved target profiles.
 TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v2"
-TARGET_E2E_GRAPH_VERSION = "target-e2e-graph.2026-08-18.1"
+TARGET_E2E_GRAPH_VERSION = "target-e2e-graph.2026-08-18.2"
 TARGET_E2E_CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v2"
 TARGET_E2E_PROMPT_VERSION = "all-rooms-prompt.target-e2e.v2"
 TARGET_E2E_OUTPUT_SCHEMA_VERSION = "target-e2e-room-proposal-source.v2"

@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.targete2e.finalization;
 
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.example.dispute.workflow.contract.v1.AgentRunWorkflowIds;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
@@ -20,9 +21,10 @@ import java.util.Objects;
 public final class TargetE2eExecutionLaneVerifier {
 
     public static final String EXECUTION_LANE = "TARGET_E2E_CANDIDATE";
-    public static final String GRAPH_KEY = "all-rooms.target-e2e.v2";
-    public static final String GRAPH_VERSION = "target-e2e-graph.2026-08-18.1";
-    public static final String CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v2";
+    public static final String GRAPH_KEY = TargetTypedRoomProtocol.GRAPH_KEY;
+    public static final String GRAPH_VERSION = TargetTypedRoomProtocol.GRAPH_VERSION;
+    public static final String CHECKPOINT_SCHEMA_VERSION =
+            TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION;
 
     private final Clock clock;
 

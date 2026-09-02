@@ -160,6 +160,35 @@ public interface CaseProcessWorkflow {
   }
 
   /**
+   * 上游：控制面以已拒绝 strict-v3 authority 触发一次显式恢复。
+   *
+   * <p>Temporal 角色：异步 Signal；下游：仅当当前命令恢复边界和整个 terminal inbox 都与该 strict-v3
+   * authority 精确一致时，重新开放原有幂等收敛路径。该独立 Signal 名是升级后历史的显式恢复判别器。
+   */
+  @SignalMethod(
+      name = CaseProcessWorkflowProtocol.TARGET_INTAKE_TERMINAL_NO_COMMIT_RECOVERY_SIGNAL)
+  default void recoverRejectedTargetIntakeCommandTerminalNoCommit(
+      TargetIntakeCommandTerminalNoCommit authority) {
+    throw new UnsupportedOperationException(
+        "rejected target Intake terminal-no-commit recovery is not supported");
+  }
+
+  /**
+   * Upstream: an operator that has proven the exact continued target Intake child execution.
+   *
+   * <p>Temporal role: explicit recovery Signal. The implementation rebinds only one stranded
+   * command whose parent run, first child run, current child run, fenced revisions, and command
+   * identity all match the request. It never changes provisioning or deployment routing.
+   */
+  @SignalMethod(
+      name = CaseProcessWorkflowProtocol.TARGET_INTAKE_CURRENT_RUN_DISPATCH_RECOVERY_SIGNAL)
+  default void recoverTargetIntakeCurrentRunCommandDispatch(
+      CaseProcessTargetIntakeCurrentRunDispatchRecoveryRequest request) {
+    throw new UnsupportedOperationException(
+        "target Intake current-run dispatch recovery is not supported");
+  }
+
+  /**
    * 上游：发现命令或领域事件 sequence 缺口的控制面恢复调用方。
    *
    * <p>Temporal 角色：异步 Signal；下游：实现请求下一轮账本重读/缺口处理，具体持久化问题由

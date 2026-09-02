@@ -127,6 +127,36 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
         respondent_capacity=False,
     ).model_dump(mode="json") == _dialogue_frame()
 
+    transition_type, _ = request_bound_dialogue_output_types(
+        persisted_phase="READY_PENDING_REMARK_INVITE"
+    )
+    transition_schema = transition_type.model_json_schema()
+    assert list(transition_schema["properties"]) == [
+        "public_projection_items",
+        "dialogue",
+    ]
+    assert transition_schema["required"] == [
+        "public_projection_items",
+        "dialogue",
+    ]
+    null_authority = transition_schema["$defs"]["DialogueNullAuthorityV5"]
+    assert null_authority["properties"]["remark_disposition"] == {
+        "title": "Remark Disposition",
+        "type": "null",
+    }
+    transition = _dialogue_transition_provider_frame()
+    assert transition_type.model_validate(transition)
+    assert materialize_request_bound_frame_output(
+        "DIALOGUE_FRAME",
+        transition,
+        persisted_phase="READY_PENDING_REMARK_INVITE",
+        respondent_capacity=False,
+    ).model_dump(mode="json") == _dialogue_frame()
+    invalid_transition = _dialogue_transition_provider_frame()
+    invalid_transition["dialogue"] = {"remark_disposition": "REMARK"}
+    with pytest.raises(ValidationError, match="none_required"):
+        transition_type.model_validate(invalid_transition)
+
     waiting_type, _ = request_bound_dialogue_output_types(
         persisted_phase="WAITING_FOR_REMARK"
     )
@@ -179,7 +209,7 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
     respondent_claim = dossier_schema["$defs"]["DossierRespondentClaimV2"]
     assert "NOT_ADDRESSED" not in respondent_claim["properties"]["attitude"]["enum"]
     assert dossier_schema["properties"]["public_projection_items"]["maxItems"] == 5
-    assert source_row["position_summary"]["maxLength"] == 100
+    assert source_row["position_summary"]["maxLength"] == 3999
     assert any(
         option.get("maxLength") == 60
         for option in source_row["asserted_value"]["anyOf"]
@@ -216,7 +246,7 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
     assert item_type.model_validate(valid_new)
 
     initiator_tail = _dossier_provider_frame()
-    initiator_tail["dossier_delta"] = {"respondent_claim_updates": []}
+    initiator_tail["dossier_delta"] = {"respondent_claim": {}}
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         frame_type.model_validate(initiator_tail)
     assert materialize_request_bound_frame_output(
@@ -265,37 +295,46 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
         respondent_capacity=True,
     )
     respondent_schema = respondent_frame_type.model_json_schema()
-    assert set(respondent_schema["properties"]) == {
+    assert list(respondent_schema["properties"]) == [
+        "respondent_attitude",
+        "respondent_position_summary",
+        "respondent_alternative_proposal",
         "public_projection_items",
-        "dossier_delta",
+    ]
+    assert set(respondent_schema["required"]) == {
+        "respondent_attitude",
+        "respondent_position_summary",
+        "respondent_alternative_proposal",
+        "public_projection_items",
     }
-    respondent_tail_schema = {
-        name: respondent_schema["$defs"][name]
-        for name in ("DossierFrameDeltaDraftV4", "DossierRespondentClaimDraftV4")
-    }
-    assert '"const": null' not in json.dumps(respondent_tail_schema, sort_keys=True)
-    assert '"type": "null"' not in json.dumps(respondent_tail_schema, sort_keys=True)
-
-    empty_updates = _respondent_dossier_provider_frame([])
-    assert respondent_frame_type.model_validate(empty_updates)
-    assert (
-        materialize_request_bound_frame_output(
-            "DOSSIER_FRAME",
-            empty_updates,
-            persisted_phase="NOT_READY",
-            respondent_capacity=True,
-            frozen_case_matrix=_frozen_matrix(),
-        ).dossier_delta.respondent_claim
-        is None
+    assert respondent_schema["properties"]["public_projection_items"]["minItems"] == 1
+    respondent_wire = json.dumps(respondent_schema, sort_keys=True)
+    assert '"const": null' not in respondent_wire
+    assert all(
+        respondent_schema["properties"][field]["type"] == "string"
+        for field in (
+            "respondent_attitude",
+            "respondent_position_summary",
+            "respondent_alternative_proposal",
+        )
     )
+    assert "DossierFrameDeltaDraftV5" not in respondent_wire
+    assert "DossierRespondentClaimDraftV4" not in respondent_wire
+
+    with pytest.raises(ValidationError):
+        respondent_frame_type.model_validate(_dossier_provider_frame())
 
     claim_update = {
         "attitude": "ALTERNATIVE_PROPOSED",
         "position_summary": "同意按约定条件复测。",
         "alternative_proposals": ["复测不达标后办理退货退款。"],
     }
-    respondent_claim = _respondent_dossier_provider_frame([claim_update])
+    respondent_claim = _respondent_dossier_provider_frame(claim_update)
     assert respondent_frame_type.model_validate(respondent_claim)
+    legacy_tail = _dossier_provider_frame()
+    legacy_tail["dossier_delta"] = {"respondent_claim_updates": [claim_update]}
+    with pytest.raises(ValidationError):
+        respondent_frame_type.model_validate(legacy_tail)
     materialized = materialize_request_bound_frame_output(
         "DOSSIER_FRAME",
         respondent_claim,
@@ -308,6 +347,39 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
         "position_summary": "同意按约定条件复测。",
         "alternative_proposal": "复测不达标后办理退货退款。",
     }
+
+
+def test_dossier_position_summary_accepts_valid_detail_above_style_hint() -> None:
+    frame_type, _ = request_bound_dossier_output_types(
+        existing_fact_keys=("FACT_01",),
+        new_fact_key_prefix="NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
+        respondent_capacity=True,
+    )
+    payload = _respondent_dossier_provider_frame(
+        {
+            "attitude": "DISAGREE",
+            "position_summary": "商家对当前费用主张提出异议。",
+            "alternative_proposals": [],
+        }
+    )
+    detailed_position = "商" * 101
+    payload["public_projection_items"][0]["source_row"][
+        "position_summary"
+    ] = detailed_position
+
+    validated = frame_type.model_validate(payload)
+    materialized = materialize_request_bound_frame_output(
+        "DOSSIER_FRAME",
+        validated,
+        persisted_phase="NOT_READY",
+        respondent_capacity=True,
+        frozen_case_matrix=_frozen_matrix(),
+    )
+
+    assert (
+        materialized.public_projection_items[0].source_row.position_summary
+        == detailed_position
+    )
 
 
 def test_dossier_schema_accepts_five_facts_and_rejects_the_sixth() -> None:
@@ -588,6 +660,13 @@ def _dialogue_provider_frame() -> dict[str, object]:
     }
 
 
+def _dialogue_transition_provider_frame() -> dict[str, object]:
+    return {
+        **_dialogue_provider_frame(),
+        "dialogue": {"remark_disposition": None},
+    }
+
+
 def _dialogue_remark_provider_frame(disposition: str) -> dict[str, object]:
     return {
         **_dialogue_provider_frame(),
@@ -631,11 +710,17 @@ def _frozen_matrix() -> dict[str, object]:
 
 
 def _respondent_dossier_provider_frame(
-    updates: list[dict[str, object]],
+    claim: dict[str, object],
 ) -> dict[str, object]:
     return {
+        "respondent_attitude": claim["attitude"],
+        "respondent_position_summary": claim["position_summary"],
+        "respondent_alternative_proposal": (
+            claim["alternative_proposals"][0]
+            if claim["alternative_proposals"]
+            else ""
+        ),
         **_dossier_provider_frame(),
-        "dossier_delta": {"respondent_claim_updates": updates},
     }
 
 

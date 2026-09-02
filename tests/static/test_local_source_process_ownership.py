@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
 import subprocess
+import sys
 import time
 from ctypes import wintypes
 from pathlib import Path
@@ -16,6 +18,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = ROOT / ".local-dev" / "launch-source.ps1"
+JAVA_API_RESTART = ROOT / ".local-dev" / "restart-java-api-current-activation.ps1"
+JAVA_CONTROL_RESTART = (
+    ROOT / ".local-dev" / "restart-java-control-worker-current-activation.ps1"
+)
+JAVA_AGENT_RESTART = (
+    ROOT / ".local-dev" / "restart-java-agent-worker-current-activation.ps1"
+)
 SAFE_ENTRYPOINT = "Stop-OwnedSourceProcess"
 PUBLICATION_ENTRYPOINT = "Publish-SourceProcessOwnershipOrCompensate"
 LAUNCH_TOMBSTONE_ENTRYPOINT = "Initialize-SourceProcessOwnershipLaunchTombstone"
@@ -12401,3 +12410,402 @@ def test_topology_ownership_gate_precedes_every_irreversible_launcher_call() -> 
     assert between_gate_and_migration.count(
         "Assert-TargetE2eSourceBindingUnchanged"
     ) == 1
+
+
+def test_prepare_java_overlay_only_is_exact_and_exits_before_runtime_mutation() -> None:
+    launcher = LAUNCHER.read_text(encoding="utf-8-sig")
+
+    assert launcher.count("[switch]$PrepareJavaOverlayOnly") == 1
+    assert (
+        "$mustBuildJavaOverlay =\n"
+        "    $PrepareJavaOverlayOnly -or\n"
+    ) in launcher
+    assert (
+        '"target\\target-e2e-classes.staging." + '
+        '[Guid]::NewGuid().ToString("N")'
+    ) in launcher
+    assert '"-Dtarget-e2e.classes-directory=$stagedTargetClasses"' in launcher
+
+    binding_validation_index = launcher.index(
+        "$compiledWorktreeBinding -cne $expectedJavaSourceBinding"
+    )
+    build_only_index = launcher.index(
+        "if ($PrepareJavaOverlayOnly) {", binding_validation_index
+    )
+    output_index = launcher.index(
+        'schema_version = "local-target-e2e-java-overlay.v1"', build_only_index
+    )
+    exit_index = launcher.index("exit 0", output_index)
+    catch_index = launcher.index("\ncatch {", exit_index)
+    build_only_body = launcher[build_only_index:catch_index]
+
+    assert "Assert-TargetE2eSourceBindingUnchanged" in build_only_body
+    assert (
+        "staged_overlay_path = "
+        "[System.IO.Path]::GetFullPath($stagedTargetClasses)"
+    ) in build_only_body
+    for field in (
+        "compiled_source_sha",
+        "compiled_worktree_binding",
+        "expected_control_build_id",
+        "artifact_marker_sha256",
+    ):
+        assert f"{field} =" in build_only_body
+    assert "Move-Item" not in build_only_body
+
+    gate_index = launcher.index(
+        "$sourceTopologyOwnershipGate = Invoke-SourceTopologyOwnershipGate"
+    )
+    migration_index = launcher.index("\nInvoke-DomainMigrationPreflight\n", gate_index)
+    provision_index = launcher.index(
+        '& "D:\\miniconda\\python.exe" $provisioner', gate_index
+    )
+    canonical_promotion_index = launcher.index(
+        "Move-Item -LiteralPath $stagedOverlay -Destination $canonicalOverlay",
+        gate_index,
+    )
+    proxy_index = launcher.index(
+        "$existingProxyState = Get-LocalProxyContainerState", gate_index
+    )
+    routing_index = launcher.index("Ensure-TemporalDefaultBuildId `", gate_index)
+    process_index = launcher.index("$javaApi = Start-JavaSourceProcess", gate_index)
+    assert binding_validation_index < build_only_index < output_index < exit_index
+    assert exit_index < min(
+        gate_index,
+        migration_index,
+        provision_index,
+        canonical_promotion_index,
+        proxy_index,
+        routing_index,
+        process_index,
+    )
+
+    cleanup_start = launcher.index("function Remove-TargetE2eStagedOverlayExact")
+    cleanup_end = launcher.index("\n}\n\ntry {", cleanup_start) + 2
+    cleanup = launcher[cleanup_start:cleanup_end]
+    assert '"^target-e2e-classes\\.staging\\.[0-9a-f]{32}$"' in cleanup
+    assert "Remove-Item -LiteralPath $stagedOverlay -Recurse -Force" in cleanup
+    assert "Remove-Item -LiteralPath $targetDirectory" not in cleanup
+
+    def reviewed_paths(variable: str) -> set[str]:
+        match = re.search(
+            rf"\${variable}\s*=.*?@\((?P<body>.*?)\)\s*\|\s*ForEach-Object\s*"
+            rf"\{{\s*\[void\]\${variable}\.Add\(\$_\)\s*\}}",
+            launcher,
+            flags=re.DOTALL,
+        )
+        assert match is not None
+        return set(re.findall(r'"([^"\r\n]+)"', match.group("body")))
+
+    modified_paths = reviewed_paths("allowedDirtyPaths")
+    untracked_paths = reviewed_paths("allowedUntrackedPaths")
+    expected_modified = {
+        "python-agent-service/app/api/intake_parallel_stream_service.py",
+        "java-api-service/src/main/java/com/example/dispute/workflow/activity/system/TemporalWorkerProbeWorkflowImpl.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/application/intake/IntakePrivateThreadRegistration.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerProperties.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/EvidenceProcessProjectionView.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/recovery/ExactCaseProcessWorkflowPinRecoveryMain.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/exchange/rooms/TargetE2eRoomExchangeContract.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/finalization/TargetE2eExecutionLaneVerifier.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/ingress/materialization/TargetIntakeRuntimePins.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/ingress/rooms/TargetE2eEvidenceManifestPublisher.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/ingress/rooms/TargetE2eHearingInvocationPublisher.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomProtocol.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/temporal/intake/finalizationread/JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/config/TemporalWorkerConfigurationTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/config/TemporalWorkerPropertiesTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/recovery/ExactCaseProcessWorkflowPinRecoveryMainTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/targete2e/ingress/materialization/TargetIntakeRuntimePinsTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/targete2e/temporal/intake/finalizationread/JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest.java",
+    }
+    expected_untracked = {
+        "java-api-service/src/main/java/com/example/dispute/workflow/recovery/ExactCaseProcessWorkflowRePinRecoveryMain.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/recovery/ExactIntakeRoomWorkflowRePinRecoveryMain.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/recovery/ExactCaseProcessWorkflowRePinRecoveryMainTest.java",
+        "java-api-service/src/test/java/com/example/dispute/workflow/recovery/ExactIntakeRoomWorkflowRePinRecoveryMainTest.java",
+    }
+    assert expected_modified <= modified_paths
+    assert expected_untracked <= untracked_paths
+    assert expected_modified.isdisjoint(untracked_paths)
+    assert expected_untracked.isdisjoint(modified_paths)
+    assert all(
+        not any(token in path for token in ("*", "?", "[", "]", "\\"))
+        for path in expected_modified | expected_untracked
+    )
+
+
+def test_mid_round_intake_resume_continues_only_uncommitted_ordinals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = ROOT / ".local-dev" / "five-round-intake-api-uat.py"
+    spec = importlib.util.spec_from_file_location("five_round_mid_resume_test", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    values = {
+        module.RESUME_BOUNDARY_ENV: module.INITIATOR_WAITING_PARTY_MID_ROUNDS,
+        module.RESUME_CASE_ID_ENV: "CASE_MID_ROUND",
+        module.RESUME_INITIATOR_ID_ENV: "user-mid-round",
+        module.RESUME_RESPONDENT_ID_ENV: "merchant-mid-round",
+        module.RESUME_OPERATION_ID_ENV: "mid-round-op-v1",
+        module.RESUME_EXPECTED_PHASE_ENV: "WAITING_PARTY",
+        module.RESUME_EXPECTED_DOSSIER_VERSION_ENV: "2",
+        module.RESUME_EXPECTED_SOURCE_TURN_ENV: "2",
+        module.RESUME_EXPECTED_MATRIX_ID_ENV: "CASE_MATRIX_MID_ROUND",
+        module.RESUME_EXPECTED_MATRIX_VERSION_ENV: "2",
+        module.RESUME_EXPECTED_MATRIX_HASH_ENV: "a" * 64,
+        module.RESUME_CONTINUATION_TEXT_ENV: "冻结的第三轮恢复文本，且不是内建夹具。",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    configuration = module.load_resume_configuration(5)
+    assert configuration is not None
+    assert configuration.expected_matrix_version == 2
+
+    monkeypatch.setenv(
+        module.RESUME_BOUNDARY_ENV,
+        module.INITIATOR_WAITING_PARTY_BEFORE_RESPONDENT,
+    )
+    with pytest.raises(module.uat.UatFailure):
+        module.load_resume_configuration(5)
+    for name in (
+        module.RESUME_EXPECTED_DOSSIER_VERSION_ENV,
+        module.RESUME_EXPECTED_SOURCE_TURN_ENV,
+        module.RESUME_EXPECTED_MATRIX_VERSION_ENV,
+    ):
+        monkeypatch.setenv(name, "5")
+    assert module.load_resume_configuration(5) is not None
+
+    monkeypatch.setenv(
+        module.RESUME_BOUNDARY_ENV,
+        module.INITIATOR_WAITING_PARTY_MID_ROUNDS,
+    )
+    for name in (
+        module.RESUME_EXPECTED_DOSSIER_VERSION_ENV,
+        module.RESUME_EXPECTED_SOURCE_TURN_ENV,
+        module.RESUME_EXPECTED_MATRIX_VERSION_ENV,
+    ):
+        monkeypatch.setenv(name, "2")
+    configuration = module.load_resume_configuration(5)
+    assert configuration is not None
+
+    matrices = {
+        version: module.MatrixState(
+            f"matrix-{version}",
+            version,
+            f"{version}" * 64,
+            "INITIATOR_FROZEN",
+            None,
+            None,
+            None,
+        )
+        for version in range(2, 6)
+    }
+    preflight = module.ResumePreflight(
+        matrix=matrices[2],
+        room_id="room-mid-round",
+        message_ids=frozenset({"message-1", "message-2"}),
+        run_ids=frozenset({"run-1", "run-2"}),
+        committed_texts=frozenset(),
+    )
+    posted_ordinals: list[int] = []
+    formal_versions: list[int] = []
+    readiness: list[tuple[int, int]] = []
+
+    class Timings:
+        def measure(self, _name: str, operation: Any) -> Any:
+            return operation()
+
+    monkeypatch.setattr(module, "require_resume_preflight", lambda *_: preflight)
+    monkeypatch.setattr(
+        module,
+        "post_resume_continuation",
+        lambda *_: ("message-3", "run-3"),
+    )
+    monkeypatch.setattr(module, "observe_intake_agent_run", lambda *_: object())
+    monkeypatch.setattr(module, "record_parallel_intake_timing", lambda *_: None)
+
+    def post_party_text(
+        _context: Any, _stage: str, ordinal: int, rounds_per_party: int
+    ) -> str:
+        assert rounds_per_party == 5
+        posted_ordinals.append(ordinal)
+        return f"run-{ordinal}"
+
+    def wait_for_formal_turn(
+        _context: Any,
+        _stage: str,
+        _run_id: str,
+        *,
+        expected_version: int,
+        expected_dossier_version: int,
+        previous: Any,
+    ) -> Any:
+        assert expected_dossier_version == expected_version
+        assert previous.version == expected_version - 1
+        formal_versions.append(expected_version)
+        return matrices[expected_version]
+
+    monkeypatch.setattr(module, "post_party_text", post_party_text)
+    monkeypatch.setattr(module, "wait_for_formal_turn", wait_for_formal_turn)
+    monkeypatch.setattr(
+        module,
+        "require_semantic_ready",
+        lambda _context,
+        _stage,
+        *,
+        expected_dossier_version,
+        expected_source_turn_no: readiness.append(
+            (expected_dossier_version, expected_source_turn_no)
+        ),
+    )
+
+    result = module.execute_resume_waiting_party(
+        Timings(), object(), configuration, 5
+    )
+
+    assert posted_ordinals == [4, 5]
+    assert formal_versions == [3, 4, 5]
+    assert readiness == [(5, 5)]
+    assert result["resume_new_agent_run_ids"] == ["run-3", "run-4", "run-5"]
+    assert result["initiator_rounds"] == 5
+    assert result["final_matrix_version"] == 5
+    assert result["stopped_after"] == "INITIATOR_READY_TO_CONFIRM"
+
+
+def test_five_round_v3_observer_accepts_room_utterance_without_ordered_sections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    script = ROOT / ".local-dev" / "five-round-intake-api-uat.py"
+    spec = importlib.util.spec_from_file_location("five_round_v3_observer_test", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    run_id = "target-intake-run:v3-visible-only"
+    attempt_id = "target-intake-attempt:v3-visible-only:1"
+    events = [
+        {
+            "protocol": "agent-stream.v3",
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "attempt_no": 1,
+            "sequence": 0,
+            "type": "attempt_started",
+        },
+        {
+            "protocol": "agent-stream.v3",
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "attempt_no": 1,
+            "sequence": 1,
+            "type": "visible_delta",
+            "field": "room_utterance",
+            "delta": "商家您好，请说明立场。",
+        },
+        {
+            "protocol": "agent-stream.v3",
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "attempt_no": 1,
+            "sequence": 2,
+            "type": "usage",
+            "token_usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+            },
+        },
+        {
+            "protocol": "agent-stream.v3",
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "attempt_no": 1,
+            "sequence": 3,
+            "type": "final",
+            "response": {
+                "final_result_ref": "urn:after-sale-flow:graph-result:" + "a" * 64,
+                "final_result_hash": "a" * 64,
+            },
+        },
+    ]
+    monkeypatch.setattr(
+        module,
+        "read_timed_evidence_sse_events",
+        lambda *_: SimpleNamespace(events=events),
+    )
+    monkeypatch.setattr(module.uat, "read_replay_events", lambda *_: list(events))
+
+    observation = module.observe_intake_agent_run(
+        object(), "v3_visible_only", run_id, 0.0
+    )
+    assert observation.protocol == "agent-stream.v3"
+
+    events[1] = {**events[1], "field": "private_trace"}
+    with pytest.raises(module.uat.UatFailure):
+        module.observe_intake_agent_run(
+            object(), "v3_visible_only_negative", run_id, 0.0
+        )
+
+
+def test_java_api_stopped_start_requires_explicit_operator_authority() -> None:
+    script = JAVA_API_RESTART.read_text(encoding="utf-8-sig")
+
+    assert script.count("[switch]$AllowStartIfStopped") == 1
+    assert "if ($listeners.Count -gt 1)" in script
+    stopped_guard = script.index("if ($listeners.Count -eq 0)")
+    explicit_guard = script.index("if (-not $AllowStartIfStopped)", stopped_guard)
+    start_index = script.index("$javaApi = Start-Process", explicit_guard)
+    owned_listener_branch = script.index("} else {", explicit_guard)
+    stop_index = script.index("Stop-Process -Id $oldPid -Force", owned_listener_branch)
+
+    assert stopped_guard < explicit_guard < owned_listener_branch < stop_index < start_index
+    assert "Java API is stopped; use -AllowStartIfStopped" in script
+    assert (
+        "TARGET_E2E_INTAKE_EXECUTION_PROVIDER_ID = "
+        "[string]$env:DEFAULT_LLM_PROVIDER"
+    ) in script
+
+
+def test_current_workers_can_start_if_stopped_without_replacing_recovery_workers() -> None:
+    control = JAVA_CONTROL_RESTART.read_text(encoding="utf-8-sig")
+    agent = JAVA_AGENT_RESTART.read_text(encoding="utf-8-sig")
+
+    assert control.count("[switch]$AllowStartIfStopped") == 1
+    assert agent.count("[switch]$AllowStartIfStopped") == 1
+    assert control.count('if ($PSVersionTable.PSEdition -ne "Core")') == 1
+    assert agent.count('if ($PSVersionTable.PSEdition -ne "Core")') == 1
+    assert control.index('if ($PSVersionTable.PSEdition -ne "Core")') < control.index(
+        "$setupSource ="
+    )
+    assert agent.index('if ($PSVersionTable.PSEdition -ne "Core")') < agent.index(
+        "$setupSource ="
+    )
+    assert '& $pwsh @forwardArguments' in control
+    assert '& $pwsh @forwardArguments' in agent
+    assert "$targetState.control_build_id" in control
+    assert "$targetState.agent_build_id" in agent
+    assert "CASE_PROCESS_RECOVERY_ONLY" in control
+    assert "CASE_PROCESS_INTAKE_CONTINUATION_ONLY" in control
+    assert "A conflicting normal CONTROL worker already exists." in control
+    assert "A conflicting AGENT worker already exists." in agent
+
+    control_start_only = control.index("if ($AllowStartIfStopped)")
+    control_stop = control.index("Stop-Process -Id $process.ProcessId -Force")
+    control_start = control.index("$controlWorker = Start-Process")
+    agent_start_only = agent.index("if ($AllowStartIfStopped)")
+    agent_stop = agent.index("Stop-Process -Id $process.ProcessId -Force")
+    agent_start = agent.index("$agentWorker = Start-Process")
+
+    assert control_start_only < control_stop < control_start
+    assert agent_start_only < agent_stop < agent_start
+    assert 'disposition = "ALREADY_RUNNING"' in control
+    assert 'disposition = "ALREADY_RUNNING"' in agent

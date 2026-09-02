@@ -673,6 +673,32 @@ def test_frozen_parallel_ingress_projects_one_shared_model_context_for_three_fra
         )
 
 
+def test_parallel_ingress_stably_deduplicates_persisted_question_authority() -> None:
+    requests, _ = _requests_and_contexts()
+    execution = _parallel_execution(requests)
+    snapshot, event, execution = _parallel_ingress(execution)
+    user_state = deepcopy(
+        snapshot["current_dossier"]["party_intake_state"]["USER"]
+    )
+    user_state["missing_information"]["next_questions"] = [
+        "请说明签收时间。",
+        "请说明签收时间。",
+    ]
+    snapshot["current_dossier"]["party_intake_state"]["USER"] = user_state
+
+    material = build_parallel_turn_model_material(
+        execution,
+        snapshot_context=IntakeTurnContext("SNAPSHOT", snapshot),
+        event_context=IntakeTurnContext("EVENT", event),
+        instruction_packs=_instruction_packs(),
+    )
+
+    assert [
+        slot.canonical_text
+        for slot in material.model_context.authorized_question_slots
+    ] == ["请说明签收时间。"]
+
+
 def test_production_bundle_deterministically_binds_three_prompts_ids_and_budgets() -> None:
     requests, _ = _requests_and_contexts()
     execution = _parallel_execution(requests)

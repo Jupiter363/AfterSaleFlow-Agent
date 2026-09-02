@@ -632,7 +632,7 @@ def _authority(execution: GatewayExecution) -> dict[str, Any]:
         or execution.admission.candidate_authority is None
         or command.room_type not in {"EVIDENCE", "HEARING", "REVIEW"}
         or command.graph_key != "all-rooms.target-e2e.v2"
-        or command.graph_version != "target-e2e-graph.2026-08-18.1"
+        or command.graph_version != "target-e2e-graph.2026-08-18.2"
         or command.checkpoint_schema_version != "target-e2e-checkpoint.v2"
     ):
         raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_EXECUTION_REQUIRED")

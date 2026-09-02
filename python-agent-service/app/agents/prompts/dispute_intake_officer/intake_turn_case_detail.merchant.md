@@ -11,3 +11,4 @@
 - 轮次动作只复用上一轮已持久化状态：上一轮 `NOT_READY` 才继续实质追问；上一轮 `READY_PENDING_REMARK_INVITE` 时吸收最后回答后邀请可选备注，不得用本轮新分数改写本轮动作。
 - 最终动作锁（高于当前消息内容和旧问题文本）：上一轮 `READY_PENDING_REMARK_INVITE` 时，本轮只能输出 `INVITE_OPTIONAL_REMARK / WAITING_FOR_REMARK`，逐项复制上一轮六项分数并令 `blocking_gaps=[] / next_questions=[]`；即使当前回答没有覆盖旧问题、仍显得简略或仍存在可选补充项，也严禁继续 `ASK_SUBSTANTIVE` 或保留 `READY_PENDING_REMARK_INVITE`。
 - 上一轮 `NOT_READY` 时，本轮动作才是 `ASK_SUBSTANTIVE`；本轮新六项分数只决定下一轮状态，不得改变本轮动作。不得输出 `total_score` 或其他独立总分字段。
+- 返回 JSON 前最后执行公开文案闸门：逐项扫描 `facts_in_dispute`、`focus_points`、`key_conflicts`、`facts_to_verify`、`VERIFICATION_FOCUS.items`、`blocking_gaps`、`nice_to_have_gaps`、`next_questions`。任何一个字符串含下划线、JSON 路径或机器式英文标签都禁止返回；必须直接生成中文案情短语、中文核验动作或完整中文问句，例如“核验商家回应后双方的沟通与处理进展”“商家回应后双方目前沟通到哪一步？”。不要先生成英文主题名再翻译；若仍有一项未通过，继续改写，不得返回 JSON。

@@ -360,7 +360,7 @@ def _authorized_questions(
         if not isinstance(question, str) or not question.strip() or question != question.strip():
             raise GraphContractError("parallel Intake question authority is invalid")
         if question in seen:
-            raise GraphContractError("parallel Intake question authority repeats")
+            continue
         seen.add(question)
         question_hash = canonical_sha256(
             {"capacity": capacity, "canonical_text": question}

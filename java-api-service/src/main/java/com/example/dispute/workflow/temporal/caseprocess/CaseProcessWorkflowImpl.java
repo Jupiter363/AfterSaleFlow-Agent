@@ -147,6 +147,10 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         "case-process-target-intake-global-projection-cursor-v1";
     private static final String TARGET_INTAKE_TERMINAL_EVENT_CATCHUP_CHANGE_ID =
         "case-process-target-intake-terminal-event-catchup-v1";
+    private static final String TARGET_INTAKE_TERMINAL_V3_ACK_RECOVERY_CHANGE_ID =
+        "case-process-target-intake-terminal-v3-ack-recovery-v1";
+    private static final String TARGET_TYPED_DISPATCH_RECOVERY_CHANGE_ID =
+        "case-process-target-typed-dispatch-recovery-v1";
     private static final String EXPIRED_TARGET_EVIDENCE_TERMINAL_RECOVERY_CHANGE_ID =
         "case-process-expired-target-evidence-terminal-recovery-v1";
     private static final String INTAKE_PROJECTION_RECOVERY_FAILURE =
@@ -300,6 +304,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     private int childCompensationInvariantVersion;
     private int targetIntakeProjectionCompletionVersion;
     private int targetIntakeTerminalEventCatchupVersion;
+    private int targetIntakeTerminalV3AckRecoveryVersion;
+    private int targetTypedDispatchRecoveryVersion;
     private boolean provisioningSwitchInProgress;
     private StartedChild uncommittedChild;
     private String protocolErrorCode;
@@ -392,6 +398,15 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         targetIntakeTerminalEventCatchupVersion =
             Workflow.getVersion(
                 TARGET_INTAKE_TERMINAL_EVENT_CATCHUP_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+        targetIntakeTerminalV3AckRecoveryVersion =
+            Workflow.getVersion(
+                TARGET_INTAKE_TERMINAL_V3_ACK_RECOVERY_CHANGE_ID,
+                Workflow.DEFAULT_VERSION,
+                1);
+        targetTypedDispatchRecoveryVersion =
+            Workflow.getVersion(
+                TARGET_TYPED_DISPATCH_RECOVERY_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+        normalizeRestoredTargetTypedDispatchError();
         validateCarriedTargetHistory();
         restoreActiveChildStub();
         restoreAuthorityCheckpoint();
@@ -828,6 +843,96 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             && !activateAcknowledgedTerminalNoCommitRecovery()) {
             terminalNoCommitInbox.removeLastOccurrence(authority);
         }
+    }
+
+    @Override
+    public void recoverRejectedTargetIntakeCommandTerminalNoCommit(
+        TargetIntakeCommandTerminalNoCommit authority) {
+        awaitNoActiveRecovery();
+        if (!commandManualRecoveryRequired
+            || !"TARGET_INTAKE_TERMINAL_NO_COMMIT_REJECTED".equals(protocolErrorCode)
+            || protocolErrorOrigin != RecoveryErrorOrigin.COMMAND
+            || authority == null
+            || !TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+                authority.schemaVersion())
+            || terminalNoCommitInbox.isEmpty()
+            || terminalNoCommitInbox.stream().anyMatch(candidate -> !authority.equals(candidate))) {
+            return;
+        }
+        terminalNoCommitInbox.clear();
+        terminalNoCommitInbox.addFirst(authority);
+        commandManualRecoveryRequired = false;
+        clearRecoveryError(RecoveryErrorOrigin.COMMAND);
+    }
+
+    @Override
+    public void recoverTargetIntakeCurrentRunCommandDispatch(
+        CaseProcessTargetIntakeCurrentRunDispatchRecoveryRequest request) {
+        awaitNoActiveRecovery();
+        PendingCommand pending = orderedCommands.get(nextCommandSequence);
+        ActiveChildDescriptor descriptor = activeChildDescriptor;
+        if (!matchesTargetIntakeCurrentRunDispatchRecovery(request, pending, descriptor)) {
+            return;
+        }
+        TargetTypedRoomChildHandle rebound;
+        try {
+            rebound =
+                restoreTargetTypedRoomChildForCurrentRun(
+                    descriptor, request.childCurrentRunId());
+        } catch (RuntimeException unavailable) {
+            return;
+        }
+        if (rebound == null || !matchesExecution(rebound.execution(), descriptor)) {
+            return;
+        }
+        activeTargetTypedChild = rebound;
+        commandManualRecoveryRequired = false;
+        clearRecoveryError(RecoveryErrorOrigin.COMMAND);
+    }
+
+    private boolean matchesTargetIntakeCurrentRunDispatchRecovery(
+        CaseProcessTargetIntakeCurrentRunDispatchRecoveryRequest request,
+        PendingCommand pending,
+        ActiveChildDescriptor descriptor) {
+        if (request == null
+            || !CaseProcessTargetIntakeCurrentRunDispatchRecoveryRequest.SCHEMA_VERSION.equals(
+                request.schemaVersion())
+            || !commandManualRecoveryRequired
+            || !"TARGET_TYPED_ROOM_COMMAND_DISPATCH_FAILED".equals(protocolErrorCode)
+            || protocolErrorOrigin != RecoveryErrorOrigin.COMMAND
+            || orderedCommands.size() != 1
+            || pending == null
+            || !pending.ledgerState().routable()
+            || commandInboxCount != 0
+            || !replayChecks.isEmpty()
+            || descriptor == null
+            || descriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM
+            || descriptor.writerMode() != WriterMode.TEMPORAL
+            || descriptor.roomType() != RoomType.INTAKE
+            || activeRoomType != RoomType.INTAKE) {
+            return false;
+        }
+        CaseCommandRef command = pending.command();
+        return Workflow.getInfo().getWorkflowId().equals(request.workflowId())
+            && Workflow.getInfo().getRunId().equals(request.workflowRunId())
+            && Objects.equals(tenantSurrogate, request.tenantSurrogate())
+            && Objects.equals(caseId, request.caseId())
+            && Objects.equals(activeChildWorkflowId, request.childWorkflowId())
+            && Objects.equals(activeChildWorkflowRunId, request.childStartedRunId())
+            && Objects.equals(descriptor.workflowId(), request.childWorkflowId())
+            && Objects.equals(descriptor.startedRunId(), request.childStartedRunId())
+            && !request.childStartedRunId().equals(request.childCurrentRunId())
+            && activeRoomEpoch == request.roomEpoch()
+            && activeFencingToken == request.fencingToken()
+            && observedProcessRevision == request.expectedProcessRevision()
+            && activeRoomRevision == request.expectedRoomRevision()
+            && nextCommandSequence == request.expectedNextCommandSequence()
+            && processedCommandCount == request.expectedProcessedCommandCount()
+            && command.caseCommandSequence() == nextCommandSequence
+            && command.roomType() == RoomType.INTAKE
+            && command.roomEpoch() == activeRoomEpoch
+            && command.commandId().equals(request.expectedCommandId())
+            && command.requestHash().equals(request.expectedRequestHash());
     }
 
     /**
@@ -2105,6 +2210,16 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             "target typed room restore dispatcher is not assembled in the default artifact");
     }
 
+    /**
+     * Explicit recovery hook for a target Intake child that continued after its provisioning run.
+     * The returned handle retains the persisted first-run identity while directing its signal to
+     * {@code currentRunId}; the default artifact deliberately has no such authority.
+     */
+    protected TargetTypedRoomChildHandle restoreTargetTypedRoomChildForCurrentRun(
+        ActiveChildDescriptor descriptor, String currentRunId) {
+        return null;
+    }
+
     private static StartedChild startInDetachedCancellationScope(Supplier<StartedChild> starter) {
         StartedChild[] started = new StartedChild[1];
         CancellationScope detached =
@@ -2708,18 +2823,29 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             return false;
         }
         TargetIntakeCommandTerminalNoCommit rejected = terminalNoCommitInbox.peekFirst();
-        if (rejected == null
-            || !TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(
-            rejected.schemaVersion())) {
+        if (rejected == null) {
+            return false;
+        }
+        boolean rejectedObservedV2 =
+            TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(
+                rejected.schemaVersion());
+        boolean rejectedStrictV3 =
+            targetIntakeTerminalV3AckRecoveryVersion == 1
+                && TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+                    rejected.schemaVersion());
+        if (!rejectedObservedV2 && !rejectedStrictV3) {
             return false;
         }
         TargetIntakeCommandTerminalNoCommit acknowledged =
             terminalNoCommitInbox.stream()
+                .skip(1)
                 .filter(
                     candidate ->
                         TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
                             candidate.schemaVersion())
-                            && rejected.equals(candidate.asObservedV2Authority()))
+                            && ((rejectedObservedV2
+                                    && rejected.equals(candidate.asObservedV2Authority()))
+                                || (rejectedStrictV3 && rejected.equals(candidate))))
                 .findFirst()
                 .orElse(null);
         if (acknowledged == null) {
@@ -4304,7 +4430,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                     || protocolErrorCode.equals("INTAKE_CHILD_BRIDGE_COMMAND_FAILED")
                     || protocolErrorCode.equals("INTAKE_CHILD_BRIDGE_COMMAND_BINDING_INVALID")
                     || protocolErrorCode.equals("INTAKE_CHILD_COMMAND_SIGNAL_FAILED")
-                    || protocolErrorCode.equals("INTAKE_CHILD_ACTIVE_BINDING_INVALID");
+                    || protocolErrorCode.equals("INTAKE_CHILD_ACTIVE_BINDING_INVALID")
+                    || (targetTypedDispatchRecoveryVersion == 1
+                        && protocolErrorCode.equals("TARGET_TYPED_ROOM_COMMAND_DISPATCH_FAILED"));
                 case DOMAIN_EVENT -> protocolErrorCode.equals("DOMAIN_EVENT_SEQUENCE_NOT_FOUND")
                     || protocolErrorCode.equals("DOMAIN_EVENT_LEDGER_UNAVAILABLE")
                     || protocolErrorCode.equals("DOMAIN_EVENT_LEDGER_RESPONSE_INVALID")
@@ -4313,12 +4441,35 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                     || protocolErrorCode.equals("INTAKE_CHILD_BRIDGE_EVENT_FAILED")
                     || protocolErrorCode.equals("INTAKE_CHILD_BRIDGE_EVENT_BINDING_INVALID")
                     || protocolErrorCode.equals("INTAKE_CHILD_EVENT_SIGNAL_FAILED")
-                    || protocolErrorCode.equals("INTAKE_CHILD_ACTIVE_BINDING_INVALID");
+                    || protocolErrorCode.equals("INTAKE_CHILD_ACTIVE_BINDING_INVALID")
+                    || (targetTypedDispatchRecoveryVersion == 1
+                        && protocolErrorCode.equals("TARGET_TYPED_ROOM_EVENT_DISPATCH_FAILED"));
             };
         if (recoverable) {
             protocolErrorCode = null;
             protocolErrorOrigin = null;
         }
+    }
+
+    /**
+     * Continue-As-New may carry the target typed-room dispatch error recorded before the delivery
+     * outcome was known. Version 1 clears only the event-side state whose durable cursors prove
+     * that every observed event was subsequently consumed. An unresolved dispatch still retains
+     * its buffered event/manual-recovery authority and therefore cannot enter this branch.
+     */
+    private void normalizeRestoredTargetTypedDispatchError() {
+        if (targetTypedDispatchRecoveryVersion != 1
+            || !"TARGET_TYPED_ROOM_EVENT_DISPATCH_FAILED".equals(protocolErrorCode)
+            || protocolErrorOrigin != RecoveryErrorOrigin.DOMAIN_EVENT
+            || eventManualRecoveryRequired
+            || !bufferedEvents.isEmpty()
+            || nextCaseEventSequence <= 0
+            || processedEventCount != nextCaseEventSequence - 1
+            || highestObservedEventSequence != processedEventCount) {
+            return;
+        }
+        protocolErrorCode = null;
+        protocolErrorOrigin = null;
     }
 
     private void clearRecoveryError(RecoveryErrorOrigin origin) {

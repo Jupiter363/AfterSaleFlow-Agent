@@ -570,6 +570,241 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void derivesOmittedFormalRemarkPartitionFromExactRoomMessageAuthorityAndReplays()
+            throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        ObjectNode initialPatch = partyIntakePatch(
+                "MERCHANT", partyIntakeEntry(0), partyIntakeEntry(0));
+        initialPatch.set(
+                "handoff_remark_partition",
+                handoffRemarkPartition(current, "MERCHANT", "NOT_READY", null));
+        MergeResult before = merger.merge(
+                current,
+                proposal(initialPatch, null),
+                matrixAuthority(ActorRole.MERCHANT));
+
+        String thresholdMessageId = "MESSAGE_V4_THRESHOLD_MERCHANT";
+        ObjectNode pendingState =
+                ((ObjectNode) before.dossier().path("party_intake_state")).deepCopy();
+        ObjectNode pendingMerchant = readyPartyIntakeEntry(
+                "READY_PENDING_REMARK_INVITE", thresholdMessageId);
+        pendingState.set("MERCHANT", pendingMerchant);
+        ObjectNode pendingPatch = JSON.createObjectNode();
+        pendingPatch.set("party_intake_state", pendingState);
+        copyPartyMirror(pendingPatch, pendingMerchant);
+        MatrixAuthority thresholdAuthority = matrixAuthority(
+                ActorRole.MERCHANT, thresholdMessageId, SourceType.ROOM_MESSAGE);
+
+        ObjectNode wrongSourcePatch = pendingPatch.deepCopy();
+        wrongSourcePatch
+                .withObject("party_intake_state")
+                .withObject("MERCHANT")
+                .withObject("handoff_notes")
+                .put("phase_source_message_id", "MESSAGE_V4_THRESHOLD_FOREIGN");
+        wrongSourcePatch.set(
+                "handoff_notes",
+                wrongSourcePatch
+                        .at("/party_intake_state/MERCHANT/handoff_notes")
+                        .deepCopy());
+        assertRejected(
+                "INTAKE_PARTY_STATE_PHASE_SOURCE_INVALID",
+                () -> merger.merge(
+                        before.dossier(),
+                        proposal(
+                                wrongSourcePatch,
+                                respondentDelta(before.dossier()
+                                        .at("/case_fact_matrix/fact_rows/0/fact_id")
+                                        .asText()),
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of()),
+                        thresholdAuthority));
+
+        MergeResult pending = merger.merge(
+                before.dossier(),
+                proposal(
+                        pendingPatch,
+                        respondentDelta(before.dossier()
+                                .at("/case_fact_matrix/fact_rows/0/fact_id")
+                                .asText()),
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                thresholdAuthority);
+        JsonNode pendingParty = pending.dossier()
+                .at("/handoff_remark_partition/parties/MERCHANT");
+        assertThat(pendingParty.path("remark_status").asText())
+                .isEqualTo("READY_PENDING_REMARK_INVITE");
+        assertThat(pendingParty.at("/source/message_id").asText())
+                .isEqualTo(thresholdMessageId);
+        assertThat(pendingParty.at("/source/message_hash").asText())
+                .isEqualTo("e".repeat(64));
+        assertThat(pending.dossier().at("/handoff_remark_partition/parties/USER"))
+                .isEqualTo(before.dossier().at("/handoff_remark_partition/parties/USER"));
+
+        String inviteMessageId = "MESSAGE_V4_INVITE_MERCHANT";
+        ObjectNode waitingState =
+                ((ObjectNode) pending.dossier().path("party_intake_state")).deepCopy();
+        ObjectNode waitingMerchant =
+                readyPartyIntakeEntry("WAITING_FOR_REMARK", inviteMessageId);
+        waitingState.set("MERCHANT", waitingMerchant);
+        ObjectNode waitingPatch = JSON.createObjectNode();
+        waitingPatch.set("party_intake_state", waitingState);
+        copyPartyMirror(waitingPatch, waitingMerchant);
+        MatrixAuthority inviteAuthority = matrixAuthority(
+                ActorRole.MERCHANT, inviteMessageId, SourceType.ROOM_MESSAGE);
+        MergeResult waiting = merger.merge(
+                pending.dossier(),
+                proposal(
+                        waitingPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                inviteAuthority);
+        assertThat(waiting.dossier()
+                        .at("/handoff_remark_partition/parties/MERCHANT/remark_status")
+                        .asText())
+                .isEqualTo("WAITING_FOR_REMARK");
+
+        MergeResult waitingReplay = merger.merge(
+                waiting.dossier(),
+                proposal(
+                        waitingPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                inviteAuthority);
+        assertThat(waitingReplay.dossier().path("handoff_remark_partition"))
+                .isEqualTo(waiting.dossier().path("handoff_remark_partition"));
+
+        String noRemarkMessageId = "MESSAGE_V4_NO_REMARK_MERCHANT";
+        ObjectNode noRemarkState =
+                ((ObjectNode) waiting.dossier().path("party_intake_state")).deepCopy();
+        ObjectNode noRemarkMerchant =
+                readyPartyIntakeEntry("NO_EXTRA_REMARKS", noRemarkMessageId);
+        noRemarkMerchant
+                .withObject("handoff_notes")
+                .put("latest_remark", "无额外备注。");
+        noRemarkState.set("MERCHANT", noRemarkMerchant);
+        ObjectNode noRemarkPatch = JSON.createObjectNode();
+        noRemarkPatch.set("party_intake_state", noRemarkState);
+        copyPartyMirror(noRemarkPatch, noRemarkMerchant);
+        MergeResult noRemark = merger.merge(
+                waiting.dossier(),
+                proposal(
+                        noRemarkPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                matrixAuthority(
+                        ActorRole.MERCHANT,
+                        noRemarkMessageId,
+                        SourceType.ROOM_MESSAGE));
+        JsonNode noRemarkParty =
+                noRemark.dossier().at("/handoff_remark_partition/parties/MERCHANT");
+        assertThat(noRemarkParty.path("remark_status").asText())
+                .isEqualTo("NO_EXTRA_REMARKS");
+        assertThat(noRemarkParty.path("latest_remark").asText()).isEmpty();
+
+        String remarkMessageId = "MESSAGE_V4_REMARK_MERCHANT";
+        String remarkText = "商家补充：可以安排一次远程检测。";
+        ObjectNode remarkState =
+                ((ObjectNode) waiting.dossier().path("party_intake_state")).deepCopy();
+        ObjectNode remarkMerchant = readyPartyIntakeEntry("HAS_REMARKS", remarkMessageId);
+        ObjectNode handoff = remarkMerchant.withObject("handoff_notes");
+        handoff.put("latest_remark", remarkText);
+        handoff.putArray("remarks")
+                .addObject()
+                .put("role", "MERCHANT")
+                .put("text", remarkText)
+                .put("source_message_id", remarkMessageId)
+                .put("turn_source", "ROOM_MESSAGE");
+        remarkState.set("MERCHANT", remarkMerchant);
+        ObjectNode remarkPatch = JSON.createObjectNode();
+        remarkPatch.set("party_intake_state", remarkState);
+        copyPartyMirror(remarkPatch, remarkMerchant);
+        MergeResult withRemark = merger.merge(
+                waiting.dossier(),
+                proposal(
+                        remarkPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                matrixAuthority(
+                        ActorRole.MERCHANT,
+                        remarkMessageId,
+                        SourceType.ROOM_MESSAGE));
+        JsonNode partitionRemark = withRemark.dossier()
+                .at("/handoff_remark_partition/parties/MERCHANT/remarks/0");
+        assertThat(partitionRemark.path("text").asText()).isEqualTo(remarkText);
+        assertThat(partitionRemark.path("source_message_hash").asText())
+                .isEqualTo(handoffRemarkSourceHash(
+                        remarkMessageId, "MERCHANT", remarkText));
+    }
+
+    @Test
+    void bootstrapsMissingFormalRemarkPartitionForExactTerminalAcknowledgement()
+            throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        String waitingMessageId = "MESSAGE_V4_INVITE_USER";
+        ObjectNode waitingUser =
+                readyPartyIntakeEntry("WAITING_FOR_REMARK", waitingMessageId);
+        ObjectNode waitingState = JSON.createObjectNode();
+        waitingState.put("schema_version", "party-intake-state.v1");
+        waitingState.set("USER", waitingUser);
+        waitingState.set("MERCHANT", partyIntakeEntry(0));
+        current.set("party_intake_state", waitingState);
+        copyPartyMirror(current, waitingUser);
+        assertThat(current.has("handoff_remark_partition")).isFalse();
+
+        String noRemarkMessageId = "MESSAGE_V4_NO_REMARK_USER";
+        ObjectNode noRemarkUser =
+                readyPartyIntakeEntry("NO_EXTRA_REMARKS", noRemarkMessageId);
+        noRemarkUser.withObject("handoff_notes").put("latest_remark", "无额外备注。");
+        ObjectNode terminalState = waitingState.deepCopy();
+        terminalState.set("USER", noRemarkUser);
+        ObjectNode terminalPatch = JSON.createObjectNode();
+        terminalPatch.set("party_intake_state", terminalState);
+        copyPartyMirror(terminalPatch, noRemarkUser);
+        MatrixAuthority authority = matrixAuthority(
+                ActorRole.USER, noRemarkMessageId, SourceType.ROOM_MESSAGE);
+
+        MergeResult terminal = merger.merge(
+                current,
+                proposal(
+                        terminalPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                authority);
+
+        JsonNode partition = terminal.dossier().path("handoff_remark_partition");
+        assertThat(partition.path("case_fact_matrix_id"))
+                .isEqualTo(terminal.dossier().at("/case_fact_matrix/matrix_id"));
+        assertThat(partition.path("case_fact_matrix_version"))
+                .isEqualTo(terminal.dossier().at("/case_fact_matrix/matrix_version"));
+        assertThat(partition.path("case_fact_matrix_hash"))
+                .isEqualTo(terminal.dossier().at("/case_fact_matrix/content_hash"));
+        assertThat(partition.at("/parties/USER/remark_status").asText())
+                .isEqualTo("NO_EXTRA_REMARKS");
+        assertThat(partition.at("/parties/USER/source/message_id").asText())
+                .isEqualTo(noRemarkMessageId);
+        assertThat(partition.at("/parties/USER/source/message_hash").asText())
+                .isEqualTo("c".repeat(64));
+        assertThat(partition.at("/parties/MERCHANT/remark_status").asText())
+                .isEqualTo("NOT_READY");
+
+        MergeResult replay = merger.merge(
+                terminal.dossier(),
+                proposal(
+                        terminalPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                authority);
+        assertThat(replay.dossier().path("handoff_remark_partition"))
+                .isEqualTo(partition);
+    }
+
+    @Test
     void exactHandoffPartitionCarryKeepsPriorSourceWhileChangedPartitionRequiresCurrentMessage()
             throws Exception {
         String priorMessageId = "MESSAGE_HANDOFF_THRESHOLD_MERCHANT";
@@ -1682,6 +1917,23 @@ class IntakeDossierProjectionMergerTest {
                 .isEqualByComparingTo(BigDecimal.ZERO);
         assertThat(result.dossier().at("/party_intake_state/USER/intake_quality/score").asInt())
                 .isEqualTo(60);
+    }
+
+    @Test
+    void initialFormMayOmitHandoffRemarkPartitionWhilePartyIsNotReady() {
+        ObjectNode patch = partyIntakePatch(
+                "USER", partyIntakeEntry(60), partyIntakeEntry(0));
+
+        MergeResult result = merger.merge(
+                JSON.createObjectNode(),
+                proposal(patch, null),
+                matrixAuthority(ActorRole.USER, SourceType.INITIAL_FORM));
+
+        assertThat(result.dossier().has("handoff_remark_partition")).isFalse();
+        assertThat(result.dossier()
+                        .at("/party_intake_state/USER/handoff_notes/remark_status")
+                        .asText())
+                .isEqualTo("NOT_READY");
     }
 
     @Test

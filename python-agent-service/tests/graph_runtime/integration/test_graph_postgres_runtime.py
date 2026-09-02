@@ -2439,6 +2439,95 @@ async def test_real_post_lease_checkpoint_suffix_releases_heartbeat_within_safet
 
 
 @pytest.mark.asyncio
+async def test_real_renew_survives_committed_checkpoint_lease_refresh_while_waiting(
+    graph_database: _Database,
+) -> None:
+    await _migration_runner(graph_database).run()
+    await _seed_executable_command(graph_database)
+    refresh_pool = _runtime_pool(graph_database)
+    renew_pool = _runtime_pool(graph_database)
+    await refresh_pool.open(wait=True, timeout=10)
+    await renew_pool.open(wait=True, timeout=10)
+    lease_repository = PostgresLeaseRepository()
+    fence = _fence(owner_id="worker-1", fencing_token=1)
+
+    async with renew_pool.connection(timeout=5) as connection:
+        initial_lease = await lease_repository.observe(connection, thread_id=THREAD_ID)
+        command_row = await (
+            await connection.execute(
+                """
+                select deadline_at
+                  from agent_graph_command
+                 where thread_id = %s and command_id = %s
+                """,
+                (THREAD_ID, COMMAND_ID),
+            )
+        ).fetchone()
+    assert initial_lease is not None
+    assert command_row is not None
+    command_deadline_at = command_row["deadline_at"]
+    assert isinstance(command_deadline_at, datetime)
+
+    refresh_applied = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def refresh_and_commit() -> None:
+        async with refresh_pool.connection(timeout=5) as connection:
+            async with connection.transaction():
+                await FencedPostgresSaver._refresh_locked_fence_lease(  # noqa: SLF001
+                    connection,
+                    fence,
+                )
+                refresh_applied.set()
+                await release_refresh.wait()
+
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=renew_pool,
+        leases=lease_repository,
+        input_authorizer=object(),  # type: ignore[arg-type]
+        acquire_timeout_seconds=2,
+    )
+    execution = GatewayExecution(  # type: ignore[arg-type]
+        admission=SimpleNamespace(
+            command=SimpleNamespace(deadline_at=command_deadline_at)
+        ),
+        attempt=SimpleNamespace(),
+        lease=initial_lease,
+        fence=fence,
+    )
+    refresh_task = asyncio.create_task(refresh_and_commit())
+    renew_task: asyncio.Task[Any] | None = None
+    try:
+        await asyncio.wait_for(refresh_applied.wait(), timeout=2)
+        renew_task = asyncio.create_task(gateway.renew_execution(execution))
+        await asyncio.sleep(0.05)
+        assert not renew_task.done()
+
+        release_refresh.set()
+        await asyncio.wait_for(refresh_task, timeout=2)
+        renewed = await asyncio.wait_for(renew_task, timeout=2)
+
+        assert renewed.thread_id == THREAD_ID
+        assert renewed.command_id == COMMAND_ID
+        assert renewed.owner_id == "worker-1"
+        assert renewed.fencing_token == 1
+        assert renewed.revision == initial_lease.revision + 2
+    finally:
+        release_refresh.set()
+        if not refresh_task.done():
+            refresh_task.cancel()
+        if renew_task is not None and not renew_task.done():
+            renew_task.cancel()
+        await asyncio.gather(refresh_task, return_exceptions=True)
+        if renew_task is not None:
+            await asyncio.gather(renew_task, return_exceptions=True)
+        gateway.cleanup_execution_lease(execution)
+        await renew_pool.close(timeout=10)
+        await refresh_pool.close(timeout=10)
+
+
+@pytest.mark.asyncio
 async def test_real_released_final_fence_rolls_back_uncommitted_bulk_checkpoint(
     graph_database: _Database,
     monkeypatch: pytest.MonkeyPatch,

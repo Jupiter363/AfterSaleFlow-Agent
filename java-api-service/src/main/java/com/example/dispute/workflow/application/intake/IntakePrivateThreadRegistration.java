@@ -3,6 +3,7 @@ package com.example.dispute.workflow.application.intake;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import java.time.Instant;
@@ -37,9 +38,9 @@ public record IntakePrivateThreadRegistration(
         String registrationHash) {
 
     private static final String LEGACY_GRAPH_KEY = "intake.v2";
-    private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v2";
-    private static final String TARGET_GRAPH_VERSION = "target-e2e-graph.2026-08-18.1";
-    private static final String TARGET_CHECKPOINT_SCHEMA = "target-e2e-checkpoint.v2";
+    private static final String TARGET_GRAPH_KEY = TargetTypedRoomProtocol.GRAPH_KEY;
+    private static final String TARGET_CHECKPOINT_SCHEMA =
+            TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION;
 
     public IntakePrivateThreadRegistration {
         if (!"graph-private-thread-registration.v1".equals(schemaVersion)) {
@@ -83,7 +84,7 @@ public record IntakePrivateThreadRegistration(
         }
         if (TARGET_GRAPH_KEY.equals(graphKey)
                 && (writerMode != WriterMode.TEMPORAL
-                        || !TARGET_GRAPH_VERSION.equals(graphVersion)
+                        || !TargetTypedRoomProtocol.supportsGraphVersion(graphVersion)
                         || !TARGET_CHECKPOINT_SCHEMA.equals(checkpointSchemaVersion)
                         || !"target-e2e-room-proposal-source.v2".equals(
                                 outputSchemaVersion))) {

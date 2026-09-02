@@ -240,7 +240,7 @@ function targetTemporalProjection(count, overrides = {}) {
     recovery: { state: "NONE" },
     version_pins: {
       workflow_build_id: "control-build.991ec9c5",
-      graph_version: "target-e2e-graph.2026-08-18.1",
+      graph_version: "target-e2e-graph.2026-08-18.2",
       checkpoint_schema_version: "target-e2e-checkpoint.v2",
       state_schema_version: "evidence-graph-state.v2",
       prompt_version: "all-rooms-prompt.target-e2e.v2",

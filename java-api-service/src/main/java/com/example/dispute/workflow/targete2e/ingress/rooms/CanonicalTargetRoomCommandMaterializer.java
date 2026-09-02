@@ -376,9 +376,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
                 invocation, new RoomGraphCommand.RetryBudget(2, 3, 1), command.deadlineAt(),
                 traceparent(expectedTraceId(traceId)),
                 "0".repeat(64));
-        ObjectNode canonical = mapper.valueToTree(provisional);
-        canonical.remove("request_hash");
-        String requestHash = ContractJson.sha256Hex(canonical);
+        String requestHash = envelopes.commandRequestHash(provisional);
         return new RoomGraphCommand(provisional.schemaVersion(), provisional.commandId(), provisional.logicalRunId(),
                 provisional.attemptId(), provisional.tenantSurrogate(), provisional.caseId(), provisional.roomType(),
                 provisional.roomEpoch(), provisional.graphKey(), provisional.graphVersion(), provisional.checkpointSchemaVersion(),

@@ -142,7 +142,13 @@ class IntakeParallelFrameAssemblerTest {
                         .at("/party_intake_state/USER/intake_quality/score")
                         .asInt())
                 .isEqualTo(100);
-        assertThat(proposal.roomUtterance()).doesNotContain("total_score");
+        assertThat(proposal.dossierPatch()
+                        .at("/party_intake_state/USER/missing_information/next_questions/0")
+                        .asText())
+                .isEqualTo("请确认以上案情与诉求是否完整，如有遗漏请补充最后一项可核验事实？");
+        assertThat(proposal.roomUtterance())
+                .doesNotContain("total_score")
+                .endsWith("请确认以上案情与诉求是否完整，如有遗漏请补充最后一项可核验事实？");
     }
 
     @Test
@@ -581,6 +587,31 @@ class IntakeParallelFrameAssemblerTest {
         assertThat(output.proposal().matrixPatch()
                         .at("/summary_source_fact_keys/1").asText())
                 .isEqualTo("NEW_" + "C".repeat(24) + "_SECOND");
+    }
+
+    @Test
+    void acceptsDetailedPositionSummaryBeyondTheProviderStyleHint() {
+        ObjectNode previous = previousDossier("NOT_READY", 0, false);
+        ObjectNode dossier = dossier();
+        String detailedPosition = "核".repeat(122);
+        ((ObjectNode) dossier.at("/public_projection_items/0/source_row"))
+                .put("position_summary", detailedPosition);
+
+        var output = assembler.assemble(command(previous, frames(
+                dialogue(previous, "ASK_SUBSTANTIVE"),
+                dossier,
+                quality(Map.of(
+                        "references", 15,
+                        "event_story", 20,
+                        "party_positions", 20,
+                        "requested_resolution", 15,
+                        "risk_and_conflicts", 15,
+                        "next_action_clarity", 15),
+                        List.of()))));
+
+        assertThat(output.proposal().dossierPatch()
+                        .at("/case_story/one_sentence_summary").asText())
+                .isEqualTo(detailedPosition);
     }
 
     @Test

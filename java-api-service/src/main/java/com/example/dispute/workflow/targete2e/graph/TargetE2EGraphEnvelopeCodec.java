@@ -102,6 +102,22 @@ public final class TargetE2EGraphEnvelopeCodec {
         command);
   }
 
+  /** Computes the nested command hash from the same schema-normalized JSON used by validation. */
+  public String commandRequestHash(RoomGraphCommand command) {
+    JsonNode encoded = v1Codec.encode(COMMAND_SCHEMA, Objects.requireNonNull(command, "command"));
+    if (!(encoded instanceof ObjectNode object)) {
+      throw new IllegalArgumentException("serialized command must be an object");
+    }
+    ObjectNode unhashed = object.deepCopy();
+    JsonNode declaredHash = unhashed.remove("request_hash");
+    if (declaredHash == null
+        || !declaredHash.isTextual()
+        || !constantTimeEquals(command.requestHash(), declaredHash.asText())) {
+      throw new IllegalArgumentException("command request_hash serialization drifted");
+    }
+    return ContractJson.sha256Hex(unhashed);
+  }
+
   public TargetE2ESealedGraphCommand sealCommand(
       String activationId,
       long roomFencingToken,

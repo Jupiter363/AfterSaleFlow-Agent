@@ -19,6 +19,20 @@ system.forceSearchAttributesCacheRefreshOnRead:
   - value: true
     constraints: {}
 
+# Temporal 1.27 deployment-version routing is guarded independently from the
+# legacy Worker Versioning APIs below. Keep the preview surface limited to the
+# local UAT namespace while allowing Workflow and Activity pollers to register
+# the same deployment version.
+system.enableDeployments:
+  - value: true
+    constraints:
+      namespace: "default"
+
+system.enableDeploymentVersions:
+  - value: true
+    constraints:
+      namespace: "default"
+
 frontend.workerVersioningDataAPIs:
   - value: true
     constraints: {}

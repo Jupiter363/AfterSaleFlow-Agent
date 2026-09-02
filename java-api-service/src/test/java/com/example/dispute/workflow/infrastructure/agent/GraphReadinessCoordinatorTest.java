@@ -374,8 +374,16 @@ class GraphReadinessCoordinatorTest {
             assertThat(body.closeCalls()).isZero();
             assertThatThrownBy(() -> transport.stream(
                             request, new AgentRunCancellationToken(), noOpListener()))
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("admission");
+                    .isInstanceOfSatisfying(
+                            GraphCommandTransportException.class,
+                            failure -> {
+                                assertThat(failure.kind())
+                                        .isEqualTo(GraphCommandTransportException.Kind.NOT_SUBMITTED);
+                                assertThat(failure.notSubmitted()).isTrue();
+                                assertThat(failure.getCause())
+                                        .isInstanceOf(IllegalStateException.class)
+                                        .hasMessageContaining("admission");
+                            });
             verify(client, times(1))
                     .<InputStream>sendAsync(any(HttpRequest.class), any());
 

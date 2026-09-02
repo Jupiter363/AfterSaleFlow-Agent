@@ -8,6 +8,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import java.time.Instant;
@@ -21,6 +22,7 @@ public record RoomGraphCommand(
         String attemptId,
         String tenantSurrogate,
         String caseId,
+        @JsonInclude(JsonInclude.Include.NON_NULL)
         String roomId,
         RoomType roomType,
         long roomEpoch,

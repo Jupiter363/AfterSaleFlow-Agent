@@ -2,6 +2,7 @@ package com.example.dispute.workflow.targete2e.ingress.materialization;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistrationFactory;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import java.util.Objects;
 
 /** Frozen target activation/profile values required to build a graph-private Intake command. */
@@ -49,8 +50,8 @@ public record TargetIntakeRuntimePins(
 
     private IntakePrivateThreadRegistrationFactory.VersionPins registrationPins(String profilePromptVersion) {
         return new IntakePrivateThreadRegistrationFactory.VersionPins(
-                "all-rooms.target-e2e.v2", "target-e2e-graph.2026-08-18.1",
-                "target-e2e-checkpoint.v2", "intake-graph-state.v2", profilePromptVersion,
+                TargetTypedRoomProtocol.GRAPH_KEY, TargetTypedRoomProtocol.GRAPH_VERSION,
+                TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION, "intake-graph-state.v2", profilePromptVersion,
                 modelProfileId, "target-e2e-room-proposal-source.v2", policyVersion, guardrailVersion,
                 toolPolicyVersion);
     }
@@ -61,9 +62,10 @@ public record TargetIntakeRuntimePins(
             String activeGraphCodeBuildId, String activeDomainBindingHash) {
         if (!caseBuildId.equals(activeCaseBuildId)
                 || !agentBuildId.equals(activeAgentBuildId)
-                || !"all-rooms.target-e2e.v2".equals(graphKey)
-                || !"target-e2e-graph.2026-08-18.1".equals(graphVersion)
-                || !"target-e2e-checkpoint.v2".equals(checkpointSchemaVersion)
+                || !TargetTypedRoomProtocol.GRAPH_KEY.equals(graphKey)
+                || !TargetTypedRoomProtocol.GRAPH_VERSION.equals(graphVersion)
+                || !TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION.equals(
+                        checkpointSchemaVersion)
                 || !graphBindingHash.equals(activeGraphBindingHash)
                 || !graphCodeBuildId.equals(activeGraphCodeBuildId)
                 || !isolatedDomainDbBindingHash.equals(activeDomainBindingHash)) {

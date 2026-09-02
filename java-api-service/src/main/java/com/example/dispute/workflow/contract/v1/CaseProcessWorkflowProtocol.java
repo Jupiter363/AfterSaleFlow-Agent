@@ -30,6 +30,10 @@ public final class CaseProcessWorkflowProtocol {
   public static final String TARGET_ROOM_PROGRESS_SIGNAL = "targetRoomProgressed";
   public static final String TARGET_INTAKE_TERMINAL_NO_COMMIT_SIGNAL =
       "targetIntakeCommandTerminalNoCommit";
+  public static final String TARGET_INTAKE_TERMINAL_NO_COMMIT_RECOVERY_SIGNAL =
+      "recoverRejectedTargetIntakeCommandTerminalNoCommit";
+  public static final String TARGET_INTAKE_CURRENT_RUN_DISPATCH_RECOVERY_SIGNAL =
+      "recoverTargetIntakeCurrentRunCommandDispatch";
   public static final String RETRY_SEQUENCE_GAP_SIGNAL = "retrySequenceGap";
   public static final String REQUEST_CONTINUE_AS_NEW_SIGNAL = "requestContinueAsNew";
   public static final String PROCESS_STATE_QUERY = "processState";

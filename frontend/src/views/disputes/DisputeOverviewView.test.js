@@ -861,10 +861,14 @@ describe("DisputeOverviewView", () => {
         };
       })
       .mockImplementationOnce(async (_actor, caseId) => {
-        callOrder.push(`prepare-not-required:${caseId}`);
+        callOrder.push(`prepare-unavailable:${caseId}`);
+        throw new Error("intake infrastructure preparation is unavailable");
+      })
+      .mockImplementationOnce(async (_actor, caseId) => {
+        callOrder.push(`prepare-manual-retry:${caseId}`);
         return {
           schema_version: "intake-infrastructure-preparation.v1",
-          status: "NOT_REQUIRED",
+          status: "READY",
         };
       })
       .mockImplementationOnce(async (_actor, caseId) => {
@@ -942,12 +946,24 @@ describe("DisputeOverviewView", () => {
 
     expect(callOrder.slice(-2)).toEqual([
       "manual-commit",
-      "prepare-not-required:CASE_PREPARED_MANUAL",
+      "prepare-unavailable:CASE_PREPARED_MANUAL",
     ]);
     expect(createAction).toHaveBeenCalledTimes(1);
     expect(prepareIntake.mock.calls[2][2]).toBe(
       "intake-preparation:CASE_PREPARED_MANUAL",
     );
+    expect(manual.wrapper.find(".intake-launcher__card").exists()).toBe(false);
+    expect(manual.wrapper.get("[data-intake-preparation-transition]").text())
+      .toContain("案件已创建，但接待环境暂不可用");
+    expect(manualPush).not.toHaveBeenCalled();
+    expect(manual.router.currentRoute.value.path).toBe("/disputes");
+
+    await manual.wrapper.get("[data-retry-intake-preparation]").trigger("click");
+    await flushPromises();
+
+    expect(createAction).toHaveBeenCalledTimes(1);
+    expect(prepareIntake).toHaveBeenCalledTimes(4);
+    expect(prepareIntake.mock.calls[3][2]).toBe(prepareIntake.mock.calls[2][2]);
     expect(manualPush).toHaveBeenCalledTimes(1);
     expect(manual.router.currentRoute.value.path).toBe(
       "/disputes/CASE_PREPARED_MANUAL/intake",
@@ -999,9 +1015,9 @@ describe("DisputeOverviewView", () => {
       `${streamUrl}?last_event_id=-1`,
     );
     await vi.waitFor(() => {
-      expect(prepareIntake).toHaveBeenCalledTimes(4);
+      expect(prepareIntake).toHaveBeenCalledTimes(5);
     });
-    expect(prepareIntake.mock.calls[3][1]).toBe(
+    expect(prepareIntake.mock.calls[4][1]).toBe(
       "CASE_PREPARED_STREAM_IMPORT",
     );
     expect(callOrder.at(-1)).toBe(

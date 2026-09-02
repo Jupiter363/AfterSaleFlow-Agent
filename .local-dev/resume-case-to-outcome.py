@@ -164,6 +164,14 @@ def intake_source_turn(memory: dict[str, Any]) -> int:
     return value if type(value) is int else 0
 
 
+def intake_dossier_version(memory: dict[str, Any]) -> int:
+    case_dossier = v(memory, "case_intake_dossier", "caseIntakeDossier")
+    if not isinstance(case_dossier, dict):
+        return 0
+    value = v(case_dossier, "dossier_version", "dossierVersion")
+    return value if type(value) is int else 0
+
+
 def post_intake_text(ctx: Any, stage: str, text: str) -> str:
     payload = {
         "message_type": "PARTY_TEXT",
@@ -317,27 +325,35 @@ def complete_merchant_intake() -> None:
     )
 
     source_turn = intake_source_turn(memory)
-    for follow_up in range(1, len(MERCHANT_INTAKE_ANSWERS) + 2):
+    while True:
         phase = actor_intake_phase(memory, "MERCHANT")
-        if phase in {"HAS_REMARKS", "NO_EXTRA_REMARKS"}:
+        if phase in {"WAITING_FOR_REMARK", "HAS_REMARKS", "NO_EXTRA_REMARKS"}:
             break
-        if phase == "WAITING_FOR_REMARK":
-            answer = "无额外备注，确认按现有陈述提交。"
+        if phase == "READY_PENDING_REMARK_INVITE":
+            run_id = base.post_handoff_bridge(
+                MERCHANT,
+                "resume_merchant_handoff_bridge",
+                expected_dossier_version=intake_dossier_version(memory),
+                expected_source_turn_no=source_turn,
+            )
+            operation = "HANDOFF_BRIDGE"
         else:
-            answer_index = follow_up - 1
+            answer_index = source_turn - 1
             if answer_index >= len(MERCHANT_INTAKE_ANSWERS):
                 raise RuntimeError(
                     "merchant intake remains substantive after all question-aligned "
                     "fixture answers were submitted"
                 )
-            answer = MERCHANT_INTAKE_ANSWERS[answer_index]
+            run_id = post_intake_text(
+                MERCHANT,
+                f"resume_merchant_follow_up_{source_turn + 1}",
+                MERCHANT_INTAKE_ANSWERS[answer_index],
+            )
+            operation = "FIXTURE_ANSWER"
         source_turn += 1
-        run_id = post_intake_text(
-            MERCHANT, f"resume_merchant_follow_up_{follow_up}", answer
-        )
-        wait_run(MERCHANT, f"resume_merchant_follow_up_run_{follow_up}", run_id)
+        wait_run(MERCHANT, f"resume_merchant_follow_up_run_{source_turn}", run_id)
         memory = wait_intake_turn(
-            MERCHANT, f"resume_merchant_follow_up_turn_{follow_up}", source_turn
+            MERCHANT, f"resume_merchant_follow_up_turn_{source_turn}", source_turn
         )
         print(
             json.dumps(
@@ -345,6 +361,7 @@ def complete_merchant_intake() -> None:
                     "checkpoint": "MERCHANT_INTAKE_FOLLOW_UP",
                     "source_turn": source_turn,
                     "run_id": run_id,
+                    "operation": operation,
                     "previous_phase": phase,
                     "persisted_phase": actor_intake_phase(memory, "MERCHANT"),
                 }
@@ -352,6 +369,7 @@ def complete_merchant_intake() -> None:
             flush=True,
         )
     if actor_intake_phase(memory, "MERCHANT") not in {
+        "WAITING_FOR_REMARK",
         "HAS_REMARKS",
         "NO_EXTRA_REMARKS",
     }:

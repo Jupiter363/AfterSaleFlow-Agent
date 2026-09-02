@@ -6,6 +6,7 @@ import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigning
 import com.example.dispute.workflow.targete2e.exchange.rooms.TargetE2eRoomExchangeContract.Authority;
 import com.example.dispute.workflow.targete2e.exchange.rooms.TargetE2eRoomObjectIndex;
 import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeRuntimePins;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
@@ -62,7 +63,7 @@ public final class TargetE2eEvidenceManifestPublisher {
     manifest.put("actor_scope_hash", ContractJson.sha256Hex(actorScope)); manifest.put("agent_session_id", "session:" + token(input.commandId()));
     ObjectNode binding = manifest.putObject("command_binding"); binding.put("schema_version", "evidence-room-command.v1"); binding.put("command_id", input.commandId()); binding.put("logical_run_id", input.logicalRunId()); binding.put("attempt_id", input.attemptId()); binding.put("command_type", "EVIDENCE_ASSESS_BATCH"); binding.put("submitted_at", now); binding.put("deadline_at", input.deadline().toString());
     manifest.put("submission_batch_id", "batch:" + token(input.commandId())); manifest.put("submission_revision", 1); manifest.put("dossier_target_version", 1);
-    ObjectNode profiles = manifest.putObject("profile_versions"); profiles.put("graph_version", "target-e2e-graph.2026-08-18.1"); profiles.put("checkpoint_schema_version", "target-e2e-checkpoint.v2"); profiles.put("state_schema_version", "evidence-graph-state.v2"); profiles.put("prompt_version", input.pins().promptVersion()); profiles.put("model_profile_id", input.pins().modelProfileId()); profiles.put("assessment_output_schema_version", "evidence-item-assessment.v1"); profiles.put("terminal_output_schema_version", "evidence-batch-proposal.v1"); profiles.put("policy_version", input.pins().policyVersion()); profiles.put("guardrail_version", input.pins().guardrailVersion()); profiles.put("tool_policy_version", input.pins().toolPolicyVersion());
+    ObjectNode profiles = manifest.putObject("profile_versions"); profiles.put("graph_version", TargetTypedRoomProtocol.GRAPH_VERSION); profiles.put("checkpoint_schema_version", TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION); profiles.put("state_schema_version", "evidence-graph-state.v2"); profiles.put("prompt_version", input.pins().promptVersion()); profiles.put("model_profile_id", input.pins().modelProfileId()); profiles.put("assessment_output_schema_version", "evidence-item-assessment.v1"); profiles.put("terminal_output_schema_version", "evidence-batch-proposal.v1"); profiles.put("policy_version", input.pins().policyVersion()); profiles.put("guardrail_version", input.pins().guardrailVersion()); profiles.put("tool_policy_version", input.pins().toolPolicyVersion());
     manifest.put("issued_at", now); manifest.put("not_before", now); manifest.put("expires_at", input.deadline().toString()); manifest.put("item_count", 1); manifest.putArray("ordered_item_keys").add(item.path("evidence_id").asText()); manifest.putArray("items").add(item);
     manifest.put("signature_algorithm", "ES256"); manifest.put("signing_key_id", signingKey.keyId());
     manifest.put("manifest_hash", ContractJson.sha256Hex(manifest));

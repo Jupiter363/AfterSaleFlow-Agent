@@ -74,7 +74,8 @@ public final class MaterializedIntakeParallelAssemblyContextResolver
                 turn.cognitiveRevision(),
                 turn.previousDossier(),
                 turn.executionProvider(),
-                turn.executionModel());
+                turn.executionModel(),
+                material.admission().activationId());
     }
 
     private void requireFrameSetMatchesRequest(

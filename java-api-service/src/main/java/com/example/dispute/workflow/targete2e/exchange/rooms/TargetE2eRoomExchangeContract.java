@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.targete2e.exchange.rooms;
 
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import java.util.Objects;
@@ -28,9 +29,9 @@ public final class TargetE2eRoomExchangeContract {
       id(logicalRunId, "logicalRunId"); id(attemptId, "attemptId"); id(graphKey, "graphKey");
       id(graphVersion, "graphVersion"); id(checkpointSchemaVersion, "checkpointSchemaVersion"); id(stageCode, "stageCode");
       if (roomType == null || !ROOM.matcher(roomType).matches()) invalid("roomType");
-      exact(graphKey, "all-rooms.target-e2e.v2", "graphKey");
-      exact(graphVersion, "target-e2e-graph.2026-08-18.1", "graphVersion");
-      exact(checkpointSchemaVersion, "target-e2e-checkpoint.v2", "checkpointSchemaVersion");
+      exact(graphKey, TargetTypedRoomProtocol.GRAPH_KEY, "graphKey");
+      if (!TargetTypedRoomProtocol.supportsGraphVersion(graphVersion)) invalid("graphVersion");
+      exact(checkpointSchemaVersion, TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION, "checkpointSchemaVersion");
     }
   }
 

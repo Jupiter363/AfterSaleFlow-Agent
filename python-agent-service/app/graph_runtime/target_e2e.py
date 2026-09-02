@@ -296,7 +296,7 @@ class TargetE2ERuntimeAuthority:
         binding = bindings[0]
         if (
             binding.graph_key != "all-rooms.target-e2e.v2"
-            or binding.graph_version != "target-e2e-graph.2026-08-18.1"
+            or binding.graph_version != "target-e2e-graph.2026-08-18.2"
             or binding.checkpoint_schema_version != "target-e2e-checkpoint.v2"
             or binding.output_schema_version != "target-e2e-room-proposal-source.v2"
             or frozenset(binding.allowed_room_types)

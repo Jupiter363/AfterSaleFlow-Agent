@@ -17,6 +17,7 @@ import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnProposalLoader.LoadedProposal;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.time.Instant;
@@ -28,9 +29,14 @@ class TargetEvidenceFinalizationRequestResolverTest {
 
   @Test
   void carriesTheMaterialFenceAndBothFrozenRevisionsIntoTheFormalRequest() {
-    ObjectMapper mapper = JsonMapper.builder().findAndAddModules().build();
+    ObjectMapper mapper = JsonMapper.builder().findAndAddModules().build()
+        .setSerializationInclusion(JsonInclude.Include.ALWAYS);
     RoomGraphCommand graph = graph();
-    String commandHash = ContractJson.sha256Hex(mapper.valueToTree(graph));
+    String commandHash = ContractJson.sha256Hex(
+        mapper.copy()
+            .setSerializationInclusion(JsonInclude.Include.NON_NULL)
+            .valueToTree(graph));
+    assertThat(mapper.valueToTree(graph).has("room_id")).isFalse();
     String envelopeHash = "b".repeat(64);
     String manifestHash = "c".repeat(64);
     String databaseHash = "d".repeat(64);
@@ -97,7 +103,8 @@ class TargetEvidenceFinalizationRequestResolverTest {
     TargetEvidenceTurnProposalLoader proposalLoader = mock(TargetEvidenceTurnProposalLoader.class);
     LoadedProposal proposal = mock(LoadedProposal.class);
     TargetEvidenceTurnResultV2 turnResult = mock(TargetEvidenceTurnResultV2.class);
-    when(turnResult.roomUtterance()).thenReturn("guarded Evidence Clerk message");
+    String roomUtterance = "guarded Evidence Clerk message";
+    when(turnResult.roomUtterance()).thenReturn(roomUtterance);
     when(proposal.proposalHash()).thenReturn("7".repeat(64));
     when(proposal.commandId()).thenReturn(graph.commandId());
     when(proposal.logicalRunId()).thenReturn(graph.logicalRunId());
@@ -110,7 +117,7 @@ class TargetEvidenceFinalizationRequestResolverTest {
     when(proposal.actorId()).thenReturn(graph.actorScope().actorId());
     when(proposal.actorRole()).thenReturn(graph.actorScope().actorRole().name());
     when(proposal.inputHash()).thenReturn(graph.domainSnapshotRef().sha256());
-    when(proposal.roomUtterance()).thenReturn(turnResult.roomUtterance());
+    when(proposal.roomUtterance()).thenReturn(roomUtterance);
     when(proposal.evidenceTurnResult()).thenReturn(turnResult);
     when(proposalLoader.load(command, snapshot)).thenReturn(proposal);
 

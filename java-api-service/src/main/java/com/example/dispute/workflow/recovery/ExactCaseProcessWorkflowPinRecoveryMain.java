@@ -3,11 +3,14 @@ package com.example.dispute.workflow.recovery;
 import static com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE;
 import static com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE;
 import static com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol.DOMAIN_EVENT_SIGNAL;
+import static com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol.TARGET_INTAKE_TERMINAL_NO_COMMIT_SIGNAL;
 import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_WORKFLOW_EXECUTION_OPTIONS_UPDATED;
 import static io.temporal.api.enums.v1.PendingWorkflowTaskState.PENDING_WORKFLOW_TASK_STATE_SCHEDULED;
 import static io.temporal.api.enums.v1.TaskQueueKind.TASK_QUEUE_KIND_NORMAL;
 import static io.temporal.api.enums.v1.VersioningBehavior.VERSIONING_BEHAVIOR_PINNED;
+import static io.temporal.api.enums.v1.VersioningBehavior.VERSIONING_BEHAVIOR_UNSPECIFIED;
 import static io.temporal.api.enums.v1.WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING;
+import static io.temporal.api.workflow.v1.VersioningOverride.PinnedOverrideBehavior.PINNED_OVERRIDE_BEHAVIOR_PINNED;
 
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl;
 import com.google.protobuf.ByteString;
@@ -74,6 +77,8 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                     "CaseProcessWorkflowImpl.class");
     static final String UPDATE_MASK_PATH = "versioning_override";
     static final String UPDATE_IDENTITY = "exact-case-process-pin-recovery.v1";
+    static final String TARGET_INTAKE_TERMINAL_V3_ACK_RECOVERY_CHANGE_ID =
+            "case-process-target-intake-terminal-v3-ack-recovery-v1";
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final ServerVersion MINIMUM_SERVER_VERSION = new ServerVersion(1, 27, 4);
@@ -92,9 +97,11 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                     "run-id",
                     "legacy-build-id",
                     "retained-classes",
+                    "workflow-class-authority",
                     "recovery-deployment-name",
                     "recovery-build-id",
                     "recovery-pinned-version",
+                    "pending-workflow-task-state",
                     "pending-workflow-task-scheduled-event-id",
                     "pending-workflow-task-attempt",
                     "pending-child-workflow-id",
@@ -201,10 +208,14 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
         require(
                 retainedWorkflowBytes.length > 0 && currentWorkflowBytes.length > 0,
                 "CaseProcess workflow class bytes are empty");
-        String workflowClassSha256 = sha256(retainedWorkflowBytes);
-        require(
-                workflowClassSha256.equals(sha256(currentWorkflowBytes)),
-                "retained and current CaseProcess workflow classes differ");
+        String retainedWorkflowClassSha256 = sha256(retainedWorkflowBytes);
+        String currentWorkflowClassSha256 = sha256(currentWorkflowBytes);
+        validateWorkflowClassAuthority(
+                request,
+                retainedWorkflowBytes,
+                currentWorkflowBytes,
+                retainedWorkflowClassSha256,
+                currentWorkflowClassSha256);
 
         String serverVersion = authority.serverVersion();
         requireServerVersion(serverVersion);
@@ -229,7 +240,8 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                         request,
                         retainedRoot,
                         retainedBinding,
-                        workflowClassSha256,
+                        retainedWorkflowClassSha256,
+                        currentWorkflowClassSha256,
                         serverVersion,
                         execution,
                         history,
@@ -238,7 +250,8 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                 request,
                 retainedRoot,
                 retainedBinding,
-                workflowClassSha256,
+                retainedWorkflowClassSha256,
+                currentWorkflowClassSha256,
                 serverVersion,
                 execution,
                 history,
@@ -248,6 +261,34 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                 command);
     }
 
+    private static void validateWorkflowClassAuthority(
+            RecoveryRequest request,
+            byte[] retainedWorkflowBytes,
+            byte[] currentWorkflowBytes,
+            String retainedWorkflowClassSha256,
+            String currentWorkflowClassSha256) {
+        Objects.requireNonNull(request.workflowClassAuthority(), "workflowClassAuthority");
+        switch (request.workflowClassAuthority()) {
+            case IDENTICAL ->
+                    require(
+                            retainedWorkflowClassSha256.equals(currentWorkflowClassSha256),
+                            "retained and current CaseProcess workflow classes differ");
+            case TARGET_INTAKE_TERMINAL_V3_ACK_RECOVERY_V1 -> {
+                require(
+                        !retainedWorkflowClassSha256.equals(currentWorkflowClassSha256),
+                        "versioned workflow transition must change the CaseProcess class");
+                require(
+                        !containsAscii(
+                                        retainedWorkflowBytes,
+                                        TARGET_INTAKE_TERMINAL_V3_ACK_RECOVERY_CHANGE_ID)
+                                && containsAscii(
+                                        currentWorkflowBytes,
+                                        TARGET_INTAKE_TERMINAL_V3_ACK_RECOVERY_CHANGE_ID),
+                        "versioned workflow transition marker authority is invalid");
+            }
+        }
+    }
+
     private static void validateRequest(RecoveryRequest request) {
         requireText(request.address(), "address", 512);
         requireText(request.namespace(), "namespace", 255);
@@ -255,15 +296,27 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
         requireCanonicalUuid(request.runId(), "runId");
         requireText(request.legacyBuildId(), "legacyBuildId", 512);
         require(request.retainedClasses() != null, "retainedClasses is required");
+        Objects.requireNonNull(request.workflowClassAuthority(), "workflowClassAuthority");
         requireText(request.recoveryDeploymentName(), "recoveryDeploymentName", 255);
         requireText(request.recoveryBuildId(), "recoveryBuildId", 255);
         requireText(request.recoveryPinnedVersion(), "recoveryPinnedVersion", 512);
-        require(
-                request.pendingWorkflowTaskScheduledEventId() > 0,
-                "pending workflow-task scheduled event ID must be positive");
-        require(
-                request.pendingWorkflowTaskAttempt() > 0,
-                "pending workflow-task attempt must be positive");
+        Objects.requireNonNull(request.pendingWorkflowTaskState(), "pendingWorkflowTaskState");
+        switch (request.pendingWorkflowTaskState()) {
+            case ABSENT ->
+                    require(
+                            request.pendingWorkflowTaskScheduledEventId() == 0
+                                    && request.pendingWorkflowTaskAttempt() == 0,
+                            "absent workflow-task authority must use zero coordinates");
+            case SCHEDULED -> {
+                require(
+                        request.pendingWorkflowTaskScheduledEventId() > 0,
+                        "pending workflow-task scheduled event ID must be positive");
+                require(
+                        request.pendingWorkflowTaskAttempt() > 0,
+                        "pending workflow-task attempt must be positive");
+            }
+            case OTHER -> throw new IllegalStateException("unsupported pending workflow-task state");
+        }
         requireText(request.pendingChildWorkflowId(), "pendingChildWorkflowId", 255);
         requireCanonicalUuid(request.pendingChildRunId(), "pendingChildRunId");
         requireText(request.pendingChildWorkflowType(), "pendingChildWorkflowType", 255);
@@ -271,16 +324,20 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                 request.pendingChildInitiatedEventId() > 0,
                 "pending child initiated event ID must be positive");
         require(request.expectedLastEventId() > 0, "expected last event ID must be positive");
-        require(
-                request.pendingWorkflowTaskScheduledEventId() <= request.expectedLastEventId(),
-                "pending workflow-task schedule is after the complete history tail");
+        if (request.pendingWorkflowTaskState() == PendingTaskState.SCHEDULED) {
+            require(
+                    request.pendingWorkflowTaskScheduledEventId() <= request.expectedLastEventId(),
+                    "pending workflow-task schedule is after the complete history tail");
+        }
         require(
                 request.expectedLastSignalEventId() > 0
                         && request.expectedLastSignalEventId() <= request.expectedLastEventId(),
                 "expected last signal event ID is invalid");
         require(
-                DOMAIN_EVENT_SIGNAL.equals(request.expectedSignalName()),
-                "expected signal name is not the CaseProcess domain-event protocol signal");
+                DOMAIN_EVENT_SIGNAL.equals(request.expectedSignalName())
+                        || TARGET_INTAKE_TERMINAL_NO_COMMIT_SIGNAL.equals(
+                                request.expectedSignalName()),
+                "expected signal name is not an authorized CaseProcess recovery signal");
         require(
                 request.expectedLastEventId() < MAXIMUM_HISTORY_EVENTS
                         && request.historyMaxEvents() >= request.expectedLastEventId() + 1
@@ -309,7 +366,7 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                         && request.legacyBuildId().equals(execution.mostRecentBuildId()),
                 "workflow versioned legacy build authority drifted");
         require(
-                execution.pendingState() == PendingTaskState.SCHEDULED
+                execution.pendingState() == request.pendingWorkflowTaskState()
                         && execution.pendingAttempt() == request.pendingWorkflowTaskAttempt(),
                 "workflow pending task state or attempt drifted");
         require(execution.pendingActivities() == 0, "workflow has pending activities");
@@ -396,7 +453,7 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
         List<HistoryEvent> prePinHistory = completeHistory.subList(0, prePinEventCount);
         long lastSignalEventId = 0;
         String lastSignalName = "";
-        HistoryEvent lastWorkflowTaskScheduled = null;
+        Map<Long, WorkflowTaskHistoryState> pendingWorkflowTasks = new HashMap<>();
         Map<Long, ChildHistoryState> pendingChildren = new HashMap<>();
         for (HistoryEvent event : prePinHistory) {
             if (event.hasWorkflowExecutionSignaledEventAttributes()) {
@@ -404,9 +461,7 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                 lastSignalName =
                         event.getWorkflowExecutionSignaledEventAttributes().getSignalName();
             }
-            if (event.hasWorkflowTaskScheduledEventAttributes()) {
-                lastWorkflowTaskScheduled = event;
-            }
+            applyWorkflowTaskHistoryEvent(event, pendingWorkflowTasks);
             applyChildHistoryEvent(event, pendingChildren);
         }
 
@@ -418,19 +473,27 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                 lastSignalEventId == request.expectedLastSignalEventId()
                         && request.expectedSignalName().equals(lastSignalName),
                 "complete history last signal authority drifted");
-        require(
-                lastWorkflowTaskScheduled != null
-                        && lastWorkflowTaskScheduled.getEventId()
-                                == request.pendingWorkflowTaskScheduledEventId(),
-                "complete history last workflow-task schedule authority drifted");
-        var scheduled = lastWorkflowTaskScheduled.getWorkflowTaskScheduledEventAttributes();
-        require(
-                scheduled.hasTaskQueue()
-                        && scheduled.getTaskQueue().getKind() == TASK_QUEUE_KIND_NORMAL
-                        && CASE_CONTROL_TASK_QUEUE.equals(scheduled.getTaskQueue().getName())
-                        && scheduled.getAttempt() == request.pendingWorkflowTaskAttempt()
-                        && scheduled.getAttempt() == execution.pendingAttempt(),
-                "pending workflow-task history authority drifted");
+        long pendingWorkflowTaskScheduledEventId;
+        if (request.pendingWorkflowTaskState() == PendingTaskState.ABSENT) {
+            require(pendingWorkflowTasks.isEmpty(), "complete history has a pending workflow task");
+            pendingWorkflowTaskScheduledEventId = 0;
+        } else {
+            require(
+                    pendingWorkflowTasks.size() == 1,
+                    "complete history does not contain exactly one pending workflow task");
+            WorkflowTaskHistoryState pendingWorkflowTask =
+                    pendingWorkflowTasks.values().iterator().next();
+            require(
+                    pendingWorkflowTask.scheduledEventId()
+                                    == request.pendingWorkflowTaskScheduledEventId()
+                            && pendingWorkflowTask.normal()
+                            && CASE_CONTROL_TASK_QUEUE.equals(pendingWorkflowTask.taskQueue())
+                            && pendingWorkflowTask.attempt()
+                                    == request.pendingWorkflowTaskAttempt()
+                            && pendingWorkflowTask.attempt() == execution.pendingAttempt(),
+                    "pending workflow-task history authority drifted");
+            pendingWorkflowTaskScheduledEventId = pendingWorkflowTask.scheduledEventId();
+        }
         require(
                 pendingChildren.size() == 1,
                 "complete history does not contain exactly one active pending child");
@@ -444,9 +507,66 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                 prePinHistory.size(),
                 last.getEventId(),
                 lastSignalEventId,
-                lastWorkflowTaskScheduled.getEventId(),
+                pendingWorkflowTaskScheduledEventId,
                 historySha256(prePinHistory),
                 child.asPendingAuthority());
+    }
+
+    private static void applyWorkflowTaskHistoryEvent(
+            HistoryEvent event, Map<Long, WorkflowTaskHistoryState> pending) {
+        if (event.hasWorkflowTaskScheduledEventAttributes()) {
+            var attributes = event.getWorkflowTaskScheduledEventAttributes();
+            require(
+                    attributes.hasTaskQueue() && attributes.getAttempt() > 0,
+                    "workflow-task schedule authority is incomplete");
+            require(
+                    pending.putIfAbsent(
+                                    event.getEventId(),
+                                    new WorkflowTaskHistoryState(
+                                            event.getEventId(),
+                                            attributes.getTaskQueue().getName(),
+                                            attributes.getTaskQueue().getKind()
+                                                    == TASK_QUEUE_KIND_NORMAL,
+                                            attributes.getAttempt(),
+                                            false))
+                            == null,
+                    "workflow-task schedule is duplicated");
+            return;
+        }
+        if (event.hasWorkflowTaskStartedEventAttributes()) {
+            long scheduledEventId =
+                    event.getWorkflowTaskStartedEventAttributes().getScheduledEventId();
+            WorkflowTaskHistoryState state = pending.get(scheduledEventId);
+            require(state != null && !state.started(), "workflow-task start has no schedule");
+            pending.put(
+                    scheduledEventId,
+                    new WorkflowTaskHistoryState(
+                            state.scheduledEventId(),
+                            state.taskQueue(),
+                            state.normal(),
+                            state.attempt(),
+                            true));
+            return;
+        }
+        Long terminalScheduledEventId = workflowTaskTerminalScheduledEventId(event);
+        if (terminalScheduledEventId != null) {
+            require(
+                    pending.remove(terminalScheduledEventId) != null,
+                    "workflow-task terminal event has no schedule");
+        }
+    }
+
+    private static Long workflowTaskTerminalScheduledEventId(HistoryEvent event) {
+        if (event.hasWorkflowTaskCompletedEventAttributes()) {
+            return event.getWorkflowTaskCompletedEventAttributes().getScheduledEventId();
+        }
+        if (event.hasWorkflowTaskFailedEventAttributes()) {
+            return event.getWorkflowTaskFailedEventAttributes().getScheduledEventId();
+        }
+        if (event.hasWorkflowTaskTimedOutEventAttributes()) {
+            return event.getWorkflowTaskTimedOutEventAttributes().getScheduledEventId();
+        }
+        return null;
     }
 
     private static void validatePostPinHistoryEvent(
@@ -469,7 +589,7 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                 "post-pin options update contains unsupported authority");
         require(
                 targetVersion.equals(
-                        requirePinnedVersion(
+                        requireServerPersistedPinnedVersion(
                                 attributes.getVersioningOverride(),
                                 "post-pin history override")),
                 "post-pin history override does not match the exact target version");
@@ -574,14 +694,15 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
             RecoveryRequest request,
             Path retainedRoot,
             String retainedBinding,
-            String workflowClassSha256,
+            String retainedWorkflowClassSha256,
+            String currentWorkflowClassSha256,
             String serverVersion,
             ExecutionAuthority execution,
             HistoryAuthority history,
             PinnedVersion targetVersion) {
         PendingChildAuthority child = execution.pendingChildren().getFirst();
         return canonicalSha256(
-                "exact-case-process-pin-authority.v1",
+                "exact-case-process-pin-authority.v2",
                 request.address(),
                 request.namespace(),
                 request.workflowId(),
@@ -589,7 +710,9 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                 request.legacyBuildId(),
                 retainedRoot.toString(),
                 retainedBinding,
-                workflowClassSha256,
+                request.workflowClassAuthority().name(),
+                retainedWorkflowClassSha256,
+                currentWorkflowClassSha256,
                 serverVersion,
                 targetVersion.deploymentName(),
                 targetVersion.buildId(),
@@ -609,6 +732,7 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                 Long.toString(child.initiatedEventId()),
                 Long.toString(history.lastEventId()),
                 Long.toString(history.lastSignalEventId()),
+                request.expectedSignalName(),
                 Long.toString(history.pendingWorkflowTaskScheduledEventId()),
                 Integer.toString(history.eventCount()),
                 history.historySha256(),
@@ -666,7 +790,7 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
             return CurrentOverride.absent();
         }
         PinnedVersion version =
-                requirePinnedVersion(
+                requireServerPersistedPinnedVersion(
                         info.getVersioningInfo().getVersioningOverride(),
                         "workflow description override");
         return CurrentOverride.pinned(version.deploymentName(), version.buildId());
@@ -675,32 +799,83 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
     static PinnedVersion requirePinnedVersion(
             WorkflowExecutionOptions options, String source) {
         require(options != null && options.hasVersioningOverride(), source + " has no override");
-        return requirePinnedVersion(options.getVersioningOverride(), source);
+        return requireServerPersistedPinnedVersion(options.getVersioningOverride(), source);
     }
 
-    private static PinnedVersion requirePinnedVersion(
+    private static PinnedVersion requireClientPinnedVersion(
             VersioningOverride override, String source) {
         require(override != null, source + " is missing");
         require(
                 override.getBehavior() == VERSIONING_BEHAVIOR_PINNED,
                 source + " does not have top-level PINNED behavior");
         require(!override.hasPinned(), source + " contains a legacy nested pinned override");
-        String canonical = override.getPinnedVersion();
+        return parsePinnedVersion(override.getPinnedVersion(), source + " pinnedVersion");
+    }
+
+    private static PinnedVersion requireServerPersistedPinnedVersion(
+            VersioningOverride override, String source) {
+        require(override != null, source + " is missing");
+        boolean hasTopLevel =
+                override.getBehavior() != VERSIONING_BEHAVIOR_UNSPECIFIED
+                        || !override.getPinnedVersion().isBlank();
+        boolean hasNested = override.hasPinned();
+        require(hasTopLevel || hasNested, source + " has no pinned version authority");
+
+        PinnedVersion topLevel = null;
+        if (hasTopLevel) {
+            require(
+                    override.getBehavior() == VERSIONING_BEHAVIOR_PINNED,
+                    source + " top-level behavior is not PINNED");
+            topLevel =
+                    parsePinnedVersion(
+                            override.getPinnedVersion(), source + " top-level pinnedVersion");
+        }
+
+        PinnedVersion nested = null;
+        if (hasNested) {
+            VersioningOverride.PinnedOverride persisted = override.getPinned();
+            require(
+                    persisted.getBehavior() == PINNED_OVERRIDE_BEHAVIOR_PINNED,
+                    source + " nested behavior is not PINNED");
+            require(persisted.hasVersion(), source + " nested version is missing");
+            nested =
+                    parsePinnedVersion(
+                            canonicalVersion(persisted.getVersion(), source + " nested version"),
+                            source + " nested version");
+        }
+
+        require(
+                topLevel == null || nested == null || topLevel.equals(nested),
+                source + " top-level and nested versions conflict");
+        return topLevel != null ? topLevel : nested;
+    }
+
+    private static PinnedVersion parsePinnedVersion(String canonical, String source) {
         requireText(canonical, source + " pinnedVersion", 512);
-        require(canonical.equals(canonical.strip()), source + " pinnedVersion is noncanonical");
+        require(canonical.equals(canonical.strip()), source + " is noncanonical");
         io.temporal.common.WorkerDeploymentVersion version;
         try {
             version = io.temporal.common.WorkerDeploymentVersion.fromCanonicalString(canonical);
         } catch (IllegalArgumentException invalidVersion) {
-            throw new IllegalStateException(source + " pinnedVersion is invalid", invalidVersion);
+            throw new IllegalStateException(source + " is invalid", invalidVersion);
         }
         requireText(version.getDeploymentName(), source + " deploymentName", 255);
         requireText(version.getBuildId(), source + " buildId", 255);
         require(
                 canonical.equals(version.toCanonicalString()),
-                source + " pinnedVersion is noncanonical");
+                source + " is noncanonical");
         return new PinnedVersion(
                 version.getDeploymentName(), version.getBuildId(), canonical);
+    }
+
+    private static String canonicalVersion(
+            io.temporal.api.deployment.v1.WorkerDeploymentVersion version, String source) {
+        require(version != null, source + " is missing");
+        requireText(version.getDeploymentName(), source + " deploymentName", 255);
+        requireText(version.getBuildId(), source + " buildId", 255);
+        return new io.temporal.common.WorkerDeploymentVersion(
+                        version.getDeploymentName(), version.getBuildId())
+                .toCanonicalString();
     }
 
     private static VersioningOverride versioningOverride(PinnedVersion version) {
@@ -713,6 +888,12 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
     static UpdateWorkflowExecutionOptionsRequest updateRequest(PinCommand command) {
         Objects.requireNonNull(command, "command");
         VersioningOverride override = versioningOverride(command.targetVersion());
+        require(
+                command.targetVersion()
+                        .equals(
+                                requireClientPinnedVersion(
+                                        override, "client pin request override")),
+                "client pin request override drifted");
         return UpdateWorkflowExecutionOptionsRequest.newBuilder()
                 .setNamespace(command.namespace())
                 .setWorkflowExecution(
@@ -782,6 +963,23 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
         Matcher matcher = LEGACY_CONTROL_BUILD_ID.matcher(buildId);
         require(matcher.matches(), "legacy control build ID shape is invalid");
         return matcher.group(1);
+    }
+
+    private static boolean containsAscii(byte[] source, String expected) {
+        byte[] needle = expected.getBytes(StandardCharsets.US_ASCII);
+        for (int offset = 0; offset <= source.length - needle.length; offset++) {
+            boolean matches = true;
+            for (int index = 0; index < needle.length; index++) {
+                if (source[offset + index] != needle[index]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String sha256(byte[] bytes) {
@@ -857,8 +1055,14 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
     }
 
     enum PendingTaskState {
+        ABSENT,
         SCHEDULED,
         OTHER
+    }
+
+    enum WorkflowClassAuthority {
+        IDENTICAL,
+        TARGET_INTAKE_TERMINAL_V3_ACK_RECOVERY_V1
     }
 
     enum OverrideKind {
@@ -874,9 +1078,11 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
             String runId,
             String legacyBuildId,
             Path retainedClasses,
+            WorkflowClassAuthority workflowClassAuthority,
             String recoveryDeploymentName,
             String recoveryBuildId,
             String recoveryPinnedVersion,
+            PendingTaskState pendingWorkflowTaskState,
             long pendingWorkflowTaskScheduledEventId,
             int pendingWorkflowTaskAttempt,
             String pendingChildWorkflowId,
@@ -922,9 +1128,11 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                         values.get("run-id"),
                         values.get("legacy-build-id"),
                         Path.of(values.get("retained-classes")),
+                        WorkflowClassAuthority.valueOf(values.get("workflow-class-authority")),
                         values.get("recovery-deployment-name"),
                         values.get("recovery-build-id"),
                         values.get("recovery-pinned-version"),
+                        PendingTaskState.valueOf(values.get("pending-workflow-task-state")),
                         Long.parseLong(values.get("pending-workflow-task-scheduled-event-id")),
                         Integer.parseInt(values.get("pending-workflow-task-attempt")),
                         values.get("pending-child-workflow-id"),
@@ -950,9 +1158,11 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                     runId,
                     legacyBuildId,
                     retainedClasses,
+                    workflowClassAuthority,
                     recoveryDeploymentName,
                     recoveryBuildId,
                     recoveryPinnedVersion,
+                    pendingWorkflowTaskState,
                     pendingWorkflowTaskScheduledEventId,
                     pendingWorkflowTaskAttempt,
                     pendingChildWorkflowId,
@@ -999,6 +1209,9 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
     record PendingChildAuthority(
             String workflowId, String runId, String workflowType, long initiatedEventId) {}
 
+    record WorkflowTaskHistoryState(
+            long scheduledEventId, String taskQueue, boolean normal, int attempt, boolean started) {}
+
     record ExecutionAuthority(
             String workflowId,
             String runId,
@@ -1032,7 +1245,8 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
             RecoveryRequest request,
             Path retainedClasses,
             String retainedWorktreeBinding,
-            String workflowClassSha256,
+            String retainedWorkflowClassSha256,
+            String currentWorkflowClassSha256,
             String serverVersion,
             ExecutionAuthority execution,
             HistoryAuthority history,
@@ -1153,8 +1367,7 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                                     .build());
             require(
                     response.hasExecutionConfig()
-                            && response.hasWorkflowExecutionInfo()
-                            && response.hasPendingWorkflowTask(),
+                            && response.hasWorkflowExecutionInfo(),
                     "workflow description authority is incomplete");
             WorkflowExecutionInfo info = response.getWorkflowExecutionInfo();
             boolean versioned =
@@ -1169,6 +1382,16 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                             && info.getVersioningInfo().hasDeploymentTransition();
             boolean versionTransition =
                     info.hasVersioningInfo() && info.getVersioningInfo().hasVersionTransition();
+            PendingTaskState pendingState = PendingTaskState.ABSENT;
+            int pendingAttempt = 0;
+            if (response.hasPendingWorkflowTask()) {
+                pendingState =
+                        response.getPendingWorkflowTask().getState()
+                                        == PENDING_WORKFLOW_TASK_STATE_SCHEDULED
+                                ? PendingTaskState.SCHEDULED
+                                : PendingTaskState.OTHER;
+                pendingAttempt = response.getPendingWorkflowTask().getAttempt();
+            }
             return new ExecutionAuthority(
                     info.getExecution().getWorkflowId(),
                     info.getExecution().getRunId(),
@@ -1180,11 +1403,8 @@ public final class ExactCaseProcessWorkflowPinRecoveryMain {
                     info.getAssignedBuildId(),
                     versioned ? info.getMostRecentWorkerVersionStamp().getBuildId() : "",
                     versioned,
-                    response.getPendingWorkflowTask().getState()
-                                    == PENDING_WORKFLOW_TASK_STATE_SCHEDULED
-                            ? PendingTaskState.SCHEDULED
-                            : PendingTaskState.OTHER,
-                    response.getPendingWorkflowTask().getAttempt(),
+                    pendingState,
+                    pendingAttempt,
                     response.getPendingActivitiesCount(),
                     children,
                     currentOverride(info),

@@ -8,7 +8,7 @@
 
 单一输出权威：
 
-- 每一条本轮事实只在 `public_projection_items[*].source_row` 中生成一次；整个数组最多 5 项。优先合并同一主题的细节为一条可核验事实；生成第 5 项后必须立即闭合数组并输出 `dossier_delta`，绝对不要开始第 6 项。每个 item 只能包含 `source_row`，不得输出 `matrix_patch`、`candidate_value`、slot、路径或协议常量。
+- 每一条本轮事实只在 `public_projection_items[*].source_row` 中生成一次；整个数组最多 5 项。优先合并同一主题的细节为一条可核验事实，绝对不要开始第 6 项。每个 item 只能包含 `source_row`，不得输出 `matrix_patch`、`candidate_value`、slot、路径或协议常量。
 - `source_row` 只包含 `fact_key`、`fact_target`、`stance`、`position_summary` 和可空的 `asserted_value`。`stance` 只能是 `CONFIRM`、`DENY`、`PARTIAL` 或 `UNKNOWN`。不要输出 `category`、`materiality` 或来源范围；它们全部由服务端依据冻结矩阵和 fact-key authority 确定性补齐。
 - 已存在事实只能从 `fact_key_authority.existing_fact_keys` 逐字选择完整 `FACT_` key。`fact_target` 应与冻结矩阵中的目标一致；服务端会恢复该行的既有 `category`、`fact_target`、`materiality`，模型不得创造或改写任何 `FACT_` key。
 - 新增事实的 key 必须以 `fact_key_authority.new_fact_key_prefix` 的完整值开头，再追加简短且本 Frame 内唯一的英文数字下划线后缀。不得使用其他 `NEW_` namespace。
@@ -18,9 +18,9 @@
 回应边界：
 
 - 当前参与方不是 `RESPONDENT` 时，根对象只输出 `public_projection_items`，不得输出 `dossier_delta`；服务端会确定性补齐无被申请方回应。
-- 当前参与方是 `RESPONDENT` 时，按 Schema 输出 `dossier_delta.respondent_claim_updates`：未表达新回应时使用空数组，明确表达新回应时恰好输出一个对象。对象只总结当前消息的回应，`alternative_proposals` 使用零或一个字符串，不得复制旧回应或推测另一方态度。
-- 回应对象的 `attitude` 只能逐字使用 `AGREE`、`PARTIALLY_AGREE`、`DISAGREE`、`ALTERNATIVE_PROPOSED`、`NEED_MORE_INFO` 之一。这里不得使用事实 `stance` 的 `PARTIAL`；部分同意必须写 `PARTIALLY_AGREE`。
-- 没有任何可授权事实增量时，输出空 `public_projection_items`；仅在 Schema 要求时再输出空的 `respondent_claim_updates`。
+- 当前参与方是 `RESPONDENT` 时，必须先依次完整输出根字段 `respondent_attitude`、`respondent_position_summary`、`respondent_alternative_proposal`，再输出 `public_projection_items`。这三个根字段只总结当前消息的回应：没有替代方案时 `respondent_alternative_proposal` 使用空字符串，有替代方案时使用一个不超过 100 字的字符串；不得输出嵌套 `dossier_delta`、回应数组、旧回应或另一方态度。
+- `respondent_attitude` 只能逐字使用 `AGREE`、`PARTIALLY_AGREE`、`DISAGREE`、`ALTERNATIVE_PROPOSED`、`NEED_MORE_INFO` 之一。这里不得使用事实 `stance` 的 `PARTIAL`；部分同意必须写 `PARTIALLY_AGREE`。
+- 当前参与方不是 `RESPONDENT` 且没有任何可授权事实增量时，输出空 `public_projection_items`。当前参与方是 `RESPONDENT` 时，回应权威必须对应至少一条当前来源事实，因此 `public_projection_items` 不得为空。
 
 上一轮冻结矩阵中的未更新事实由服务端确定性继承；不要在本 Frame 中复制历史行。
 

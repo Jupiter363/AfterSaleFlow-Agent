@@ -3,6 +3,7 @@ package com.example.dispute.workflow.targete2e.ingress.rooms;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.targete2e.exchange.rooms.TargetE2eRoomExchangeContract.Authority;
 import com.example.dispute.workflow.targete2e.exchange.rooms.TargetE2eRoomObjectIndex;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -55,9 +56,9 @@ public final class TargetE2eHearingInvocationPublisher {
   public void bind(Authority authority, RoomGraphCommand command, String operation, InvocationInputs inputs) {
     String expectedStage = OPERATION_STAGE.get(operation);
     if (expectedStage == null || command.roomType().name().equals("HEARING") == false
-        || !expectedStage.equals(command.stageCode()) || !command.graphKey().equals("all-rooms.target-e2e.v2")
-        || !command.graphVersion().equals("target-e2e-graph.2026-08-18.1")
-        || !command.checkpointSchemaVersion().equals("target-e2e-checkpoint.v2")
+        || !expectedStage.equals(command.stageCode()) || !command.graphKey().equals(TargetTypedRoomProtocol.GRAPH_KEY)
+        || !TargetTypedRoomProtocol.supportsGraphVersion(command.graphVersion())
+        || !command.checkpointSchemaVersion().equals(TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION)
         || !inputs.domainSnapshotRef().equals(command.domainSnapshotRef())
         || !inputs.eventRef().equals(command.eventRef())) {
       throw new IllegalArgumentException("Hearing invocation operation does not bind its outer command");

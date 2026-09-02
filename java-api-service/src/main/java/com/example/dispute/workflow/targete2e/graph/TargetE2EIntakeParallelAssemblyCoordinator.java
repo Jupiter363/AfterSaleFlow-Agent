@@ -297,7 +297,8 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
             GraphRegistryBindingPolicy.ExpectedBinding registryBinding,
             AssemblyOutput output) {
         TargetE2EGraphCommandEnvelope commandEnvelope =
-                envelopeCodec.wrapCommand(activationId, roomFencingToken, command);
+                envelopeCodec.wrapCommand(
+                        context.authorityActivationId(), roomFencingToken, command);
         byte[] commandEnvelopeBytes = envelopeCodec.encodeCommand(commandEnvelope);
         TargetE2ERoomProposalSource proposalSource = proposalSource(command, output);
         JsonNode proposalSourceNode = mapper.valueToTree(proposalSource);
@@ -322,7 +323,11 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
                 output.artifactUri(),
                 output.proposalSha256(),
                 output.canonicalProposalBytes(),
-                profileManifestId(command, inputs, registryBinding),
+                profileManifestId(
+                        command,
+                        inputs,
+                        registryBinding,
+                        context.authorityActivationId()),
                 resultArtifactId,
                 resultRef,
                 graphResultHash,
@@ -361,10 +366,11 @@ public final class TargetE2EIntakeParallelAssemblyCoordinator {
     private String profileManifestId(
             RoomGraphCommand command,
             ExactThreeInputs inputs,
-            GraphRegistryBindingPolicy.ExpectedBinding registryBinding) {
+            GraphRegistryBindingPolicy.ExpectedBinding registryBinding,
+            String authorityActivationId) {
         ObjectNode manifest = JsonNodeFactory.instance.objectNode();
         manifest.put("schema_version", "intake.parallel-profile-manifest.v1");
-        manifest.put("activation_id", activationId);
+        manifest.put("activation_id", authorityActivationId);
         manifest.put("execution_profile_id", inputs.authority().executionProfileId());
         manifest.put("graph_version", command.graphVersion());
         manifest.put("checkpoint_schema_version", command.checkpointSchemaVersion());

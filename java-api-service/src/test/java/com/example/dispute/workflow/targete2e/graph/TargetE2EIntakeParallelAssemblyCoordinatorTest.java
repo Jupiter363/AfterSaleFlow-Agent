@@ -72,7 +72,8 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                             2,
                             previous,
                             "aliyun-bailian",
-                            "qwen3.7-max-2026-06-08");
+                            "qwen3.7-max-2026-06-08",
+                            ACTIVATION);
                 },
                 REGISTRY_HASH);
 
@@ -144,7 +145,8 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                         2,
                         previous,
                         "aliyun-bailian",
-                        "qwen3.7-max-2026-06-08"),
+                        "qwen3.7-max-2026-06-08",
+                        ACTIVATION),
                 REGISTRY_HASH);
         firstCoordinator.assembleReady(
                 request, FRAME_SET_ID, new AgentRunCancellationToken());
@@ -174,6 +176,37 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
     }
 
     @Test
+    void firstAssemblyAfterRuntimeRotationPreservesFrozenAdmissionActivation() {
+        ExecuteAgentRunRequest request = request(
+                TargetE2EIntakeParallelAssemblyCoordinator.AGENT_PROFILE_ID);
+        ObjectNode previous = previousDossier();
+        InMemoryAssemblyStore store = new InMemoryAssemblyStore(inputs(request, previous));
+        var rotatedCoordinator = coordinator(
+                NEXT_ACTIVATION,
+                store,
+                (execution, authority) -> new TrustedTurnContext(
+                        "MESSAGE_1",
+                        "本轮补充了核心事实。",
+                        2,
+                        previous,
+                        "aliyun-bailian",
+                        "qwen3.7-max-2026-06-08",
+                        ACTIVATION),
+                REGISTRY_HASH,
+                TOOL_POLICY,
+                31);
+
+        var assembled = rotatedCoordinator.assembleReady(
+                request, FRAME_SET_ID, new AgentRunCancellationToken());
+        TargetE2EGraphCommandEnvelope storedEnvelope =
+                new TargetE2EGraphEnvelopeCodec(MAPPER)
+                        .decodeCommand(assembled.artifact().canonicalCommandEnvelopeBytes());
+
+        assertThat(storedEnvelope.activationId()).isEqualTo(ACTIVATION);
+        assertThat(storedEnvelope.activationId()).isNotEqualTo(NEXT_ACTIVATION);
+    }
+
+    @Test
     void replaysDurableReadyAcrossDeploymentWithExactCommandAndRoomAuthorities() {
         ExecuteAgentRunRequest request = request(
                 TargetE2EIntakeParallelAssemblyCoordinator.AGENT_PROFILE_ID);
@@ -189,9 +222,10 @@ class TargetE2EIntakeParallelAssemblyCoordinatorTest {
                             "MESSAGE_1",
                             "本轮补充了核心事实。",
                             2,
-                            previous,
-                            "aliyun-bailian",
-                            "qwen3.7-max-2026-06-08");
+                        previous,
+                        "aliyun-bailian",
+                        "qwen3.7-max-2026-06-08",
+                        ACTIVATION);
                 },
                 REGISTRY_HASH,
                 TOOL_POLICY,
