@@ -22,7 +22,8 @@
 
 </div>
 
-> **文档基线**：`release/0.1.0` @ `7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65`
+> **文档基线**：`main`，截至 2026-09-03；运行代码基线为 `10526e58b954498f69bae00ea709f6f9e4981971`。
+> **当前 UAT 基线**：接待室 V4 三 Frame 并行图已在全新浏览器案件 `CASE_P9_6A98633E_11` 上完成六站全链路验证；该结论属于隔离 UAT 证据，不等同于默认生产开关已开启。
 > **重要边界**：所有模型输出均为结构化建议或草案；最终裁决由平台人工终审确认，高影响动作只能由审批后、哈希绑定且幂等的 Tool Executor 执行。
 
 <a href="docs/assets/architecture/AfterSaleFlow-Agent-architecture.png">
@@ -42,13 +43,26 @@ AfterSaleFlow-Agent 是一个面向**用户与商家履约争端**的 AI Native 
 | 目标 | 设计回答 |
 | --- | --- |
 | 业务事实不能被模型覆盖 | Java 与 PostgreSQL 是身份、消息、证据、裁决、审核、执行和审计的正式事实源 |
-| 长流程不能依赖进程存活 | Temporal 管理持久等待、Signal、Timer、重试和恢复；当前正式路径已用于举证窗口，目标路径按房间迁移 |
+| 长流程不能依赖进程存活 | Temporal 管理持久等待、Signal、Timer、重试和恢复；默认路径继续受开关保护，Case/Room 候选路径已完成隔离 UAT |
 | Agent 不能获得无限权限 | 每个角色使用默认拒绝的 Agent Profile，显式限定状态、上下文、Skill、工具、预算和输出 Schema |
 | 流式输出不能直接成为正式结果 | Python 输出先作为 provisional stream；只有 Java Finalizer 验收并持久化的 final 才能成为正式消息或工件 |
 | 高影响动作必须可控 | 人工终审 → 审批策略 → Tool Executor → ActionRecord，Agent 无退款、补发、驳回、关单或审批权限 |
 | 重试不能产生重复裁决或重复执行 | 幂等键、请求哈希、单调序号、append-only 账本、outbox/inbox、fencing token 与操作记录共同约束 |
 | 私有会话不能跨参与方泄漏 | USER 与 MERCHANT 按精确 actor、房间、会话和 audience 隔离，庭审只消费已授权的正式材料 |
 | 系统必须可解释和可审计 | AgentRun、输入快照、Prompt/模型/Schema/策略版本、引用、输出哈希、Token 与 Trace 全链路留痕 |
+
+### 当前 `main` 版本快照
+
+| 维度 | 当前基线 |
+| --- | --- |
+| 接待室认知图 | V4 三个显式兄弟 Frame：`DIALOGUE_FRAME`、`DOSSIER_FRAME`、`QUALITY_FRAME`；独立校验后由受权威约束的合并路径提交 |
+| Graph / Stream 身份 | `target-e2e-graph.2026-08-18.3`；Intake 并行流使用 `agent-stream.v4`，其余目标房间继续使用 `agent-stream.v3` |
+| 模型配置 | LiteLLM 统一路由 `qwen3.8-flash`；默认关闭 thinking，并启用严格 JSON Schema |
+| 运行时依赖 | Java 21、Spring Boot `3.5.15`、Temporal Java SDK `1.35.0`；Python 3.11、LangGraph `1.2.6`、LangChain Core `1.4.9` |
+| 数据库版本 | Java Flyway 迁移上限 `V094__target_e2e_graph_patch_release_identity.sql` |
+| 浏览器 UAT | 从前端表单创建全新案件，经双方接待、证据、庭审、人工终审到 Outcome，进度达到 `6 / 6` |
+
+运行平台需要与源码版本分开理解：仓库 Compose 默认仍固定 `temporalio/auto-setup:1.25.2`；上述 deployment-pinned UAT 在经单独授权升级并验证的 Temporal Server `1.29.7` 上完成。仓库不会在启动时自动替换核心组件版本。
 
 ---
 
@@ -187,7 +201,7 @@ sequenceDiagram
     T->>P: 受约束的结构化请求
     P->>L: Prompt + JSON Schema + Model Profile
     L-->>P: 流式模型输出
-    P-->>J: NDJSON visible_delta / usage / final
+    P-->>J: 版本化 NDJSON（v3 / Intake v4）
     J->>J: 持久化流、校验 Schema、引用与版本绑定
     J->>J: Finalizer 提交正式消息或工件
     J-->>UI: SSE 回放与实时投影
@@ -202,8 +216,8 @@ sequenceDiagram
 | 状态类别 | 权威边界 | 说明 |
 | --- | --- | --- |
 | 正式领域事实 | **Java + Domain PostgreSQL** | 身份、权限、消息、证据、提交、冻结工件、审核决定、执行记录和查询投影 |
-| 持久业务过程 | **Temporal Event History** | 目标架构负责案件/房间阶段、等待、Timer、取消、重试、补偿与命令顺序；当前正式路径已承载举证窗口 |
-| 认知执行状态 | **Python LangGraph + Graph PostgreSQL** | 目标候选路径负责 checkpoint、认知 revision、命令结果、上下文摘要与有界 fan-out |
+| 持久业务过程 | **Temporal Event History** | 负责案件/房间阶段、等待、Timer、取消、重试、补偿与命令顺序；Case/Room 候选路径已完成隔离 UAT，生产启用仍由门禁控制 |
+| 认知执行状态 | **Python LangGraph + Graph PostgreSQL** | 负责 checkpoint、认知 revision、命令结果、上下文摘要与有界 fan-out；Intake V4 使用三个独立 Frame 并行执行 |
 | 模型对象流 | **LangChain Core / LCEL** | Prompt、Message、ChatModel、Parser、stream、callback 与 tracing，不拥有领域权限或阶段推进权 |
 | 证据二进制 | **MinIO** | 原始证据、脱敏证据、OCR 临时文件、政策文件和导出文件分桶管理 |
 | 搜索与实时加速 | **Elasticsearch / Redis** | 可重建搜索投影、缓存、短期状态、实时唤醒和执行锁；永远不是裁决正确性的事实源 |
@@ -234,14 +248,14 @@ agent-execution
 notification-and-tools
 ```
 
-当前 `release/0.1.0` 的默认业务路径仍以 Java 状态机为主，Temporal 已实际管理 2 小时举证窗口、双方完成 Signal、提醒与到期 Activity；`case-dispute-task-queue` 是 EvidenceWindow 的兼容队列。目标架构代码进一步提供 Case/Room Workflow、命令 outbox、单调 revision、fencing、Continue-As-New 与投影 reconciliation，但默认开关保持 fail-closed。
+当前 `main` 的默认业务路径仍以 Java 状态机为主，Temporal 已实际管理 2 小时举证窗口、双方完成 Signal、提醒与到期 Activity；`case-dispute-task-queue` 是 EvidenceWindow 的兼容队列。仓库同时提供 Case/Room Workflow、命令 outbox、单调 revision、fencing、Continue-As-New 与投影 reconciliation，并已在隔离 `TARGET_E2E_CANDIDATE` 中走通完整浏览器流程；默认生产开关仍保持 fail-closed。
 
 ### 4. Python 认知平面
 
 Python Agent Service 只暴露内部 FastAPI 接口，承担两类执行：
 
-- **当前正式路径**：接待与证据使用受治理的单轮 LangGraph；庭审由四个显式 Hearing Graph Family 承载七个一次调用操作，但 15 阶段 cursor、等待和正式工件提交仍由 Java 管理；另包含 Review Copilot 与离线 Evaluation。
-- **目标架构候选**：`intake.v2`、`evidence.v2`、Outcome Review Graph，以及将现有 Hearing Graph Family 接入持久 Graph Gateway 的运行路径；候选平台增加 PostgreSQL checkpoint、命令账本、lease/fencing、版本注册表和 proposal-only 跨服务协议。
+- **默认正式路径**：接待与证据使用受治理的单轮 LangGraph；庭审由四个显式 Hearing Graph Family 承载七个一次调用操作，但 15 阶段 cursor、等待和正式工件提交仍由 Java 管理；另包含 Review Copilot 与离线 Evaluation。
+- **隔离 UAT 候选**：Intake V4 将对话、卷宗与质量评估拆为三个并行 Frame，使用 `agent-stream.v4` 提交独立帧结果；Evidence、Hearing 与 Outcome 使用持久 Graph Gateway 和 `agent-stream.v3`。候选平台具备 PostgreSQL checkpoint、命令账本、lease/fencing、版本注册表和 proposal-only 跨服务协议。
 
 Hearing 认知拓扑按职责拆成四个显式 family：
 
@@ -259,12 +273,12 @@ hearing.jury.v1     -> jury review
 | 维度 | 当前默认正式路径 | 目标架构候选路径 |
 | --- | --- | --- |
 | 流程所有权 | Java 状态机；Temporal 实际管理 EvidenceWindow | Temporal Case/Room Workflow 管理宏观阶段、等待与恢复 |
-| Agent 状态 | 单轮图；跨回合事实由 Java 持久化 | Graph PostgreSQL checkpoint + command ledger + lease/fencing |
+| Agent 状态 | 单轮图；跨回合事实由 Java 持久化 | Graph PostgreSQL checkpoint + command ledger + lease/fencing；Intake 为三 Frame 并行图 |
 | 庭审 Python | 四个显式 Graph Family 承载七个有界、一次调用操作；不持有 15 阶段流程状态 | 同一认知拓扑接入 Graph Gateway、PostgreSQL checkpoint、命令账本和 proposal-only 跨服务传输 |
-| 流式协议 | `agent_stream.v1`：`start/visible_delta/usage/final/error` | Agent Stream V2：logical run/attempt/reset/terminal recovery |
+| 流式协议 | `agent_stream.v1` 兼容路径 | `agent-stream.v3`；Intake V4 专用 `agent-stream.v4` Frame 协议 |
 | Graph Gateway | 默认 `DISABLED` | 签名 synthetic `SHADOW` 或隔离预生产 `TARGET_E2E_CANDIDATE` |
 | 正式领域写入 | 始终只有 Java | 始终只有 Java Finalizer；Graph 仍是 proposal-only |
-| 部署授权 | Docker Compose 本地/CI 正式拓扑 | 隔离预生产候选；生产 promotion gate 仍需外部证据和明确批准 |
+| 部署授权 | Docker Compose 本地/CI 默认拓扑 | 隔离预生产候选已完成浏览器 UAT；生产 promotion gate 仍需完整发布证据和明确批准 |
 
 这一区分是项目可信度的重要组成部分：仓库包含面向生产终态的高强度工程实现和验证合同，但不会把默认关闭的候选能力包装成已经上线的生产事实。
 
@@ -366,8 +380,8 @@ Browser -> Java Command -> Outbox/Temporal -> AgentRun
 | 层 | 主要技术 |
 | --- | --- |
 | 前端 | Vue 3.5、Vue Router、Element Plus 2.9、Vite 6、Vitest、Playwright |
-| Java 领域层 | Java 21、Spring Boot 3.5、Spring MVC、Spring Security、JPA、Flyway、Temporal Java SDK、Micrometer、OpenTelemetry |
-| Python Agent | Python 3.11、FastAPI、Pydantic、LangGraph 1.2、LangChain Core 1.4、PostgreSQL Checkpointer、Langfuse、OpenTelemetry |
+| Java 领域层 | Java 21、Spring Boot 3.5.15、Spring MVC、Spring Security、JPA、Flyway、Temporal Java SDK 1.35.0、Micrometer、OpenTelemetry |
+| Python Agent | Python 3.11、FastAPI、Pydantic、LangGraph 1.2.6、LangChain Core 1.4.9、PostgreSQL Checkpointer 3.1.0、Langfuse、OpenTelemetry |
 | OCR / Parser | FastAPI、PaddleOCR、PaddlePaddle、MarkItDown、MinIO SDK |
 | 数据与中间件 | PostgreSQL 16、Redis 7.2、Elasticsearch 8.13、MinIO、Temporal、LiteLLM、Langfuse、Nginx |
 | 工程化 | Docker Compose、Maven、pnpm、GitHub Actions、Testcontainers、ArchUnit、Pytest、Playwright |
@@ -418,7 +432,7 @@ AfterSaleFlow-Agent/
 ```bash
 git clone https://github.com/Jupiter363/AfterSaleFlow-Agent.git
 cd AfterSaleFlow-Agent
-git checkout release/0.1.0
+git checkout main
 
 cp .env.example .env
 ./scripts/generate-secrets.sh
@@ -432,6 +446,8 @@ cp .env.example .env
 ```text
 http://localhost:18080
 ```
+
+`.env.example` 是仓库可复现默认值，不会自动把 Temporal 或其他核心组件升级到本轮 UAT 使用的版本。任何核心组件升级都应单独评审、备份、迁移并获得明确授权。
 
 停止服务并保留数据卷：
 
@@ -459,7 +475,7 @@ CONFIRM_RESET=YES ./scripts/dev-reset.sh
 .\scripts\dev-local.ps1 -Stop
 ```
 
-本地 Vite `5173` 会代理 Java `8080`；Docker 全量环境必须从 Nginx `18080` 进入。
+本地 Vite `5173` 会代理 Java `8080`；Docker 全量环境必须从 Nginx `18080` 进入。隔离 target-E2E 运维拓扑可能使用 Java `8081`，它不是普通本地开发或默认生产入口。
 
 ---
 
@@ -470,7 +486,7 @@ CONFIRM_RESET=YES ./scripts/dev-reset.sh
 | 服务 | 地址 / 端口 | 说明 |
 | --- | --- | --- |
 | 完整应用 | `http://localhost:18080` | Nginx 统一入口 |
-| Frontend | `http://localhost:5173` | Docker 静态服务；本地开发时提供 Vite API 代理 |
+| Frontend | `http://localhost:5173` | Compose 直连前端；本地开发时由 Vite 提供 API 代理 |
 | Java API | `http://localhost:8080` | REST、SSE、OpenAPI、领域事务 |
 | Python Agent | `http://localhost:18000` | 内部 Agent 服务健康检查 |
 | OCR Parser | `http://localhost:18010` | 内部解析服务健康检查 |
@@ -507,6 +523,8 @@ http://localhost:8080/swagger-ui.html
 | --- | --- |
 | `DASHSCOPE_API_KEY` | 百炼模型凭据，必须只写入本地 `.env` |
 | `LITELLM_DEFAULT_MODEL` | 默认模型别名，仓库默认 `qwen3.8-flash` |
+| `LLM_ENABLE_THINKING` | 默认 `false`；当前 Qwen UAT 不依赖隐藏推理输出 |
+| `LLM_STRICT_JSON_SCHEMA_ENABLED` | 默认 `true`；Provider 输出先通过严格 Schema，再进入 Pydantic 与业务 Guardrail |
 | `FEATURE_HUMAN_REVIEW_REQUIRED` | 默认 `true`，强制人工终审 |
 | `FEATURE_TOOL_EXECUTOR_SIMULATION` | 默认 `true`，本地环境不声称真实退款/履约执行 |
 | `EVIDENCE_WINDOW` | 默认 `PT2H` |
@@ -515,6 +533,7 @@ http://localhost:8080/swagger-ui.html
 | `SSE_HEARTBEAT` | 默认 `PT15S` |
 | `APP_ORCHESTRATION_NEW_EPOCH_MODE` | 默认 `LEGACY`，非默认路径必须显式开启并通过门禁 |
 | `GRAPH_GATEWAY_MODE` | 默认 `DISABLED`，候选模式必须具备 Graph DB、签名、版本和授权绑定 |
+| `TEMPORAL_IMAGE` | Compose 默认 `temporalio/auto-setup:1.25.2`；本轮 UAT 的 `1.29.7` 不是仓库自动升级默认值 |
 | `OTEL_TRACING_ENABLED` | OpenTelemetry Trace 开关 |
 
 ---
@@ -533,6 +552,13 @@ http://localhost:8080/swagger-ui.html
 - Docker Compose 配置验证、全栈启动和健康检查
 - API、E2E 与 Load Smoke
 - 重复、延迟、乱序、断线、Redis 故障、模型截断、Schema 漂移和 stale fence 等负向场景
+
+### 当前 UAT 证据
+
+- 使用真实前端表单创建 `CASE_P9_6A98633E_11`，未通过后端接口预置案件。
+- `qwen3.8-flash` 在 thinking 关闭、严格 JSON Schema 开启的配置下完成双方 Intake；“下一步核验重点”输出为面向用户的中文动作，不再暴露内部英文字段名。
+- 案件继续通过 Evidence、Hearing、人工终审与 Outcome，最终进度为 `6 / 6`。
+- 本轮对应机制的 Java、Python 与前端聚焦回归通过；该证据不替代下方全仓发布检查。
 
 ### 本地完整发布检查
 
@@ -567,12 +593,13 @@ python -m pytest tests/api tests/e2e tests/load -q
 
 ## 当前边界与非目标
 
-为避免把工程候选能力包装成已经上线的生产事实，`release/0.1.0` 明确保持以下边界：
+为避免把工程候选能力包装成已经上线的生产事实，当前 `main` 明确保持以下边界：
 
 - 当前不实现申诉/复审业务。
 - 当前正式庭审仍由 Java 持有 15 阶段 cursor、等待和正式工件写入；Python 通过四个显式 Graph Family 执行七个受治理操作，但不拥有流程推进权。
-- 当前 Temporal 实际承担举证窗口；全房间 Temporal-first 仍需按迁移与生产门禁逐步启用。
-- Graph PostgreSQL、AgentRun V2 和 `TARGET_E2E_CANDIDATE` 是默认关闭的候选/隔离预生产路径。
+- 当前默认路径由 Temporal 承担举证窗口；全房间 Temporal-first 已在隔离候选路径完成 UAT，但仍需按迁移与生产门禁显式启用。
+- Graph PostgreSQL、版本化 AgentRun 和 `TARGET_E2E_CANDIDATE` 是默认关闭的候选/隔离预生产路径。
+- Temporal Server `1.29.7` 是本轮经授权的 UAT 平台证据，不是仓库默认配置；README 与启动脚本不得被视为核心组件升级授权。
 - 当前本地和 CI 使用 Docker Compose；仓库不以本版本宣称 Kubernetes 生产 HA 已落地。
 - 当前不引入 Kafka、MCP 或向量数据库。
 - 当前不宣称已经接入真实生产退款、补发或履约系统；Tool Executor 默认模拟，真实适配器必须具备外部幂等、状态查询、回执与补偿合同。
@@ -584,24 +611,25 @@ python -m pytest tests/api tests/e2e tests/load -q
 
 | 文档 | 用途 |
 | --- | --- |
-| [`docs/acceptance/current-room-function-baseline.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/acceptance/current-room-function-baseline.md) | 当前代码实际提供的功能、权限和回归不变量 |
-| [`docs/architecture/README.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/architecture/README.md) | 当前权威架构文档入口 |
-| [`docs/architecture/temporal-first-agent-platform.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/architecture/temporal-first-agent-platform.md) | Temporal-first 目标架构、容量、状态权威与迁移计划 |
-| [`docs/architecture/temporal-first-slo.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/architecture/temporal-first-slo.md) | 可用性、延迟、容量和错误预算合同 |
-| [`docs/architecture/adr/`](https://github.com/Jupiter363/AfterSaleFlow-Agent/tree/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/architecture/adr) | 状态所有权、命令投递、AgentRun、Graph、部署、安全和预生产 E2E 决策 |
-| [`docs/contracts/hearing-flow-v2.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/contracts/hearing-flow-v2.md) | 固定 15 阶段庭审与裁决工件合同 |
-| [`docs/acceptance/temporal-first-agent-platform-verification-checklist.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/acceptance/temporal-first-agent-platform-verification-checklist.md) | P0/P1/P2 发布门禁、容量、故障注入、安全与灾备证据 |
-| [`docs/api/README.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/api/README.md) | API、身份、幂等、SSE 和 OpenAPI 约定 |
-| [`docs/database/README.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/database/README.md) | PostgreSQL、Redis、MinIO 与 Elasticsearch 边界 |
-| [`docs/deployment/README.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/deployment/README.md) | Compose、本地联调、Worker 拓扑与运维命令 |
-| [`docs/release/README.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/docs/release/README.md) | Code Review、发布和回滚门禁 |
-| [`SECURITY.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/SECURITY.md) | 安全报告与核心安全边界 |
+| [`docs/acceptance/current-room-function-baseline.md`](docs/acceptance/current-room-function-baseline.md) | 当前代码实际提供的功能、权限和回归不变量 |
+| [`docs/architecture/README.md`](docs/architecture/README.md) | 当前权威架构文档入口 |
+| [`docs/architecture/temporal-first-agent-platform.md`](docs/architecture/temporal-first-agent-platform.md) | Temporal-first 目标架构、容量、状态权威与迁移计划 |
+| [`docs/architecture/temporal-first-slo.md`](docs/architecture/temporal-first-slo.md) | 可用性、延迟、容量和错误预算合同 |
+| [`docs/architecture/adr/`](docs/architecture/adr/) | 状态所有权、命令投递、AgentRun、Graph、部署、安全和预生产 E2E 决策 |
+| [`docs/contracts/hearing-flow-v2.md`](docs/contracts/hearing-flow-v2.md) | 固定 15 阶段庭审与裁决工件合同 |
+| [`docs/acceptance/temporal-first-agent-platform-verification-checklist.md`](docs/acceptance/temporal-first-agent-platform-verification-checklist.md) | P0/P1/P2 发布门禁、容量、故障注入、安全与灾备证据 |
+| [`docs/api/README.md`](docs/api/README.md) | API、身份、幂等、SSE 和 OpenAPI 约定 |
+| [`docs/database/README.md`](docs/database/README.md) | PostgreSQL、Redis、MinIO 与 Elasticsearch 边界 |
+| [`docs/deployment/README.md`](docs/deployment/README.md) | Compose、本地联调、Worker 拓扑与运维命令 |
+| [`docs/release/v4-parallel-graph-uat-2026-09-02.md`](docs/release/v4-parallel-graph-uat-2026-09-02.md) | V4 并行图候选形成过程、运行平台边界与上一轮 UAT 记录 |
+| [`docs/release/README.md`](docs/release/README.md) | Code Review、发布和回滚门禁 |
+| [`SECURITY.md`](SECURITY.md) | 安全报告与核心安全边界 |
 
 ---
 
 ## 贡献与安全
 
-提交代码前请阅读 [`CONTRIBUTING.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/CONTRIBUTING.md)、[`CODE_STYLE.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/CODE_STYLE.md) 和 [`SECURITY.md`](https://github.com/Jupiter363/AfterSaleFlow-Agent/blob/7b0a9fd3a546eb7ee5043cb7d52341f0afabbd65/SECURITY.md)。
+提交代码前请阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)、[`CODE_STYLE.md`](CODE_STYLE.md) 和 [`SECURITY.md`](SECURITY.md)。
 
 安全问题请私下报告给维护者，不要在公开 Issue 中披露凭据、敏感证据、越权路径或可利用细节。任何涉及正式裁决、审批、Tool Executor、跨参与方可见性、Temporal 写入权或 Graph Domain 写入权的修改，都必须同时补齐正向、负向、幂等、重放和相邻回归测试。
 
