@@ -349,6 +349,70 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
     }
 
 
+@pytest.mark.parametrize(
+    "persisted_phase",
+    ("READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"),
+)
+def test_ready_respondent_dossier_encodes_no_remark_as_an_exact_empty_delta(
+    persisted_phase: str,
+) -> None:
+    frame_type, _ = request_bound_dossier_output_types(
+        existing_fact_keys=("FACT_01",),
+        new_fact_key_prefix="NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
+        respondent_capacity=True,
+        allow_empty_respondent_delta=True,
+    )
+    schema = frame_type.model_json_schema()
+    assert schema["required"] == [
+        "respondent_attitude",
+        "respondent_position_summary",
+        "respondent_alternative_proposal",
+        "public_projection_items",
+    ]
+    assert "minItems" not in schema["properties"]["public_projection_items"]
+    assert schema["properties"]["public_projection_items"]["maxItems"] == 5
+
+    no_delta = {
+        "respondent_attitude": None,
+        "respondent_position_summary": None,
+        "respondent_alternative_proposal": None,
+        "public_projection_items": [],
+    }
+    assert frame_type.model_validate(no_delta)
+    materialized = materialize_request_bound_frame_output(
+        "DOSSIER_FRAME",
+        no_delta,
+        persisted_phase=persisted_phase,
+        respondent_capacity=True,
+        frozen_case_matrix=_frozen_matrix(),
+    )
+    assert materialized.public_projection_items == ()
+    assert materialized.dossier_delta.respondent_claim is None
+
+    claim_without_fact = dict(no_delta)
+    claim_without_fact.update(
+        {
+            "respondent_attitude": "AGREE",
+            "respondent_position_summary": "商家确认陈述完整。",
+            "respondent_alternative_proposal": "",
+        }
+    )
+    with pytest.raises(ValidationError, match="no-delta remark"):
+        frame_type.model_validate(claim_without_fact)
+
+    fact_without_claim = {**no_delta, **_dossier_provider_frame()}
+    with pytest.raises(ValidationError, match="complete respondent claim"):
+        frame_type.model_validate(fact_without_claim)
+
+    with pytest.raises(ValueError, match="only a respondent remark"):
+        request_bound_dossier_output_types(
+            existing_fact_keys=("FACT_01",),
+            new_fact_key_prefix="NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
+            respondent_capacity=False,
+            allow_empty_respondent_delta=True,
+        )
+
+
 def test_dossier_position_summary_accepts_valid_detail_above_style_hint() -> None:
     frame_type, _ = request_bound_dossier_output_types(
         existing_fact_keys=("FACT_01",),

@@ -80,7 +80,7 @@ def main() -> int:
         "__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__",
     }:
         print(
-            "DASHSCOPE_API_KEY 未配置，无法调用真实 qwen3.7-plus 多模态模型。",
+            "DASHSCOPE_API_KEY 未配置，无法调用真实 qwen3.8-flash 多模态模型。",
             file=sys.stderr,
         )
         return 2
@@ -91,7 +91,7 @@ def main() -> int:
     base_url = os.getenv("LITELLM_PROBE_BASE_URL", "http://127.0.0.1:14000")
     image_data = base64.b64encode(_red_blue_test_image()).decode("ascii")
     request_body = {
-        "model": "qwen3.7-plus",
+        "model": "qwen3.8-flash",
         "temperature": 0,
         "enable_thinking": False,
         "response_format": {"type": "json_object"},

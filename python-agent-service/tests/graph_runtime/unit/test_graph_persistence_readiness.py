@@ -18,6 +18,7 @@ from app.graph_runtime.persistence_models import (
     GraphReadinessConfig,
 )
 from app.graph_runtime.readiness import (
+    CONSISTENCY_QUERIES,
     REQUIRED_RELATIONS,
     GraphPersistenceReadinessProbe,
 )
@@ -330,6 +331,37 @@ async def test_checkpoint_metadata_binding_corruption_fails_restore_readiness() 
     assert not report.ready
     assert report.code == "GRAPH_RESTORE_INCONSISTENT"
     assert report.checks["checkpoint_rows_consistent"] is False
+
+
+@pytest.mark.asyncio
+async def test_executing_command_without_recovery_authority_fails_readiness() -> None:
+    config = _config()
+    connection = _Connection(config, inconsistent_check="command.status = 'executing'")
+
+    report = await GraphPersistenceReadinessProbe(config, _Pool(connection)).check()
+
+    assert not report.ready
+    assert report.code == "GRAPH_RESTORE_INCONSISTENT"
+    assert report.checks["active_fences_consistent"] is False
+
+
+def test_released_retryable_parallel_receipt_is_explicit_recovery_authority() -> None:
+    query = dict(CONSISTENCY_QUERIES)["active_fences_consistent"]
+    normalized = " ".join(query.split()).lower()
+
+    assert "agent_graph_command_attempt attempt" in normalized
+    assert "agent_graph_parallel_receipt_cycle cycle" in normalized
+    assert "agent_graph_parallel_receipt_execution execution" in normalized
+    assert "attempt.attempt_no = command.attempt_count" in normalized
+    assert "attempt.fencing_token = command.fencing_token" in normalized
+    assert "lease.released_at is not null" in normalized
+    assert "lease.cancelled_at is null" in normalized
+    assert "cycle.terminal_retryable" in normalized
+    assert (
+        "cycle.terminal_error_code = 'intake_parallel_frame_batch_failed'"
+        in normalized
+    )
+    assert "cycle.provider_call_count_after = attempt.provider_call_count" in normalized
 
 
 @pytest.mark.asyncio

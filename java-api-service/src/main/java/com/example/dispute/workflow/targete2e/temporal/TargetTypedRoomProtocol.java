@@ -20,12 +20,13 @@ public final class TargetTypedRoomProtocol {
     public static final String HEARING_WORKFLOW_TYPE = "HearingRoomWorkflow";
     public static final String GRAPH_KEY = "all-rooms.target-e2e.v2";
     public static final String PREDECESSOR_GRAPH_VERSION = "target-e2e-graph.2026-08-18.1";
-    public static final String GRAPH_VERSION = "target-e2e-graph.2026-08-18.2";
+    public static final String PREVIOUS_GRAPH_VERSION = "target-e2e-graph.2026-08-18.2";
+    public static final String GRAPH_VERSION = "target-e2e-graph.2026-08-18.3";
     public static final String CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v2";
     public static final String STREAM_PROTOCOL = "agent-stream.v3";
 
     private static final Set<String> SUPPORTED_GRAPH_VERSIONS =
-            Set.of(PREDECESSOR_GRAPH_VERSION, GRAPH_VERSION);
+            Set.of(PREDECESSOR_GRAPH_VERSION, PREVIOUS_GRAPH_VERSION, GRAPH_VERSION);
 
     private TargetTypedRoomProtocol() {}
 

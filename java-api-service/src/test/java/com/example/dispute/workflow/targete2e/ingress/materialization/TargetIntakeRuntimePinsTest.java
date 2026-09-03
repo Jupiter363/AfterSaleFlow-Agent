@@ -26,7 +26,7 @@ class TargetIntakeRuntimePinsTest {
         var registration = pins.registrationPins();
 
         assertThat(registration.graphKey()).isEqualTo(TargetTypedRoomProtocol.GRAPH_KEY);
-        assertThat(registration.graphVersion()).isEqualTo("target-e2e-graph.2026-08-18.2");
+        assertThat(registration.graphVersion()).isEqualTo("target-e2e-graph.2026-08-18.3");
         assertThat(registration.checkpointSchemaVersion())
                 .isEqualTo(TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION);
         assertThat(registration.stateSchemaVersion()).isEqualTo("intake-graph-state.v2");

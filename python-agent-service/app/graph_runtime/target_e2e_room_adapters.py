@@ -219,7 +219,7 @@ def _require_target_intake_command(execution: GatewayExecution) -> None:
         or execution.admission.candidate_authority is None
         or command.room_type != "INTAKE"
         or command.graph_key != "all-rooms.target-e2e.v2"
-        or command.graph_version != "target-e2e-graph.2026-08-18.2"
+        or command.graph_version != "target-e2e-graph.2026-08-18.3"
         or command.checkpoint_schema_version != "target-e2e-checkpoint.v2"
         or command.invocation_context.output_schema_version
         != "target-e2e-room-proposal-source.v2"

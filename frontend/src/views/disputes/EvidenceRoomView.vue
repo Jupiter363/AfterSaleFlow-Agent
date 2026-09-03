@@ -173,7 +173,7 @@ const targetTemporalProjection = computed(() =>
   processProjection.value?.real_case_shadow_allowed === false &&
   projectionManifestItemCount.value !== null &&
   Boolean(projectionVersionPins.value?.workflow_build_id) &&
-  projectionVersionPins.value?.graph_version === "target-e2e-graph.2026-08-18.2" &&
+  projectionVersionPins.value?.graph_version === "target-e2e-graph.2026-08-18.3" &&
   projectionVersionPins.value?.checkpoint_schema_version === "target-e2e-checkpoint.v2" &&
   projectionVersionPins.value?.state_schema_version === "evidence-graph-state.v2" &&
   projectionVersionPins.value?.prompt_version === "all-rooms-prompt.target-e2e.v2" &&

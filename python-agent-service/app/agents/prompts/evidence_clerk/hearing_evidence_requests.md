@@ -20,7 +20,14 @@
 
 - `public_message` 简要说明本轮补证围绕哪些 `uncovered_fact_catalog` 事实展开；目录为空时说明当前没有新增补证事项。不重复庭前证据介绍，不宣布阶段推进。
 - 请求应只绑定 `uncovered_fact_catalog` 中已有的 `fact_id`，尽量一次覆盖目录中的全部事实且不要把同一事实拆到多个请求。
+- `requests[].fact_ids` 中的每个值都必须从 `uncovered_fact_catalog[*].fact_id` 逐字、完整复制；禁止新造、翻译、缩写、拼接或重建标识，也禁止填写事实标题、材料 ID、字段名或任何目录之外的字符串。目录中没有可复制的合法 `fact_id` 时，必须输出空数组 `"requests": []`。
 - 每个请求的 `target_roles` 统一写为 `["USER", "MERCHANT"]`，表示双方共享同一事实级补证事项，不推导任何角色缺省槽位。
 - `requested_material` 说明最小必要材料；`verification_goal` 说明要核验的事实目标；`required` 明确必要性。
 - 已出现在事实级覆盖目录且带有正式 `evidence_ids` 的事实不再重复索要材料；人工复核由后续流程处理，不因角色不同再次补证。
 - 不新增事实、不保证真实性、不认定责任或救济结果，不输出欢迎语、倒计时或内部标识。
+
+输出键名和层级必须严格遵守以下形态，不得增加键：
+
+```json
+{"public_message":"面向双方的简体中文说明","requests":[{"target_roles":["USER","MERCHANT"],"fact_ids":["从 uncovered_fact_catalog 逐字复制的 fact_id"],"requested_material":"最小必要材料","verification_goal":"需要核验的事实目标","required":true}]}
+```

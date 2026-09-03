@@ -213,6 +213,9 @@ class HearingFlowWorkflows:
             "hearing_evidence_requests",
             request,
             HearingEvidenceRequestsLlmOutput,
+            semantic_validator=lambda candidate: _validate_evidence_requests_model_output(
+                request, candidate
+            ),
         )
         known_facts = _case_fact_ids(request.case_fact_matrix)
         requests: list[HearingEvidenceRequest] = []
@@ -275,6 +278,9 @@ class HearingFlowWorkflows:
             "hearing_evidence_requests",
             request,
             HearingEvidenceRequestsLlmOutput,
+            semantic_validator=lambda candidate: _validate_evidence_requests_model_output(
+                request, candidate
+            ),
             agent_context=agent_context,
         )
         return self._evidence_requests_proposal(request, _output=output)
@@ -2084,6 +2090,16 @@ def _validate_intake_question_fact_membership(
 ) -> HearingIntakeQuestionsLlmOutput:
     if any(set(item.fact_ids) - known for item in output.questions):
         raise ValueError("intake questions reference facts outside the frozen matrix")
+    return output
+
+
+def _validate_evidence_requests_model_output(
+    request: HearingEvidenceRequestsRequest,
+    output: HearingEvidenceRequestsLlmOutput,
+) -> HearingEvidenceRequestsLlmOutput:
+    known = _case_fact_ids(request.case_fact_matrix)
+    if any(set(item.fact_ids) - known for item in output.requests):
+        raise ValueError("evidence requests reference facts outside current case matrix")
     return output
 
 

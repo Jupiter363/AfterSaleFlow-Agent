@@ -145,6 +145,49 @@ class EvidenceDossierFreezerTest {
     }
 
     @Test
+    void freezesIncompleteV3AssessmentWithNullScoresForHumanReview() throws Exception {
+        EvidenceItemEntity item = evidence("EVIDENCE_INCOMPLETE_V3");
+        EvidenceVerificationEntity verification =
+                verification(
+                        item,
+                        EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW,
+                        incompleteV3AssessmentJson(),
+                        true);
+        stubFreezeAuthority(1, List.of(item));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        item.getId()))
+                .thenReturn(Optional.of(verification));
+
+        EvidenceDossierEntity frozen = freezer.freeze(CASE_ID, 1, "system");
+
+        JsonNode frozenItem =
+                objectMapper.readTree(frozen.getSummaryJson()).path("evidence_items").get(0);
+        assertThat(frozenItem.path("authenticity_score").isNull()).isTrue();
+        assertThat(frozenItem.path("relevance_score").isNull()).isTrue();
+        assertThat(frozenItem.path("completeness_score").isNull()).isTrue();
+        assertThat(frozenItem.path("assessment_confidence").isNull()).isTrue();
+        assertThat(frozenItem.path("assessment_complete").asBoolean()).isFalse();
+        assertThat(frozenItem.path("requires_human_review").asBoolean()).isTrue();
+        assertThat(frozenItem.path("reason_details").get(0).path("code").asText())
+                .isEqualTo("ASSESSMENT_INCOMPLETE");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<EvidenceDossierItemEntity>> snapshots =
+                ArgumentCaptor.forClass(List.class);
+        verify(dossierItemRepository).saveAll(snapshots.capture());
+        String snapshotJson =
+                (String)
+                        ReflectionTestUtils.getField(
+                                snapshots.getValue().get(0), "evidenceSnapshotJson");
+        JsonNode snapshot = objectMapper.readTree(snapshotJson);
+        assertThat(snapshot.path("authenticity_score").isNull()).isTrue();
+        assertThat(snapshot.path("assessment_confidence").isNull()).isTrue();
+        assertThat(snapshot.path("assessment_complete").asBoolean()).isFalse();
+        assertThat(snapshot.path("verification_status").asText())
+                .isEqualTo("NEEDS_HUMAN_REVIEW");
+    }
+
+    @Test
     void failsClosedWithoutFormalIntakeMatrixAuthority() {
         when(dossierRepository.findByCaseIdAndDossierVersion(CASE_ID, 1))
                 .thenReturn(Optional.empty());
@@ -306,6 +349,24 @@ class EvidenceDossierFreezerTest {
                     "source_unit_id":"SOURCE_UNIT_01",
                     "observation_slot":"OBS_01"
                   }]
+                }
+                """;
+    }
+
+    private static String incompleteV3AssessmentJson() {
+        return """
+                {
+                  "schema_version":"evidence-turn-result.v3",
+                  "assessment_public_text":"材料已读取，但模型未返回完整核验评分。",
+                  "verification_feedback":"材料已读取，但模型未返回完整核验评分。",
+                  "assessment_complete":false,
+                  "requires_human_review":true,
+                  "reason_details":[{
+                    "code":"ASSESSMENT_INCOMPLETE",
+                    "label":"模型核验字段不完整，需人工复核",
+                    "explanation":"缺少或无效的模型核验项：真实性评分、关联度评分、完整性评分、核验置信度、风险等级。"
+                  }],
+                  "fact_links":[]
                 }
                 """;
     }

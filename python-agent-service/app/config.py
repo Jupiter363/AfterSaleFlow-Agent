@@ -336,7 +336,7 @@ class Settings(BaseSettings):
     例如 litellm_base_url 可由 LITELLM_BASE_URL 覆盖。
     """
 
-    QWEN_MODEL: ClassVar[str] = "qwen3.7-max-2026-06-08"
+    QWEN_MODEL: ClassVar[str] = "qwen3.8-flash"
 
     model_config = SettingsConfigDict(
         # .env 是本地开发配置文件；生产环境通常由容器环境变量注入。
@@ -530,7 +530,7 @@ class Settings(BaseSettings):
             composite = self.graph_target_e2e_bindings[0]
             if (
             composite.graph_key != "all-rooms.target-e2e.v2"
-            or composite.graph_version != "target-e2e-graph.2026-08-18.2"
+            or composite.graph_version != "target-e2e-graph.2026-08-18.3"
             or composite.checkpoint_schema_version != "target-e2e-checkpoint.v2"
                 or composite.output_schema_version
             != "target-e2e-room-proposal-source.v2"

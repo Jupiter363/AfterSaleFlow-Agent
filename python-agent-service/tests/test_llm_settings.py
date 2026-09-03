@@ -20,7 +20,7 @@ def test_settings_resolve_qwen_only_through_litellm() -> None:
     )
 
     assert settings.resolved_llm_base_url == "http://litellm-proxy:4000"
-    assert settings.resolved_llm_model == "qwen3.7-max-2026-06-08"
+    assert settings.resolved_llm_model == "qwen3.8-flash"
     assert settings.resolved_llm_api_key == "test-litellm-master-key"
 
 

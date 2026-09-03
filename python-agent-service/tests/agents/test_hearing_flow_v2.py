@@ -1485,6 +1485,25 @@ def test_evidence_requests_accept_the_prehearing_frozen_matrix_for_new_facts() -
     assert result.requests[0].target_roles == ["USER", "MERCHANT"]
     assert result.requests[0].verification_goal == "核验实际签收人与代收授权"
 
+    model_call = runner.calls[0]
+    semantic_validator = model_call["semantic_validator"]
+    invalid_output = model_call["output_type"].model_validate(
+        {
+            "requests": [
+                {
+                    "target_roles": ["USER", "MERCHANT"],
+                    "fact_ids": ["FACT_HALLUCINATED"],
+                    "requested_material": "模型臆造事实对应的材料",
+                    "verification_goal": "错误核验目标",
+                    "required": True,
+                }
+            ],
+            "public_message": "错误输出。",
+        }
+    )
+    with pytest.raises(ValueError, match="outside current case matrix"):
+        semantic_validator(invalid_output)
+
 
 def test_evidence_request_scope_remains_prompt_guidance_but_roles_are_shared() -> None:
     runner = QueueRunner(

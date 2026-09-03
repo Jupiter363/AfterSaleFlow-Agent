@@ -2182,6 +2182,40 @@ def _model_context() -> IntakeModelContextViewV1:
     )
 
 
+def test_ready_pending_respondent_selects_optional_no_delta_dossier_schema() -> None:
+    payload = _model_context().model_dump(mode="json")
+    payload.pop("model_context_view_sha256")
+    payload["source_capacity"] = {
+        "business_role": "USER",
+        "litigation_capacity": "RESPONDENT",
+        "writable_partition": "RESPONDENT_ONLY",
+    }
+    payload["current_user_message"]["source_capacity"] = "RESPONDENT"
+    payload["authorized_question_slots"][0]["target_capacity"] = "RESPONDENT"
+    previous_state = payload["previous_state"]
+    previous_state["persisted_phase"] = "READY_PENDING_REMARK_INVITE"
+    payload["current_action_binding"] = {
+        "action": "INVITE_OPTIONAL_REMARK",
+        "derived_from_phase": "READY_PENDING_REMARK_INVITE",
+        "phase_source_sha256": canonical_sha256(previous_state),
+    }
+    context = IntakeModelContextViewV1.seal(payload)
+
+    output_type, _ = parallel_graph_module._request_bound_frame_types(
+        "DOSSIER_FRAME",
+        context,
+    )
+
+    assert output_type.model_validate(
+        {
+            "respondent_attitude": None,
+            "respondent_position_summary": None,
+            "respondent_alternative_proposal": None,
+            "public_projection_items": [],
+        }
+    )
+
+
 def _context_envelope(context: IntakeModelContextViewV1):
     return build_parallel_context_envelope(
         case_ref=IntakeCaseRefV1.model_validate(

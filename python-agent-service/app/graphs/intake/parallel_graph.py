@@ -1514,6 +1514,11 @@ def _request_bound_frame_types(
         respondent_capacity=(
             model_context.source_capacity.litigation_capacity == "RESPONDENT"
         ),
+        allow_empty_respondent_delta=(
+            model_context.source_capacity.litigation_capacity == "RESPONDENT"
+            and model_context.previous_state.persisted_phase
+            in {"READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"}
+        ),
     )
     return output_type, item_type
 

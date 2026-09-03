@@ -257,7 +257,7 @@ def _target_e2e_command(
         {
             "room_type": room_type,
             "graph_key": graph_key,
-        "graph_version": "target-e2e-graph.2026-08-18.2",
+        "graph_version": "target-e2e-graph.2026-08-18.3",
             "checkpoint_schema_version": "target-e2e-checkpoint.v2",
             "actor_scope": {
                 **payload["actor_scope"],
@@ -286,7 +286,7 @@ def _target_e2e_registry(*, prompt_version: str = "all-rooms-prompt.target-e2e.v
         binding=replace(
             record.binding,
             graph_key="all-rooms.target-e2e.v2",
-            graph_version="target-e2e-graph.2026-08-18.2",
+            graph_version="target-e2e-graph.2026-08-18.3",
             checkpoint_schema_version="target-e2e-checkpoint.v2",
             prompt_version=prompt_version,
             output_schema_version="target-e2e-room-proposal-source.v2",

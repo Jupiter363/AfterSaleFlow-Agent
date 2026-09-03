@@ -7,8 +7,8 @@ plan_status: IMPLEMENTED_FOCUSED_VERIFIED
 implementation_status: R5_THREE_NODE_PARENT_FOCUSED_VERIFIED
 runtime_change: SOURCE_COMPLETE_FRESH_ACTIVATION_REQUIRED
 database_change: IMPLEMENTED_JAVA_V081_TO_V088_AND_GRAPH_G011_TO_G013
-uat_status: PENDING_FRESH_ACTIVATION
-target_model: qwen3.7-max-2026-06-08
+uat_status: PASSED_FULL_BROWSER_CASE_P9_6A98633E_11
+target_model: qwen3.8-flash
 provider_output_mode: STRICT_JSON_SCHEMA
 thinking: DISABLED
 target_execution_profile: PARALLEL_FRAMES_V1
@@ -39,7 +39,7 @@ parallel_stream_protocol: agent-stream.v4
 2. `DOSSIER_FRAME`：生成可独立校验的案情 typed patch proposal 与最终结构化增量。
 3. `QUALITY_FRAME`：生成可独立校验的评分/gap typed metric proposal 与最终六项评分和受约束缺口候选。
 
-三个节点使用完全相同、一次冻结的业务上下文快照，只改变各自的 System 指令、输出 Schema 和输出预算。三路模型均固定为 `qwen3.7-max-2026-06-08`、strict JSON Schema、thinking 关闭；本方案不混用小模型，不引入模型自动降级。
+三个节点使用完全相同、一次冻结的业务上下文快照，只改变各自的 System 指令、输出 Schema 和输出预算。三路模型均固定为 `qwen3.8-flash`、strict JSON Schema、thinking 关闭；本方案不混用其他模型，不引入模型自动降级。
 
 三路输出不能各自改写正式案件状态。Provider 调用前，Java 必须原子 admission exact-three Frame manifest 并返回 durable ack；三个 Node 随后把各自 validator 返回的 canonical typed projection item 写入同一个 attempt-scoped multiplex ingress。Python 父运行器只为当前 transport session 分配连接内顺序，Java 为每个公开 item 原子持久化 per-Frame `next_local_index`、durable event/outbox 和 cursor；重放只认 Java durable cursor、per-Frame progress 与 hash。Java 收齐三个 sealed Frame 后执行唯一确定性 Assembler/Reducer：
 
@@ -134,7 +134,7 @@ parallel_stream_protocol: agent-stream.v4
 固定目标：
 
 ```text
-model = qwen3.7-max-2026-06-08
+model = qwen3.8-flash
 strict_json_schema = true
 thinking = false
 ```

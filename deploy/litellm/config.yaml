@@ -2,9 +2,9 @@
 # 说明：本注释用于帮助读者先了解配置用途，再修改具体配置项。
 
 model_list:
-  - model_name: qwen3.7-max-2026-06-08
+  - model_name: qwen3.8-flash
     litellm_params:
-      model: openai/qwen3.7-max-2026-06-08
+      model: openai/qwen3.8-flash
       api_key: os.environ/DASHSCOPE_API_KEY
       api_base: os.environ/DEFAULT_LLM_API_BASE
       extra_body:

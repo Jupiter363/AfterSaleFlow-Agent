@@ -306,6 +306,66 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
     }
 
     @Test
+    void activityRetryPassesPartialCompletionProbeAndRunsOnlyTheFailedSuccessor() {
+        ExecuteAgentRunRequest request = validParallelRequest();
+        StreamFixture complete = StreamFixture.complete(request);
+        StreamFixture oneLaneFailed = complete.withLines(List.of(
+                complete.lines().get(0),
+                complete.lines().get(1),
+                complete.lines().get(2),
+                complete.lines().get(3),
+                complete.lines().get(7),
+                complete.lines().get(8),
+                complete.lines().get(9),
+                complete.lines().get(11)));
+        GraphTransportSecurityProof proof = mutualTlsProof();
+        RecordingStaging staging = new RecordingStaging(request, complete)
+                .withIncompleteCompletionConflict();
+
+        assertThatThrownBy(() -> client(
+                                request,
+                                proof,
+                                new FakeCommandTransport(proof, oneLaneFailed),
+                                staging)
+                        .executeOrResume(
+                                request,
+                                ignored -> {},
+                                new AgentRunCancellationToken()))
+                .isInstanceOfSatisfying(
+                        TargetE2EGraphClientException.class,
+                        failure -> assertThat(failure.errorCode())
+                                .isEqualTo("INTAKE_PARALLEL_FRAME_BATCH_FAILED"));
+        int actionsBeforeRetry = staging.actions.size();
+        AbandonmentTransport retryTransport = new AbandonmentTransport(proof, complete);
+
+        FrameExecutionReceipt receipt = client(request, proof, retryTransport, staging)
+                .executeOrResume(
+                        request,
+                        ignored -> {},
+                        new AgentRunCancellationToken());
+
+        assertThat(receipt.frameSetId()).isEqualTo(complete.frameSetId());
+        assertThat(retryTransport.phases).containsExactly("PREPARE", "EXECUTE");
+        assertThat(retryTransport.executedFrameTypes)
+                .containsExactly(FrameType.DIALOGUE_FRAME);
+        assertThat(staging.actions.subList(actionsBeforeRetry, staging.actions.size()))
+                .containsSubsequence(
+                        "find-completion",
+                        "admit",
+                        "plan",
+                        "plan-retry:DIALOGUE_FRAME:2")
+                .endsWith(
+                        "append:PUBLIC_FRAME_START:DIALOGUE_FRAME",
+                        "append:PUBLIC_FRAME_PROJECTION_ITEM:DIALOGUE_FRAME",
+                        "append:USAGE:DIALOGUE_FRAME",
+                        "seal:DIALOGUE_FRAME",
+                        "find-completion");
+        assertThat(staging.slots.get(FrameType.DIALOGUE_FRAME).generation()).isEqualTo(2L);
+        assertThat(staging.slots.get(FrameType.QUALITY_FRAME).generation()).isEqualTo(1L);
+        assertThat(staging.slots.get(FrameType.DOSSIER_FRAME).generation()).isEqualTo(1L);
+    }
+
+    @Test
     void partialSealedCompletionConflictRetainsLocalReconciliationAuthority() {
         ExecuteAgentRunRequest request = validParallelRequest();
         StreamFixture complete = StreamFixture.complete(request);
@@ -1211,6 +1271,28 @@ class HttpTargetE2EIntakeParallelFrameExecutionClientTest {
                             null,
                             null,
                             "CALL_STATE_AMBIGUOUS"));
+                    continue;
+                }
+                if (slot.state() == SlotState.FAILED) {
+                    FrameWire previous = fixture.frames().get(type);
+                    long generation = slot.generation() + 1;
+                    String frameId = replacementFrameId(
+                            value.frameSetId(), previous, Math.toIntExact(generation));
+                    slots.put(type, new FrameSlotView(
+                            type, generation, frameId, SlotState.ADMITTED, null));
+                    actions.add("plan-retry:" + type + ":" + generation);
+                    lanes.put(type, new ExecutionLane(
+                            type,
+                            generation,
+                            frameId,
+                            SlotState.ADMITTED,
+                            ExecutionAction.RUN_RETRY,
+                            0,
+                            3,
+                            null,
+                            null,
+                            null,
+                            "GRAPH_PROVIDER_STREAM_INTERRUPTED"));
                     continue;
                 }
                 lanes.put(type, new ExecutionLane(

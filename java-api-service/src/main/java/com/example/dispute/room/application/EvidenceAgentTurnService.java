@@ -584,33 +584,33 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 throw new IllegalStateException(
                         "v3 Evidence assessment is outside current actor attachment authority");
             }
-            double authenticity = header.path("authenticity_score").doubleValue();
-            double relevance = header.path("relevance_score").doubleValue();
-            double completeness = header.path("completeness_score").doubleValue();
-            double confidence = header.path("assessment_confidence").doubleValue();
-            String riskLevel = header.path("risk_level").textValue();
+            Double authenticity = optionalAssessmentScore(header, "authenticity_score");
+            Double relevance = optionalAssessmentScore(header, "relevance_score");
+            Double completeness = optionalAssessmentScore(header, "completeness_score");
+            Double confidence = optionalAssessmentScore(header, "assessment_confidence");
+            String riskLevel = optionalAssessmentText(header, "risk_level");
             var reasonDetails = objectMapper.createArrayNode();
             appendReviewReason(
                     reasonDetails,
-                    authenticity < 0.50,
+                    authenticity != null && authenticity < 0.50,
                     "LOW_AUTHENTICITY_SUSPECTED_FORGERY",
                     "疑似造假：真实性评分低于 50%",
                     header.path("authenticity_score_explanation").asText(""));
             appendReviewReason(
                     reasonDetails,
-                    relevance < 0.50,
+                    relevance != null && relevance < 0.50,
                     "LOW_RELEVANCE_SCORE",
                     "关联度低：材料与待证事实的关联性评分低于 50%",
                     header.path("relevance_score_explanation").asText(""));
             appendReviewReason(
                     reasonDetails,
-                    completeness < 0.50,
+                    completeness != null && completeness < 0.50,
                     "LOW_COMPLETENESS_SCORE",
                     "完成度低：材料完整性评分偏低",
                     header.path("completeness_score_explanation").asText(""));
             appendReviewReason(
                     reasonDetails,
-                    confidence < 0.50,
+                    confidence != null && confidence < 0.50,
                     "LOW_ASSESSMENT_CONFIDENCE",
                     "置信度低：模型对本次核验的把握不足",
                     header.path("assessment_confidence_explanation").asText(""));
@@ -620,6 +620,27 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                     "HIGH_RISK_FLAG",
                     "模型综合判断该材料为高风险",
                     header.path("risk_explanation").asText(""));
+            List<String> incompleteAssessmentFields = new ArrayList<>();
+            appendIncompleteAssessmentField(
+                    incompleteAssessmentFields, authenticity, "真实性评分");
+            appendIncompleteAssessmentField(
+                    incompleteAssessmentFields, relevance, "关联度评分");
+            appendIncompleteAssessmentField(
+                    incompleteAssessmentFields, completeness, "完整性评分");
+            appendIncompleteAssessmentField(
+                    incompleteAssessmentFields, confidence, "核验置信度");
+            if (riskLevel == null) {
+                incompleteAssessmentFields.add("风险等级");
+            }
+            boolean assessmentComplete = incompleteAssessmentFields.isEmpty();
+            appendReviewReason(
+                    reasonDetails,
+                    !assessmentComplete,
+                    "ASSESSMENT_INCOMPLETE",
+                    "模型核验字段不完整，需人工复核",
+                    "缺少或无效的模型核验项："
+                            + String.join("、", incompleteAssessmentFields)
+                            + "。");
             boolean requiresReview = !reasonDetails.isEmpty();
             EvidenceVerificationStatus status = requiresReview
                     ? EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW
@@ -648,6 +669,16 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             findings.put("verification_feedback", frame.publicText());
             findings.put("public_text_sha256", frame.publicTextSha256());
             findings.put("requires_human_review", requiresReview);
+            findings.put("assessment_complete", assessmentComplete);
+            putNullableScore(findings, "authenticity_score", authenticity);
+            putNullableScore(findings, "relevance_score", relevance);
+            putNullableScore(findings, "completeness_score", completeness);
+            putNullableScore(findings, "assessment_confidence", confidence);
+            if (riskLevel == null) {
+                findings.putNull("risk_level");
+            } else {
+                findings.put("risk_level", riskLevel);
+            }
             findings.set("reason_details", reasonDetails.deepCopy());
             findings.set("fact_links", factLinks);
             ObjectNode reasons = objectMapper.createObjectNode();
@@ -671,6 +702,39 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                             Instant.now(clock),
                             AGENT_SENDER_ID,
                             traceId));
+        }
+    }
+
+    private static Double optionalAssessmentScore(JsonNode header, String fieldName) {
+        JsonNode value = header.path(fieldName);
+        if (!value.isNumber()) {
+            return null;
+        }
+        double score = value.doubleValue();
+        return Double.isFinite(score) && score >= 0.0 && score <= 1.0 ? score : null;
+    }
+
+    private static String optionalAssessmentText(JsonNode header, String fieldName) {
+        JsonNode value = header.path(fieldName);
+        if (!value.isTextual()) {
+            return null;
+        }
+        String text = value.textValue().trim();
+        return text.isEmpty() ? null : text;
+    }
+
+    private static void appendIncompleteAssessmentField(
+            List<String> incompleteFields, Double value, String label) {
+        if (value == null) {
+            incompleteFields.add(label);
+        }
+    }
+
+    private static void putNullableScore(ObjectNode target, String fieldName, Double value) {
+        if (value == null) {
+            target.putNull(fieldName);
+        } else {
+            target.put(fieldName, value);
         }
     }
 

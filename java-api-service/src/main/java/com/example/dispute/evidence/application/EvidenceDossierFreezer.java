@@ -158,10 +158,17 @@ public class EvidenceDossierFreezer {
             JsonNode assessment = agentFindings(item);
             // v3 scores are independent model authority.  The freezer copies them
             // verbatim and never supplies a default, normalizes, clamps or combines them.
-            double authenticityScore = verificationScore(item, "authenticity_score");
-            double relevanceScore = verificationScore(item, "relevance_score");
-            double completenessScore = verificationScore(item, "completeness_score");
-            double assessmentConfidence = verificationScore(item, "assessment_confidence");
+            Double authenticityScore = verificationScore(item, "authenticity_score");
+            Double relevanceScore = verificationScore(item, "relevance_score");
+            Double completenessScore = verificationScore(item, "completeness_score");
+            Double assessmentConfidence = verificationScore(item, "assessment_confidence");
+            boolean assessmentComplete =
+                    assessmentComplete(
+                            assessment,
+                            authenticityScore,
+                            relevanceScore,
+                            completenessScore,
+                            assessmentConfidence);
             String claimedFact = claimedFact(evidence);
             List<FactLinkSnapshot> factLinks = factLinks(item);
             boolean structuredFactLinks = hasStructuredFactLinks(item);
@@ -237,6 +244,7 @@ public class EvidenceDossierFreezer {
             evidenceItem.put(
                     "assessment_public_text",
                     assessment.path("assessment_public_text").asText());
+            evidenceItem.put("assessment_complete", assessmentComplete);
             evidenceItem.put("requires_human_review", requiresHumanReview);
             evidenceItem.put("reason_details", assessment.path("reason_details").deepCopy());
             evidenceItem.put("verification_status", statusName(item.status()));
@@ -322,6 +330,10 @@ public class EvidenceDossierFreezer {
         for (IncludedEvidence item : included) {
             EvidenceItemEntity evidence = item.evidence();
             JsonNode assessment = agentFindings(item);
+            Double authenticityScore = verificationScore(item, "authenticity_score");
+            Double relevanceScore = verificationScore(item, "relevance_score");
+            Double completenessScore = verificationScore(item, "completeness_score");
+            Double assessmentConfidence = verificationScore(item, "assessment_confidence");
             Map<String, Object> snapshot = new LinkedHashMap<>();
             snapshot.put("evidence_type", evidence.getEvidenceType());
             snapshot.put("source_type", evidence.getSourceType());
@@ -341,21 +353,21 @@ public class EvidenceDossierFreezer {
                     "enforcement_gate",
                     evidenceMetadata(evidence).path("enforcement_gate").asText(null));
             snapshot.put("verification_status", statusName(item.status()));
-            snapshot.put("authenticity_score", verificationScore(item, "authenticity_score"));
+            snapshot.put("authenticity_score", authenticityScore);
             snapshot.put(
                     "authenticity_score_explanation",
                     assessment.path("authenticity_score_explanation").asText());
-            snapshot.put("relevance_score", verificationScore(item, "relevance_score"));
+            snapshot.put("relevance_score", relevanceScore);
             snapshot.put(
                     "relevance_score_explanation",
                     assessment.path("relevance_score_explanation").asText());
-            snapshot.put("completeness_score", verificationScore(item, "completeness_score"));
+            snapshot.put("completeness_score", completenessScore);
             snapshot.put(
                     "completeness_score_explanation",
                     assessment.path("completeness_score_explanation").asText());
             snapshot.put(
                     "assessment_confidence",
-                    verificationScore(item, "assessment_confidence"));
+                    assessmentConfidence);
             snapshot.put(
                     "assessment_confidence_explanation",
                     assessment.path("assessment_confidence_explanation").asText());
@@ -372,6 +384,14 @@ public class EvidenceDossierFreezer {
             snapshot.put(
                     "assessment_public_text",
                     assessment.path("assessment_public_text").asText());
+            snapshot.put(
+                    "assessment_complete",
+                    assessmentComplete(
+                            assessment,
+                            authenticityScore,
+                            relevanceScore,
+                            completenessScore,
+                            assessmentConfidence));
             snapshot.put("requires_human_review", item.verification().isRequiresHumanReview());
             snapshot.put("reason_details", assessment.path("reason_details").deepCopy());
             snapshots.add(
@@ -611,7 +631,7 @@ public class EvidenceDossierFreezer {
     // 上游调用：「EvidenceDossierFreezer.verificationScore(IncludedEvidence,String,double)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
     // 下游影响：「EvidenceDossierFreezer.verificationScore(IncludedEvidence,String,double)」向下依次触达 「Double.isFinite」、「Math.max」、「Math.min」、「item.verification」；计算结果以「double」交给调用方。
     // 系统意义：「EvidenceDossierFreezer.verificationScore(IncludedEvidence,String,double)」负责主链路中的“核验分数”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private double verificationScore(IncludedEvidence item, String fieldName) {
+    private Double verificationScore(IncludedEvidence item, String fieldName) {
         if (item.verification() == null) {
             throw new IllegalStateException(
                     "frozen Evidence material has no v3 model assessment");
@@ -622,13 +642,30 @@ public class EvidenceDossierFreezer {
                             .readTree(item.verification().getAgentFindingsJson())
                             .path(fieldName);
             if (!value.isNumber()) {
-                throw new IllegalStateException(
-                        "frozen Evidence v3 assessment score is absent: " + fieldName);
+                return null;
             }
-            return value.asDouble();
+            double score = value.doubleValue();
+            return Double.isFinite(score) && score >= 0.0 && score <= 1.0 ? score : null;
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("frozen Evidence assessment is invalid JSON", exception);
         }
+    }
+
+    private static boolean assessmentComplete(
+            JsonNode assessment,
+            Double authenticityScore,
+            Double relevanceScore,
+            Double completenessScore,
+            Double assessmentConfidence) {
+        boolean explicitlyIncomplete =
+                assessment.has("assessment_complete")
+                        && !assessment.path("assessment_complete").asBoolean(false);
+        return !explicitlyIncomplete
+                && authenticityScore != null
+                && relevanceScore != null
+                && completenessScore != null
+                && assessmentConfidence != null
+                && !assessment.path("risk_level").asText("").trim().isEmpty();
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.hasStructuredFactLinks(IncludedEvidence)」。

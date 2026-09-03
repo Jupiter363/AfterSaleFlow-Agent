@@ -555,8 +555,8 @@ def test_activation_graph_hash_is_distinct_from_executor_registry_hash() -> None
     target, registry_hash = provision._target_binding("a" * 40)
     activation, activation_hash = provision._activation_graph_binding(target)
 
-    assert target["graph_version"] == "target-e2e-graph.2026-08-18.2"
-    assert target["graph_version"] != "target-e2e-graph.2026-08-18.1"
+    assert target["graph_version"] == "target-e2e-graph.2026-08-18.3"
+    assert target["graph_version"] != "target-e2e-graph.2026-08-18.2"
     preimage = dict(activation)
     preimage.pop("bindingHash")
     assert activation_hash == common.canonical_sha256(preimage)
@@ -1111,6 +1111,30 @@ def test_graph_patch_release_domain_authority_preserves_predecessor() -> None:
     assert "create or replace function enforce_target_e2e_intake_selection()" in migration
     assert migration.count("'target-e2e-graph.2026-08-18.1'") == 4
     assert migration.count("'target-e2e-graph.2026-08-18.2'") == 4
+    assert "'target-e2e-graph.2026-07-27.1'" in migration
+    assert "'target-e2e-room-proposal-source.v1'" in migration
+    assert "activation_row.graph_version is distinct from new.graph_version" in migration
+
+
+def test_current_graph_patch_release_preserves_both_predecessors() -> None:
+    migration = (
+        ROOT
+        / "java-api-service"
+        / "src"
+        / "main"
+        / "resources"
+        / "db"
+        / "migration"
+        / "V094__target_e2e_graph_patch_release_identity.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "ck_target_e2e_activation_bindings" in migration
+    assert "ck_r15_selection_constants" in migration
+    assert "ck_intake_graph_thread_constants" in migration
+    assert "create or replace function enforce_target_e2e_intake_selection()" in migration
+    assert migration.count("'target-e2e-graph.2026-08-18.1'") == 4
+    assert migration.count("'target-e2e-graph.2026-08-18.2'") == 4
+    assert migration.count("'target-e2e-graph.2026-08-18.3'") == 4
     assert "'target-e2e-graph.2026-07-27.1'" in migration
     assert "'target-e2e-room-proposal-source.v1'" in migration
     assert "activation_row.graph_version is distinct from new.graph_version" in migration

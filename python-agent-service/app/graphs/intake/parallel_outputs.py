@@ -366,11 +366,60 @@ class IntakeRespondentDossierGenerationV6(StrictFrameOutput):
             raise ValueError("Dossier current-source facts must have unique fact keys")
         return self
 
+
+class IntakeRespondentRemarkDossierGenerationV7(StrictFrameOutput):
+    """Provider draft for the exact optional-remark transition.
+
+    Once Intake is ready, a respondent may either answer the optional-remark
+    invitation or explicitly close Intake without adding another fact. Keep every
+    field required on the wire so strict JSON Schema remains deterministic, but
+    represent that no-delta branch with three null claim fields and an empty
+    projection array. A substantive remark must still carry the complete claim
+    tuple and at least one current-source fact.
+    """
+
+    respondent_attitude: DossierRespondentAttitude | None
+    respondent_position_summary: DossierPositionSummary | None
+    respondent_alternative_proposal: DossierOptionalProposalText | None
+    public_projection_items: tuple[DossierPublicFactDraftV5, ...] = Field(
+        max_length=DOSSIER_FACT_MAX_ITEMS,
+    )
+
+    @model_validator(mode="after")
+    def validate_optional_remark_delta(
+        self,
+    ) -> "IntakeRespondentRemarkDossierGenerationV7":
+        claim_values = (
+            self.respondent_attitude,
+            self.respondent_position_summary,
+            self.respondent_alternative_proposal,
+        )
+        if not self.public_projection_items:
+            if any(value is not None for value in claim_values):
+                raise ValueError(
+                    "Dossier no-delta remark must use null respondent claim fields"
+                )
+            return self
+        if any(value is None for value in claim_values):
+            raise ValueError(
+                "Dossier substantive remark requires the complete respondent claim"
+            )
+        proposal = self.respondent_alternative_proposal
+        if proposal and proposal != proposal.strip():
+            raise ValueError(
+                "Dossier respondent alternative proposal must be empty or trimmed"
+            )
+        fact_keys = tuple(item.source_row.fact_key for item in self.public_projection_items)
+        if len(fact_keys) != len(set(fact_keys)):
+            raise ValueError("Dossier current-source facts must have unique fact keys")
+        return self
+
 def request_bound_dossier_output_types(
     *,
     existing_fact_keys: tuple[str, ...],
     new_fact_key_prefix: str,
     respondent_capacity: bool,
+    allow_empty_respondent_delta: bool = False,
 ) -> tuple[type[BaseModel], type[DossierPublicFactDraftV5]]:
     """Narrow Dossier authority in the provider-visible Schema for this exact turn."""
 
@@ -385,6 +434,8 @@ def request_bound_dossier_output_types(
         raise ValueError("request-bound existing fact key is invalid")
     if re.fullmatch(r"NEW_[A-F0-9]{24}_", new_fact_key_prefix) is None:
         raise ValueError("request-bound new fact-key prefix is invalid")
+    if allow_empty_respondent_delta and not respondent_capacity:
+        raise ValueError("only a respondent remark can authorize an empty delta")
 
     identity = hashlib.sha256(
         ("\0".join((*existing_fact_keys, new_fact_key_prefix, str(respondent_capacity))))
@@ -421,14 +472,15 @@ def request_bound_dossier_output_types(
         __module__=__name__,
         source_row=(row_type, ...),
     )
-    frame_base: type[BaseModel] = (
-        IntakeRespondentDossierGenerationV6
-        if respondent_capacity
-        else IntakeDossierGenerationV5
-    )
+    if allow_empty_respondent_delta:
+        frame_base: type[BaseModel] = IntakeRespondentRemarkDossierGenerationV7
+    elif respondent_capacity:
+        frame_base = IntakeRespondentDossierGenerationV6
+    else:
+        frame_base = IntakeDossierGenerationV5
     public_items_field = (
         Field(min_length=1, max_length=DOSSIER_FACT_MAX_ITEMS)
-        if respondent_capacity
+        if respondent_capacity and not allow_empty_respondent_delta
         else Field(max_length=DOSSIER_FACT_MAX_ITEMS)
     )
     frame_type = create_model(
@@ -686,14 +738,30 @@ def materialize_request_bound_frame_output(
     if frame_type == "DOSSIER_FRAME":
         respondent_claim: dict[str, Any] | None = None
         if respondent_capacity:
-            draft = IntakeRespondentDossierGenerationV6.model_validate(payload)
-            respondent_claim = {
-                "attitude": draft.respondent_attitude,
-                "position_summary": draft.respondent_position_summary,
-                "alternative_proposal": (
-                    draft.respondent_alternative_proposal or None
-                ),
-            }
+            if persisted_phase in {
+                "READY_PENDING_REMARK_INVITE",
+                "WAITING_FOR_REMARK",
+            }:
+                draft = IntakeRespondentRemarkDossierGenerationV7.model_validate(
+                    payload
+                )
+                if draft.public_projection_items:
+                    respondent_claim = {
+                        "attitude": draft.respondent_attitude,
+                        "position_summary": draft.respondent_position_summary,
+                        "alternative_proposal": (
+                            draft.respondent_alternative_proposal or None
+                        ),
+                    }
+            else:
+                draft = IntakeRespondentDossierGenerationV6.model_validate(payload)
+                respondent_claim = {
+                    "attitude": draft.respondent_attitude,
+                    "position_summary": draft.respondent_position_summary,
+                    "alternative_proposal": (
+                        draft.respondent_alternative_proposal or None
+                    ),
+                }
         else:
             draft = IntakeDossierGenerationV5.model_validate(payload)
         materialized_items = [

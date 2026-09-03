@@ -506,7 +506,7 @@ http://localhost:8080/swagger-ui.html
 | 配置 | 默认/作用 |
 | --- | --- |
 | `DASHSCOPE_API_KEY` | 百炼模型凭据，必须只写入本地 `.env` |
-| `LITELLM_DEFAULT_MODEL` | 默认模型别名，仓库默认 `qwen3.7-plus` |
+| `LITELLM_DEFAULT_MODEL` | 默认模型别名，仓库默认 `qwen3.8-flash` |
 | `FEATURE_HUMAN_REVIEW_REQUIRED` | 默认 `true`，强制人工终审 |
 | `FEATURE_TOOL_EXECUTOR_SIMULATION` | 默认 `true`，本地环境不声称真实退款/履约执行 |
 | `EVIDENCE_WINDOW` | 默认 `PT2H` |

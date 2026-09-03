@@ -84,6 +84,8 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
     private static final String FRAME_SET_HEADER = "X-Intake-Frame-Set-Id";
     private static final String STARTED_AMBIGUOUS =
             "INTAKE_PARALLEL_EXECUTION_STARTED_AMBIGUOUS";
+    private static final String COMPLETION_INCOMPLETE =
+            "INTAKE_PARALLEL_COMPLETION_INCOMPLETE";
     private static final String PROJECTION_REGISTRY_VERSION = "intake-projection-registry.v1";
     private static final Set<String> REMOTE_ERROR_FIELDS = Set.of("code", "retryable");
     private static final Set<String> FAILURE_TERMINATION_FIELDS = Set.of(
@@ -318,6 +320,14 @@ public final class HttpTargetE2EIntakeParallelFrameExecutionClient
                             completion.lastSequenceNo(),
                             completion.publicOutputEmitted()));
         } catch (StagingConflictException failure) {
+            if (COMPLETION_INCOMPLETE.equals(failure.code())) {
+                // A retry probe may legitimately observe sealed siblings beside a retryable
+                // failed lane. That is not a completion replay. Continue into PREPARE and let
+                // planExecution lock and validate all three current slots before it admits the
+                // one bounded successor generation. The post-stream completion check remains
+                // strict and still rejects the same incomplete shape.
+                return Optional.empty();
+            }
             throw new LocalReconciliationException(
                     failure.code(),
                     "parallel exact-three replay requires local reconciliation",

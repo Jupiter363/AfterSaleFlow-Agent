@@ -199,6 +199,41 @@ CONSISTENCY_QUERIES: Final[tuple[tuple[str, str], ...]] = (
                       and lease.released_at is null
                       and lease.cancelled_at is null
                )
+               and not exists (
+                   select 1
+                     from agent_graph_command_attempt attempt
+                     join agent_graph_lease lease
+                       on lease.thread_id = attempt.thread_id
+                      and lease.command_id = attempt.command_id
+                      and lease.owner_id = attempt.owner_id
+                      and lease.fencing_token = attempt.fencing_token
+                     join agent_graph_parallel_receipt_cycle cycle
+                       on cycle.thread_id = attempt.thread_id
+                      and cycle.command_id = attempt.command_id
+                      and cycle.attempt_id = attempt.attempt_id
+                      and cycle.owner_id = attempt.owner_id
+                      and cycle.fencing_token = attempt.fencing_token
+                     join agent_graph_parallel_receipt_execution execution
+                       on execution.execution_id = cycle.execution_id
+                      and execution.thread_id = cycle.thread_id
+                      and execution.command_id = cycle.command_id
+                      and execution.attempt_id = cycle.attempt_id
+                      and execution.receipt_sha256 = cycle.receipt_sha256
+                      and execution.owner_id = cycle.owner_id
+                      and execution.fencing_token = cycle.fencing_token
+                    where attempt.thread_id = command.thread_id
+                      and attempt.command_id = command.command_id
+                      and attempt.attempt_no = command.attempt_count
+                      and attempt.attempt_status = 'EXECUTING'
+                      and attempt.fencing_token = command.fencing_token
+                      and lease.released_at is not null
+                      and lease.cancelled_at is null
+                      and cycle.terminal_retryable
+                      and cycle.terminal_error_code
+                          = 'INTAKE_PARALLEL_FRAME_BATCH_FAILED'
+                      and cycle.provider_call_count_after
+                          = attempt.provider_call_count
+               )
              limit 1
         ) as inconsistent
         """,

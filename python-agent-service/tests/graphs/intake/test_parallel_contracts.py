@@ -323,6 +323,7 @@ def test_frame_output_schema_pins_dialogue_and_dossier_v4_without_changing_quali
 
 
 def test_prompt_profiles_do_not_embed_foreign_frame_rule_names() -> None:
+    authority = _prompt("intake_turn_parallel_authority.md")
     dialogue = _prompt("intake_turn_dialogue_frame.md")
     dossier = _prompt("intake_turn_dossier_frame.md")
     quality = _prompt("intake_turn_quality_frame.md")
@@ -331,6 +332,31 @@ def test_prompt_profiles_do_not_embed_foreign_frame_rule_names() -> None:
     assert "room_utterance" not in dossier and "score_breakdown" not in dossier
     assert "room_utterance" not in quality and "dossier_delta" not in quality
     assert "不得生成、改写、转述问题正文" in dialogue
+    assert "固定输出一个 `REMARK_ACKNOWLEDGEMENT`" in dialogue
+    assert "立即闭合一次根对象并停止" in dialogue
+    assert (
+        '{"respondent_attitude":null,"respondent_position_summary":null,'
+        '"respondent_alternative_proposal":null,"public_projection_items":[]}'
+        in dossier
+    )
+    assert "不得把上一轮事实复制成伪新增项" in dossier
+    assert "这不是空消息：它是对当前状态的直接确认" in dossier
+    assert "不得输出空数组，也不得为同一语义创建新的 `NEW_*` 事实" in dossier
+    assert "普通单条消息默认只输出 1 至 3 项" in dossier
+    assert "`asserted_value` 即使没有短值也必须显式输出 `null`" in dossier
+    assert "不得为了自我修正而重复任何右括号" in dossier
+    assert "不得重新开始、改写或“修复”已经生成的 JSON" in authority
+    assert (
+        "`public_projection_items` → `gap_candidates` → `quality` 的顺序"
+        in quality
+    )
+    assert "先在内部确定六项分数和 `gap_candidates` 的最终数量" in quality
+    assert "必须把输入中的内部字段语义改写" in quality
+    assert "内部事实键只允许出现在 `linked_fact_keys`" in quality
+    assert "属于后续证据室材料，不是接待质量缺口" in quality
+    assert "不得换一种说法重复追问" in quality
+    assert "没有其他核心案情缺口时输出 `gap_candidates=[]`" in quality
+    assert "只闭合一次 `quality` 对象和一次根对象并立即停止" in quality
     assert "下一阶段建议" not in quality
     assert "不得输出或建议阶段" in quality
 

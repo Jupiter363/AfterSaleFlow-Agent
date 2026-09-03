@@ -1511,6 +1511,60 @@ class EvidenceAgentTurnServiceTest {
     }
 
     @Test
+    void targetV3MissingAssessmentFieldsRemainNullAndTriggerNeutralReview() throws Exception {
+        EvidenceItemEntity attached =
+                evidenceItem("EVIDENCE_V3_INCOMPLETE", "USER", "user-local", "PARTIES");
+        CaseAccessSessionEntity accessSession = mock(CaseAccessSessionEntity.class);
+        when(accessSession.privileged()).thenReturn(false);
+        when(accessSession.getActorRole()).thenReturn(ActorRole.USER);
+        when(accessSession.getActorId()).thenReturn("user-local");
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                "CASE_EVIDENCE_AGENT"))
+                .thenReturn(List.of(attached));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        attached.getId()))
+                .thenReturn(Optional.empty());
+        when(verificationRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        ReflectionTestUtils.invokeMethod(
+                service,
+                "persistTargetV2Assessments",
+                "CASE_EVIDENCE_AGENT",
+                accessSession,
+                List.of(attached.getId()),
+                targetV3AssessmentResult(attached.getId(), null, null, null, null, null),
+                "target-evidence-run:v3-incomplete",
+                "TRACE_V3_INCOMPLETE");
+
+        ArgumentCaptor<EvidenceVerificationEntity> saved =
+                ArgumentCaptor.forClass(EvidenceVerificationEntity.class);
+        verify(verificationRepository).save(saved.capture());
+        JsonNode findings = objectMapper.readTree(saved.getValue().getAgentFindingsJson());
+        JsonNode reasons = objectMapper.readTree(saved.getValue().getReasonsJson());
+        assertThat(findings.path("authenticity_score").isNull()).isTrue();
+        assertThat(findings.path("relevance_score").isNull()).isTrue();
+        assertThat(findings.path("completeness_score").isNull()).isTrue();
+        assertThat(findings.path("assessment_confidence").isNull()).isTrue();
+        assertThat(findings.path("risk_level").isNull()).isTrue();
+        assertThat(findings.path("assessment_complete").asBoolean()).isFalse();
+        assertThat(reasons.path("reason_details").findValuesAsText("code"))
+                .containsExactly("ASSESSMENT_INCOMPLETE");
+        assertThat(reasons.path("reason_details").get(0).path("label").asText())
+                .isEqualTo("模型核验字段不完整，需人工复核");
+        assertThat(reasons.toString())
+                .doesNotContain(
+                        "LOW_AUTHENTICITY_SUSPECTED_FORGERY",
+                        "LOW_RELEVANCE_SCORE",
+                        "LOW_COMPLETENESS_SCORE",
+                        "LOW_ASSESSMENT_CONFIDENCE");
+        assertThat(saved.getValue().getVerificationStatus())
+                .isEqualTo(EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW);
+        assertThat(saved.getValue().isRequiresHumanReview()).isTrue();
+    }
+
+    @Test
     void terminalNoCommitOpeningAdvancesDeterministicGenerationsAndRejectsDriftBeforeAllocation()
             throws Exception {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -3302,10 +3356,10 @@ class EvidenceAgentTurnServiceTest {
 
     private TargetEvidenceTurnResultV2 targetV3AssessmentResult(
             String evidenceId,
-            double authenticityScore,
-            double relevanceScore,
-            double completenessScore,
-            double assessmentConfidence,
+            Double authenticityScore,
+            Double relevanceScore,
+            Double completenessScore,
+            Double assessmentConfidence,
             String riskLevel) {
         ArrayNode manifest = objectMapper.createArrayNode();
 
@@ -3316,15 +3370,25 @@ class EvidenceAgentTurnServiceTest {
         ObjectNode assessment = targetV2Header(2, "EVIDENCE_ASSESSMENT");
         assessment.put("evidence_id", evidenceId);
         assessment.set("observation_slots", objectMapper.createArrayNode());
-        assessment.put("authenticity_score", authenticityScore);
+        if (authenticityScore != null) {
+            assessment.put("authenticity_score", authenticityScore);
+        }
         assessment.put("authenticity_score_explanation", "真实性解释：缺少原始导出。");
-        assessment.put("relevance_score", relevanceScore);
+        if (relevanceScore != null) {
+            assessment.put("relevance_score", relevanceScore);
+        }
         assessment.put("relevance_score_explanation", "关联性解释：仅部分对应待证事实。");
-        assessment.put("completeness_score", completenessScore);
+        if (completenessScore != null) {
+            assessment.put("completeness_score", completenessScore);
+        }
         assessment.put("completeness_score_explanation", "完整性解释：缺少关键上下文。");
-        assessment.put("assessment_confidence", assessmentConfidence);
+        if (assessmentConfidence != null) {
+            assessment.put("assessment_confidence", assessmentConfidence);
+        }
         assessment.put("assessment_confidence_explanation", "置信度解释：可读取信息有限。");
-        assessment.put("risk_level", riskLevel);
+        if (riskLevel != null) {
+            assessment.put("risk_level", riskLevel);
+        }
         assessment.put(
                 "risk_explanation", "综合风险解释：存在必须人工确认的重大风险。");
         assessment.set("source_basis", targetV2Array("材料解析文本"));
