@@ -1,15 +1,24 @@
 # ADR 0017: Isolated Target-Architecture Preproduction E2E
 
-- Status: ACCEPTED FOR ISOLATED PREPRODUCTION ENGINEERING ONLY
+- Status: ACCEPTED; ISOLATED TARGET LANE IMPLEMENTED AND UAT-VERIFIED
 - Date: 2026-07-27
 - Scope: Phase 9 target-architecture end-to-end candidate lane
-- Production authorization: NONE
+- Production authorization: EXPLICIT DEPLOYMENT DECISION REQUIRED
 
 ```text
-production_checkpoint: PENDING_EXTERNAL
-promotion_gate: PENDING
-MIG-003..008: PENDING_PROMOTION
+implementation_checkpoint: COMPLETE
+isolated_browser_uat: PASS
+automatic_production_activation: FORBIDDEN
 ```
+
+## Current implementation note (2026-09-04)
+
+The target lane described by this ADR is now implemented with graph identity
+`all-rooms.target-e2e.v2` / `target-e2e-graph.2026-08-18.3` /
+`target-e2e-checkpoint.v2`. Intake uses `PARALLEL_FRAMES_V1` and `agent-stream.v4`; the complete
+six-station browser flow passed on fresh case `CASE_P9_6A98633E_11`, including image/document
+evidence. This result validates the isolated UAT lane only. It does not silently change default
+Compose settings, deployment routing, external-effect adapters or production authorization.
 
 ## Context
 

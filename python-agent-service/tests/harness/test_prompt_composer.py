@@ -535,12 +535,10 @@ def test_intake_and_evidence_prompts_define_business_specific_prompt_injection_d
 # 系统意义：固定“Agent Harness > test_prompt_composer”的可观察契约，防止后续重构改变业务结果。
 def test_prompt_tuning_log_records_security_hardening_decision() -> None:
     log_path = (
-        Path(__file__).resolve().parents[2]
-        / "app"
-        / "harness"
-        / "prompts"
-        / "tuning_logs"
-        / "2026-07-06-prompt-safety-hardening.md"
+        Path(__file__).resolve().parents[3]
+        / "docs"
+        / "security"
+        / "prompt-safety-hardening.md"
     )
 
     assert log_path.exists()

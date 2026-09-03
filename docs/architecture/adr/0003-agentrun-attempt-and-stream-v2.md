@@ -5,6 +5,15 @@
 - Decision owner: Java, Temporal, Python, Frontend, AI Platform
 - Approved by: project owner through the 2026-07-17 plan approval
 
+## Current implementation note (2026-09-04)
+
+The logical-run, attempt, reset and single-final authority defined here remains in force. Protocol
+versions have advanced since this ADR was written: target Evidence, Hearing, Review and Outcome
+use `agent-stream.v3`, while Intake `PARALLEL_FRAMES_V1` uses the multiplexed
+`agent-stream.v4`. The v2 names below describe the decision's original migration boundary, not the
+current wire identity. Current identities are listed in
+[the current UAT baseline](../../release/current-uat-baseline.md).
+
 ## Context
 
 The current retry path creates new AgentRun rows with `:attempt-N` suffixes, while the public

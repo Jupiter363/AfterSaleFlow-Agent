@@ -92,7 +92,7 @@ def test_phase16_ci_quality_gate_exists() -> None:
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `read`。
 # 系统意义：固定“跨服务契约测试 > test_phase16_acceptance_contract”的可观察契约，防止后续重构改变业务结果。
 def test_phase16_release_review_and_rollback_docs_exist() -> None:
-    contributing = read("CONTRIBUTING.md")
+    contributing = read("docs/development/contributing.md")
     deployment = read("docs/deployment/README.md")
     verification = read(
         "docs/acceptance/temporal-first-agent-platform-verification-checklist.md"

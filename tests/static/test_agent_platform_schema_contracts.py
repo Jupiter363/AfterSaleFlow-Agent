@@ -129,8 +129,13 @@ def _validate_format(value: str, format_name: str, path: str) -> None:
 
 
 def _validate(
-    instance: object, schema: dict, root_schema: dict, path: str = "$"
+    instance: object, schema: dict | bool, root_schema: dict, path: str = "$"
 ) -> None:
+    if schema is True:
+        return
+    if schema is False:
+        raise ContractValidationError(f"{path}: boolean schema rejected value")
+
     if "$ref" in schema:
         _validate(
             instance, _resolve_ref(root_schema, schema["$ref"]), root_schema, path
@@ -242,7 +247,10 @@ def _validate(
             raise ContractValidationError(f"{path}: number is above maximum")
 
 
-def _assert_supported_schema(schema: dict) -> None:
+def _assert_supported_schema(schema: dict | bool) -> None:
+    if isinstance(schema, bool):
+        return
+
     unknown = set(schema) - SUPPORTED_SCHEMA_KEYWORDS
     assert not unknown, f"schema uses untested keywords: {sorted(unknown)}"
     for child in schema.get("$defs", {}).values():

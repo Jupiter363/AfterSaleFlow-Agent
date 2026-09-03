@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -11,14 +10,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BASE = "d18a1f130a925429e8c2dfd11352cea4ca8673a0"
 C7 = "0aa260f722fced0eba4314bd4793e415b5bf0b05"
-PHASE_7_INTENTIONALLY_MUTATED_SNAPSHOT_PATHS = frozenset(
-    {
-        "java-api-service/src/main/java/com/example/dispute/review/application/ReviewApplicationService.java",
-        "python-agent-service/app/agents/review_copilot.py",
-    }
-)
 MATRIX_PATH = ROOT / "contracts/agent-platform/outcome/v1/compatibility-matrix.yaml"
 SCHEMA_PATH = (
     ROOT
@@ -33,13 +25,6 @@ REVIEW_DECISION_SCHEMA_PATH = (
     / "contracts/agent-platform/outcome/v1/outcome-reviewer-decision-receipt.schema.json"
 )
 OUTCOME_FIXTURE_ROOT = ROOT / "contracts/agent-platform/outcome/v1/fixtures"
-ADR_PATH = ROOT / "docs/architecture/adr/0016-phase-7-outcome-engineering-exception.md"
-CHECKPOINT_PATH = (
-    ROOT / "docs/runbooks/temporal-first/phase-6-engineering-checkpoint.md"
-)
-CONTRACT_PACK_PATH = (
-    ROOT / "docs/runbooks/temporal-first/phase-7-p7.0-contract-pack.md"
-)
 MIGRATION_DIRECTORY = "java-api-service/src/main/resources/db/migration"
 MIGRATION_RELATIVE = (
     f"{MIGRATION_DIRECTORY}/V045__outcome_operation_receipt_compensation.sql"
@@ -61,16 +46,6 @@ def _matrix() -> dict[str, Any]:
     return value
 
 
-def _git_blob(revision: str, path: str) -> bytes:
-    completed = subprocess.run(
-        ["git", "show", f"{revision}:{path}"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    )
-    return completed.stdout
-
-
 def _git_tree_paths(revision: str, path: str) -> set[str]:
     completed = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", revision, "--", path],
@@ -80,42 +55,6 @@ def _git_tree_paths(revision: str, path: str) -> set[str]:
         text=True,
     )
     return set(completed.stdout.splitlines())
-
-
-def test_source_snapshot_is_bound_to_exact_accepted_a6_git_blobs() -> None:
-    matrix = _matrix()
-    assert matrix["accepted_base"] == BASE
-    snapshot = matrix["source_snapshot"]
-    assert snapshot["hash_scope"] == "raw_git_blob_at_accepted_base"
-    assert snapshot["digest"] == "SHA_256"
-    assert len(snapshot["files"]) == 9
-
-    pins_by_path = {pin["path"]: pin for pin in snapshot["files"]}
-    assert len(pins_by_path) == len(snapshot["files"])
-    assert PHASE_7_INTENTIONALLY_MUTATED_SNAPSHOT_PATHS <= set(pins_by_path)
-
-    accepted_by_path: dict[str, bytes] = {}
-    for path, pin in pins_by_path.items():
-        accepted = _git_blob(BASE, path)
-        assert hashlib.sha256(accepted).hexdigest() == pin["sha256"]
-        accepted_by_path[path] = accepted
-
-    changed_pinned_paths = {
-        path
-        for path, accepted in accepted_by_path.items()
-        if _git_blob("HEAD", path) != accepted
-    }
-    assert changed_pinned_paths == (
-        PHASE_7_INTENTIONALLY_MUTATED_SNAPSHOT_PATHS
-    )
-    for path, accepted in accepted_by_path.items():
-        if path not in PHASE_7_INTENTIONALLY_MUTATED_SNAPSHOT_PATHS:
-            assert _git_blob("HEAD", path) == accepted
-
-    checkpoint = snapshot["accepted_checkpoint"]
-    accepted_checkpoint = _git_blob(BASE, checkpoint["path"])
-    assert hashlib.sha256(accepted_checkpoint).hexdigest() == checkpoint["sha256"]
-    assert _git_blob("HEAD", checkpoint["path"]) == accepted_checkpoint
 
 
 def test_java_is_the_sole_formal_authority_for_all_five_human_decisions() -> None:
@@ -403,17 +342,6 @@ def test_effect_protocol_requires_query_before_retry_and_append_only_compensatio
     assert retry["workflow_completion_while_compensation_in_flight"] == "forbidden"
     assert retry["redis_lock_authority"] == "NONE"
 
-    for path in (ADR_PATH, CONTRACT_PACK_PATH):
-        text = path.read_text(encoding="utf-8")
-        lowered = text.lower()
-        assert "AMBIGUOUS" in text
-        assert "nonterminal" in lowered or "non-terminal" in lowered
-        assert "closure" in lowered and ("block" in lowered or "blocking" in lowered)
-        assert "blind retry" in lowered
-        assert "compensation" in lowered
-        assert "query" in lowered or "reconciliation" in lowered
-
-
 def test_closure_precedes_evaluation_and_evaluation_cannot_reopen_or_mutate() -> None:
     contract = _matrix()["closure_and_evaluation"]
     gate = contract["closure_gate"]
@@ -470,45 +398,3 @@ def test_synthetic_noop_schema_accepts_only_effect_free_java_signed_shape() -> N
     for relative in noop["fixture_paths"]["invalid"]:
         fixture = json.loads((SCHEMA_PATH.parent / relative).read_text(encoding="utf-8"))
         assert list(validator.iter_errors(fixture))
-
-
-def test_engineering_gate_is_exactly_not_run_and_grants_no_runtime_authority() -> None:
-    matrix = _matrix()
-    gate = matrix["gate_state"]
-    assert gate["upstream_engineering_checkpoint"] == "PASS"
-    assert gate["upstream_promotion_gate"] == "PENDING"
-    assert gate["permission"] == "PHASE_7_ENGINEERING_ONLY"
-    assert gate["engineering_exception_token"] == (
-        "ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY"
-    )
-    assert gate["p7_0_entry_gate"] == "NOT_RUN"
-    assert gate["contract_candidate_state"] == "CONTRACT_CANDIDATE_READY"
-    assert gate["entry_evidence_effect"] == "P7_0_ENGINEERING_ENTRY_PASS"
-    assert gate["entry_evidence_recorded"] is False
-    assert gate["phase_7_implementation_allowed"] is False
-    assert gate["formal_outcome_selector"] == "LEGACY"
-    assert gate["allowed_runtime_modes"] == [
-        "DISABLED",
-        "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW",
-    ]
-    for field in (
-        "real_case_or_party_data_allowed",
-        "real_tool_invocation_allowed",
-        "real_external_effect_allowed",
-        "real_shadow_allowed",
-        "formal_outcome_workflow_allowed",
-        "temporal_outcome_allocation_allowed",
-        "formal_graph_sink_allowed",
-        "production_traffic_allowed",
-        "canary_allowed",
-        "promotion_allowed",
-    ):
-        assert gate[field] is False
-    assert gate["migrations"] == {
-        "MIG-006": "PENDING_PROMOTION",
-        "MIG-007": "PENDING_PROMOTION",
-    }
-    assert matrix["entry_acceptance"]["current_result"] == "NOT_RUN"
-    assert matrix["entry_acceptance"]["implementation_must_remain_blocked"] is True
-    assert ADR_PATH.is_file()
-    assert CHECKPOINT_PATH.is_file()

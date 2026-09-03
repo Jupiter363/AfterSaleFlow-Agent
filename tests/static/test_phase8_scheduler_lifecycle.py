@@ -17,7 +17,7 @@ def test_agent_run_detector_uses_a_complete_authoritative_legacy_aggregate() -> 
     )
     detector = source[
         source.index("private void detectLegacyOwnedRuns()") :
-        source.index("private record AgentRunDetection")
+        source.index("private void recoverV2Attempts()")
     ]
 
     for marker in (

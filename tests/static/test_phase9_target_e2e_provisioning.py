@@ -32,6 +32,13 @@ p9_gate = importlib.import_module("p9_gate")
 provision = importlib.import_module("provision")
 teardown = importlib.import_module("teardown")
 LOCAL_SOURCE_PROVISIONER = ROOT / ".local-dev" / "provision-local-target.py"
+LOCAL_SOURCE_LAUNCHER = ROOT / ".local-dev" / "launch-source.ps1"
+
+
+def _read_optional_local_source(path: Path) -> str:
+    if not path.is_file():
+        pytest.skip("local source tooling is an operator artifact, not production source")
+    return path.read_text(encoding="utf-8")
 
 
 def _decode(segment: str) -> bytes:
@@ -49,7 +56,7 @@ def _compose_service(compose: str, service: str) -> str:
 
 
 def _local_source_identity_namespace() -> dict[str, object]:
-    source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+    source = _read_optional_local_source(LOCAL_SOURCE_PROVISIONER)
     tree = ast.parse(source)
     selected_names = {
         "CANDIDATE_SHA_PATTERN",
@@ -83,7 +90,7 @@ def _local_source_identity_namespace() -> dict[str, object]:
 
 
 def _local_source_certificate_namespace() -> dict[str, object]:
-    source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+    source = _read_optional_local_source(LOCAL_SOURCE_PROVISIONER)
     tree = ast.parse(source)
     selected_names = {"KEY_ID", "MTLS_PASSWORD"}
     selected_functions = {
@@ -997,10 +1004,8 @@ def test_local_source_build_identity_is_exact_deterministic_and_binding_sensitiv
     assert shared_prefix_first_binding in shared_prefix_first_control
     assert shared_prefix_first_binding in shared_prefix_first_agent
 
-    provisioner_source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
-    launcher_source = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
-        encoding="utf-8"
-    )
+    provisioner_source = _read_optional_local_source(LOCAL_SOURCE_PROVISIONER)
+    launcher_source = _read_optional_local_source(LOCAL_SOURCE_LAUNCHER)
     assert (
         re.search(
             r"\b[A-Za-z_][A-Za-z0-9_]*binding[A-Za-z0-9_]*\s*"
@@ -1044,12 +1049,12 @@ def test_local_source_build_identity_rejects_malformed_binding(binding: str) -> 
     with pytest.raises(ValueError, match="lowercase SHA-256"):
         require_binding(binding)
 
-    source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+    source = _read_optional_local_source(LOCAL_SOURCE_PROVISIONER)
     assert 'parser.add_argument("--compiled-worktree-binding", required=True)' in source
 
 
 def test_local_source_graph_code_identity_remains_independent() -> None:
-    source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+    source = _read_optional_local_source(LOCAL_SOURCE_PROVISIONER)
     assert "target_binding, registry_hash = provision._target_binding(candidate)" in source
     assert "provision._target_binding(compiled_worktree_binding)" not in source
     assert '"compiledWorktreeBinding": compiled_worktree_binding' in source
@@ -1057,7 +1062,7 @@ def test_local_source_graph_code_identity_remains_independent() -> None:
 
 
 def test_local_source_activation_rotation_preserves_graph_authority_and_runtime_receipt() -> None:
-    source = LOCAL_SOURCE_PROVISIONER.read_text(encoding="utf-8")
+    source = _read_optional_local_source(LOCAL_SOURCE_PROVISIONER)
 
     assert "reset_local_graph_candidate_state" not in source
     assert "TRUNCATE TABLE" not in source

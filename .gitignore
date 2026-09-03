@@ -27,6 +27,7 @@ tmp/
 **/test-results/
 **/blob-report/
 **/debug.log
+/test-reports/
 
 .worktrees/
 

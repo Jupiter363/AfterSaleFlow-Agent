@@ -16,14 +16,31 @@ ROOT = Path(__file__).resolve().parents[2]
 
 REQUIRED_ROOT_FILES = {
     "README.md",
-    "CONTRIBUTING.md",
-    "CODE_STYLE.md",
-    "SECURITY.md",
     ".gitignore",
     ".gitattributes",
     ".editorconfig",
     ".env.example",
     "docker-compose.yml",
+}
+
+REQUIRED_DOCUMENT_FILES = {
+    "README.md",
+    "architecture/README.md",
+    "architecture/temporal-first-agent-platform.md",
+    "architecture/intake-room-context-and-streaming.md",
+    "architecture/evidence-room-context-binding-and-token-streaming.md",
+    "acceptance/temporal-first-agent-platform-verification-checklist.md",
+    "acceptance/canonical-full-chain-uat-fixture.md",
+    "release/current-uat-baseline.md",
+    "development/contributing.md",
+    "development/code-style.md",
+    "security/security-policy.md",
+    "frontend/README.md",
+    "deployment/README.md",
+    "deployment/temporal.md",
+    "release/README.md",
+    "runbooks/README.md",
+    "testing/temporal-history-fixtures.md",
 }
 
 REQUIRED_DIRECTORIES = {
@@ -155,12 +172,46 @@ def parse_env_example() -> dict[str, str]:
 # 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_repository_contains_required_root_files_and_directories() -> None:
     missing_files = sorted(name for name in REQUIRED_ROOT_FILES if not (ROOT / name).is_file())
+    missing_documents = sorted(
+        name for name in REQUIRED_DOCUMENT_FILES if not (ROOT / "docs" / name).is_file()
+    )
     missing_directories = sorted(
         name for name in REQUIRED_DIRECTORIES if not (ROOT / name).is_dir()
     )
 
     assert not missing_files, f"missing root files: {missing_files}"
+    assert not missing_documents, f"missing production documents: {missing_documents}"
     assert not missing_directories, f"missing directories: {missing_directories}"
+
+
+def test_current_architecture_documents_match_the_uat_release_identity() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    intake = (ROOT / "docs/architecture/intake-room-context-and-streaming.md").read_text(
+        encoding="utf-8"
+    )
+    evidence = (
+        ROOT / "docs/architecture/evidence-room-context-binding-and-token-streaming.md"
+    ).read_text(encoding="utf-8")
+    platform = (
+        ROOT / "docs/architecture/temporal-first-agent-platform.md"
+    ).read_text(encoding="utf-8")
+    acceptance = (
+        ROOT / "docs/acceptance/temporal-first-agent-platform-verification-checklist.md"
+    ).read_text(encoding="utf-8")
+
+    for document in (readme, intake, evidence, platform, acceptance):
+        assert "target-e2e-graph.2026-08-18.3" in document
+        assert "qwen3.8-flash" in document
+
+    for document in (readme, intake, platform, acceptance):
+        assert "PARALLEL_FRAMES_V1" in document
+        assert "agent-stream.v4" in document
+
+    for document in (readme, evidence, acceptance):
+        assert "evidence-turn-result.v3" in document
+
+    assert "G017" in intake
+    assert "V094" in intake
 
 
 def test_java_maven_settings_use_the_official_central_repository() -> None:

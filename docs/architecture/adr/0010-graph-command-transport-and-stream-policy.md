@@ -2,8 +2,17 @@
 
 ## Status
 
-Accepted for Phase 3 engineering. Runtime remains `DISABLED` by default and signed synthetic
-`SHADOW` is the only executable mode. This ADR does not authorize a formal room writer.
+Accepted. The original Phase 3 implementation window kept runtime `DISABLED` by default and allowed
+only signed synthetic `SHADOW`. That historical restriction was later extended by ADR 0017's
+manifest-bound target lane. This ADR still does not give Python or Graph a formal room-writer role;
+only the Java finalization boundary may commit a proposal.
+
+## Current implementation note (2026-09-04)
+
+The signed command, immutable body/nonce, fresh JWS delivery, fixed HTTP allowlist, public-field
+policy and proposal-only result rules remain current. Target UAT now uses
+`all-rooms.target-e2e.v2` and `target-e2e-graph.2026-08-18.3`; Intake V4 transports three typed
+Frame lanes through `agent-stream.v4`, while the other target rooms use `agent-stream.v3`.
 
 ## Context
 

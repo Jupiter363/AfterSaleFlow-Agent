@@ -4,7 +4,6 @@ import re
 from pathlib import Path
 
 import pytest
-import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,8 +19,6 @@ FIXTURE_ROOT = (
     / "java-api-service/src/test/java/com/example/dispute/workflow"
     / "formalsinkarchitecturefixture"
 )
-PHASE4_BATCHES = ROOT / "plans/phase-4-intake-pilot-test-batches.yaml"
-
 FORMAL_ROOT_NAMES = {
     "IntakeAgentRunDomainResultCommitter",
     "IntakeFormalBranchCommitPort",
@@ -262,35 +259,3 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         assert required in fixture_source
 
     assert SERVICE_PROVIDER_TRANSITIVE_AUTHORITY in ARCHUNIT_TEST.name
-
-
-def test_gate_is_scheduled_in_batch_2_and_inherited_by_batch_3() -> None:
-    batches = yaml.safe_load(PHASE4_BATCHES.read_text(encoding="utf-8"))["batches"]
-    gate_path = "tests/static/test_phase4_no_formal_sink_assembly.py"
-    archunit_class = "IntakeFormalSinkAssemblyTest"
-    batch_2 = batches["P4-BATCH-2"]
-    batch_3 = batches["P4-BATCH-3"]
-
-    assert gate_path in batch_2["static_tests"]
-    assert archunit_class in batch_2["java_test_classes"]
-
-    java_source = next(
-        source
-        for source in batch_3["source_commands"]
-        if source["id"] == "java_phase_4"
-    )
-    inherited_batches = java_source["inherits_java_test_classes_from"]
-    assert inherited_batches == ["P4-BATCH-1", "P4-BATCH-2"]
-    inherited_classes = {
-        test_class
-        for batch_name in inherited_batches
-        for test_class in batches[batch_name]["java_test_classes"]
-    }
-    assert archunit_class in inherited_classes
-
-    static_source = next(
-        source
-        for source in batch_3["source_commands"]
-        if source["id"] == "static_phase_4"
-    )
-    assert gate_path in static_source["command"]

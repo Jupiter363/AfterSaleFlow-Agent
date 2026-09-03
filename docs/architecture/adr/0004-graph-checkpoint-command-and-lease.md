@@ -5,6 +5,15 @@
 - Decision owner: Python, Platform, Security
 - Approved by: project owner through the 2026-07-17 plan approval
 
+## Current implementation note (2026-09-04)
+
+This decision is implemented in the target lane: Graph PostgreSQL, the command ledger,
+database-clock lease/fencing, checkpoint persistence and Java finalization remain separate from
+the Domain and Temporal stores. The current graph selection is
+`all-rooms.target-e2e.v2` / `target-e2e-graph.2026-08-18.3` /
+`target-e2e-checkpoint.v2`; Intake additionally uses exact-three Frame authority. Historical
+check IDs later in this ADR are traceability labels, not unresolved release status.
+
 ## Context
 
 Intake and Evidence currently compile a graph for one invocation and rely on Java to send memory

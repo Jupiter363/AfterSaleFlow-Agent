@@ -6,6 +6,15 @@
 - Approved by: project owner through the 2026-07-17 plan approval
 - Supersedes: no current authoritative ADR
 
+## Current implementation note (2026-09-04)
+
+The authority split in this ADR remains current. The implementation has progressed beyond the
+one-shot state described in the historical context: the target lane now runs the durable
+Temporal-first room lifecycle, while Java/PostgreSQL remains the formal domain authority and
+Python/LangGraph remains proposal-only cognitive authority. The current identities, Intake V4
+parallel topology and latest browser result are recorded in
+[the current UAT baseline](../../release/current-uat-baseline.md).
+
 ## Context
 
 The current application has strong Java domain ledgers, but process advancement is split between

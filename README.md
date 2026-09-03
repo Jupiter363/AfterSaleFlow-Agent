@@ -22,7 +22,7 @@
 
 </div>
 
-> **文档基线**：`main`，截至 2026-09-03；运行代码基线为 `10526e58b954498f69bae00ea709f6f9e4981971`。
+> **文档基线**：`main`，截至 2026-09-04；运行代码基线为 `10526e58b954498f69bae00ea709f6f9e4981971`。
 > **当前 UAT 基线**：接待室 V4 三 Frame 并行图已在全新浏览器案件 `CASE_P9_6A98633E_11` 上完成六站全链路验证；该结论属于隔离 UAT 证据，不等同于默认生产开关已开启。
 > **重要边界**：所有模型输出均为结构化建议或草案；最终裁决由平台人工终审确认，高影响动作只能由审批后、哈希绑定且幂等的 Tool Executor 执行。
 
@@ -55,8 +55,9 @@ AfterSaleFlow-Agent 是一个面向**用户与商家履约争端**的 AI Native 
 
 | 维度 | 当前基线 |
 | --- | --- |
-| 接待室认知图 | V4 三个显式兄弟 Frame：`DIALOGUE_FRAME`、`DOSSIER_FRAME`、`QUALITY_FRAME`；独立校验后由受权威约束的合并路径提交 |
+| 接待室认知图 | 新 epoch 使用 `PARALLEL_FRAMES_V1`：V4 三个显式兄弟 Frame `DIALOGUE_FRAME`、`DOSSIER_FRAME`、`QUALITY_FRAME`；独立校验后由受权威约束的合并路径提交 |
 | Graph / Stream 身份 | `target-e2e-graph.2026-08-18.3`；Intake 并行流使用 `agent-stream.v4`，其余目标房间继续使用 `agent-stream.v3` |
+| Evidence 合同 | `evidence_room_context.v2`、`evidence_turn_stream.v3`、`evidence-turn-result.v3` |
 | 模型配置 | LiteLLM 统一路由 `qwen3.8-flash`；默认关闭 thinking，并启用严格 JSON Schema |
 | 运行时依赖 | Java 21、Spring Boot `3.5.15`、Temporal Java SDK `1.35.0`；Python 3.11、LangGraph `1.2.6`、LangChain Core `1.4.9` |
 | 数据库版本 | Java Flyway 迁移上限 `V094__target_e2e_graph_patch_release_identity.sql` |
@@ -398,19 +399,22 @@ AfterSaleFlow-Agent/
 ├── ocr-parser-service/          # 图片/PDF/Word/Excel 解析与结构化抽取
 ├── contracts/agent-platform/v1/ # Schema-first 跨服务合同、兼容矩阵与 fixtures
 ├── docs/
-│   ├── architecture/            # 权威架构、ADR、SLO 与迁移决策
-│   ├── acceptance/              # 当前功能基线和生产验证门禁
+│   ├── architecture/            # 权威架构、ADR、SLO 与状态所有权
+│   ├── acceptance/              # 全链路 UAT 夹具和生产验证门禁
 │   ├── contracts/               # hearing_flow.v2 等业务合同
 │   ├── api/                     # 公共 API 与 SSE 约定
 │   ├── database/                # 数据源、Migration 与存储边界
 │   ├── deployment/              # 本地部署、Worker 拓扑与运行说明
+│   ├── development/             # 贡献流程与代码规范
+│   ├── frontend/                # 前端模块职责与安全边界
+│   ├── security/                # 安全报告和开发安全规则
+│   ├── testing/                 # Smoke Test 与 replay fixture 说明
 │   ├── release/                 # 发布、回滚和 Code Review gate
 │   └── runbooks/                # 故障恢复、迁移和生产演练手册
 ├── deploy/                      # Nginx、PostgreSQL、MinIO、ES、Temporal、LiteLLM 配置
 ├── scripts/                     # 启停、密钥生成、初始化、Smoke Test、OpenAPI
 ├── tests/                       # Static、API、E2E、Load 与架构门禁
 ├── infra-tests/                 # 生产形态运行时与工程证据验证
-├── plans/                       # Temporal-first 分阶段实施与测试批次
 ├── docker-compose.yml           # 本地/CI 全服务拓扑
 └── .github/workflows/           # 质量门禁和工程证据流水线
 ```
@@ -611,9 +615,11 @@ python -m pytest tests/api tests/e2e tests/load -q
 
 | 文档 | 用途 |
 | --- | --- |
-| [`docs/acceptance/current-room-function-baseline.md`](docs/acceptance/current-room-function-baseline.md) | 当前代码实际提供的功能、权限和回归不变量 |
+| [`docs/README.md`](docs/README.md) | 当前生产文档统一入口与保留规则 |
+| [`docs/acceptance/canonical-full-chain-uat-fixture.md`](docs/acceptance/canonical-full-chain-uat-fixture.md) | 可重复六站回归的固定夹具 |
+| [`docs/release/current-uat-baseline.md`](docs/release/current-uat-baseline.md) | 当前 `main` 的版本身份与 fresh-case 浏览器 UAT 证据 |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | 当前权威架构文档入口 |
-| [`docs/architecture/temporal-first-agent-platform.md`](docs/architecture/temporal-first-agent-platform.md) | Temporal-first 目标架构、容量、状态权威与迁移计划 |
+| [`docs/architecture/temporal-first-agent-platform.md`](docs/architecture/temporal-first-agent-platform.md) | Temporal-first 当前架构、容量与状态权威 |
 | [`docs/architecture/temporal-first-slo.md`](docs/architecture/temporal-first-slo.md) | 可用性、延迟、容量和错误预算合同 |
 | [`docs/architecture/adr/`](docs/architecture/adr/) | 状态所有权、命令投递、AgentRun、Graph、部署、安全和预生产 E2E 决策 |
 | [`docs/contracts/hearing-flow-v2.md`](docs/contracts/hearing-flow-v2.md) | 固定 15 阶段庭审与裁决工件合同 |
@@ -621,15 +627,14 @@ python -m pytest tests/api tests/e2e tests/load -q
 | [`docs/api/README.md`](docs/api/README.md) | API、身份、幂等、SSE 和 OpenAPI 约定 |
 | [`docs/database/README.md`](docs/database/README.md) | PostgreSQL、Redis、MinIO 与 Elasticsearch 边界 |
 | [`docs/deployment/README.md`](docs/deployment/README.md) | Compose、本地联调、Worker 拓扑与运维命令 |
-| [`docs/release/v4-parallel-graph-uat-2026-09-02.md`](docs/release/v4-parallel-graph-uat-2026-09-02.md) | V4 并行图候选形成过程、运行平台边界与上一轮 UAT 记录 |
 | [`docs/release/README.md`](docs/release/README.md) | Code Review、发布和回滚门禁 |
-| [`SECURITY.md`](SECURITY.md) | 安全报告与核心安全边界 |
+| [`docs/security/security-policy.md`](docs/security/security-policy.md) | 安全报告与核心安全边界 |
 
 ---
 
 ## 贡献与安全
 
-提交代码前请阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)、[`CODE_STYLE.md`](CODE_STYLE.md) 和 [`SECURITY.md`](SECURITY.md)。
+提交代码前请阅读[贡献指南](docs/development/contributing.md)、[代码规范](docs/development/code-style.md)和[安全说明](docs/security/security-policy.md)。
 
 安全问题请私下报告给维护者，不要在公开 Issue 中披露凭据、敏感证据、越权路径或可利用细节。任何涉及正式裁决、审批、Tool Executor、跨参与方可见性、Temporal 写入权或 Graph Domain 写入权的修改，都必须同时补齐正向、负向、幂等、重放和相邻回归测试。
 

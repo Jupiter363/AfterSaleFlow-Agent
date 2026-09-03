@@ -1,16 +1,17 @@
 # Temporal-first Agent Platform 生产验证清单
 
 - 版本：v1
-- 日期：2026-07-17
-- 状态：目标架构实施与生产发布门禁
+- 更新：2026-09-04
+- 状态：当前生产发布门禁
 - 对应架构：[`temporal-first-agent-platform.md`](../architecture/temporal-first-agent-platform.md)
-- 现状功能基线：[`current-room-function-baseline.md`](./current-room-function-baseline.md)
+- 可重复回归输入：[`canonical-full-chain-uat-fixture.md`](./canonical-full-chain-uat-fixture.md)
+- 当前浏览器证据：[`current-uat-baseline.md`](../release/current-uat-baseline.md)
 
 ## 1. 使用规则
 
 本清单用于架构实现、阶段切换和生产发布验收。勾选表示已经取得可复核证据，
 不表示“代码已经写完”或“人工看起来正常”。
-发布同时要求现状功能基线中的回归编号全部通过，除非产品已批准并记录行为变更。
+发布同时要求当前业务合同和全链路 UAT 基线通过，除非产品已批准并记录行为变更。
 
 ### 1.1 优先级
 
@@ -35,7 +36,8 @@ Prometheus/Grafana 指标快照
 代码/配置静态审计链接
 ```
 
-统一存放目录：
+本地生成的证据统一存放在下列临时目录；该目录被 Git 忽略，正式发布记录应由 CI
+Artifact 或外部受控证据库保存：
 
 ```text
 test-reports/temporal-first/{release-id}/
@@ -382,19 +384,35 @@ test-reports/temporal-first/{release-id}/
 - [ ] `REL-009` **P1** 回滚保留新版本已写入字段，旧reader能够忽略或兼容。
 - [ ] `REL-010` **P1** 清理旧Worker/Graph前查询确认无活跃Workflow、Child和thread引用。
 
-## 17. 分阶段迁移门禁
+## 17. 当前版本发布门禁
 
-每个阶段只在本阶段门禁及其依赖的P0项通过后切流；回滚不得恢复第二个正式写入者。
+旧的 Phase 0-8 条目是已经完成的实施计划，不再作为待办清单。每个候选提交必须以同一
+release identity 完成以下门禁；不得拼接不同提交、不同 activation 或不同模型配置的结果。
 
-- [ ] `MIG-000` **P0** Phase 0完成状态所有权ADR、SLO、合同、版本和retry taxonomy审批，并用静态清单确认每类正式状态只有一个writer。
-- [ ] `MIG-001` **P0** Phase 1的Case/Room Workflow、inbox/outbox、projection fencing、reconciliation和独立Task Queue通过故障恢复后，才允许Temporal推进首个宏观阶段。
-- [ ] `MIG-002` **P0** Phase 2完成Logical Run/Attempt拆分、heartbeat、stream reset和Finalizer幂等验证，切流后同一队列只有Temporal自动调度。
-- [ ] `MIG-003` **P0** Phase 3的PostgreSQL checkpointer、command ledger、lease/fencing、GraphRegistry、State Lens、Reducer和LCEL治理协议全部就绪后，才迁移房间Agent。
-- [ ] `MIG-004` **P0** Phase 4 Intake shadow结果、隐私隔离和恢复测试通过；外部等待归Temporal，Java不再把`memory_frame`作为认知真相往返传递。
-- [ ] `MIG-005` **P0** Phase 5 Evidence的有界`Send`、keyed reducer、100文件批次和授权测试通过，同时Java正式证据账本保持唯一写入权。
-- [ ] `MIG-006` **P0** Phase 6 Hearing在活跃案件shadow/parity和deadline演练通过后，由Temporal唯一推进`hearing_flow.v2`，旧Java推进入口关闭。
-- [ ] `MIG-007` **P0** Phase 7 Reviewer wait、Artifact hash绑定、Tool Executor幂等及补偿演练通过，Agent仍无正式审批和执行权限。
-- [ ] `MIG-008` **P1** Phase 8确认无活跃对象引用旧Worker、Graph、scheduler或阶段入口，完成load、chaos、replay、security和DR统一门禁后再删除旧代码。
+- [ ] `RELBASE-001` **P0** Graph 固定为 `all-rooms.target-e2e.v2` /
+  `target-e2e-graph.2026-08-18.3` / `target-e2e-checkpoint.v2`。
+- [ ] `RELBASE-002` **P0** 新 Intake epoch 固定 `PARALLEL_FRAMES_V1` 和
+  `agent-stream.v4`；历史 `MONOLITHIC_V3` 只走已记录的兼容/回放路径。
+- [ ] `RELBASE-003` **P0** 三个 Intake sibling Node、独立 checkpoint、exact-three
+  Java admission/assembly/finalization 通过正向、单路失败、reset、replay 和邻接回归。
+- [ ] `RELBASE-004` **P0** Evidence 固定 `evidence_room_context.v2`、
+  `evidence_turn_stream.v3`、`evidence-turn-result.v3`，文字和图片来源均绑定授权 hash。
+- [ ] `RELBASE-005` **P0** 所有模型路径解析为 `qwen3.8-flash`，thinking 关闭，strict
+  JSON Schema 开启；不存在自由 JSON、模型降级或隐藏推理公开路径。
+- [ ] `RELBASE-006` **P0** Java Flyway migration 至少包含当前上限 `V094`，Graph
+  migration 至少包含当前上限 `G017`；旧 migration 不被改写或删除。
+- [ ] `RELBASE-007` **P0** 使用 canonical fixture 从前端表单创建 fresh case，完整走通
+  双方 Intake、Evidence、Hearing、人工 Review 和 Outcome，并保留 case ID 与关键截图/History。
+- [ ] `RELBASE-008` **P0** UAT 全程没有重复正式消息、跨 actor 数据、stale projection、
+  丢失命令、未授权工具执行或靠人工数据库修改解锁流程。
+- [ ] `RELBASE-009` **P0** 当前 activation、worker、Graph、Prompt、Model、Schema 和
+  artifact hash 完全匹配；任一版本漂移失败关闭。
+- [ ] `RELBASE-010` **P0** Target E2E/Temporal 候选开关保持显式授权；UAT 成功不自动
+  修改默认生产路由、Current/Ramping version 或核心组件版本。
+- [ ] `RELBASE-011` **P0** Temporal/数据库等核心组件升级具有单独批准、逐版本迁移、
+  一致备份恢复和 rollback 证据；应用发布命令不得隐式升级它们。
+- [ ] `RELBASE-012` **P1** 静态合同、Java/Python/OCR/frontend 聚焦测试、构建、Compose
+  config、smoke-test 和 API/E2E/load 检查均绑定同一候选 commit。
 
 ## 18. 备份与灾难恢复
 
@@ -434,6 +452,7 @@ test-reports/temporal-first/{release-id}/
 | `PERF-001` | TODO |  |  |  |  |
 | `HA-010` | TODO |  |  |  |  |
 | `SEC-014` | TODO |  |  |  |  |
+| `RELBASE-007` | TODO |  |  |  |  |
 | `GATE-010` | TODO |  |  |  |  |
 
 实际发布时应由脚本生成包含所有Check ID的完整证据表，禁止只保留本模板示例行。
@@ -461,7 +480,7 @@ test-reports/temporal-first/{release-id}/
 | §18-19 审计与观测 | `OBS-*` |
 | §20 版本发布 | `REL-*` |
 | §21 验证策略 | `GATE-*` |
-| §22 迁移 | `MIG-*`及各阶段依赖前缀 |
+| §22 当前实现与兼容 | `RELBASE-*`, `REL-*`, `TEMP-*`, `GRAPH-*` |
 | §23 拒绝方案 | `ARCH-*`, `TEMP-*`, `GRAPH-*`, `E2E-*` |
 | §24 框架决策 | `ARCH-*`, `REL-*` |
 | §25 成功标准 | `E2E-*`, `HA-*`, `SEC-*`, `GATE-*` |

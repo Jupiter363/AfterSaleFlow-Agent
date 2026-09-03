@@ -1,5 +1,14 @@
 # 本地部署与联调
 
+补充说明：[Temporal](temporal.md)、[Langfuse](langfuse.md)、
+[隔离 Target E2E](target-e2e.md)。
+
+当前应用候选固定为 `all-rooms.target-e2e.v2` /
+`target-e2e-graph.2026-08-18.3` / `target-e2e-checkpoint.v2`，模型固定为
+`qwen3.8-flash`（thinking 关闭、strict JSON Schema）。最近的完整浏览器结果见
+[当前 UAT 基线](../release/current-uat-baseline.md)。这些应用身份不会授权脚本改变
+Temporal、PostgreSQL 或其他核心组件版本。
+
 ## 前置条件
 
 - Docker Desktop 已启动，Linux 容器模式可用。
@@ -75,7 +84,7 @@ CONTROL Worker 的启动依赖只包含 PostgreSQL、Redis、MinIO、Elasticsear
 - 该值必须与四条正式协议队列不同，否则 CONTROL Worker 启动失败。
 - 新 Case/Room 控制面不得向该队列投递。
 
-只有 `REL-010` 查询确认该队列上没有 Running、Continued-As-New 或待处理的
+只有可复核的 Visibility 查询确认该队列上没有 Running、Continued-As-New 或待处理的
 EvidenceWindow Workflow/Activity，且 Evidence 房间已经完成新 epoch 的 writer 切换和回滚演练后，
 才允许停止兼容 Worker并删除配置。不得以代码已经迁移为理由提前清理旧 Worker。
 
@@ -99,11 +108,15 @@ Worker Deployment API，就假定该本地 Server 支持对应控制面能力。
 4. 先部署 Worker，再通过 Temporal Operator API/CLI 设置 current/default 或受控 ramp；禁止仅修改环境变量完成 promote。
 5. 运行 synthetic Workflow，核对 Workflow/Run/Build、task queue、search attributes 和 probe 返回值。
 
+接待室 V4 浏览器 UAT 使用的是另行授权并验证的 Temporal `1.29.7` 平台；它不会改写
+上述 Compose 默认值，也不能作为后续自动升级依据。平台版本差异和升级门禁见
+[Temporal 部署边界](temporal.md)。
+
 回滚时先把 current/default/ramp 路由恢复到上一版本，同时保持上一版本 Worker 在线。
 `PINNED` Workflow 不会因为路由回滚自动迁移版本；新旧 Worker 都必须保留到 Visibility 查询
-证明没有活跃引用。任何 Worker/Build/Graph 清理都受 `REL-010` 门禁约束。
+证明没有活跃引用。任何 Worker、Build 或 Graph 清理都必须先通过同等的活跃引用与回滚门禁。
 
-## Phase 1 恢复任务
+## Temporal 恢复任务
 
 `APP_ORCHESTRATION_NEW_EPOCH_MODE` 只允许 `LEGACY`、`SHADOW` 或 `TEMPORAL`，默认
 `LEGACY`。Java 只在创建新 room epoch 时读取该 selector，并把结果持久化到
@@ -118,14 +131,14 @@ Control Worker 承载两个默认关闭的有界恢复任务：
 - `APP_ORCHESTRATION_PROJECTION_RECONCILIATION_ENABLED` 扫描 SHADOW/TEMPORAL epoch。
   Query 结果只能提供观测，不能单独授权 projection 修复。生产 reader 必须同时核对
   bootstrap commitment、first/current Run 的 History chain，以及 History 中的
-  `case_process_authority_checkpoint_v1` memo。当前 Phase 1 仅允许尚未发生业务推进、且上述证据
-  完整一致的 bootstrap checkpoint 返回 `Verified`；后续状态继续 fail-closed 为
+  `case_process_authority_checkpoint_v1` memo。当前实现仅允许尚未发生业务推进、且上述证据
+  完整一致的 bootstrap checkpoint 返回 `Verified`；其他不完整状态继续 fail-closed 为
   `SOURCE_INCOMPLETE`。SHADOW 始终只记录 drift，只有 TEMPORAL 的 `Verified` 结果可进入受 fencing
   保护的修复事务；History 不可用时不得降级使用 Query。
 
 两个任务都限制单批大小并拒绝同 JVM 重入；多副本依靠 Signal 幂等和数据库 fencing 保持安全。
-只有 `MIG-001` 的 PostgreSQL、replay、Worker 恢复和 reconciliation 证据在同一 commit 通过后，
-才允许在 control worker 开启。回滚时先关闭这两个入口，保留账本、History 和 issue 记录。
+只有 PostgreSQL、replay、Worker 恢复和 reconciliation 证据绑定同一发布版本并全部通过后，
+才允许在 control worker 开启。回滚时先关闭这两个入口，保留账本、History 和审计记录。
 
 ## 服务入口
 

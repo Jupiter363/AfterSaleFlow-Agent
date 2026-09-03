@@ -1,7 +1,7 @@
 # Temporal-first Service Levels and Capacity Contract
 
-- Status: ACCEPTED FOR IMPLEMENTATION
-- Date: 2026-07-17
+- Status: CURRENT PRODUCTION CAPACITY CONTRACT
+- Updated: 2026-09-04
 - Owners: Architecture, SRE, Java, Temporal, Python, AI Platform
 - Approval: project owner plan approval, 2026-07-17
 
@@ -72,4 +72,4 @@ Dashboards cover command/outbox, Temporal queue/history/replay, AgentRun/stream,
 and lease, model/provider, projection/reconciliation, security, and DR. Alerts link to runbooks under
 `docs/runbooks/temporal-first/` for stuck commands, Workflow replay, Agent heartbeat, Graph lease,
 provider outage, database failover, projection drift, tool ambiguity/compensation, key rotation, and
-regional DR. Phase 8 requires a no-internal-table-edit recovery exercise and a 24-hour soak.
+regional DR. Production release requires a no-internal-table-edit recovery exercise and a 24-hour soak.

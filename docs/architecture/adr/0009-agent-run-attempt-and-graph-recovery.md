@@ -1,10 +1,20 @@
 # ADR 0009: AgentRun Attempt Ownership and Graph Recovery
 
-- Status: ACCEPTED FOR ENGINEERING; PRODUCTION PROMOTION BLOCKED BY THE CONTRACT DELTAS BELOW
+- Status: ACCEPTED; ORIGINAL PHASE-3 RESTRICTION SUPERSEDED BY THE IMPLEMENTED TARGET LANE
 - Date: 2026-07-19
 - Decision owner: Java AgentRun, Temporal orchestration, Python Graph runtime
 - Scope: AgentRun V2, RoomGraphCommand, Agent Stream V2, and Graph recovery
 - Runtime restriction: `DISABLED` or signed synthetic `SHADOW` only
+
+## Current implementation note (2026-09-04)
+
+The attempt/command/lease distinctions and fail-closed recovery rules in this ADR remain current.
+Its original `DISABLED`/synthetic-`SHADOW` restriction applied to the Phase 3 implementation
+window. The later manifest-bound `TARGET_E2E_CANDIDATE` lane is implemented and has completed an
+isolated browser UAT; this does not authorize automatic production activation. Current runtime
+identity and evidence are recorded in
+[the current UAT baseline](../../release/current-uat-baseline.md), while default and target
+deployment boundaries are documented in [deployment](../../deployment/README.md).
 
 ## Context
 

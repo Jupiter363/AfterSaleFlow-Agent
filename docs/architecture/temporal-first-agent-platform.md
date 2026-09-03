@@ -1,14 +1,16 @@
 # Temporal-first Agent Platform Architecture
 
-Status: Proposed target architecture
-Date: 2026-07-17
+Status: Current production architecture baseline
+Updated: 2026-09-04
 Scope: 1,000 concurrently active dispute rooms with production-grade availability,
 recovery, auditability, and controlled model concurrency.
 
-Current behavior baseline:
-[`current-room-function-baseline.md`](../acceptance/current-room-function-baseline.md).
-The migration is incomplete if the target architecture passes its own checks but
-regresses any approved current-room invariant.
+Current behavior is defined by the running code, versioned contracts and
+[`canonical-full-chain-uat-fixture.md`](../acceptance/canonical-full-chain-uat-fixture.md).
+The currently verified browser candidate is recorded separately in
+[`current-uat-baseline.md`](../release/current-uat-baseline.md).
+No architecture change may regress those business, authorization, idempotency or replay
+invariants.
 
 ## 1. Executive decision
 
@@ -475,8 +477,20 @@ independent components cannot automatically execute the same pending run.
 
 ### 9.1 Provisional and committed output
 
-Model text streamed before terminal schema validation is explicitly provisional.
-Public protocol events include:
+Model text streamed before terminal schema validation is explicitly provisional. The
+current target Graph uses two deliberately separate stream contracts:
+
+| Lane | Protocol | Shape |
+| --- | --- | --- |
+| Intake `PARALLEL_FRAMES_V1` | `agent-stream.v4` | Three typed Frame lanes, per-Frame generation/reset/seal and one exact final |
+| Evidence, Hearing, Review and Outcome | `agent-stream.v3` | One attempt-scoped ordered stream and one exact final |
+
+V3 remains a single-frame protocol and is not widened with V4 payloads. Historical
+`agent_stream.v1`/V2 data is replay-only compatibility material. New Intake epochs pin
+their execution profile; a running epoch never switches between monolithic V3 and
+parallel V4.
+
+The common lifecycle includes:
 
 ```text
 attempt_started
@@ -488,9 +502,12 @@ final
 error
 ```
 
-If an attempt fails after visible text was emitted, a retry uses a new attempt ID and
-emits `attempt_reset`. The client discards provisional text from the aborted attempt.
-Only `final` can create the formal Java room message.
+For V4, `public_frame_start`, `public_frame_projection_item`,
+`active_frame_snapshot`, `frame_generation_reset`, `public_frame_sealed` and
+`public_frame_interrupted` bind each provisional item to one Frame and generation. If
+an attempt or Frame fails after visible text was emitted, the client discards only the
+superseded provisional authority. Only the exact durable `final` can create the formal
+Java room message.
 
 ### 9.2 Efficient delivery
 
@@ -590,6 +607,12 @@ consume only formal, visibility-filtered artifacts, never private room transcrip
 
 ### 10.5 Parallelism and reducers
 
+- Intake V4 is a special exact-three topology: `dialogue_frame`, `dossier_frame`, and
+  `quality_frame` are sibling parent nodes with independent child checkpoints. Python
+  has no semantic join; Java is the first convergence point and sole assembler of the
+  formal `IntakeTurnProposal`.
+- A failed Intake Frame may advance only its own bounded generation. An already sealed
+  sibling cannot be called again or replaced by last-write-wins output.
 - Use `Send` only for naturally independent work such as evidence-file assessment or
   critic review.
 - Set per-room and global concurrency limits. Never allocate one unbounded thread per
@@ -977,6 +1000,12 @@ outage, projection drift, and region failover.
 
 ## 20. Versioning and deployment
 
+The current UAT-aligned source identity is `all-rooms.target-e2e.v2` /
+`target-e2e-graph.2026-08-18.3` / `target-e2e-checkpoint.v2`. Intake V4 uses
+`PARALLEL_FRAMES_V1` and `agent-stream.v4`; the other target rooms use
+`agent-stream.v3`. All model lanes currently resolve through `qwen3.8-flash` with
+thinking disabled and strict JSON Schema enabled.
+
 Every formal run pins:
 
 ```text
@@ -1001,6 +1030,12 @@ Deployment policy:
 - migrate checkpoints only at explicit safe boundaries;
 - compare old/new outputs in shadow mode without writing two formal results;
 - remove old code only after no active workflow or graph thread references it.
+
+The repository's default Compose image and a separately authorized UAT platform are
+not interchangeable release identities. A successful UAT on Temporal 1.29.7 does not
+authorize the repository to upgrade, recreate, or repoint a Temporal cluster. Core
+component changes require a separate operator decision, schema-safe migration, backup
+and rollback evidence.
 
 ## 21. Verification strategy
 
@@ -1036,72 +1071,40 @@ Release fails on any duplicated formal message/artifact, lost accepted command,
 cross-scope data exposure, stale projection overwrite, unrecoverable checkpoint, or SLO
 breach beyond the agreed error budget.
 
-## 22. Migration plan
+## 22. Current implementation and compatibility state
 
-### Phase 0: Decisions and contracts
+The former Phase 0-8 migration plan has been implemented into the current source
+baseline and is no longer an open work plan. The production repository now contains:
 
-- Approve this ownership model as architecture decision records.
-- Define SLOs, command/result schemas, version policy, and retry taxonomy.
-- Add process and projection revision invariants.
+- typed Case/Room Temporal workflows, inbox/outbox delivery, fencing, projection
+  reconciliation, Continue-As-New and replay tests;
+- logical AgentRun/attempt separation, durable V3/V4 streams and idempotent Java
+  finalizers;
+- PostgreSQL LangGraph checkpointing, command ledger, leases, GraphRegistry and
+  version-pinned target execution;
+- Intake exact-three parallel Frames, Evidence source-bound frames, the fixed
+  `hearing_flow.v2` path, Review and Outcome proposal-only graphs;
+- append-only formal Java ledgers, human review, policy-gated Tool Executor and the
+  active recovery/observability runbooks.
 
-### Phase 1: Temporal control-plane foundation
+Current compatibility boundaries remain deliberate:
 
-- Introduce `CaseProcessWorkflow` and room child-workflow contracts.
-- Add command inbox/outbox delivery to stable Workflow IDs.
-- Add versioned process projection and reconciliation.
-- Separate Temporal task queues and worker deployment from the API deployment.
+1. Existing workflow histories keep the worker and protocol versions recorded when
+   they were created. They are not rewritten to the latest profile.
+2. New target Intake epochs use `PARALLEL_FRAMES_V1`; historical monolithic Intake
+   epochs continue through `MONOLITHIC_V3` readers and replay paths.
+3. V3/V4 stream contracts, Graph migration history, Flyway migration history and
+   Temporal history fixtures remain in the repository while any persisted data can
+   reference them.
+4. Target E2E execution remains an explicit, fail-closed lane. Browser UAT proves the
+   candidate path, not automatic production enablement.
+5. The Compose default remains a repository configuration decision. The separately
+   authorized Temporal 1.29.7 UAT environment is platform evidence, not permission for
+   an application launch script to upgrade core infrastructure.
 
-### Phase 2: AgentRun V2
-
-- Split logical run from attempts.
-- Add Temporal Activity execution and heartbeat.
-- Add provisional attempt reset semantics and stream batching.
-- Retain the polling scheduler only as migration detection.
-
-### Phase 3: Python graph platform
-
-- Add PostgreSQL checkpointer, command ledger, lease/fencing, GraphRegistry, and graph
-  version pinning.
-- Refactor the model gateway into the governed LangChain Runnable pipeline.
-- Add common graph kernel, state lenses, typed reducers, and custom stream projection.
-
-### Phase 4: Intake pilot
-
-- Migrate the intake Agent to a bounded cognitive graph.
-- Move external wait and completion ownership to the intake room child workflow.
-- Stop round-tripping `memory_frame` through Java as the cognitive source of truth.
-- Run shadow comparison and isolation/load tests.
-
-### Phase 5: Evidence
-
-- Expand the existing evidence Temporal workflow into the room child workflow.
-- Migrate per-file work to bounded `Send` and keyed reducers.
-- Preserve Java evidence authorization and formal assessment ledgers.
-
-### Phase 6: Hearing
-
-- Move `hearing_flow.v2` phase, deadlines, retry, and handoff control to the Temporal
-  hearing child workflow.
-- Split the Python hearing file into intake-officer, evidence-clerk, judge, and jury
-  cognitive subgraphs.
-- Keep hearing action and artifact tables as append-only formal ledgers and projections.
-- Remove independent Java phase advancement after parity is proven.
-
-### Phase 7: Outcome, review, and execution
-
-- Orchestrate reviewer waits and approved execution through Temporal.
-- Keep human decision and Tool Executor as the only formal approval/execution path.
-- Move explanatory Agents to bounded graphs without execution authority.
-
-### Phase 8: Cleanup and hardening
-
-- Disable automatic legacy AgentRun polling execution.
-- Remove duplicate room-memory and stage-transition ownership.
-- Complete load, chaos, replay, failover, security, and disaster-recovery exercises.
-- Publish operational dashboards, runbooks, and ownership rotation.
-
-Each phase is independently deployable behind server-side feature flags. There is no
-big-bang cutover and never more than one formal writer for the same case path.
+Future changes are ordinary versioned releases, not continuations of the deleted phase
+plan. They require additive contracts, focused replay/compatibility tests, a fresh-case
+UAT checkpoint and explicit authorization for any core component or schema upgrade.
 
 ## 23. Explicitly rejected designs
 

@@ -210,7 +210,7 @@ def test_non_model_http_is_confined_to_fixed_java_intake_exchange_endpoints() ->
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "client"
     ]
-    assert http_client_calls == ["stream"]
+    assert sorted(http_client_calls) == ["aclose", "stream"]
 
 
 def test_target_e2e_non_model_http_is_confined_to_fixed_java_exchange_endpoints() -> None:
@@ -299,14 +299,15 @@ def test_target_e2e_non_model_http_is_confined_to_fixed_java_exchange_endpoints(
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "httpx"
     ] == ["AsyncClient"]
-    assert [
+    http_client_calls = [
         node.func.attr
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "client"
-    ] == ["post"]
+    ]
+    assert sorted(http_client_calls) == ["aclose", "post"]
 
 
 def test_compose_does_not_share_bootstrap_or_graph_credentials_with_services() -> None:

@@ -1,151 +1,209 @@
-# 接待室上下文与同源流式输出契约
+# 接待室 V4 三 Frame 并行 Graph 架构
 
-状态：V3 实现契约
-适用范围：发起方首轮、发起方实质补充轮、被发起方实质回应轮
-不改变：系统安全提示、既有记忆内容、纯备注阶段契约、服务端身份/幂等/epoch/fence/状态机权威
+- 状态：当前实现基线
+- 更新：2026-09-04
+- 代码基线：`main@10526e58b954498f69bae00ea709f6f9e4981971`
+- UAT 基线：`CASE_P9_6A98633E_11` 六站全链路完成
 
-## 1. 设计目标
+本文描述当前接待室实现。旧的 V3 单体输出仍作为已记录执行的回放兼容边界，
+不再是新目标 Intake epoch 的设计说明。
 
-接待室每个实质轮次只调用模型一次，由同一份 Provider 结构化输出同时驱动：
+## 1. 当前版本身份
 
-1. 左侧接待官聊天回复；
-2. 右侧争议轮廓卡片；
-3. 案情事实矩阵语义；
-4. 最后一段完整度评价和会话动作。
+| 绑定 | 当前值 |
+| --- | --- |
+| Graph key | `all-rooms.target-e2e.v2` |
+| Graph version | `target-e2e-graph.2026-08-18.3` |
+| Checkpoint schema | `target-e2e-checkpoint.v2` |
+| 新 Intake execution profile | `PARALLEL_FRAMES_V1` |
+| 历史兼容 profile | `MONOLITHIC_V3` |
+| 并行公开流 | `agent-stream.v4` |
+| 模型 | `qwen3.8-flash` |
+| Provider 输出 | strict JSON Schema |
+| thinking | 关闭 |
 
-`initial_case_facts` 是服务端/表单提供的不可变种子。它直接用于初始卡片展示并进入模型输入，但不属于模型输出，不参与流式生成，也不能被模型改写。
+Execution profile 在 room epoch 建立时固定。已经记录为 `MONOLITHIC_V3` 的执行只按
+原协议回放，不在同一 epoch 内热切换；新目标 Intake epoch 使用
+`PARALLEL_FRAMES_V1`。Evidence、Hearing、Review 和 Outcome 继续使用各自的
+`agent-stream.v3` 路径。
 
-模型生成的案情语义是业务语义来源。后端不再用正则重新判断态度，不再改写模型摘要、争议焦点、缺口或风险语义，也不重新计算完整度。后端仅执行响应 Schema 解码，以及身份、角色、来源、事实 ID、哈希、矩阵版本、幂等和状态机等服务端权威边界。
+## 2. 权威边界
 
-## 2. 输入装配
-
-### 2.1 物理顺序
-
-进入 User Prompt 的上下文段固定按以下顺序序列化：
-
-| 顺序 | 段 | 内容 | 权威 |
-|---:|---|---|---|
-| 1 | `case_identity` | 案件、房间、当前角色、固定业务引用 | Java/服务端过滤 |
-| 2 | `initial_case_facts` | 首轮不可变表单事实 | Java/表单输入 |
-| 3 | `frozen_case_matrix` | 上轮正式矩阵的允许投影 | 持久化矩阵 |
-| 4 | `previous_dispute_outline` | 当前角色可见的上一版轮廓与接待状态，不重复矩阵 | 持久化卷宗投影 |
-| 5 | `recent_dialogue_messages` | 当前私有会话最近 5 条历史消息 | 房间消息历史 |
-| 6 | `current_user_message` | 当前参与方本轮原始输入 | 当前认证房间消息 |
-
-当前消息在物理上最后出现，便于模型把最新补充作为本轮主要任务；它不能覆盖前面段的身份、来源和冻结矩阵权威。
-
-### 2.2 保留优先级与提示顺序分离
-
-Token 超限时先按“必需段、保留优先级”选择段，选择完成后再按上表的 `prompt_order` 排列。这样当前消息和冻结矩阵可以具有最高保留优先级，同时仍维持稳定的阅读顺序。
-
-以下段在相应阶段必须存在，放不下时失败关闭而不是静默猜测：
-
-- `case_identity`；
-- 首轮的 `initial_case_facts`；
-- 普通轮的 `current_user_message`；
-- 被发起方轮的 `frozen_case_matrix`。
-
-### 2.3 隐私裁剪
-
-- 最近消息只来自当前角色的私有接待会话，最多 5 条；不装载另一方私聊原文。
-- 被发起方只能看到冻结矩阵的结构化事实和诉求投影，以及自己的接待状态。
-- `previous_dispute_outline` 不再重复 `frozen_case_matrix`，避免相同事实占用两份上下文。
-- 原始消息、业务 ID 和矩阵键保持原值，不经过文案本地化或第三人称重写。
-
-## 3. 输出 Schema
-
-根对象只允许两个字段，并按以下顺序生成：
+接待室把“模型生成内容”和“正式业务状态”分开：
 
 ```text
-room_utterance
-ordered_sections
+Java 冻结身份、案件、epoch、fence、消息与矩阵
+  -> Java 原子准入 exact-three Frame manifest
+  -> Python 三个兄弟 Graph Node 并行生成
+  -> Java 按 Frame 持久化 provisional item
+  -> Java 收齐三个 sealed Frame
+  -> Java 确定性 Assembler
+  -> Java Finalizer 提交正式消息、卷宗与阶段
 ```
 
-`ordered_sections` 是固定长度为 10 的 tuple，而不是依赖 JSON 对象键顺序的普通映射：
+- Temporal 负责持久流程、等待、重试、取消和 room epoch。
+- Java/PostgreSQL 是正式消息、案情矩阵、阶段、命令结果和审计的唯一写入者。
+- Python/LangGraph 只产生受版本约束的 Frame proposal 和技术 checkpoint。
+- 模型不决定正式总分、下一阶段、幂等键、ID、hash、actor scope、epoch 或 fence。
+- 前端只展示 durable provisional projection 和正式投影，不从文本猜测状态。
 
-| sequence | kind | 右侧/终态投影 |
-|---:|---|---|
-| 1 | `CASE_MATRIX` | 正式矩阵的模型语义输入；服务端生成 ID、来源、哈希和版本 |
-| 2 | `CASE_STORY` | `case_story` |
-| 3 | `PARTY_POSITIONS` | `party_positions` |
-| 4 | `CLAIM_AND_RESPONSE` | `claim_resolution`、`respondent_attitude`；被发起方轮的发起方诉求由冻结权威约束为精确回显 |
-| 5 | `DISPUTE_FOCUS` | `dispute_core_state`、`dispute_focus` |
-| 6 | `VERIFICATION_FOCUS` | `dispute_core_state.next_verification_focus` |
-| 7 | `RISK_ASSESSMENT` | `risk_assessment` |
-| 8 | `MISSING_INFORMATION` | `missing_information` |
-| 9 | `HANDOFF_SUMMARY` | 展示说明；正式备注状态和来源仍由状态机注入 |
-| 10 | `TURN_EVALUATION` | `intake_quality`、`admission`、`conversation_action` |
+## 3. Exact-three 父图
 
-除 `CASE_MATRIX` 外，各 section 都是本轮完整累计值，不是增量补丁。`initial_case_facts` 不得出现在模型输出。
-
-纯备注阶段继续使用独立的 `IntakeRemarkAcknowledgementLlmOutput`；被发起方自动开场继续使用只含正式话术的 opening 契约。它们不伪造一次新的实质卡片生成。
-
-## 4. 真实流式时序
+Python 顶层 `StateGraph` 只有三个从 `START` 同时出发、分别直达 `END` 的兄弟
+Node：
 
 ```text
-Provider SSE bytes
-  -> room_utterance string_prefix
-  -> ordered_sections[0] 完整对象
-  -> ordered_sections[1] 完整对象
-  -> ...
-  -> ordered_sections[9] TURN_EVALUATION
-  -> 完整 JSON Schema 解码
-  -> 服务端来源/状态权威装配
-  -> 正式提交
+                     -> dialogue_frame  ->
+START (同一上下文)  -> dossier_frame   -> END
+                     -> quality_frame   ->
 ```
 
-- `room_utterance` 按 Provider 的实际 `delta.content` 字符前缀立即公开，因此首包不等待矩阵、卡片或完整 JSON。
-- 只有 `room_utterance` 的 closing quote 到达后，右侧 section 才开放，保证左侧回复先出现。
-- 每个 section 的 JSON 对象闭合后立即以一个原子事件公开，不等待数组 `]` 或模型终态。
-- 前端把每个 section 映射到已有卡片，不把结构化 JSON 放进聊天消息。
-- 超过单事件上限的可选卡片不能拆成无效 JSON；该卡片跳过临时流式投影，终态刷新仍恢复正式卷宗。
-- `TURN_EVALUATION` 固定最后生成，完善度不会抢占回复首包时间。
+父图没有语义 join、Assembler 或 Proposal 节点。每个父 Node 只调用对应的 lane-local
+子图，并写入互不重叠的 outcome channel。父图的 END barrier 仅表示本次技术调用结束，
+不会推迟任一路已通过校验的公开 item。
 
-## 5. 被发起方语义与来源绑定
+每个 lane-local 子图均采用：
 
-被发起方实质轮的 `CASE_MATRIX.respondent_claim` 使用 `respondent-claim-binding.v1`：
+```text
+authorize_input
+  -> invoke_model
+  -> [必要时 generation reset -> invoke_replacement_model]
+  -> checkpoint_terminal
+```
 
-- 有本人直接诉求态度时，模型输出 `CURRENT_ACTOR_DIRECT`、当前认证角色、当前消息中的逐字最小引文，以及关联的当前来源事实键；
-- 只补充事实而没有表达诉求态度时，输出 `NO_DIRECT_POSITION`，不创建新的直接态度权威；
-- 服务端只验证角色、引文是否来自当前认证消息、关联键是否属于当前来源事实；不再用中文/英文正则重新判断引文到底是同意、拒绝还是替代方案；
-- `source_quote` 只在本轮内用于来源绑定，不写入跨方正式矩阵或最终卷宗；正式卷宗只保留消息 ID 和来源类型。
+单路 Schema 失败只允许该路进入有界 replacement generation；已 sealed 的兄弟 Frame
+不会再次调用模型。三个 Frame 使用独立 checkpoint namespace、generation、frame ID、
+Prompt 和输出 Schema。
 
-`CLAIM_AND_RESPONSE.respondent_attitude.source_attribution` 在 Provider Schema 中显式区分 `INITIATOR_REPORTED / RESPONDENT_DIRECT / NO_DIRECT_POSITION`。发起方转述的对方态度只能作为“发起方单方陈述（主观）”，不会创建被发起方直接态度；若模型判定为尚未直接回应，终态只保留中性的“尚未回应”对象，不把具体转述内容与该来源混装。被发起方轮的 `claim_resolution` 不是重新生成的语义权威：Provider Schema 把上一版完整发起方诉求约束为常量，终态再从冻结卷宗原样投影，因此当前被发起方只拥有自身回应和新事实语义。
+## 4. 一次冻结、三路复用
 
-## 6. 完整度评价
+Java 在 Provider 调用前冻结同一份业务快照。服务端信封包含 case、room、actor、
+source event、epoch、fence、command、snapshot/hash 等权威；Provider 只接收脱敏后的
+model view。
 
-模型在最后一个 `TURN_EVALUATION` 按固定标准一次生成：
+Model view 以稳定顺序包含：
 
-| 分项 | 上限 | 评价内容 |
-|---|---:|---|
-| `references` | 15 | 订单、售后、物流等引用是否足以定位案件 |
-| `event_story` | 20 | 时间、对象、金额、经过和当前状态是否清楚 |
-| `party_positions` | 20 | 当前应接待方立场及已知双方分歧是否清楚 |
-| `requested_resolution` | 15 | 发起方诉求、金额/对象和理由是否清楚 |
-| `risk_and_conflicts` | 15 | 核心冲突、争议事实和风险点是否明确中立 |
-| `next_action_clarity` | 15 | 缺口、问题或交接动作是否明确且不索要证据 |
+1. 当前参与方的诉讼身份与可写分区；
+2. 上一轮正式 phase、案情和质量投影；
+3. 当前动作绑定；
+4. 冻结事实矩阵；
+5. 当前参与方最近私有对话；
+6. 当前原始消息；
+7. 该 Frame 专属任务和输出合同。
 
-模型只输出六项 `score_breakdown`，不输出独立总分；服务端以六项之和生成唯一最终完善度。阈值固定为 85：
+两方私聊原文不交叉；tenant、case ID、actor ID、fence、内部引用、凭证和写入能力不
+进入 Provider 内容。三路输入共享同一 `model_context_view_sha256`，但各自拥有独立的
+`frame_model_input_sha256` 和 `frame_prompt_sha256`。
 
-- 六项分数之和 `>= 85` 且无阻塞缺口：`ready_for_next_step=true`；
-- 否则保持 `ASK_SUBSTANTIVE / NOT_READY`；
-- 后端不重新评分，也不把缺口或完整度改写成固定话术；
-- 服务端状态机仍要求“首次达标轮必须来自认证参与方消息”，并负责正式备注分区和交接来源。
+## 5. Frame 职责
 
-## 7. 重放与失败语义
+| Frame | Prompt / sealed schema | 唯一职责 | 明确禁止 |
+| --- | --- | --- | --- |
+| `DIALOGUE_FRAME` | `intake_turn_dialogue_frame` / `intake-dialogue-frame.v4` | 候选确认、过渡或备注回应；仅在等待备注时区分 remark disposition | 写卷宗、评分、模型自造追问或正式动作 |
+| `DOSSIER_FRAME` | `intake_turn_dossier_frame` / `intake-dossier-frame.v4` | 当前来源的 typed fact/position delta | 评分、阶段推进、覆盖另一方冻结立场 |
+| `QUALITY_FRAME` | `intake_turn_quality_frame` / `intake-quality-frame.v2` | 六个固定维度分数及最多六个缺口候选 | 写事实、公开回复、输出独立总分 |
 
-- Provider 原始结构化输出只调用一次；聊天和卡片来自同一输出，不存在第二次“卡片补写”调用。
-- 同一 AgentRun 的流事件是 append-only，并按 attempt/sequence 去重；断线重连只重放已持久化事件。
-- `attempt_aborted` 或 `attempt_reset` 会清空临时卡片覆盖层，恢复最近正式卷宗。
-- 正式提交后，前端以持久化卷宗替换临时卡片；模型输出中的矩阵临时键、来源引文和服务端生成字段不会成为第二套权威。
-- 角色、引文来源、事实键、矩阵 CAS、请求哈希、epoch/fence 或状态机不一致时失败关闭；不会回退到正则猜测或静态固定回复。
+六个质量维度顺序和上限固定：
 
-## 8. 上下文预算
+| 维度 | 上限 |
+| --- | ---: |
+| `REFERENCES` | 15 |
+| `EVENT_STORY` | 20 |
+| `PARTY_POSITIONS` | 20 |
+| `REQUESTED_RESOLUTION` | 15 |
+| `RISK_AND_CONFLICTS` | 15 |
+| `NEXT_ACTION_CLARITY` | 15 |
 
-接待室上下文段预算固定为 20,000 个保守估算 token，为 32,000 输入窗口预留系统提示、响应 Schema 和 Prompt 包装空间。当前 V3 的静态估算为：
+Provider 只输出各维度分数。Java 按固定顺序校验并求和；缺口必须绑定当前冻结矩阵允许的
+`FACT_` 键。对外问题和“下一步核验重点”必须使用面向当事人的中文业务表达，英文
+字段名只是协议标识，不得作为 UI 文案直接输出。
 
-- 系统提示：7,057 字符，约 1,765 token；
-- 发起方 Schema：14,843 字符，约 3,711 token；
-- 被发起方 Schema：16,417 字符，约 4,105 token。
+## 6. 准入、流与持久化
 
-按较大的被发起方 Schema 估算，20,000 段预算加静态提示约为 25,870 token，仍为包装开销和 tokenizer 偏差保留约 6,000 token。估算采用统一的“字符数除以 4 向上取整”治理口径，不冒充供应商精确 tokenizer 结果。
+Java 在任何 Provider 调用前原子准入 exactly three manifests。每个 manifest 绑定：
+
+- frame type、generation 和 frame ID；
+- Prompt、Schema 与 Model profile；
+- command、source event、actor scope、room epoch 与 fence；
+- context/model input/prompt SHA-256；
+- 统一 turn deadline。
+
+准入失败时三路均不得开始。通过后，每个 canonical item 按自己的
+`frame_type + generation + local_index` 进入 Java durable ingress。
+
+`agent-stream.v4` 是独立的 multiplex 协议，主要事件包括：
+
+- `public_frame_start`
+- `public_frame_projection_item`
+- `active_frame_snapshot`
+- `frame_generation_reset`
+- `public_frame_sealed`
+- `public_frame_interrupted`
+- `usage`
+- `final`
+- `error`
+
+公开 item 先持久化、后投影到 SSE。Dialogue、Dossier、Quality 三个区域可独立更新，
+但在唯一 `final` 提交前都只是 provisional；前端不得据此提前开放阶段动作。
+`agent-stream.v3` 不扩充 V4 Frame payload 或 reset 语义。
+
+## 7. Java 确定性合并
+
+只有三个 Frame 都以 exact current generation sealed，Java Assembler 才能运行：
+
+- 当前可见动作由上一持久 phase 派生；
+- 正式案情增量只来自 Dossier；
+- 六项分数只来自 Quality，总分由 Java 求和；
+- Quality 缺口与 sealed Dossier matrix 做 fact-binding 对账；
+- 公开回复由 Dialogue 候选、服务端动作和授权问题槽组合；
+- `ready_for_next_step`、下一 phase、备注与 handoff 状态由 Java 规则派生；
+- Java 生成唯一 `IntakeTurnProposal`，Finalizer 仍是唯一正式写入者。
+
+阈值为 85 分，但“分数达到阈值”本身不能覆盖仍存在的阻塞缺口。身份、角色、来源、
+matrix revision、hash、epoch、fence 或 command authority 不一致时失败关闭。
+
+## 8. 失败、重放与恢复
+
+- 每个 item、Frame seal、assembly 和 final 都有稳定 ID/hash。
+- 相同 command/hash 重放采用已持久化结果，不重新调用 Provider。
+- 单路可重试失败只 replacement 该 Frame；sealed sibling 保持不变。
+- reset 以旧/new frame ID 和相邻 generation 显式表示，前端清除被替换 generation 的
+  provisional projection。
+- 未形成正式提交的失败以 `FAILED_UNCOMMITTED` 收敛，不能伪造成业务成功。
+- Python 技术完成不等于业务完成；只有 Java durable final authority 和 Formal
+  Finalizer 成功才可推进案件。
+- 迟到事件、旧 generation、错误 local index、跨 actor/case/epoch 或 hash 漂移一律
+  拒绝。
+
+## 9. 模型与 Prompt 约束
+
+当前三路统一使用 `qwen3.8-flash`，默认 `enable_thinking=false`，且由 LiteLLM 与
+Python 设置共同固定 strict JSON Schema。Prompt 通过三路独立 profile 管理：
+
+- 只要求模型生成它拥有的业务语义；
+- 服务端已知值通过 request-bound Schema 收窄，不让模型重复猜测；
+- 不把隐藏推理写入日志、stream、checkpoint 或正式结果；
+- 不以第二模型、正则或关键词覆盖已经通过 Schema 和来源绑定的模型语义；
+- Schema/来源错误触发有界局部重生成，不能切换模型或降级为自由 JSON。
+
+## 10. 兼容与发布边界
+
+- Java Flyway 当前上限为 `V094`；Graph migration 当前上限为 `G017`。
+- V3/V4 合同、历史 checkpoint、旧 matrix hash 和 replay fixture 均需保留，不能因
+  新 UAT 成功而删除。
+- 目标 E2E lane 默认关闭；隔离 UAT 成功不等于默认生产开关已启用。
+- 核心中间件版本变更必须单独授权、逐级迁移并保留恢复证据；本文不授权升级 Temporal
+  或其他核心组件。
+- 发布验收以[生产验证清单](../acceptance/temporal-first-agent-platform-verification-checklist.md)
+  、[Canonical 回归夹具](../acceptance/canonical-full-chain-uat-fixture.md)和
+  [当前 UAT 基线](../release/current-uat-baseline.md)为准。
+
+## 11. 实现入口
+
+- Python 父图与子图：`python-agent-service/app/graphs/intake/parallel_graph.py`
+- Python 输入装配：`python-agent-service/app/graph_runtime/intake_parallel_context.py`
+- Python bundle：`python-agent-service/app/graph_runtime/intake_parallel_bundle.py`
+- Java staging：`IntakeParallelFrameStagingPort`
+- Java Assembler：`IntakeParallelFrameAssembler`
+- Java stream contract：`AgentStreamEventV4`
+- 前端投影：`frontend/src/views/disputes/IntakeRoomView.vue`

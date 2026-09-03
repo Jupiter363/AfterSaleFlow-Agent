@@ -1,6 +1,10 @@
-# Release, rollback, and Code Review gate
+# Release、rollback 与 Code Review gate
 
-本文档是正式版 Phase 16 的发布质量门禁说明，用于补充 `CONTRIBUTING.md`、`docs/deployment/README.md` 和最终验收清单。
+本文档是当前生产分支的发布质量门禁，配合[贡献指南](../development/contributing.md)、
+[部署说明](../deployment/README.md)和[生产验证清单](../acceptance/temporal-first-agent-platform-verification-checklist.md)使用。
+
+当前代码和浏览器验证身份见[当前 UAT 基线](current-uat-baseline.md)。UAT 通过是候选证据，
+不是跳过本页 release gate、自动打开生产路由或升级核心组件的授权。
 
 ## Code Review Checklist
 
@@ -32,5 +36,8 @@ python -m pytest tests/api tests/e2e tests/load -q
 
 - 应用层失败：回退到上一个已通过 `smoke-test` 的 Git commit 与 Docker image 组合。
 - migration 失败：停止发布，保留数据库快照，按 Flyway 版本和 `docs/database/README.md` 定位失败 migration；未验证反向脚本前不得手工删表或改数据。
-- 中间件失败：执行 `docker compose down` 后使用上一版 `.env`、镜像变量和 Compose 文件重启。
+- 中间件失败：先停止应用写入并保留容器、volume、schema 和 image digest 证据；没有单独授权
+  与恢复演练时，不升级、降级、重建或重定向 Temporal/PostgreSQL 等核心组件。
+- Temporal schema 已前向迁移时，不得只切回旧 server image；必须恢复匹配版本的一致数据库
+  快照，或按已批准方案修复前进。禁止 `docker compose down -v` 和手工修改 schema 版本。
 - rollback 后必须再次执行 `scripts/smoke-test.sh`，确认 Nginx、Java、Python Agent、OCR、中间件与 case 创建/查询链路可用。

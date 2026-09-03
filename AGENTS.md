@@ -1,32 +1,38 @@
-# A2A delegation and direct coordination
+# Repository agent instructions
 
-- Provisioned Codex tasks and spawned sub-agents may communicate directly with one another for dependency handoffs, status updates, reviews, and conflict resolution. Prefer direct peer-to-peer messaging when it avoids routing routine coordination through the primary agent.
-- The primary agent should provide peer task/thread IDs when direct coordination is useful, together with exact owned paths, forbidden paths, acceptance criteria, and the required handoff format.
-- Direct communication does not transfer or expand authorization: each agent must keep its assigned write ownership and forbidden scope unless the primary or user explicitly changes them.
-- The primary agent remains responsible for integration, final verification, external mutations, and the user-facing result, even when peer agents coordinate directly.
-- Bug fixes must repair the responsible mechanism and restore its end-to-end invariants across every affected producer, persistence boundary, replay path, and consumer. Do not solve a failure with case-specific IDs, magic prefixes, payload-shape guesses, environment-only values, or a narrow hardcoded bypass.
-- A protocol-specific branch is allowed only when it is driven by an explicit authoritative discriminator in the domain contract. It must fail closed for legacy or missing authority and include positive, negative, replay/idempotency, and adjacent-regression tests proving that unrelated flows are unchanged.
-- Every fix handoff must state the root mechanism, the violated invariant, why the repair generalizes beyond the observed case, and which regression tests prevent the symptom from being reintroduced elsewhere.
+## Production baseline
 
-# Local development workflow
+- Treat `main` as the releasable production baseline.
+- Repair the responsible mechanism and its end-to-end invariants. Never use case-specific IDs,
+  payload guesses, magic prefixes, or environment-only bypasses as a general fix.
+- A protocol-specific branch requires an explicit authoritative discriminator and positive,
+  negative, replay/idempotency, and adjacent-regression coverage.
+- Keep Java/PostgreSQL as formal domain authority, Temporal as durable process authority, and
+  LangGraph as bounded cognitive authority. Model output cannot become a formal decision or effect.
 
-- Use an agile implementation loop. Do not run the full regression suite or an end-to-end browser flow after every individual task.
-- Run full or end-to-end verification only when the user explicitly asks for it, or once at the agreed unified verification checkpoint.
-- Prefer focused static checks while editing; keep expensive cross-service verification grouped at the checkpoint.
-- Local debugging uses the frontend on `5173`, the Java dev service on `8080`, and the Python dev service on `18000`. Docker remains the final all-service deployment target.
-- Preserve unrelated working-tree changes. Do not reset or overwrite files outside the active task.
-- Apply the adaptive delegation policy in `plans/agent-collaboration-execution.md` for every task that uses sub-agents. The primary must assign exact owned and forbidden paths, prevent concurrent writers to the same file, preserve seven logical implementation owners when capacity is constrained, and reuse released slots in the next wave.
-- Before creating a new sub-agent, prefer reusing the user-provisioned Codex sessions `019fcb08-ed40-70e0-9ca7-5ed2bf4e669a`, `019fcb08-9dbf-7941-8b81-b2adf45f18cf`, and `019fcb07-7690-7c91-b58a-eb3bdebb3135` as the first candidate pool. The primary must send each reused session a tightly bounded task with exact owned and forbidden paths, explicit acceptance criteria, and a requirement to report completion directly; avoid open-ended exploration. Use newly spawned agents only when these sessions are unavailable, already occupied, or unsuitable for the required isolation or concurrency, and never relax write-safety, secret, or external-authorization boundaries when reusing them.
-- Default topology when capacity permits is one primary plus eleven delegated logical roles: seven disjoint implementation owners, one in-flight P0 review lane, two verification lanes, and one lookahead lane. Activate these roles adaptively as dependencies unlock and reviewable work becomes available; they may run concurrently when that materially improves throughput, but all eleven need not remain active at once. Start delegated work 10-20 seconds apart. For Phase 4-8 this explicit 1+11 capacity may override the collaboration policy's lower simultaneous model-sampling budget when useful, while the two-light-test-process limit, two isolated Maven/Testcontainers lanes, and all ownership/write-safety rules remain mandatory.
-- Fast mode means the higher-throughput priority service tier (approximately 1.5x speed at higher usage); it must never be implemented by lowering model capability or reasoning effort. Keep the primary at its configured maximum reasoning. Every delegated role that writes or reviews code, tests, migrations, or runtime configuration uses `gpt-5.6-sol` with `xhigh` reasoning; security, Temporal, transaction, and P0 review work also uses `sol xhigh`. Pure test execution and mechanical verification may use `gpt-5.6-terra high`, while read-only inventory, documentation, and lookahead may use `terra medium`. For Phase 4-8 this rule overrides the collaboration policy's lower-effort model matrix and 2-3 concurrent `sol xhigh` cap; role activation remains dependency-aware rather than keeping all roles busy.
-- Keep the single planned P0 review lane in flight whenever a stable P0-sensitive diff is available. Post-commit review is P0-only. On 429, 503, or usage failure, preserve the partial edit state, reassign the role or retry after backoff, and do not weaken P0 review; choose the nearest available model class when a requested model is unavailable.
-- Run focused checks for owned changes while editing. Batch light test shards to at most two concurrent processes and allow at most two Maven/Testcontainers processes. Concurrent heavy processes must use isolated worktrees, build output, report suffixes, containers, networks, and dynamically allocated ports; run full or end-to-end verification only when explicitly requested or at the agreed unified verification checkpoint.
-- Treat a Phase boundary as an internal checkpoint, not a stopping point. Continue automatically through every remaining Phase and the agreed unified verification; stop only for a genuine external authorization, infrastructure, or unavailable-dependency blocker that cannot be resolved locally.
-- Before Phase 2-8 Temporal refactor work, read `docs/runbooks/temporal-first/phase-1-lessons-quick-reference.md`; open the full retrospective only when detailed evidence or root-cause history is needed.
-- For Phase 2 delegation and test scheduling, the primary agent follows `plans/phase-2-agent-run-v2-execution.md` and `plans/phase-2-agent-run-v2-test-batches.yaml`; delegated agents receive only their task brief and relevant batch excerpt, and all implementation remains blocked until the recorded entry gate is satisfied.
-- For Phase 3 delegation and test scheduling, the primary agent follows `plans/phase-3-graph-lcel-execution.md` and `plans/phase-3-graph-lcel-test-batches.yaml`; runtime remains `DISABLED` or signed synthetic `SHADOW`, and implementation starts only from the committed P3.0 contract gate.
-- For Phase 4 delegation and test scheduling, the primary agent follows `plans/phase-4-intake-pilot-execution.md`, `plans/phase-4-intake-pilot-test-batches.yaml`, and `docs/runbooks/temporal-first/phase-4-p4.0-contract-pack.md`; implementation remains blocked until the separate P4.0 entry-evidence commit records Batch 0 PASS for the exact contract-candidate SHA.
-- Phase 4-8 task partitioning defaults to one primary plus eleven logical delegated roles: seven implementation owners, one in-flight P0 reviewer, two verification owners, and one lookahead owner. Start, pause, and backfill roles in dependency-aware waves based on task progress; do not launch an idle reviewer before a stable diff or idle verification before a testable candidate exists. All seven implementation owners must receive concrete, disjoint implementation scope and may edit, test, and commit directly; review, verification, and lookahead roles do not replace implementation owners. If capacity or dependencies prevent all roles from being active, preserve the logical assignments and backfill released slots instead of collapsing ownership.
-- Phase 4 runtime remains `DISABLED` or Java-signed synthetic `SHADOW`. Real case shadow, a formal Intake Finalizer sink, `TEMPORAL` Intake allocation, canary, and promotion remain forbidden under ADR 0011 while `MIG-003` is pending.
-- Delegated implementation agents may directly create and edit code, tests, migrations, and documentation inside their assigned worktree and owned paths, run focused checks, and commit their work without per-edit user approval.
-- The primary agent must define owned and forbidden paths before delegation, integrate sub-agent commits, and prevent sub-agents from staging unrelated working-tree changes or crossing destructive, secret, production, or external-approval boundaries.
+## Change safety
+
+- Preserve unrelated working-tree changes and do not use destructive Git commands to discard them.
+- Do not upgrade or restart Temporal, databases, queues, model gateways, or other core components
+  without explicit user authorization.
+- Migrations are append-only. Retain replay fixtures, versioned schemas, protocol contracts, and
+  compatibility code unless a separate proof shows no persisted execution or data can require them.
+- Keep documentation in `docs/`; root `README.md` and agent instruction files are intentional
+  repository-entry exceptions. Runtime Markdown prompts remain colocated with their source.
+
+## Development workflow
+
+- Prefer focused checks while editing. Run full suites, all-service Compose, or browser E2E only
+  when the user asks or at a unified release checkpoint.
+- Local development ports are frontend `5173`, Java `8080`, and Python `18000`; Docker Compose is
+  the final all-service deployment target.
+- Before handing off a bug fix, state the root mechanism, violated invariant, generalized repair,
+  and exact regression tests.
+
+## Delegation
+
+- Give every delegated task exact owned paths, forbidden paths, acceptance criteria, and a required
+  handoff format. Never assign concurrent writers to the same file.
+- Delegation does not expand authorization for destructive operations, secrets, external systems,
+  production mutations, release actions, or component upgrades.
+- The primary agent owns integration, final verification, commits, pushes, and user-facing results.

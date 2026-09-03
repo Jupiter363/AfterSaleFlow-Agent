@@ -71,9 +71,10 @@ def test_frontend_is_partitioned_by_final_workspace_responsibility() -> None:
     expected = {
         "api",
         "components/agent",
-        "components/evidence",
-        "components/hearing",
-        "components/review",
+        "components/avatar",
+        "components/common",
+        "components/notification",
+        "components/room",
         "components/shared",
         "router",
         "schemas",
@@ -98,9 +99,11 @@ def test_repository_documentation_names_the_final_product_and_boundaries() -> No
     ).read_text(encoding="utf-8")
     normalized_readme = " ".join(readme.split())
 
-    assert readme.startswith("# AI Native 履约争端审理系统")
-    assert "Python Agent Runtime Harness" in normalized_readme
-    assert "平台人工终审承担最终责任" in normalized_readme
-    assert "Tool Executor 只执行已批准" in normalized_readme
+    assert readme.startswith('<div align="center">')
+    assert "# AfterSaleFlow-Agent" in readme
+    assert "AI Native 履约争端审理协作平台" in normalized_readme
+    assert "Python 认知运行时" in normalized_readme
+    assert "最终裁决由平台人工终审确认" in normalized_readme
+    assert "Tool Executor 不接受“模型建议执行”作为授权" in normalized_readme
     assert "Java and PostgreSQL are the authoritative domain ledger" in architecture
     assert "No state field has two authoritative writers" in architecture

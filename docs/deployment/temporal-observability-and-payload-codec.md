@@ -1,6 +1,6 @@
 # Temporal Observability and Payload Codec
 
-This runbook covers the Phase 1 Java control-plane tracing, visibility, and payload
+This runbook covers the current Java control-plane tracing, visibility, and payload
 protection contract. API, CONTROL Worker, and AGENT Worker use the same configuration.
 
 ## Search Attributes
@@ -41,9 +41,9 @@ spans are created by Spring observability. The durable command stores the curren
 client/worker interceptors then propagate the context into Workflow and Activity
 execution. Export failure must not fail a command.
 
-The Phase 8 production topology supplies two collectors. Until then local and Compose
-export is opt-in through `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and
-`OTEL_TRACES_SAMPLING_PROBABILITY`.
+Production topology supplies redundant collectors. Local and Compose export remains
+opt-in through `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and
+`OTEL_TRACES_SAMPLING_PROBABILITY`; missing telemetry fails a production release gate.
 
 The Spring profiles publish distinct resource service names: `java-api-service`,
 `java-control-worker`, and `java-agent-worker`. Do not collapse them in collector

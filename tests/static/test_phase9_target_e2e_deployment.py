@@ -21,8 +21,17 @@ ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = ROOT / "docker-compose.target-e2e.yml"
 DEPLOY = ROOT / "deploy" / "target-e2e"
 SCRIPTS = ROOT / "scripts" / "target-e2e"
+LOCAL_SOURCE_LAUNCHER = ROOT / ".local-dev" / "launch-source.ps1"
 sys.path.insert(0, str(SCRIPTS))
 common = importlib.import_module("common")
+
+
+def _read_optional_local_source_launcher() -> str:
+    if not LOCAL_SOURCE_LAUNCHER.is_file():
+        pytest.skip("local source launcher is an operator artifact, not production source")
+    return LOCAL_SOURCE_LAUNCHER.read_text(encoding="utf-8")
+
+
 ledger = importlib.import_module("ledger")
 assertion = importlib.import_module("assert_evidence")
 readiness = importlib.import_module("readiness")
@@ -1052,9 +1061,7 @@ def test_application_contract_gates_keep_infrastructure_only_from_claiming_pass(
 
 
 def test_local_source_dirty_manifest_is_closed_complete_and_fully_hashed() -> None:
-    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
-        encoding="utf-8"
-    )
+    launcher = _read_optional_local_source_launcher()
     required_paths = {
         ".local-dev/launch-source.ps1",
         ".local-dev/provision-local-target.py",
@@ -1123,9 +1130,7 @@ def test_local_source_dirty_manifest_is_closed_complete_and_fully_hashed() -> No
 
 
 def test_local_source_launcher_passes_binding_and_gates_before_mutation() -> None:
-    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
-        encoding="utf-8"
-    )
+    launcher = _read_optional_local_source_launcher()
     gate = launcher.index(
         "$sourceTopologyOwnershipGate = Invoke-SourceTopologyOwnershipGate"
     )
@@ -1150,9 +1155,7 @@ def test_local_source_launcher_passes_binding_and_gates_before_mutation() -> Non
 
 
 def test_local_source_clean_launch_retains_exact_overlay_replay_semantics() -> None:
-    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
-        encoding="utf-8"
-    )
+    launcher = _read_optional_local_source_launcher()
 
     assert "$dirtySourceEntries = @()" in launcher
     assert (
@@ -1167,9 +1170,7 @@ def test_local_source_clean_launch_retains_exact_overlay_replay_semantics() -> N
 
 
 def test_local_source_frontend_spawn_scopes_ci_and_preserves_identity() -> None:
-    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
-        encoding="utf-8"
-    )
+    launcher = _read_optional_local_source_launcher()
 
     command = launcher.index('$frontendCommand = \'pnpm --dir "{0}" dev\'')
     capture = launcher.index(
@@ -1218,9 +1219,7 @@ def test_local_source_frontend_spawn_restores_ci_when_spawn_throws(
     if powershell is None:
         pytest.skip("PowerShell is required to execute the launcher CI-scope contract")
 
-    launcher = (ROOT / ".local-dev" / "launch-source.ps1").read_text(
-        encoding="utf-8"
-    )
+    launcher = _read_optional_local_source_launcher()
     scope_start = launcher.index(
         '    $frontendCiWasPresent = Test-Path -LiteralPath "Env:CI"'
     )

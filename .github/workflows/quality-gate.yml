@@ -48,7 +48,6 @@ jobs:
           unexpected="$(
             printf '%s\n' "$matches" \
               | sed -E 's/^([^:]+):[0-9]+:/\1:/' \
-              | grep -vFx 'tests/static/test_phase8_entry_evidence.py:        b"-----BEGIN PRIVATE'" KEY"'-----",' \
               | grep -vFx 'java-api-service/src/test/java/com/example/dispute/workflow/agentrun/MountedPemGraphEnvelopeKeySetTest.java:                "-----BEGIN PRIVATE'" KEY"'-----\nnot-base64\n-----END PRIVATE KEY-----\n",' \
               || true
           )"
@@ -64,59 +63,8 @@ jobs:
           python -m pip install --disable-pip-version-check --no-deps --require-hashes \
             -r .github/requirements-static.lock
 
-      - name: Audit static quality-gate manifests
-        run: python -m pytest -q tests/static/test_quality_gate_static_manifests.py
-
-      - name: Static current repository contracts
-        shell: bash
-        run: |
-          manifest=.github/static-current-contracts.txt
-          historical_manifest=.github/static-historical-replay-only.txt
-          mapfile -t selectors < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$manifest")
-          mapfile -t historical_nodes < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$historical_manifest")
-          (( ${#selectors[@]} > 0 )) || { echo "empty static selector manifest: $manifest" >&2; exit 1; }
-          declare -A selected_files=()
-          for selector in "${selectors[@]}"; do
-            [[ "$selector" =~ ^tests/static/test_[A-Za-z0-9_]+\.py$ ]] || {
-              echo "unsafe static selector in $manifest: $selector" >&2
-              exit 1
-            }
-            [[ -f "$selector" ]] || { echo "missing static selector in $manifest: $selector" >&2; exit 1; }
-            selected_files["$selector"]=1
-          done
-          deselect_args=()
-          for historical_node in "${historical_nodes[@]}"; do
-            [[ "$historical_node" =~ ^tests/static/test_[A-Za-z0-9_]+\.py::test_[A-Za-z0-9_]+(\[[^][]+\])?$ ]] || {
-              echo "unsafe historical node in $historical_manifest: $historical_node" >&2
-              exit 1
-            }
-            historical_file="${historical_node%%::*}"
-            [[ -f "$historical_file" ]] || {
-              echo "missing historical node file in $historical_manifest: $historical_file" >&2
-              exit 1
-            }
-            [[ -n "${selected_files[$historical_file]:-}" ]] || {
-              echo "historical node file is not a current selector: $historical_file" >&2
-              exit 1
-            }
-            deselect_args+=("--deselect=$historical_node")
-          done
-          python -m pytest -q "${deselect_args[@]}" "${selectors[@]}"
-
-      - name: Static frozen evidence verifiers
-        shell: bash
-        run: |
-          manifest=.github/static-frozen-evidence-verifiers.txt
-          mapfile -t selectors < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$manifest")
-          (( ${#selectors[@]} > 0 )) || { echo "empty static selector manifest: $manifest" >&2; exit 1; }
-          for selector in "${selectors[@]}"; do
-            [[ "$selector" =~ ^tests/static/test_[A-Za-z0-9_]+\.py$ ]] || {
-              echo "unsafe static selector in $manifest: $selector" >&2
-              exit 1
-            }
-            [[ -f "$selector" ]] || { echo "missing static selector in $manifest: $selector" >&2; exit 1; }
-          done
-          python -m pytest -q "${selectors[@]}"
+      - name: Static production contracts
+        run: python -m pytest -q tests/static
 
       - name: Java tests
         working-directory: java-api-service
@@ -164,7 +112,7 @@ jobs:
       - name: Docker compose config
         run: docker compose config --quiet
 
-  phase-1-postgresql-integration:
+  postgresql-integration:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -177,18 +125,18 @@ jobs:
           java-version: "21"
           cache: maven
 
-      - name: Phase 1 PostgreSQL integration tests
+      - name: PostgreSQL integration tests
         working-directory: java-api-service
         run: >
           bash ./mvnw -s .mvn/settings.xml -B -ntp -Pintegration-test
           -Dit.test=MigrationIntegrationTest,TemporalControlPlaneMigrationIntegrationTest,WorkflowPersistenceRepositoryIntegrationTest,CaseCommandServiceIntegrationTest,CaseCommandOutboxStoreIntegrationTest,CommandOutboxKillWindowIntegrationTest,CaseProcessLedgerActivitiesIntegrationTest,ActivityCompletionLossIntegrationTest,ProcessProjectionFencingIntegrationTest,ProcessProjectionReconcilerIntegrationTest,RoomEpochScanClaimStoreIntegrationTest,RoomEpochAllocatorIntegrationTest,RoomEpochBootstrapStoreIntegrationTest,IntakeRoomServiceIntegrationTest,EvidenceRoomIntegrationTest,DisputeImportServiceIntegrationTest
           verify
 
-      - name: Upload Phase 1 Failsafe reports
+      - name: Upload PostgreSQL Failsafe reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase-1-postgresql-failsafe-reports
+          name: postgresql-failsafe-reports
           path: java-api-service/target/failsafe-reports/
           if-no-files-found: error
           retention-days: 14
@@ -197,7 +145,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - static-and-unit
-      - phase-1-postgresql-integration
+      - postgresql-integration
     steps:
       - uses: actions/checkout@v4
         with:
