@@ -43,7 +43,7 @@ Redis only wakes live subscribers.
 - Accountable roles: AI Platform and Finance
 - Approval reference: project owner plan approval, 2026-07-17
 
-The initial approved profile is the current LiteLLM alias `qwen3.7-plus`, with provider thinking
+The approved runtime profile is the current LiteLLM alias `qwen3.8-flash`, with provider thinking
 disabled and `temperature=0`. Current node budgets remain explicit, with the general governed
 profile capped at 32,000 input and 8,000 output tokens unless a versioned profile narrows them.
 Model, token budget, response format, and fallback profile come only from the signed invocation

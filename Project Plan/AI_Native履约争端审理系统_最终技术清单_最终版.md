@@ -47,7 +47,7 @@ Evaluation 做改进。
 |---|---|---|---|
 | Workflow | Temporal | 长流程、Signal、Timer、重试、恢复 | 不做开放式认知 |
 | 模型代理 | LiteLLM Proxy | 唯一 LLM 网关 | 应用不直连模型厂商 |
-| 模型 | qwen3.7-plus | 统一 LLM 模型 | 仅通过 LiteLLM 调用 |
+| 模型 | qwen3.8-flash | 统一 LLM 模型 | 仅通过 LiteLLM 调用 |
 | Agent 观测 | Langfuse | Prompt/Agent Trace、成本、评估关联 | 不保存业务最终状态 |
 
 ### 2.3 数据与基础设施
@@ -240,7 +240,7 @@ Workflow History。
 约束：
 
 ```text
-唯一默认模型 qwen3.7-plus；
+唯一默认模型 qwen3.8-flash；
 应用服务只调用 LiteLLM；
 Qwen 思考模式由 LiteLLM 统一设置 enable_thinking=false；
 模型供应商密钥不进入前端、Prompt、日志或数据库；
@@ -1010,10 +1010,10 @@ Agent 预算超限率；
 ### 12.1 统一模型配置
 
 ```text
-DEFAULT_LLM_MODEL=qwen3.7-plus
-LITELLM_DEFAULT_MODEL=qwen3.7-plus
-AGENT_LLM_MODEL=qwen3.7-plus
-EVALUATION_LLM_MODEL=qwen3.7-plus
+DEFAULT_LLM_MODEL=qwen3.8-flash
+LITELLM_DEFAULT_MODEL=qwen3.8-flash
+AGENT_LLM_MODEL=qwen3.8-flash
+EVALUATION_LLM_MODEL=qwen3.8-flash
 ```
 
 所有 LLM 调用必须经过 LiteLLM。

@@ -36,7 +36,7 @@ Agent Harness 配置；
 本项目所有 LLM 调用统一使用：
 
 ```text
-qwen3.7-plus
+qwen3.8-flash
 ```
 
 所有 Agent、证据分析、争点归纳、规则适用、裁决草案、AI 评议团、审核辅助官和 Evaluation Agent 的 LLM 调用，都必须通过 LiteLLM Proxy 访问该模型。
@@ -74,15 +74,15 @@ Prompt 文件写入 API Key；
 
 ```env
 DASHSCOPE_API_KEY=__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__
-DEFAULT_LLM_MODEL=qwen3.7-plus
+DEFAULT_LLM_MODEL=qwen3.8-flash
 DEFAULT_LLM_API_BASE=https://ws-veazvl2fycrurdmv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 ```
 
 本地 `.env` 写法：
 
 ```env
-DASHSCOPE_API_KEY=<填入真实 Qwen 3.7 Plus API Key>
-DEFAULT_LLM_MODEL=qwen3.7-plus
+DASHSCOPE_API_KEY=<填入真实 Qwen3.8-Flash API Key>
+DEFAULT_LLM_MODEL=qwen3.8-flash
 DEFAULT_LLM_API_BASE=https://ws-veazvl2fycrurdmv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 ```
 
@@ -136,13 +136,13 @@ TZ=Asia/Shanghai
 # =========================================================
 DASHSCOPE_API_KEY=__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__
 DEFAULT_LLM_PROVIDER=litellm
-DEFAULT_LLM_MODEL=qwen3.7-plus
+DEFAULT_LLM_MODEL=qwen3.8-flash
 DEFAULT_LLM_API_BASE=https://ws-veazvl2fycrurdmv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 
 LITELLM_MASTER_KEY=__GENERATED_BY_CODEX__
 LITELLM_SALT_KEY=__GENERATED_BY_CODEX__
 LITELLM_BASE_URL=http://litellm-proxy:4000
-LITELLM_DEFAULT_MODEL=qwen3.7-plus
+LITELLM_DEFAULT_MODEL=qwen3.8-flash
 
 # =========================================================
 # Agent Harness Versioning
@@ -527,7 +527,7 @@ healthcheck 必须存在。
 
 ```text
 读取 DASHSCOPE_API_KEY；
-默认模型 qwen3.7-plus；
+默认模型 qwen3.8-flash；
 对 Python Agent Service 提供 OpenAI-compatible 接口；
 配置 master key；
 日志不得打印 API Key；
@@ -561,9 +561,9 @@ deploy/litellm/config.yaml
 
 ```yaml
 model_list:
-  - model_name: qwen3.7-plus
+  - model_name: qwen3.8-flash
     litellm_params:
-      model: openai/qwen3.7-plus
+      model: openai/qwen3.8-flash
       api_key: os.environ/DASHSCOPE_API_KEY
       api_base: os.environ/DEFAULT_LLM_API_BASE
       extra_body:
@@ -581,14 +581,14 @@ general_settings:
 要求：
 
 ```text
-model_name 必须是 qwen3.7-plus；
+model_name 必须是 qwen3.8-flash；
 api_key 必须从环境变量读取；
 api_base 必须从环境变量读取；
 不允许在 YAML 写真实 Key；
 不允许配置其他默认模型。
 ```
 
-如果 LiteLLM 对 Qwen 3.7 Plus 有更推荐 provider 写法，Codex 可以适配，但对系统暴露模型名称仍必须是 `qwen3.7-plus`。
+如果 LiteLLM 对 Qwen3.8-Flash 有更推荐 provider 写法，Codex 可以适配，但对系统暴露模型名称仍必须是 `qwen3.8-flash`。
 
 ---
 
@@ -666,7 +666,7 @@ Java 服务边界：
 ```env
 APP_ENV=local
 LITELLM_BASE_URL=http://litellm-proxy:4000
-LITELLM_MODEL=qwen3.7-plus
+LITELLM_MODEL=qwen3.8-flash
 LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
 
 LANGFUSE_HOST=http://langfuse:3000
@@ -949,7 +949,7 @@ Codex 需要根据本文档完成配置体系落地：
 修改 Java / Python / OCR / Frontend 配置读取；
 确保所有中间件通过 Docker 自动部署；
 确保所有缺失运行依赖自动安装；
-确保所有模型调用统一走 qwen3.7-plus；
+确保所有模型调用统一走 qwen3.8-flash；
 确保正式版 API 路径不包含 /v2 或 /v3。
 ```
 
@@ -992,11 +992,11 @@ Codex 不允许：
 
 ### 17.2 模型统一
 
-- [ ] `DEFAULT_LLM_MODEL=qwen3.7-plus`。
-- [ ] `LITELLM_DEFAULT_MODEL=qwen3.7-plus`。
-- [ ] `LITELLM_MODEL=qwen3.7-plus`。
+- [ ] `DEFAULT_LLM_MODEL=qwen3.8-flash`。
+- [ ] `LITELLM_DEFAULT_MODEL=qwen3.8-flash`。
+- [ ] `LITELLM_MODEL=qwen3.8-flash`。
 - [ ] Python Agent Service 只调用 LiteLLM。
-- [ ] Java API Service 不直接调用 Qwen 3.7 Plus。
+- [ ] Java API Service 不直接调用 Qwen3.8-Flash。
 - [ ] 所有 Agent 默认模型一致。
 - [ ] Evaluation Agent 默认模型一致。
 
@@ -1040,9 +1040,9 @@ Codex 不允许：
 请严格按照《AI Native 履约争端审理系统：统一配置说明（最终版）》执行。
 
 任务目标：
-1. 统一所有模型调用为 qwen3.7-plus。
-2. 通过 LiteLLM Proxy 统一代理 Qwen 3.7 Plus。
-3. Qwen 3.7 Plus API Key 只能从 .env 读取，不允许写入仓库。
+1. 统一所有模型调用为 qwen3.8-flash。
+2. 通过 LiteLLM Proxy 统一代理 Qwen3.8-Flash。
+3. Qwen3.8-Flash API Key 只能从 .env 读取，不允许写入仓库。
 4. 所有数据库和中间件都必须使用 Docker Compose 部署。
 5. PostgreSQL、Redis、Elasticsearch、MinIO、Temporal、Langfuse、LiteLLM、Nginx 等服务必须可一键启动。
 6. 用户名、密码、secret、salt、service token 由 scripts/generate-secrets.sh 自动生成。
@@ -1081,9 +1081,9 @@ Codex 不允许：
 - .env.example 不包含真实密钥。
 - docker compose up 可启动所有服务。
 - 所有 healthcheck 正常。
-- LiteLLM 默认模型为 qwen3.7-plus。
-- Python Agent Service 可通过 LiteLLM 调用 qwen3.7-plus。
-- Java API Service 不直接调用 Qwen 3.7 Plus。
+- LiteLLM 默认模型为 qwen3.8-flash。
+- Python Agent Service 可通过 LiteLLM 调用 qwen3.8-flash。
+- Java API Service 不直接调用 Qwen3.8-Flash。
 - 前端不包含任何服务密钥。
 - smoke-test.sh 通过。
 ```
@@ -1095,7 +1095,7 @@ Codex 不允许：
 本项目配置体系最终定版为：
 
 ```text
-统一模型：qwen3.7-plus；
+统一模型：qwen3.8-flash；
 统一模型代理：LiteLLM Proxy；
 模型 API Key：仅写入本地 .env，不进入仓库；
 中间件部署：全部 Docker Compose 部署；
