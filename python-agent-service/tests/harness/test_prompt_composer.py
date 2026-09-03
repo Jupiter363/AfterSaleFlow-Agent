@@ -297,7 +297,11 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     assert "不写裸材料名、疑问句或证据索要" in system_prompt
     assert "所有用户可见文本只用简体中文" in system_prompt
     assert "不输出独立总分" in system_prompt
-    assert "六项 score_breakdown 分数合计大于等于 85" in system_prompt
+    assert "六项之和是唯一完善度" in system_prompt
+    assert "R := (S >= 85) AND (G == 0)" in system_prompt
+    assert "三个状态字段只能由 R 决定" in system_prompt
+    assert "S >= 85 且 G == 0 时" in system_prompt
+    assert "不得假设服务端会替模型修正互相矛盾的状态" in system_prompt
     assert system_prompt.index("room_utterance") < system_prompt.index(
         "ordered_sections"
     )
@@ -312,7 +316,7 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     assert "是否提供该转述不得影响 party_positions 评分" in system_prompt
     assert "所有问题和缺口只能由当前方本人直接、权威回答" in system_prompt
     assert "检测机构名称/资质、报告编号" in system_prompt
-    assert "必须令 blocking_gaps=[]" in system_prompt
+    assert "blocking_gaps=[] / next_questions=[]" in system_prompt
     assert "claim_resolution" in system_prompt
     assert "respondent_attitude" in system_prompt
     assert "dispute_core_state" in system_prompt
@@ -401,6 +405,8 @@ def test_intake_party_profiles_keep_current_message_priority_and_do_not_request_
     assert "用户主动转述商家曾表达的态度" in user_system_prompt
     assert "不得写入 merchant_claim、respondent_position 或商家直接立场" in user_system_prompt
     assert "不得因此扣减完善度" in user_system_prompt
+    assert "发起方终检" in user_system_prompt
+    assert "缺少商家回应、仍有可选补充项" in user_system_prompt
     assert "用户所了解的商家态度" not in user_system_prompt
 
 

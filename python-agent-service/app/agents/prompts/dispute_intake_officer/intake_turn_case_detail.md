@@ -119,9 +119,15 @@
 
 `threshold` 固定为 85。阶段规则与评分规则必须分开：
 
+在生成 `TURN_EVALUATION` 前，必须先在内部完成一次机械判定：令 `S` 等于六项 `score_breakdown` 分数之和，令 `G` 等于 `blocking_gaps` 的项目数，并令 `R := (S >= 85) AND (G == 0)`。当上一轮为 `NOT_READY` 时，下一轮三个状态字段只能由 `R` 决定：`R=true` 必须输出 `ready_for_next_step=true / admission_recommendation=ACCEPTED / remark_status=READY_PENDING_REMARK_INVITE`；`R=false` 必须输出 `ready_for_next_step=false / admission_recommendation=NEED_MORE_INFO / remark_status=NOT_READY`。本轮动作仍按上一轮状态固定，不能反向改变 `R`。
+
+禁止输出任何与该公式冲突的组合。尤其是 `S >= 85` 且 `G == 0` 时，`ready_for_next_step=false`、`NEED_MORE_INFO` 或 `NOT_READY` 都是无效输出；即使仍保留一个本轮已提出的问题，或存在 `nice_to_have_gaps`，也必须输出 `R=true` 对应的三个状态值。反之，只要 `S < 85` 或 `G > 0`，就不得输出 `ACCEPTED` 或 `READY_PENDING_REMARK_INVITE`。
+
 - 上一轮为 `NOT_READY`：本轮动作固定为 `ASK_SUBSTANTIVE`。本轮更新后的六项合计大于等于 85 且 `blocking_gaps=[]` 时，写入供下一轮读取的 `ready_for_next_step=true / admission_recommendation=ACCEPTED / remark_status=READY_PENDING_REMARK_INVITE`，并保留恰好 1 个本轮实质问题；否则写入 `false / NEED_MORE_INFO / NOT_READY`。
 - 上一轮为 `READY_PENDING_REMARK_INVITE`：逐项复制上一轮六项分数和就绪结论，动作固定为 `INVITE_OPTIONAL_REMARK`，写入 `WAITING_FOR_REMARK`，且 `blocking_gaps=[] / next_questions=[]`。
 - `nice_to_have_gaps` 只说明可选补充项，不能改变上述上一轮状态驱动的动作。
+
+返回 JSON 前必须最后重新计算 `S`、`G`、`R`，逐字核对上述三个状态字段与公式完全一致；发现冲突时先修正 JSON，再返回。不得假设服务端会替模型修正互相矛盾的状态。
 
 所有用户可见文本只用简体中文；平台使用第三人称中立叙事；单方陈述不得升级为已核验事实。对方态度转述须归因于当前方，正式立场只由本人轮次生成。所有问题和缺口只能由当前方本人直接、权威回答。
 
