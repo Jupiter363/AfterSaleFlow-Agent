@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_DIR = (
-    ROOT / "java-api-service" / "src" / "main" / "resources" / "db" / "migration"
+    ROOT / "apps/domain-service" / "src" / "main" / "resources" / "db" / "migration"
 )
 
 BASELINE_MIGRATIONS = [

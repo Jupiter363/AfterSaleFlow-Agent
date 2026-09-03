@@ -8,17 +8,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 JAVA_MAIN = (
     ROOT
-    / "java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence"
+    / "apps/domain-service/src/main/java/com/example/dispute/workflow/shadow/evidence"
 )
 JAVA_TEST = (
     ROOT
-    / "java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence"
+    / "apps/domain-service/src/test/java/com/example/dispute/workflow/shadow/evidence"
 )
 BULKHEAD = JAVA_MAIN / "EvidenceBulkheadPolicy.java"
 NO_SINK = JAVA_MAIN / "EvidenceNoFormalSinkGuard.java"
 BULKHEAD_TEST = JAVA_TEST / "EvidenceBulkheadPolicyTest.java"
 NO_SINK_TEST = JAVA_TEST / "EvidenceNoFormalSinkGuardTest.java"
-PYTHON_AGENT = ROOT / "python-agent-service"
+PYTHON_AGENT = ROOT / "apps/agent-runtime"
 GRAPH_BASE_MIGRATION = PYTHON_AGENT / "migrations/graph/G004_graph_fanout_bulkhead.sql"
 GRAPH_HARDENING_MIGRATION = (
     PYTHON_AGENT / "migrations/graph/G005_graph_fanout_fairness_and_cancellation.sql"

@@ -7,24 +7,24 @@ from pathlib import Path
 
 import pytest
 
-from scripts.phase8.recovery.domain_pitr import (
+from tools.operations.recovery.domain_pitr import (
     RECOVERY_ORDER,
     canonical_sha256,
     validate_domain_pitr,
 )
-from scripts.phase8.recovery.graph_object_restore import (
+from tools.operations.recovery.graph_object_restore import (
     validate_graph_object_restore,
 )
-from scripts.phase8.recovery.rotation_compatibility import (
+from tools.operations.recovery.rotation_compatibility import (
     validate_rotation_compatibility,
 )
-from scripts.phase8.recovery.temporal_regional_dr import (
+from tools.operations.recovery.temporal_regional_dr import (
     validate_temporal_regional_dr,
 )
 
 
 ROOT = Path(__file__).resolve().parents[2]
-RECOVERY = ROOT / "scripts" / "phase8" / "recovery"
+RECOVERY = ROOT / "tools" / "operations" / "recovery"
 
 
 def _context(scenario: str) -> tuple[dict[str, object], str]:

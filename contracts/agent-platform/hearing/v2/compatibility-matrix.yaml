@@ -10,16 +10,16 @@ source_snapshot:
     - path: docs/contracts/hearing-flow-v2.md
       sha256: 78cdb606b4c44b20cd4576d4c0585560c2cc79b8244ad46ea4696e6006854d22
       purpose: authoritative_hearing_flow_v2_business_contract
-    - path: python-agent-service/app/schemas/hearing_flow.py
+    - path: apps/agent-runtime/app/schemas/hearing_flow.py
       sha256: 5b57f0f47a3b0169f7a59a065235ef5364c1e29737b365b6c293414609c29fce
       purpose: authoritative_typed_cognition_request_result_and_hash_contract
-    - path: java-api-service/src/main/java/com/example/dispute/hearing/domain/HearingFlowStage.java
+    - path: apps/domain-service/src/main/java/com/example/dispute/hearing/domain/HearingFlowStage.java
       sha256: 8e1e37231622118ea2d3f46b85605e149817d1e75a21ba5a9c3e9baaccd31606
       purpose: authoritative_fixed_stage_enum
-    - path: java-api-service/src/main/resources/db/migration/V035__hearing_flow_v2.sql
+    - path: apps/domain-service/src/main/resources/db/migration/V035__hearing_flow_v2.sql
       sha256: 1fd05055e7a0104466fa0be5d784e4b78e488356f95085e9735abffd909e6649
       purpose: authoritative_formal_hearing_ledger_shape
-    - path: java-api-service/src/main/resources/db/migration/V037__key_hearing_party_actions_by_participant_id.sql
+    - path: apps/domain-service/src/main/resources/db/migration/V037__key_hearing_party_actions_by_participant_id.sql
       sha256: 5f3e1ef9cdcccd939ac08a10c3fd118dcbdbd6ca1516f8a54d92ca07dc519984
       purpose: authoritative_participant_identity_and_compatibility_read_shape
   accepted_checkpoint:

@@ -20,14 +20,14 @@ release 前必须完成以下命令，并把输出保存到发布记录或 PR �
 
 ```bash
 python -m pytest tests/static -q
-cd java-api-service && ./mvnw -s .mvn/settings.xml -B -ntp test
-cd python-agent-service && python -m pytest -q
-cd ocr-parser-service && python -m pytest -q
-cd frontend && pnpm test && pnpm build
+cd apps/domain-service && ./mvnw -s .mvn/settings.xml -B -ntp test
+cd apps/agent-runtime && python -m pytest -q
+cd apps/ocr-parser && python -m pytest -q
+cd apps/web && pnpm test && pnpm build
 docker compose config --quiet
 docker compose up -d --build --wait --wait-timeout 360
-./scripts/smoke-test.sh
-python -m pytest tests/api tests/e2e tests/load -q
+./tools/verify/smoke-test.sh
+python -m pytest tests/integration/api tests/e2e tests/performance -q
 ```
 
 发布说明必须包含 Git commit、镜像版本、Flyway migration 版本、环境变量变化、外部依赖变化和已执行的验证命令。
@@ -40,4 +40,4 @@ python -m pytest tests/api tests/e2e tests/load -q
   与恢复演练时，不升级、降级、重建或重定向 Temporal/PostgreSQL 等核心组件。
 - Temporal schema 已前向迁移时，不得只切回旧 server image；必须恢复匹配版本的一致数据库
   快照，或按已批准方案修复前进。禁止 `docker compose down -v` 和手工修改 schema 版本。
-- rollback 后必须再次执行 `scripts/smoke-test.sh`，确认 Nginx、Java、Python Agent、OCR、中间件与 case 创建/查询链路可用。
+- rollback 后必须再次执行 `tools/verify/smoke-test.sh`，确认 Nginx、Java、Python Agent、OCR、中间件与 case 创建/查询链路可用。

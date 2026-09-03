@@ -3,7 +3,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-JAVA = ROOT / "java-api-service" / "src" / "main" / "java" / "com" / "example" / "dispute"
+JAVA = ROOT / "apps/domain-service" / "src" / "main" / "java" / "com" / "example" / "dispute"
 
 # 所属模块：跨服务契约测试 > test_phase11_review_contract；函数角色：模块公开业务函数。
 # 具体功能：`read` 读取并按案件、角色或会话范围筛选被测业务场景；关键协作调用：`path.read_text`。
@@ -47,13 +47,13 @@ def test_all_review_actions_and_evidence_return_are_supported() -> None:
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `read`。
 # 系统意义：固定“跨服务契约测试 > test_phase11_review_contract”的可观察契约，防止后续重构改变业务结果。
 def test_reviewer_frontend_is_backend_driven_and_role_gated() -> None:
-    app = read(ROOT / "frontend" / "src" / "App.vue")
-    actor = read(ROOT / "frontend" / "src" / "state" / "actor.js")
+    app = read(ROOT / "apps/web" / "src" / "App.vue")
+    actor = read(ROOT / "apps/web" / "src" / "state" / "actor.js")
     review = read(
-        ROOT / "frontend" / "src" / "views" / "ReviewWorkbenchView.vue"
+        ROOT / "apps/web" / "src" / "views" / "ReviewWorkbenchView.vue"
     )
-    api = read(ROOT / "frontend" / "src" / "api" / "review.js")
-    package = read(ROOT / "frontend" / "package.json")
+    api = read(ROOT / "apps/web" / "src" / "api" / "review.js")
+    package = read(ROOT / "apps/web" / "package.json")
     assert "PLATFORM_REVIEWER" in app
     assert "CUSTOMER_SERVICE" in actor
     assert "MODIFY_AND_APPROVE" in review
@@ -67,7 +67,7 @@ def test_reviewer_frontend_is_backend_driven_and_role_gated() -> None:
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `read`。
 # 系统意义：固定“跨服务契约测试 > test_phase11_review_contract”的可观察契约，防止后续重构改变业务结果。
 def test_frontend_container_keeps_application_writable_for_non_root_user() -> None:
-    dockerfile = read(ROOT / "frontend" / "Dockerfile")
+    dockerfile = read(ROOT / "apps/web" / "Dockerfile")
     assert "AS build" in dockerfile
     assert "COPY --from=build --chown=node:node /app/dist ./dist" in dockerfile
     assert "USER node" in dockerfile
@@ -78,8 +78,8 @@ def test_frontend_container_keeps_application_writable_for_non_root_user() -> No
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `read`。
 # 系统意义：固定“跨服务契约测试 > test_phase11_review_contract”的可观察契约，防止后续重构改变业务结果。
 def test_frontend_container_pins_the_runtime_package_manager() -> None:
-    dockerfile = read(ROOT / "frontend" / "Dockerfile")
-    package = read(ROOT / "frontend" / "package.json")
+    dockerfile = read(ROOT / "apps/web" / "Dockerfile")
+    package = read(ROOT / "apps/web" / "package.json")
     assert "ENV COREPACK_HOME=/opt/corepack" in dockerfile
     assert '"packageManager": "pnpm@11.7.0"' in package
 
@@ -89,7 +89,7 @@ def test_frontend_container_pins_the_runtime_package_manager() -> None:
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `read`。
 # 系统意义：固定“跨服务契约测试 > test_phase11_review_contract”的可观察契约，防止后续重构改变业务结果。
 def test_frontend_healthchecks_use_the_ipv4_listener() -> None:
-    dockerfile = read(ROOT / "frontend" / "Dockerfile")
+    dockerfile = read(ROOT / "apps/web" / "Dockerfile")
     compose = read(ROOT / "docker-compose.yml")
     assert "http://127.0.0.1:5173/healthz" in dockerfile
     assert "http://127.0.0.1:5173/" in compose

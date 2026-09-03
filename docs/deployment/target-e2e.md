@@ -53,7 +53,7 @@ by digest, measures config and ordered layer identities, and writes a self-hashe
 with its bound build attestation to a new directory outside the worktree.
 
 ```text
-python scripts/target-e2e/build_image_lock.py \
+python tools/uat/target-e2e/build_image_lock.py \
   --candidate <exact-40-char-SHA> \
   --base-images <external-base-images.json> \
   --repository-prefix <registry/repository-prefix> \
@@ -86,7 +86,7 @@ promotion ceiling. A successful run creates `p9.0-evidence.json` with
 `PASS_AWAITING_ACCEPTANCE`. It does not self-accept.
 
 ```text
-python scripts/target-e2e/batch4.py --env-file <external-env> \
+python tools/uat/target-e2e/batch4.py --env-file <external-env> \
   --case-id CASE_P9_SYNTHETIC_0001 \
   --journey-command <journey-argv.json> --drain-command <drain-argv.json>
 ```
@@ -97,7 +97,7 @@ object. The current source baseline subsequently completed a fresh browser six-s
 core platform versions still require an explicit release decision.
 
 ```text
-python scripts/target-e2e/p9_gate.py accept --env-file <external-env> \
+python tools/uat/target-e2e/p9_gate.py accept --env-file <external-env> \
   --acceptance-private-key <external-private.pem> \
   --acceptance-public-key <external-public.pem> \
   --acceptance-key-id <independent-reviewer-key-id>

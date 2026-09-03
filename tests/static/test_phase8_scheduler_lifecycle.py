@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-JAVA = ROOT / "java-api-service/src/main/java/com/example/dispute"
+JAVA = ROOT / "apps/domain-service/src/main/java/com/example/dispute"
 
 
 def _read(path: Path) -> str:
@@ -101,7 +101,7 @@ def test_drained_off_keeps_temporal_identity_and_defaults_stay_executing() -> No
         JAVA / "workflow/recovery/hearing/HearingSchedulerControl.java"
     )
     properties = _read(JAVA / "workflow/config/AgentRunV2Properties.java")
-    application = _read(ROOT / "java-api-service/src/main/resources/application.yml")
+    application = _read(ROOT / "apps/domain-service/src/main/resources/application.yml")
     deadline = _read(
         JAVA / "hearing/application/HearingFlowDeadlineScheduler.java"
     )

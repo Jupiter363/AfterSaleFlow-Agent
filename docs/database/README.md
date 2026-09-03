@@ -16,8 +16,8 @@ proposal/receipt 交由 Java Finalizer 验收；Temporal 负责编排顺序，�
 
 | 数据面 | 迁移目录 | 当前上限 |
 | --- | --- | --- |
-| Java / Domain | `java-api-service/src/main/resources/db/migration` | `V094__target_e2e_graph_patch_release_identity.sql` |
-| Python / Graph | `python-agent-service/migrations/graph` | `G017_fanout_command_terminalization_authority.sql` |
+| Java / Domain | `apps/domain-service/src/main/resources/db/migration` | `V094__target_e2e_graph_patch_release_identity.sql` |
+| Python / Graph | `apps/agent-runtime/migrations/graph` | `G017_fanout_command_terminalization_authority.sql` |
 
 两组 migration 都是追加式兼容历史：已发布文件不得重命名、改写或复用版本号。Java 使用
 `ddl-auto=validate`，禁止 Hibernate 自动改表；Graph runtime 必须先验证 migration 与

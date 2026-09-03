@@ -22,7 +22,7 @@
 
 </div>
 
-> **文档基线**：`main`，截至 2026-09-04；运行代码基线为 `10526e58b954498f69bae00ea709f6f9e4981971`。
+> **文档基线**：`main`，截至 2026-09-04；代码、合同与文档以当前 `main` 提交共同构成发布基线。
 > **合同基线**：当前生产合同组合统一为 `production-contract-baseline.v1`；具体 wire/schema 版本保持不可变，用于兼容和重放。
 > **当前 UAT 基线**：接待室 V4 三 Frame 并行图已在全新浏览器案件 `CASE_P9_6A98633E_11` 上完成六站全链路验证；该结论属于隔离 UAT 证据，不等同于默认生产开关已开启。
 > **重要边界**：所有模型输出均为结构化建议或草案；最终裁决由平台人工终审确认，高影响动作只能由审批后、哈希绑定且幂等的 Tool Executor 执行。
@@ -393,13 +393,32 @@ Browser -> Java Command -> Outbox/Temporal -> AgentRun
 
 ## 仓库结构
 
+详细的目录所有权、依赖方向和新增文件落位规则见
+[仓库布局与边界](docs/development/repository-layout.md)。
+
 ```text
 AfterSaleFlow-Agent/
-├── frontend/                    # 六站争议旅程、房间 UI、审核工作台、SSE 恢复
-├── java-api-service/            # 领域账本、API、Temporal Worker、审核、执行与审计
-├── python-agent-service/        # Agent、Harness、LangGraph/LCEL、Graph Runtime 与评估
-├── ocr-parser-service/          # 图片/PDF/Word/Excel 解析与结构化抽取
-├── contracts/agent-platform/v1/ # Schema-first 跨服务合同、兼容矩阵与 fixtures
+├── apps/                        # 所有可部署应用
+│   ├── domain-service/          # Java 领域账本、API、Temporal Workflow/Worker
+│   ├── agent-runtime/           # Python Agent、LangGraph、模型与 Graph Runtime
+│   ├── web/                     # Vue 六站争议旅程与审核工作台
+│   └── ocr-parser/              # 图片、PDF、Word、Excel 解析
+├── contracts/                   # 生产合同目录、不可变 Schema 与兼容 fixtures
+│   ├── catalog/                 # production-contract-baseline.v1
+│   └── agent-platform/          # 按领域和协议版本组织的机器合同
+├── infra/                       # 环境和部署资产
+│   ├── services/                # Temporal、PostgreSQL、Redis、MinIO 等基础服务配置
+│   ├── compose/                 # 隔离 E2E Compose
+│   ├── environments/            # Target E2E 环境资源
+│   ├── kubernetes/              # 生产 Kubernetes 清单
+│   └── observability/           # 告警、指标与 Dashboard
+├── tools/                       # 开发、生成、验证、UAT 与恢复工具
+│   ├── dev/
+│   ├── generate/
+│   ├── verify/
+│   ├── uat/
+│   └── operations/
+├── tests/                       # 跨应用 Static、API、E2E、性能和基础设施测试
 ├── docs/
 │   ├── architecture/            # 权威架构、ADR、SLO 与状态所有权
 │   ├── acceptance/              # 全链路 UAT 夹具和生产验证门禁
@@ -413,10 +432,6 @@ AfterSaleFlow-Agent/
 │   ├── testing/                 # Smoke Test 与 replay fixture 说明
 │   ├── release/                 # 发布、回滚和 Code Review gate
 │   └── runbooks/                # 故障恢复、迁移和生产演练手册
-├── deploy/                      # Nginx、PostgreSQL、MinIO、ES、Temporal、LiteLLM 配置
-├── scripts/                     # 启停、密钥生成、初始化、Smoke Test、OpenAPI
-├── tests/                       # Static、API、E2E、Load 与架构门禁
-├── infra-tests/                 # 生产形态运行时与工程证据验证
 ├── docker-compose.yml           # 本地/CI 全服务拓扑
 └── .github/workflows/           # 质量门禁和工程证据流水线
 ```
@@ -441,10 +456,10 @@ cd AfterSaleFlow-Agent
 git checkout main
 
 cp .env.example .env
-./scripts/generate-secrets.sh
+./tools/generate/generate-secrets.sh
 
 # 编辑本地 .env，写入真实 DASHSCOPE_API_KEY；不要提交该文件
-./scripts/dev-up.sh
+./tools/dev/dev-up.sh
 ```
 
 `dev-up.sh` 会完成配置校验、镜像构建、健康检查和 Smoke Test。完整应用入口：
@@ -458,13 +473,13 @@ http://localhost:18080
 停止服务并保留数据卷：
 
 ```bash
-./scripts/dev-down.sh
+./tools/dev/dev-down.sh
 ```
 
 明确清空本项目数据卷并重建：
 
 ```bash
-CONFIRM_RESET=YES ./scripts/dev-reset.sh
+CONFIRM_RESET=YES ./tools/dev/dev-reset.sh
 ```
 
 ### Windows 快速开发
@@ -472,13 +487,13 @@ CONFIRM_RESET=YES ./scripts/dev-reset.sh
 保留数据库、Temporal、Python Agent、OCR 等依赖在 Docker 中，让 Java 与 Vite 直接运行：
 
 ```powershell
-.\scripts\dev-local.ps1
+.\tools\dev\dev-local.ps1
 ```
 
 停止本地 Java/Vite：
 
 ```powershell
-.\scripts\dev-local.ps1 -Stop
+.\tools\dev\dev-local.ps1 -Stop
 ```
 
 本地 Vite `5173` 会代理 Java `8080`；Docker 全量环境必须从 Nginx `18080` 进入。隔离 target-E2E 运维拓扑可能使用 Java `8081`，它不是普通本地开发或默认生产入口。
@@ -571,28 +586,28 @@ http://localhost:8080/swagger-ui.html
 ```bash
 python -m pytest tests/static -q
 
-cd java-api-service
+cd apps/domain-service
 ./mvnw -s .mvn/settings.xml -B -ntp test
-cd ..
+cd ../..
 
-cd python-agent-service
+cd apps/agent-runtime
 python -m pytest -q
-cd ..
+cd ../..
 
-cd ocr-parser-service
+cd apps/ocr-parser
 python -m pytest -q
-cd ..
+cd ../..
 
-cd frontend
+cd apps/web
 pnpm test
 pnpm build
 pnpm test:browser
-cd ..
+cd ../..
 
 docker compose config --quiet
 docker compose up -d --build --wait --wait-timeout 360
-./scripts/smoke-test.sh
-python -m pytest tests/api tests/e2e tests/load -q
+./tools/verify/smoke-test.sh
+python -m pytest tests/integration/api tests/e2e tests/performance -q
 ```
 
 ---

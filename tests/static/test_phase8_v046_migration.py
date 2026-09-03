@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = (
     ROOT
-    / "java-api-service"
+    / "apps/domain-service"
     / "src"
     / "main"
     / "resources"
@@ -15,7 +15,7 @@ MIGRATION = (
 )
 MIGRATION_TEST = (
     ROOT
-    / "java-api-service"
+    / "apps/domain-service"
     / "src"
     / "test"
     / "java"

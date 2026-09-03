@@ -11,7 +11,7 @@ production_apply: FORBIDDEN
 real_traffic: FORBIDDEN
 ```
 
-The manifests under `deploy/production/phase8` declare an engineering target. They deliberately
+The manifests under `infra/kubernetes/production` declare an engineering target. They deliberately
 use reserved `.invalid` image registries and external endpoints, do not contain a `Namespace` or
 `Secret`, and do not authorize `kubectl apply`. A successful YAML parse or Kustomize render is not
 deployment, security enforcement, three-domain placement, production capacity, or promotion
@@ -96,7 +96,7 @@ control-plane receipt.
 Only the following local check is authorized by this runbook:
 
 ```powershell
-kubectl kustomize deploy/production/phase8
+kubectl kustomize infra/kubernetes/production
 ```
 
 The security bundle must contain no `Secret`, `data`, or `stringData`, and the complete output must

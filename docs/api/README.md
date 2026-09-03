@@ -37,4 +37,4 @@ Nginx 对事件流路径关闭缓冲和缓存，读取超时为四小时。
 - OpenAPI：`http://localhost:8080/v3/api-docs`
 - Swagger UI：`http://localhost:8080/swagger-ui.html`
 
-执行 `scripts/generate-openapi.sh` 可生成 OpenAPI 快照。
+执行 `tools/generate/generate-openapi.sh` 可生成 OpenAPI 快照。

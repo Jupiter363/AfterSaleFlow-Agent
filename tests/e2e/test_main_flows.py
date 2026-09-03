@@ -223,12 +223,12 @@ def test_seeded_disputes_are_listed_and_enterable_through_nginx() -> None:
 def test_repository_e2e_flow_coverage_is_not_only_happy_path() -> None:
     java_tests = "\n".join(
         [
-            (ROOT / "java-api-service/src/test/java/com/example/dispute/evidence/EvidenceRoomIntegrationTest.java").read_text(encoding="utf-8"),
-            (ROOT / "java-api-service/src/test/java/com/example/dispute/hearing/HearingFlowRuntimeServiceTest.java").read_text(encoding="utf-8"),
-            (ROOT / "java-api-service/src/test/java/com/example/dispute/review/ReviewApplicationServiceIntegrationTest.java").read_text(encoding="utf-8"),
-            (ROOT / "java-api-service/src/test/java/com/example/dispute/executor/ToolExecutorServiceIntegrationTest.java").read_text(encoding="utf-8"),
-            (ROOT / "java-api-service/src/test/java/com/example/dispute/evaluation/CaseClosureServiceIntegrationTest.java").read_text(encoding="utf-8"),
-            (ROOT / "java-api-service/src/test/java/com/example/dispute/remedy/RemedyPlannerTest.java").read_text(encoding="utf-8"),
+            (ROOT / "apps/domain-service/src/test/java/com/example/dispute/evidence/EvidenceRoomIntegrationTest.java").read_text(encoding="utf-8"),
+            (ROOT / "apps/domain-service/src/test/java/com/example/dispute/hearing/HearingFlowRuntimeServiceTest.java").read_text(encoding="utf-8"),
+            (ROOT / "apps/domain-service/src/test/java/com/example/dispute/review/ReviewApplicationServiceIntegrationTest.java").read_text(encoding="utf-8"),
+            (ROOT / "apps/domain-service/src/test/java/com/example/dispute/executor/ToolExecutorServiceIntegrationTest.java").read_text(encoding="utf-8"),
+            (ROOT / "apps/domain-service/src/test/java/com/example/dispute/evaluation/CaseClosureServiceIntegrationTest.java").read_text(encoding="utf-8"),
+            (ROOT / "apps/domain-service/src/test/java/com/example/dispute/remedy/RemedyPlannerTest.java").read_text(encoding="utf-8"),
         ]
     )
 

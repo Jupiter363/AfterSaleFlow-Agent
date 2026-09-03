@@ -47,15 +47,19 @@ REQUIRED_DOCUMENT_FILES = {
 }
 
 REQUIRED_DIRECTORIES = {
+    "apps",
+    "apps/domain-service",
+    "apps/agent-runtime",
+    "apps/web",
+    "apps/ocr-parser",
+    "contracts",
     "docs",
-    "deploy",
-    "scripts",
-    "frontend",
-    "java-api-service",
-    "python-agent-service",
-    "ocr-parser-service",
+    "infra",
+    "infra/services/temporal",
+    "infra/kubernetes/production",
+    "tools",
     "tests",
-    "infra-tests",
+    "tests/infrastructure",
 }
 
 REQUIRED_SERVICES = {
@@ -75,15 +79,15 @@ REQUIRED_SERVICES = {
 }
 
 REQUIRED_SCRIPTS = {
-    "generate-secrets.sh",
-    "dev-up.sh",
-    "dev-down.sh",
-    "dev-reset.sh",
-    "init-db.sh",
-    "init-minio.sh",
-    "init-es.sh",
-    "smoke-test.sh",
-    "generate-openapi.sh",
+    "tools/generate/generate-secrets.sh",
+    "tools/dev/dev-up.sh",
+    "tools/dev/dev-down.sh",
+    "tools/dev/dev-reset.sh",
+    "tools/dev/init-db.sh",
+    "tools/dev/init-minio.sh",
+    "tools/dev/init-es.sh",
+    "tools/verify/smoke-test.sh",
+    "tools/generate/generate-openapi.sh",
 }
 
 REQUIRED_ENV_KEYS = {
@@ -219,7 +223,7 @@ def test_current_architecture_documents_match_the_uat_release_identity() -> None
 
 def test_production_contract_baseline_v1_catalog_is_exact_and_replay_safe() -> None:
     catalog = json.loads(
-        (ROOT / "contracts/agent-platform/production-baseline.v1.json").read_text(
+        (ROOT / "contracts/catalog/production-baseline.v1.json").read_text(
             encoding="utf-8"
         )
     )
@@ -268,14 +272,14 @@ def test_production_contract_baseline_v1_catalog_is_exact_and_replay_safe() -> N
         path.read_text(encoding="utf-8")
         for path in (
             ROOT
-            / "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomProtocol.java",
+            / "apps/domain-service/src/main/java/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomProtocol.java",
             ROOT
-            / "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/graph/TargetE2EIntakeParallelAssemblyCoordinator.java",
-            ROOT / "python-agent-service/app/config.py",
-            ROOT / "frontend/src/api/agentStream.js",
-            ROOT / "python-agent-service/app/agents/dispute_intake_officer/workflow.py",
-            ROOT / "python-agent-service/app/agents/evidence_clerk/v2_contracts.py",
-            ROOT / "python-agent-service/app/schemas/hearing_flow.py",
+            / "apps/domain-service/src/main/java/com/example/dispute/workflow/targete2e/graph/TargetE2EIntakeParallelAssemblyCoordinator.java",
+            ROOT / "apps/agent-runtime/app/config.py",
+            ROOT / "apps/web/src/api/agentStream.js",
+            ROOT / "apps/agent-runtime/app/agents/dispute_intake_officer/workflow.py",
+            ROOT / "apps/agent-runtime/app/agents/evidence_clerk/v2_contracts.py",
+            ROOT / "apps/agent-runtime/app/schemas/hearing_flow.py",
             ROOT / "contracts/agent-platform/v1/room-graph-command.schema.json",
             ROOT / "contracts/agent-platform/v1/room-graph-result.schema.json",
             ROOT
@@ -302,16 +306,16 @@ def test_production_contract_baseline_v1_catalog_is_exact_and_replay_safe() -> N
 
     assert (
         ROOT
-        / "java-api-service/src/main/resources/db/migration/V094__target_e2e_graph_patch_release_identity.sql"
+        / "apps/domain-service/src/main/resources/db/migration/V094__target_e2e_graph_patch_release_identity.sql"
     ).is_file()
     assert (
         ROOT
-        / "python-agent-service/migrations/graph/G017_fanout_command_terminalization_authority.sql"
+        / "apps/agent-runtime/migrations/graph/G017_fanout_command_terminalization_authority.sql"
     ).is_file()
 
 
 def test_java_maven_settings_use_the_official_central_repository() -> None:
-    settings = ET.parse(ROOT / "java-api-service" / ".mvn" / "settings.xml")
+    settings = ET.parse(ROOT / "apps/domain-service" / ".mvn" / "settings.xml")
     namespace = {"m": "http://maven.apache.org/SETTINGS/1.2.0"}
     mirrors = settings.findall("m:mirrors/m:mirror", namespace)
 
@@ -364,7 +368,9 @@ def test_qwen_credentials_stop_at_litellm_gateway() -> None:
     proxy_environment = services["litellm-proxy"]["environment"]
     agent_environment = services["python-agent-service"]["environment"]
     litellm_config = yaml.safe_load(
-        (ROOT / "deploy" / "litellm" / "config.yaml").read_text(encoding="utf-8")
+        (ROOT / "infra" / "services" / "litellm" / "config.yaml").read_text(
+            encoding="utf-8"
+        )
     )
 
     assert "DASHSCOPE_API_KEY" in proxy_environment
@@ -411,12 +417,11 @@ def test_compose_has_persistent_volumes_and_expected_host_ports() -> None:
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`、`text.startswith`、`re.search`、`is_file`。
 # 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_required_scripts_exist_and_fail_fast() -> None:
-    scripts_dir = ROOT / "scripts"
-    missing = sorted(name for name in REQUIRED_SCRIPTS if not (scripts_dir / name).is_file())
+    missing = sorted(name for name in REQUIRED_SCRIPTS if not (ROOT / name).is_file())
 
     assert not missing, f"missing scripts: {missing}"
     for name in REQUIRED_SCRIPTS:
-        text = (scripts_dir / name).read_text(encoding="utf-8")
+        text = (ROOT / name).read_text(encoding="utf-8")
         assert text.startswith("#!/usr/bin/env bash"), name
         assert re.search(r"^set -euo pipefail$", text, re.MULTILINE), name
 
@@ -465,7 +470,7 @@ def test_gitattributes_preserves_container_and_shell_line_endings() -> None:
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `join`、`path.read_text`、`source_root.rglob`。
 # 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_java_public_controllers_use_only_final_unversioned_api_roots() -> None:
-    source_root = ROOT / "java-api-service" / "src" / "main" / "java"
+    source_root = ROOT / "apps/domain-service" / "src" / "main" / "java"
     controller_sources = "\n".join(
         path.read_text(encoding="utf-8")
         for path in source_root.rglob("*Controller.java")
@@ -482,7 +487,7 @@ def test_java_public_controllers_use_only_final_unversioned_api_roots() -> None:
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`。
 # 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_nginx_supports_replayable_sse_without_exposing_internal_routes() -> None:
-    nginx = (ROOT / "deploy" / "nginx" / "default.conf").read_text(
+    nginx = (ROOT / "infra" / "services" / "nginx" / "default.conf").read_text(
         encoding="utf-8"
     )
 
@@ -495,7 +500,7 @@ def test_nginx_supports_replayable_sse_without_exposing_internal_routes() -> Non
 
 
 def test_nginx_only_proxies_the_public_model_health_endpoint() -> None:
-    nginx = (ROOT / "deploy" / "nginx" / "default.conf").read_text(
+    nginx = (ROOT / "infra" / "services" / "nginx" / "default.conf").read_text(
         encoding="utf-8"
     )
 
@@ -532,7 +537,7 @@ def test_nginx_only_proxies_the_public_model_health_endpoint() -> None:
 # 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_room_timing_configuration_is_declared_with_final_defaults() -> None:
     application = (
-        ROOT / "java-api-service" / "src" / "main" / "resources" / "application.yml"
+        ROOT / "apps/domain-service" / "src" / "main" / "resources" / "application.yml"
     ).read_text(encoding="utf-8")
 
     assert "evidence-window: ${EVIDENCE_WINDOW:PT2H}" in application
@@ -562,7 +567,7 @@ def test_windows_secret_generator_preserves_user_key_and_hides_secrets(
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            "scripts\\generate-secrets.ps1",
+            "tools\\generate\\generate-secrets.ps1",
             "-EnvFile",
             str(destination),
             "-ExampleFile",
@@ -594,10 +599,12 @@ def test_windows_secret_generator_defaults_to_project_root(tmp_path: Path) -> No
     if shutil.which("powershell.exe") is None:
         pytest.skip("Windows PowerShell is not available")
     project = tmp_path / "project"
-    scripts = project / "scripts"
-    scripts.mkdir(parents=True)
-    (scripts / "generate-secrets.ps1").write_text(
-        (ROOT / "scripts" / "generate-secrets.ps1").read_text(encoding="utf-8"),
+    generator_dir = project / "tools" / "generate"
+    generator_dir.mkdir(parents=True)
+    (generator_dir / "generate-secrets.ps1").write_text(
+        (ROOT / "tools" / "generate" / "generate-secrets.ps1").read_text(
+            encoding="utf-8"
+        ),
         encoding="utf-8",
     )
     (project / ".env.example").write_text(
@@ -612,7 +619,7 @@ def test_windows_secret_generator_defaults_to_project_root(tmp_path: Path) -> No
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            "scripts\\generate-secrets.ps1",
+            "tools\\generate\\generate-secrets.ps1",
         ],
         check=False,
         capture_output=True,
@@ -629,7 +636,7 @@ def test_windows_secret_generator_defaults_to_project_root(tmp_path: Path) -> No
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`、`dockerfile.count`。
 # 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_java_service_uses_java_21_multistage_nonroot_image() -> None:
-    dockerfile = (ROOT / "java-api-service" / "Dockerfile").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "apps/domain-service" / "Dockerfile").read_text(encoding="utf-8")
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
 
     assert (

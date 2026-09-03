@@ -16,7 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_ROOT = ROOT / "contracts/agent-platform/evidence/v2"
 V1_CONTRACT_ROOT = ROOT / "contracts/agent-platform/v1"
-PYTHON_AGENT_ROOT = ROOT / "python-agent-service"
+PYTHON_AGENT_ROOT = ROOT / "apps/agent-runtime"
 VALID_ROOT = CONTRACT_ROOT / "fixtures/valid"
 INVALID_ROOT = CONTRACT_ROOT / "fixtures/invalid"
 EVIDENCE_COMMAND_FIXTURE = (

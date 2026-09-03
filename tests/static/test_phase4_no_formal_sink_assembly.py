@@ -7,16 +7,16 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-JAVA_MAIN = ROOT / "java-api-service/src/main/java"
-JAVA_RESOURCES = ROOT / "java-api-service/src/main/resources"
+JAVA_MAIN = ROOT / "apps/domain-service/src/main/java"
+JAVA_RESOURCES = ROOT / "apps/domain-service/src/main/resources"
 ARCHUNIT_TEST = (
     ROOT
-    / "java-api-service/src/test/java/com/example/dispute/workflow/architecture"
+    / "apps/domain-service/src/test/java/com/example/dispute/workflow/architecture"
     / "IntakeFormalSinkAssemblyTest.java"
 )
 FIXTURE_ROOT = (
     ROOT
-    / "java-api-service/src/test/java/com/example/dispute/workflow"
+    / "apps/domain-service/src/test/java/com/example/dispute/workflow"
     / "formalsinkarchitecturefixture"
 )
 FORMAL_ROOT_NAMES = {

@@ -4,10 +4,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FRONTEND = ROOT / "frontend" / "src"
+FRONTEND = ROOT / "apps/web" / "src"
 JAVA = (
     ROOT
-    / "java-api-service"
+    / "apps/domain-service"
     / "src"
     / "main"
     / "java"
@@ -47,7 +47,7 @@ def test_frontend_has_real_routes_for_all_phase_14_workspaces() -> None:
 # 系统意义：固定“跨服务契约测试 > test_phase14_frontend_contract”的可观察契约，防止后续重构改变业务结果。
 def test_frontend_uses_only_nginx_proxy_paths_and_no_service_secrets() -> None:
     client = read(FRONTEND / "api" / "client.js")
-    environment = read(ROOT / "frontend" / ".env.example")
+    environment = read(ROOT / "apps/web" / ".env.example")
     source = "\n".join(
         path.read_text(encoding="utf-8")
         for path in FRONTEND.rglob("*")

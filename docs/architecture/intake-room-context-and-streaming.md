@@ -200,10 +200,10 @@ Python 设置共同固定 strict JSON Schema。Prompt 通过三路独立 profile
 
 ## 11. 实现入口
 
-- Python 父图与子图：`python-agent-service/app/graphs/intake/parallel_graph.py`
-- Python 输入装配：`python-agent-service/app/graph_runtime/intake_parallel_context.py`
-- Python bundle：`python-agent-service/app/graph_runtime/intake_parallel_bundle.py`
+- Python 父图与子图：`apps/agent-runtime/app/graphs/intake/parallel_graph.py`
+- Python 输入装配：`apps/agent-runtime/app/graph_runtime/intake_parallel_context.py`
+- Python bundle：`apps/agent-runtime/app/graph_runtime/intake_parallel_bundle.py`
 - Java staging：`IntakeParallelFrameStagingPort`
 - Java Assembler：`IntakeParallelFrameAssembler`
 - Java stream contract：`AgentStreamEventV4`
-- 前端投影：`frontend/src/views/disputes/IntakeRoomView.vue`
+- 前端投影：`apps/web/src/views/disputes/IntakeRoomView.vue`

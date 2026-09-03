@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-JAVA_ROOT = ROOT / "java-api-service" / "src" / "main" / "java"
+JAVA_ROOT = ROOT / "apps/domain-service" / "src" / "main" / "java"
 PERSISTENCE = (
     JAVA_ROOT
     / "com"
@@ -22,7 +22,7 @@ APPLICATION = (
 )
 TEST_ROOT = (
     ROOT
-    / "java-api-service"
+    / "apps/domain-service"
     / "src"
     / "test"
     / "java"

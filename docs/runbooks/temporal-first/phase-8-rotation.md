@@ -11,7 +11,7 @@ real_secret_certificate_credential_or_codec_rotation: FORBIDDEN_FROM_ENGINEERING
 ## Boundary
 
 This runbook covers external certificate, service credential, database credential, and payload
-codec-key rotation compatibility. `scripts/phase8/recovery/rotation_compatibility.py` validates
+codec-key rotation compatibility. `tools/operations/recovery/rotation_compatibility.py` validates
 explicit metadata and digest fixtures only. It never reads secret-bearing environment variables,
 contains no secret values, and cannot call a network, KMS, vault, database, Temporal, cloud, or
 subprocess interface.

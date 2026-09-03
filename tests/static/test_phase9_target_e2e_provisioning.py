@@ -22,7 +22,7 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = ROOT / "scripts" / "target-e2e"
+SCRIPTS = ROOT / "tools" / "uat" / "target-e2e"
 sys.path.insert(0, str(SCRIPTS))
 common = importlib.import_module("common")
 build_image_lock = importlib.import_module("build_image_lock")
@@ -136,7 +136,7 @@ def _local_source_certificate_namespace() -> dict[str, object]:
 
 
 def test_all_java_roles_use_the_target_artifact_and_control_mounts_activation_material() -> None:
-    compose = (ROOT / "docker-compose.target-e2e.yml").read_text(encoding="utf-8")
+    compose = (ROOT / "infra/compose/target-e2e.yml").read_text(encoding="utf-8")
     expected = {
         "java-api-service": ("target-e2e,api", "API", 'APP_TEMPORAL_WORKER_ENABLED: "false"'),
         "java-control-worker": (
@@ -1101,7 +1101,7 @@ def test_local_source_mtls_certificates_cover_the_activation_lifetime(
 def test_graph_patch_release_domain_authority_preserves_predecessor() -> None:
     migration = (
         ROOT
-        / "java-api-service"
+        / "apps/domain-service"
         / "src"
         / "main"
         / "resources"
@@ -1124,7 +1124,7 @@ def test_graph_patch_release_domain_authority_preserves_predecessor() -> None:
 def test_current_graph_patch_release_preserves_both_predecessors() -> None:
     migration = (
         ROOT
-        / "java-api-service"
+        / "apps/domain-service"
         / "src"
         / "main"
         / "resources"

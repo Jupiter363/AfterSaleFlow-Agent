@@ -19,10 +19,9 @@ PR 必须说明需求来源、风险、数据迁移、验证命令和回滚方�
 ## 提交前检查
 
 ```bash
-cd java-api-service && mvn test
-cd python-agent-service && pytest
-cd ocr-parser-service && pytest
-cd frontend && npm run lint && npm run typecheck && npm run test
+cd apps/domain-service && mvn test
+cd apps/agent-runtime && pytest
+cd apps/ocr-parser && pytest
+cd apps/web && npm run lint && npm run typecheck && npm run test
 docker compose config
 ```
-

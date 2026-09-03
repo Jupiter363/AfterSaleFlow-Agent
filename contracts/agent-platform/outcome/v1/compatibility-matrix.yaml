@@ -16,22 +16,22 @@ source_snapshot:
     - path: docs/architecture/adr/0001-process-domain-cognitive-authority.md
       sha256: eefe4a3d62564c12e5c2f76d78862158d2e1d9c82cc07176cd35320df8e0574a
       purpose: authoritative_process_domain_and_cognition_boundary
-    - path: java-api-service/src/main/java/com/example/dispute/domain/model/ApprovalDecisionType.java
+    - path: apps/domain-service/src/main/java/com/example/dispute/domain/model/ApprovalDecisionType.java
       sha256: e3c9b50d65a5a73d3bf7ced2ef7d7b114b01f5cf5dc3681caa92920a5e920ea6
       purpose: authoritative_five_human_decision_vocabulary
-    - path: java-api-service/src/main/java/com/example/dispute/review/application/ReviewApplicationService.java
+    - path: apps/domain-service/src/main/java/com/example/dispute/review/application/ReviewApplicationService.java
       sha256: 63d82c65e1ecd2d98a8e2235b9f1e26978103f2b790cf5c540dfc3183cc7210e
       purpose: authoritative_review_idempotency_hash_and_java_decision_write_behavior
-    - path: java-api-service/src/main/java/com/example/dispute/executor/application/ToolExecutorService.java
+    - path: apps/domain-service/src/main/java/com/example/dispute/executor/application/ToolExecutorService.java
       sha256: 107ed27b31256ab51f689bf96b1777d53022ed1d73348fc6fbd3c377bc11889e
       purpose: authoritative_existing_approved_action_execution_boundary
-    - path: java-api-service/src/main/java/com/example/dispute/evaluation/application/CaseClosureService.java
+    - path: apps/domain-service/src/main/java/com/example/dispute/evaluation/application/CaseClosureService.java
       sha256: ee9e14326fa0fc766ec7c0730cd07836133a37a9843a2660038c0b28a6bf68d5
       purpose: authoritative_existing_all_actions_succeeded_closure_and_evaluation_boundary
-    - path: java-api-service/src/main/java/com/example/dispute/room/domain/RoomType.java
+    - path: apps/domain-service/src/main/java/com/example/dispute/room/domain/RoomType.java
       sha256: 7dc7dff0044c019c8e0bd9e7bbea92abe5139bb87fbc188a49aeff608b5aa5f9
       purpose: authoritative_room_type_vocabulary_without_draft_or_outcome
-    - path: python-agent-service/app/agents/review_copilot.py
+    - path: apps/agent-runtime/app/agents/review_copilot.py
       sha256: daaef70d3a6148efca12af8d2cfc6c630916f8354ead82ef817685e0e49fcf06
       purpose: authoritative_existing_read_only_frozen_packet_copilot_boundary
   accepted_checkpoint:

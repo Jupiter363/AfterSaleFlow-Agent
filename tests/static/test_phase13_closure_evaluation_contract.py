@@ -4,8 +4,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-JAVA = ROOT / "java-api-service" / "src" / "main" / "java" / "com" / "example" / "dispute"
-PYTHON = ROOT / "python-agent-service" / "app"
+JAVA = ROOT / "apps/domain-service" / "src" / "main" / "java" / "com" / "example" / "dispute"
+PYTHON = ROOT / "apps/agent-runtime" / "app"
 
 
 # 所属模块：跨服务契约测试 > test_phase13_closure_evaluation_contract；函数角色：模块公开业务函数。

@@ -7,12 +7,12 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PYTHON_APP = ROOT / "python-agent-service/app"
+PYTHON_APP = ROOT / "apps/agent-runtime/app"
 GRAPH_RUNTIME = PYTHON_APP / "graph_runtime"
 COMPOSE = ROOT / "docker-compose.yml"
-POSTGRES_INIT = ROOT / "deploy/postgresql/init-multiple-databases.sh"
-PYTHON_DOCKERFILE = ROOT / "python-agent-service/Dockerfile"
-TEMPORAL_DYNAMIC_CONFIG = ROOT / "deploy/temporal/dynamicconfig/development-sql.yaml"
+POSTGRES_INIT = ROOT / "infra/services/postgresql/init-multiple-databases.sh"
+PYTHON_DOCKERFILE = ROOT / "apps/agent-runtime/Dockerfile"
+TEMPORAL_DYNAMIC_CONFIG = ROOT / "infra/services/temporal/dynamicconfig/development-sql.yaml"
 
 RAW_SAVER_OWNERS = {
     GRAPH_RUNTIME / "checkpoint.py",
@@ -357,7 +357,7 @@ def test_temporal_server_enables_versioning_for_the_control_worker() -> None:
     dynamic_config = yaml.safe_load(TEMPORAL_DYNAMIC_CONFIG.read_text(encoding="utf-8"))
 
     assert (
-        "./deploy/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro"
+        "./infra/services/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro"
         in temporal["volumes"]
     )
     assert temporal["environment"]["DYNAMIC_CONFIG_FILE_PATH"] == (

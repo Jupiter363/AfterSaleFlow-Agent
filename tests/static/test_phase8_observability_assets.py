@@ -8,7 +8,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-OBSERVABILITY = ROOT / "deploy" / "observability" / "phase8"
+OBSERVABILITY = ROOT / "infra" / "observability"
 RUNBOOK = ROOT / "docs" / "runbooks" / "temporal-first" / "phase-8-alert-response.md"
 DASHBOARD_NAMES = {
     "command-outbox.json",

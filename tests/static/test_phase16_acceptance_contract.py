@@ -22,9 +22,9 @@ def read(path: str) -> str:
 # 系统意义：固定“跨服务契约测试 > test_phase16_acceptance_contract”的可观察契约，防止后续重构改变业务结果。
 def test_phase16_runtime_test_suites_exist() -> None:
     for relative in (
-        "tests/api/test_api_contracts.py",
+        "tests/integration/api/test_api_contracts.py",
         "tests/e2e/test_main_flows.py",
-        "tests/load/test_performance_budget.py",
+        "tests/performance/test_performance_budget.py",
         "tests/fixtures/case_payloads.json",
     ):
         assert (ROOT / relative).exists(), relative
@@ -43,21 +43,21 @@ def test_phase16_ci_quality_gate_exists() -> None:
         "pytest",
         "pnpm",
         "docker compose config",
-        "scripts/smoke-test.sh",
+        "tools/verify/smoke-test.sh",
         "secret",
     ):
         assert required in text
     assert 'COMPOSE_PARALLEL_LIMIT: "1"' in text
-    secret_generation = text.index("bash ./scripts/generate-secrets.sh")
+    secret_generation = text.index("bash ./tools/generate/generate-secrets.sh")
     acceptance_dependencies = text.index("name: Install acceptance test dependencies")
     compose_pull = text.index("docker compose pull --ignore-buildable --policy missing")
     compose_up = text.index(
         "docker compose up -d --build --pull never --wait --wait-timeout 360"
     )
-    acceptance_tests = text.index("python -m pytest tests/api tests/e2e tests/load -q")
+    acceptance_tests = text.index("python -m pytest tests/integration/api tests/e2e tests/performance -q")
     assert acceptance_dependencies < secret_generation < compose_pull < compose_up
     assert compose_up < acceptance_tests
-    assert "-r infra-tests/phase8/runtime/requirements.lock" in text
+    assert "-r tests/infrastructure/runtime/requirements.lock" in text
     compose_steps = yaml.safe_load(text)["jobs"]["compose-smoke"]["steps"]
     setup_python = next(
         step for step in compose_steps if step.get("uses") == "actions/setup-python@v5"
@@ -75,13 +75,13 @@ def test_phase16_ci_quality_gate_exists() -> None:
     assert setup_python["with"]["python-version"] == "3.11"
     assert "--require-hashes" in install_dependencies["run"]
     assert (
-        "infra-tests/phase8/runtime/requirements.lock"
+        "tests/infrastructure/runtime/requirements.lock"
         in install_dependencies["run"]
     )
     assert "max_attempts=5" in text
     assert "delay=$((15 * 2 ** (attempt - 1)))" in text
     assert 'SEED_DEMO_DISPUTES: "true"' in text
-    assert acceptance_step["run"] == "python -m pytest tests/api tests/e2e tests/load -q"
+    assert acceptance_step["run"] == "python -m pytest tests/integration/api tests/e2e tests/performance -q"
     assert acceptance_step["env"] == {
         "ACCEPTANCE_BASE_URL": "http://127.0.0.1:18080"
     }

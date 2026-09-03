@@ -3,7 +3,7 @@
 当前 `main` 统一定义为 **`production-contract-baseline.v1`**。这里的 `v1` 是生产发布
 目录的版本，用来把同一次 UAT 验证过的 Graph、Stream、Room 和模型合同组合绑定在一起；
 机器可读目录位于
-[`contracts/agent-platform/production-baseline.v1.json`](../../contracts/agent-platform/production-baseline.v1.json)。
+[`contracts/catalog/production-baseline.v1.json`](../../contracts/catalog/production-baseline.v1.json)。
 
 ## 为什么不把所有协议重命名为 v1
 

@@ -24,13 +24,13 @@ Windows 默认 Docker Desktop 路径可为
 
 ```bash
 cp .env.example .env
-./scripts/generate-secrets.sh
+./tools/generate/generate-secrets.sh
 ```
 
 将 `.env` 中的 `DASHSCOPE_API_KEY` 替换为真实值，然后执行：
 
 ```bash
-./scripts/dev-up.sh
+./tools/dev/dev-up.sh
 ```
 
 `dev-up.sh` 会依次完成：
@@ -45,7 +45,7 @@ cp .env.example .env
 如只启动服务而暂不执行 smoke test：
 
 ```bash
-RUN_SMOKE_TEST=false ./scripts/dev-up.sh
+RUN_SMOKE_TEST=false ./tools/dev/dev-up.sh
 ```
 
 ## Java 进程与 Temporal Worker 拓扑
@@ -177,7 +177,7 @@ Compose 默认使用官方镜像名。若网络环境无法访问某个 Registry
 TEMPORAL_IMAGE=your-registry/temporalio/auto-setup:1.25.2 \
 LANGFUSE_IMAGE=your-registry/langfuse/langfuse:2.95.11 \
 LITELLM_IMAGE=your-registry/berriai/litellm:main-v1.63.14-stable \
-./scripts/dev-up.sh
+./tools/dev/dev-up.sh
 ```
 
 覆盖镜像必须与 `.env.example` 中固定版本对应。不得使用未固定的 `latest`。
@@ -192,21 +192,21 @@ docker compose ps
 docker compose logs --tail 200 java-api-service
 
 # 重新执行 smoke test
-./scripts/smoke-test.sh
+./tools/verify/smoke-test.sh
 
 # 停止服务，保留数据卷
-./scripts/dev-down.sh
+./tools/dev/dev-down.sh
 
 # 明确确认后删除本项目数据卷并重建
-CONFIRM_RESET=YES ./scripts/dev-reset.sh
+CONFIRM_RESET=YES ./tools/dev/dev-reset.sh
 ```
 
 单独初始化：
 
 ```bash
-./scripts/init-db.sh
-./scripts/init-es.sh
-./scripts/init-minio.sh
+./tools/dev/init-db.sh
+./tools/dev/init-es.sh
+./tools/dev/init-minio.sh
 ```
 
 ## 数据与安全

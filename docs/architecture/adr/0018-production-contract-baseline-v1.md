@@ -16,7 +16,7 @@ Removing versions would make old and new payloads indistinguishable.
 
 1. The current production combination is named `production-contract-baseline.v1`.
 2. Its machine-readable catalog is
-   `contracts/agent-platform/production-baseline.v1.json`.
+   `contracts/catalog/production-baseline.v1.json`.
 3. The baseline version is a release-catalog version only. It does not replace or alias a wire
    contract's own version.
 4. Existing wire/schema versions remain immutable. No v2/v3/v4 identifier is rewritten to v1 and

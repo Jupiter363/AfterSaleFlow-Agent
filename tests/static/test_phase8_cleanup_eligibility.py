@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.phase8.reference_audit import (
+from tools.operations.reference_audit import (
     ADAPTER_REGISTRY,
     Authority,
     CompletenessStatus,
@@ -21,12 +21,12 @@ from scripts.phase8.reference_audit import (
     build_active_reference_report,
     canonical_sha256,
 )
-from scripts.phase8.reference_audit.model import ActiveReferenceReport
-from scripts.phase8.reference_audit.report import (
+from tools.operations.reference_audit.model import ActiveReferenceReport
+from tools.operations.reference_audit.report import (
     adapter_inventory_hash,
     verify_sealed_active_reference_report,
 )
-from scripts.phase8.reference_audit.eligibility import (
+from tools.operations.reference_audit.eligibility import (
     MAXIMUM_QUIESCENCE_OBSERVATION_GAP,
     ApplicableArchiveRange,
     ArchiveArtifactEvidence,
@@ -50,7 +50,7 @@ from scripts.phase8.reference_audit.eligibility import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ELIGIBILITY_SOURCE = ROOT / "scripts/phase8/reference_audit/eligibility.py"
+ELIGIBILITY_SOURCE = ROOT / "tools/operations/reference_audit/eligibility.py"
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
 ENVIRONMENT_HASH = "e" * 64
 VISIBILITY_WINDOW = timedelta(minutes=10)
@@ -673,7 +673,7 @@ def test_report_fixture_is_two_independent_sealed_complete_exact_35_zero_scans()
 
 
 def test_cleanup_evidence_models_are_frozen_slotted_and_advisory() -> None:
-    from scripts.phase8.reference_audit.eligibility import (
+    from tools.operations.reference_audit.eligibility import (
         ArchiveRetentionEvidence,
         CleanupEligibilityDecision,
         QuiescenceEvidence,

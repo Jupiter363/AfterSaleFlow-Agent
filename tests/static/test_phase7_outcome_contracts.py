@@ -25,7 +25,7 @@ REVIEW_DECISION_SCHEMA_PATH = (
     / "contracts/agent-platform/outcome/v1/outcome-reviewer-decision-receipt.schema.json"
 )
 OUTCOME_FIXTURE_ROOT = ROOT / "contracts/agent-platform/outcome/v1/fixtures"
-MIGRATION_DIRECTORY = "java-api-service/src/main/resources/db/migration"
+MIGRATION_DIRECTORY = "apps/domain-service/src/main/resources/db/migration"
 MIGRATION_RELATIVE = (
     f"{MIGRATION_DIRECTORY}/V045__outcome_operation_receipt_compensation.sql"
 )

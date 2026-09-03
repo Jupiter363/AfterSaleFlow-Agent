@@ -203,11 +203,11 @@ Evidence 页面只在下列版本完全匹配时消费目标投影：
 
 ## 11. 实现入口
 
-- 上下文：`python-agent-service/app/harness/evidence_room_context_v2.py`
-- Prompt：`python-agent-service/app/agents/prompts/evidence_clerk/evidence_turn_v2.md`
-- 模型工作流：`python-agent-service/app/agents/evidence_clerk/v2_workflow.py`
-- 结果合同：`python-agent-service/app/agents/evidence_clerk/v2_contracts.py`
-- Graph executor：`python-agent-service/app/graph_runtime/evidence_turn_executor.py`
+- 上下文：`apps/agent-runtime/app/harness/evidence_room_context_v2.py`
+- Prompt：`apps/agent-runtime/app/agents/prompts/evidence_clerk/evidence_turn_v2.md`
+- 模型工作流：`apps/agent-runtime/app/agents/evidence_clerk/v2_workflow.py`
+- 结果合同：`apps/agent-runtime/app/agents/evidence_clerk/v2_contracts.py`
+- Graph executor：`apps/agent-runtime/app/graph_runtime/evidence_turn_executor.py`
 - Java transport：`TargetEvidenceTurnResultV2`
 - Java 正式化：`EvidenceAgentTurnService`、`JdbcTargetEvidenceTerminalActivities`
-- 前端：`frontend/src/views/disputes/EvidenceRoomView.vue`
+- 前端：`apps/web/src/views/disputes/EvidenceRoomView.vue`

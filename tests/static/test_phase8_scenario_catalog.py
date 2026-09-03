@@ -10,7 +10,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCENARIOS = ROOT / "infra-tests" / "phase8" / "scenarios"
+SCENARIOS = ROOT / "tests" / "infrastructure" / "scenarios"
 EXPECTED_FILES = {
     "unified-checkpoint.yaml",
     "load-and-burst.yaml",
@@ -281,15 +281,15 @@ unified-checkpoint.yaml:
   ordered_steps:
     - {order: 1, step_id: EVIDENCE_TABLES_AND_PREREQUISITES, gate: {classification: EXTERNAL_GATE, status: PENDING}}
     - {order: 2, step_id: THREE_FAILURE_DOMAIN_DEPLOYMENT_BINDING, gate: {classification: EXTERNAL_GATE, status: PENDING}}
-    - {order: 3, step_id: EXTERNAL_SECURITY_PREFLIGHT, scenario_file: infra-tests/phase8/scenarios/security-and-rotation.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
+    - {order: 3, step_id: EXTERNAL_SECURITY_PREFLIGHT, scenario_file: tests/infrastructure/scenarios/security-and-rotation.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
     - {order: 4, step_id: MULTI_ROLE_BOUNDARY_E2E_AND_BASELINES, gate: {classification: EXTERNAL_GATE, status: PENDING}}
-    - {order: 5, step_id: STEADY_LOAD, scenario_file: infra-tests/phase8/scenarios/load-and-burst.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
-    - {order: 6, step_id: BURST_AND_BOUNDED_RECOVERY, scenario_file: infra-tests/phase8/scenarios/load-and-burst.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
-    - {order: 7, step_id: LOAD_COUPLED_CHAOS_AND_FAILOVER, scenario_file: infra-tests/phase8/scenarios/chaos-and-failover.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
-    - {order: 8, step_id: WORKFLOW_GRAPH_ROLLBACK_AND_REPLAY, scenario_file: infra-tests/phase8/scenarios/replay-and-dr.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
-    - {order: 9, step_id: CROSS_SCOPE_SECURITY_AND_ROTATION, scenario_file: infra-tests/phase8/scenarios/security-and-rotation.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
-    - {order: 10, step_id: PITR_RESTORE_AND_REGIONAL_DR, scenario_file: infra-tests/phase8/scenarios/replay-and-dr.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
-    - {order: 11, step_id: SOAK_AND_SIX_ROLE_SIGNOFF, scenario_file: infra-tests/phase8/scenarios/soak.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
+    - {order: 5, step_id: STEADY_LOAD, scenario_file: tests/infrastructure/scenarios/load-and-burst.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
+    - {order: 6, step_id: BURST_AND_BOUNDED_RECOVERY, scenario_file: tests/infrastructure/scenarios/load-and-burst.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
+    - {order: 7, step_id: LOAD_COUPLED_CHAOS_AND_FAILOVER, scenario_file: tests/infrastructure/scenarios/chaos-and-failover.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
+    - {order: 8, step_id: WORKFLOW_GRAPH_ROLLBACK_AND_REPLAY, scenario_file: tests/infrastructure/scenarios/replay-and-dr.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
+    - {order: 9, step_id: CROSS_SCOPE_SECURITY_AND_ROTATION, scenario_file: tests/infrastructure/scenarios/security-and-rotation.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
+    - {order: 10, step_id: PITR_RESTORE_AND_REGIONAL_DR, scenario_file: tests/infrastructure/scenarios/replay-and-dr.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
+    - {order: 11, step_id: SOAK_AND_SIX_ROLE_SIGNOFF, scenario_file: tests/infrastructure/scenarios/soak.yaml, gate: {classification: EXTERNAL_GATE, status: PENDING}}
   stop_conditions:
     - FIRST_STEP_FAILURE
     - AUTHORIZATION_MISSING_INVALID_EXPIRED_OR_OUT_OF_SCOPE

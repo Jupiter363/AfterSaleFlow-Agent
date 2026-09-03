@@ -9,8 +9,8 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CAPACITY = ROOT / "infra-tests" / "phase8" / "capacity"
-POLICY = ROOT / "deploy" / "production" / "phase8" / "capacity-policy.yaml"
+CAPACITY = ROOT / "tests" / "infrastructure" / "capacity"
+POLICY = ROOT / "infra" / "kubernetes" / "production" / "capacity-policy.yaml"
 SCENARIO = CAPACITY / "scenario.yaml"
 sys.path.insert(0, str(CAPACITY))
 

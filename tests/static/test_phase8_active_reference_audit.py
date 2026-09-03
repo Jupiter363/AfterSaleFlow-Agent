@@ -10,7 +10,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-from scripts.phase8.reference_audit import (
+from tools.operations.reference_audit import (
     ADAPTERS,
     ADAPTER_REGISTRY,
     Authority,
@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = (
     ROOT / "contracts/agent-platform/phase8/active-reference-report.schema.json"
 )
-PACKAGE = ROOT / "scripts/phase8/reference_audit"
+PACKAGE = ROOT / "tools/operations/reference_audit"
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
 ENVIRONMENT_HASH = "e" * 64
 

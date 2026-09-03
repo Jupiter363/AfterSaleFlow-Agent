@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 JAVA = (
     ROOT
-    / "java-api-service"
+    / "apps/domain-service"
     / "src"
     / "main"
     / "java"
@@ -14,8 +14,8 @@ JAVA = (
     / "example"
     / "dispute"
 )
-PYTHON = ROOT / "python-agent-service" / "app"
-FRONTEND = ROOT / "frontend" / "src"
+PYTHON = ROOT / "apps/agent-runtime" / "app"
+FRONTEND = ROOT / "apps/web" / "src"
 
 
 # 所属模块：跨服务契约测试 > test_final_repository_structure；函数角色：回归测试用例。

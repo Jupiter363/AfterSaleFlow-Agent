@@ -12,7 +12,8 @@
 - [业务合同](contracts/README.md)：统一的 Production Contract Baseline v1、具体协议版本和变更规则。
 - [数据](database/README.md)：数据库、迁移和存储边界。
 - [部署](deployment/README.md)：Compose、Temporal、Langfuse 与隔离 E2E。
-- [开发](development/contributing.md)：贡献流程与代码规范。
+- [开发](development/contributing.md)：贡献流程与代码规范；
+  [仓库布局与边界](development/repository-layout.md)说明目录所有权和依赖方向。
 - [前端](frontend/README.md)：模块职责和前端安全边界。
 - [安全](security/security-policy.md)：漏洞报告、核心安全规则与 Prompt 安全加固记录。
 - [测试](testing/smoke-test-cases.md)：冒烟测试和 Temporal History 夹具说明。

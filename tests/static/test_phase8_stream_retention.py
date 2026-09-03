@@ -3,14 +3,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-JAVA_ROOT = ROOT / "java-api-service" / "src" / "main" / "java"
+JAVA_ROOT = ROOT / "apps/domain-service" / "src" / "main" / "java"
 AGENT_STREAM = JAVA_ROOT / "com" / "example" / "dispute" / "agentstream"
 APPLICATION = AGENT_STREAM / "application"
 DELIVERY = AGENT_STREAM / "infrastructure" / "delivery"
 PERSISTENCE = AGENT_STREAM / "infrastructure" / "persistence"
 JAVA_TESTS = (
     ROOT
-    / "java-api-service"
+    / "apps/domain-service"
     / "src"
     / "test"
     / "java"

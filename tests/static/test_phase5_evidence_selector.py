@@ -3,16 +3,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SELECTOR = ROOT / (
-    "java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/"
+    "apps/domain-service/src/main/java/com/example/dispute/workflow/shadow/evidence/"
     "EvidenceEpochSelector.java"
 )
 ROLLBACK = ROOT / (
-    "java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/"
+    "apps/domain-service/src/main/java/com/example/dispute/workflow/shadow/evidence/"
     "EvidenceCutoverRollback.java"
 )
 RECOVERY_TESTS = [
     ROOT
-    / "java-api-service/src/test/java/com/example/dispute/workflow/recovery/"
+    / "apps/domain-service/src/test/java/com/example/dispute/workflow/recovery/"
     / name
     for name in (
         "EvidenceTemporalCutoverIntegrationTest.java",
@@ -98,7 +98,7 @@ def test_focused_recovery_tests_cover_required_boundaries():
 def test_public_submission_limit_remains_fifty():
     request = (
         ROOT
-        / "java-api-service/src/main/java/com/example/dispute/evidence/api/"
+        / "apps/domain-service/src/main/java/com/example/dispute/evidence/api/"
         / "EvidenceSubmissionRequest.java"
     ).read_text(encoding="utf-8")
 

@@ -7,7 +7,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PHASE8 = ROOT / "deploy" / "production" / "phase8"
+PHASE8 = ROOT / "infra" / "kubernetes" / "production"
 
 
 def _docs(path: Path) -> list[dict[str, Any]]:

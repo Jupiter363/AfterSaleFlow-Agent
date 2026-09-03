@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SERVICE = ROOT / "python-agent-service"
+SERVICE = ROOT / "apps/agent-runtime"
 APP = SERVICE / "app"
 
 

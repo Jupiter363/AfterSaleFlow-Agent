@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-JAVA = ROOT / "java-api-service" / "src" / "main" / "java" / "com" / "example" / "dispute"
+JAVA = ROOT / "apps/domain-service" / "src" / "main" / "java" / "com" / "example" / "dispute"
 
 
 # 所属模块：跨服务契约测试 > test_phase9_temporal_contract；函数角色：模块公开业务函数。
@@ -97,7 +97,7 @@ def test_worker_enablement_is_explicitly_configurable() -> None:
     compose = text(ROOT / "docker-compose.yml")
     local = text(
         ROOT
-        / "java-api-service"
+        / "apps/domain-service"
         / "src"
         / "main"
         / "resources"

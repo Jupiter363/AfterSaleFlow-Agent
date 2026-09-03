@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-JAVA = ROOT / "java-api-service" / "src" / "main" / "java" / "com" / "example" / "dispute"
+JAVA = ROOT / "apps/domain-service" / "src" / "main" / "java" / "com" / "example" / "dispute"
 
 
 # 所属模块：跨服务契约测试 > test_phase12_executor_contract；函数角色：模块公开业务函数。

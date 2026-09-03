@@ -11,7 +11,7 @@ real_restore: FORBIDDEN_FROM_ENGINEERING_TOOLING
 ## Boundary
 
 This runbook describes the evidence an externally authorized DBA and SRE team must produce for a
-Domain PostgreSQL point-in-time recovery drill. `scripts/phase8/recovery/domain_pitr.py` only
+Domain PostgreSQL point-in-time recovery drill. `tools/operations/recovery/domain_pitr.py` only
 validates an explicit in-memory fixture. It cannot connect to a database, read credentials, invoke
 a backup service, mutate a filesystem, or perform a restore.
 

@@ -37,7 +37,7 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
+          cache-dependency-path: apps/web/pnpm-lock.yaml
 
       - name: Secret scan / secret scanning
         run: |
@@ -48,7 +48,7 @@ jobs:
           unexpected="$(
             printf '%s\n' "$matches" \
               | sed -E 's/^([^:]+):[0-9]+:/\1:/' \
-              | grep -vFx 'java-api-service/src/test/java/com/example/dispute/workflow/agentrun/MountedPemGraphEnvelopeKeySetTest.java:                "-----BEGIN PRIVATE'" KEY"'-----\nnot-base64\n-----END PRIVATE KEY-----\n",' \
+              | grep -vFx 'apps/domain-service/src/test/java/com/example/dispute/workflow/agentrun/MountedPemGraphEnvelopeKeySetTest.java:                "-----BEGIN PRIVATE'" KEY"'-----\nnot-base64\n-----END PRIVATE KEY-----\n",' \
               || true
           )"
           if [[ -n "$unexpected" ]]; then
@@ -59,7 +59,7 @@ jobs:
       - name: Install static test dependencies
         run: |
           python -m pip install --disable-pip-version-check --require-hashes \
-            -r infra-tests/phase8/runtime/requirements.lock
+            -r tests/infrastructure/runtime/requirements.lock
           python -m pip install --disable-pip-version-check --no-deps --require-hashes \
             -r .github/requirements-static.lock
 
@@ -67,36 +67,36 @@ jobs:
         run: python -m pytest -q tests/static
 
       - name: Java tests
-        working-directory: java-api-service
+        working-directory: apps/domain-service
         run: bash ./mvnw -s .mvn/settings.xml -B -ntp test
 
       - name: Python Agent tests
-        working-directory: python-agent-service
+        working-directory: apps/agent-runtime
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
           python -m pytest -q
 
       - name: OCR Parser tests
-        working-directory: ocr-parser-service
+        working-directory: apps/ocr-parser
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pytest -q
 
       - name: Frontend tests and build
-        working-directory: frontend
+        working-directory: apps/web
         run: |
           pnpm install --frozen-lockfile
           pnpm test
           pnpm build
 
       - name: Install Playwright Chromium
-        working-directory: frontend
+        working-directory: apps/web
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Frontend browser layout regression
-        working-directory: frontend
+        working-directory: apps/web
         run: pnpm test:browser
 
       - name: Upload Playwright diagnostics
@@ -105,8 +105,8 @@ jobs:
         with:
           name: playwright-report
           path: |
-            frontend/playwright-report/
-            frontend/test-results/
+            apps/web/playwright-report/
+            apps/web/test-results/
           retention-days: 7
 
       - name: Docker compose config
@@ -126,7 +126,7 @@ jobs:
           cache: maven
 
       - name: PostgreSQL integration tests
-        working-directory: java-api-service
+        working-directory: apps/domain-service
         run: >
           bash ./mvnw -s .mvn/settings.xml -B -ntp -Pintegration-test
           -Dit.test=MigrationIntegrationTest,TemporalControlPlaneMigrationIntegrationTest,WorkflowPersistenceRepositoryIntegrationTest,CaseCommandServiceIntegrationTest,CaseCommandOutboxStoreIntegrationTest,CommandOutboxKillWindowIntegrationTest,CaseProcessLedgerActivitiesIntegrationTest,ActivityCompletionLossIntegrationTest,ProcessProjectionFencingIntegrationTest,ProcessProjectionReconcilerIntegrationTest,RoomEpochScanClaimStoreIntegrationTest,RoomEpochAllocatorIntegrationTest,RoomEpochBootstrapStoreIntegrationTest,IntakeRoomServiceIntegrationTest,EvidenceRoomIntegrationTest,DisputeImportServiceIntegrationTest
@@ -137,7 +137,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: postgresql-failsafe-reports
-          path: java-api-service/target/failsafe-reports/
+          path: apps/domain-service/target/failsafe-reports/
           if-no-files-found: error
           retention-days: 14
 
@@ -161,9 +161,9 @@ jobs:
       - name: Install acceptance test dependencies
         run: |
           python -m pip install --disable-pip-version-check --require-hashes \
-            -r infra-tests/phase8/runtime/requirements.lock
+            -r tests/infrastructure/runtime/requirements.lock
       - name: Generate ephemeral Compose credentials
-        run: bash ./scripts/generate-secrets.sh
+        run: bash ./tools/generate/generate-secrets.sh
       - name: Pull Compose images with bounded backoff
         env:
           COMPOSE_PARALLEL_LIMIT: "1"
@@ -191,7 +191,7 @@ jobs:
           SEED_DEMO_DISPUTES: "true"
         run: docker compose up -d --build --pull never --wait --wait-timeout 360
       - name: Temporal worker restart recovery
-        working-directory: java-api-service
+        working-directory: apps/domain-service
         run: >
           bash ./mvnw -s .mvn/settings.xml -B -ntp -Pintegration-test
           -Dit.test=TemporalWorkerRestartIntegrationTest
@@ -203,18 +203,18 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: temporal-worker-restart-failsafe-reports
-          path: java-api-service/target/failsafe-reports/
+          path: apps/domain-service/target/failsafe-reports/
           if-no-files-found: warn
           retention-days: 14
       - name: Smoke test
         env:
           DASHSCOPE_API_KEY: ci-placeholder-not-a-real-key
           DEFAULT_LLM_API_BASE: http://127.0.0.1:9
-        run: bash ./scripts/smoke-test.sh
+        run: bash ./tools/verify/smoke-test.sh
       - name: API, E2E, and load smoke tests
         env:
           ACCEPTANCE_BASE_URL: http://127.0.0.1:18080
-        run: python -m pytest tests/api tests/e2e tests/load -q
+        run: python -m pytest tests/integration/api tests/e2e tests/performance -q
       - name: Compose logs on failure
         if: failure()
         run: docker compose logs --tail 200

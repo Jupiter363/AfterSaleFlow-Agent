@@ -11,7 +11,7 @@ real_graph_or_object_restore: FORBIDDEN_FROM_ENGINEERING_TOOLING
 ## Boundary
 
 This runbook describes the externally executed Graph PostgreSQL and object-store recovery stages.
-`scripts/phase8/recovery/graph_object_restore.py` is an in-memory validator and cannot contact
+`tools/operations/recovery/graph_object_restore.py` is an in-memory validator and cannot contact
 PostgreSQL or object storage, load credentials, mutate files, or execute restore operations.
 
 The exact order is Domain, Temporal, Graph, object store, workers, and projections. Domain and

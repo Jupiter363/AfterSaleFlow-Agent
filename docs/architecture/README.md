@@ -32,6 +32,7 @@ ADR 0018 将当前 `main` 定义为 `production-contract-baseline.v1`。该版�
 
 ## 工程与运行
 
+- [仓库布局与边界](../development/repository-layout.md)
 - [API 约定](../api/README.md)
 - [数据库说明](../database/README.md)
 - [部署说明](../deployment/README.md)
