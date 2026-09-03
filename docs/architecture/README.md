@@ -15,6 +15,8 @@
   可重复六站回归的固定输入、角色和预期结果。
 - [当前 UAT 基线](../release/current-uat-baseline.md)：当前 `main` 的版本身份与最新
   fresh-case 浏览器全链路证据。
+- [Production Contract Baseline v1](../contracts/README.md)：统一生产合同目录以及
+  wire/schema 版本不可重编号的规则。
 - [Hearing Flow V2 合同](../contracts/hearing-flow-v2.md)：固定 15 阶段庭审及其
   对象、接口和不可变约束。
 
@@ -24,6 +26,9 @@
 状态，旧日期、旧协议名和迁移 Check ID 不应被解释为当前运行状态；当前状态以本页列出的
 权威文档和代码为准。已完成的阶段准入例外、候选计划和冻结工程证据不再保存在 `main`；完整历史可从备份分支
 `codex/main-full-backup-20260904-f5cb0686` 查阅。
+
+ADR 0018 将当前 `main` 定义为 `production-contract-baseline.v1`。该版本只标识当前生产
+合同组合，不覆盖各协议已经持久化的 v1/v2/v3/v4 discriminator。
 
 ## 工程与运行
 

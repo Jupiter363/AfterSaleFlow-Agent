@@ -13,6 +13,7 @@
 
 | 维度 | 当前 UAT 代码基线 |
 | --- | --- |
+| 生产 Contract Baseline | `production-contract-baseline.v1` |
 | Graph key | `all-rooms.target-e2e.v2` |
 | Graph version | `target-e2e-graph.2026-08-18.3` |
 | Checkpoint | `target-e2e-checkpoint.v2` |
@@ -35,6 +36,10 @@
 6. 流程中未依靠手工数据库更新、重复提交已接受命令或绕过人工终审完成推进。
 
 ## 平台边界
+
+Contract Baseline v1 是统一发布目录，不会把 `agent-stream.v4`、`hearing_flow.v2` 等
+持久化协议机械改名为 v1，也不会移除版本 discriminator。完整目录和演进规则见
+[生产合同目录](../contracts/README.md)。
 
 该次 deployment-pinned 路由验证运行于经单独授权升级并验收的 Temporal Server
 `1.29.7`。仓库 Compose 默认仍为 `temporalio/auto-setup:1.25.2`，本页不会也不能授权

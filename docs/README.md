@@ -9,7 +9,7 @@
 - [验收](acceptance/temporal-first-agent-platform-verification-checklist.md)：当前发布门禁；
   [Canonical UAT 夹具](acceptance/canonical-full-chain-uat-fixture.md)固定全链路输入。
 - [接口](api/README.md)：公共 API、身份、幂等与 SSE 约定。
-- [业务合同](contracts/hearing-flow-v2.md)：庭审等业务协议。
+- [业务合同](contracts/README.md)：统一的 Production Contract Baseline v1、具体协议版本和变更规则。
 - [数据](database/README.md)：数据库、迁移和存储边界。
 - [部署](deployment/README.md)：Compose、Temporal、Langfuse 与隔离 E2E。
 - [开发](development/contributing.md)：贡献流程与代码规范。

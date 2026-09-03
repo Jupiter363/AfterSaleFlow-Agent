@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -29,8 +30,10 @@ REQUIRED_DOCUMENT_FILES = {
     "architecture/temporal-first-agent-platform.md",
     "architecture/intake-room-context-and-streaming.md",
     "architecture/evidence-room-context-binding-and-token-streaming.md",
+    "architecture/adr/0018-production-contract-baseline-v1.md",
     "acceptance/temporal-first-agent-platform-verification-checklist.md",
     "acceptance/canonical-full-chain-uat-fixture.md",
+    "contracts/README.md",
     "release/current-uat-baseline.md",
     "development/contributing.md",
     "development/code-style.md",
@@ -212,6 +215,99 @@ def test_current_architecture_documents_match_the_uat_release_identity() -> None
 
     assert "G017" in intake
     assert "V094" in intake
+
+
+def test_production_contract_baseline_v1_catalog_is_exact_and_replay_safe() -> None:
+    catalog = json.loads(
+        (ROOT / "contracts/agent-platform/production-baseline.v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert catalog["schema_version"] == "production-contract-baseline.v1"
+    assert catalog["status"] == "CURRENT"
+    assert catalog["source"]["branch"] == "main"
+    assert catalog["source"]["runtime_commit"] == (
+        "10526e58b954498f69bae00ea709f6f9e4981971"
+    )
+    assert catalog["versioning_policy"] == {
+        "baseline_is_release_catalog": True,
+        "wire_contract_versions_are_immutable": True,
+        "versionless_wire_contracts_allowed": False,
+        "renumber_existing_wire_contracts": False,
+    }
+    assert catalog["graph"] == {
+        "key": "all-rooms.target-e2e.v2",
+        "version": "target-e2e-graph.2026-08-18.3",
+        "checkpoint_schema": "target-e2e-checkpoint.v2",
+        "command_schema": "room-graph-command.v1",
+        "result_schema": "room-graph-result.v1",
+    }
+    assert catalog["intake"]["execution_profile"] == "PARALLEL_FRAMES_V1"
+    assert catalog["intake"]["public_stream"] == "agent-stream.v4"
+    assert catalog["evidence"] == {
+        "context_contract": "evidence_room_context.v2",
+        "frame_stream": "evidence_turn_stream.v3",
+        "result_contract": "evidence-turn-result.v3",
+        "public_stream": "agent-stream.v3",
+    }
+    assert catalog["hearing"]["flow_contract"] == "hearing_flow.v2"
+    assert catalog["hearing"]["answer_bundle"] == "hearing_answer_bundle.v4"
+    assert catalog["outcome"]["contract_family"] == "outcome.v1"
+    assert catalog["model"] == {
+        "id": "qwen3.8-flash",
+        "thinking_enabled": False,
+        "strict_json_schema": True,
+    }
+    assert catalog["persistence"] == {
+        "domain_migration_ceiling": "V094",
+        "graph_migration_ceiling": "G017",
+    }
+
+    current_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            ROOT
+            / "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomProtocol.java",
+            ROOT
+            / "java-api-service/src/main/java/com/example/dispute/workflow/targete2e/graph/TargetE2EIntakeParallelAssemblyCoordinator.java",
+            ROOT / "python-agent-service/app/config.py",
+            ROOT / "frontend/src/api/agentStream.js",
+            ROOT / "python-agent-service/app/agents/dispute_intake_officer/workflow.py",
+            ROOT / "python-agent-service/app/agents/evidence_clerk/v2_contracts.py",
+            ROOT / "python-agent-service/app/schemas/hearing_flow.py",
+            ROOT / "contracts/agent-platform/v1/room-graph-command.schema.json",
+            ROOT / "contracts/agent-platform/v1/room-graph-result.schema.json",
+            ROOT
+            / "contracts/agent-platform/outcome/v1/outcome-workflow-start.schema.json",
+        )
+    )
+    for identity in (
+        catalog["graph"]["key"],
+        catalog["graph"]["version"],
+        catalog["graph"]["checkpoint_schema"],
+        catalog["graph"]["command_schema"],
+        catalog["graph"]["result_schema"],
+        catalog["intake"]["execution_profile"],
+        catalog["intake"]["context_contract"],
+        catalog["intake"]["public_stream"],
+        catalog["evidence"]["frame_stream"],
+        catalog["evidence"]["result_contract"],
+        catalog["hearing"]["flow_contract"],
+        catalog["hearing"]["answer_bundle"],
+        catalog["outcome"]["workflow_start"],
+        catalog["model"]["id"],
+    ):
+        assert identity in current_sources
+
+    assert (
+        ROOT
+        / "java-api-service/src/main/resources/db/migration/V094__target_e2e_graph_patch_release_identity.sql"
+    ).is_file()
+    assert (
+        ROOT
+        / "python-agent-service/migrations/graph/G017_fanout_command_terminalization_authority.sql"
+    ).is_file()
 
 
 def test_java_maven_settings_use_the_official_central_repository() -> None:

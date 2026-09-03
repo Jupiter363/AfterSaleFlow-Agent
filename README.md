@@ -23,6 +23,7 @@
 </div>
 
 > **文档基线**：`main`，截至 2026-09-04；运行代码基线为 `10526e58b954498f69bae00ea709f6f9e4981971`。
+> **合同基线**：当前生产合同组合统一为 `production-contract-baseline.v1`；具体 wire/schema 版本保持不可变，用于兼容和重放。
 > **当前 UAT 基线**：接待室 V4 三 Frame 并行图已在全新浏览器案件 `CASE_P9_6A98633E_11` 上完成六站全链路验证；该结论属于隔离 UAT 证据，不等同于默认生产开关已开启。
 > **重要边界**：所有模型输出均为结构化建议或草案；最终裁决由平台人工终审确认，高影响动作只能由审批后、哈希绑定且幂等的 Tool Executor 执行。
 
@@ -55,6 +56,7 @@ AfterSaleFlow-Agent 是一个面向**用户与商家履约争端**的 AI Native 
 
 | 维度 | 当前基线 |
 | --- | --- |
+| 生产 Contract Baseline | `production-contract-baseline.v1`；统一目录，不重写持久化 wire/schema 版本 |
 | 接待室认知图 | 新 epoch 使用 `PARALLEL_FRAMES_V1`：V4 三个显式兄弟 Frame `DIALOGUE_FRAME`、`DOSSIER_FRAME`、`QUALITY_FRAME`；独立校验后由受权威约束的合并路径提交 |
 | Graph / Stream 身份 | `target-e2e-graph.2026-08-18.3`；Intake 并行流使用 `agent-stream.v4`，其余目标房间继续使用 `agent-stream.v3` |
 | Evidence 合同 | `evidence_room_context.v2`、`evidence_turn_stream.v3`、`evidence-turn-result.v3` |

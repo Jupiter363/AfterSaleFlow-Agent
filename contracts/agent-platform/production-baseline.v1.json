@@ -1,0 +1,55 @@
+{
+  "schema_version": "production-contract-baseline.v1",
+  "status": "CURRENT",
+  "source": {
+    "branch": "main",
+    "runtime_commit": "10526e58b954498f69bae00ea709f6f9e4981971",
+    "catalog_origin_commit": "9118f0ee16e94dec92e3c321859235cd7861afb2"
+  },
+  "versioning_policy": {
+    "baseline_is_release_catalog": true,
+    "wire_contract_versions_are_immutable": true,
+    "versionless_wire_contracts_allowed": false,
+    "renumber_existing_wire_contracts": false
+  },
+  "graph": {
+    "key": "all-rooms.target-e2e.v2",
+    "version": "target-e2e-graph.2026-08-18.3",
+    "checkpoint_schema": "target-e2e-checkpoint.v2",
+    "command_schema": "room-graph-command.v1",
+    "result_schema": "room-graph-result.v1"
+  },
+  "intake": {
+    "execution_profile": "PARALLEL_FRAMES_V1",
+    "context_contract": "intake_turn_context.v3",
+    "public_stream": "agent-stream.v4",
+    "frame_contract": "dispute-intake-officer.parallel-frames.v1"
+  },
+  "evidence": {
+    "context_contract": "evidence_room_context.v2",
+    "frame_stream": "evidence_turn_stream.v3",
+    "result_contract": "evidence-turn-result.v3",
+    "public_stream": "agent-stream.v3"
+  },
+  "hearing": {
+    "flow_contract": "hearing_flow.v2",
+    "answer_bundle": "hearing_answer_bundle.v4",
+    "trial_dossier": "trial_dossier.v1",
+    "judge_v1_contract": "hearing_judge_v1.v2",
+    "public_stream": "agent-stream.v3"
+  },
+  "outcome": {
+    "contract_family": "outcome.v1",
+    "workflow_start": "outcome-workflow-start.v1",
+    "public_stream": "agent-stream.v3"
+  },
+  "model": {
+    "id": "qwen3.8-flash",
+    "thinking_enabled": false,
+    "strict_json_schema": true
+  },
+  "persistence": {
+    "domain_migration_ceiling": "V094",
+    "graph_migration_ceiling": "G017"
+  }
+}
