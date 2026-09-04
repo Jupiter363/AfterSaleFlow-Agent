@@ -1366,8 +1366,8 @@ def canonical_parallel_public_projection(
             },
         )
     if not isinstance(quality, QualityPublicMetricDraftV2):
-        raise ParallelFrameStreamProtocolError(
-            "Quality public projection type is invalid"
+        raise IntakeGraphContractError(
+            "INTAKE_PARALLEL_FRAME_PUBLIC_PROJECTION_TYPE_INVALID"
         )
     return CanonicalPublicProjectionItem(
         canonical_item_id=f"QSCORE_{quality.dimension}",

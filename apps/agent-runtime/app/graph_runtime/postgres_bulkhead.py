@@ -24,7 +24,7 @@ from app.graph_runtime.errors import (
     GraphPermitLostError,
     GraphPermitUnavailableError,
 )
-from app.graph_runtime.identity import THREAD_ID_PATTERN, _identifier
+from app.graph_runtime.identity import _identifier
 from app.graph_runtime.transaction_boundary import run_postgres_transaction
 
 

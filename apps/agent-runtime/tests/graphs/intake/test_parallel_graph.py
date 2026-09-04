@@ -334,6 +334,29 @@ def _nested_keys(value: object) -> tuple[str, ...]:
     return ()
 
 
+def test_quality_projection_rejects_an_unrecognized_typed_union_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quality_item = parallel_graph_module.QualityPublicProjectionDraftV2.model_validate(
+        _quality_output()["public_projection_items"][0]
+    )
+    monkeypatch.setattr(
+        parallel_graph_module.QualityPublicProjectionDraftV2,
+        "model_validate",
+        classmethod(lambda cls, payload: SimpleNamespace(root=object())),
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_PARALLEL_FRAME_PUBLIC_PROJECTION_TYPE_INVALID",
+    ):
+        parallel_graph_module.canonical_parallel_public_projection(
+            "QUALITY_FRAME",
+            quality_item,
+            actor_role="USER",
+        )
+
+
 def test_parent_graph_is_exactly_three_sibling_frame_nodes() -> None:
     graph = build_parallel_intake_graph().compile().get_graph()
 

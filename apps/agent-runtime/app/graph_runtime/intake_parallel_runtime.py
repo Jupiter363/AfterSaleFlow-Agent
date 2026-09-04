@@ -63,7 +63,6 @@ def build_parallel_checkpoint_configs(
     if not set(by_type) <= set(FRAME_TYPES):
         raise GraphContractError("parallel Intake checkpoint request has another Frame type")
 
-    command = execution.admission.command
     fence = execution.fence
     record = execution.thread_record
     assert record is not None

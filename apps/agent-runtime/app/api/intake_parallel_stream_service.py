@@ -1470,7 +1470,6 @@ def _build_subset_technical_completion(
         raise ParallelFrameStreamProtocolError(
             "parallel subset completion requires a proper successful Frame subset"
         )
-    command = execution.admission.command
     sealed: dict[ParallelFrameType, FrameSealed] = {}
     event_documents: list[dict[str, Any]] = []
     for event in events:
