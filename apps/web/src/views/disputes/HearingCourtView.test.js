@@ -15,7 +15,10 @@ import {
 } from "../../stores/agentStream";
 import HearingCourtView from "./HearingCourtView.vue";
 
-const componentSource = readFileSync("src/views/disputes/HearingCourtView.vue", "utf8");
+const componentSource = [
+  readFileSync("src/views/disputes/HearingCourtView.vue", "utf8"),
+  readFileSync("src/views/disputes/HearingCourtView.css", "utf8"),
+].join("\n");
 
 afterEach(() => {
   clearAgentStreams({}, { abort: true });
