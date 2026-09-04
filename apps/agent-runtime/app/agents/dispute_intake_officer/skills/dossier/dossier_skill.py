@@ -16,6 +16,14 @@ from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2
 from app.agents.dispute_intake_officer.case_fact_matrix import (
     finalize_case_fact_matrix,
 )
+from app.agents.dispute_intake_officer.skills.dossier.intake_guidance import (
+    FIELD_DISPLAY_LABELS,
+    _human_missing_fields,
+    _humanize_internal_tokens,
+    _is_evidence_material_request,
+    _question_for_missing,
+    _question_for_quality_gap,
+)
 from app.contracts.v1.codec import canonical_sha256
 from app.llm import AgentOutputSchemaError
 
@@ -277,9 +285,7 @@ CASE_DETAIL_MAX_DEPTH = 12
 CASE_DETAIL_MAX_NODES = 5_000
 CASE_DETAIL_MAX_TEXT_CHARACTERS = 200_000
 
-# The quality score is persisted authority, so its six prompt-defined components
-# have fixed maxima and are derived from the normalized dossier rather than model
-# supplied score, breakdown, threshold, or ready fields.
+# Persisted score authority remains with the dossier reducer that derives it.
 _QUALITY_SCORE_COMPONENT_MAXIMA = {
     "references": 15,
     "event_story": 20,
@@ -288,6 +294,7 @@ _QUALITY_SCORE_COMPONENT_MAXIMA = {
     "risk_and_conflicts": 15,
     "next_action_clarity": 15,
 }
+
 PARTY_INTAKE_STATE_SCHEMA_VERSION = "party-intake-state.v1"
 _PARTY_INTAKE_ROLES = ("USER", "MERCHANT")
 _PARTY_INTAKE_ENTRY_FIELDS = frozenset(
@@ -374,37 +381,6 @@ _QUALITY_CONFLICT_TYPES = frozenset(
         "CLAIM_WITH_EVIDENCE_GAP",
     }
 )
-
-FIELD_DISPLAY_LABELS = {
-    "CURRENT_PARTY_STATEMENT": "当前参与方对案情的直接说明",
-    "ORDER_REFERENCE": "订单号",
-    "AFTER_SALES_REFERENCE": "售后单号",
-    "LOGISTICS_REFERENCE": "物流单号",
-    "REQUESTED_RESOLUTION": "明确的处理诉求",
-    "order_reference_confirmation": "订单号核对",
-    "after_sales_reference_confirmation": "售后单号核对",
-    "logistics_reference_confirmation": "物流单号核对",
-    "product_issue_details": "故障细节",
-    "product_quality_details": "商品质量细节",
-    "user_statement": "用户原始陈述",
-    "merchant_statement": "商家原始陈述",
-    "merchant_requested_outcome": "商家期望处理方案",
-    "requested_outcome": "期望处理结果",
-    "evidence_attachments": "证据材料",
-    "buyer_evidence": "买家证据材料",
-    "user_evidence": "用户证据材料",
-    "merchant_evidence": "商家证据材料",
-    "merchant_outbound_photos": "商家发货前照片",
-    "merchant_outbound_records": "商家发货前记录",
-    "merchant_quality_inspection": "商家质检记录",
-    "buyer_photos": "买家照片",
-    "user_photos": "用户照片",
-    "unboxing_video": "开箱视频",
-    "opening_video": "开箱视频",
-    "delivery_record": "物流派送记录",
-    "proof_of_delivery": "签收凭证",
-}
-
 
 @dataclass(frozen=True)
 class DossierRenderResult:
@@ -848,11 +824,17 @@ class CaseDetailDossierSkill:
             if actor_remark_status == "READY_PENDING_REMARK_INVITE":
                 missing_info["next_questions"] = (
                     substantive_questions[:1]
-                    or [_question_for_quality_gap(score_breakdown)]
+                    or [
+                        _question_for_quality_gap(
+                            score_breakdown,
+                            _QUALITY_SCORE_COMPONENT_MAXIMA,
+                        )
+                    ]
                 )
             elif not substantive_questions:
                 question = _question_for_missing(missing) or _question_for_quality_gap(
-                    score_breakdown
+                    score_breakdown,
+                    _QUALITY_SCORE_COMPONENT_MAXIMA,
                 )
                 missing_info["next_questions"] = [question]
             else:
@@ -5211,45 +5193,6 @@ def _clamp_confidence(value: Any) -> float:
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
-# 具体功能：`_human_field_label` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`strip`、`normalized.lower`、`re.search`。
-# 上下游：上游为 本文件的 `_human_missing_fields`、`_question_for_missing`；下游为 协作调用 `strip`、`normalized.lower`、`re.search`。
-# 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
-def _human_field_label(field: str) -> str:
-    if field in FIELD_DISPLAY_LABELS:
-        return FIELD_DISPLAY_LABELS[field]
-    normalized = str(field or "").strip()
-    if normalized in FIELD_DISPLAY_LABELS:
-        return FIELD_DISPLAY_LABELS[normalized]
-    lower = normalized.lower()
-    if lower in FIELD_DISPLAY_LABELS:
-        return FIELD_DISPLAY_LABELS[lower]
-    if re.search(r"[A-Za-z_]{3,}", normalized):
-        return "相关补充材料"
-    return normalized or "相关补充材料"
-
-
-# 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
-# 具体功能：`_human_missing_fields` 围绕本阶段状态计算该函数独立负责的业务派生值。
-# 上下游：上游为 表单、当前参与方私聊、上一版卷宗；下游为 本文件的 `_human_field_label`。
-# 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
-def _human_missing_fields(missing: list[str]) -> list[str]:
-    return [_human_field_label(field) for field in missing]
-
-
-# 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
-# 具体功能：`_humanize_internal_tokens` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`FIELD_DISPLAY_LABELS.items`、`output.replace`。
-# 上下游：上游为 表单、当前参与方私聊、上一版卷宗；下游为 协作调用 `FIELD_DISPLAY_LABELS.items`、`output.replace`。
-# 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
-def _humanize_internal_tokens(text: str) -> str:
-    output = text
-    for token, label in sorted(
-        FIELD_DISPLAY_LABELS.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        output = output.replace(token, label)
-    return output
-
-
-# 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
 # 具体功能：`_list_values` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`value.strip`、`strip`。
 # 上下游：上游为 本文件的 `_normalize_next_verification_focus`；下游为 协作调用 `value.strip`、`strip`。
 # 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
@@ -5261,180 +5204,3 @@ def _list_values(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
-
-
-# 接待室只拒绝把材料交到当前房间的指令；不能因普通案情澄清提到材料名就覆盖模型回复。
-_EVIDENCE_TRANSFER_OBJECT_RE = re.compile(
-    r"(?:"
-    r"截图|图片|照片|视频|聊天记录|沟通记录|通话记录|物流记录|交易记录|录音|凭证|证明材料|证据材料|证据(?!书记官|室)|"
-    r"检测报告|检验报告|发票|交易流水|支付流水|快递底单|签收单|物流单(?!号)|运单(?!号)|文件|文档|附件|材料|订单确认稿|"
-    r"screenshots?|images?|photos?|videos?|chat\s+records?|communication\s+records?|"
-    r"recordings?|vouchers?|receipts?|documents?|files?|materials?|attachments?|"
-    r"order[-\s]?confirmation\s+(?:draft|document)|\b(?:evidence|proofs?)\b"
-    r")",
-    re.IGNORECASE,
-)
-_EVIDENCE_TRANSFER_ACTION_RE = re.compile(
-    r"(?:上传|补交|补充(?!说明)|提供|提交|发送|发来|附上|出示|发给|发至|寄给|分享|共享|"
-    r"\b(?:upload|provide|submit|send|attach|show|email|share)\b)",
-    re.IGNORECASE,
-)
-_EVIDENCE_TRANSFER_REQUEST_CUE_RE = re.compile(
-    r"(?:请(?:您)?|麻烦(?:您)?|劳烦|烦请|还请|能否|可否|是否(?:可以|能)|方便|"
-    r"please|could\s+you|can\s+you|would\s+you|kindly)",
-    re.IGNORECASE,
-)
-_EVIDENCE_TRANSFER_DIRECT_CUE_RE = re.compile(
-    r"^(?:请(?:您)?|麻烦(?:您)?|劳烦|烦请|还请|能否|可否|是否(?:可以|能)|方便|"
-    r"please|could\s+you|can\s+you|would\s+you|kindly)\s*",
-    re.IGNORECASE,
-)
-_EVIDENCE_TRANSFER_OBLIGATION_RE = re.compile(
-    r"(?:还需要|还需|需要|必须|务必|应当|"
-    r"\bmust\b|\bneed\s+to\b|\brequired\s+to\b)",
-    re.IGNORECASE,
-)
-_EVIDENCE_TRANSFER_ATTRIBUTION_RE = re.compile(
-    r"(?:商家|用户|对方|发起方|被发起方).{0,24}(?:称|表示|说|回复|主张|认为|告知|反馈)",
-)
-_EVIDENCE_FACTUAL_HISTORY_RE = re.compile(
-    r"(?:确认|核实|说明|告知|提到).{0,80}(?:已经|已|此前|之前|曾|曾经|目前)",
-)
-_EVIDENCE_FACTUAL_ACTOR_QUERY_RE = re.compile(
-    r"(?:请问|确认|核实|说明|告知|提到).{0,80}"
-    r"(?:商家|用户|对方|发起方|被发起方).{0,48}"
-    r"(?:是否|还需要|还需|需要|必须|务必|应当)",
-)
-
-
-def _is_evidence_action_history_form(text: str, action: re.Match[str]) -> bool:
-    """Recognize forms such as ``提供的`` and ``上传过`` as material history."""
-
-    return text[action.end() :].lstrip().startswith(("的", "方", "过", "了"))
-
-
-def _is_current_evidence_transfer_instruction(
-    clause: str,
-    action: re.Match[str] | None,
-) -> bool:
-    """Recognize a current officer-to-user transfer direction before attribution checks."""
-
-    if action is None:
-        return False
-    leading = re.sub(r"^(?:[-*•]|\d+[.、)])\s*", "", clause).lstrip()
-    leading_action = _EVIDENCE_TRANSFER_ACTION_RE.match(leading)
-    if leading_action is not None:
-        return not _is_evidence_action_history_form(leading, leading_action)
-
-    direct_cue = _EVIDENCE_TRANSFER_DIRECT_CUE_RE.match(leading)
-    if direct_cue is None:
-        return False
-    remainder = re.sub(
-        r"^(?:现在|立即|马上|尽快|now|immediately|right\s+away)\s*",
-        "",
-        leading[direct_cue.end() :],
-        flags=re.IGNORECASE,
-    )
-    direct_action = _EVIDENCE_TRANSFER_ACTION_RE.match(remainder)
-    if direct_action is not None:
-        return not _is_evidence_action_history_form(remainder, direct_action)
-    return remainder.startswith(("把", "将"))
-
-
-def _is_factual_evidence_reference(
-    clause: str,
-    action: re.Match[str] | None,
-) -> bool:
-    """Return whether a clause refers to material history rather than asks for delivery."""
-
-    if _EVIDENCE_TRANSFER_ATTRIBUTION_RE.search(clause):
-        return True
-    if action is None:
-        return False
-    before_action = clause[: action.start()]
-    if _is_evidence_action_history_form(clause, action):
-        return True
-    if re.search(r"(?:由谁|谁|哪一方|哪个主体)\s*$", before_action):
-        return True
-    return (
-        _EVIDENCE_FACTUAL_HISTORY_RE.search(before_action) is not None
-        or _EVIDENCE_FACTUAL_ACTOR_QUERY_RE.search(before_action) is not None
-    )
-
-
-# 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
-# 具体功能：`_is_evidence_material_request` 仅识别要求在接待室传递证据材料的明确指令；关键协作调用：`strip`、`search`。
-# 上下游：上游为 表单、当前参与方私聊、上一版卷宗；下游为 协作调用 `strip`。
-# 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付，同时保留正常事实澄清。
-def _is_evidence_material_request(value: Any) -> bool:
-    text = str(value or "").strip()
-    if not text:
-        return False
-    for clause in re.split(r"[，,。！？?；;\n]+", text):
-        evidence_object = _EVIDENCE_TRANSFER_OBJECT_RE.search(clause)
-        if evidence_object is None:
-            continue
-
-        action = _EVIDENCE_TRANSFER_ACTION_RE.search(clause)
-        # 先识别接待官当下向用户发出的交付指令。这样“请上传商家称需要的
-        # 物流凭证”不会因修饰语中的归属转述而放行。
-        if _is_current_evidence_transfer_instruction(clause, action):
-            return True
-        # 转述商家/任一当事人对材料的要求，或询问已经提供的材料内容，都是
-        # 事实澄清而非接待官要求当前用户交付，不能覆盖已流式生成的话术。
-        if _is_factual_evidence_reference(clause, action):
-            continue
-
-        # “还需要物流凭证”“必须提供发票”均是要求把材料补入当前房间的
-        # 明确义务；前者即便省略交付动作，也不能作为普通事实澄清放行。
-        if _EVIDENCE_TRANSFER_OBLIGATION_RE.search(clause):
-            return True
-
-        if action is None:
-            continue
-
-        # 「订单确认稿具体是哪个版本的沟通记录或文件」这类事实澄清会提到
-        # 材料名称，但没有要求用户把材料传入接待室，必须原样保留。
-        if _EVIDENCE_TRANSFER_REQUEST_CUE_RE.search(clause):
-            return True
-
-        # “把/将材料发送、上传”本身构成明确的交付指令，即使省略了“请”。
-        if re.search(
-            r"(?:把|将).{0,80}(?:上传|补交|提供|提交|发送|发来|附上|出示|发给|发至|寄给|分享|共享|"
-            r"\b(?:send|email|share)\b)",
-            clause,
-            re.IGNORECASE,
-        ):
-            return True
-    return False
-
-
-# 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
-# 具体功能：`_question_for_missing` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`join`、`questions.get`。
-# 上下游：上游为 表单、当前参与方私聊、上一版卷宗；下游为 本文件的 `_human_field_label`。
-# 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
-def _question_for_missing(missing: list[str]) -> str:
-    questions = {
-        "ORDER_REFERENCE": "请补充订单号或平台可识别的订单引用。",
-        "LOGISTICS_REFERENCE": "请补充物流单号或平台可识别的物流引用。",
-        "REQUESTED_RESOLUTION": "请明确希望获得的处理方式。",
-    }
-    return " ".join(
-        questions.get(field, f"请补充{_human_field_label(field)}。")
-        for field in missing
-    )
-
-
-def _question_for_quality_gap(breakdown: dict[str, int]) -> str:
-    questions = {
-        "references": "请继续补充可核验的业务引用。",
-        "event_story": "请继续补充可核验的事件经过。",
-        "party_positions": "请继续补充当事方的已知立场。",
-        "requested_resolution": "请明确希望获得的处理方式。",
-        "risk_and_conflicts": "请继续补充需要核验的争议事实。",
-        "next_action_clarity": "请继续补充下一步需要核验的事项。",
-    }
-    for component, maximum in _QUALITY_SCORE_COMPONENT_MAXIMA.items():
-        if breakdown.get(component, 0) < maximum:
-            return questions[component]
-    return "请继续补充可核验的案件事实。"
