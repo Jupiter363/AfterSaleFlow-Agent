@@ -663,7 +663,8 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
     @Override
     @Transactional
     public void finalizeResult(AgentRunFinalizationContext finalization, JsonNode rawResult) {
-        HearingFlowStage expectedStage = stageForOperation(finalization.operation());
+        HearingFlowStage expectedStage =
+                HearingFlowStagePlan.stageForOperation(finalization.operation());
         HearingFlowInstanceEntity instance =
                 instanceRepository
                         .findByCaseIdForUpdate(finalization.caseId())
@@ -960,7 +961,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         requireSchema(matrix, "case_fact_matrix.v2");
         verifyEmbeddedHash(matrix, "content_hash");
         ObjectNode sourceMatrix = object(finalization.request().path("case_fact_matrix"));
-        validateHearingClarifiedMatrix(matrix, sourceMatrix);
+        HearingClarifiedMatrixValidator.validate(matrix, sourceMatrix);
         appendAgentResultMessage(dispute, stage, result, finalization, clock.instant());
         Instant now = clock.instant();
         stage.complete(json(result), now, SYSTEM_ACTOR);
@@ -1535,7 +1536,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             HearingFlowStageEntity stage,
             String operation,
             ObjectNode request) {
-        if (isJudgeOperation(operation)
+        if (HearingFlowStagePlan.isJudgeOperation(operation)
                 && trialDossierRepository.findByCaseId(dispute.getId()).isEmpty()) {
             throw new IllegalStateException("judge AgentRun cannot start before trial dossier freeze");
         }
@@ -1594,7 +1595,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             return false;
         }
 
-        String operation = operationForStage(instance.getCurrentStage());
+        String operation = HearingFlowStagePlan.operationForStage(instance.getCurrentStage());
         if (operation == null) {
             return false;
         }
@@ -1842,7 +1843,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             JsonNode input,
             Instant deadline,
             Instant now) {
-        HearingFlowStage expected = nextStage(instance.getCurrentStage());
+        HearingFlowStage expected = HearingFlowStagePlan.nextStage(instance.getCurrentStage());
         if (expected != nextStage) {
             throw illegalTransition(instance, nextStage);
         }
@@ -1855,7 +1856,7 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         instance.getCaseId(),
                         nextStage,
                         sequence,
-                        processorRole(nextStage),
+                        HearingFlowStagePlan.processorRole(nextStage),
                         nextStage.hasSharedPartyDeadline()
                                 ? HearingFlowStageStatus.WAITING_PARTIES
                                 : HearingFlowStageStatus.RUNNING,
@@ -2414,7 +2415,8 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             ObjectNode result,
             AgentRunFinalizationContext finalization,
             Instant now) {
-        HearingFlowStage sourceStage = stageForOperation(finalization.operation());
+        HearingFlowStage sourceStage =
+                HearingFlowStagePlan.stageForOperation(finalization.operation());
         if (stage.getStageCode() != sourceStage) {
             throw new IllegalStateException("Hearing public result stage is not its Agent operation");
         }
@@ -2894,172 +2896,6 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         }
     }
 
-    private void validateHearingClarifiedMatrix(
-            ObjectNode clarified, ObjectNode sourceMatrix) {
-        requireSchema(sourceMatrix, "case_fact_matrix.v2");
-        verifyEmbeddedHash(sourceMatrix, "content_hash");
-        if (!requiredText(sourceMatrix, "case_id").equals(requiredText(clarified, "case_id"))
-                || !"HEARING_CLARIFIED_FROZEN"
-                        .equals(requiredText(clarified, "matrix_kind"))) {
-            throw new IllegalStateException("hearing clarified matrix identity is invalid");
-        }
-        int sourceVersion = sourceMatrix.path("matrix_version").asInt(-1);
-        if (sourceVersion < 1 || clarified.path("matrix_version").asInt(-1) != sourceVersion + 1) {
-            throw new IllegalStateException("hearing clarified matrix version must increment once");
-        }
-        ObjectNode parent = object(clarified.path("parent_ref"));
-        if (!requiredText(sourceMatrix, "matrix_id").equals(requiredText(parent, "matrix_id"))
-                || sourceVersion != parent.path("matrix_version").asInt(-1)
-                || !requiredText(sourceMatrix, "content_hash")
-                        .equals(requiredText(parent, "content_hash"))) {
-            throw new IllegalStateException("hearing clarified matrix parent binding is invalid");
-        }
-        if (!canonicalJson(sourceMatrix.path("party_map"))
-                        .equals(canonicalJson(clarified.path("party_map")))
-                || !canonicalJson(sourceMatrix.path("claims"))
-                        .equals(canonicalJson(clarified.path("claims")))
-                || !canonicalJson(sourceMatrix.path("fact_relationships"))
-                        .equals(canonicalJson(clarified.path("fact_relationships")))) {
-            throw new IllegalStateException(
-                    "hearing clarification cannot replace party identity, claims, or relationships");
-        }
-        Set<String> clarifiedSourceRefs = textSet(clarified.path("source_refs"), "source_refs");
-        if (!clarifiedSourceRefs.containsAll(textSet(sourceMatrix.path("source_refs"), "source_refs"))) {
-            throw new IllegalStateException("hearing clarified matrix dropped prior source_refs");
-        }
-        ObjectNode generation = object(clarified.path("generation_ref"));
-        if (!"HEARING_CLARIFICATION".equals(requiredText(generation, "source_stage"))
-                || !"SYSTEM".equals(requiredText(generation, "actor_role"))
-                || !requiredText(generation, "source_context_hash").matches("[0-9a-f]{64}")) {
-            throw new IllegalStateException("hearing clarification generation_ref is invalid");
-        }
-        requiredText(generation, "latest_source_ref");
-
-        ArrayNode priorRows = array(sourceMatrix.path("fact_rows"));
-        ArrayNode rows = array(clarified.path("fact_rows"));
-        if (priorRows.isEmpty() || rows.size() < priorRows.size() || rows.size() > 200) {
-            throw new IllegalStateException("hearing clarified matrix fact row count is invalid");
-        }
-        Set<String> factIds = new LinkedHashSet<>();
-        for (int index = 0; index < rows.size(); index++) {
-            ObjectNode row = object(rows.get(index));
-            String factId = requiredText(row, "fact_id");
-            if (!factIds.add(factId)) {
-                throw new IllegalStateException("hearing clarified matrix contains duplicate fact_id");
-            }
-            if (!"NOT_EVALUATED".equals(requiredText(row, "truth_status"))) {
-                throw new IllegalStateException("hearing clarification cannot evaluate fact truth");
-            }
-            assertDerivedResolution(row);
-            if (index < priorRows.size()) {
-                ObjectNode prior = object(priorRows.get(index));
-                if (!requiredText(prior, "fact_id").equals(factId)
-                        || !requiredText(prior, "category")
-                                .equals(requiredText(row, "category"))
-                        || !requiredText(prior, "fact_target")
-                                .equals(requiredText(row, "fact_target"))
-                        || !requiredText(prior, "materiality")
-                                .equals(requiredText(row, "materiality"))) {
-                    throw new IllegalStateException(
-                            "hearing clarification changed or renumbered a prior fact");
-                }
-                continue;
-            }
-            if (!factId.startsWith("FACT_HEARING_")
-                    || !"HEARING_CLARIFICATION"
-                            .equals(
-                                    requiredText(
-                                            object(row.path("origin")), "introduced_stage"))
-                    || !"NOT_COVERED_BY_FROZEN_DOSSIER"
-                            .equals(requiredText(row, "evidence_coverage_status"))) {
-                throw new IllegalStateException(
-                        "new hearing fact lacks stable identity or frozen-dossier coverage state");
-            }
-        }
-        assertFactIndexes(clarified, rows);
-    }
-
-    private void assertDerivedResolution(ObjectNode row) {
-        String status =
-                requiredText(object(row.path("party_alignment")), "status");
-        JsonNode resolution = row.path("requires_resolution");
-        if ("NOT_COMPUTED".equals(status)) {
-            if (!resolution.isNull()) {
-                throw new IllegalStateException(
-                        "NOT_COMPUTED fact alignment requires null requires_resolution");
-            }
-            return;
-        }
-        if (!Set.of(
-                        "AGREED",
-                        "PARTIALLY_AGREED",
-                        "CONTESTED",
-                        "ONE_SIDED",
-                        "UNRESOLVED")
-                .contains(status)) {
-            throw new IllegalStateException("hearing fact alignment status is invalid");
-        }
-        if (!resolution.isBoolean()
-                || resolution.asBoolean() != !"AGREED".equals(status)) {
-            throw new IllegalStateException(
-                    "requires_resolution must be derived from party_alignment");
-        }
-    }
-
-    private void assertFactIndexes(ObjectNode matrix, ArrayNode rows) {
-        ObjectNode expected = objectMapper.createObjectNode();
-        for (String key :
-                List.of(
-                        "not_computed_fact_ids",
-                        "agreed_fact_ids",
-                        "partially_agreed_fact_ids",
-                        "contested_fact_ids",
-                        "one_sided_fact_ids",
-                        "unresolved_fact_ids",
-                        "core_fact_ids",
-                        "requires_resolution_fact_ids")) {
-            expected.putArray(key);
-        }
-        for (JsonNode value : rows) {
-            ObjectNode row = object(value);
-            String factId = requiredText(row, "fact_id");
-            String status = requiredText(object(row.path("party_alignment")), "status");
-            String indexKey =
-                    switch (status) {
-                        case "NOT_COMPUTED" -> "not_computed_fact_ids";
-                        case "AGREED" -> "agreed_fact_ids";
-                        case "PARTIALLY_AGREED" -> "partially_agreed_fact_ids";
-                        case "CONTESTED" -> "contested_fact_ids";
-                        case "ONE_SIDED" -> "one_sided_fact_ids";
-                        case "UNRESOLVED" -> "unresolved_fact_ids";
-                        default -> throw new IllegalStateException(
-                                "hearing fact alignment status is invalid");
-                    };
-            expected.withArray(indexKey).add(factId);
-            if ("CORE".equals(row.path("materiality").asText())) {
-                expected.withArray("core_fact_ids").add(factId);
-            }
-            if (row.path("requires_resolution").asBoolean(false)) {
-                expected.withArray("requires_resolution_fact_ids").add(factId);
-            }
-        }
-        if (!canonicalJson(expected).equals(canonicalJson(matrix.path("fact_indexes")))) {
-            throw new IllegalStateException("hearing clarified matrix fact_indexes are invalid");
-        }
-    }
-
-    private static Set<String> textSet(JsonNode value, String field) {
-        ArrayNode values = array(value);
-        Set<String> result = new LinkedHashSet<>();
-        for (JsonNode item : values) {
-            String text = item.asText();
-            if (text.isBlank() || !result.add(text)) {
-                throw new IllegalStateException(field + " must contain unique non-blank text");
-            }
-        }
-        return Set.copyOf(result);
-    }
-
     private String hashWithoutField(ObjectNode payload, String field) {
         ObjectNode copy = payload.deepCopy();
         copy.remove(field);
@@ -3279,70 +3115,6 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                                 && !actor.actorId().equals(dispute.getMerchantId()))) {
             throw new ForbiddenException("only the authenticated case party may submit");
         }
-    }
-
-    private static HearingFlowStage stageForOperation(String operation) {
-        return switch (operation) {
-            case "HEARING_INTAKE_QUESTIONS" -> HearingFlowStage.INTAKE_QUESTIONS_GENERATING;
-            case "HEARING_INTAKE_SYNTHESIS" -> HearingFlowStage.INTAKE_SYNTHESIZING;
-            case "HEARING_EVIDENCE_REQUESTS" -> HearingFlowStage.EVIDENCE_REQUESTS_GENERATING;
-            case "HEARING_EVIDENCE_SYNTHESIS" -> HearingFlowStage.EVIDENCE_SYNTHESIZING;
-            case "HEARING_JUDGE_V1" -> HearingFlowStage.JUDGE_V1_GENERATING;
-            case "HEARING_JURY_REVIEW" -> HearingFlowStage.JURY_REVIEWING;
-            case "HEARING_JUDGE_V2" -> HearingFlowStage.JUDGE_V2_GENERATING;
-            default -> throw new IllegalArgumentException("unsupported hearing flow operation");
-        };
-    }
-
-    private static String operationForStage(HearingFlowStage stage) {
-        return switch (stage) {
-            case INTAKE_QUESTIONS_GENERATING -> "HEARING_INTAKE_QUESTIONS";
-            case INTAKE_SYNTHESIZING -> "HEARING_INTAKE_SYNTHESIS";
-            case EVIDENCE_REQUESTS_GENERATING -> "HEARING_EVIDENCE_REQUESTS";
-            case EVIDENCE_SYNTHESIZING -> "HEARING_EVIDENCE_SYNTHESIS";
-            case JUDGE_V1_GENERATING -> "HEARING_JUDGE_V1";
-            case JURY_REVIEWING -> "HEARING_JURY_REVIEW";
-            case JUDGE_V2_GENERATING -> "HEARING_JUDGE_V2";
-            default -> null;
-        };
-    }
-
-    private static HearingFlowStage nextStage(HearingFlowStage current) {
-        return switch (current) {
-            case COURT_PREPARING -> HearingFlowStage.CASE_INTRODUCTION;
-            case CASE_INTRODUCTION -> HearingFlowStage.EVIDENCE_INTRODUCTION;
-            case EVIDENCE_INTRODUCTION -> HearingFlowStage.INTAKE_QUESTIONS_GENERATING;
-            case INTAKE_QUESTIONS_GENERATING -> HearingFlowStage.PARTY_ANSWERS_OPEN;
-            case PARTY_ANSWERS_OPEN -> HearingFlowStage.INTAKE_SYNTHESIZING;
-            case INTAKE_SYNTHESIZING -> HearingFlowStage.EVIDENCE_REQUESTS_GENERATING;
-            case EVIDENCE_REQUESTS_GENERATING -> HearingFlowStage.PARTY_EVIDENCE_OPEN;
-            case PARTY_EVIDENCE_OPEN -> HearingFlowStage.EVIDENCE_SYNTHESIZING;
-            case EVIDENCE_SYNTHESIZING -> HearingFlowStage.DOSSIER_FREEZING;
-            case DOSSIER_FREEZING -> HearingFlowStage.JUDGE_V1_GENERATING;
-            case JUDGE_V1_GENERATING -> HearingFlowStage.JURY_REVIEWING;
-            case JURY_REVIEWING -> HearingFlowStage.JUDGE_V2_GENERATING;
-            case JUDGE_V2_GENERATING -> HearingFlowStage.HUMAN_REVIEW_OPEN;
-            case HUMAN_REVIEW_OPEN -> HearingFlowStage.CLOSED;
-            case CLOSED -> throw new IllegalStateException("closed hearing flow has no successor");
-        };
-    }
-
-    private static String processorRole(HearingFlowStage stage) {
-        return switch (stage) {
-            case CASE_INTRODUCTION, INTAKE_QUESTIONS_GENERATING, INTAKE_SYNTHESIZING ->
-                    "INTAKE_OFFICER";
-            case EVIDENCE_INTRODUCTION,
-                    EVIDENCE_REQUESTS_GENERATING,
-                    EVIDENCE_SYNTHESIZING -> "EVIDENCE_CLERK";
-            case PARTY_ANSWERS_OPEN, PARTY_EVIDENCE_OPEN -> "PARTIES";
-            case JUDGE_V1_GENERATING, JUDGE_V2_GENERATING -> "PRESIDING_JUDGE";
-            case JURY_REVIEWING -> "JURY_PANEL";
-            case COURT_PREPARING, DOSSIER_FREEZING, HUMAN_REVIEW_OPEN, CLOSED -> "SYSTEM";
-        };
-    }
-
-    private static boolean isJudgeOperation(String operation) {
-        return "HEARING_JUDGE_V1".equals(operation) || "HEARING_JUDGE_V2".equals(operation);
     }
 
     private static boolean targetsRole(ObjectNode item, ActorRole role) {
