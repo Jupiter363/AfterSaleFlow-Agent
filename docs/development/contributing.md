@@ -19,9 +19,18 @@ PR 必须说明需求来源、风险、数据迁移、验证命令和回滚方�
 ## 提交前检查
 
 ```bash
-cd apps/domain-service && mvn test
-cd apps/agent-runtime && pytest
-cd apps/ocr-parser && pytest
-cd apps/web && npm run lint && npm run typecheck && npm run test
+cd apps/domain-service && bash ./mvnw -s .mvn/settings.xml test
+cd apps/agent-runtime && python -m ruff check --no-cache app && python -m pytest -q
+cd apps/ocr-parser && python -m ruff check --no-cache app && python -m pytest -q
+cd apps/web && pnpm test && pnpm build && pnpm test:browser
 docker compose config
+```
+
+生产 Java 构件还必须通过独立的构件隔离验证：
+
+```bash
+cd apps/domain-service
+bash ./mvnw -s .mvn/settings.xml -Pproduction-runtime \
+  -Dproduction-runtime.source-sha="$(git rev-parse HEAD)" \
+  -Dproduction-runtime.skip-unit-tests=true clean verify
 ```
